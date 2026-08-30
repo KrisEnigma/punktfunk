@@ -166,21 +166,25 @@ On Linux and Windows, opening a controller *claims* it (SDL takes the device nod
 passthrough tool can't bind a claimed device; off, the session never opens the pad. Consequence:
 the [controller escape chord](/docs/input#leaving-with-a-controller) is read off forwarded pads, so
 on those two it is unavailable while this is off — leave with the keyboard chord or the client's
-UI. The Apple and Android apps claim nothing, so their chords keep working; Android does stop its
-DualSense and Steam Controller 2 USB captures, which do claim the device. The rows below grey out
-while this is off.
+UI. The Apple and Android apps claim nothing through their normal controller paths, so their chords
+keep working; Android and the Mac do stop their DualSense and Steam Controller 2 USB captures,
+which claim the device. The rows below grey out while this is off.
 
 **Steam Controller passthrough** (`sc2_capture`) — *default: on for Android, off for Apple*. Reads
 an already-paired Steam Controller 2 directly and passes it to the host **as itself**: the host
 presents a real `28DE:1302` that its own Steam drives, so the trackpads, gyro and haptics behave as
 they do locally instead of being flattened into a generic pad. Android captures over USB, the Puck
-dongle, or Bluetooth; Apple over Bluetooth only. Needs *Forward controllers* on, and a Linux or
-Windows host — elsewhere the pad falls back to its ordinary type.
+dongle, or Bluetooth; a Mac over USB — a cable or the Puck dongle, up to four pads on one dongle —
+or Bluetooth; an iPhone or iPad has no USB path, so Bluetooth only (Apple TV has neither). Needs
+*Forward controllers* on, and a Linux or Windows host — elsewhere the pad falls back to its
+ordinary type.
 
-It defaults **off on Apple** because switching it on prompts for Bluetooth permission, which is a
-question worth asking only from a controller the app can see you own. Android needs no such prompt
-for a pad already attached, so it defaults on and simply does nothing when no SC2 is present. The
-capture engages at the next stream, and a badge confirms it.
+It defaults **off on Apple** because the Bluetooth transport prompts for permission when switched
+on, which is a question worth asking only from a controller the app can see you own. The Mac's USB
+transport prompts for nothing, but it shares the toggle, and the Bluetooth fallback behind it is
+what a Mac with no pad plugged in engages. Android needs no such prompt for a pad already attached,
+so it defaults on and simply does nothing when no SC2 is present. The capture engages at the next
+stream, and a badge confirms it.
 
 **Gamepad type** (*Controller type* on Apple, Android and the console home) — *default: Automatic*,
 which matches each physical controller. Pickers offer Xbox 360, Xbox One, DualSense and DualShock 4
