@@ -80,7 +80,8 @@ public final class Sc2Capture {
     private var claimPending = false
     private var stopped = false
     /// App inactive → BLE is released and the slot freed; resume re-acquires (the recommended
-    /// backgrounding behavior for a CoreBluetooth central).
+    /// backgrounding behavior for a CoreBluetooth central). A USB pad is exempt — see the
+    /// resign observer in `start()`.
     private var suspended = false
     // Typed-mirror diff state (wire units).
     private var wireButtons: UInt32 = 0
@@ -183,6 +184,10 @@ public final class Sc2Capture {
             forName: resign, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            // A wired or Puck pad keeps streaming across focus changes: on macOS this
+            // notification fires whenever another window takes focus, and dropping the
+            // capture there kills the pad mid-game. The radio rationale below is BLE's alone.
+            if self.currentTransport == .usb { return }
             self.lock.lock()
             self.suspended = true
             self.lock.unlock()
@@ -217,12 +222,17 @@ public final class Sc2Capture {
     private func startTransport() {
         #if os(macOS)
         if Sc2UsbLink.attached() {
+            // Exactly one link runs, so the other stops FIRST — re-picking after an
+            // unplug-while-unfocused would otherwise leave the idle link acquiring in the
+            // background and double-feed the pad when it comes back.
+            link.stop()
             lock.lock()
             transport = .usb
             lock.unlock()
             usbLink.start()
             return
         }
+        usbLink.stop()
         #endif
         lock.lock()
         transport = .ble
