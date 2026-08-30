@@ -169,6 +169,15 @@ enum Sc2Device {
     /// The Puck reports a controller bonded to one of its slots.
     static let wirelessConnect: UInt8 = 2
 
+    /// The frame `Sc2Capture` replays onto a fresh wire slot for a wireless edge the Puck
+    /// emitted before that slot existed — always id `0x79`, whichever of `0x79`/`0x46` arrived.
+    /// The virtual identity's report descriptor declares `0x79` but not `0x46`
+    /// (`pf_driver_proto::triton::RDESC`), and the Windows driver drops undeclared input ids,
+    /// so a `0x46`-shaped replay would silently vanish on one host and land on the other.
+    static func wirelessReplay(_ framed: [UInt8]) -> [UInt8] {
+        [idWireless, framed.count >= 2 ? framed[1] : 0]
+    }
+
     /// The gyro-enable Steam itself sends — WRITE_REGISTER, reg 0x30 (GYRO_MODE), value 0x0018
     /// (raw accel | raw gyro); confirmed both ways on real hardware 2026-06-08. Kept ONLY for
     /// logging and tests: the client must NEVER self-enable the gyro (a permanent enable re-flies

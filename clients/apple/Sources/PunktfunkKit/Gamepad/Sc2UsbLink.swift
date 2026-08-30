@@ -69,11 +69,30 @@ final class Sc2UsbLink {
     private var started = false
     /// Report ids seen so far — one line each, for remote diagnosis of what the pad emits.
     private var seenIds: Set<UInt8> = []
+    /// Whether the no-target write drop logged yet (once per link life — the drop is expected
+    /// before the first input report, and a persistent one is invisible otherwise).
+    private var loggedNoTarget = false
+
+    /// Backs `isDongle`; written on `queue`, read from any thread, hence the dedicated lock
+    /// (the capture reads it on the main actor at claim time).
+    private let dongleLock = NSLock()
+    private var dongleFlag = false
 
     /// True while the opened device is a Puck dongle. Read by `Sc2Capture` to pick the declared
     /// wire kind and to decide whether wireless-status reports are authoritative — a WIRED pad
-    /// emits them too, truthfully reporting "no radio link".
-    private(set) var isDongle = false
+    /// emits them too, truthfully reporting "no radio link". Safe from any thread.
+    var isDongle: Bool {
+        dongleLock.lock()
+        defer { dongleLock.unlock() }
+        return dongleFlag
+    }
+
+    /// Set `isDongle` (on `queue`, like every other mutation here).
+    private func setDongle(_ value: Bool) {
+        dongleLock.lock()
+        dongleFlag = value
+        dongleLock.unlock()
+    }
 
     /// `IOHIDDeviceRegisterInputReportCallback`'s report buffer size. The Triton's longest input
     /// report is the 54-byte 0x42 state; 64 is the HID report bound the ABI already clamps to
@@ -149,8 +168,9 @@ final class Sc2UsbLink {
             for (id, dev) in open { cancel(id: id, device: dev) }
             open.removeAll()
             target = nil
-            isDongle = false
+            setDongle(false)
             seenIds.removeAll()
+            loggedNoTarget = false
             if let mgr = manager {
                 // Dispatch-queue mode: Cancel, never Close/UnscheduleFromRunLoop — mixing the
                 // run-loop teardown API with a queue-scheduled manager is undefined and crashes.
@@ -187,7 +207,17 @@ final class Sc2UsbLink {
     /// GATT transport's id-stripping; USB has no such transform to undo.)
     func writeRaw(kind: UInt8, frame: [UInt8]) {
         queue.async { [self] in
-            guard let dev = target, let id = frame.first else { return }
+            guard let id = frame.first else { return }
+            guard let dev = target else {
+                // Expected only before the first input report — the capture cannot have claimed
+                // a wire slot yet, so the host cannot legitimately address this pad. Say so
+                // once: if this fires past startup, host writes are being thrown away.
+                if !loggedNoTarget {
+                    loggedNoTarget = true
+                    log.info("SC2 USB: host write before any input report — dropped (no target)")
+                }
+                return
+            }
             let type: IOHIDReportType = kind == 1 ? kIOHIDReportTypeFeature : kIOHIDReportTypeOutput
             let rc = frame.withUnsafeBufferPointer { buf in
                 IOHIDDeviceSetReport(dev, type, CFIndex(id), buf.baseAddress!, buf.count)
@@ -226,7 +256,7 @@ final class Sc2UsbLink {
         buf.initialize(repeating: 0, count: Self.reportBufSize)
         buffers[id] = buf
         open[id] = device
-        isDongle = Sc2Device.isDongle(pid: pid)
+        setDongle(Sc2Device.isDongle(pid: pid))
         IOHIDDeviceRegisterInputReportCallback(
             device, buf, Self.reportBufSize,
             { ctx, _, sender, _, reportID, report, len in
@@ -252,8 +282,9 @@ final class Sc2UsbLink {
         if target === device { target = nil }
         guard open.isEmpty else { return }
         stopKeepAlive()
-        isDongle = false
+        setDongle(false)
         seenIds.removeAll()
+        loggedNoTarget = false
         log.info("SC2 USB: last collection removed — link closed")
         onClosed()
     }

@@ -92,6 +92,18 @@ final class Sc2DeviceTests: XCTestCase {
         XCTAssertEqual(Sc2Device.wirelessConnect, 2)
     }
 
+    func testWirelessReplayNormalizesEitherIdTo0x79() {
+        // The replay must carry 0x79 whichever wireless id the Puck emitted: 0x46 is not in the
+        // virtual identity's report descriptor, and the Windows driver drops undeclared ids.
+        XCTAssertEqual(
+            Sc2Device.wirelessReplay([Sc2Device.idWirelessX, Sc2Device.wirelessConnect]),
+            [Sc2Device.idWireless, Sc2Device.wirelessConnect])
+        XCTAssertEqual(
+            Sc2Device.wirelessReplay([Sc2Device.idWireless, Sc2Device.wirelessConnect]),
+            [Sc2Device.idWireless, Sc2Device.wirelessConnect])
+        XCTAssertEqual(Sc2Device.wirelessReplay([Sc2Device.idWireless]).count, 2)
+    }
+
     func testFeatureCommandBytesVerbatim() {
         // DISABLE_LIZARD: [1][0x87 ID_SET_SETTINGS_VALUES][3][9 SETTING_LIZARD_MODE][0 0 u16],
         // zero-padded to the 64-byte feature size (Android sends the identical frame).

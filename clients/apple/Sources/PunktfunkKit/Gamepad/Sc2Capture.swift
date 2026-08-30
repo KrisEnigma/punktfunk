@@ -69,11 +69,13 @@ public final class Sc2Capture {
     /// can be BLE-paired AND plugged in (charging), and running both links would stream the same
     /// controller onto two wire slots, doubling every input.
     private enum Transport { case none, ble, usb }
-    private var transport: Transport = .none
     private var observers: [NSObjectProtocol] = []
 
     /// Guards every field below (see the threading note in the header).
     private let lock = NSLock()
+    /// Written on the main actor (`startTransport`/`stopTransport`), read on the link queue and
+    /// the feedback drain thread — which is why it sits under `lock` with the rest.
+    private var transport: Transport = .none
     private var padIndex: UInt8?
     private var claimPending = false
     private var stopped = false
@@ -143,12 +145,20 @@ public final class Sc2Capture {
         #endif
     }
 
+    /// The live transport, safe from any thread. Never call with `lock` held (NSLock does not
+    /// re-enter).
+    private var currentTransport: Transport {
+        lock.lock()
+        defer { lock.unlock() }
+        return transport
+    }
+
     /// Whether the live transport is a Puck dongle. Decides the declared wire kind AND whether
-    /// wireless-status reports may be acted on — see `handleWireless`. Read on the link queue,
-    /// where `Sc2UsbLink.isDongle` is also written.
+    /// wireless-status reports may be acted on — see `handleWireless`. Safe from any thread
+    /// (both halves are guarded); never call with `lock` held.
     private var isDongleLink: Bool {
         #if os(macOS)
-        return transport == .usb && usbLink.isDongle
+        return currentTransport == .usb && usbLink.isDongle
         #else
         return false
         #endif
@@ -207,12 +217,16 @@ public final class Sc2Capture {
     private func startTransport() {
         #if os(macOS)
         if Sc2UsbLink.attached() {
+            lock.lock()
             transport = .usb
+            lock.unlock()
             usbLink.start()
             return
         }
         #endif
+        lock.lock()
         transport = .ble
+        lock.unlock()
         link.start()
     }
 
@@ -222,7 +236,9 @@ public final class Sc2Capture {
         usbLink.stop()
         #endif
         link.stop()
+        lock.lock()
         transport = .none
+        lock.unlock()
     }
 
     /// Tear everything down: link stopped (unsubscribe, cancel, stop scanning), slot released,
@@ -248,10 +264,11 @@ public final class Sc2Capture {
     public func onHidRaw(pad: UInt8, kind: UInt8, data: [UInt8]) {
         lock.lock()
         let claimed = padIndex
+        let live = transport
         lock.unlock()
         guard claimed == pad else { return } // addressed to some other controller
         #if os(macOS)
-        if transport == .usb {
+        if live == .usb {
             usbLink.writeRaw(kind: kind, frame: data)
             return
         }
@@ -313,7 +330,7 @@ public final class Sc2Capture {
         switch framed[1] {
         case Sc2Device.wirelessConnect:
             lock.lock()
-            pendingWireless = Array(framed.prefix(2))
+            pendingWireless = Sc2Device.wirelessReplay(framed)
             lock.unlock()
         case Sc2Device.wirelessDisconnect:
             lock.lock()
@@ -432,7 +449,7 @@ public final class Sc2Capture {
                     self.forwardRawLocked(&pending, pad: index)
                 }
                 self.lock.unlock()
-                let via = dongle ? "Puck" : (self.transport == .usb ? "USB" : "BLE")
+                let via = dongle ? "Puck" : (self.currentTransport == .usb ? "USB" : "BLE")
                 log.info(
                     "SC2 captured → wire pad \(index) (\(via, privacy: .public) passthrough, pref \(kind.rawValue))"
                 )
