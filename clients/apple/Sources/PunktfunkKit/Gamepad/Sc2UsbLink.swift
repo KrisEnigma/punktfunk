@@ -21,8 +21,10 @@
 //
 // **The Puck opens every match, not one.** The dongle hosts up to four pads on interfaces 2…5
 // and nothing says which slot a controller bonded to — Android's first on-glass run claimed only
-// interface 2 and read silence. So every matched collection is opened, and whichever one streams
-// reports becomes the write target for rumble and settings.
+// interface 2 and read silence. So every matched collection is opened, each as its OWN source
+// (keyed by IOKit registry entry id): its reports carry its key up to `Sc2Capture`, which gives
+// every powered-on pad its own wire slot, and host writes come back addressed to the source that
+// claimed them — rumble for pad B never lands on pad A.
 //
 // **Keep-alive.** The firmware watchdog re-enables lizard mode after a few seconds of silence, so
 // `disableLizard` + `normalizeJoysticks` are re-sent on SDL's ~3 s cadence — the same contract
@@ -47,20 +49,19 @@ final class Sc2UsbLink {
     /// The queue every IOKit callback and every mutation below runs on — owned by `Sc2Capture`,
     /// USER_INTERACTIVE for the same reason the BLE link's is (a stalled consumer drops reports).
     private let queue: DispatchQueue
-    /// One incoming report, id-first — on `queue`. USB reports carry their id out of band, so
-    /// this link prepends it; the wire contract is id-first on every transport.
-    private let onReport: ([UInt8]) -> Void
-    /// Every opened collection went away (unplug / dongle pulled) — on `queue`.
-    private let onClosed: () -> Void
+    /// One incoming report from one source (the collection's registry entry id), id-first — on
+    /// `queue`. USB reports carry their id out of band, so this link prepends it; the wire
+    /// contract is id-first on every transport.
+    private let onReport: (UInt64, [UInt8]) -> Void
+    /// One opened collection went away (pad unplugged; fires once per collection when the
+    /// dongle is pulled) — on `queue`.
+    private let onSourceClosed: (UInt64) -> Void
 
     // All state below is touched ONLY on `queue`.
     private var manager: IOHIDManager?
     /// Every opened controller collection, by IOKit registry entry id. The Puck contributes up
     /// to four; a wired pad exactly one.
     private var open: [UInt64: IOHIDDevice] = [:]
-    /// The collection that last streamed a report — where `writeRaw` sends. Nil until the first
-    /// report, which is also when `Sc2Capture` claims its wire slot, so no write can precede it.
-    private var target: IOHIDDevice?
     /// Per-device input buffer, kept alive for as long as the device is open:
     /// `IOHIDDeviceRegisterInputReportCallback` writes into this memory for the device's whole
     /// lifetime, so a Swift array's storage would be a dangling pointer the moment it moved.
@@ -69,29 +70,24 @@ final class Sc2UsbLink {
     private var started = false
     /// Report ids seen so far — one line each, for remote diagnosis of what the pad emits.
     private var seenIds: Set<UInt8> = []
-    /// Whether the no-target write drop logged yet (once per link life — the drop is expected
-    /// before the first input report, and a persistent one is invisible otherwise).
+    /// Whether the unknown-source write drop logged yet (once per link life — the drop is
+    /// expected only for a source that just unplugged, and a persistent one is invisible
+    /// otherwise).
     private var loggedNoTarget = false
 
-    /// Backs `isDongle`; written on `queue`, read from any thread, hence the dedicated lock
-    /// (the capture reads it on the main actor at claim time).
+    /// The sources that belong to a Puck dongle; written on `queue`, read from any thread,
+    /// hence the dedicated lock (the capture reads it on the main actor at claim time).
     private let dongleLock = NSLock()
-    private var dongleFlag = false
+    private var dongleSources: Set<UInt64> = []
 
-    /// True while the opened device is a Puck dongle. Read by `Sc2Capture` to pick the declared
-    /// wire kind and to decide whether wireless-status reports are authoritative — a WIRED pad
-    /// emits them too, truthfully reporting "no radio link". Safe from any thread.
-    var isDongle: Bool {
+    /// Whether `source` is a Puck-dongle collection rather than a directly-attached pad. Read
+    /// by `Sc2Capture` to pick the declared wire kind and to decide whether wireless-status
+    /// reports are authoritative — a WIRED pad emits them too, truthfully reporting "no radio
+    /// link". Safe from any thread.
+    func isDongle(source: UInt64) -> Bool {
         dongleLock.lock()
         defer { dongleLock.unlock() }
-        return dongleFlag
-    }
-
-    /// Set `isDongle` (on `queue`, like every other mutation here).
-    private func setDongle(_ value: Bool) {
-        dongleLock.lock()
-        dongleFlag = value
-        dongleLock.unlock()
+        return dongleSources.contains(source)
     }
 
     /// `IOHIDDeviceRegisterInputReportCallback`'s report buffer size. The Triton's longest input
@@ -101,12 +97,12 @@ final class Sc2UsbLink {
 
     init(
         queue: DispatchQueue,
-        onReport: @escaping ([UInt8]) -> Void,
-        onClosed: @escaping () -> Void
+        onReport: @escaping (UInt64, [UInt8]) -> Void,
+        onSourceClosed: @escaping (UInt64) -> Void
     ) {
         self.queue = queue
         self.onReport = onReport
-        self.onClosed = onClosed
+        self.onSourceClosed = onSourceClosed
     }
 
     /// Whether any SC2 controller collection is attached right now — the cheap pre-flight
@@ -160,15 +156,16 @@ final class Sc2UsbLink {
     }
 
     /// Close every collection and tear the manager down. Idempotent; safe from any thread. Does
-    /// not fire `onClosed` — the caller is the one tearing down.
+    /// not fire `onSourceClosed` — the caller is the one tearing down.
     func stop() {
         queue.async { [self] in
             started = false
             stopKeepAlive()
             for (id, dev) in open { cancel(id: id, device: dev) }
             open.removeAll()
-            target = nil
-            setDongle(false)
+            dongleLock.lock()
+            dongleSources.removeAll()
+            dongleLock.unlock()
             seenIds.removeAll()
             loggedNoTarget = false
             if let mgr = manager {
@@ -197,7 +194,7 @@ final class Sc2UsbLink {
         IOHIDDeviceCancel(device)
     }
 
-    /// Replay one raw host report on the physical pad. `kind` is the C ABI's
+    /// Replay one raw host report on the physical pad behind `source`. `kind` is the C ABI's
     /// `PUNKTFUNK_HID_RAW_OUTPUT` (0) / `PUNKTFUNK_HID_RAW_FEATURE` (1); `frame` is id-first,
     /// exactly as Steam wrote it. Safe from any thread.
     ///
@@ -205,16 +202,16 @@ final class Sc2UsbLink {
     /// `IOHIDDeviceSetReport` takes the frame as the device's own HID stack expects it, which is
     /// precisely what the host already sent. (`Sc2Device.strippedOutputLen` exists to undo the
     /// GATT transport's id-stripping; USB has no such transform to undo.)
-    func writeRaw(kind: UInt8, frame: [UInt8]) {
+    func writeRaw(source: UInt64, kind: UInt8, frame: [UInt8]) {
         queue.async { [self] in
             guard let id = frame.first else { return }
-            guard let dev = target else {
-                // Expected only before the first input report — the capture cannot have claimed
-                // a wire slot yet, so the host cannot legitimately address this pad. Say so
-                // once: if this fires past startup, host writes are being thrown away.
+            guard let dev = open[source] else {
+                // Expected only in the unplug window — the capture routed by a wire slot the
+                // source claimed, so a miss means the collection just went away. Say so once:
+                // if this fires steadily, host writes are being thrown away.
                 if !loggedNoTarget {
                     loggedNoTarget = true
-                    log.info("SC2 USB: host write before any input report — dropped (no target)")
+                    log.info("SC2 USB: host write for a gone source — dropped")
                 }
                 return
             }
@@ -256,7 +253,11 @@ final class Sc2UsbLink {
         buf.initialize(repeating: 0, count: Self.reportBufSize)
         buffers[id] = buf
         open[id] = device
-        setDongle(Sc2Device.isDongle(pid: pid))
+        if Sc2Device.isDongle(pid: pid) {
+            dongleLock.lock()
+            dongleSources.insert(id)
+            dongleLock.unlock()
+        }
         IOHIDDeviceRegisterInputReportCallback(
             device, buf, Self.reportBufSize,
             { ctx, _, sender, _, reportID, report, len in
@@ -273,20 +274,21 @@ final class Sc2UsbLink {
         startKeepAlive()
     }
 
-    /// A collection went away. The link reports closed only when the LAST one does — a Puck
-    /// losing one of its four slots is not an unplug.
+    /// A collection went away: retire it and tell the capture, so ONE pad of several unplugging
+    /// releases exactly its own wire slot — a Puck losing one slot is not a dongle unplug.
     private func drop(_ device: IOHIDDevice) {
         let id = Self.registryID(device)
         guard open.removeValue(forKey: id) != nil else { return }
         cancel(id: id, device: device)
-        if target === device { target = nil }
+        dongleLock.lock()
+        dongleSources.remove(id)
+        dongleLock.unlock()
+        onSourceClosed(id)
         guard open.isEmpty else { return }
         stopKeepAlive()
-        setDongle(false)
         seenIds.removeAll()
         loggedNoTarget = false
-        log.info("SC2 USB: last collection removed — link closed")
-        onClosed()
+        log.info("SC2 USB: last collection removed — link idle")
     }
 
     /// One input report from IOKit. USB delivers the id out of band (`reportID`) and the payload
@@ -296,9 +298,7 @@ final class Sc2UsbLink {
         device: IOHIDDevice, reportID: UInt32, report: UnsafeMutablePointer<UInt8>, len: CFIndex
     ) {
         guard len > 0 else { return }
-        // Whichever collection streams becomes the write target — the Puck's bonded slot is not
-        // knowable in advance (Android's on-glass lesson, mirrored).
-        if target !== device { target = device }
+        let source = Self.registryID(device)
         let id = UInt8(truncatingIfNeeded: reportID)
         if seenIds.insert(id).inserted {
             log.info(
@@ -311,7 +311,7 @@ final class Sc2UsbLink {
         if Self.verbose {
             log.debug("SC2 USB in: \(framed.map { String(format: "%02x", $0) }.joined(), privacy: .public)")
         }
-        onReport(framed)
+        onReport(source, framed)
     }
 
     // MARK: - Lizard keep-alive
