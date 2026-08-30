@@ -76,6 +76,12 @@ fn pick_gamepad(pref: GamepadPref, env: Option<&str>, linux: bool, windows: bool
         GamepadPref::SteamController2 if windows => GamepadPref::SteamController2,
         // 28DE:1304 has seven USB interfaces; no Windows synthesis, so `_` → Xbox360.
         GamepadPref::SteamController2Puck if linux => GamepadPref::SteamController2Puck,
+        // The Puck's 7-interface 28DE:1304 topology has no Windows synthesis, and needs none:
+        // the dongle PIDs are client-side transports only — Steam treats the wired PID as the
+        // canonical controller (triton_proto.rs) — so a Puck-captured pad folds onto the same
+        // wired 28DE:1302 virtual pad a cabled one mints. The descriptor declares the wireless
+        // ids (0x79), so the client's forwarded connect edge stays legal on the wired identity.
+        GamepadPref::SteamController2Puck if windows => GamepadPref::SteamController2,
         _ => GamepadPref::Xbox360,
     }
 }
@@ -458,9 +464,11 @@ mod tests {
             pick_gamepad(Auto, Some("sc2puck"), true, false),
             SteamController2Puck
         );
+        // Windows has no virtual Puck; the pref folds onto the wired Triton identity, which
+        // Steam treats as the canonical controller — NOT to the Xbox 360 degrade.
         assert_eq!(
             pick_gamepad(SteamController2Puck, None, false, true),
-            Xbox360
+            SteamController2
         );
     }
 
