@@ -199,6 +199,9 @@ public final class Sc2Capture {
         stopped = false
         suspended = false
         lock.unlock()
+        // This capture owns every SC2 for its lifetime — drop the GameController shadows so the
+        // host never sees the same physical pad twice (see GamepadManager).
+        manager.steamController2Suppressed = true
         #if os(macOS)
         let resign = NSApplication.willResignActiveNotification
         let activate = NSApplication.didBecomeActiveNotification
@@ -286,6 +289,7 @@ public final class Sc2Capture {
         stopped = true
         lock.unlock()
         guard !wasStopped else { return }
+        manager.steamController2Suppressed = false
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
         releaseAll(reason: "stop")
