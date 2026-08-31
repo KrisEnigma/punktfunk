@@ -179,12 +179,12 @@ or Bluetooth; an iPhone or iPad has no USB path, so Bluetooth only (Apple TV has
 *Forward controllers* on, and a Linux or Windows host — elsewhere the pad falls back to its
 ordinary type.
 
-It defaults **off on Apple** because the Bluetooth transport prompts for permission when switched
-on, which is a question worth asking only from a controller the app can see you own. The Mac's USB
-transport prompts for nothing, but it shares the toggle, and the Bluetooth fallback behind it is
-what a Mac with no pad plugged in engages. Android needs no such prompt for a pad already attached,
-so it defaults on and simply does nothing when no SC2 is present. The capture engages at the next
-stream, and a badge confirms it.
+It defaults **off on Apple** because switching it on costs a permission question, which is worth
+asking only from a controller the app can see you own: Input Monitoring on a Mac (the controller
+shares its USB interface with the pad's built-in keyboard mode, so macOS treats opening it as
+keyboard listening), Bluetooth on an iPhone or iPad. Android needs no such prompt for a pad
+already attached, so it defaults on and simply does nothing when no SC2 is present. The capture
+engages at the next stream, and a badge confirms it.
 
 **Gamepad type** (*Controller type* on Apple, Android and the console home) — *default: Automatic*,
 which matches each physical controller. Pickers offer Xbox 360, Xbox One, DualSense and DualShock 4

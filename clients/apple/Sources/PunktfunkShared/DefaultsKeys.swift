@@ -60,9 +60,9 @@ public enum DefaultsKey {
     /// can raise a CoreBluetooth permission prompt, so a default-on toggle would ask every user
     /// for the radio whether or not they own an SC2. Android's capture needs no prompt for an
     /// already-attached pad, so it can default on and cost nothing when none is present. Do not
-    /// "align" the two without moving the prompt. (The macOS USB path prompts for nothing — it is
-    /// covered by the app's `device.usb` entitlement — but it shares this toggle, and the BLE
-    /// fallback behind it is still what a Mac with no pad plugged in would engage.)
+    /// "align" the two without moving the prompt. (The macOS USB path prompts too — Input
+    /// Monitoring, because the controller interface carries the lizard keyboard collection — so
+    /// BOTH Apple transports cost a permission question the toggle must stay opt-in for.)
     public static let sc2Capture = "punktfunk.sc2Capture"
     /// Where a controller's SYSTEM buttons (guide + the share/QAM misc) land while streaming:
     /// `"auto"` | `"forward"` | `"local"` — the cross-client `system_buttons` key. Auto
