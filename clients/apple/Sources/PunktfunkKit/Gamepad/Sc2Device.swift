@@ -42,17 +42,16 @@ enum Sc2Device {
     }
 
     /// The HID usage pair of the SC2's CONTROLLER collection (vendor-defined page 0xFF00,
-    /// usage 0x01) — the third top-level collection in `pf_driver_proto::triton::RDESC`, behind
-    /// the lizard-mode mouse (Generic Desktop 01:02, report 0x40) and keyboard (01:06, report
-    /// 0x41).
+    /// usage 0x01) — declared in `pf_driver_proto::triton::RDESC` beside the lizard-mode mouse
+    /// (Generic Desktop 01:02, report 0x40) and keyboard (01:06, report 0x41).
     ///
-    /// ⚠ Load-bearing, and the reason the USB link matches on a usage pair rather than on
-    /// VID/PID alone: macOS splits ONE multi-collection HID interface into one `IOHIDDevice` per
-    /// top-level collection (verified by census on this bench — a Keychron keyboard surfaces as
-    /// five devices sharing a single VID/PID, one per collection). Matching VID/PID alone would
-    /// therefore also open the SC2's KEYBOARD collection, which puts the app behind the Input
-    /// Monitoring TCC gate for no benefit. Pinning the vendor pair opens exactly the collection
-    /// that carries reports 0x42/0x43/0x45/0x79 and outputs 0x80…0x89, and nothing else.
+    /// ⚠ Load-bearing as a DEVICE-usage-pair match (`kIOHIDDeviceUsagePageKey`), never a
+    /// primary-usage one: on real hardware (Puck, macOS 27, 2026-08-31) each controller
+    /// interface is ONE `IOHIDDevice` carrying all its collections with primary usage
+    /// `0001:0002`, so a primary match finds nothing. The pair match selects the four controller
+    /// slots and excludes the Puck's management interface, whose only pair is `ff00:02` —
+    /// opening that one is actively wrong (feature-report-2 queries; see
+    /// `pf_driver_proto::triton`).
     static let usagePageVendor = 0xFF00
     static let usageController = 0x01
 
@@ -119,6 +118,8 @@ enum Sc2Device {
 
     static let idState: UInt8 = 0x42
     static let idBattery: UInt8 = 0x43
+    /// The WIRELESS state shape, not a BLE-only one: the Puck dongle delivers `0x45` (46 B,
+    /// id-first) over USB too — measured on-glass 2026-08-31. Only a cabled pad emits `0x42`.
     static let idStateBLE: UInt8 = 0x45
     static let idWirelessX: UInt8 = 0x46
     static let idStateTimestamp: UInt8 = 0x47

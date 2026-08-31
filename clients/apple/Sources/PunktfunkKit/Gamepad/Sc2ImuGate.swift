@@ -12,7 +12,8 @@
 // calm cursor; a gyro game makes Steam send the enable (feature `01 87 03 30 18 00`, replayed to
 // the pad by `Sc2Capture.onHidRaw`) → the timestamp starts ticking → live data flows.
 //
-// Gated shapes: `0x42` (USB state, 54 B wire) and `0x45` (BLE state, 46 B wire) — both are
+// Gated shapes: `0x42` (cabled state, 54 B wire) and `0x45` (wireless state, 46 B wire — what
+// BLE pads AND Puck slots over USB emit, on-glass 2026-08-31) — both are
 // `[report id][pack(1) TritonMTUNoQuat_t]`, so the IMU block (u32 timestamp + 3× i16 accel +
 // 3× i16 gyro) sits at wire offset 30 (struct offset 29 + the id byte) in both. `0x47` is
 // deliberately NOT gated: its layout diverges from byte 18 (inserted trackpad timestamp), no

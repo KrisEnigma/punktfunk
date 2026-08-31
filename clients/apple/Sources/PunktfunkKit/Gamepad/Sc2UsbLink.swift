@@ -10,14 +10,16 @@
 // to multiplex, and no EP0 fallback — `IOHIDDeviceRegisterInputReportCallback` delivers reports
 // on a dispatch queue and `IOHIDDeviceSetReport` performs both output and feature writes.
 //
-// **The match dictionary is the load-bearing design decision.** macOS splits one multi-collection
-// USB HID interface into one `IOHIDDevice` PER TOP-LEVEL COLLECTION (bench census: a single
-// Keychron VID/PID surfaces as five devices, one per collection). The SC2 declares three —
-// lizard mouse (01:02, report 0x40), lizard keyboard (01:06, report 0x41), and the controller
-// (vendor page FF00:01, reports 0x42/0x43/0x45/0x79 and outputs 0x80…0x89). Matching on VID/PID
-// alone would open the KEYBOARD collection too, which puts the whole app behind the Input
-// Monitoring TCC gate; pinning `Sc2Device.usagePageVendor`/`usageController` opens exactly the
-// controller collection and leaves the keylogging-class surface untouched.
+// **The match dictionary is the load-bearing design decision.** On-glass (Puck `1304`, macOS 27,
+// 2026-08-31): each controller INTERFACE is one `IOHIDDevice` carrying all of its top-level
+// collections — lizard mouse (01:02, report 0x40), pointer (01:01), lizard keyboard (01:06,
+// report 0x41), and the controller (vendor page FF00:01, reports 0x42/0x43/0x45/0x79 and
+// outputs 0x80…0x89) — and the dongle surfaces four of them plus a management interface whose
+// only pair is FF00:02. Matching the DEVICE usage pair `Sc2Device.usagePageVendor`/
+// `usageController` selects exactly the four controller slots and never the management
+// interface (feature-report-2 queries; opening it is actively wrong — pf_driver_proto). The
+// opened devices DO carry keyboard/mouse collections, so an Input Monitoring (TCC) prompt is a
+// live possibility; `adopt()` names it when open fails with kIOReturnNotPermitted.
 //
 // **The Puck opens every match, not one.** The dongle hosts up to four pads on interfaces 2…5
 // and nothing says which slot a controller bonded to — Android's first on-glass run claimed only
@@ -116,14 +118,19 @@ final class Sc2UsbLink {
     }
 
     /// One match dictionary per USB product id, each pinned to the controller collection's usage
-    /// pair (see the file header — this is what keeps the lizard keyboard out of our hands).
+    /// pair. ⚠ The DEVICE-usage-pair keys, not the primary-usage ones: on-glass (Puck, macOS 27,
+    /// 2026-08-31) each controller interface is ONE `IOHIDDevice` carrying ALL its collections —
+    /// lizard mouse, pointer, lizard keyboard, and the vendor controller (`01:02 01:01 01:06
+    /// ff00:01`) — with PRIMARY usage `0001:0002`, so a primary-usage match finds nothing. The
+    /// pair keys match any declared pair: `ff00:01` selects exactly the four controller slots
+    /// and still excludes the management interface, whose only pair is `ff00:02`.
     private static func matchingCriteria() -> [CFDictionary] {
         Sc2Device.usbPIDs.map { pid in
             [
                 kIOHIDVendorIDKey: Sc2Device.vidValve,
                 kIOHIDProductIDKey: pid,
-                kIOHIDPrimaryUsagePageKey: Sc2Device.usagePageVendor,
-                kIOHIDPrimaryUsageKey: Sc2Device.usageController,
+                kIOHIDDeviceUsagePageKey: Sc2Device.usagePageVendor,
+                kIOHIDDeviceUsageKey: Sc2Device.usageController,
             ] as CFDictionary
         }
     }
@@ -134,6 +141,17 @@ final class Sc2UsbLink {
         queue.async { [self] in
             guard manager == nil else { return }
             started = true
+            // The controller interface carries the lizard KEYBOARD collection too (on-glass
+            // census, see the header), so opening it sits behind the Input Monitoring TCC gate.
+            // Ask before the first open — without this, `IOHIDDeviceOpen` fails not-permitted
+            // forever and the user is never shown the question. ⚠ An UNBUNDLED binary (swift
+            // run) gets no prompt from this — measured silent-false 2026-08-31; the grant must
+            // be added by hand in System Settings for dev-shell runs. The bundled app prompts.
+            if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted {
+                let granted = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+                log.info(
+                    "SC2 USB: Input Monitoring requested (granted=\(granted, privacy: .public))")
+            }
             let mgr = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
             IOHIDManagerSetDeviceMatchingMultiple(mgr, Self.matchingCriteria() as CFArray)
             let ctx = Unmanaged.passUnretained(self).toOpaque()
@@ -233,10 +251,24 @@ final class Sc2UsbLink {
     // MARK: - Device lifecycle (queue)
 
     /// Open one newly matched controller collection and start its report callback.
-    private func adopt(_ device: IOHIDDevice) {
+    ///
+    /// ⚠ Never opens or registers on the MANAGER's device object: `IOHIDManagerActivate`
+    /// activates every device the manager owns, this callback runs during that activation, and
+    /// per-device callback registration on an activated device traps (on-glass crash
+    /// 2026-08-31: EXC_BREAKPOINT in `IOHIDDeviceRegisterInputReportCallback` under
+    /// `IOHIDManagerActivate`). A fresh `IOHIDDevice` minted from the same IOKit service is
+    /// ours alone, so the register → set-queue → activate order the API requires holds.
+    private func adopt(_ matched: IOHIDDevice) {
         guard started else { return }
-        let id = Self.registryID(device)
+        let id = Self.registryID(matched)
         guard open[id] == nil else { return }
+        let service = IOHIDDeviceGetService(matched)
+        guard service != MACH_PORT_NULL,
+              let device = IOHIDDeviceCreate(kCFAllocatorDefault, service)
+        else {
+            log.error("SC2 USB: could not mint a device from the matched service")
+            return
+        }
         let rc = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
         guard rc == kIOReturnSuccess else {
             // kIOReturnNotPermitted here would mean the usage-pair match failed to keep us off a
@@ -276,10 +308,12 @@ final class Sc2UsbLink {
 
     /// A collection went away: retire it and tell the capture, so ONE pad of several unplugging
     /// releases exactly its own wire slot — a Puck losing one slot is not a dongle unplug.
-    private func drop(_ device: IOHIDDevice) {
-        let id = Self.registryID(device)
-        guard open.removeValue(forKey: id) != nil else { return }
-        cancel(id: id, device: device)
+    private func drop(_ matched: IOHIDDevice) {
+        let id = Self.registryID(matched)
+        // Cancel OUR minted device (see `adopt`) — the manager's object was never activated,
+        // and cancelling a non-activated device is its own trap.
+        guard let mine = open.removeValue(forKey: id) else { return }
+        cancel(id: id, device: mine)
         dongleLock.lock()
         dongleSources.remove(id)
         dongleLock.unlock()
@@ -305,9 +339,20 @@ final class Sc2UsbLink {
                 "SC2 USB: report id=0x\(String(id, radix: 16), privacy: .public) seen (len=\(len, privacy: .public))"
             )
         }
-        var framed = [UInt8](repeating: 0, count: min(Int(len), Self.reportBufSize - 1) + 1)
-        framed[0] = id
-        for i in 1..<framed.count { framed[i] = report[i - 1] }
+        // The callback buffer arrives id-FIRST on-glass (0x45 at len 46 — the id-INCLUDED wire
+        // size; 2026-08-31), so it is forwarded verbatim: re-prepending shifted every field one
+        // byte and the typed mirror sprayed phantom input. The prepend survives only as the
+        // guard for a platform that ever delivers the buffer stripped.
+        var framed: [UInt8]
+        if report[0] == id {
+            let n = min(Int(len), Self.reportBufSize)
+            framed = [UInt8](repeating: 0, count: n)
+            for i in 0..<n { framed[i] = report[i] }
+        } else {
+            framed = [UInt8](repeating: 0, count: min(Int(len), Self.reportBufSize - 1) + 1)
+            framed[0] = id
+            for i in 1..<framed.count { framed[i] = report[i - 1] }
+        }
         if Self.verbose {
             log.debug("SC2 USB in: \(framed.map { String(format: "%02x", $0) }.joined(), privacy: .public)")
         }
