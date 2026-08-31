@@ -68,6 +68,7 @@ struct GamepadSettingsView: View {
     @AppStorage(DefaultsKey.streamHz) private var hz = 60
     @AppStorage(DefaultsKey.compositor) private var compositor = 0
     @AppStorage(DefaultsKey.gamepadType) private var gamepadType = 0
+    @AppStorage(DefaultsKey.sc2Capture) private var sc2Capture = false
     @AppStorage(DefaultsKey.gamepadForwarding) private var gamepadForwarding = true
     @AppStorage(DefaultsKey.systemButtons) private var systemButtons = "auto"
     @AppStorage(DefaultsKey.guideGesture) private var guideGesture = "auto"
@@ -974,6 +975,21 @@ struct GamepadSettingsView: View {
                     detail: "Windowed streams present in step with the compositor — avoids a "
                         + "macOS display-driver crash, at a small latency cost.",
                     value: $windowedSafePresent),
+                at: at + 1)
+        }
+        #endif
+        #if os(iOS) || os(macOS)
+        // The SC2 as-is passthrough slots in after "Use controller" — the same neighborhood the
+        // desktop settings window gives it. tvOS has neither capture path, so no row there.
+        if let at = list.firstIndex(where: { $0.id == "pad" })
+            ?? list.firstIndex(where: { $0.id == "padForward" }) {
+            list.insert(
+                toggleRow(
+                    id: "sc2Capture", tab: .controller, icon: "gamecontroller",
+                    label: "Steam Controller 2 passthrough",
+                    detail: SettingsView.sc2CaptureCaption,
+                    value: $sc2Capture,
+                    enabled: gamepadForwarding),
                 at: at + 1)
         }
         #endif

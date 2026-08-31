@@ -27,11 +27,13 @@ import SwiftUI
 extension SettingsView {
     /// The SC2 passthrough toggle's caption: one clause of what it does + one of what it costs
     /// (the caption rule). macOS says it differently because USB is the preferred transport
-    /// there and costs nothing — "needs Bluetooth access" would be plainly false for the wired
-    /// pad and the Puck, which are exactly the Mac's cases.
+    /// there and its cost is the Input Monitoring grant, not Bluetooth — the controller
+    /// interface carries the lizard keyboard collection, so macOS gates the open behind that
+    /// permission (on-glass 2026-08-31).
     static var sc2CaptureCaption: String {
         #if os(macOS)
-        return "Stream a Steam Controller 2 or Puck as-is; a Bluetooth pad needs access."
+        return "Stream a Steam Controller 2 or Puck as-is; needs Input Monitoring "
+            + "(or Bluetooth) access."
         #else
         return "Stream a Steam Controller 2 as-is; needs Bluetooth access."
         #endif
@@ -863,10 +865,9 @@ extension SettingsView {
                 // hardware THIS device captures). tvOS has neither capture path.
                 // The capture engages at the next stream; the in-stream badge announces it.
                 // One clause of what it does + one of what it costs (the caption rule); the
-                // opening clause is Android's word-for-word, the rider is the Apple-only cost.
-                // macOS says it differently because USB is the preferred transport there and
-                // costs nothing — claiming the toggle "needs Bluetooth access" would be false
-                // for the wired pad and the Puck, which are exactly the Mac's new cases.
+                // opening clause is Android's word-for-word, the rider is the Apple-only cost —
+                // Input Monitoring on macOS (the lizard keyboard rides the same interface),
+                // Bluetooth elsewhere. See sc2CaptureCaption.
                 described(Self.sc2CaptureCaption, field: "sc2_capture") {
                     Toggle("Steam Controller 2 passthrough", isOn: $sc2Capture)
                         .disabled(!effective.gamepadForwarding)
