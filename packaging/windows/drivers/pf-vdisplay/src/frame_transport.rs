@@ -817,7 +817,7 @@ impl FramePublisher {
     }
 
     /// Open the endpoint's shared fences on this device (`ID3D11Device5::OpenSharedFence`) and the
-    /// `ID3D11DeviceContext4` the GPU-side waits/signals need. `None` — logged — when the device
+    /// `ID3D11DeviceContext4` the GPU-side signal needs. `None` — logged — when the device
     /// predates D3D11.4 or either open fails; the ring then runs on the keyed-mutex arm.
     fn open_fences(
         ep: &RingEndpoint,
@@ -1137,10 +1137,18 @@ impl FramePublisher {
         PublishOutcome::AllSlotsBusy
     }
 
-    /// The fence-protocol publish (immunity plan D5; the S2-proven shape). One scan, one CAS
-    /// claim, GPU-ordered copy — the producer never CPU-waits on the reader: it takes a FREE
-    /// slot, else overwrites the OLDEST PUBLISHED one, else drops the frame; READING and WRITING
-    /// slots are never touched.
+    /// The fence-protocol publish (immunity plan D5). One scan, one CAS claim, one queued copy:
+    /// it takes a FREE slot, else overwrites the OLDEST PUBLISHED one, else drops the frame;
+    /// READING and WRITING slots are never touched.
+    ///
+    /// The producer never waits, on the CPU or on the GPU. A claimed slot whose retire fence has
+    /// not completed is handed back in the state the claim took it from and the frame is dropped.
+    /// Queueing a GPU-side wait instead would put the host's read latency in front of every later
+    /// submission on this context — and our submissions are what DWM waits on for this head, so a
+    /// slow reader would become the display's frame time.
+    ///
+    /// The ready value is taken only once the slot is really being written, so a dropped frame
+    /// never burns one.
     fn publish_fence(&mut self, surface: &ID3D11Texture2D, display_qpc: u64) -> PublishOutcome {
         let ring_len = self.slots.len();
         let ep = self.ep.clone();
@@ -1181,19 +1189,25 @@ impl FramePublisher {
         let retire_v = ep
             .slot_u64(slot, offset_of!(SlotRecord, retire_value))
             .load(Ordering::Acquire);
+        // SAFETY: `f.retire` is the live opened shared fence; a read-only completed-value query.
+        let retired = unsafe { f.retire.GetCompletedValue() } >= retire_v;
+        if !retired {
+            // The host still holds this slot's last read. Put it back exactly as claimed and drop
+            // the frame — the next compose rescans.
+            ep.slot_state(slot).store(from, Ordering::Release);
+            ep.note_drop();
+            return PublishOutcome::AllSlotsBusy;
+        }
         let ready_v = ep
             .ready_value
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
         // SAFETY: GPU-queued calls over live COM objects on this worker's immediate context: the
-        // retire Wait orders our copy after the host's last read of this slot on the GPU timeline
-        // (never a CPU block), the copy is format-matched (checked by the caller), and the ready
-        // Signal orders it before the host's consume.
+        // copy is format-matched (checked by the caller), and the ready Signal orders it before
+        // the host's consume.
         let queued = unsafe {
-            f.ctx4.Wait(&f.retire, retire_v).and_then(|()| {
-                self.context.CopyResource(&self.slots[slot].tex, surface);
-                f.ctx4.Signal(&f.ready, ready_v)
-            })
+            self.context.CopyResource(&self.slots[slot].tex, surface);
+            f.ctx4.Signal(&f.ready, ready_v)
         };
         if let Err(e) = queued {
             // Give the slot back (its pixels are unknown, so FREE — the consumer never reads a FREE
@@ -1207,7 +1221,7 @@ impl FramePublisher {
                 })
             };
             dbglog!(
-                "[pf-vd] frame-push FATAL: fence Wait/Signal failed rc={:#x} (device-removed reason {removed:#x}) — poisoning this ring generation",
+                "[pf-vd] frame-push FATAL: fence Signal failed rc={:#x} (device-removed reason {removed:#x}) — poisoning this ring generation",
                 e.code().0
             );
             ep.note_drop();
