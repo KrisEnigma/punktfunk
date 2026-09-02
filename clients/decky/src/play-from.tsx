@@ -10,12 +10,12 @@
 // host is remembered per title; while it stands, the Play button itself is re-dressed as a
 // violet Stream (lens mark, label, our launch), the way Steam's turns into Stream for a remote
 // client. Choosing a Steam client hands the choice back to Steam.
-import { findClassModule, Menu, MenuItem, showContextMenu } from "@decky/ui";
+import { findClassModule, Menu, MenuItem, MenuSeparator, showContextMenu } from "@decky/ui";
 import { cloneElement } from "react";
 import { FaCheck } from "react-icons/fa";
 import { hostsForApp, subscribeCatalog } from "./catalog";
 import { diag } from "./diag";
-import { Game, PunktfunkMark, streamFrom, VIOLET_LIGHT } from "./game";
+import { Game, PunktfunkMark, streamFrom } from "./game";
 import { getHostStore, HostView, subscribeHosts } from "./hooks";
 import { collectElements, createRenderPatcher, describe } from "./patch";
 import { isGameStreaming, stopGameStream, subscribeRunning } from "./steam";
@@ -165,6 +165,12 @@ export function openPlayFromMenu(overview: Overview, anchor?: EventTarget): void
       </MenuItem>,
     );
   }
+  // Punktfunk hosts as a second group, drawn exactly like Steam's rows — same check column, same
+  // label, Steam's text colour — with a small lens mark at the row's end as the only brand hint.
+  // A separator is how Steam's own menu groups its entries.
+  if (hosts.length > 0) {
+    items.push(<MenuSeparator key="pf-sep" />);
+  }
   for (const host of hosts) {
     const selected = ours?.ref === host.ref;
     items.push(
@@ -173,14 +179,13 @@ export function openPlayFromMenu(overview: Overview, anchor?: EventTarget): void
         {...{ className: cls.StreamingContextMenuItem }}
         onSelected={() => setPlayFromSelection(game.appId, host.ref)}
       >
-        <span className={cls.CheckContainer}>{selected && <FaCheck style={{ color: VIOLET_LIGHT }} />}</span>
-        <span
-          className={cls.StreamingTargetLabel}
-          style={{ color: VIOLET_LIGHT, display: "inline-flex", alignItems: "center", gap: "0.45em" }}
-        >
-          <PunktfunkMark ready back="#cec9fb" deep="#8c7ef5" />
+        <span className={cls.CheckContainer}>{selected && <FaCheck style={{ color: "#1a9fff" }} />}</span>
+        <span className={cls.StreamingTargetLabel}>
           {localize("#StreamingClient_StreamFrom", "Stream from: %s", host.name)}
-          {!host.online && <span style={{ opacity: 0.6 }}>· asleep</span>}
+          {!host.online && <span style={{ opacity: 0.6 }}> · asleep</span>}
+        </span>
+        <span style={{ marginLeft: "auto", paddingLeft: "1em", display: "inline-flex", opacity: 0.85 }}>
+          <PunktfunkMark ready size={18} back="#a79ff8" deep="#6c5bf3" />
         </span>
       </MenuItem>,
     );

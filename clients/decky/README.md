@@ -25,7 +25,8 @@ uses). Everything the panel doesn't do is one tap away in the client's own gamep
    other client speaks, stored on the host's record — so one you make in the desktop client shows
    up here, and vice versa. The plugin renders them; it doesn't create or edit them.
 5. **Stream from Steam's own Play button** — the ▾ beside Play lists Punktfunk hosts that have
-   the game alongside Steam Link's own "Stream from" entries, in violet with the lens mark. Pick
+   the game below Steam Link's own "Stream from" entries, as Steam-styled rows with a small lens
+   mark. Pick
    one and Steam's Play button becomes **Stream** — violet under focus, the way Play is green — that
    launches the game on the host,
    whether or not the Deck has it installed, and reads **Stop** while the stream runs. Steam
@@ -58,8 +59,9 @@ past a missing fingerprint.
 
 The ▾ beside Steam's Play button opens its streaming selector: **This device**, then **Stream
 from: <PC>** for each Steam Remote Play client that has the title. Punktfunk hosts that have the
-title now appear in that same list, after Steam's clients, in brand violet with the lens mark in
-front. Choosing one is remembered per title, and while it stands **Steam's own Play button becomes
+title now appear in that same list as a second group below a separator, drawn exactly like
+Steam's rows — same check column, same label, Steam's text colour — with a small lens mark at the
+row's end as the only brand hint. Choosing one is remembered per title, and while it stands **Steam's own Play button becomes
 Stream** — lens mark, `Stream` label, our launch, `Stop` while the stream is up, violet under focus
 and hover where Play is green, Steam's own gray at rest — the way Steam's turns into Stream for a
 Remote Play client. Choosing a Steam client hands the choice back to
