@@ -19,14 +19,21 @@ import {
   findInReactTree,
   Focusable,
   joinClassNames,
-  ModalRoot,
+  Menu,
+  MenuItem,
   playSectionClasses,
-  showModal,
+  showContextMenu,
 } from "@decky/ui";
 import { FC, ReactElement, useEffect, useRef, useState } from "react";
-import { FaPlay, FaStop } from "react-icons/fa";
+import { FaChevronDown, FaStop } from "react-icons/fa";
 import { hostsForApp, subscribeCatalog } from "./catalog";
-import { HostView, refreshHostsIfStale, startGameStream, useHostStore } from "./hooks";
+import {
+  getHostStore,
+  HostView,
+  refreshHostsIfStale,
+  startGameStream,
+  useHostStore,
+} from "./hooks";
 import { isGameStreaming, stopGameStream, subscribeRunning } from "./steam";
 
 const ROUTE = "/library/app/:appid";
@@ -95,86 +102,183 @@ function streamFrom(host: HostView, game: Game): void {
   void startGameStream(host, game.appId, game.title, game.iconHash);
 }
 
-/** More than one host has the title: the same choice Steam's own client dropdown offers. */
-const HostPicker: FC<{
-  hosts: HostView[];
-  game: Game;
-  closeModal?: () => void;
-}> = ({ hosts, game, closeModal }) => (
-  <ModalRoot closeModal={closeModal}>
-    <div style={{ fontWeight: "bold", fontSize: "1.3em", marginBottom: "0.3em" }}>
-      Stream {game.title} from…
-    </div>
-    <Focusable style={{ display: "flex", flexDirection: "column", gap: "0.5em" }}>
+/** Several hosts have the title: Steam's own context menu, the way its Play dropdown lists
+ *  the clients a game could run on. Anchored to the chevron segment that opened it. */
+function openHostMenu(hosts: HostView[], game: Game, anchor: EventTarget): void {
+  showContextMenu(
+    <Menu label={`Stream ${game.title} from`}>
       {hosts.map((h) => (
-        <DialogButton
-          key={h.ref}
-          onClick={() => {
-            closeModal?.();
-            streamFrom(h, game);
-          }}
-        >
+        <MenuItem key={h.ref} onSelected={() => streamFrom(h, game)}>
           {h.name}
-          <span style={{ opacity: 0.7 }}> · {h.online ? "online" : "asleep, will wake"}</span>
-        </DialogButton>
+          <span style={{ opacity: 0.6 }}> · {h.online ? "online" : "asleep, will wake"}</span>
+        </MenuItem>
       ))}
-      <DialogButton onClick={() => closeModal?.()}>Cancel</DialogButton>
-    </Focusable>
-  </ModalRoot>
+    </Menu>,
+    anchor,
+  );
+}
+
+/** The Punktfunk lens mark (the two overlapping circles of the logo). Fills come from the
+ *  button's CSS variables, so the mark follows the button's ready / idle / focused state. */
+const PunktfunkMark: FC<{ ready: boolean }> = ({ ready }) => (
+  <svg viewBox="17 13 141 141" width="22" height="22" aria-hidden="true">
+    <defs>
+      <linearGradient id="pf-lens" x1="0" y1="1" x2="1" y2="0">
+        <stop offset="0" stopColor="#ffffff" stopOpacity="0" />
+        <stop offset="1" stopColor="#ffffff" stopOpacity="0.9" />
+      </linearGradient>
+    </defs>
+    <circle cx="65.44" cy="105.85" r="44.3" style={{ fill: "var(--pf-back)" }} />
+    <circle cx="109.74" cy="61.55" r="44.3" style={{ fill: "var(--pf-deep)" }} />
+    {ready && (
+      <path
+        fill="url(#pf-lens)"
+        d="M121.228,104.359c-14.777,3.965 -31.187,0.136 -42.811,-11.488c-11.624,-11.624 -15.453,-28.034 -11.488,-42.811c14.777,-3.965 31.187,-0.136 42.811,11.488c11.624,11.624 15.453,28.034 11.488,42.811Z"
+      />
+    )}
+  </svg>
 );
 
-// Anchored at the boundary between the header and the play panel, so the bar's own bottom
-// edge is the reference: in the play bar's right-hand group, at the ⚙ / ℹ buttons' height —
-// the offsets MoonDeck ships as its default. Drawn with the bar's MenuButton class so the
-// height, radius and focus ring are Steam's; only the label is ours.
+// Anchored at the boundary between the header and the play section. Measured on a Deck: the
+// bar's ⚙ / ℹ buttons are 48 px squares starting 16 px below that boundary, the ℹ ending at
+// the 2.8vw page margin and the ⚙ 10 px to its left with a 10 px margin of its own — so the
+// slot before them ends at 2.8vw + 116 px. MenuButton gives Steam's height, radius and focus
+// behaviour; its fixed 48 px width is lifted so the label fits. z-index lifts the button above
+// the play section, a later sibling that otherwise paints over it.
+//
+// Colour is the state, the way Play is green when it can be pressed: brand violet
+// (assets/punktfunk-logo.svg) when a host can stream the title, Steam's muted gray when none
+// can. Steam styles this element through `button.<hash>.DialogButton:enabled…` selectors and
+// turns it white on focus; the ready state's colours are `!important` so they hold, and it
+// brightens under focus instead, while the idle state keeps Steam's own white focus.
 const STYLE = `
   .punktfunk-stream {
     position: absolute;
-    right: 2.8vw;
-    bottom: 16px;
+    right: calc(2.8vw + 116px);
+    top: 16px;
+    z-index: 1;
   }
-  .punktfunk-stream-button {
+  .punktfunk-stream-row {
+    display: flex;
+    align-items: stretch;
+  }
+  .punktfunk-stream-button,
+  .punktfunk-stream-more {
     margin: 0 !important;
+    width: auto !important;
     min-width: 0 !important;
-    padding: 0 18px !important;
     display: flex !important;
     align-items: center;
     white-space: nowrap;
-    background: rgba(14, 20, 27, 0.5);
+    transition: background-color 0.2s, color 0.2s;
   }
-  .punktfunk-stream-button:hover {
-    background: rgba(14, 20, 27, 0.75);
+  .punktfunk-stream-button {
+    padding: 0 16px 0 12px !important;
+    gap: 8px;
+    font-weight: 500;
+  }
+  .punktfunk-stream-button.is-idle {
+    color: #8b929a !important;
+    --pf-back: #6b7079;
+    --pf-deep: #8b929a;
+  }
+  .punktfunk-stream-button.is-idle:focus {
+    --pf-back: #9aa0a8;
+    --pf-deep: #5c6068;
+  }
+  .punktfunk-stream-button.is-ready,
+  .punktfunk-stream-more.is-ready {
+    background: #6c5bf3 !important;
+    color: #ffffff !important;
+    --pf-back: #cec9fb;
+    --pf-deep: #f2f1fe;
+  }
+  .punktfunk-stream-more.is-ready {
+    background: #5b4ce0 !important;
+  }
+  .punktfunk-stream-button.is-ready:hover,
+  .punktfunk-stream-more.is-ready:hover {
+    background: #7b6cf6 !important;
+  }
+  .punktfunk-stream-button.is-ready:focus,
+  .punktfunk-stream-more.is-ready:focus,
+  .punktfunk-stream-button.is-ready.gpfocus,
+  .punktfunk-stream-more.is-ready.gpfocus {
+    background: #8574f7 !important;
+    color: #ffffff !important;
+  }
+  .punktfunk-stream-button.is-ready svg,
+  .punktfunk-stream-more.is-ready svg {
+    color: #ffffff !important;
+  }
+  .punktfunk-stream-row.has-more .punktfunk-stream-button {
+    border-top-right-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
+  }
+  .punktfunk-stream-more {
+    padding: 0 10px !important;
+    margin-inline-start: 0 !important;
+    border-top-left-radius: 0 !important;
+    border-bottom-left-radius: 0 !important;
+    border-left: 1px solid rgba(255, 255, 255, 0.18);
+    font-size: 0.7em;
   }
 `;
 
+/**
+ * The button is always on a Steam title's page, as a status as much as a control: the lens mark
+ * is violet when a paired host can stream the title, gray when none can. Several hosts add a
+ * chevron segment with Steam's own menu; the main segment streams from the best host.
+ */
 const StreamButton: FC<Game> = (game) => {
   const hosts = useHostsForApp(game.appId);
   const streaming = useGameStreaming(game.appId);
-  if (hosts.length === 0 && !streaming) {
-    return null;
-  }
+  const ready = hosts.length > 0;
   const onClick = () => {
     if (streaming) {
       stopGameStream(game.appId); // Steam's Stop, for the stream this page started
-    } else if (hosts.length === 1) {
-      streamFrom(hosts[0], game);
+    } else if (ready) {
+      streamFrom(hosts[0], game); // best host: online first, then most recently used
     } else {
-      showModal(<HostPicker hosts={hosts} game={game} />);
+      toaster.toast({
+        title: "Punktfunk",
+        body: `No paired host has ${game.title} in its library`,
+      });
     }
   };
+  const hasMore = ready && !streaming && hosts.length > 1;
   return (
     <Focusable
       className={joinClassNames(basicAppDetailsSectionStylerClasses.AppButtons, "punktfunk-stream")}
     >
       <style>{STYLE}</style>
-      <Focusable>
+      <Focusable
+        className={joinClassNames("punktfunk-stream-row", hasMore ? "has-more" : "")}
+        flow-children="row"
+      >
         <DialogButton
-          className={joinClassNames(playSectionClasses.MenuButton, "punktfunk-stream-button")}
+          className={joinClassNames(
+            playSectionClasses.MenuButton,
+            "punktfunk-stream-button",
+            ready || streaming ? "is-ready" : "is-idle",
+          )}
           onClick={onClick}
         >
-          {streaming ? <FaStop style={{ marginRight: "0.5em" }} /> : <FaPlay style={{ marginRight: "0.5em" }} />}
+          {streaming ? <FaStop /> : <PunktfunkMark ready={ready} />}
           {streaming ? "Stop" : "Stream"}
         </DialogButton>
+        {hasMore && (
+          <DialogButton
+            className={joinClassNames(
+              playSectionClasses.MenuButton,
+              "punktfunk-stream-more",
+              "is-ready",
+            )}
+            onClick={(e) => openHostMenu(hosts, game, e.currentTarget as EventTarget)}
+          >
+            <FaChevronDown />
+          </DialogButton>
+        )}
       </Focusable>
     </Focusable>
   );
@@ -243,7 +347,11 @@ interface OverviewLike {
   icon_hash?: unknown;
 }
 
-type PanelChild = ReactElement<{ overview?: unknown; onShowLaunchingDetails?: unknown }>;
+type PanelChild = ReactElement<{
+  overview?: unknown;
+  onShowLaunchingDetails?: unknown;
+  fullscreen?: unknown;
+}>;
 type InnerContainer = ReactElement<{ children: PanelChild[]; className?: string }>;
 
 /**
@@ -252,10 +360,36 @@ type InnerContainer = ReactElement<{ children: PanelChild[]; className?: string 
  * callback). Every lookup is defensive — Steam's tree is not an API, and a miss must leave the
  * page exactly as Steam drew it.
  */
+// Where each patch attempt got to, readable from the CEF debugger as `window.__punktfunkDiag`
+// and echoed to the console. Steam's tree is not an API; when it moves, this says which step.
+declare global {
+  interface Window {
+    __punktfunkDiag?: string[];
+  }
+}
+let lastDiag = "";
+function diag(msg: string): void {
+  if (msg === lastDiag) {
+    return; // the page renders several times per open; one line per change is enough
+  }
+  lastDiag = msg;
+  const line = `${new Date().toISOString().slice(11, 19)} ${msg}`;
+  console.warn(`punktfunk: ${msg}`);
+  try {
+    (window.__punktfunkDiag ??= []).push(line);
+    if (window.__punktfunkDiag.length > 60) {
+      window.__punktfunkDiag.shift();
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 function patchLibraryApp(): RoutePatch {
   return routerHook.addPatch(ROUTE, (tree: any) => {
     const routeProps = findInReactTree(tree, (x: any) => x?.renderFunc);
     if (!routeProps) {
+      diag("game page: no renderFunc in route tree");
       return tree;
     }
     let overview: OverviewLike | undefined;
@@ -265,6 +399,7 @@ function patchLibraryApp(): RoutePatch {
           const children = findInReactTree(node, (x: any) => x?.props?.children?.props?.overview)
             ?.props?.children;
           if (typeof children !== "object" || typeof children?.props?.overview !== "object") {
+            diag("game page: no child carrying an overview");
             return null;
           }
           overview = children.props.overview as OverviewLike;
@@ -273,6 +408,7 @@ function patchLibraryApp(): RoutePatch {
       ],
       (_: unknown[], ret?: ReactElement) => {
         if (!ret || !gamePageStreamEnabled()) {
+          diag(`game page: ${ret ? "button disabled by preference" : "empty render"}`);
           return ret;
         }
         const appId = overview?.appid;
@@ -281,6 +417,7 @@ function patchLibraryApp(): RoutePatch {
           overview?.app_type === APP_TYPE_SHORTCUT ||
           typeof overview?.display_name !== "string"
         ) {
+          diag(`game page: skipped overview appid=${String(appId)} type=${String(overview?.app_type)}`);
           return ret;
         }
         const parent = findInReactTree(
@@ -290,20 +427,37 @@ function patchLibraryApp(): RoutePatch {
             !!x?.props?.className?.includes(appDetailsClasses.InnerContainer),
         ) as InnerContainer | undefined;
         if (!parent) {
+          diag(`game page ${appId}: no InnerContainer (${appDetailsClasses.InnerContainer})`);
           return ret;
         }
         const children = parent.props.children;
         if (children.some((c) => c?.key === ANCHOR_KEY)) {
           return ret; // already spliced into this render's tree
         }
+        // The children are [header, play section, launching-details] — the last carries the
+        // overview and the launch callback but draws nothing, so it is only a witness that this
+        // is the page. The anchor goes right AFTER THE HEADER (the child with the `fullscreen`
+        // flag), which is the boundary the play bar hangs from.
         const panelIndex = children.findIndex(
           (c) => c?.props?.overview && c?.props?.onShowLaunchingDetails,
         );
         if (panelIndex < 0) {
+          diag(
+            `game page ${appId}: no play panel among ${children.length} children: ` +
+              children.map((c) => Object.keys(c?.props ?? {}).join("+") || String(c)).join(" | "),
+          );
           return ret;
         }
+        const headerIndex = children.findIndex(
+          (c) => c?.props?.overview && "fullscreen" in (c.props as object),
+        );
+        const at = headerIndex >= 0 ? headerIndex + 1 : Math.max(panelIndex - 1, 0);
+        diag(
+          `game page ${appId}: anchor spliced at ${at}/${children.length}, ` +
+            `${hostsForApp(appId, getHostStore().views).length} host(s) have it`,
+        );
         children.splice(
-          panelIndex,
+          at,
           0,
           <StreamButtonAnchor
             key={ANCHOR_KEY}

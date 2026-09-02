@@ -91,17 +91,19 @@ stream — plus a door into the client's own gamepad UI for everything else.
   applied — "4K on the TV" and "battery saver" presets, one tap each. Pins are made in the
   Punktfunk app (or any other client) and shared across all of them; the panel shows them, it
   doesn't create them.
-- **Stream from a game's own page** — when a paired host has a Steam game in its
-  [library](/docs/game-library) (the host's Steam library plugin is connected), that game's page
-  on the Deck gets a **Stream** button in the play bar, next to Steam's own buttons. Tap it and
-  the host launches the game into a stream — the same idea as Remote Play's **Stream** button,
-  pointed at your Punktfunk host. It works whether or not the Deck has the game installed, so a
-  page that says **Install** can stream instead of downloading. If more than one host has the
-  game, a picker asks which. A sleeping host is woken first when the client knows how (see
-  [Wake-on-LAN](/docs/wake-on-lan)). While it streams, Steam shows the **game** as running —
-  its name, its art, in the overlay and to your friends — and the button reads **Stop**. The
-  button is on by default; the switch is in the panel under **Punktfunk → Stream button on game
-  pages**.
+- **Stream from a game's own page** — every Steam game's page on the Deck gets a **Stream**
+  button in the play bar, next to Steam's controller and settings buttons. Like Play is green
+  when you can press it, the button is **violet** when a paired host has that game in its
+  [library](/docs/game-library) (the host's Steam library plugin is connected) and **gray** when
+  none does. Tap it and the host launches
+  the game into a stream — the same idea as Remote Play's **Stream** button, pointed at your
+  Punktfunk host. It works whether or not the Deck has the game installed, so a page that says
+  **Install** can stream instead of downloading. If more than one host has the game, the button
+  grows a dropdown arrow, like Steam's own Play button, to pick one. A sleeping host is woken
+  first when the client knows how (see [Wake-on-LAN](/docs/wake-on-lan)). While it streams,
+  Steam shows the **game** as running — its name, its art, in the overlay and to your friends —
+  and the button reads **Stop**. The button is on by default; the switch is in the panel under
+  **Punktfunk → Stream button on game pages**.
 - **Open Punktfunk** — opens the client's console home: the host picker, adding a host by address,
   pairing, browsing a host's [game library](/docs/game-library), and the **full settings screen** —
   resolution, bitrate, codec, audio, controllers and the stats overlay.
@@ -197,7 +199,8 @@ The plugin check follows the [channel](/docs/channels) you installed from: a plu
 | **Request access** isn't offered | The host isn't advertising on this network, so there's no identity to pin. Use the PIN path. |
 | A request-access stream sits there | That's it waiting — somebody has to approve the Deck on the host. It gives up after about three minutes. |
 | Stream launches but doesn't focus | Start it from the panel (not by launching the client by hand) so Steam/gamescope focuses it. |
-| No **Stream** button on a game's page | The host must be **paired** (not just trusted) and have been online since the plugin loaded, and the game must be in the host's library as a Steam title. Open the panel once to rescan, then reopen the page. The switch under **Punktfunk** in the panel must be on. |
+| The **Stream** button on a game's page is gray | No paired host has that game. The host must be **paired** (not just trusted) and have been online since the plugin loaded, and the game must be in the host's library as a Steam title. Open the panel once to rescan, then reopen the page. |
+| No **Stream** button at all on game pages | The switch under **Punktfunk** in the panel must be on. If it is, Steam's page layout may have changed; the plugin logs what it found in Decky's CEF console (lines starting `punktfunk:`). |
 | The game's own **Play** button doesn't turn into **Stop** while streaming | Expected: Steam derives that from its own state. The plugin's **Stream** button is the one that reads **Stop**, and Steam's overlay names the game. |
 | Hidden entries named after games pile up in "show hidden" | Each game streamed from its page has one. Panel → **About** → **Remove game shortcuts** clears them; they return on the next Stream. |
 | The stream wedges — black, or won't close | Panel → **About** → **Force-stop**, then start it again. |

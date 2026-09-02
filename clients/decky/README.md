@@ -24,12 +24,15 @@ uses). Everything the panel doesn't do is one tap away in the client's own gamep
    and streams with that settings profile applied. Cards are the **shared** pinning model every
    other client speaks, stored on the host's record — so one you make in the desktop client shows
    up here, and vice versa. The plugin renders them; it doesn't create or edit them.
-5. **Stream button on game pages** — a Steam game's own page gets a **Stream** button when a
-   paired host has that game in its library (the host's Steam library plugin reports it as
-   `steam:<appid>`). Tap it and the host launches the game into a stream, whether or not the
-   Deck has it installed — Steam Remote Play's "Stream" for a Punktfunk host. Steam shows the
-   *game* running, with its own art, and the button reads **Stop** until the stream ends. See
-   [The game-page button](#the-game-page-button).
+5. **Stream button on game pages** — every Steam game's own page gets a **Stream** button in
+   the play bar, beside Steam's controller and settings buttons. Like Play is green when it can
+   be pressed, the button is **brand violet when a paired host has that game** in its library
+   (the host's Steam library plugin reports it as `steam:<appid>`) and **gray when none does**.
+   Tap it and the host launches the
+   game into a stream, whether or not the Deck has it installed — Steam Remote Play's "Stream"
+   for a Punktfunk host. Several hosts add a dropdown segment, like Steam's own Play button.
+   Steam shows the *game* running, with its own art, and the button reads **Stop** until the
+   stream ends. See [The game-page button](#the-game-page-button).
 6. **Open Punktfunk** — launches the client's **console home**: the host picker, add-host by
    address, PIN pairing, the game library browser, and the **full settings screen**. This is where
    everything the panel no longer does now lives. The toggle for the game-page button lives here
@@ -63,7 +66,18 @@ route `/library/app/:appid` is patched, the render is walked to the play panel, 
 spliced in just before it. Every lookup is defensive: a Steam UI change leaves the page as Steam
 drew it, with no button, rather than a broken page.
 
-What decides whether the button shows:
+The button is always there on a Steam title's page, as a status as much as a control: the whole
+button is brand violet when a host can stream the title and Steam's muted gray when none can (a
+tap then says so in a toast), with the lens mark from the Punktfunk logo as its icon. Steam's
+focus rule for that button class turns it white; the violet state outranks it by one class and
+brightens instead, the way Play stays green under focus. Placement was measured on a Deck: the
+anchor sits at the boundary
+between the header and the play section, and the button occupies the slot before Steam's ⚙ / ℹ
+pair, drawn with Steam's own play-bar button class so height, radius and focus ring match. Several
+hosts add a chevron segment that opens Steam's own context menu, the way the Play button's dropdown
+lists the clients a game could run on; the main segment streams from the best host.
+
+What decides whether the button is violet:
 
 - **The catalog.** Every scan (plugin load, each QAM open, a game page opened more than a
   minute after the last one) asks each **paired, online** host for its library
@@ -72,8 +86,8 @@ What decides whether the button shows:
   the launch wakes it (when the client's auto-wake is on and the MAC is known). A host that
   answers `needs-pairing` or `refused` loses its set; a forgotten record is pruned.
 - **The match** is Steam's own appid against that set. Non-Steam shortcuts never match.
-- **One host** streams on tap; **several** open a picker (online first, then most recently used),
-  the same choice Steam's client dropdown offers.
+- **The main segment** streams from the best host (online first, then most recently used);
+  **several hosts** add the dropdown segment to choose one.
 
 A tap runs the ordinary stream launch with `PF_GAME=steam:<appid>`, which the wrapper turns into
 `punktfunk launch <host> --game steam:<appid>`. The Deck names the title; the host resolves it
@@ -204,9 +218,10 @@ visible, stateless library entry that opens console home.
   each launch and again at load, so it survives a reboot.
 - **Labels are English.** Steam's own "Stream" and "Stop" are localized; ours are not, because
   the localization tokens Steam uses for them are not something to guess at from outside.
-- **The button's position is a fixed offset** in the play bar (MoonDeck's default offsets). A
-  Steam UI change, or another plugin's button in the same corner, can crowd it; the offsets live
-  in one `STYLE` constant in `library-page.tsx`.
+- **The button's position is a fixed offset** in the play bar, measured on a Deck against
+  Steam's ⚙ / ℹ pair. A Steam UI change, or another plugin's button in the same slot, can crowd
+  it; the offsets live in one `STYLE` constant in `library-page.tsx`, and every patch attempt
+  logs where it got to in `window.__punktfunkDiag` (CEF console lines start with `punktfunk:`).
 
 ## Related
 
