@@ -91,8 +91,14 @@ stream — plus a door into the client's own gamepad UI for everything else.
   applied — "4K on the TV" and "battery saver" presets, one tap each. Pins are made in the
   Punktfunk app (or any other client) and shared across all of them; the panel shows them, it
   doesn't create them.
-- **Stream from a game's own page** — every Steam game's page on the Deck gets a **Stream**
-  button in the play bar, next to Steam's controller and settings buttons. Like Play is green
+- **Stream from Steam's own Play button** — press the **▾** beside Play. Steam's "Play from"
+  list shows your Punktfunk hosts that have the game right under Steam Link's own "Stream from"
+  entries, in violet with the Punktfunk mark. Pick one and Steam's Play button itself becomes a
+  violet **Stream** for that game, and reads **Stop** while the stream runs. Pick "This device"
+  or a Steam PC to hand the button back to Steam.
+- **Stream from a game's own page** — every Steam game's page on the Deck also gets a **Stream**
+  button in the play bar, next to Steam's controller and settings buttons (it steps aside while
+  a host is chosen in the dropdown). Like Play is green
   when you can press it, the button is **violet** when a paired host has that game in its
   [library](/docs/game-library) (the host's Steam library plugin is connected) and **gray** when
   none does. Tap it and the host launches

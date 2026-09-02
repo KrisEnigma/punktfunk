@@ -24,8 +24,13 @@ uses). Everything the panel doesn't do is one tap away in the client's own gamep
    and streams with that settings profile applied. Cards are the **shared** pinning model every
    other client speaks, stored on the host's record — so one you make in the desktop client shows
    up here, and vice versa. The plugin renders them; it doesn't create or edit them.
-5. **Stream button on game pages** — every Steam game's own page gets a **Stream** button in
-   the play bar, beside Steam's controller and settings buttons. Like Play is green when it can
+5. **Stream from Steam's own Play button** — the ▾ beside Play lists Punktfunk hosts that have
+   the game alongside Steam Link's own "Stream from" entries, in violet with the lens mark. Pick
+   one and Steam's Play button becomes a violet **Stream**. See
+   [Steam's own "Play from" menu](#steams-own-play-from-menu).
+6. **Stream button on game pages** — every Steam game's own page also gets a **Stream** button in
+   the play bar, beside Steam's controller and settings buttons (it steps aside while a host is
+   chosen in the dropdown). Like Play is green when it can
    be pressed, the button is **brand violet when a paired host has that game** in its library
    (the host's Steam library plugin reports it as `steam:<appid>`) and **gray when none does**.
    Tap it and the host launches the
@@ -33,11 +38,11 @@ uses). Everything the panel doesn't do is one tap away in the client's own gamep
    for a Punktfunk host. Several hosts add a dropdown segment, like Steam's own Play button.
    Steam shows the *game* running, with its own art, and the button reads **Stop** until the
    stream ends. See [The game-page button](#the-game-page-button).
-6. **Open Punktfunk** — launches the client's **console home**: the host picker, add-host by
+7. **Open Punktfunk** — launches the client's **console home**: the host picker, add-host by
    address, PIN pairing, the game library browser, and the **full settings screen**. This is where
    everything the panel no longer does now lives. The toggle for the game-page button lives here
    too.
-7. **About** — plugin version, "Check for updates", "Recreate library shortcut", and a force-stop
+8. **About** — plugin version, "Check for updates", "Recreate library shortcut", and a force-stop
    for a wedged stream.
 
 To leave a stream: the in-client controller chord (**L1 + R1 + Start + Select**), or close the
@@ -55,6 +60,26 @@ to **paired** so every later stream is silent.
 standing between a 185-second wait and an impostor answering for the host, so a host you typed in
 by address gets the PIN path only — and the sheet says why. The plugin never trusts-on-first-use
 past a missing fingerprint.
+
+### Steam's own "Play from" menu
+
+The ▾ beside Steam's Play button opens its streaming selector: **This device**, then **Stream
+from: <PC>** for each Steam Remote Play client that has the title. Punktfunk hosts that have the
+title now appear in that same list, after Steam's clients, in brand violet with the lens mark in
+front. Choosing one is remembered per title, and while it stands **Steam's own Play button becomes
+the violet Stream** — lens mark, `Stream` label, our launch, `Stop` while the stream is up — the way
+Steam's turns into Stream for a Remote Play client. Choosing a Steam client hands the choice back to
+Steam untouched.
+
+How: the menu is built inside the Play button class's bound `ShowStreamingMenu`, which cannot be
+extended, so the ▾ is re-pointed at a menu built here from the same data
+(`overview.per_client_data`, `BIsPerClientDataLocal`, `selected_clientid`), Steam's own Menu
+components and class names, and Steam's own localization tokens (`#GameAction_PlayFrom`,
+`#StreamingClient_StreamFrom`, `#StreamingClient_Menu`); selecting a Steam client calls
+`SteamClient.Apps.SetStreamingClientForApp`, exactly as Steam's item does. The Play button class is
+reached through the same render chain as the group button (it is the first child of the play bar
+row) and re-dressed in its own render output. The one entry Steam's menu can have that ours does
+not is the "Play on another device with Remote Play" explainer.
 
 ### The game-page button
 
@@ -187,7 +212,9 @@ the client's data files and re-implements none of its rules.
 | `src/index.tsx` | Plugin entry + the QAM panel: update banner, hosts (with nested pinned cards), the console-home door, about. |
 | `src/hooks.ts` | The module-level host store (one scan merging discovery and the saved store, shared by the panel and the game page), the update hooks, and the launch action. Also the trust-state model the rows render. |
 | `src/catalog.ts` | Which paired hosts have which Steam appids — one `punktfunk library` call per online host per scan, cached per host record in localStorage. |
-| `src/library-page.tsx` | The Stream button on Steam's game page: the `/library/app/:appid` route patch, the button, the host picker, and the on/off preference. |
+| `src/library-page.tsx` | The Stream button on Steam's game page: the `/library/app/:appid` route patch, the descent into the play bar, the button, and the on/off preference. |
+| `src/play-from.tsx` | Punktfunk hosts in Steam's own "Play from" dropdown, and Steam's Play button re-dressed as the violet Stream while one is chosen. |
+| `src/patch.ts` · `src/game.tsx` · `src/diag.ts` | Rendering through Steam's components (MobX-observer-safe subclassing, wrapped copies for function / memo / forwardRef); the title record and the lens mark; the diagnostics buffer. |
 | `src/trust.tsx` · `src/pair.tsx` | The trust sheet (Request access / Use a PIN instead / Cancel) and the gamepad-navigable PIN keypad. |
 | `src/steam.ts` | Steam-shortcut launch (`AddShortcut` / `SetAppLaunchOptions` / `RunGame`) — the focus-correct stream start, for the generic stream shortcut and the hidden per-game ones — plus the running-state feed the game page's Stop reads. The shortcut's exe is `/bin/sh` with the wrapper passed as an argument, so the script never needs an exec bit (Decky's zip extraction drops it and the root-owned plugins dir can't be chmodded by the unprivileged backend). |
 | `src/backend.ts` · `src/boundary.tsx` · `src/os-icon.tsx` | Typed `callable` bridges to `main.py`; the render error boundary; the host row's OS mark. |

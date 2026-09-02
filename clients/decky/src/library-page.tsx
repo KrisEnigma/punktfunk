@@ -27,13 +27,16 @@ import {
 import { FC, ReactElement, useEffect, useRef, useState } from "react";
 import { FaChevronDown, FaStop } from "react-icons/fa";
 import { hostsForApp, subscribeCatalog } from "./catalog";
+import { diag, verbose } from "./diag";
+import { Game, PunktfunkMark, streamFrom } from "./game";
 import {
   getHostStore,
   HostView,
   refreshHostsIfStale,
-  startGameStream,
   useHostStore,
 } from "./hooks";
+import { collectElements, createRenderPatcher, describe } from "./patch";
+import { hasPlayFromSelection, patchPlayGroup, resetPlayFrom, subscribePlayFrom } from "./play-from";
 import { isGameStreaming, stopGameStream, subscribeRunning } from "./steam";
 
 const ROUTE = "/library/app/:appid";
@@ -87,21 +90,6 @@ function useGameStreaming(appId: number): boolean {
   return streaming;
 }
 
-/** What the game page knows about its title; what the per-game shortcut is dressed with. */
-interface Game {
-  appId: number;
-  title: string;
-  iconHash: string;
-}
-
-function streamFrom(host: HostView, game: Game): void {
-  // A sleeping host is the one case that takes a while and looks like nothing happened.
-  if (!host.online) {
-    toaster.toast({ title: "Punktfunk", body: `Waking ${host.name} to stream ${game.title}` });
-  }
-  void startGameStream(host, game.appId, game.title, game.iconHash);
-}
-
 /** Several hosts have the title: Steam's own context menu, the way its Play dropdown lists
  *  the clients a game could run on. Anchored to the chevron segment that opened it. */
 function openHostMenu(hosts: HostView[], game: Game, anchor: EventTarget): void {
@@ -117,27 +105,6 @@ function openHostMenu(hosts: HostView[], game: Game, anchor: EventTarget): void 
     anchor,
   );
 }
-
-/** The Punktfunk lens mark (the two overlapping circles of the logo). Fills come from the
- *  button's CSS variables, so the mark follows the button's ready / idle / focused state. */
-const PunktfunkMark: FC<{ ready: boolean }> = ({ ready }) => (
-  <svg viewBox="17 13 141 141" width="22" height="22" aria-hidden="true">
-    <defs>
-      <linearGradient id="pf-lens" x1="0" y1="1" x2="1" y2="0">
-        <stop offset="0" stopColor="#ffffff" stopOpacity="0" />
-        <stop offset="1" stopColor="#ffffff" stopOpacity="0.9" />
-      </linearGradient>
-    </defs>
-    <circle cx="65.44" cy="105.85" r="44.3" style={{ fill: "var(--pf-back)" }} />
-    <circle cx="109.74" cy="61.55" r="44.3" style={{ fill: "var(--pf-deep)" }} />
-    {ready && (
-      <path
-        fill="url(#pf-lens)"
-        d="M121.228,104.359c-14.777,3.965 -31.187,0.136 -42.811,-11.488c-11.624,-11.624 -15.453,-28.034 -11.488,-42.811c14.777,-3.965 31.187,-0.136 42.811,11.488c11.624,11.624 15.453,28.034 11.488,42.811Z"
-      />
-    )}
-  </svg>
-);
 
 // Anchored at the boundary between the header and the play section. Measured on a Deck: the
 // bar's ⚙ / ℹ buttons are 48 px squares starting 16 px below that boundary, the ℹ ending at
@@ -223,6 +190,17 @@ const STYLE = `
     border-left: 1px solid rgba(255, 255, 255, 0.18);
     font-size: 0.7em;
   }
+  /* Steam's own Play button while a Punktfunk host is chosen in its dropdown: Steam's green is a
+     sliding gradient, so ours is the same gradient in violet. */
+  .punktfunk-play {
+    background: linear-gradient(to right, #8c7ef5 0%, #5b4ce0 60%) 25% center / 330% 100% !important;
+    color: #ffffff !important;
+  }
+  .punktfunk-play:hover,
+  .punktfunk-play.gpfocus,
+  .punktfunk-play:focus {
+    background-position: 0% center !important;
+  }
 `;
 
 /**
@@ -235,6 +213,13 @@ const STYLE = `
 const StreamButton: FC<Game & { inFlow?: boolean }> = ({ inFlow, ...game }) => {
   const hosts = useHostsForApp(game.appId);
   const streaming = useGameStreaming(game.appId);
+  const [, bumpSelection] = useState(0);
+  useEffect(() => subscribePlayFrom(() => bumpSelection((n) => n + 1)), []);
+  if (hasPlayFromSelection(game.appId, hosts)) {
+    // Steam's own Play button is the violet Stream while a host is chosen in its dropdown
+    // (see play-from.tsx); a second one beside the ⚙ would say the same thing twice.
+    return null;
+  }
   const ready = hosts.length > 0;
   const onClick = () => {
     if (streaming) {
@@ -386,38 +371,10 @@ let deepTimer: ReturnType<typeof setTimeout> | null = null;
 const isPlaySection = (x: any): boolean => !!x?.props && "onGameInfoButtonToggle" in x.props && "overview" in x.props;
 const isSectionShaped = (x: any): boolean => !!x?.props && "setSections" in x.props && "overview" in x.props;
 
-/** Every element under `node` matching `pred`, not descending into a match (its subtree is
- *  rendered by the match itself). Bounded, because Steam's trees are deep and this runs per
- *  render. */
-function collectElements(node: any, pred: (x: any) => boolean, out: any[] = [], depth = 0): any[] {
-  if (!node || depth > 40) {
-    return out;
-  }
-  if (Array.isArray(node)) {
-    for (const n of node) {
-      collectElements(n, pred, out, depth + 1);
-    }
-    return out;
-  }
-  if (typeof node !== "object") {
-    return out;
-  }
-  if (pred(node)) {
-    out.push(node);
-    return out;
-  }
-  const children = node.props?.children;
-  if (children) {
-    collectElements(children, pred, out, depth + 1);
-  }
-  return out;
-}
-
 /** Splice the button into the play bar's button group if `out` contains it; otherwise patch
  *  every section-shaped child so their renders come back through here. Never throws: a miss
  *  leaves Steam's output untouched, because an exception here is Steam's error screen. */
-function onSectionRender(_args: unknown[], out?: ReactElement): ReactElement | undefined {
-  try {
+function onSectionRender(out: any): any {
     if (!out || !currentGame) {
       return out;
     }
@@ -441,6 +398,8 @@ function onSectionRender(_args: unknown[], out?: ReactElement): ReactElement | u
         deepFailed = false; // the in-flow button is showing; the anchor must not join it
         diag(`game page ${currentGame.appId}: button placed in the play bar's button group`);
       }
+      // The same row holds the Play group: its ▾ menu and Play button get Punktfunk's hosts.
+      patchPlayGroup(out);
       return out;
     }
     const next = collectElements(out, isSectionShaped);
@@ -455,129 +414,17 @@ function onSectionRender(_args: unknown[], out?: ReactElement): ReactElement | u
       diag(`deep: no group in [${classes.join(" ")}] (want ${basicAppDetailsSectionStylerClasses.AppButtons})`);
     }
     for (const child of next) {
-      patchRender(child);
+      sections.patch(child);
     }
-  } catch (e) {
-    diag(`deep: handler failed: ${e}`);
-  }
-  return out;
+    return out;
 }
 
-/** A short name for a React element, for the trace. */
-function describe(el: any): string {
-  const t = el?.type;
-  if (!t) {
-    return String(el);
-  }
-  if (typeof t === "string") {
-    return `<${t} ${String(el.props?.className ?? "").split(" ")[0]}>`;
-  }
-  if (typeof t === "function") {
-    return `${t.displayName || t.name || "fn"}${t.prototype?.isReactComponent ? "(class)" : "(fn)"}`;
-  }
-  return t.render ? `fwd:${t.render.name || "?"}` : t.type ? `memo:${t.type.name || "?"}` : "obj";
-}
-
-// One wrapper per component type, reused across renders so React sees a stable type; the
-// originals are never mutated. A class component gets a SUBCLASS whose render wraps the output:
-// a prototype patch is not enough, because Steam's page sections are MobX observers, which
-// install a reactive `render` on each instance at first render and shadow the prototype (that
-// is also why Decky's tree patcher, which wraps a class in a plain function, throws "cannot be
-// invoked without new" on them). Function components, memo and forwardRef get a wrapped copy.
-const wrappedTypes = new Map<any, any>();
-
-/** Run the original with the same `this` and arguments, naming it in the trace if it throws. */
-function callOriginal(fn: any, self: unknown, args: any[], what: string): any {
-  try {
-    return fn.apply(self, args);
-  } catch (e) {
-    diag(`deep: ${what} threw: ${e instanceof Error ? e.message : String(e)}`);
-    throw e;
-  }
-}
-
-function wrapClass(orig: any): any {
-  class Wrapped extends orig {
-    render(): any {
-      // Steam's sections are MobX observers: the first render defines a reactive `render` on the
-      // instance, read-only and non-configurable, that every later render goes through. It can
-      // only be wrapped while it is being defined, so this one synchronous call watches
-      // defineProperty for our own instance's `render` and installs a wrapped value instead.
-      const define = Object.defineProperty;
-      const self = this;
-      (Object as any).defineProperty = function (o: any, k: PropertyKey, d: PropertyDescriptor) {
-        if (o === self && k === "render" && d && typeof d.value === "function" && !(d.value as any).__punktfunk) {
-          const inner = d.value;
-          const reactive = function (this: unknown) {
-            return onSectionRender([], inner.call(this));
-          };
-          Object.setPrototypeOf(reactive, inner); // MobX finds its reaction on the render itself
-          (reactive as any).__punktfunk = true;
-          d = { ...d, value: reactive };
-        }
-        return define.call(Object, o, k, d);
-      };
-      try {
-        return onSectionRender([], callOriginal(super.render, this, [], describe({ type: orig })));
-      } finally {
-        (Object as any).defineProperty = define;
-      }
-    }
-  }
-  (Wrapped as any).__punktfunk = true;
-  try {
-    Object.defineProperty(Wrapped, "name", { value: orig.name });
-  } catch {
-    /* cosmetic */
-  }
-  return Wrapped;
-}
-
-function patchRender(el: any): void {
-  const orig = el?.type;
-  if (!orig) {
-    return;
-  }
-  const cached = wrappedTypes.get(orig);
-  if (cached) {
-    el.type = cached;
-    return;
-  }
-  let wrapped: any = orig;
-  if (typeof orig === "function") {
-    if (orig.prototype?.isReactComponent) {
-      wrapped = wrapClass(orig);
-    } else {
-      const fn = function (this: unknown, ...args: any[]) {
-        return onSectionRender(args, callOriginal(orig, this, args, describe({ type: orig })));
-      };
-      Object.assign(fn, orig);
-      (fn as any).__punktfunk = true;
-      wrapped = fn;
-    }
-  } else if (typeof orig === "object") {
-    if (typeof orig.render === "function") {
-      const render = orig.render;
-      wrapped = {
-        ...orig,
-        __punktfunk: true,
-        render: function (this: unknown, ...args: any[]) {
-          return onSectionRender(args, callOriginal(render, this, args, describe({ type: orig })));
-        },
-      };
-    } else if (orig.type) {
-      const inner = { type: orig.type };
-      patchRender(inner);
-      wrapped = { ...orig, __punktfunk: true, type: inner.type };
-    }
-  }
-  wrappedTypes.set(orig, wrapped);
-  el.type = wrapped;
-}
+const sections = createRenderPatcher(onSectionRender, "sections");
 
 /** Forget the wrappers — for dismount. Steam's originals were never touched. */
 function unpatchSections(): void {
-  wrappedTypes.clear();
+  sections.reset();
+  resetPlayFrom();
   placedInFlow = false;
 }
 
@@ -589,7 +436,7 @@ function placeInPlayBar(ret: ReactElement, game: Game): boolean {
     return false;
   }
   currentGame = game;
-  patchRender(section);
+  sections.patch(section);
   if (!placedInFlow && !deepTimer) {
     // The group only shows up once the children have rendered. If it has not within a few
     // seconds of the first attempt, Steam's tree has moved: fall back to the floating anchor.
@@ -609,38 +456,6 @@ function placeInPlayBar(ret: ReactElement, game: Game): boolean {
  * callback). Every lookup is defensive — Steam's tree is not an API, and a miss must leave the
  * page exactly as Steam drew it.
  */
-// Where each patch attempt got to, readable from the CEF debugger as `window.__punktfunkDiag`
-// and echoed to the console. Steam's tree is not an API; when it moves, this says which step.
-declare global {
-  interface Window {
-    __punktfunkDiag?: string[];
-  }
-}
-let lastDiag = "";
-function verbose(): boolean {
-  try {
-    return localStorage.getItem("punktfunk:diagVerbose") === "1";
-  } catch {
-    return false;
-  }
-}
-function diag(msg: string): void {
-  if (msg === lastDiag && !verbose()) {
-    return; // the page renders several times per open; one line per change is enough
-  }
-  lastDiag = msg;
-  const line = `${new Date().toISOString().slice(11, 19)} ${msg}`;
-  console.warn(`punktfunk: ${msg}`);
-  try {
-    (window.__punktfunkDiag ??= []).push(line);
-    if (window.__punktfunkDiag.length > 60) {
-      window.__punktfunkDiag.shift();
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
 function patchLibraryApp(): RoutePatch {
   return routerHook.addPatch(ROUTE, (tree: any) => {
     const routeProps = findInReactTree(tree, (x: any) => x?.renderFunc);
