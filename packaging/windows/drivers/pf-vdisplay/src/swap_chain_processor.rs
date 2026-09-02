@@ -43,14 +43,15 @@ use wdk_sys::iddcx::{
 use wdk_sys::{HANDLE, NTSTATUS, WDFOBJECT, call_unsafe_wdf_function_binding};
 use windows::{
     Win32::{
-        Foundation::HANDLE as WHANDLE,
+        Foundation::{CloseHandle, HANDLE as WHANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{IDXGIDevice, IDXGIResource},
         },
         System::Threading::{
-            AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, GetCurrentThread,
-            SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL, WaitForSingleObject,
+            AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW,
+            GetCurrentThread, SetEvent, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+            WaitForMultipleObjects, WaitForSingleObject,
         },
     },
     core::{Interface, w},
@@ -64,9 +65,12 @@ use crate::{
 /// E_PENDING — `ReleaseAndAcquireBuffer2` returns this (HRESULT-shaped) when the swap-chain is valid but
 /// DWM has composed no new frame yet; wait on the surface-available event and retry.
 const E_PENDING: u32 = 0x8000_000A;
-/// `WAIT_TIMEOUT` from `WaitForSingleObject` (defined locally to avoid pulling a windows-crate constant
-/// type into the comparison — the raw `WAIT_EVENT.0` is just a `u32`).
-const WAIT_TIMEOUT_U32: u32 = 0x0000_0102;
+/// Idle-wait timeout. Deliveries and stops arrive on the wake event, so this exists ONLY to keep
+/// the drain heartbeat (`FramePublisher::note_drain`) ticking over a desktop that composes
+/// nothing: the host convicts this worker when it reads that stamp older than `max(gap/2, 250 ms)`
+/// (`pf-capture` stall attribution) or 2 s (`pf_frame::health`, which then runs its recovery
+/// ladder). An INFINITE wait here would report every idle desktop as a stalled worker.
+const IDLE_WAIT_MS: u32 = 125;
 
 /// HRESULT-shaped success test for the swap-chain DDIs (raw `NTSTATUS`/HRESULT: success iff non-negative).
 #[inline]
@@ -143,6 +147,11 @@ unsafe impl<T> Send for Sendable<T> {}
 
 pub struct SwapChainProcessor {
     terminate: Arc<AtomicBool>,
+    /// AUTO-reset event that releases the worker's idle wait: a frame-channel delivery or a stop
+    /// reaches it at once instead of waiting out [`IDLE_WAIT_MS`]. `None` when the event could not
+    /// be created — the worker then only has its timeout. Closed by `Drop` AFTER the worker is
+    /// joined, so [`Self::wake`] can never signal a closed handle.
+    wake: Option<WHANDLE>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -155,12 +164,33 @@ unsafe impl Sync for SwapChainProcessor {}
 
 impl SwapChainProcessor {
     pub fn new() -> Self {
+        // SAFETY: plain event creation — auto-reset, unsignalled, unnamed, no security descriptor.
+        let wake = unsafe { CreateEventW(None, false, false, None) }.ok();
+        if wake.is_none() {
+            dbglog!("[pf-vd] swap-chain: wake event creation failed — timeout-only idle wait");
+        }
         Self {
             terminate: Arc::new(AtomicBool::new(false)),
+            wake,
             thread: None,
         }
     }
 
+    /// Release the worker's idle wait so it re-runs the loop top — after a frame-channel delivery
+    /// lands, and from `Drop`. `SetEvent` never blocks, so a caller may hold `MONITOR_MODES`
+    /// across it. No-op when the event could not be created (the worker polls instead).
+    pub fn wake(&self) {
+        if let Some(h) = self.wake {
+            // SAFETY: `h` is our own event handle; `Drop` closes it only after joining the worker.
+            let _ = unsafe { SetEvent(h) };
+        }
+    }
+
+    /// Spawn the drain worker for a freshly assigned swap-chain. It runs at MMCSS `Distribution`
+    /// priority (TIME_CRITICAL if MMCSS declines), owns `swap_chain` for its lifetime and deletes
+    /// that object before returning. Its idle wait covers `available_buffer_event` (the
+    /// framework's surface-available event) AND this processor's wake event, so a delivery or a
+    /// stop reaches an idle display immediately rather than at the next timeout.
     pub fn run(
         &mut self,
         swap_chain: IDDCX_SWAPCHAIN,
@@ -170,17 +200,17 @@ impl SwapChainProcessor {
         render_luid_low: u32,
         render_luid_high: i32,
     ) {
-        let available_buffer_event = Sendable(available_buffer_event);
+        let events = Sendable((self.wake, available_buffer_event));
         let swap_chain = Sendable(swap_chain);
         let terminate = self.terminate.clone();
 
         let join_handle = thread::spawn(move || {
             // Rust 2021 disjoint closure captures would otherwise grab the raw `swap_chain.0` /
-            // `available_buffer_event.0` FIELDS directly (defeating the `Sendable` Send wrapper, since the
-            // inner `*mut IDDCX_SWAPCHAIN__` / `HANDLE` are `!Send`). Rebind the WHOLE wrappers here so the
+            // `events.0` FIELDS directly (defeating the `Sendable` Send wrapper, since the inner
+            // `*mut IDDCX_SWAPCHAIN__` / `HANDLE` are `!Send`). Rebind the WHOLE wrappers here so the
             // closure captures them as `Sendable<_>` (which IS `Send`), then unwrap from the locals.
             let swap_chain = swap_chain;
-            let available_buffer_event = available_buffer_event;
+            let events = events;
             // It is very important to prioritize this thread by making use of the Multimedia Scheduler
             // Service. It will intelligently prioritize the thread for improved throughput in high
             // CPU-load scenarios.
@@ -218,7 +248,7 @@ impl SwapChainProcessor {
             Self::run_core(
                 swap_chain.0,
                 &device,
-                available_buffer_event.0,
+                events.0,
                 &terminate,
                 target_id,
                 render_luid_low,
@@ -254,12 +284,15 @@ impl SwapChainProcessor {
     fn run_core(
         swap_chain: IDDCX_SWAPCHAIN,
         device: &Direct3DDevice,
-        available_buffer_event: HANDLE,
+        // (this processor's wake event — `None` if it could not be created, the framework's
+        // surface-available event); one parameter so the argument count stays under the lint.
+        events: (Option<WHANDLE>, HANDLE),
         terminate: &AtomicBool,
         target_id: u32,
         render_luid_low: u32,
         render_luid_high: i32,
     ) {
+        let (wake, available_buffer_event) = events;
         let assignment_epoch = ASSIGNMENT_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
         // `as_raw()` BORROWS our single reference — IddCx AddRefs its own — and it is released right
         // after the realtime raise below. An `into_raw()` here would orphan that reference and pin the
@@ -494,22 +527,31 @@ impl SwapChainProcessor {
                     );
                     logged_pending = true;
                 }
-                // SAFETY: `available_buffer_event` is the framework-provided surface-available event.
-                let wait_result =
-                    unsafe { WaitForSingleObject(WHANDLE(available_buffer_event.cast()), 16).0 };
-
-                // thread requested an end
-                if terminate.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                // WAIT_OBJECT_0 | WAIT_TIMEOUT
-                if matches!(wait_result, 0 | WAIT_TIMEOUT_U32) {
-                    // We have a new buffer (or timed out), so try the AcquireBuffer again.
+                let surface = WHANDLE(available_buffer_event.cast());
+                // SAFETY: `surface` is the framework-provided surface-available event, live for
+                // this assignment; `w` is this processor's own wake event, which it closes only
+                // after joining this thread.
+                let waited = unsafe {
+                    match wake {
+                        Some(w) => WaitForMultipleObjects(&[w, surface], false, IDLE_WAIT_MS),
+                        None => WaitForSingleObject(surface, IDLE_WAIT_MS),
+                    }
+                };
+                // Wake, surface-available or the heartbeat timeout all just re-run the loop top,
+                // which re-checks terminate, device removal and the delivery gate. The wake event
+                // is auto-reset with ONE waiter, so a `SetEvent` raised while this thread is not
+                // waiting stays latched until its next wait — no wakeup is lost.
+                if waited == WAIT_OBJECT_0
+                    || waited == WAIT_TIMEOUT
+                    || waited.0 == WAIT_OBJECT_0.0 + 1
+                {
                     continue;
                 }
-
                 // The wait was cancelled or something unexpected happened.
+                dbglog!(
+                    "[pf-vd] swap-chain run_core: idle wait -> {:#x} (target={target_id}) — exiting",
+                    waited.0
+                );
                 break;
             } else if hr_success(hr) {
                 // The OS's display time for this frame — the provenance stamp the publish carries
@@ -615,10 +657,17 @@ impl SwapChainProcessor {
 impl Drop for SwapChainProcessor {
     fn drop(&mut self) {
         if let Some(handle) = self.thread.take() {
-            // signal the worker to end
+            // Store the flag BEFORE waking: the worker re-checks it at the loop top. Without the
+            // wake, an idle worker would sit out its whole timeout before seeing the flag.
             self.terminate.store(true, Ordering::Relaxed);
-            // wait until the worker is finished (it deletes the swap-chain object before returning)
+            self.wake();
+            // The worker deletes the swap-chain object before returning.
             let _ = handle.join();
+        }
+        if let Some(h) = self.wake.take() {
+            // SAFETY: the worker has been joined (or never started), so nothing can signal `h` any
+            // more; this is its sole close.
+            let _ = unsafe { CloseHandle(h) };
         }
     }
 }

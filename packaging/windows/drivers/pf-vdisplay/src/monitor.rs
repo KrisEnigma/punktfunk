@@ -429,7 +429,9 @@ pub fn target_id_for_object(object: iddcx::IDDCX_MONITOR) -> Option<u32> {
 
 /// Stash a host frame-channel delivery on the monitor with `target_id` (an ARRIVED monitor — a pending
 /// entry's `target_id` is still 0, which the host can never send since OS target ids are non-zero).
-/// A superseded delivery leaves the locked scope and closes its handles after the guard drops.
+/// A superseded delivery leaves the locked scope and closes its handles after the guard drops. The
+/// monitor's drain worker is woken while the guard is still held, so an idle display attaches to the
+/// new ring at once instead of waiting out its idle timeout.
 /// `Err(ch)` if no such monitor exists — the caller must NOT close those handles (the host only sees
 /// the error status and reaps its remote duplicates itself; closing here too would double-close values
 /// the OS may have reused).
@@ -450,6 +452,11 @@ pub fn set_frame_channel(
         // lock-free gate ([`frame_channel_gen`]) notice it. Bump-after-store: a loop pass that
         // reads the old generation misses THIS pass and attaches on the next.
         FRAME_CHANNEL_GEN.fetch_add(1, core::sync::atomic::Ordering::Release);
+        // Release the worker's idle wait so an IDLE display attaches now rather than at its next
+        // timeout. `SetEvent` never blocks, so it is safe to raise while the guard is held.
+        if let Some(p) = m.swap_chain_processor.as_ref() {
+            p.wake();
+        }
         superseded
     };
     drop(superseded);
