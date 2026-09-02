@@ -209,6 +209,7 @@ check("library: an empty ref is refused the same way", "args" not in captured an
 # `appid` and `icon_hash` come from Steam's overview through the frontend; a bad one must fail
 # closed rather than fetch an arbitrary path or write an arbitrary file name.
 main._read_art = lambda appid, name: None  # no cache, no network in a unit check
+shutil.rmtree("/tmp/pf-test-plugin", ignore_errors=True)  # no leftover fallback icon from a past run
 check("art: a non-numeric appid is refused", asyncio.run(main.Plugin().game_art("x")) == {
     "ok": False, "error": "bad-appid",
 })
@@ -220,6 +221,15 @@ check("art: local cache is asked per-app dir first, flat file second", [
 ] == ["library_hero.jpg", "570_library_hero.jpg"])
 check("art: the per-app dir is keyed by appid",
       main._librarycache_candidates(570, "logo.png")[0].parent.name == "570")
+# The icon: without a hash nothing is fetched, but the Punktfunk icon stands in so the overlay
+# never shows a gray box — and with no plugin assets at all, icon_path is honestly empty.
+got = asyncio.run(main.Plugin().game_art(570, ""))
+check("art: no hash, no assets => no icon path", got["icon_path"] == "")
+Path("/tmp/pf-test-plugin/assets").mkdir(parents=True, exist_ok=True)
+Path("/tmp/pf-test-plugin/assets/icon.png").write_bytes(b"png")
+got = asyncio.run(main.Plugin().game_art(570, ""))
+check("art: no hash => the Punktfunk icon stands in", got["icon_path"].endswith("assets/icon.png"))
+check("art: Steam's current icon CDN is asked first", "shared.steamstatic.com" in main._ICON_CDNS[0])
 
 # ---- _field_from (flatpak info parsing, drives the client update check) ------------------
 info = "        ID: io.unom.Punktfunk\n    Origin: punktfunk-origin\n    Commit: abc123def\n"

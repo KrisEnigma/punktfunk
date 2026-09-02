@@ -286,7 +286,12 @@ _ART_CDNS = (
     "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/{name}",
     "https://shared.steamstatic.com/store_item_assets/steam/apps/{appid}/{name}",
 )
-_ICON_CDN = "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/{appid}/{hash}.jpg"
+# The game's small icon, by the overview's `icon_hash`: the URL Steam's own client resolves first,
+# the older community path second.
+_ICON_CDNS = (
+    "https://shared.steamstatic.com/community_assets/images/apps/{appid}/{hash}.jpg",
+    "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/{appid}/{hash}.jpg",
+)
 _ICON_HASH = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -317,6 +322,35 @@ def _read_art(appid: int, name: str) -> bytes | None:
 def _icon_dir() -> Path:
     """Where fetched game icons land — Steam reads the path, so it must be user-readable."""
     return Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "icons"
+
+
+def _icon_path(appid: int, icon_hash: str) -> str:
+    """A user-readable file with the game's icon, or "" when there is none anywhere.
+
+    Steam's own cache is preferred and used IN PLACE (`librarycache/<appid>/<hash>.jpg`, a file
+    Steam wrote and reads itself); only a miss there is fetched from the CDNs into the plugin's
+    settings dir."""
+    cached = _steam_root() / "appcache" / "librarycache" / str(appid) / f"{icon_hash}.jpg"
+    if cached.is_file():
+        return str(cached)
+    dest = _icon_dir() / f"{appid}.jpg"
+    if dest.is_file():
+        return str(dest)
+    for cdn in _ICON_CDNS:
+        try:
+            data = _fetch_bytes(cdn.format(appid=appid, hash=icon_hash))
+        except Exception:  # noqa: BLE001 — a 404 on one CDN is the next one's turn
+            continue
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.parent.chmod(0o755)
+            dest.write_bytes(data)
+            dest.chmod(0o644)  # this backend is root; Steam is not
+            return str(dest)
+        except OSError:
+            decky.logger.warning("icon for %s not written", appid, exc_info=True)
+            return ""
+    return ""
 
 
 def _flatpak() -> str | None:
@@ -942,20 +976,14 @@ class Plugin:
                 art[f"{key}_type"] = fmt
         icon_hash = str(icon_hash or "").strip().lower()
         if _ICON_HASH.match(icon_hash):
-            dest = _icon_dir() / f"{appid}.jpg"
-            if not dest.exists():
-                try:
-                    data = await loop.run_in_executor(
-                        None, _fetch_bytes, _ICON_CDN.format(appid=appid, hash=icon_hash)
-                    )
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.parent.chmod(0o755)
-                    dest.write_bytes(data)
-                    dest.chmod(0o644)  # this backend is root; Steam is not
-                except Exception:  # noqa: BLE001
-                    decky.logger.info("no icon for %s", appid)
-            if dest.exists():
-                art["icon_path"] = str(dest)
+            art["icon_path"] = await loop.run_in_executor(None, _icon_path, appid, icon_hash)
+            if not art["icon_path"]:
+                decky.logger.info("no icon for %s (hash %s)", appid, icon_hash[:8])
+        if not art["icon_path"]:
+            # Never a gray box: the Punktfunk icon stands in when the game's own is nowhere.
+            fallback = Path(decky.DECKY_PLUGIN_DIR) / "assets" / "icon.png"
+            if fallback.exists():
+                art["icon_path"] = str(fallback)
         return art
 
     async def apply_controller_config(self, name: str = "Punktfunk") -> dict:

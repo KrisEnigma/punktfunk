@@ -561,7 +561,8 @@ export function steamAppIdForShortcut(shortcutAppId: number): number | null {
 }
 
 // Bump when what applyGameArtwork fetches changes, so existing per-game shortcuts re-apply.
-const GAME_ART_VERSION = 1;
+// v2: the icon comes from Steam's current CDN, with the Punktfunk icon as the fallback.
+const GAME_ART_VERSION = 2;
 function gameArtKey(shortcutAppId: number): string {
   return `punktfunk:gameArt:${shortcutAppId}`;
 }
@@ -597,9 +598,10 @@ async function applyGameArtwork(
     }
     if (art.icon_path) {
       SteamClient.Apps.SetShortcutIcon(shortcutAppId, art.icon_path);
-      applied = true;
     }
-    if (applied) {
+    // Done only when the icon landed too: it is the one piece the overlay shows on every
+    // frame, and a gray box there must be retried on the next launch, not recorded as fine.
+    if (applied && art.icon_path) {
       localStorage.setItem(gameArtKey(shortcutAppId), `${GAME_ART_VERSION}`);
     }
   } catch (e) {
