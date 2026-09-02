@@ -324,33 +324,22 @@ def _icon_dir() -> Path:
     return Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "icons"
 
 
-def _icon_path(appid: int, icon_hash: str) -> str:
-    """A user-readable file with the game's icon, or "" when there is none anywhere.
-
-    Steam's own cache is preferred and used IN PLACE (`librarycache/<appid>/<hash>.jpg`, a file
-    Steam wrote and reads itself); only a miss there is fetched from the CDNs into the plugin's
-    settings dir."""
+def _read_icon(appid: int, icon_hash: str) -> bytes | None:
+    """The game's icon bytes: Steam's own cache (`librarycache/<appid>/<hash>.jpg`) first, the
+    CDNs second; None when nowhere has it."""
     cached = _steam_root() / "appcache" / "librarycache" / str(appid) / f"{icon_hash}.jpg"
-    if cached.is_file():
-        return str(cached)
-    dest = _icon_dir() / f"{appid}.jpg"
-    if dest.is_file():
-        return str(dest)
+    try:
+        data = cached.read_bytes()
+        if data:
+            return data
+    except OSError:
+        pass
     for cdn in _ICON_CDNS:
         try:
-            data = _fetch_bytes(cdn.format(appid=appid, hash=icon_hash))
+            return _fetch_bytes(cdn.format(appid=appid, hash=icon_hash))
         except Exception:  # noqa: BLE001 — a 404 on one CDN is the next one's turn
             continue
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.parent.chmod(0o755)
-            dest.write_bytes(data)
-            dest.chmod(0o644)  # this backend is root; Steam is not
-            return str(dest)
-        except OSError:
-            decky.logger.warning("icon for %s not written", appid, exc_info=True)
-            return ""
-    return ""
+    return None
 
 
 def _flatpak() -> str | None:
@@ -974,17 +963,48 @@ class Plugin:
             if data:
                 art[key] = base64.b64encode(data).decode()
                 art[f"{key}_type"] = fmt
+        # The icon travels as bytes as well as a path: Steam embeds a shortcut's icon into its
+        # overview only when it loads shortcuts at startup, so the frontend sets the file for
+        # the next start AND injects the bytes into the live overview for this one.
         icon_hash = str(icon_hash or "").strip().lower()
         if _ICON_HASH.match(icon_hash):
-            art["icon_path"] = await loop.run_in_executor(None, _icon_path, appid, icon_hash)
-            if not art["icon_path"]:
+            data = await loop.run_in_executor(None, _read_icon, appid, icon_hash)
+            if data:
+                art["icon"] = base64.b64encode(data).decode()
+                art["icon_type"] = "jpg"
+            else:
                 decky.logger.info("no icon for %s (hash %s)", appid, icon_hash[:8])
-        if not art["icon_path"]:
+        if "icon" not in art:
             # Never a gray box: the Punktfunk icon stands in when the game's own is nowhere.
             fallback = Path(decky.DECKY_PLUGIN_DIR) / "assets" / "icon.png"
-            if fallback.exists():
+            try:
+                art["icon"] = base64.b64encode(fallback.read_bytes()).decode()
+                art["icon_type"] = "png"
                 art["icon_path"] = str(fallback)
+            except OSError:
+                pass
         return art
+
+    async def save_icon(self, appid: int, png_base64: str) -> dict:
+        """Write a per-game shortcut's icon as PNG (Steam's shortcut icons are PNG or ICO; the
+        frontend converts the game's JPG on a canvas) and hand back the path SetShortcutIcon
+        wants. User-readable, since Steam reads it as the user."""
+        try:
+            appid = int(appid)
+            data = base64.b64decode(str(png_base64), validate=True)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad-input"}
+        if appid <= 0 or not data.startswith(b"\x89PNG"):
+            return {"ok": False, "error": "bad-input"}
+        dest = _icon_dir() / f"{appid}.png"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.parent.chmod(0o755)
+            dest.write_bytes(data)
+            dest.chmod(0o644)  # this backend is root; Steam is not
+        except OSError as e:
+            return {"ok": False, "error": "write-failed", "detail": str(e)}
+        return {"ok": True, "path": str(dest)}
 
     async def apply_controller_config(self, name: str = "Punktfunk") -> dict:
         """Install our Steam Input layout (native touchscreen `ts_n` + gamepad passthrough) and

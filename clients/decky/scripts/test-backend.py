@@ -228,7 +228,15 @@ check("art: no hash, no assets => no icon path", got["icon_path"] == "")
 Path("/tmp/pf-test-plugin/assets").mkdir(parents=True, exist_ok=True)
 Path("/tmp/pf-test-plugin/assets/icon.png").write_bytes(b"png")
 got = asyncio.run(main.Plugin().game_art(570, ""))
-check("art: no hash => the Punktfunk icon stands in", got["icon_path"].endswith("assets/icon.png"))
+check("art: no hash => the Punktfunk icon stands in", got["icon_path"].endswith("assets/icon.png") and got["icon_type"] == "png" and got["icon"] == "cG5n")
+# save_icon: only a real PNG for a real appid is written, into the settings dir, as .png
+decky.DECKY_PLUGIN_SETTINGS_DIR = "/tmp/pf-test-settings"
+shutil.rmtree("/tmp/pf-test-settings", ignore_errors=True)
+import base64 as _b64  # noqa: E402
+check("icon: non-png bytes are refused", asyncio.run(main.Plugin().save_icon(570, _b64.b64encode(b"\xff\xd8jpeg").decode()))["ok"] is False)
+check("icon: junk base64 is refused", asyncio.run(main.Plugin().save_icon(570, "***"))["ok"] is False)
+got = asyncio.run(main.Plugin().save_icon(570, _b64.b64encode(b"\x89PNG\r\n\x1a\n....").decode()))
+check("icon: a png lands as <appid>.png in the settings dir", got["ok"] and got["path"] == "/tmp/pf-test-settings/icons/570.png" and Path(got["path"]).is_file())
 check("art: Steam's current icon CDN is asked first", "shared.steamstatic.com" in main._ICON_CDNS[0])
 
 # ---- _field_from (flatpak info parsing, drives the client update check) ------------------

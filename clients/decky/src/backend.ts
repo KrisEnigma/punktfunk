@@ -200,9 +200,18 @@ export interface GameArt {
   hero_type?: string;
   logo?: string;
   logo_type?: string;
+  /** The icon's bytes (`jpg` from Steam's cache or CDN, `png` for the Punktfunk fallback). */
+  icon?: string;
+  icon_type?: string;
+  /** A ready file for SetShortcutIcon — only set for the PNG fallback. */
   icon_path?: string;
 }
 export const gameArt = callable<[appid: number, iconHash: string], GameArt>("game_art");
+/** Write a converted PNG icon for a shortcut; returns the path SetShortcutIcon wants. */
+export const saveIcon = callable<
+  [appid: number, pngBase64: string],
+  { ok: boolean; path?: string; error?: string }
+>("save_icon");
 // Install the Steam Input layout (native touchscreen `ts_n` + gamepad passthrough) and point our
 // shortcut(s) at it, so the Deck touchscreen reaches the client as native touch with no manual
 // controller setup. Best-effort + idempotent; keyed by the shared shortcut NAME (both shortcuts

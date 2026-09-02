@@ -22,7 +22,7 @@
 // "now playing" surfaces and the friends list show the game rather than "Punktfunk". Minted on
 // the first Stream tap for that game and reused after; see ensureGameShortcut.
 
-import { applyControllerConfig, gameArt, runnerInfo, shortcutArt } from "./backend";
+import { applyControllerConfig, gameArt, runnerInfo, saveIcon, shortcutArt } from "./backend";
 
 // SteamClient is a Steam-internal global injected into the CEF context; it is not fully typed
 // by @decky/ui, so declare the surface we use. Signatures verified against MoonDeck + the
@@ -88,6 +88,9 @@ interface SteamAppOverviewLike {
   display_name?: string;
   /** Unix seconds; what the Deck's Recent shelf sorts by. */
   rt_last_time_locally_played?: number;
+  /** The icon Steam embeds for a shortcut when it loads shortcuts at startup. */
+  icon_data?: string;
+  icon_data_format?: string;
   BIsShortcut?: () => boolean;
 }
 
@@ -561,8 +564,57 @@ export function steamAppIdForShortcut(shortcutAppId: number): number | null {
 }
 
 // Bump when what applyGameArtwork fetches changes, so existing per-game shortcuts re-apply.
-// v2: the icon comes from Steam's current CDN, with the Punktfunk icon as the fallback.
-const GAME_ART_VERSION = 2;
+// v3: the icon is written as PNG and injected into the live overview.
+const GAME_ART_VERSION = 3;
+
+/** Steam's cached icons are JPG; a shortcut icon has to be PNG (or ICO). Decode on a canvas. */
+async function toPng(base64: string, type: string): Promise<string> {
+  if (type === "png") {
+    return base64;
+  }
+  const img = new Image();
+  img.src = `data:image/${type === "jpg" ? "jpeg" : type};base64,${base64}`;
+  await img.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth || 32;
+  canvas.height = img.naturalHeight || 32;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("no 2d canvas");
+  }
+  ctx.drawImage(img, 0, 0);
+  return canvas.toDataURL("image/png").split(",")[1];
+}
+
+/**
+ * The icon for a per-game shortcut, two ways: the PNG file for Steam's next start (it embeds a
+ * shortcut's icon into the overview only when loading shortcuts), and the bytes into the live
+ * overview now, which is what the Steam menu draws this session.
+ */
+async function applyGameIcon(shortcutAppId: number, steamAppId: number, art: { icon?: string; icon_type?: string; icon_path?: string }): Promise<boolean> {
+  if (!art.icon) {
+    return false;
+  }
+  const png = await toPng(art.icon, art.icon_type ?? "jpg");
+  let path = art.icon_path ?? "";
+  if (!path) {
+    const saved = await saveIcon(steamAppId, png);
+    path = saved.ok && saved.path ? saved.path : "";
+  }
+  if (path) {
+    SteamClient.Apps.SetShortcutIcon(shortcutAppId, path);
+  }
+  try {
+    const overview = appStore?.GetAppOverviewByAppID?.(shortcutAppId);
+    if (overview) {
+      overview.icon_data = png;
+      overview.icon_data_format = "png";
+    }
+  } catch {
+    /* the file still lands for the next start */
+  }
+  return !!path;
+}
 function gameArtKey(shortcutAppId: number): string {
   return `punktfunk:gameArt:${shortcutAppId}`;
 }
@@ -596,12 +648,10 @@ async function applyGameArtwork(
         applied = true;
       }
     }
-    if (art.icon_path) {
-      SteamClient.Apps.SetShortcutIcon(shortcutAppId, art.icon_path);
-    }
+    const iconLanded = await applyGameIcon(shortcutAppId, steamAppId, art);
     // Done only when the icon landed too: it is the one piece the overlay shows on every
     // frame, and a gray box there must be retried on the next launch, not recorded as fine.
-    if (applied && art.icon_path) {
+    if (applied && iconLanded) {
       localStorage.setItem(gameArtKey(shortcutAppId), `${GAME_ART_VERSION}`);
     }
   } catch (e) {
