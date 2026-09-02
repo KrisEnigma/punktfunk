@@ -88,6 +88,48 @@ pub struct MonitorObject {
 // SAFETY: the raw IddCx monitor handle is framework-managed; access is serialized by MONITOR_MODES.
 unsafe impl Send for MonitorObject {}
 
+/// The fields of a departing [`MonitorObject`] whose `Drop` BLOCKS: the cursor worker (signal +
+/// join, and it can be inside a hardware-cursor query), the swap-chain drain worker (signal +
+/// join), the ring endpoint (the last `Arc` unmaps the header and closes its handles) and an
+/// unconsumed frame-channel delivery (closes its handles). Every registry path detaches these
+/// while the [`MONITOR_MODES`] guard is held and drops them once it is released: a join or a
+/// handle close under that lock head-blocks every IOCTL and every mode DDI the OS issues during
+/// the same topology change.
+struct Teardown {
+    cursor: Option<crate::cursor_worker::CursorWorker>,
+    swap: Option<crate::swap_chain_processor::SwapChainProcessor>,
+    endpoint: Option<Arc<crate::frame_transport::RingEndpoint>>,
+    chan: Option<crate::frame_transport::FrameChannel>,
+}
+
+/// Move a monitor entry's blocking-drop fields into a [`Teardown`]. The rest of `m` — ids, the
+/// mode list, the copied IddCx handle — drops right here: heap only, safe under the lock.
+fn detach(m: MonitorObject) -> Teardown {
+    Teardown {
+        cursor: m.cursor_worker,
+        swap: m.swap_chain_processor,
+        endpoint: m.endpoint,
+        chan: m.frame_channel,
+    }
+}
+
+impl Drop for Teardown {
+    fn drop(&mut self) {
+        let started = Instant::now();
+        // Cursor worker first: it can be inside a hardware-cursor query against the monitor
+        // handle the caller departs next. Then the drain worker, then the ring (whose last `Arc`
+        // unmaps the header), then any delivery no worker picked up.
+        drop(self.cursor.take());
+        drop(self.swap.take());
+        drop(self.endpoint.take());
+        drop(self.chan.take());
+        let took = started.elapsed();
+        if took > Duration::from_millis(250) {
+            dbglog!("[pf-vd] monitor teardown took {} ms", took.as_millis());
+        }
+    }
+}
+
 /// All live monitors. A process-`static` (not a WDFDEVICE-context-owned allocation) BY NECESSITY: the IddCx
 /// monitor/mode DDIs receive only an IddCx handle — never the WDFDEVICE or its context — so this state must
 /// be reachable without one (the upstream virtual-display-rs is a process-`static` for the same reason).
@@ -131,37 +173,35 @@ pub fn frame_channel_gen() -> u32 {
 }
 
 /// Depart every monitor that has existed at least `grace` — the host-gone watchdog reap
-/// ([`crate::control::start_watchdog`]). The grace skips a just-created monitor (the host adds it, then
-/// starts pinging) so a momentarily-stale ping timer can't nuke a brand-new monitor. Returns the count
-/// departed. Same lock discipline as [`remove_monitor`]: drop each worker (which RAII-joins its thread)
-/// OUTSIDE the `MONITOR_MODES` lock, then depart.
+/// ([`crate::control::start_watchdog`]). The grace skips a just-created monitor (the host adds it,
+/// then starts pinging) so a momentarily-stale ping timer can't nuke a brand-new monitor. Returns
+/// the count departed. Same lock discipline as [`remove_monitor`]: the guard only unlinks entries
+/// and collects their [`Teardown`]s; the joins and handle closes happen after it is released.
 pub fn reap_orphaned(grace: Duration) -> usize {
-    let mut drained: Vec<(
-        Option<iddcx::IDDCX_MONITOR>,
-        Option<crate::swap_chain_processor::SwapChainProcessor>,
-    )> = {
+    let mut objects: Vec<iddcx::IDDCX_MONITOR> = Vec::new();
+    let teardowns: Vec<Teardown> = {
         let mut lock = lock_monitors();
         let mut taken = Vec::new();
         let mut i = 0;
         while i < lock.len() {
             if lock[i].created_at.elapsed() >= grace {
-                let mut m = lock.remove(i);
-                taken.push((m.object, m.swap_chain_processor.take()));
+                let m = lock.remove(i);
+                if let Some(object) = m.object {
+                    objects.push(object);
+                }
+                taken.push(detach(m));
             } else {
                 i += 1;
             }
         }
         taken
     };
-    let n = drained.len();
-    for (_, processor) in &mut drained {
-        drop(processor.take());
-    }
-    for (object, _) in drained {
-        if let Some(m) = object {
-            // SAFETY: `m` is a live IddCx monitor handle; departure tears it down.
-            unsafe { wdk_iddcx::IddCxMonitorDeparture(m) };
-        }
+    let n = teardowns.len();
+    // Stop the workers (each joins its thread) BEFORE departing the monitors they still name.
+    drop(teardowns);
+    for m in objects {
+        // SAFETY: `m` is a live IddCx monitor handle; departure tears it down.
+        unsafe { wdk_iddcx::IddCxMonitorDeparture(m) };
     }
     n
 }
@@ -389,7 +429,7 @@ pub fn target_id_for_object(object: iddcx::IDDCX_MONITOR) -> Option<u32> {
 
 /// Stash a host frame-channel delivery on the monitor with `target_id` (an ARRIVED monitor — a pending
 /// entry's `target_id` is still 0, which the host can never send since OS target ids are non-zero).
-/// Replacing an unconsumed delivery drops it → its handles close (it WAS adopted by a prior success).
+/// A superseded delivery leaves the locked scope and closes its handles after the guard drops.
 /// `Err(ch)` if no such monitor exists — the caller must NOT close those handles (the host only sees
 /// the error status and reaps its remote duplicates itself; closing here too would double-close values
 /// the OS may have reused).
@@ -400,17 +440,20 @@ pub fn set_frame_channel(
     if target_id == 0 {
         return Err(ch);
     }
-    let mut lock = lock_monitors();
-    if let Some(m) = lock.iter_mut().find(|m| m.target_id == target_id) {
-        m.frame_channel = Some(ch);
+    let superseded = {
+        let mut lock = lock_monitors();
+        let Some(m) = lock.iter_mut().find(|m| m.target_id == target_id) else {
+            return Err(ch);
+        };
+        let superseded = m.frame_channel.replace(ch);
         // The channel store above is mutex-ordered; the bump is what lets the drain loop's
         // lock-free gate ([`frame_channel_gen`]) notice it. Bump-after-store: a loop pass that
-        // reads the old generation misses THIS pass and attaches on the next (~16 ms).
+        // reads the old generation misses THIS pass and attaches on the next.
         FRAME_CHANNEL_GEN.fetch_add(1, core::sync::atomic::Ordering::Release);
-        Ok(())
-    } else {
-        Err(ch)
-    }
+        superseded
+    };
+    drop(superseded);
+    Ok(())
 }
 
 /// Take (remove) the pending frame-channel delivery for `target_id`, transferring handle ownership to
@@ -441,7 +484,8 @@ pub fn has_frame_channel(target_id: u32) -> bool {
 /// hardware cursor to the OS and start the worker. Rejected (`Err(ch)`) when the monitor is
 /// unknown, didn't ask for a cursor at ADD, or isn't created yet. A RE-delivery replaces the
 /// worker (the old one stops+joins on drop) — the host only re-sends after recreating the
-/// section. The IddCx setup runs OUTSIDE the monitors lock (it can call back into mode DDIs).
+/// section. Both the IddCx setup and every worker drop run OUTSIDE the monitors lock: the setup
+/// can call back into the mode DDIs, and a worker's drop joins its thread.
 pub fn set_cursor_channel(
     target_id: u32,
     ch: crate::cursor_worker::CursorChannel,
@@ -475,11 +519,15 @@ pub fn set_cursor_channel(
         // The worker only spawns after `IddCxMonitorSetupHardwareCursor` succeeded.
         mark_declared(target_id);
     }
-    let mut lock = lock_monitors();
-    if let Some(m) = lock.iter_mut().find(|m| m.target_id == target_id) {
-        m.cursor_worker = Some(worker);
-    }
-    // A monitor departed in the window: dropping `worker` here stops it cleanly.
+    let displaced = {
+        let mut lock = lock_monitors();
+        match lock.iter_mut().find(|m| m.target_id == target_id) {
+            Some(m) => m.cursor_worker.replace(worker),
+            // The monitor departed in the window — hand the fresh worker straight back.
+            None => Some(worker),
+        }
+    };
+    drop(displaced); // stop+join outside the lock
     Ok(())
 }
 
@@ -487,18 +535,21 @@ pub fn set_cursor_channel(
 /// on the monitor with `target_id`, replacing the previous generation's (which drops once its last
 /// publisher lets go). Called from the worker thread — the caller must NOT hold `MONITOR_MODES`.
 /// `false` (and `ep` dropped, closing its handles) when the monitor is gone — a genuine teardown.
+/// Whichever `Arc` this releases leaves the locked scope first: if it is the last holder, its drop
+/// unmaps the header and closes the ring handles, which must not run under the registry lock.
 pub fn set_endpoint(target_id: u32, ep: Arc<crate::frame_transport::RingEndpoint>) -> bool {
     if target_id == 0 {
         return false;
     }
-    let mut lock = lock_monitors();
-    match lock.iter_mut().find(|m| m.target_id == target_id) {
-        Some(m) => {
-            m.endpoint = Some(ep);
-            true
+    let (installed, released) = {
+        let mut lock = lock_monitors();
+        match lock.iter_mut().find(|m| m.target_id == target_id) {
+            Some(m) => (true, m.endpoint.replace(ep)),
+            None => (false, Some(ep)),
         }
-        None => false,
-    }
+    };
+    drop(released);
+    installed
 }
 
 /// The monitor's current ring endpoint, for a freshly-assigned worker to open on its own device.
@@ -517,19 +568,24 @@ pub fn endpoint(target_id: u32) -> Option<Arc<crate::frame_transport::RingEndpoi
 /// Retire the monitor's endpoint IF it is still generation `generation` — a worker whose open of a
 /// FRESH delivery failed calls this so the failure stays terminal for that delivery (the host's
 /// wait-for-attach reads the status and fails the open; a retry is a new delivery). A newer endpoint
-/// installed meanwhile is left alone.
+/// installed meanwhile is left alone. The retired `Arc` drops after the guard — as the last holder
+/// it unmaps the header and closes the ring handles.
 pub fn clear_endpoint(target_id: u32, generation: u32) {
     if target_id == 0 {
         return;
     }
-    let mut lock = lock_monitors();
-    if let Some(m) = lock.iter_mut().find(|m| m.target_id == target_id)
-        && m.endpoint
-            .as_ref()
-            .is_some_and(|e| e.generation() == generation)
-    {
-        m.endpoint = None;
-    }
+    let retired = {
+        let mut lock = lock_monitors();
+        lock.iter_mut()
+            .find(|m| m.target_id == target_id)
+            .filter(|m| {
+                m.endpoint
+                    .as_ref()
+                    .is_some_and(|e| e.generation() == generation)
+            })
+            .and_then(|m| m.endpoint.take())
+    };
+    drop(retired);
 }
 
 /// The monitor's source-sequence counter (see [`MonitorObject::source_seq`]); `None` if it is gone.
@@ -914,22 +970,22 @@ pub fn update_monitor_modes(session_id: u64, width: u32, height: u32, refresh: u
 
 /// `IOCTL_REMOVE`: depart + drop the monitor for `session_id`. Returns true if one was removed.
 pub fn remove_monitor(session_id: u64) -> bool {
-    // Pull out the IddCx handle AND the swap-chain processor under the lock, but drop the processor
-    // (which RAII-joins its worker thread) only AFTER the lock guard is released — joining a worker
-    // while holding `MONITOR_MODES` would head-block the whole control plane / risk a self-deadlock.
-    let (monitor, processor) = {
+    // Under the guard: unlink the entry and detach its blocking-drop fields. The joins and handle
+    // closes happen below, once the guard is gone — under `MONITOR_MODES` they head-block the whole
+    // control plane and every mode DDI, and risk a self-deadlock.
+    let (monitor, teardown) = {
         let mut lock = lock_monitors();
         let Some(pos) = lock.iter().position(|m| m.session_id == session_id) else {
             return false;
         };
-        let mut entry = lock.remove(pos);
+        let entry = lock.remove(pos);
         // Keep the departing monitor's advertised list for its id — the next same-id create
         // unions it back in (P2 mode history; see MODE_HISTORY).
         remember_modes(entry.id, &entry.modes);
-        (entry.object, entry.swap_chain_processor.take())
+        (entry.object, detach(entry))
     };
-    // Drop the worker FIRST (it joins + deletes the swap-chain), THEN depart the monitor.
-    drop(processor);
+    // Stop the workers FIRST (each joins its thread), THEN depart the monitor they still name.
+    drop(teardown);
     if let Some(m) = monitor {
         // SAFETY: `m` is a live IddCx monitor handle; departure tears it down.
         unsafe { wdk_iddcx::IddCxMonitorDeparture(m) };
@@ -937,53 +993,61 @@ pub fn remove_monitor(session_id: u64) -> bool {
     true
 }
 
-/// `IOCTL_CLEAR_ALL`: depart + drop every monitor (host-startup orphan reap).
+/// `IOCTL_CLEAR_ALL`: depart + drop every monitor (host-startup orphan reap). Same discipline as
+/// [`remove_monitor`]: the guard only drains the registry and collects handles + [`Teardown`]s;
+/// the workers stop and the ring handles close after it is released, then the monitors depart.
 pub fn clear_all() {
-    // Drain every entry under the lock, keeping each (handle, processor); drop the processors (RAII-join
-    // their workers) only AFTER releasing the lock, then depart the monitors. See `remove_monitor`.
-    let mut drained: Vec<(
-        Option<iddcx::IDDCX_MONITOR>,
-        Option<crate::swap_chain_processor::SwapChainProcessor>,
-    )> = {
+    let mut objects: Vec<iddcx::IDDCX_MONITOR> = Vec::new();
+    let teardowns: Vec<Teardown> = {
         let mut lock = lock_monitors();
         lock.drain(..)
-            .map(|mut m| (m.object, m.swap_chain_processor.take()))
+            .map(|m| {
+                if let Some(object) = m.object {
+                    objects.push(object);
+                }
+                detach(m)
+            })
             .collect()
     };
-    // Drop all workers FIRST (join + delete their swap-chains), THEN depart the monitors.
-    for (_, processor) in &mut drained {
-        drop(processor.take());
-    }
-    for (object, _) in drained {
-        if let Some(m) = object {
-            // SAFETY: `m` is a live IddCx monitor handle.
-            unsafe { wdk_iddcx::IddCxMonitorDeparture(m) };
-        }
+    drop(teardowns);
+    for m in objects {
+        // SAFETY: `m` is a live IddCx monitor handle.
+        unsafe { wdk_iddcx::IddCxMonitorDeparture(m) };
     }
 }
 
-/// `EvtCleanupCallback` (device removal, [`crate::callbacks::device_cleanup`]): drop every monitor's heavy
-/// resources — the swap-chain processor workers (each RAII-joins its thread + deletes its swap-chain) — and
-/// clear the list, WITHOUT `IddCxMonitorDeparture` (the framework tears the IddCx monitors down together
+/// `EvtCleanupCallback` (device removal, [`crate::callbacks::device_cleanup`]): clear the registry and
+/// release every monitor's heavy resources — drain workers, cursor workers, rings, unconsumed
+/// deliveries — WITHOUT `IddCxMonitorDeparture` (the framework tears the IddCx monitors down together
 /// with the departing device; departing here would double-tear). Frees our worker threads promptly even
-/// though the per-devnode WUDFHost (`ProcessSharingDisabled`) would also reap them when it exits.
+/// though the per-devnode WUDFHost (`ProcessSharingDisabled`) would also reap them when it exits. The
+/// [`Teardown`]s drop after the guard is released, for the reason in [`remove_monitor`].
 pub fn cleanup_for_device_removal() {
-    let mut drained: Vec<Option<crate::swap_chain_processor::SwapChainProcessor>> = {
+    let teardowns: Vec<Teardown> = {
         let mut lock = lock_monitors();
-        lock.drain(..)
-            .map(|mut m| m.swap_chain_processor.take())
-            .collect()
+        lock.drain(..).map(detach).collect()
     };
-    // Drop the workers (join their threads) AFTER releasing the lock — joining under MONITOR_MODES would
-    // head-block the control plane (same discipline as remove_monitor / clear_all).
-    for processor in &mut drained {
-        drop(processor.take());
-    }
+    drop(teardowns);
 }
 
-/// Drop a pending entry by id (create failed before arrival).
+/// Drop a pending entry by id (create failed before arrival). Unlinked under the guard, released
+/// after it — a pending entry normally holds nothing, but the id can also be reclaimed from an
+/// entry a concurrent delivery already stocked.
 fn remove_by_id(id: u32) {
-    lock_monitors().retain(|m| m.id != id);
+    let teardowns: Vec<Teardown> = {
+        let mut lock = lock_monitors();
+        let mut taken = Vec::new();
+        let mut i = 0;
+        while i < lock.len() {
+            if lock[i].id == id {
+                taken.push(detach(lock.remove(i)));
+            } else {
+                i += 1;
+            }
+        }
+        taken
+    };
+    drop(teardowns);
 }
 
 /// Resolve the id to name a new monitor by: honor the host's `preferred` per-client id when it is in the
