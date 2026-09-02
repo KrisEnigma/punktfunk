@@ -320,18 +320,9 @@ impl SwapChainProcessor {
         render_luid_high: i32,
     ) {
         let assignment_epoch = ASSIGNMENT_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
-        // SetDevice fails (0x887A0026, FACILITY_DXGI) when the monitor briefly flaps INACTIVE during
-        // topology activation — the OS unassigns + re-assigns the swap-chain, and a fresh run_core thread
-        // can lose the race to the unassign. Retry briefly so a stable re-assign binds the device instead
-        // of giving up on the first transient failure. `terminate` (set when the OS unassigns + drops the
-        // processor) breaks us out promptly.
-        //
-        // Cast to IDXGIDevice ONCE and BORROW it to the swap-chain across all retries. Re-casting +
-        // `into_raw()`'ing on EVERY attempt — and a flapping monitor fails several attempts per session —
-        // orphans an IDXGIDevice reference per failure, pinning the D3D device (and its ~dozen worker
-        // threads + tens of MB of VRAM) so it is NEVER freed when the processor drops. `as_raw()` keeps
-        // our single reference (released right after the loop); IddCx AddRefs its own on success, and
-        // `device` keeps the object alive for the drain loop regardless.
+        // `as_raw()` BORROWS our single reference — IddCx AddRefs its own — and it is released right
+        // after the realtime raise below. An `into_raw()` here would orphan that reference and pin the
+        // D3D device (its worker threads and VRAM) past the processor's drop.
         let dxgi_device = match device.device.cast::<IDXGIDevice>() {
             Ok(d) => d,
             Err(e) => {
@@ -342,38 +333,27 @@ impl SwapChainProcessor {
         // Built zeroed + field-assigned (driver style) — robust against a bindgen field-set difference.
         let mut set_device = pod_init!(IDARG_IN_SWAPCHAINSETDEVICE);
         set_device.pDevice = dxgi_device.as_raw().cast();
-        let mut set_ok = false;
-        let mut terminated = false;
-        for attempt in 0..60u32 {
-            if terminate.load(Ordering::Relaxed) {
-                dbglog!(
-                    "[pf-vd] swap-chain run_core: terminated during SetDevice (attempt {attempt}, target={target_id})"
-                );
-                terminated = true;
-                break;
-            }
-            // SAFETY: driver is loaded; `swap_chain` is valid; `set_device` points to valid local storage.
-            let hr = unsafe { wdk_iddcx::IddCxSwapChainSetDevice(swap_chain, &set_device) };
-            if hr_success(hr) {
-                set_ok = true;
-                dbglog!(
-                    "[pf-vd] swap-chain run_core: SetDevice OK (target={target_id}, attempt={attempt}) — entering drain loop"
-                );
-                break;
-            }
-            if attempt == 0 {
-                dbglog!(
-                    "[pf-vd] swap-chain run_core: SetDevice attempt 0 failed ({hr:#x}) — retrying up to 60x@50ms (monitor may be flapping)"
-                );
-            }
-            thread::sleep(Duration::from_millis(50));
+        // One shot: a failure here means the OS already unassigned this swap-chain, and
+        // DXGI_ERROR_ACCESS_LOST on that handle never recovers. Returning lets the thread epilogue
+        // delete it so the OS mints a fresh one — the reassign is what succeeds.
+        // SAFETY: driver is loaded; `swap_chain` is valid; `set_device` points to valid local storage.
+        let hr = unsafe { wdk_iddcx::IddCxSwapChainSetDevice(swap_chain, &set_device) };
+        if !hr_success(hr) {
+            dbglog!(
+                "[pf-vd] swap-chain run_core: SetDevice failed ({hr:#x}, target={target_id}) — returning for a fresh swap-chain"
+            );
+            drop(dxgi_device);
+            return;
         }
+        dbglog!(
+            "[pf-vd] swap-chain run_core: SetDevice OK (target={target_id}) — entering drain loop"
+        );
         // GPU-scheduling raise for the swap-chain processing device — default ON, so the leg
         // feeding every captured frame into the ring outranks a GPU-saturating game (history +
         // `PFVD_NO_RT_GPU` escape hatch: [`rt_gpu_enabled`]). Best-effort, never fatal, issued
         // while our borrowed device reference is still alive (IddCx uses it synchronously); the
         // DDI may still decline (e.g. E_NOTIMPL on pre-WDDM-3.0 hardware).
-        if set_ok && rt_gpu_enabled() {
+        if rt_gpu_enabled() {
             let mut rt = pod_init!(IDARG_IN_SETREALTIMEGPUPRIORITY);
             rt.pDevice = dxgi_device.as_raw().cast();
             // SAFETY: driver is loaded; `swap_chain` is the live assigned swap-chain whose
@@ -390,17 +370,9 @@ impl SwapChainProcessor {
                 );
             }
         }
-        // Release our borrowed device reference — IddCx holds its own now, or we gave up. (Explicit drop
-        // so NLL can't release it mid-loop while the swap-chain still references the raw ptr.)
+        // Release our borrowed device reference — IddCx holds its own now. (Explicit drop so NLL
+        // can't release it mid-loop while the swap-chain still references the raw ptr.)
         drop(dxgi_device);
-        if !set_ok {
-            if !terminated {
-                dbglog!(
-                    "[pf-vd] swap-chain run_core: SetDevice never succeeded after retries (target={target_id}) — giving up"
-                );
-            }
-            return;
-        }
 
         // STEP 6 IDD-push: publish into the HOST-created shared ring over the SEALED channel (the
         // control plane stashes the delivered handle values on our monitor). Until a delivery lands

@@ -184,7 +184,8 @@ iddcx_ddi!(
     ) @ IddCxMonitorUpdateModes2TableIndex as PFN_IDDCXMONITORUPDATEMODES2
 );
 iddcx_ddi!(
-    /// Bind a D3D device to an assigned swap-chain. HRESULT-shaped (0x887A0026 → retry on monitor flap).
+    /// Bind a D3D device to an assigned swap-chain. HRESULT-shaped; a failure means the OS has
+    /// already unassigned it, so the caller drops the swap-chain and waits for the reassign.
     IddCxSwapChainSetDevice(
         swap_chain: iddcx::IDDCX_SWAPCHAIN,
         in_args: *const iddcx::IDARG_IN_SWAPCHAINSETDEVICE,
