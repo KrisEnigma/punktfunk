@@ -8,34 +8,13 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use pf_driver_proto::vdisplay;
 use wdk_sys::{NTSTATUS, WDFOBJECT, call_unsafe_wdf_function_binding, iddcx};
 
-/// One resolution with the refresh rates it supports.
-#[derive(Clone)]
-pub struct Mode {
-    pub width: u32,
-    pub height: u32,
-    pub refresh_rates: Vec<u32>,
-}
-
-/// A single (width, height, refresh) tuple — modes flattened across their refresh rates.
-#[derive(Copy, Clone)]
-pub struct ModeItem {
-    pub width: u32,
-    pub height: u32,
-    pub refresh_rate: u32,
-}
-
-/// Flatten a mode list into per-refresh-rate tuples (the order the mode DDIs emit).
-pub fn flatten(modes: &[Mode]) -> impl Iterator<Item = ModeItem> + '_ {
-    modes.iter().flat_map(|m| {
-        m.refresh_rates.iter().map(|&rr| ModeItem {
-            width: m.width,
-            height: m.height,
-            refresh_rate: rr,
-        })
-    })
-}
+/// The advertised mode list and its flattening (the order the mode DDIs emit). Both live in
+/// [`pf_driver_proto::vdisplay`], where they run under `cargo test` on any OS; re-exported so the
+/// mode callbacks keep naming them through this module.
+pub use pf_driver_proto::vdisplay::{Mode, flatten};
 
 /// A live (or pending) virtual monitor.
 pub struct MonitorObject {
@@ -43,7 +22,7 @@ pub struct MonitorObject {
     pub object: Option<iddcx::IDDCX_MONITOR>,
     /// EDID serial / connector index — the key the mode DDIs match on.
     pub id: u32,
-    /// Advertised modes (requested mode first, then [`default_modes`]).
+    /// Advertised modes (requested mode first, then the proto's fallbacks).
     pub modes: Vec<Mode>,
     /// The host's monotonic key (ADD/REMOVE).
     pub session_id: u64,
@@ -206,29 +185,13 @@ pub fn reap_orphaned(grace: Duration) -> usize {
     n
 }
 
-/// Append `from`'s modes to `into`, skipping resolutions already present, capped at
-/// [`MODE_LIST_CAP`] — the accumulate half of the union semantics (see [`update_monitor_modes`]).
-fn union_modes(into: &mut Vec<Mode>, from: &[Mode]) {
-    for m in from {
-        if into.len() >= MODE_LIST_CAP {
-            break;
-        }
-        if !into
-            .iter()
-            .any(|e| (e.width, e.height) == (m.width, m.height))
-        {
-            into.push(m.clone());
-        }
-    }
-}
-
 /// The last advertised mode list of a DEPARTED monitor, per monitor id — consumed by the next
 /// same-id [`create_monitor`] so a re-arrived monitor's ARRIVAL list already contains every mode
 /// its predecessor ever served. The OS pins a monitor's settable set at arrival (see
 /// [`update_monitor_modes`]), so this is what makes a windowed↔fullscreen cycle (or any return to
 /// a previously-used size) an IN-PLACE mode set instead of another hotplug. In-process only (a
 /// WUDFHost restart forgets it — harmless, the next resizes re-teach it); bounded: ≤ 16 ids ×
-/// [`MODE_LIST_CAP`] modes.
+/// [`vdisplay::MODE_LIST_CAP`] modes.
 static MODE_HISTORY: Mutex<Vec<(u32, Vec<Mode>)>> = Mutex::new(Vec::new());
 
 /// Desired cursor-render state per OS TARGET id (`IOCTL_SET_CURSOR_FORWARD`, the mid-stream
@@ -292,59 +255,38 @@ fn remember_modes(id: u32, modes: &[Mode]) {
     }
 }
 
-/// Fallback modes appended after the requested mode, so a topology change still has options.
-fn default_modes() -> Vec<Mode> {
-    vec![
-        Mode {
-            width: 1920,
-            height: 1080,
-            refresh_rates: vec![60, 120],
-        },
-        Mode {
-            width: 1280,
-            height: 720,
-            refresh_rates: vec![60],
-        },
-    ]
-}
-
-/// THE `DISPLAYCONFIG_VIDEO_SIGNAL_INFO` builder — one formula for both mode DDI families
-/// (IddSampleDriver-exact): pixel rate = rr·w·h, integer sync rationals, total == active (no
-/// fabricated blanking). Monitor (description) and target (scan-out) modes differ ONLY in
-/// `vSyncFreqDivider`, which the caller passes (0 / 1 per the DDI contract).
-///
-/// Until 2026-07 the monitor side used the virtual-display-rs legacy math instead — a WIDTH-LESS
-/// pixel rate (`rr·(h+4)²+1000`) and a deliberately fractional vSync — so the OS saw two
-/// disagreeing signal descriptions for the same `(w,h,rr)` tuple, one of them physically
-/// meaningless. Numerators computed in u64 and saturated: an 8K240-class input would overflow the
-/// u32 rational and panic→abort the extern-"C" mode DDI in a debug build.
+/// Stamp [`vdisplay::signal_info`]'s numbers into the OS `DISPLAYCONFIG_VIDEO_SIGNAL_INFO` —
+/// one description for both mode DDI families, differing only in `v_sync_freq_divider` (0 for
+/// monitor modes, 1 for target modes, per the DDI contract). Both sync rationals have
+/// denominator 1, and total size equals active size: no fabricated blanking.
 fn signal_info(
     width: u32,
     height: u32,
     refresh_rate: u32,
     v_sync_freq_divider: u32,
 ) -> wdk_sys::DISPLAYCONFIG_VIDEO_SIGNAL_INFO {
+    let n = vdisplay::signal_info(width, height, refresh_rate, v_sync_freq_divider);
     let region = wdk_sys::DISPLAYCONFIG_2DREGION {
         cx: width,
         cy: height,
     };
     let mut si = pod_init!(wdk_sys::DISPLAYCONFIG_VIDEO_SIGNAL_INFO);
-    si.pixelRate = u64::from(refresh_rate) * u64::from(width) * u64::from(height);
+    si.pixelRate = n.pixel_rate;
     si.hSyncFreq = wdk_sys::DISPLAYCONFIG_RATIONAL {
-        Numerator: u32::try_from(u64::from(refresh_rate) * u64::from(height)).unwrap_or(u32::MAX),
+        Numerator: n.h_sync_num,
         Denominator: 1,
     };
     si.vSyncFreq = wdk_sys::DISPLAYCONFIG_RATIONAL {
-        Numerator: refresh_rate,
+        Numerator: n.v_sync_num,
         Denominator: 1,
     };
     si.totalSize = region;
     si.activeSize = region;
     si.scanLineOrdering =
         wdk_sys::DISPLAYCONFIG_SCANLINE_ORDERING::DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
-    // union { AdditionalSignalInfo bitfield | videoStandard:u32 }: videoStandard=255 (other),
-    // vSyncFreqDivider in bits 16..21.
-    si.__bindgen_anon_1.videoStandard = 255 | (v_sync_freq_divider << 16);
+    // union { AdditionalSignalInfo bitfield | videoStandard:u32 } — the proto packs the
+    // vSyncFreqDivider into bits 16..21 of the "other" video standard.
+    si.__bindgen_anon_1.videoStandard = n.video_standard;
     si
 }
 
@@ -770,7 +712,7 @@ pub fn create_monitor(
         height,
         refresh_rates: vec![refresh],
     }];
-    modes.extend(default_modes());
+    modes.extend(vdisplay::default_modes());
 
     // Register the (pending) monitor so the mode DDIs can find it by EDID-serial id before arrival. The id
     // seeds the EDID serial + IddCx ConnectorIndex + ContainerId — i.e. the monitor's OS IDENTITY. Honor the
@@ -782,14 +724,15 @@ pub fn create_monitor(
     // can't pick the same id.
     let id = {
         let mut lock = lock_monitors();
-        let id = resolve_id(&lock, preferred_id);
+        let live: Vec<u32> = lock.iter().map(|m| m.id).collect();
+        let id = vdisplay::resolve_id(&live, preferred_id);
         // Same-id mode history (P2 union semantics): a RE-ARRIVED monitor advertises every mode
         // its departed predecessor served, so the OS's arrival-pinned settable set already
         // contains them — a return to any previously-used size is then an IN-PLACE mode set.
         {
             let hist = MODE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((_, prev)) = hist.iter().find(|(i, _)| *i == id) {
-                union_modes(&mut modes, prev);
+                vdisplay::union_modes(&mut modes, prev);
             }
         }
         lock.push(MonitorObject {
@@ -904,11 +847,6 @@ pub fn create_monitor(
     Some((id, target_id, luid_low, luid_high))
 }
 
-/// How many distinct resolutions a monitor's advertised list may accumulate (the requested head +
-/// history + the built-in fallbacks). Bounds the union growth across many resizes; the OLDEST
-/// history entries fall off first.
-const MODE_LIST_CAP: usize = 12;
-
 /// `IOCTL_UPDATE_MODES` (v4): refresh the LIVE monitor's advertised mode list to lead with a new
 /// preferred mode and push the new TARGET mode list to the OS via `IddCxMonitorUpdateModes2` —
 /// the in-place mid-stream resize (`design/first-frame-and-resize-latency.md` P2). No departure:
@@ -922,7 +860,7 @@ const MODE_LIST_CAP: usize = 12;
 /// is pinned then). So replacing the list can only ever LOSE settable modes (v1 of this op
 /// dropped the arrival mode from the target list, breaking even a resize BACK to it); the update
 /// therefore accumulates — new mode first, every previously-advertised mode kept (deduped by
-/// resolution, capped at [`MODE_LIST_CAP`]) — and the real payoff is at the NEXT re-arrival,
+/// resolution, capped at [`vdisplay::MODE_LIST_CAP`]) — the real payoff is at the NEXT re-arrival,
 /// where [`create_monitor`]'s same-id history union makes every previously-used mode settable.
 ///
 /// The stored list is updated FIRST (under the lock) so any OS re-query through the mode DDIs
@@ -944,7 +882,7 @@ pub fn update_monitor_modes(session_id: u64, width: u32, height: u32, refresh: u
             height,
             refresh_rates: vec![refresh],
         }];
-        union_modes(&mut new_modes, &m.modes);
+        vdisplay::union_modes(&mut new_modes, &m.modes);
         let old = core::mem::replace(&mut m.modes, new_modes.clone());
         (object, old, new_modes)
     };
@@ -1057,47 +995,15 @@ fn remove_by_id(id: u32) {
     drop(teardowns);
 }
 
-/// Resolve the id to name a new monitor by: honor the host's `preferred` per-client id when it is in the
-/// valid range (`1..=15`, so the IddCx `ConnectorIndex` = id stays `< MaxMonitorsSupported` = 16) AND not
-/// currently live (two live monitors MUST have distinct ids/connectors); otherwise fall back to
-/// [`alloc_monitor_id`] (auto, lowest-free). NEVER auto-departs a colliding live monitor — that would tear
-/// down an unrelated concurrent client — so the live-uniqueness invariant is preserved even against a host
-/// bug. `preferred == 0` (anonymous/TOFU/GameStream) always falls through to auto. Caller holds `MONITOR_MODES`.
-fn resolve_id(modes: &[MonitorObject], preferred: u32) -> u32 {
-    if (1..=15).contains(&preferred) && !modes.iter().any(|m| m.id == preferred) {
-        preferred
-    } else {
-        alloc_monitor_id(modes)
-    }
-}
-
-/// The lowest monitor id (≥1) not currently live. Reusing freed ids (instead of a monotonic counter) keeps
-/// the connector index / EDID serial / container GUID bounded to the number of concurrent monitors, so a
-/// fresh ADD reuses a departed monitor's OS target slot rather than allocating a new one and orphaning the
-/// old (the ghost-monitor accumulation that wedges ADD at 0x80070490 ERROR_NOT_FOUND). Caller holds
-/// `MONITOR_MODES`. With ≤ N live ids, a free one always exists in `1..=N+1` (pigeonhole).
-fn alloc_monitor_id(modes: &[MonitorObject]) -> u32 {
-    (1u32..=modes.len() as u32 + 1)
-        .find(|id| !modes.iter().any(|m| m.id == *id))
-        .unwrap_or(1)
-}
-
-/// A deterministic, monitor-unique container GUID (groups targets into a physical device). Derived from
-/// `id` so it is stable + collision-free without a random source.
+/// Rebuild [`vdisplay::container_guid`]'s fields as the OS `GUID` — the container id that groups a
+/// monitor's targets into one physical device. `pf_driver_proto` is `no_std` and has no `GUID` type,
+/// so it hands back the four fields.
 fn container_guid(id: u32) -> wdk_sys::GUID {
+    let (d1, d2, d3, d4) = vdisplay::container_guid(id);
     wdk_sys::GUID {
-        Data1: 0x7066_7664u32.wrapping_add(id),
-        Data2: 0x7044,
-        Data3: 0x5350,
-        Data4: [
-            0xa1,
-            0xb2,
-            0xc3,
-            0xd4,
-            0xe5,
-            0xf6,
-            (id >> 8) as u8,
-            id as u8,
-        ],
+        Data1: d1,
+        Data2: d2,
+        Data3: d3,
+        Data4: d4,
     }
 }

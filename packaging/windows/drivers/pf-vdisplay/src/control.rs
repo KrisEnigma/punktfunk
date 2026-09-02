@@ -11,6 +11,7 @@
 
 use bytemuck::Pod;
 use pf_driver_proto::control;
+use pf_driver_proto::vdisplay::valid_mode;
 use pf_umdf_util::wdf::Request;
 use wdk_sys::WDFREQUEST;
 
@@ -49,14 +50,6 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
         control::IOCTL_SET_CURSOR_FORWARD => set_cursor_forward(request),
         _ => request.complete(STATUS_NOT_FOUND),
     }
-}
-
-/// Sanity bounds for a requested mode — generous (covers any real client) but rejects zero/absurd
-/// values that would otherwise feed the EDID/mode math unchecked.
-fn valid_mode(width: u32, height: u32, refresh_hz: u32) -> bool {
-    (1..=16384).contains(&width)
-        && (1..=16384).contains(&height)
-        && (1..=1000).contains(&refresh_hz)
 }
 
 /// `IOCTL_SET_RENDER_ADAPTER`: pin the IddCx render adapter (hybrid-GPU IDD-push).
