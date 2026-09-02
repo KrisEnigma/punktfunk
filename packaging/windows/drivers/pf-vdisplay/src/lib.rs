@@ -22,6 +22,8 @@ mod callbacks;
 mod control;
 mod cursor_worker;
 mod direct_3d_device;
+#[cfg(feature = "encode-probe")]
+mod encode_probe;
 mod entry;
 mod frame_transport;
 mod monitor;
