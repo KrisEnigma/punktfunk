@@ -125,6 +125,13 @@ extern "C" fn driver_add(_driver: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTSTA
         return status;
     }
 
+    // The host-gone watchdog timer, parented to this device — created before the interface exists,
+    // so no IOCTL can arrive with the timer still missing. `adapter_init_finished` arms it.
+    let status = crate::watchdog::create(device);
+    if !nt_success(status) {
+        return status;
+    }
+
     // Expose the owned pf-vdisplay control interface: the host opens this GUID and drives the proto control
     // plane (IOCTL_ADD/REMOVE/PING/…) which arrives at EvtIddCxDeviceIoControl. NOT SudoVDA's GUID. (The
     // upstream uses a socket instead, so it has no interface; ours is IOCTL-based.)

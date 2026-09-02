@@ -136,7 +136,7 @@ impl Drop for Teardown {
 /// With a single `pf_vdisplay` devnode + `UmdfHostProcessSharing=ProcessSharingDisabled` the host process
 /// (and this state) die WITH the device, so it is effectively device-scoped already; a `Box` + `AtomicPtr`
 /// "device-owned" variant (audit §2.5) would only add a use-after-free window — the host-gone watchdog
-/// thread ([`crate::control::start_watchdog`]) races device cleanup — for no real gain. Cleanup of the
+/// tick ([`crate::watchdog`]) races device cleanup — for no real gain. Cleanup of the
 /// heavy per-monitor resources on device removal is instead done explicitly ([`cleanup_for_device_removal`]).
 pub static MONITOR_MODES: Mutex<Vec<MonitorObject>> = Mutex::new(Vec::new());
 
@@ -154,7 +154,7 @@ fn lock_monitors() -> std::sync::MutexGuard<'static, Vec<MonitorObject>> {
 }
 
 /// True if any virtual monitor currently exists — the host-gone watchdog only reaps when there's
-/// something to reap (see [`crate::control::start_watchdog`]).
+/// something to reap (see [`crate::watchdog`]).
 pub fn has_monitors() -> bool {
     !lock_monitors().is_empty()
 }
@@ -173,7 +173,7 @@ pub fn frame_channel_gen() -> u32 {
 }
 
 /// Depart every monitor that has existed at least `grace` — the host-gone watchdog reap
-/// ([`crate::control::start_watchdog`]). The grace skips a just-created monitor (the host adds it,
+/// ([`crate::watchdog`]). The grace skips a just-created monitor (the host adds it,
 /// then starts pinging) so a momentarily-stale ping timer can't nuke a brand-new monitor. Returns
 /// the count departed. Same lock discipline as [`remove_monitor`]: the guard only unlinks entries
 /// and collects their [`Teardown`]s; the joins and handle closes happen after it is released.

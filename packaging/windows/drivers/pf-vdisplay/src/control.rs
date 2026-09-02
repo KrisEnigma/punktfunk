@@ -9,9 +9,6 @@
 //! a type-level fact. Buffer I/O rides the token's methods over `bytemuck` casts of the Pod wire
 //! structs — which leaves the control plane one `unsafe` block, the token construction.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
 use bytemuck::Pod;
 use pf_driver_proto::control;
 use pf_umdf_util::wdf::Request;
@@ -19,91 +16,14 @@ use wdk_sys::WDFREQUEST;
 
 use crate::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS};
 
-/// The host must send an IOCTL within this window (it PINGs on a `timeout/3` timer) or the watchdog
-/// treats it as gone and reaps every monitor. Reported to the host via [`control::IOCTL_GET_INFO`].
-const WATCHDOG_TIMEOUT_S: u32 = 10;
-
-/// Host-liveness counter — EVERY inbound IOCTL bumps it; [`start_watchdog`]'s thread samples it.
-static WATCHDOG_PINGS: AtomicU64 = AtomicU64::new(0);
-/// Spawns the watchdog thread exactly once (idempotent across re-entrant adapter inits).
-static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
-/// Asks the watchdog thread to exit ([`stop_watchdog`], from device cleanup). The thread consumes
-/// the flag (swap) and clears [`WATCHDOG_STARTED`] on the way out, so a later adapter init on a
-/// fresh device can re-arm.
-static WATCHDOG_STOP: AtomicBool = AtomicBool::new(false);
-
-/// Start the host-liveness watchdog (once, from `adapter_init_finished`).
-///
-/// Previously [`WATCHDOG_PINGS`] was bumped but NEVER sampled (no thread existed) — so a host that died
-/// without a cooperative REMOVE (crash / `TerminateProcess`) left its virtual monitor + swap-chain
-/// worker + pooled D3D device wedged in WUDFHost until the next host start's CLEAR_ALL, and a
-/// not-restarted host left the orphan monitor in the desktop topology indefinitely
-/// (`design/windows-host-rewrite.md` §2.8). This thread closes that: if no IOCTL arrives for
-/// `WATCHDOG_TIMEOUT_S` while monitors exist, it departs them all.
-///
-/// (A WDF `EvtFileClose` on the control handle would be more immediate — the plan's preferred §3.4
-/// option — but the polling watchdog matches the proven oracle and needs no IddCx file-object plumbing.)
-pub fn start_watchdog() {
-    if WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let tick = Duration::from_secs(u64::from((WATCHDOG_TIMEOUT_S / 3).max(1)));
-    let timeout = Duration::from_secs(u64::from(WATCHDOG_TIMEOUT_S));
-    std::thread::spawn(move || {
-        let mut last = WATCHDOG_PINGS.load(Ordering::Relaxed);
-        let mut last_change = Instant::now();
-        loop {
-            std::thread::sleep(tick);
-            // Device cleanup asked us to stop: the WDFDEVICE (and with it every monitor) is going
-            // away — a reap fired after that point would race `cleanup_for_device_removal` over
-            // the same monitor list. Consume the flag and un-mark STARTED so a fresh device's
-            // adapter init can re-arm. (Previously this thread ran forever: it outlived the
-            // device and was reaped only with the WUDFHost process.)
-            if WATCHDOG_STOP.swap(false, Ordering::SeqCst) {
-                WATCHDOG_STARTED.store(false, Ordering::SeqCst);
-                dbglog!("[pf-vd] watchdog: device cleanup — thread exiting");
-                return;
-            }
-            let cur = WATCHDOG_PINGS.load(Ordering::Relaxed);
-            if cur != last {
-                last = cur;
-                last_change = Instant::now();
-                continue;
-            }
-            // No IOCTL since `last_change`. A live host PINGs every `timeout/3`, so this only trips once
-            // the host is truly gone; only reap when there's something to reap.
-            if last_change.elapsed() >= timeout && crate::monitor::has_monitors() {
-                let n = crate::monitor::reap_orphaned(Duration::from_secs(3));
-                if n > 0 {
-                    dbglog!(
-                        "[pf-vd] watchdog: no host IOCTL in {WATCHDOG_TIMEOUT_S}s — host gone, departed {n} monitor(s)"
-                    );
-                }
-                last_change = Instant::now(); // don't re-reap every tick
-            }
-        }
-    });
-}
-
-/// Ask the watchdog thread to exit (device cleanup). Takes effect within one tick (~3 s); the
-/// narrow window where a cleanup-then-re-add lands between the flag and the thread noticing it
-/// is unreachable in practice — `ProcessSharingDisabled` gives each device its own WUDFHost, so
-/// a new device means a new process with fresh statics.
-pub fn stop_watchdog() {
-    if WATCHDOG_STARTED.load(Ordering::SeqCst) {
-        WATCHDOG_STOP.store(true, Ordering::SeqCst);
-    }
-}
-
 /// Dispatch one control IOCTL and complete the request.
 ///
 /// # Safety
 /// `request` is the framework-provided `WDFREQUEST` for an `EvtIddCxDeviceIoControl` call.
 pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
     // Every inbound IOCTL is host liveness (the host PINGs on a timer, plus ADD/REMOVE/GET_INFO/…) —
-    // bump the watchdog at the top so it only fires once the host has gone truly silent. See
-    // [`start_watchdog`].
-    WATCHDOG_PINGS.fetch_add(1, Ordering::Relaxed);
+    // ping at the top so the watchdog only fires once the host has gone truly silent.
+    crate::watchdog::ping();
     // SAFETY: `request` is the live request for THIS EvtIddCxDeviceIoControl invocation — exactly
     // the contract `Request::new` requires. Everything below is safe: the token owns completion.
     let request = unsafe { Request::new(request) };
@@ -111,7 +31,7 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
         control::IOCTL_GET_INFO => {
             let reply = control::InfoReply {
                 protocol_version: pf_driver_proto::PROTOCOL_VERSION,
-                watchdog_timeout_s: WATCHDOG_TIMEOUT_S,
+                watchdog_timeout_s: crate::watchdog::WATCHDOG_TIMEOUT_S,
             };
             write_output_prefix_complete(request, &reply, size_of::<control::InfoReply>());
         }

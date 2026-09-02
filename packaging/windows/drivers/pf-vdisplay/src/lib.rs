@@ -26,6 +26,7 @@ mod entry;
 mod frame_transport;
 mod monitor;
 mod swap_chain_processor;
+mod watchdog;
 
 use wdk_sys::NTSTATUS;
 

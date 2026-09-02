@@ -40,7 +40,8 @@ pub unsafe extern "C" fn device_d0_entry(
 }
 
 /// Async completion of `IddCxAdapterInitAsync`: stash the adapter for later DDIs — IFF the init
-/// actually SUCCEEDED. STEP 4 also starts the watchdog here.
+/// actually SUCCEEDED — and arm the host-gone watchdog, since this is the point from which
+/// monitors can exist.
 pub unsafe extern "C" fn adapter_init_finished(
     adapter: iddcx::IDDCX_ADAPTER,
     p_in: *const iddcx::IDARG_IN_ADAPTER_INIT_FINISHED,
@@ -57,7 +58,7 @@ pub unsafe extern "C" fn adapter_init_finished(
         return STATUS_SUCCESS; // the callback itself succeeded; the failure is in NOT adopting
     }
     crate::adapter::set_adapter(adapter);
-    crate::control::start_watchdog();
+    crate::watchdog::start();
     STATUS_SUCCESS
 }
 
@@ -67,9 +68,9 @@ pub unsafe extern "C" fn adapter_init_finished(
 /// [`crate::monitor::cleanup_for_device_removal`].
 pub unsafe extern "C" fn device_cleanup(_object: WDFOBJECT) {
     dbglog!("[pf-vd] device cleanup — releasing monitors");
-    // Stop the host-liveness watchdog FIRST: a reap that fired mid-cleanup would race this
-    // teardown over the same monitor list (the hazard `monitor.rs` documents).
-    crate::control::stop_watchdog();
+    // Stop the host-liveness watchdog FIRST, and WAIT: a reap that fired mid-cleanup would race
+    // this teardown over the same monitor list (the hazard `monitor.rs` documents).
+    crate::watchdog::stop();
     crate::monitor::cleanup_for_device_removal();
 }
 
