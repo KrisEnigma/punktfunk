@@ -34,11 +34,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
-- **Decky: Punktfunk hosts in Steam's "Play from" dropdown, and a Stream button on game
-  pages.** The plugin patches `/library/app/:appid`, lists hosts whose library carries
-  `steam:<appid>` in the Play button's ▾ menu (Steam's own Menu components and tokens;
-  `SetStreamingClientForApp` for Steam's entries), re-dresses Steam's Play button as a violet
-  Stream while one is chosen, and shows **Stream** beside the ⚙ otherwise, launching a hidden
+- **Decky: Punktfunk hosts in Steam's "Play from" dropdown.** The plugin patches
+  `/library/app/:appid`, lists hosts whose library carries `steam:<appid>` in the Play button's
+  ▾ menu (Steam's own Menu components and tokens; `SetStreamingClientForApp` for Steam's
+  entries), and re-dresses Steam's Play button as a violet Stream while one is chosen, launching a hidden
   per-game shortcut (the game's name, art and icon) with `PF_GAME=steam:<appid>`, which the
   wrapper passes as `punktfunk launch --game`. Anyone wrapping `bin/punktfunkrun.sh` gains that
   variable; the backend gains `library(ref)` over `punktfunk library <ref> --json` and

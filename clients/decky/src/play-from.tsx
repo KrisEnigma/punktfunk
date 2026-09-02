@@ -71,9 +71,6 @@ export function setPlayFromSelection(appId: number, ref: string | null): void {
     /* ignore */
   }
   rerenderPlayButtons();
-  for (const listener of selectionListeners) {
-    listener();
-  }
 }
 
 /** The chosen host, if it is still one that can stream the title; otherwise Steam's own state
@@ -81,20 +78,6 @@ export function setPlayFromSelection(appId: number, ref: string | null): void {
 function selectedHost(appId: number, hosts: HostView[]): HostView | null {
   const ref = playFromSelection(appId);
   return ref ? (hosts.find((h) => h.ref === ref) ?? null) : null;
-}
-
-// Whoever else draws from the choice (the group button steps aside while one stands).
-const selectionListeners = new Set<() => void>();
-export function subscribePlayFrom(listener: () => void): () => void {
-  selectionListeners.add(listener);
-  return () => {
-    selectionListeners.delete(listener);
-  };
-}
-
-/** Is a Punktfunk host chosen for this title, and still able to stream it? */
-export function hasPlayFromSelection(appId: number, hosts: HostView[]): boolean {
-  return selectedHost(appId, hosts) != null;
 }
 
 // The Play button instances on screen, so a choice, a scan or a stream ending redraws them.

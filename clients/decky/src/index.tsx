@@ -304,8 +304,8 @@ const QamPanel: FC = () => {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Stream button on game pages"
-            description="A Steam game's page gets a Stream button when a paired host has that game in its library — like Remote Play, from your Punktfunk host."
+            label="Punktfunk in Steam's Play menu"
+            description="The ▾ beside a game's Play button lists your hosts that have it, next to Steam Link's; pick one and Play becomes Stream."
             checked={gamePageStream}
             onChange={(on) => {
               setGamePageStreamEnabled(on);
