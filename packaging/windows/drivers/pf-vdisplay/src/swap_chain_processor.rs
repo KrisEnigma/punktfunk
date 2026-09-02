@@ -60,6 +60,7 @@ use windows::{
 use crate::{
     direct_3d_device::Direct3DDevice,
     frame_transport::{FramePublisher, FrameStash, PublishOutcome, RingEndpoint},
+    worker::Sendable,
 };
 
 /// E_PENDING — `ReleaseAndAcquireBuffer2` returns this (HRESULT-shaped) when the swap-chain is valid but
@@ -137,13 +138,6 @@ fn machine_env(name: &str) -> Option<String> {
             .to_string(),
     )
 }
-
-/// A minimal newtype to move a raw pointer / handle across the thread boundary. The wrapped value is a
-/// raw IddCx swap-chain handle or an event HANDLE (both raw pointers, framework-managed) — sending them
-/// to the worker is sound because only this thread touches them and the framework synchronises lifetime.
-struct Sendable<T>(T);
-// SAFETY: see the type doc — the wrapped raw handle is owned by the worker for its lifetime.
-unsafe impl<T> Send for Sendable<T> {}
 
 pub struct SwapChainProcessor {
     terminate: Arc<AtomicBool>,

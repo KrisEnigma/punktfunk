@@ -23,15 +23,16 @@ use pf_driver_proto::cursor::{
 use wdk_iddcx::nt_success;
 use wdk_sys::iddcx;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::System::Memory::{
-    FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, UnmapViewOfFile,
-};
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
+use windows::Win32::System::Memory::{FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile};
+use windows::Win32::System::Threading::WaitForMultipleObjects;
+
+use crate::worker::{OwnedHandle, OwnedView, Sendable, Worker};
 
 /// The host's `IOCTL_SET_CURSOR_CHANNEL` delivery: the [`CursorShm`] mapping handle VALUE,
 /// already duplicated into this WUDFHost process. Owning a `CursorChannel` means owning the
-/// handle; `Drop` closes it unless [`into_unowned`](Self::into_unowned) disarmed that (the
-/// not-adopted reject path, where the host reaps remotely) or the worker consumed it.
+/// handle; `Drop` closes it unless [`into_unowned`](Self::into_unowned) disarmed that — the
+/// not-adopted reject path (the host reaps remotely), or [`setup_and_spawn`], which moves the
+/// handle into an [`OwnedHandle`] that closes it instead.
 pub struct CursorChannel {
     handle: u64,
     owned: bool,
@@ -65,28 +66,14 @@ impl Drop for CursorChannel {
     }
 }
 
-/// The live worker: stops + joins on drop (monitor departure / replacement).
-pub struct CursorWorker {
-    stop: isize,
-    /// The OS cursor-data event handle VALUE — kept so a later swap-chain (re)assignment can
-    /// RE-ISSUE [`IddCxMonitorSetupHardwareCursor`] on the freshly committed path (the setup is
-    /// per-mode-commit: the OS silently reverts to software cursor on every mode commit). The
-    /// worker thread still owns closing it on exit; this is a read-only copy for re-setup.
-    data_event: isize,
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-impl CursorWorker {
-    /// The OS cursor-data event, for [`setup_hardware_cursor`] re-issue.
-    pub fn data_event(&self) -> isize {
-        self.data_event
-    }
-}
-
-/// Declare (or RE-declare) the hardware cursor for `monitor` against `data_event`. Called at
-/// initial channel delivery AND on every swap-chain assignment (a mode commit reverts the path
-/// to software cursor). Must run OUTSIDE the monitors lock — the DDI may call back into the
-/// mode callbacks. Returns the DDI status.
+/// Declare (or RE-declare) the hardware cursor for `monitor` against `data_event`, returning
+/// the DDI status. Called at initial channel delivery AND on every swap-chain assignment, since
+/// a mode commit reverts the path to a software cursor.
+///
+/// `data_event` is a BORROWED value: the monitor entry owns the event and closes it only after
+/// joining the worker, so the handle this registers with the OS stays open for as long as the
+/// OS may signal it. Must run OUTSIDE the monitors lock — the DDI may call back into the mode
+/// callbacks, which take it.
 pub fn setup_hardware_cursor(monitor: iddcx::IDDCX_MONITOR, data_event: isize) -> i32 {
     let caps = iddcx::IDDCX_CURSOR_CAPS {
         Size: core::mem::size_of::<iddcx::IDDCX_CURSOR_CAPS>() as u32,
@@ -110,8 +97,7 @@ pub fn setup_hardware_cursor(monitor: iddcx::IDDCX_MONITOR, data_event: isize) -
         hNewCursorDataAvailable: data_event as *mut core::ffi::c_void,
     };
     // SAFETY: `monitor` is a live IddCx monitor; `setup` outlives the call; `data_event` is a
-    // live event handle (the worker owns it for its lifetime, and re-setup only runs while the
-    // worker is present).
+    // live event handle owned by the monitor entry, which outlives every worker it declares.
     unsafe { wdk_iddcx::IddCxMonitorSetupHardwareCursor(monitor, &setup) }
 }
 
@@ -122,40 +108,31 @@ pub fn setup_hardware_cursor(monitor: iddcx::IDDCX_MONITOR, data_event: isize) -
 // re-commit, and the OS's per-commit software-cursor default sticks because
 // `monitor::resetup_cursor` skips the flagged monitor.
 
-// SAFETY: `stop` is an event handle value; the worker owns every other resource.
-unsafe impl Send for CursorWorker {}
-
-impl Drop for CursorWorker {
-    fn drop(&mut self) {
-        // SAFETY: `stop` is our owned manual-reset event; signal + join, then close.
-        unsafe {
-            let _ = SetEvent(HANDLE(self.stop as *mut core::ffi::c_void));
-        }
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
-        // SAFETY: the worker has exited; nothing else references the handle.
-        unsafe {
-            let _ = CloseHandle(HANDLE(self.stop as *mut core::ffi::c_void));
-        }
-    }
-}
-
-/// Declare the hardware cursor for `monitor` and start the query→publish worker over the
-/// delivered section. `None` on any failure (mapping/magic/event/DDI) — the caller logs and the
-/// session simply keeps the composited-cursor behavior (the host times out waiting for a first
-/// seqlock publish and falls back the same way).
+/// Map the delivered section and start the query→publish worker for `monitor`.
+///
+/// Ownership is the point of this function. The section handle is adopted out of `ch` into an
+/// [`OwnedView`] that unmaps the view and closes the mapping on EVERY exit — including a failed
+/// spawn, which drops the closure holding it, so nothing is left behind in the host process's
+/// handle table. That view then travels into the thread and is released when the thread returns.
+/// `data_event` is only borrowed: the monitor entry owns it and closes it after the join.
+///
+/// `None` on any failure (mapping, magic, DDI); the caller keeps the composited cursor, which is
+/// also what the host falls back to when no seqlock publish arrives.
 pub fn setup_and_spawn(
     monitor: iddcx::IDDCX_MONITOR,
     ch: CursorChannel,
     declare: bool,
-) -> Option<CursorWorker> {
-    // Map the host-created section. FILE_MAP_READ|WRITE: we write, the host reads.
-    let mapping = HANDLE(ch.handle as *mut core::ffi::c_void);
-    // SAFETY: `mapping` is the duplicated section handle we own; size is the fixed contract size.
+    data_event: isize,
+) -> Option<Worker> {
+    // SAFETY: the host duplicated this section handle into our process and `CursorChannel` hands
+    // its ownership over here — `into_unowned` below disarms its own close.
+    let mapping = unsafe { OwnedHandle::from_raw(HANDLE(ch.handle as *mut core::ffi::c_void)) };
+    ch.into_unowned();
+    // SAFETY: `mapping` is the section handle we just adopted; size is the fixed contract size.
+    // FILE_MAP_READ|WRITE because we write the cursor state and the host reads it.
     let view = unsafe {
         MapViewOfFile(
-            mapping,
+            mapping.as_raw(),
             FILE_MAP_READ | FILE_MAP_WRITE,
             0,
             0,
@@ -164,53 +141,30 @@ pub fn setup_and_spawn(
     };
     if view.Value.is_null() {
         dbglog!("[pf-vd] cursor: MapViewOfFile failed — keeping composited cursor");
-        return None;
+        return None; // `mapping` drops here and closes
     }
-    let shm = view.Value.cast::<CursorShm>();
+    // SAFETY: `view` is the single mapping of `mapping` we just made; from here one value owns
+    // both, and every return below unmaps and closes them.
+    let view = unsafe { OwnedView::from_raw(view.Value, mapping) };
+    let shm = view.base().cast::<CursorShm>();
     // SAFETY: the view spans CURSOR_SHM_SIZE >= size_of::<CursorShm>(); reading the host stamp.
     if unsafe { core::ptr::addr_of!((*shm).magic).read_volatile() } != CURSOR_MAGIC {
         dbglog!("[pf-vd] cursor: section magic mismatch — rejecting");
-        // SAFETY: unmapping the view we just mapped.
-        unsafe {
-            let _ = UnmapViewOfFile(view);
-        }
         return None;
     }
 
-    // Auto-reset data event (the OS signals it per cursor update) + manual-reset stop event.
-    // SAFETY: plain event creation, no names, no security descriptor.
-    let (data_evt, stop_evt) = unsafe {
-        match (
-            CreateEventW(None, false, false, None),
-            CreateEventW(None, true, false, None),
-        ) {
-            (Ok(d), Ok(s)) => (d, s),
-            _ => {
-                let _ = UnmapViewOfFile(view);
-                dbglog!("[pf-vd] cursor: event creation failed");
-                return None;
-            }
-        }
-    };
-
     // One caps definition for initial setup AND the per-mode-commit re-setup — see
-    // `setup_hardware_cursor` for the FULL rationale. `declare = false` (a delivery landing
-    // while the session is in the COMPOSITE render mode) skips the declaration: the worker
-    // spawns anyway so a later enable-flip has its event to declare against; its queries just
-    // fail NOT_SUPPORTED until then (logged once, harmless).
+    // `setup_hardware_cursor`. `declare = false` (a delivery landing while the session is in the
+    // COMPOSITE render mode) skips the declaration: the worker spawns anyway so a later
+    // enable-flip has an event to declare against; its queries just fail NOT_SUPPORTED until
+    // then (logged once, harmless).
     if declare {
-        let st = setup_hardware_cursor(monitor, data_evt.0 as isize);
+        let st = setup_hardware_cursor(monitor, data_event);
         if !nt_success(st) {
             dbglog!(
                 "[pf-vd] cursor: IddCxMonitorSetupHardwareCursor failed 0x{:08x}",
                 st as u32
             );
-            // SAFETY: cleaning up the resources created above.
-            unsafe {
-                let _ = CloseHandle(data_evt);
-                let _ = CloseHandle(stop_evt);
-                let _ = UnmapViewOfFile(view);
-            }
             return None;
         }
         dbglog!("[pf-vd] cursor: hardware cursor declared — worker starting");
@@ -218,38 +172,22 @@ pub fn setup_and_spawn(
         dbglog!("[pf-vd] cursor: channel adopted UNdeclared (composite mode) — worker starting");
     }
 
-    // Ownership crossing into the thread as plain values (HANDLE/pointer aren't Send).
+    // The IddCx monitor handle is a raw pointer; the view carries its own `Send` wrapper.
     let monitor_v = monitor as usize;
-    let view_v = view.Value as usize;
-    let data_v = data_evt.0 as isize;
-    let stop_v = stop_evt.0 as isize;
-    let mapping_v = ch.handle;
-    ch.into_unowned(); // the worker owns the mapping handle from here (closed on exit below)
-
-    let join = std::thread::Builder::new()
-        .name("pf-vd-cursor".into())
-        .spawn(move || {
-            run_worker(monitor_v, view_v, data_v, stop_v);
-            // SAFETY: the worker is the sole owner of these at exit; close/unmap exactly once.
-            unsafe {
-                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
-                    Value: view_v as *mut core::ffi::c_void,
-                });
-                let _ = CloseHandle(HANDLE(data_v as *mut core::ffi::c_void));
-                let _ = CloseHandle(HANDLE(mapping_v as *mut core::ffi::c_void));
-            }
-        })
-        .ok()?;
-
-    Some(CursorWorker {
-        stop: stop_v,
-        data_event: data_v,
-        join: Some(join),
+    let view = Sendable(view);
+    Worker::spawn("pf-vd-cursor", move |stop| {
+        let view = view; // the wrapper, not the field: the view unmaps when this thread returns
+        run_worker(monitor_v, view.0.base() as usize, data_event, stop);
     })
 }
 
-/// The wait→query→publish loop. Exits when the stop event signals.
-fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop_v: isize) {
+/// The wait→query→publish loop, exiting when `stop` signals.
+///
+/// This thread owns NOTHING it has to release. `stop` belongs to the [`Worker`] that spawned it
+/// and `data_v` to the monitor entry, both of which close after the join; the mapping behind
+/// `view_v` is unmapped by the [`OwnedView`] the spawning closure moved in here. Returning is
+/// the whole cleanup.
+fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE) {
     let monitor = monitor_v as iddcx::IDDCX_MONITOR;
     let shm = view_v as *mut CursorShm;
     let shape_dst = (view_v + CURSOR_SHAPE_OFFSET) as *mut u8;
@@ -257,10 +195,7 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop_v: isize) {
     let mut last_shape_id: u32 = 0;
     let mut query_warned = false;
     let mut published = false;
-    let handles = [
-        HANDLE(stop_v as *mut core::ffi::c_void),
-        HANDLE(data_v as *mut core::ffi::c_void),
-    ];
+    let handles = [stop, HANDLE(data_v as *mut core::ffi::c_void)];
     loop {
         // POLL, not pure event-wait: the OS fires `hNewCursorDataAvailable` only for cursors it
         // routes through the hardware plane — masked/monochrome cursors (I-beam, hand, move,

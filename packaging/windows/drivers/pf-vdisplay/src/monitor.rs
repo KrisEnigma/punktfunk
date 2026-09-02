@@ -55,7 +55,13 @@ pub struct MonitorObject {
     /// once the cursor channel arrives (`IOCTL_SET_CURSOR_CHANNEL`) — see [`set_cursor_channel`].
     pub hw_cursor: bool,
     /// The live cursor query→publish worker (drops = stop+join) — set by [`set_cursor_channel`].
-    pub cursor_worker: Option<crate::cursor_worker::CursorWorker>,
+    pub cursor_worker: Option<crate::worker::Worker>,
+    /// The OS cursor-data event the hardware cursor is declared against, owned HERE rather than
+    /// by the worker thread. [`resetup_cursor`] and [`set_cursor_forward`] copy its raw value out
+    /// under the lock and call the setup DDI after releasing it, so an event the thread closed at
+    /// its own exit could be registered with the OS already closed — and, by then, possibly
+    /// reused for something else. The entry's [`Teardown`] closes it AFTER the worker is joined.
+    pub cursor_data_event: Option<crate::worker::OwnedHandle>,
     /// The mid-stream cursor-render flip (`IOCTL_SET_CURSOR_FORWARD`, proto v6): while `false`
     /// the hardware cursor stays UN-declared (DWM composites the pointer — the capture mouse
     /// model) and [`resetup_cursor`] skips its per-mode-commit re-declare. Starts `true` — the
@@ -73,19 +79,23 @@ unsafe impl Send for MonitorObject {}
 /// unconsumed frame-channel delivery (closes its handles). Every registry path detaches these
 /// while the [`MONITOR_MODES`] guard is held and drops them once it is released: a join or a
 /// handle close under that lock head-blocks every IOCTL and every mode DDI the OS issues during
-/// the same topology change.
+/// the same topology change. The cursor's data event rides along so that it closes AFTER its
+/// worker's join, never while a thread or an in-flight setup DDI can still name it.
 struct Teardown {
-    cursor: Option<crate::cursor_worker::CursorWorker>,
+    cursor: Option<crate::worker::Worker>,
+    cursor_event: Option<crate::worker::OwnedHandle>,
     swap: Option<crate::swap_chain_processor::SwapChainProcessor>,
     endpoint: Option<Arc<crate::frame_transport::RingEndpoint>>,
     chan: Option<crate::frame_transport::FrameChannel>,
 }
 
-/// Move a monitor entry's blocking-drop fields into a [`Teardown`]. The rest of `m` — ids, the
-/// mode list, the copied IddCx handle — drops right here: heap only, safe under the lock.
+/// Move a monitor entry's blocking-drop fields — plus the cursor event whose close must follow
+/// its worker's join — into a [`Teardown`]. The rest of `m` (ids, the mode list, the copied
+/// IddCx handle) drops right here: heap only, safe under the lock.
 fn detach(m: MonitorObject) -> Teardown {
     Teardown {
         cursor: m.cursor_worker,
+        cursor_event: m.cursor_data_event,
         swap: m.swap_chain_processor,
         endpoint: m.endpoint,
         chan: m.frame_channel,
@@ -96,9 +106,11 @@ impl Drop for Teardown {
     fn drop(&mut self) {
         let started = Instant::now();
         // Cursor worker first: it can be inside a hardware-cursor query against the monitor
-        // handle the caller departs next. Then the drain worker, then the ring (whose last `Arc`
-        // unmaps the header), then any delivery no worker picked up.
+        // handle the caller departs next, and its data event has to outlive that join. Then the
+        // drain worker, then the ring (whose last `Arc` unmaps the header), then any delivery no
+        // worker picked up.
         drop(self.cursor.take());
+        drop(self.cursor_event.take());
         drop(self.swap.take());
         drop(self.endpoint.take());
         drop(self.chan.take());
@@ -429,12 +441,15 @@ pub fn has_frame_channel(target_id: u32) -> bool {
             .any(|m| m.target_id == target_id && m.frame_channel.is_some())
 }
 
-/// Adopt a hardware-cursor channel delivery (`IOCTL_SET_CURSOR_CHANNEL`, proto v5): declare the
-/// hardware cursor to the OS and start the worker. Rejected (`Err(ch)`) when the monitor is
-/// unknown, didn't ask for a cursor at ADD, or isn't created yet. A RE-delivery replaces the
-/// worker (the old one stops+joins on drop) — the host only re-sends after recreating the
-/// section. Both the IddCx setup and every worker drop run OUTSIDE the monitors lock: the setup
-/// can call back into the mode DDIs, and a worker's drop joins its thread.
+/// Adopt a hardware-cursor channel delivery (`IOCTL_SET_CURSOR_CHANNEL`, proto v5): create the
+/// entry's cursor-data event, declare the hardware cursor to the OS, and start the worker.
+/// Rejected (`Err(ch)`) when the monitor is unknown, didn't ask for a cursor at ADD, isn't
+/// created yet, or the event could not be made. A RE-delivery replaces both — the host only
+/// re-sends after recreating the section.
+///
+/// The event outlives the worker it is declared for: a replaced worker is joined BEFORE the
+/// event it waited on closes. Both the IddCx setup and every worker drop run OUTSIDE the
+/// monitors lock, since the setup can re-enter the mode DDIs and a worker's drop joins a thread.
 pub fn set_cursor_channel(
     target_id: u32,
     ch: crate::cursor_worker::CursorChannel,
@@ -442,7 +457,7 @@ pub fn set_cursor_channel(
     if target_id == 0 {
         return Err(ch);
     }
-    let (monitor_obj, declare, old_worker) = {
+    let (monitor_obj, declare, old_worker, old_event) = {
         let mut lock = lock_monitors();
         let Some(m) = lock
             .iter_mut()
@@ -453,30 +468,50 @@ pub fn set_cursor_channel(
         let Some(obj) = m.object else {
             return Err(ch);
         };
-        (obj, m.cursor_forward_on, m.cursor_worker.take())
+        (
+            obj,
+            m.cursor_forward_on,
+            m.cursor_worker.take(),
+            m.cursor_data_event.take(),
+        )
     };
-    drop(old_worker); // stop+join a replaced worker before the new setup
+    drop(old_worker); // join a replaced worker BEFORE the event it waits on closes
+    drop(old_event);
+    // Auto-reset: the OS signals it once per cursor update.
+    let Some(data_event) = crate::worker::OwnedHandle::event(false) else {
+        dbglog!("[pf-vd] cursor: data event creation failed — keeping composited cursor");
+        return Err(ch);
+    };
     // `declare = false`: the session is currently in the COMPOSITE render mode (the mid-stream
     // flip) — adopt the channel and spawn the worker WITHOUT declaring the hardware cursor, so
-    // DWM keeps compositing; a later enable-flip declares against the worker's event.
-    let Some(worker) = crate::cursor_worker::setup_and_spawn(monitor_obj, ch, declare) else {
-        // setup_and_spawn consumed + cleaned the channel; report success=false via NOT_FOUND at
-        // the dispatch layer is wrong here — the handles are gone, so this is a plain failure.
-        return Ok(()); // adopted (handles consumed); the host detects no-publish and moves on
+    // DWM keeps compositing; a later enable-flip declares against this event.
+    let Some(worker) = crate::cursor_worker::setup_and_spawn(
+        monitor_obj,
+        ch,
+        declare,
+        data_event.as_raw().0 as isize,
+    ) else {
+        // setup_and_spawn consumed the channel and released everything it mapped; `data_event`
+        // drops here. The host detects the missing publish and keeps its composited cursor.
+        return Ok(());
     };
     if declare {
         // The worker only spawns after `IddCxMonitorSetupHardwareCursor` succeeded.
         mark_declared(target_id);
     }
-    let displaced = {
+    let (displaced_worker, displaced_event) = {
         let mut lock = lock_monitors();
         match lock.iter_mut().find(|m| m.target_id == target_id) {
-            Some(m) => m.cursor_worker.replace(worker),
-            // The monitor departed in the window — hand the fresh worker straight back.
-            None => Some(worker),
+            Some(m) => (
+                m.cursor_worker.replace(worker),
+                m.cursor_data_event.replace(data_event),
+            ),
+            // The monitor departed in the window — hand the fresh pair straight back.
+            None => (Some(worker), Some(data_event)),
         }
     };
-    drop(displaced); // stop+join outside the lock
+    drop(displaced_worker); // join outside the lock, then close the event it waited on
+    drop(displaced_event);
     Ok(())
 }
 
@@ -552,8 +587,10 @@ pub fn source_seq(target_id: u32) -> Option<Arc<AtomicU64>> {
 /// has a live cursor worker (the M2c cursor channel). Called from `assign_swap_chain`: a mode
 /// commit reverts the OS to a software cursor, so the setup must be re-declared on the freshly
 /// committed path or `IddCxMonitorQueryHardwareCursor` returns STATUS_NOT_SUPPORTED forever.
-/// Reads the worker's data-event UNDER the lock (so the worker is provably alive), then calls
-/// the DDI OUTSIDE it (the DDI can re-enter the mode callbacks, which take this lock).
+///
+/// The event value is copied from the MONITOR ENTRY under the lock, not from the worker: the
+/// entry closes it only after joining that worker, so what the DDI registers is still open. The
+/// DDI itself runs OUTSIDE the lock, because it can re-enter the mode callbacks, which take it.
 pub fn resetup_cursor(object: iddcx::IDDCX_MONITOR) {
     let data_event = {
         let lock = lock_monitors();
@@ -561,11 +598,11 @@ pub fn resetup_cursor(object: iddcx::IDDCX_MONITOR) {
             .find(|m| m.object == Some(object))
             // A composite-mode monitor (`cursor_forward_on == false`, the mid-stream flip) must
             // NOT re-declare — the commit's software-cursor default is exactly what it wants.
-            .filter(|m| m.cursor_forward_on)
+            .filter(|m| m.cursor_forward_on && m.cursor_worker.is_some())
             .and_then(|m| {
-                m.cursor_worker
+                m.cursor_data_event
                     .as_ref()
-                    .map(|w| (w.data_event(), m.target_id))
+                    .map(|h| (h.as_raw().0 as isize, m.target_id))
             })
     };
     if let Some((ev, target_id)) = data_event {
@@ -579,11 +616,13 @@ pub fn resetup_cursor(object: iddcx::IDDCX_MONITOR) {
 
 /// The mid-stream cursor-render flip (`IOCTL_SET_CURSOR_FORWARD`, proto v6): `enable` declares
 /// the hardware cursor again (DWM excludes the pointer; per-mode-commit re-declares resume);
-/// disable re-issues the setup with EMPTY caps — asking the OS to route the cursor back to the
-/// software path (composited frames) — and stops the per-commit re-declare. `false` when no
-/// monitor with `target_id` has a live cursor worker (channel never delivered / gone) — the
-/// host logs and keeps its current behavior. Flag update UNDER the lock; DDI call OUTSIDE it
-/// (it can re-enter the mode callbacks, which take this lock).
+/// disable only stores the flag, which stops the per-commit re-declare. `false` when no monitor
+/// with `target_id` has a live cursor worker (channel never delivered / gone) — the host logs
+/// and keeps its current behavior.
+///
+/// Flag update UNDER the lock; DDI call OUTSIDE it (it can re-enter the mode callbacks, which
+/// take this lock). The event value declared against comes from the monitor entry, which closes
+/// it only after joining the worker — never from the worker thread, which closes nothing.
 pub fn set_cursor_forward(target_id: u32, enable: bool) -> bool {
     // The flip is STATE, not an edge on one monitor generation: persist the desired state
     // per TARGET (fresh entries inherit it at arrival) and stamp EVERY live entry matching
@@ -611,7 +650,10 @@ pub fn set_cursor_forward(target_id: u32, enable: bool) -> bool {
             any = true;
             m.cursor_forward_on = enable;
             if m.cursor_worker.is_some() {
-                declare_on = Some((m.object, m.cursor_worker.as_ref().map(|w| w.data_event())));
+                declare_on = Some((
+                    m.object,
+                    m.cursor_data_event.as_ref().map(|h| h.as_raw().0 as isize),
+                ));
             }
         }
         any.then_some(declare_on.unwrap_or((None, None)))
@@ -749,6 +791,7 @@ pub fn create_monitor(
             source_seq: Arc::new(AtomicU64::new(0)),
             hw_cursor,
             cursor_worker: None,
+            cursor_data_event: None,
             cursor_forward_on: true,
             created_at: Instant::now(),
         });
