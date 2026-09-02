@@ -199,9 +199,11 @@ visible, stateless library entry that opens console home.
   shell.
 - **The game's native Play button stays Play while it streams.** The per-game shortcut is what
   Steam sees running, so "now playing" and the overlay name the game, but the Steam app's own
-  running state is Steam's to derive. Our button carries the Stop instead. MoonDeck's overview
-  patcher only mirrors *last played* onto the game; that touch (so the title climbs the Recent
-  shelf after a stream) is the one piece left on the table.
+  running state is Steam's to derive. Our button carries the Stop instead. The game does climb
+  the Deck's **Recent** shelf: the shortcut's last-played time is mirrored onto the title at
+  each launch and again at load, so it survives a reboot.
+- **Labels are English.** Steam's own "Stream" and "Stop" are localized; ours are not, because
+  the localization tokens Steam uses for them are not something to guess at from outside.
 - **The button's position is a fixed offset** in the play bar (MoonDeck's default offsets). A
   Steam UI change, or another plugin's button in the same corner, can crowd it; the offsets live
   in one `STYLE` constant in `library-page.tsx`.

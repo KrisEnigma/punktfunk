@@ -75,16 +75,19 @@ declare const collectionStore:
 // entry never comes back.
 declare const appStore:
   | {
-      GetAppOverviewByAppID?: (appId: number) => unknown | null;
+      GetAppOverviewByAppID?: (appId: number) => SteamAppOverviewLike | null;
       allApps?: SteamAppOverviewLike[];
     }
   | undefined;
 
 // The overview surface we read when scanning the library — Steam internals, so everything is
-// optional and accessed defensively.
+// optional and accessed defensively. Overviews are MobX observables: assigning a field re-sorts
+// whatever shelf reads it.
 interface SteamAppOverviewLike {
   appid?: number;
   display_name?: string;
+  /** Unix seconds; what the Deck's Recent shelf sorts by. */
+  rt_last_time_locally_played?: number;
   BIsShortcut?: () => boolean;
 }
 
@@ -724,8 +727,44 @@ function isOurShortcut(appId: number): boolean {
   return appId === recall(STORAGE_KEY_STREAM) || steamAppIdForShortcut(appId) != null;
 }
 
+/**
+ * Copy the per-game shortcut's last-played time onto the Steam title, so the GAME climbs the
+ * Deck's Recent shelf after a stream — a hidden entry never shows there. Steam persists the
+ * shortcut's own timestamp, so re-applying at load carries it across reboots. Only ever moves
+ * forward; a title played locally more recently keeps its own time.
+ */
+function mirrorLastPlayed(steamAppId: number, shortcutAppId: number): void {
+  try {
+    if (typeof appStore === "undefined" || !appStore?.GetAppOverviewByAppID) {
+      return;
+    }
+    const from = appStore.GetAppOverviewByAppID(shortcutAppId);
+    const to = appStore.GetAppOverviewByAppID(steamAppId);
+    const played = from?.rt_last_time_locally_played;
+    if (!to || typeof played !== "number" || played <= (to.rt_last_time_locally_played ?? 0)) {
+      return;
+    }
+    to.rt_last_time_locally_played = played;
+  } catch (e) {
+    console.warn("punktfunk: last-played not mirrored", e);
+  }
+}
+
+function mirrorAllLastPlayed(): void {
+  for (const [steamAppId, shortcut] of gameShortcutPairs()) {
+    mirrorLastPlayed(steamAppId, shortcut);
+  }
+}
+
 /** Follow Steam's app lifetime feed for our shortcuts. Returns the unregister for dismount. */
 export function watchRunningStreams(): () => void {
+  // Re-apply the mirrored timestamps once the store is readable — a fresh boot's Recent shelf
+  // should already show last night's stream.
+  void (async () => {
+    await Promise.race([waitForServicesInitialized(), sleep(STORE_WAIT_MS)]);
+    await sleep(STORE_GRACE_MS);
+    mirrorAllLastPlayed();
+  })();
   try {
     const reg = SteamClient.GameSessions.RegisterForAppLifetimeNotifications((n) => {
       if (!isOurShortcut(n.unAppID)) {
@@ -737,6 +776,11 @@ export function watchRunningStreams(): () => void {
         running.delete(n.unAppID);
       }
       notifyRunning();
+      const steamAppId = steamAppIdForShortcut(n.unAppID);
+      if (steamAppId != null) {
+        // Steam stamps the shortcut at start; a beat later it is readable here.
+        setTimeout(() => mirrorLastPlayed(steamAppId, n.unAppID), 1500);
+      }
     });
     return () => reg.unregister();
   } catch (e) {

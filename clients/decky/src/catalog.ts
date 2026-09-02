@@ -5,6 +5,7 @@
 // other stores have no Steam page to put a button on) and cached per host record in
 // localStorage, so a host that is asleep right now still offers the titles it had — the launch
 // wakes it. A host the Deck can no longer see, or that no longer trusts it, loses its entry.
+import { toaster } from "@decky/api";
 import { library } from "./backend";
 import type { HostView } from "./hooks";
 
@@ -105,6 +106,15 @@ export async function refreshLibraries(views: HostView[]): Promise<void> {
           const steamAppIds = (r.games ?? [])
             .map((g) => steamAppId(g.id))
             .filter((n): n is number => n != null);
+          // The feature is invisible until a game page is opened, so the first time a host's
+          // titles arrive, say so — once per host record, never again while it stays known.
+          if (!snapshots.has(v.ref) && steamAppIds.length > 0) {
+            toaster.toast({
+              title: "Punktfunk",
+              body: `${steamAppIds.length} Steam ${steamAppIds.length === 1 ? "game" : "games"} on ${v.name} now have a Stream button on their pages`,
+              duration: 8_000,
+            });
+          }
           const snap = { at: Date.now(), steamAppIds };
           snapshots.set(v.ref, snap);
           persist(v.ref, snap);
