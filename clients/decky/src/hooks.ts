@@ -83,7 +83,7 @@ export interface HostView {
   /**
    * The record carries a MAC, so a launch can wake it: the CLI runs its wake-and-wait loop
    * before dialling when the client's auto-wake setting is on. What lets an offline host still
-   * offer a Stream button.
+   * be listed for a title.
    */
   wakeable: boolean;
   saved: boolean;
@@ -216,10 +216,9 @@ function sortRows(a: HostView, b: HostView): number {
 }
 
 // ----------------------------------------------------------------------------------------
-// Hosts — ONE store for both lists, and for both consumers. The QAM panel used to own the
-// scan inside a hook; the Stream button on Steam's game page is not a child of the panel and
-// needs the same rows (plus each host's library) before the panel has ever been opened, so
-// the scan lives at module level and both subscribe.
+// Hosts — ONE store for both consumers. The QAM panel renders the rows; Steam's game page is
+// not a child of the panel and needs the same rows (plus each host's library) before the panel
+// has ever been opened, so the scan lives at module level and both subscribe.
 // ----------------------------------------------------------------------------------------
 export interface HostStore {
   views: HostView[];

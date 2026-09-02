@@ -1,15 +1,12 @@
-// Punktfunk hosts in Steam's own "Play from" dropdown, and Steam's own Play button turning into
-// a violet Stream when one is chosen.
+// Punktfunk hosts in Steam's own "Play from" dropdown, and Steam's Play button as Stream when
+// one is chosen.
 //
-// The ▾ beside Play opens Steam's streaming selector: `overview.per_client_data` mapped to
-// "This device" / "Stream from: <PC>" items, selection through
-// `SteamClient.Apps.SetStreamingClientForApp`. That menu is built inside the Play button class's
-// bound ShowStreamingMenu, which cannot be extended, so the ▾ is re-pointed at a menu built here
-// from the same data, the same Steam Menu components, the same class names and the same
-// localization tokens — plus one violet entry per Punktfunk host that has the title. Choosing a
-// host is remembered per title; while it stands, the Play button itself is re-dressed as a
-// violet Stream (lens mark, label, our launch), the way Steam's turns into Stream for a remote
-// client. Choosing a Steam client hands the choice back to Steam.
+// The ▾ beside Play opens Steam's streaming selector: `overview.per_client_data` as "This device"
+// / "Stream from: <PC>" rows, selection through `SteamClient.Apps.SetStreamingClientForApp`. That
+// menu is built inside the Play button class's bound ShowStreamingMenu, so the ▾ is re-pointed
+// at a menu built here from the same data with Steam's own Menu components, class names and
+// localization tokens, plus a row per Punktfunk host that has the title. The choice is kept per
+// title; while it stands, the Play button is re-dressed as Stream and launches ours.
 import { findClassModule, Menu, MenuItem, MenuSeparator, showContextMenu } from "@decky/ui";
 import { cloneElement } from "react";
 import { FaCheck } from "react-icons/fa";
@@ -185,7 +182,7 @@ export function openPlayFromMenu(overview: Overview, anchor?: EventTarget): void
           {!host.online && <span style={{ opacity: 0.6 }}> · asleep</span>}
         </span>
         <span style={{ marginLeft: "auto", paddingLeft: "1em", display: "inline-flex", opacity: 0.85 }}>
-          <PunktfunkMark ready size={18} back="#a79ff8" deep="#6c5bf3" />
+          <PunktfunkMark size={18} />
         </span>
       </MenuItem>,
     );
@@ -233,7 +230,7 @@ const playButtonPatcher = createRenderPatcher((out, self) => {
   const iconIdx = kids.findIndex((k) => k && typeof k === "object" && k.type && typeof k.type !== "string");
   const labelIdx = kids.findIndex((k) => k && k.type === "div");
   if (iconIdx >= 0) {
-    kids[iconIdx] = <PunktfunkMark key="pf-mark" ready size={26} back="#e2ddff" deep="#ffffff" />;
+    kids[iconIdx] = <PunktfunkMark key="pf-mark" size={26} back="#e2ddff" deep="#ffffff" />;
   }
   if (labelIdx >= 0) {
     kids[labelIdx] = cloneElement(kids[labelIdx], {}, streaming ? "Stop" : "Stream");

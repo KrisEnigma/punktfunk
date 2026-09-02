@@ -1,8 +1,8 @@
-// Which paired hosts have which Steam titles — what the Stream button on a game page keys off.
+// Which paired hosts have which Steam titles — what the Play-from menu on a game page lists.
 //
 // The source is `punktfunk library <host> --json`, asked of every paired host that is
 // answering. Each answer is reduced to the set of Steam appids (the `steam:<appid>` ids; the
-// other stores have no Steam page to put a button on) and cached per host record in
+// other stores have no Steam page to appear on) and cached per host record in
 // localStorage, so a host that is asleep right now still offers the titles it had — the launch
 // wakes it. A host the Deck can no longer see, or that no longer trusts it, loses its entry.
 import { toaster } from "@decky/api";
@@ -82,8 +82,8 @@ export function steamAppId(id: string): number | null {
 
 /**
  * Refresh the snapshot of every paired host that is answering. A host that is off keeps the
- * snapshot it had; one that has withdrawn its trust loses it, because a Stream button for a
- * host that will refuse the connect is worse than none. Records that are gone are pruned.
+ * snapshot it had; one that has withdrawn its trust loses it, because listing a host that
+ * will refuse the connect is worse than not listing it. Records that are gone are pruned.
  */
 export async function refreshLibraries(views: HostView[]): Promise<void> {
   hydrate();
@@ -149,14 +149,4 @@ export function hostsForApp(appId: number, views: HostView[]): HostView[] {
       }
       return (b.lastUsed ?? 0) - (a.lastUsed ?? 0);
     });
-}
-
-/** How many hosts have any Steam titles cached — the panel's one-line status for the button. */
-export function catalogSize(): { hosts: number; titles: number } {
-  hydrate();
-  let titles = 0;
-  for (const snap of snapshots.values()) {
-    titles += snap.steamAppIds.length;
-  }
-  return { hosts: snapshots.size, titles };
 }

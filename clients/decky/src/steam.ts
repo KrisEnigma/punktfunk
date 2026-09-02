@@ -591,7 +591,11 @@ async function toPng(base64: string, type: string): Promise<string> {
  * shortcut's icon into the overview only when loading shortcuts), and the bytes into the live
  * overview now, which is what the Steam menu draws this session.
  */
-async function applyGameIcon(shortcutAppId: number, steamAppId: number, art: { icon?: string; icon_type?: string; icon_path?: string }): Promise<boolean> {
+async function applyGameIcon(
+  shortcutAppId: number,
+  steamAppId: number,
+  art: { icon?: string; icon_type?: string; icon_path?: string },
+): Promise<boolean> {
   if (!art.icon) {
     return false;
   }
@@ -757,7 +761,7 @@ export function removeGameShortcuts(): number {
 }
 
 // ----------------------------------------------------------------------------------------
-// Running state — which of our shortcuts Steam says is up, so a game page can offer Stop.
+// Running state — which of our shortcuts Steam says is up, so the Play button can read Stop.
 // ----------------------------------------------------------------------------------------
 
 const running = new Set<number>(); // shortcut appIds

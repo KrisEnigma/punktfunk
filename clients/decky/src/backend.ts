@@ -186,8 +186,8 @@ export const shortcutArt = callable<[], ShortcutArt>("shortcut_art");
 
 /**
  * A Steam game's own artwork, for the hidden shortcut that streams it: base64 images keyed like
- * `ShortcutArt`, each with a `<key>_type` of `jpg` | `png`, and the icon as a file path. Any
- * piece Steam's cache and the store CDN both lack is absent.
+ * `ShortcutArt`, each with a `<key>_type` of `jpg` | `png`, and the icon as bytes. Any piece
+ * Steam's cache and the store CDN both lack is absent.
  */
 export interface GameArt {
   ok: boolean;

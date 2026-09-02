@@ -93,16 +93,17 @@ stream — plus a door into the client's own gamepad UI for everything else.
   doesn't create them.
 - **Stream from Steam's own Play button** — on a game's page press the **▾** beside Play.
   Steam's "Play from" list shows your Punktfunk hosts that have the game (the host's Steam
-  library plugin is connected) right under Steam Link's own "Stream from" entries, marked with a small
-  Punktfunk lens at the row's end. Pick one and Steam's Play button itself becomes **Stream** for that game, violet when
-  you're on it just as Play is green, — the same idea as Remote Play, pointed at your Punktfunk host. It works whether
-  or not the Deck has the game installed, so a page that says **Install** can stream instead of
-  downloading. A sleeping host is woken first when the client knows how (see
-  [Wake-on-LAN](/docs/wake-on-lan)). While it streams, Steam shows the **game** as running — its
-  name, its art, in the overlay and to your friends — and the button reads **Stop**; quitting from the Steam menu returns you to the game's page.
-  Pick "This
-  device" or a Steam PC to hand the button back to Steam. The entries are on by default; the
-  switch is in the panel under **Punktfunk → Punktfunk in Steam's Play menu**.
+  library plugin is connected) right under Steam Link's own "Stream from" entries, marked with a
+  small Punktfunk lens at the row's end. Pick one and Steam's Play button itself becomes
+  **Stream** for that game, violet when you're on it just as Play is green — the same idea as
+  Remote Play, pointed at your Punktfunk host. It works whether or not the Deck has the game
+  installed, so a page that says **Install** can stream instead of downloading. A sleeping host
+  is woken first when the client knows how (see [Wake-on-LAN](/docs/wake-on-lan)). While it
+  streams, Steam shows the **game** as running — its name, its art, in the overlay and to your
+  friends — and the button reads **Stop**; quitting from the Steam menu returns you to the
+  game's page. Pick "This device" or a Steam PC to hand the button back to Steam. The entries
+  are on by default; the switch is in the panel under **Punktfunk → Punktfunk in Steam's Play
+  menu**.
 - **Open Punktfunk** — opens the client's console home: the host picker, adding a host by address,
   pairing, browsing a host's [game library](/docs/game-library), and the **full settings screen** —
   resolution, bitrate, codec, audio, controllers and the stats overlay.

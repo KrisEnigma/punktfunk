@@ -276,11 +276,11 @@ def _fetch_bytes(url: str, timeout: float = 10.0) -> bytes:
 # to match. Steam keeps every library image it has shown in `appcache/librarycache`; what is not
 # there is on the store CDN under the same file names.
 _ART_KINDS = (
-    # key, file name, image type, SetCustomArtworkForApp asset type
-    ("grid", "library_600x900.jpg", "jpg", 0),
-    ("hero", "library_hero.jpg", "jpg", 1),
-    ("logo", "logo.png", "png", 2),
-    ("gridwide", "header.jpg", "jpg", 3),
+    # key, file name, image type
+    ("grid", "library_600x900.jpg", "jpg"),
+    ("hero", "library_hero.jpg", "jpg"),
+    ("logo", "logo.png", "png"),
+    ("gridwide", "header.jpg", "jpg"),
 )
 _ART_CDNS = (
     "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/{name}",
@@ -944,12 +944,12 @@ class Plugin:
 
     async def game_art(self, appid: int, icon_hash: str = "") -> dict:
         """A Steam game's own artwork for its stream shortcut: base64 grid / hero / logo /
-        gridwide with their image types, plus the icon written to a file (SetShortcutIcon
-        wants a path). Local cache first, the store CDN second; a missing piece is omitted,
-        never a failure — art is cosmetic and the launch does not wait on it.
+        gridwide with their image types, and the icon as bytes (the frontend writes it as PNG
+        through :meth:`save_icon`). Local cache first, the store CDN second; a missing piece is
+        omitted, never a failure — art is cosmetic and the launch does not wait on it.
 
         `icon_hash` is the overview's `icon_hash`, validated to 40 hex characters because it
-        becomes part of a URL and a file name."""
+        becomes part of a URL."""
         try:
             appid = int(appid)
         except (TypeError, ValueError):
@@ -958,7 +958,7 @@ class Plugin:
             return {"ok": False, "error": "bad-appid"}
         loop = asyncio.get_running_loop()
         art: dict = {"ok": True, "icon_path": ""}
-        for key, name, fmt, _asset in _ART_KINDS:
+        for key, name, fmt in _ART_KINDS:
             data = await loop.run_in_executor(None, _read_art, appid, name)
             if data:
                 art[key] = base64.b64encode(data).decode()

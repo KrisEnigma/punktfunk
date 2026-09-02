@@ -26,11 +26,9 @@ uses). Everything the panel doesn't do is one tap away in the client's own gamep
    up here, and vice versa. The plugin renders them; it doesn't create or edit them.
 5. **Stream from Steam's own Play button** — the ▾ beside Play lists Punktfunk hosts that have
    the game below Steam Link's own "Stream from" entries, as Steam-styled rows with a small lens
-   mark. Pick
-   one and Steam's Play button becomes **Stream** — violet under focus, the way Play is green — that
-   launches the game on the host,
-   whether or not the Deck has it installed, and reads **Stop** while the stream runs. Steam
-   shows the *game* running, with its own art. See
+   mark. Pick one and Steam's Play button becomes **Stream** — violet under focus, the way Play
+   is green — that launches the game on the host, whether or not the Deck has it installed, and
+   reads **Stop** while the stream runs. Steam shows the *game* running, with its own art. See
    [Steam's own "Play from" menu](#steams-own-play-from-menu).
 6. **Open Punktfunk** — launches the client's **console home**: the host picker, add-host by
    address, PIN pairing, the game library browser, and the **full settings screen**. This is where
@@ -61,11 +59,11 @@ The ▾ beside Steam's Play button opens its streaming selector: **This device**
 from: <PC>** for each Steam Remote Play client that has the title. Punktfunk hosts that have the
 title now appear in that same list as a second group below a separator, drawn exactly like
 Steam's rows — same check column, same label, Steam's text colour — with a small lens mark at the
-row's end as the only brand hint. Choosing one is remembered per title, and while it stands **Steam's own Play button becomes
-Stream** — lens mark, `Stream` label, our launch, `Stop` while the stream is up, violet under focus
-and hover where Play is green, Steam's own gray at rest — the way Steam's turns into Stream for a
-Remote Play client. Choosing a Steam client hands the choice back to
-Steam untouched.
+row's end as the only brand hint. Choosing one is remembered per title, and while it stands
+**Steam's own Play button becomes Stream** — lens mark, `Stream` label, our launch, `Stop` while
+the stream is up, violet under focus and hover where Play is green, Steam's own gray at rest — the
+way Steam's turns into Stream for a Remote Play client. Choosing a Steam client hands the choice
+back to Steam untouched.
 
 How: the menu is built inside the Play button class's bound `ShowStreamingMenu`, which cannot be
 extended, so the ▾ is re-pointed at a menu built here from the same data
@@ -73,8 +71,8 @@ extended, so the ▾ is re-pointed at a menu built here from the same data
 components and class names, and Steam's own localization tokens (`#GameAction_PlayFrom`,
 `#StreamingClient_StreamFrom`, `#StreamingClient_Menu`); selecting a Steam client calls
 `SteamClient.Apps.SetStreamingClientForApp`, exactly as Steam's item does. The Play button class is
-reached through the same render chain as the group button (it is the first child of the play bar
-row) and re-dressed in its own render output. The one entry Steam's menu can have that ours does
+reached through the same render chain as the play bar row (it is the row's first child) and
+re-dressed in its own render output. The one entry Steam's menu can have that ours does
 not is the "Play on another device with Remote Play" explainer.
 
 ### The stream that looks like the game
@@ -92,16 +90,14 @@ lowercase name, so the native-touch layout is bound per game name too. The short
 later streams and recreated if removed; **About → Remove game shortcuts** deletes them all. Steam
 shows the page of the app it launched or just closed — for a stream that would be the hidden
 shortcut's page, so the route patch sends that page back to the title's own page (back first,
-then navigate if back landed elsewhere). The
-shortcut's last-played time is mirrored onto the title at each launch and again at load, so the
+then navigate if back landed elsewhere). The shortcut's last-played time is mirrored onto the title at each launch and again at load, so the
 game climbs the Deck's **Recent** shelf and stays there across a reboot.
 
 **Reaching the play bar.** The route `/library/app/:appid` is patched and the render is walked
 through five of Steam's section components to the play bar row. The play section is a MobX
 observer class, so a prototype patch never runs (MobX installs a read-only, non-configurable
-reactive `render` on each instance), and a plain function wrapper around a class throws — which is
-how Decky's tree patcher took the page down during development. Each class is therefore replaced
-by a subclass that wraps MobX's render at the moment it is defined (`patch.ts`); function, memo
+reactive `render` on each instance), and a plain function wrapper around a class throws. Each
+class is therefore replaced by a subclass that wraps MobX's render at the moment it is defined (`patch.ts`); function, memo
 and forwardRef components get wrapped copies; every render handler is guarded so a miss leaves
 Steam's output untouched. Every attempt logs where it got to in `window.__punktfunkDiag` (CEF
 console lines start with `punktfunk:`); `localStorage["punktfunk:diagVerbose"] = "1"` traces every
@@ -225,7 +221,6 @@ visible, stateless library entry that opens console home.
   shell.
 - **Only the chosen host colours Steam's Play button.** Without a choice in the ▾ menu the page
   is exactly Steam's; the toast on first catalog arrival is the only hint that hosts are there.
-
 - **Labels are English.** Steam's own "Stream" and "Stop" are localized; ours are not, because
   the localization tokens Steam uses for them are not something to guess at from outside.
 - **The "Play on another device with Remote Play" explainer** that Steam's own menu can carry is

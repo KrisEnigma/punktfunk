@@ -1,14 +1,12 @@
 // Rendering through Steam's components: wrap a React element's type so the component's render
 // output passes through a handler, for every kind of component Steam uses.
 //
-// A class component gets a SUBCLASS. A prototype patch is not enough: Steam's page components
-// are MobX observers, and MobX installs a read-only, non-configurable reactive `render` on each
-// instance at its first render, which shadows the prototype from then on. That property can
-// only be wrapped while it is being defined, so the subclass's first render watches
-// defineProperty for its own `render` and installs a wrapped value. (A plain function wrapper
-// around a class — what Decky's tree patcher does — throws "cannot be invoked without new".)
-// Function components, memo and forwardRef get wrapped copies. The originals are never mutated,
-// and one wrapper per type is cached so React sees a stable type across renders.
+// A class component gets a SUBCLASS, not a prototype patch: Steam's page components are MobX
+// observers, and MobX installs a read-only, non-configurable reactive `render` on each instance
+// at its first render. That property can only be wrapped while it is being defined, so the
+// subclass's first render watches defineProperty for its own `render`. A plain function wrapper
+// around a class would throw at construction. Function, memo and forwardRef components get
+// wrapped copies. Originals are never mutated; one wrapper per type keeps React's type stable.
 import { diag } from "./diag";
 
 /** A short name for a React element, for the trace. */
