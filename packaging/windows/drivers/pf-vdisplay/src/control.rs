@@ -1,16 +1,23 @@
-//! The `pf-driver-proto` control plane (`EvtIddCxDeviceIoControl`). The host opens the device interface
-//! (`PF_VDISPLAY_INTERFACE_GUID`) and drives the low-frequency IOCTLs: GET_INFO (version handshake), PING
-//! (watchdog keepalive), ADD/REMOVE/CLEAR_ALL (virtual monitors), and SET_RENDER_ADAPTER (next). Every
-//! path completes the `WDFREQUEST` exactly once (the `EVT_IDD_CX_DEVICE_IO_CONTROL` shape returns `()`).
+//! The `pf-driver-proto` control plane (`EvtIddCxDeviceIoControl`). The host opens the device
+//! interface (`PF_VDISPLAY_INTERFACE_GUID`) and drives the low-frequency IOCTLs: GET_INFO (version
+//! handshake), PING (watchdog keepalive), ADD/REMOVE/CLEAR_ALL (virtual monitors),
+//! SET_RENDER_ADAPTER, UPDATE_MODES, and the frame/cursor channel deliveries.
+//!
+//! [`dispatch`] wraps the raw `WDFREQUEST` in a [`Request`] token once and hands it to a handler BY
+//! VALUE; completing consumes the token, so "every path completes exactly once" (the
+//! `EVT_IDD_CX_DEVICE_IO_CONTROL` shape returns `()`, leaving the framework no status to act on) is
+//! a type-level fact. Buffer I/O rides the token's methods over `bytemuck` casts of the Pod wire
+//! structs — which leaves the control plane one `unsafe` block, the token construction.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use bytemuck::Pod;
 use pf_driver_proto::control;
-use wdk_iddcx::nt_success;
-use wdk_sys::{NTSTATUS, WDFREQUEST, call_unsafe_wdf_function_binding};
+use pf_umdf_util::wdf::Request;
+use wdk_sys::WDFREQUEST;
 
-use crate::{STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS};
+use crate::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS};
 
 /// The host must send an IOCTL within this window (it PINGs on a `timeout/3` timer) or the watchdog
 /// treats it as gone and reaps every monitor. Reported to the host via [`control::IOCTL_GET_INFO`].
@@ -97,35 +104,30 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
     // bump the watchdog at the top so it only fires once the host has gone truly silent. See
     // [`start_watchdog`].
     WATCHDOG_PINGS.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: `request` is the live request for THIS EvtIddCxDeviceIoControl invocation — exactly
+    // the contract `Request::new` requires. Everything below is safe: the token owns completion.
+    let request = unsafe { Request::new(request) };
     match ioctl_code {
         control::IOCTL_GET_INFO => {
             let reply = control::InfoReply {
                 protocol_version: pf_driver_proto::PROTOCOL_VERSION,
                 watchdog_timeout_s: WATCHDOG_TIMEOUT_S,
             };
-            // SAFETY: `request` is the framework WDFREQUEST.
-            unsafe { write_output_complete(request, &reply) };
+            write_output_prefix_complete(request, &reply, size_of::<control::InfoReply>());
         }
-        control::IOCTL_PING => complete(request, STATUS_SUCCESS),
-        // SAFETY: `request` is the framework WDFREQUEST.
-        control::IOCTL_ADD => unsafe { add(request) },
-        // SAFETY: `request` is the framework WDFREQUEST.
-        control::IOCTL_REMOVE => unsafe { remove(request) },
+        control::IOCTL_PING => request.complete(STATUS_SUCCESS),
+        control::IOCTL_ADD => add(request),
+        control::IOCTL_REMOVE => remove(request),
         control::IOCTL_CLEAR_ALL => {
             crate::monitor::clear_all();
-            complete(request, STATUS_SUCCESS);
+            request.complete(STATUS_SUCCESS);
         }
-        // SAFETY: `request` is the framework WDFREQUEST.
-        control::IOCTL_SET_RENDER_ADAPTER => unsafe { set_render_adapter(request) },
-        // SAFETY: `request` is the framework WDFREQUEST.
-        control::IOCTL_SET_FRAME_CHANNEL => unsafe { set_frame_channel(request) },
-        // SAFETY: `request` is the framework WDFREQUEST.
-        control::IOCTL_UPDATE_MODES => unsafe { update_modes(request) },
-        // SAFETY: `request` is the framework WDFREQUEST.
-        control::IOCTL_SET_CURSOR_CHANNEL => unsafe { set_cursor_channel(request) },
-        // SAFETY: `request` is the framework WDFREQUEST.
-        control::IOCTL_SET_CURSOR_FORWARD => unsafe { set_cursor_forward(request) },
-        _ => complete(request, STATUS_NOT_FOUND),
+        control::IOCTL_SET_RENDER_ADAPTER => set_render_adapter(request),
+        control::IOCTL_SET_FRAME_CHANNEL => set_frame_channel(request),
+        control::IOCTL_UPDATE_MODES => update_modes(request),
+        control::IOCTL_SET_CURSOR_CHANNEL => set_cursor_channel(request),
+        control::IOCTL_SET_CURSOR_FORWARD => set_cursor_forward(request),
+        _ => request.complete(STATUS_NOT_FOUND),
     }
 }
 
@@ -138,31 +140,23 @@ fn valid_mode(width: u32, height: u32, refresh_hz: u32) -> bool {
 }
 
 /// `IOCTL_SET_RENDER_ADAPTER`: pin the IddCx render adapter (hybrid-GPU IDD-push).
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn set_render_adapter(request: WDFREQUEST) {
-    // SAFETY: `request` is the framework WDFREQUEST.
-    let Some(req) = (unsafe { read_input::<control::SetRenderAdapterRequest>(request) }) else {
-        complete(request, STATUS_INVALID_PARAMETER);
+fn set_render_adapter(request: Request) {
+    let Some(req) = read_input::<control::SetRenderAdapterRequest>(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
     let st = crate::adapter::set_render_adapter(req.luid_low, req.luid_high);
-    complete(request, st);
+    request.complete(st);
 }
 
 /// `IOCTL_ADD`: create a virtual monitor at the requested mode → reply with the OS target id + LUID.
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn add(request: WDFREQUEST) {
-    // SAFETY: `request` is the framework WDFREQUEST.
-    let Some(req) = (unsafe { read_add_request(request) }) else {
-        complete(request, STATUS_INVALID_PARAMETER);
+fn add(request: Request) {
+    let Some(req) = read_add_request(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
     if !valid_mode(req.width, req.height, req.refresh_hz) {
-        complete(request, STATUS_INVALID_PARAMETER);
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     }
     let Some((monitor_id, target_id, luid_low, luid_high)) = crate::monitor::create_monitor(
@@ -178,7 +172,7 @@ unsafe fn add(request: WDFREQUEST) {
         },
         req.hw_cursor != 0,
     ) else {
-        complete(request, STATUS_NOT_FOUND);
+        request.complete(STATUS_NOT_FOUND);
         return;
     };
     let reply = control::AddReply {
@@ -189,44 +183,29 @@ unsafe fn add(request: WDFREQUEST) {
         // This WUDFHost's pid — where the host duplicates the sealed frame channel's handles INTO
         // (`ProcessSharingDisabled`: this process is exclusively ours and dies with the device).
         wudf_pid: std::process::id(),
-        // The ADAPTER already carries an irrevocable hardware-cursor declare from an earlier
-        // session — DWM's exclusion reaches every later monitor, not just the declaring target
-        // (on-glass 2026-07-23: declare on 259 left a fresh GameStream 257 cursor-less) — so a
-        // channel-less session must self-composite the pointer (§8.6 gap, adapter-wide).
+        // An irrevocable hardware-cursor declare from an EARLIER session excludes the pointer
+        // ADAPTER-wide, not just on the declaring target, so a channel-less session on this
+        // adapter must self-composite the pointer (§8.6 gap).
         cursor_excluded: crate::monitor::any_declared() as u32,
     };
     // Dual-size reply (the `cursor_excluded` tail ext): an un-upgraded host retrieves only the
     // legacy 20-byte buffer — write the prefix it asked for instead of failing its ADD.
-    // SAFETY: `request` is the framework WDFREQUEST.
-    unsafe { write_output_prefix_complete(request, &reply, control::ADD_REPLY_LEGACY_SIZE) };
+    write_output_prefix_complete(request, &reply, control::ADD_REPLY_LEGACY_SIZE);
 }
 
-/// `IOCTL_SET_FRAME_CHANNEL`: adopt the handle values the host duplicated into this process and stash
-/// them on the target monitor for the swap-chain worker to attach with. The ownership contract with
-/// the host is **adopt-on-success only**: this driver owns (and eventually closes) the handles iff the
-/// IOCTL completes successfully; on ANY error completion it leaves them untouched, because the host
-/// reaps its remote duplicates whenever the IOCTL fails — a close on both sides would double-close
-/// values the OS may already have reused for unrelated handles.
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
 /// `IOCTL_SET_CURSOR_CHANNEL` (v5): adopt a monitor's hardware-cursor section, declare the
 /// hardware cursor to the OS, start the query→publish worker.
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn set_cursor_channel(request: WDFREQUEST) {
-    // SAFETY: `request` is the framework WDFREQUEST.
-    let Some(req) = (unsafe { read_input::<control::SetCursorChannelRequest>(request) }) else {
-        complete(request, STATUS_INVALID_PARAMETER);
+fn set_cursor_channel(request: Request) {
+    let Some(req) = read_input::<control::SetCursorChannelRequest>(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
     let Some(ch) = crate::cursor_worker::CursorChannel::from_request(&req) else {
-        complete(request, STATUS_INVALID_PARAMETER);
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
     match crate::monitor::set_cursor_channel(req.target_id, ch) {
-        Ok(()) => complete(request, STATUS_SUCCESS),
+        Ok(()) => request.complete(STATUS_SUCCESS),
         Err(ch) => {
             dbglog!(
                 "[pf-vd] SET_CURSOR_CHANNEL: no hw-cursor monitor with target_id {} — rejecting",
@@ -234,60 +213,60 @@ unsafe fn set_cursor_channel(request: WDFREQUEST) {
             );
             // NOT adopted: the host's error path reaps the duplicated handle remotely.
             ch.into_unowned();
-            complete(request, STATUS_NOT_FOUND);
+            request.complete(STATUS_NOT_FOUND);
         }
     }
 }
 
 /// `IOCTL_SET_CURSOR_FORWARD` (v6): the mid-stream cursor-render flip — (un)declare a LIVE
 /// monitor's hardware cursor as the client's mouse model demands.
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn set_cursor_forward(request: WDFREQUEST) {
-    // SAFETY: `request` is the framework WDFREQUEST.
-    let Some(req) = (unsafe { read_input::<control::SetCursorForwardRequest>(request) }) else {
-        complete(request, STATUS_INVALID_PARAMETER);
+fn set_cursor_forward(request: Request) {
+    let Some(req) = read_input::<control::SetCursorForwardRequest>(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
     if crate::monitor::set_cursor_forward(req.target_id, req.enable != 0) {
-        complete(request, STATUS_SUCCESS);
+        request.complete(STATUS_SUCCESS);
     } else {
         dbglog!(
             "[pf-vd] SET_CURSOR_FORWARD: no cursor-channel monitor with target_id {} — rejecting",
             req.target_id
         );
-        complete(request, STATUS_NOT_FOUND);
+        request.complete(STATUS_NOT_FOUND);
     }
 }
 
-unsafe fn set_frame_channel(request: WDFREQUEST) {
-    // The v2 request (WP7: two shared-fence handles behind the v1 prefix) is told apart by input
+/// `IOCTL_SET_FRAME_CHANNEL`: adopt the handle values the host duplicated into this process and
+/// stash them on the target monitor for the swap-chain worker to attach with. The ownership
+/// contract with the host is **adopt-on-success only**: this driver owns (and eventually closes)
+/// the handles iff the IOCTL completes successfully; on ANY error completion it leaves them
+/// untouched, because the host reaps its remote duplicates whenever the IOCTL fails — a close on
+/// both sides would double-close values the OS may already have reused for unrelated handles.
+fn set_frame_channel(request: Request) {
+    // The v2 request (two shared-fence handles behind the v1 prefix) is told apart by input
     // LENGTH; a v1-sized buffer fails the v2 read and takes the v1 path. Either way a malformed
     // request adopts nothing (no FrameChannel is built, so no Drop can close anything).
-    // SAFETY: `request` is the framework WDFREQUEST; both reads copy a Pod prefix out of it.
-    let (target_id, ch) = unsafe {
-        if let Some(req) = read_input::<control::SetFrameChannelRequestV2>(request) {
+    let (target_id, ch) =
+        if let Some(req) = read_input::<control::SetFrameChannelRequestV2>(&request) {
             (
                 req.v1.target_id,
                 crate::frame_transport::FrameChannel::from_request_v2(&req),
             )
-        } else if let Some(req) = read_input::<control::SetFrameChannelRequest>(request) {
+        } else if let Some(req) = read_input::<control::SetFrameChannelRequest>(&request) {
             (
                 req.target_id,
                 crate::frame_transport::FrameChannel::from_request(&req),
             )
         } else {
-            complete(request, STATUS_INVALID_PARAMETER);
+            request.complete(STATUS_INVALID_PARAMETER);
             return;
-        }
-    };
+        };
     let Some(ch) = ch else {
-        complete(request, STATUS_INVALID_PARAMETER);
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
     match crate::monitor::set_frame_channel(target_id, ch) {
-        Ok(()) => complete(request, STATUS_SUCCESS),
+        Ok(()) => request.complete(STATUS_SUCCESS),
         Err(ch) => {
             dbglog!(
                 "[pf-vd] SET_FRAME_CHANNEL: no monitor with target_id {} — rejecting (host reaps the handles)",
@@ -296,7 +275,7 @@ unsafe fn set_frame_channel(request: WDFREQUEST) {
             // NOT adopted: disarm the channel so its Drop does NOT close the handles (see the contract
             // above — the host's error path reaps them remotely).
             ch.into_unowned();
-            complete(request, STATUS_NOT_FOUND);
+            request.complete(STATUS_NOT_FOUND);
         }
     }
 }
@@ -305,154 +284,70 @@ unsafe fn set_frame_channel(request: WDFREQUEST) {
 /// the in-place mid-stream resize (`design/first-frame-and-resize-latency.md` P2). The monitor is
 /// NOT departed: its OS identity, swap-chain machinery and retained frame stash all survive; the
 /// host force-sets the freshly-advertised mode afterwards.
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn update_modes(request: WDFREQUEST) {
-    // SAFETY: `request` is the framework WDFREQUEST.
-    let Some(req) = (unsafe { read_input::<control::UpdateModesRequest>(request) }) else {
-        complete(request, STATUS_INVALID_PARAMETER);
+fn update_modes(request: Request) {
+    let Some(req) = read_input::<control::UpdateModesRequest>(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
     if !valid_mode(req.width, req.height, req.refresh_hz) {
-        complete(request, STATUS_INVALID_PARAMETER);
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     }
     let st =
         crate::monitor::update_monitor_modes(req.session_id, req.width, req.height, req.refresh_hz);
-    complete(request, st);
+    request.complete(st);
 }
 
 /// `IOCTL_REMOVE`: depart + drop the monitor for the given session id.
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn remove(request: WDFREQUEST) {
-    // SAFETY: `request` is the framework WDFREQUEST.
-    let Some(req) = (unsafe { read_input::<control::RemoveRequest>(request) }) else {
-        complete(request, STATUS_INVALID_PARAMETER);
+fn remove(request: Request) {
+    let Some(req) = read_input::<control::RemoveRequest>(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
     crate::monitor::remove_monitor(req.session_id);
-    complete(request, STATUS_SUCCESS);
+    request.complete(STATUS_SUCCESS);
 }
 
 /// Read an [`control::AddRequest`], accepting BOTH wire sizes: the full struct, or an un-upgraded
 /// host's [`ADD_REQUEST_LEGACY_SIZE`](control::ADD_REQUEST_LEGACY_SIZE)-byte prefix (no client-HDR
 /// luminance tail), whose missing tail zero-fills to "unknown" — so a new driver keeps serving an
 /// old host (see the `AddRequest` size-compatibility docs).
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn read_add_request(request: WDFREQUEST) -> Option<control::AddRequest> {
-    let mut buf: *mut core::ffi::c_void = core::ptr::null_mut();
-    let mut len: usize = 0;
-    // SAFETY: `request` valid; `buf`/`len` are out-params written by the framework.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfRequestRetrieveInputBuffer,
-            request,
-            control::ADD_REQUEST_LEGACY_SIZE,
-            &mut buf,
-            &mut len
-        )
-    };
-    if !nt_success(st) || buf.is_null() || len < control::ADD_REQUEST_LEGACY_SIZE {
+fn read_add_request(request: &Request) -> Option<control::AddRequest> {
+    const FULL: usize = size_of::<control::AddRequest>();
+    let (bytes, _) = request.input_bytes(FULL).ok()?;
+    if bytes.len() < control::ADD_REQUEST_LEGACY_SIZE {
         return None;
     }
-    let take = len.min(core::mem::size_of::<control::AddRequest>());
-    // Pod contract (pf-driver-proto derives Zeroable): all-zero = every optional tail field "unknown".
-    let mut req = pod_init!(control::AddRequest);
-    // SAFETY: `buf` has >= `take` readable bytes (framework contract: `len` bytes are valid);
-    // `req` is a Pod struct at least `take` bytes long; the ranges don't overlap (stack vs the
-    // framework's request buffer).
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.cast::<u8>(), (&raw mut req).cast::<u8>(), take);
-    }
-    Some(req)
+    // Zero fill = the Zeroable contract's "unknown" for every field past what the host sent.
+    let mut buf = [0u8; FULL];
+    buf[..bytes.len()].copy_from_slice(&bytes);
+    Some(bytemuck::pod_read_unaligned(&buf))
 }
 
-/// Read a `Copy`/`Pod` input struct from the request's input buffer (None if too small / unavailable).
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn read_input<T: Copy>(request: WDFREQUEST) -> Option<T> {
-    let mut buf: *mut core::ffi::c_void = core::ptr::null_mut();
-    let mut len: usize = 0;
-    // SAFETY: `request` valid; `buf`/`len` are out-params written by the framework.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfRequestRetrieveInputBuffer,
-            request,
-            core::mem::size_of::<T>(),
-            &mut buf,
-            &mut len
-        )
-    };
-    if !nt_success(st) || buf.is_null() || len < core::mem::size_of::<T>() {
-        return None;
-    }
-    // SAFETY: `buf` has >= size_of::<T>() bytes; T is a Pod control struct.
-    Some(unsafe { buf.cast::<T>().read_unaligned() })
+/// Read a Pod input struct from the request's input buffer. `None` if the host sent fewer bytes
+/// than the struct (or no input buffer at all) — every caller answers that with
+/// `STATUS_INVALID_PARAMETER`.
+fn read_input<T: Pod>(request: &Request) -> Option<T> {
+    // `input_bytes` caps its copy at `size_of::<T>()`, so a full-length result IS the "host sent at
+    // least the whole struct" check — and it keeps `pod_read_unaligned` off its panic path.
+    let (bytes, _) = request.input_bytes(size_of::<T>()).ok()?;
+    (bytes.len() == size_of::<T>()).then(|| bytemuck::pod_read_unaligned(&bytes))
 }
 
-/// Write a `Copy`/`Pod` reply to the request's output buffer + complete with its byte count.
+/// Copy a Pod reply into the output buffer and complete with the byte count.
 ///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn write_output_complete<T: Copy>(request: WDFREQUEST, value: &T) {
-    // SAFETY: forwarded per this function's own contract; min = the full struct.
-    unsafe { write_output_prefix_complete(request, value, core::mem::size_of::<T>()) }
-}
-
-/// [`write_output_complete`] for a reply with an APPENDED tail field (the `AddReply
-/// cursor_excluded` dual-size discipline): accepts any output buffer of at least `min_size`
-/// bytes and writes `min(buffer, size_of::<T>())` bytes of the struct — an un-upgraded host
-/// retrieving only the legacy prefix gets exactly that prefix instead of a failed IOCTL.
-///
-/// # Safety
-/// `request` is the framework `WDFREQUEST`.
-unsafe fn write_output_prefix_complete<T: Copy>(request: WDFREQUEST, value: &T, min_size: usize) {
-    let mut buf: *mut core::ffi::c_void = core::ptr::null_mut();
-    let mut len: usize = 0;
-    // SAFETY: `request` valid; `buf`/`len` are out-params written by the framework.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfRequestRetrieveOutputBuffer,
-            request,
-            min_size,
-            &mut buf,
-            &mut len
-        )
-    };
-    if !nt_success(st) || buf.is_null() {
-        complete(request, st);
+/// `min_size` is the SHORTEST reply the caller will serve; anything from there up to
+/// `size_of::<T>()` is written as a prefix of the struct. That is the dual-size discipline behind
+/// [`control::AddReply`]'s appended `cursor_excluded`: a host that retrieved only the legacy prefix
+/// gets exactly that prefix instead of a failed IOCTL. A buffer shorter than `min_size` cannot
+/// carry a usable reply and completes `STATUS_BUFFER_TOO_SMALL`.
+fn write_output_prefix_complete<T: Pod>(request: Request, value: &T, min_size: usize) {
+    let out_len = request.output_buffer_len();
+    if out_len < min_size {
+        request.complete(STATUS_BUFFER_TOO_SMALL);
         return;
     }
-    let take = len.min(core::mem::size_of::<T>());
-    // SAFETY: the framework guarantees `buf` has >= `len` writable bytes and `take <= len`;
-    // T is a Pod control struct, so any byte prefix of it is valid to copy out.
-    unsafe {
-        core::ptr::copy_nonoverlapping((value as *const T).cast::<u8>(), buf.cast::<u8>(), take);
-    }
-    complete_info(request, STATUS_SUCCESS, take);
-}
-
-/// Complete a request with just a status (no output).
-fn complete(request: WDFREQUEST, status: NTSTATUS) {
-    // SAFETY: completing hands the framework `WDFREQUEST` back to the OS.
-    unsafe { call_unsafe_wdf_function_binding!(WdfRequestComplete, request, status) };
-}
-
-/// Complete a request with a status + the number of output bytes written.
-fn complete_info(request: WDFREQUEST, status: NTSTATUS, info: usize) {
-    // SAFETY: completing hands the framework `WDFREQUEST` back to the OS.
-    unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfRequestCompleteWithInformation,
-            request,
-            status,
-            info as u64
-        )
-    };
+    let take = out_len.min(size_of::<T>());
+    let st = request.copy_to_output(&bytemuck::bytes_of(value)[..take]);
+    request.complete(st);
 }
