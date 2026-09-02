@@ -183,6 +183,26 @@ export const library = callable<[ref: string], LibraryResult>("library");
 
 export const runnerInfo = callable<[], RunnerInfo>("runner_info");
 export const shortcutArt = callable<[], ShortcutArt>("shortcut_art");
+
+/**
+ * A Steam game's own artwork, for the hidden shortcut that streams it: base64 images keyed like
+ * `ShortcutArt`, each with a `<key>_type` of `jpg` | `png`, and the icon as a file path. Any
+ * piece Steam's cache and the store CDN both lack is absent.
+ */
+export interface GameArt {
+  ok: boolean;
+  error?: string;
+  grid?: string;
+  grid_type?: string;
+  gridwide?: string;
+  gridwide_type?: string;
+  hero?: string;
+  hero_type?: string;
+  logo?: string;
+  logo_type?: string;
+  icon_path?: string;
+}
+export const gameArt = callable<[appid: number, iconHash: string], GameArt>("game_art");
 // Install the Steam Input layout (native touchscreen `ts_n` + gamepad passthrough) and point our
 // shortcut(s) at it, so the Deck touchscreen reaches the client as native touch with no manual
 // controller setup. Best-effort + idempotent; keyed by the shared shortcut NAME (both shortcuts

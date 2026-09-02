@@ -16,8 +16,13 @@
 //     This is the library-visible "Punktfunk" app the user opens directly.
 //
 // Both get the shipped artwork and the native-touch controller config.
+//
+// A stream started from a Steam game's own page runs under a THIRD kind: a hidden PER-GAME
+// shortcut named after the game and wearing the game's own art and icon, so the overlay, the
+// "now playing" surfaces and the friends list show the game rather than "Punktfunk". Minted on
+// the first Stream tap for that game and reused after; see ensureGameShortcut.
 
-import { applyControllerConfig, runnerInfo, shortcutArt } from "./backend";
+import { applyControllerConfig, gameArt, runnerInfo, shortcutArt } from "./backend";
 
 // SteamClient is a Steam-internal global injected into the CEF context; it is not fully typed
 // by @decky/ui, so declare the surface we use. Signatures verified against MoonDeck + the
@@ -45,6 +50,12 @@ declare const SteamClient: {
     RunGame(gameId: string, _unused: string, _i: number, _j: number): void;
     TerminateApp(gameId: string, _b: boolean): void;
     RemoveShortcut(appId: number): void;
+  };
+  GameSessions: {
+    // `unAppID` is the 32-bit appid — for a non-Steam shortcut, the one AddShortcut returned.
+    RegisterForAppLifetimeNotifications(
+      callback: (n: { unAppID: number; nInstanceID: number; bRunning: boolean }) => void,
+    ): { unregister(): void };
   };
 };
 
@@ -322,6 +333,11 @@ function gameIdFromAppId(appId: number): string {
 // visible gamepad-UI shortcut is created alongside.
 const STORAGE_KEY_STREAM = "punktfunk:shortcutAppId";
 const STORAGE_KEY_UI = "punktfunk:uiAppId";
+// The shortcut the most recent launch ran under — the one Force-stop must end. It may be the
+// generic stream shortcut or a per-game one; without this the panel could only stop the former.
+const STORAGE_KEY_LAST_LAUNCH = "punktfunk:lastLaunchAppId";
+// `punktfunk:gameShortcut:<steam appid>` → the per-game shortcut's appId.
+const GAME_KEY_PREFIX = "punktfunk:gameShortcut:";
 
 function remember(key: string, appId: number) {
   try {
@@ -502,6 +518,247 @@ export async function recreateShortcuts(): Promise<{
   return { appId, removedDuplicates };
 }
 
+// ----------------------------------------------------------------------------------------
+// Per-game shortcuts — the stream that looks like the game.
+// ----------------------------------------------------------------------------------------
+
+function gameKey(steamAppId: number): string {
+  return `${GAME_KEY_PREFIX}${steamAppId}`;
+}
+
+/** The per-game shortcut minted for this Steam title, if any (liveness not checked here). */
+export function gameShortcutFor(steamAppId: number): number | null {
+  return recall(gameKey(steamAppId));
+}
+
+/** Every (steam appid → shortcut appId) pair on record. */
+function gameShortcutPairs(): Array<[number, number]> {
+  const pairs: Array<[number, number]> = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(GAME_KEY_PREFIX)) {
+        continue;
+      }
+      const steamAppId = Number(key.slice(GAME_KEY_PREFIX.length));
+      const shortcut = Number(localStorage.getItem(key));
+      if (Number.isFinite(steamAppId) && Number.isFinite(shortcut) && shortcut > 0) {
+        pairs.push([steamAppId, shortcut]);
+      }
+    }
+  } catch {
+    /* storage unavailable */
+  }
+  return pairs;
+}
+
+function steamAppIdForShortcut(shortcutAppId: number): number | null {
+  return gameShortcutPairs().find(([, s]) => s === shortcutAppId)?.[0] ?? null;
+}
+
+// Bump when what applyGameArtwork fetches changes, so existing per-game shortcuts re-apply.
+const GAME_ART_VERSION = 1;
+function gameArtKey(shortcutAppId: number): string {
+  return `punktfunk:gameArt:${shortcutAppId}`;
+}
+
+/** Dress a per-game shortcut in the game's own grid/hero/logo/header and icon. Once per version;
+ *  cosmetic and best-effort, with one deferred retry for a shortcut not yet registered. */
+async function applyGameArtwork(
+  shortcutAppId: number,
+  steamAppId: number,
+  iconHash: string,
+  isRetry = false,
+): Promise<void> {
+  try {
+    if (localStorage.getItem(gameArtKey(shortcutAppId)) === `${GAME_ART_VERSION}`) {
+      return;
+    }
+    const art = await gameArt(steamAppId, iconHash);
+    if (!art.ok) {
+      return;
+    }
+    const assets: Array<[string | undefined, string | undefined, number]> = [
+      [art.grid, art.grid_type, 0],
+      [art.hero, art.hero_type, 1],
+      [art.logo, art.logo_type, 2],
+      [art.gridwide, art.gridwide_type, 3],
+    ];
+    let applied = false;
+    for (const [data, type, assetType] of assets) {
+      if (data) {
+        await SteamClient.Apps.SetCustomArtworkForApp(shortcutAppId, data, type ?? "jpg", assetType);
+        applied = true;
+      }
+    }
+    if (art.icon_path) {
+      SteamClient.Apps.SetShortcutIcon(shortcutAppId, art.icon_path);
+      applied = true;
+    }
+    if (applied) {
+      localStorage.setItem(gameArtKey(shortcutAppId), `${GAME_ART_VERSION}`);
+    }
+  } catch (e) {
+    if (!isRetry) {
+      setTimeout(() => void applyGameArtwork(shortcutAppId, steamAppId, iconHash, true), 2500);
+    }
+    console.warn("punktfunk: game artwork not applied", e);
+  }
+}
+
+/** Point a per-game shortcut at the native-touch layout. Steam keys the configset by the
+ *  shortcut's lowercase NAME, so each game name needs its own entry; once per name. */
+async function ensureGameControllerConfig(title: string): Promise<void> {
+  // The name is written into a VDF as a quoted key; one carrying a quote would corrupt the
+  // file. Such a game keeps Steam's default layout — a cosmetic loss, not a broken file.
+  if (title.includes('"')) {
+    return;
+  }
+  const key = `punktfunk:controllerConfig:${title.toLowerCase()}`;
+  try {
+    if (localStorage.getItem(key) === `${CONFIG_VERSION}`) {
+      return;
+    }
+    const r = await applyControllerConfig(title);
+    if (r?.ok && (r.applied ?? []).some((a) => a.startsWith("configset:"))) {
+      localStorage.setItem(key, `${CONFIG_VERSION}`);
+    }
+  } catch (e) {
+    console.warn("punktfunk: game controller config not applied", e);
+  }
+}
+
+/**
+ * Ensure the hidden per-game shortcut for a Steam title: named after the game, dressed in its
+ * art, pointed at the touch layout. Reused across launches by appid; recreated if the user
+ * removed it. Same liveness rule as the generic roles — a wrong "deleted" mints a duplicate.
+ */
+async function doEnsureGameShortcut(
+  steamAppId: number,
+  title: string,
+  iconHash: string,
+): Promise<{ appId: number; runner: string; clientBin: string }> {
+  const info = await runnerInfo();
+  if (!info.exists) {
+    throw new Error(`launch wrapper missing at ${info.runner}`);
+  }
+  const startDir = info.runner.replace(/\/[^/]*$/, "");
+  const remembered = gameShortcutFor(steamAppId);
+  let appId =
+    remembered != null && (await shortcutStillExists(remembered)) ? remembered : null;
+  if (appId == null) {
+    appId = await SteamClient.Apps.AddShortcut(title, SHELL, startDir, "");
+    remember(gameKey(steamAppId), appId);
+    try {
+      localStorage.removeItem(gameArtKey(appId)); // a recycled appId must not skip its art
+    } catch {
+      /* ignore */
+    }
+  }
+  SteamClient.Apps.SetShortcutExe(appId, SHELL);
+  SteamClient.Apps.SetShortcutStartDir(appId, startDir);
+  SteamClient.Apps.SetShortcutName(appId, title);
+  setShortcutHidden(appId, true);
+  void applyGameArtwork(appId, steamAppId, iconHash);
+  void ensureGameControllerConfig(title);
+  return { appId, runner: info.runner, clientBin: info.client_bin ?? "" };
+}
+
+const gameEnsureInFlight = new Map<number, Promise<{ appId: number; runner: string; clientBin: string }>>();
+function ensureGameShortcut(
+  steamAppId: number,
+  title: string,
+  iconHash: string,
+): Promise<{ appId: number; runner: string; clientBin: string }> {
+  let p = gameEnsureInFlight.get(steamAppId);
+  if (!p) {
+    p = doEnsureGameShortcut(steamAppId, title, iconHash).finally(() => {
+      gameEnsureInFlight.delete(steamAppId);
+    });
+    gameEnsureInFlight.set(steamAppId, p);
+  }
+  return p;
+}
+
+/** Remove every per-game shortcut on record — the cleanup button. Returns how many went. */
+export function removeGameShortcuts(): number {
+  let removed = 0;
+  for (const [steamAppId, shortcut] of gameShortcutPairs()) {
+    try {
+      if (queryShortcutAlive(shortcut) !== false) {
+        SteamClient.Apps.RemoveShortcut(shortcut);
+        removed++;
+      }
+      localStorage.removeItem(gameKey(steamAppId));
+      localStorage.removeItem(gameArtKey(shortcut));
+    } catch (e) {
+      console.warn("punktfunk: game shortcut not removed", e);
+    }
+  }
+  running.clear();
+  notifyRunning();
+  return removed;
+}
+
+// ----------------------------------------------------------------------------------------
+// Running state — which of our shortcuts Steam says is up, so a game page can offer Stop.
+// ----------------------------------------------------------------------------------------
+
+const running = new Set<number>(); // shortcut appIds
+const runningListeners = new Set<() => void>();
+
+function notifyRunning(): void {
+  for (const listener of runningListeners) {
+    listener();
+  }
+}
+
+export function subscribeRunning(listener: () => void): () => void {
+  runningListeners.add(listener);
+  return () => {
+    runningListeners.delete(listener);
+  };
+}
+
+function isOurShortcut(appId: number): boolean {
+  return appId === recall(STORAGE_KEY_STREAM) || steamAppIdForShortcut(appId) != null;
+}
+
+/** Follow Steam's app lifetime feed for our shortcuts. Returns the unregister for dismount. */
+export function watchRunningStreams(): () => void {
+  try {
+    const reg = SteamClient.GameSessions.RegisterForAppLifetimeNotifications((n) => {
+      if (!isOurShortcut(n.unAppID)) {
+        return;
+      }
+      if (n.bRunning) {
+        running.add(n.unAppID);
+      } else {
+        running.delete(n.unAppID);
+      }
+      notifyRunning();
+    });
+    return () => reg.unregister();
+  } catch (e) {
+    console.warn("punktfunk: app lifetime feed unavailable", e);
+    return () => {};
+  }
+}
+
+/** Is this Steam title being streamed right now (its per-game shortcut is up)? */
+export function isGameStreaming(steamAppId: number): boolean {
+  const shortcut = gameShortcutFor(steamAppId);
+  return shortcut != null && running.has(shortcut);
+}
+
+/** End the stream of this Steam title — Steam's Stop, for our button. */
+export function stopGameStream(steamAppId: number): void {
+  const shortcut = gameShortcutFor(steamAppId);
+  if (shortcut != null) {
+    SteamClient.Apps.TerminateApp(gameIdFromAppId(shortcut), false);
+  }
+}
+
 /** Launch the stateless gamepad-UI shortcut (console home) from the plugin, e.g. a QAM button. */
 export async function launchGamepadUi(): Promise<void> {
   const appId = await ensureGamepadUiShortcut();
@@ -563,6 +820,30 @@ function safeClientBin(bin: string | undefined): bin is string {
  * strictly better, and it deletes a backend method, a frontend call and a shell branch.
  */
 export async function launchStream(ref: string, opts: LaunchOpts = {}): Promise<void> {
+  validateLaunch(ref, opts);
+  const { appId, runner, clientBin } = await ensureStreamShortcut();
+  runShortcut(appId, launchOptions(ref, runner, clientBin, opts));
+}
+
+/**
+ * Stream a Steam title from its own page: the same launch as `launchStream` with the game
+ * named, but under the hidden per-game shortcut so Steam shows the game running, not Punktfunk.
+ * `title` and `iconHash` come from Steam's overview of the game and only dress the shortcut.
+ */
+export async function launchGameStream(
+  ref: string,
+  steamAppId: number,
+  title: string,
+  iconHash: string,
+  opts: LaunchOpts = {},
+): Promise<void> {
+  const full = { ...opts, gameId: `steam:${steamAppId}` };
+  validateLaunch(ref, full);
+  const { appId, runner, clientBin } = await ensureGameShortcut(steamAppId, title, iconHash);
+  runShortcut(appId, launchOptions(ref, runner, clientBin, full));
+}
+
+function validateLaunch(ref: string, opts: LaunchOpts): void {
   if (!isSafeLaunchId(ref)) {
     throw new Error(`unsupported host reference: ${ref}`);
   }
@@ -572,7 +853,16 @@ export async function launchStream(ref: string, opts: LaunchOpts = {}): Promise<
   if (opts.gameId && !isSafeLaunchId(opts.gameId)) {
     throw new Error(`unsupported game id: ${opts.gameId}`);
   }
-  const { appId, runner, clientBin } = await ensureStreamShortcut();
+}
+
+function runShortcut(appId: number, options: string): void {
+  SteamClient.Apps.SetAppLaunchOptions(appId, options);
+  remember(STORAGE_KEY_LAST_LAUNCH, appId);
+  SteamClient.Apps.RunGame(gameIdFromAppId(appId), "", -1, 100);
+}
+
+/** The Steam launch options for one stream: `KEY=value … %command% "<runner>"`. */
+function launchOptions(ref: string, runner: string, clientBin: string, opts: LaunchOpts): string {
   const env = [`PF_REF=${ref}`];
   // Set only for a NATIVE client install; absent, the wrapper takes its flatpak default, so every
   // existing Deck install produces byte-identical launch options to before.
@@ -596,13 +886,13 @@ export async function launchStream(ref: string, opts: LaunchOpts = {}): Promise<
   }
   // KEY=value ... %command% args — %command% expands to the shortcut exe (/bin/sh); the wrapper
   // script rides behind it as an argument and reads PF_* from the environment.
-  SteamClient.Apps.SetAppLaunchOptions(appId, `${env.join(" ")} %command% "${runner}"`);
-  SteamClient.Apps.RunGame(gameIdFromAppId(appId), "", -1, 100);
+  return `${env.join(" ")} %command% "${runner}"`;
 }
 
-/** Stop the running stream shortcut (best-effort; the in-stream chord/back also works). */
+/** Stop the running stream — whichever shortcut the last launch ran under (best-effort; the
+ *  in-stream chord/back also works). */
 export function stopStream(): void {
-  const appId = recall(STORAGE_KEY_STREAM);
+  const appId = recall(STORAGE_KEY_LAST_LAUNCH) ?? recall(STORAGE_KEY_STREAM);
   if (appId != null) {
     SteamClient.Apps.TerminateApp(gameIdFromAppId(appId), false);
   }

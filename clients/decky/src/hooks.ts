@@ -13,7 +13,7 @@ import {
   UpdateInfo,
 } from "./backend";
 import { refreshLibraries } from "./catalog";
-import { LaunchOpts, launchStream } from "./steam";
+import { LaunchOpts, launchGameStream, launchStream } from "./steam";
 
 export const DOCS_URL = "https://docs.punktfunk.unom.io/docs/steam-deck";
 
@@ -538,5 +538,24 @@ export async function startStream(
     Navigation.CloseSideMenus();
   } catch (e) {
     toaster.toast({ title: "Punktfunk", body: `Launch failed${label ? ` (${label})` : ""}: ${e}` });
+  }
+}
+
+/**
+ * Stream a Steam title from its own page. Same rules as `startStream`, under the per-game
+ * shortcut that wears the game's name and art (see steam.ts). `title` and `iconHash` are
+ * Steam's own overview fields for the game.
+ */
+export async function startGameStream(
+  v: HostView,
+  steamAppId: number,
+  title: string,
+  iconHash: string,
+): Promise<void> {
+  try {
+    await launchGameStream(v.ref, steamAppId, title, iconHash);
+    Navigation.CloseSideMenus();
+  } catch (e) {
+    toaster.toast({ title: "Punktfunk", body: `Launch failed (${title}): ${e}` });
   }
 }

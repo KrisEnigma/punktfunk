@@ -50,7 +50,14 @@ import {
   setGamePageStreamEnabled,
 } from "./library-page";
 import { OsMark } from "./os-icon";
-import { ensureGamepadUiShortcut, launchGamepadUi, recreateShortcuts, stopStream } from "./steam";
+import {
+  ensureGamepadUiShortcut,
+  launchGamepadUi,
+  recreateShortcuts,
+  removeGameShortcuts,
+  stopStream,
+  watchRunningStreams,
+} from "./steam";
 import { TrustSheet } from "./trust";
 
 // Recovery action for "the Punktfunk library entry vanished" — recreates the visible shortcut
@@ -70,6 +77,19 @@ async function recreatePunktfunkShortcut(): Promise<void> {
               removedDuplicates === 1 ? "entry" : "entries"
             }`
           : "Shortcut restored to your library",
+  });
+}
+
+/** Delete the hidden per-game entries that game-page streams minted. Each comes back, with its
+ *  art, on the next Stream tap for that game — so this is tidying, never a loss. */
+function removeGamePageShortcuts(): void {
+  const removed = removeGameShortcuts();
+  toaster.toast({
+    title: "Punktfunk",
+    body:
+      removed === 0
+        ? "No game shortcuts to remove"
+        : `Removed ${removed} game ${removed === 1 ? "shortcut" : "shortcuts"}`,
   });
 }
 
@@ -354,6 +374,15 @@ const QamPanel: FC = () => {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
+            description="Streams started from a game's page run under a hidden entry named after that game. This removes them; each returns on its next Stream."
+            onClick={() => removeGamePageShortcuts()}
+          >
+            Remove game shortcuts
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
             description="Ends a stream that stopped responding."
             onClick={() => void forceStop()}
           >
@@ -377,9 +406,12 @@ export default definePlugin(() => {
   // The Stream button on Steam's game pages (see library-page.tsx). Removed on dismount, or
   // Steam keeps calling into a plugin that is gone.
   const removeGamePageStream = installGamePageStream();
+  // Steam's app lifetime feed tells the game page when its stream is up (Stream ↔ Stop).
+  const unwatchRunning = watchRunningStreams();
   return {
     onDismount() {
       removeGamePageStream();
+      unwatchRunning();
     },
     // `name` must stay in sync with plugin.json (the loader keys plugins by it) — and it is
     // USER-VISIBLE: Decky labels the entry in its plugin list with it, so it carries the brand

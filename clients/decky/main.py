@@ -45,6 +45,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import ssl
 import time
@@ -259,6 +260,63 @@ def _fetch_json(url: str, timeout: float = 8.0) -> dict:
     )
     with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def _fetch_bytes(url: str, timeout: float = 10.0) -> bytes:
+    """Blocking HTTPS GET of a small binary (run in an executor). Raises on any failure."""
+    req = urllib.request.Request(url, headers={"User-Agent": "punktfunk-decky"})
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+        return resp.read()
+
+
+# --- a Steam game's own artwork, for the per-game stream shortcut -----------------------------
+#
+# A stream started from a game's page runs under a hidden shortcut NAMED after the game, so the
+# overlay, the "now playing" surfaces and friends see the game and not "Punktfunk". The art has
+# to match. Steam keeps every library image it has shown in `appcache/librarycache`; what is not
+# there is on the store CDN under the same file names.
+_ART_KINDS = (
+    # key, file name, image type, SetCustomArtworkForApp asset type
+    ("grid", "library_600x900.jpg", "jpg", 0),
+    ("hero", "library_hero.jpg", "jpg", 1),
+    ("logo", "logo.png", "png", 2),
+    ("gridwide", "header.jpg", "jpg", 3),
+)
+_ART_CDNS = (
+    "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/{name}",
+    "https://shared.steamstatic.com/store_item_assets/steam/apps/{appid}/{name}",
+)
+_ICON_CDN = "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/{appid}/{hash}.jpg"
+_ICON_HASH = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _librarycache_candidates(appid: int, name: str) -> list[Path]:
+    """Where Steam has cached this image locally, oldest layout last: the per-app directory
+    current clients write, then the flat `<appid>_<name>` files older ones did."""
+    base = _steam_root() / "appcache" / "librarycache"
+    return [base / str(appid) / name, base / f"{appid}_{name}"]
+
+
+def _read_art(appid: int, name: str) -> bytes | None:
+    """The image bytes from the local cache, else the CDN; None when nowhere has it."""
+    for path in _librarycache_candidates(appid, name):
+        try:
+            data = path.read_bytes()
+            if data:
+                return data
+        except OSError:
+            continue
+    for cdn in _ART_CDNS:
+        try:
+            return _fetch_bytes(cdn.format(appid=appid, name=name))
+        except Exception:  # noqa: BLE001 — a 404 on one CDN is the next one's turn
+            continue
+    return None
+
+
+def _icon_dir() -> Path:
+    """Where fetched game icons land — Steam reads the path, so it must be user-readable."""
+    return Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "icons"
 
 
 def _flatpak() -> str | None:
@@ -859,6 +917,45 @@ class Plugin:
                 pass
         icon = base / "icon.png"
         art["icon_path"] = str(icon) if icon.exists() else ""
+        return art
+
+    async def game_art(self, appid: int, icon_hash: str = "") -> dict:
+        """A Steam game's own artwork for its stream shortcut: base64 grid / hero / logo /
+        gridwide with their image types, plus the icon written to a file (SetShortcutIcon
+        wants a path). Local cache first, the store CDN second; a missing piece is omitted,
+        never a failure — art is cosmetic and the launch does not wait on it.
+
+        `icon_hash` is the overview's `icon_hash`, validated to 40 hex characters because it
+        becomes part of a URL and a file name."""
+        try:
+            appid = int(appid)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad-appid"}
+        if appid <= 0:
+            return {"ok": False, "error": "bad-appid"}
+        loop = asyncio.get_running_loop()
+        art: dict = {"ok": True, "icon_path": ""}
+        for key, name, fmt, _asset in _ART_KINDS:
+            data = await loop.run_in_executor(None, _read_art, appid, name)
+            if data:
+                art[key] = base64.b64encode(data).decode()
+                art[f"{key}_type"] = fmt
+        icon_hash = str(icon_hash or "").strip().lower()
+        if _ICON_HASH.match(icon_hash):
+            dest = _icon_dir() / f"{appid}.jpg"
+            if not dest.exists():
+                try:
+                    data = await loop.run_in_executor(
+                        None, _fetch_bytes, _ICON_CDN.format(appid=appid, hash=icon_hash)
+                    )
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.parent.chmod(0o755)
+                    dest.write_bytes(data)
+                    dest.chmod(0o644)  # this backend is root; Steam is not
+                except Exception:  # noqa: BLE001
+                    decky.logger.info("no icon for %s", appid)
+            if dest.exists():
+                art["icon_path"] = str(dest)
         return art
 
     async def apply_controller_config(self, name: str = "Punktfunk") -> dict:

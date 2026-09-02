@@ -27,7 +27,8 @@ uses). Everything the panel doesn't do is one tap away in the client's own gamep
 5. **Stream button on game pages** — a Steam game's own page gets a **Stream** button when a
    paired host has that game in its library (the host's Steam library plugin reports it as
    `steam:<appid>`). Tap it and the host launches the game into a stream, whether or not the
-   Deck has it installed — Steam Remote Play's "Stream" for a Punktfunk host. See
+   Deck has it installed — Steam Remote Play's "Stream" for a Punktfunk host. Steam shows the
+   *game* running, with its own art, and the button reads **Stop** until the stream ends. See
    [The game-page button](#the-game-page-button).
 6. **Open Punktfunk** — launches the client's **console home**: the host picker, add-host by
    address, PIN pairing, the game library browser, and the **full settings screen**. This is where
@@ -77,8 +78,20 @@ What decides whether the button shows:
 A tap runs the ordinary stream launch with `PF_GAME=steam:<appid>`, which the wrapper turns into
 `punktfunk launch <host> --game steam:<appid>`. The Deck names the title; the host resolves it
 against its library and launches it, so no launch recipe ever rides the Steam launch options.
-While it streams, Steam shows **Punktfunk** running, not the game — the stream is carried by the
-hidden shortcut, and the page's Play button is not touched.
+
+**It runs under a hidden shortcut named after the game.** The first Stream for a title mints a
+third kind of shortcut — same `/bin/sh` + wrapper exe, hidden, but named with the game's own
+display name and dressed in the game's own grid, hero, logo, header and icon (`game_art`: Steam's
+`appcache/librarycache` first, the store CDN second). So the overlay, the "now playing" surfaces
+and the friends list show the game, not Punktfunk. Steam keys controller layouts by a shortcut's
+lowercase name, so the native-touch layout is bound per game name too. The shortcut is reused on
+later streams and recreated if removed; **About → Remove game shortcuts** deletes them all.
+
+**The button is also the Stop.** The plugin follows Steam's app-lifetime feed for its own
+shortcuts, and while a title's stream is up its page shows **Stop** in place of **Stream** — the
+same flip Steam's own Play makes. The game's native Play button is not touched: Steam derives its
+running state from its own app state, which cannot be faked without also inviting Steam to stop a
+game it is not running.
 
 ## Install on the Deck
 
@@ -152,10 +165,10 @@ the client's data files and re-implements none of its rules.
 | `src/catalog.ts` | Which paired hosts have which Steam appids — one `punktfunk library` call per online host per scan, cached per host record in localStorage. |
 | `src/library-page.tsx` | The Stream button on Steam's game page: the `/library/app/:appid` route patch, the button, the host picker, and the on/off preference. |
 | `src/trust.tsx` · `src/pair.tsx` | The trust sheet (Request access / Use a PIN instead / Cancel) and the gamepad-navigable PIN keypad. |
-| `src/steam.ts` | Steam-shortcut launch (`AddShortcut` / `SetAppLaunchOptions` / `RunGame`) — the focus-correct stream start. The shortcut's exe is `/bin/sh` with the wrapper passed as an argument, so the script never needs an exec bit (Decky's zip extraction drops it and the root-owned plugins dir can't be chmodded by the unprivileged backend). |
+| `src/steam.ts` | Steam-shortcut launch (`AddShortcut` / `SetAppLaunchOptions` / `RunGame`) — the focus-correct stream start, for the generic stream shortcut and the hidden per-game ones — plus the running-state feed the game page's Stop reads. The shortcut's exe is `/bin/sh` with the wrapper passed as an argument, so the script never needs an exec bit (Decky's zip extraction drops it and the root-owned plugins dir can't be chmodded by the unprivileged backend). |
 | `src/backend.ts` · `src/boundary.tsx` · `src/os-icon.tsx` | Typed `callable` bridges to `main.py`; the render error boundary; the host row's OS mark. |
 | `bin/punktfunkrun.sh` | The launch wrapper the Steam shortcut runs (so the window is focusable). Reads `PF_REF` / `PF_PROFILE` / `PF_GAME` / `PF_REQUEST_ACCESS` / `PF_BROWSE` and runs `punktfunk launch` — or the session's `--browse` for console home. |
-| `main.py` | Backend: five thin CLI shells (`discover` / `hosts` / `pair` / `trust_host` / `library`) plus the Steam-side work only a plugin can do — `runner_info`, `shortcut_art`, `apply_controller_config`, `kill_stream`, `check_update` / `update_client` (with an explicit CA-bundle search — Decky's embedded Python has no usable default TLS roots on SteamOS). |
+| `main.py` | Backend: five thin CLI shells (`discover` / `hosts` / `pair` / `trust_host` / `library`) plus the Steam-side work only a plugin can do — `runner_info`, `shortcut_art`, `game_art` (a Steam title's own art for its shortcut), `apply_controller_config`, `kill_stream`, `check_update` / `update_client` (with an explicit CA-bundle search — Decky's embedded Python has no usable default TLS roots on SteamOS). |
 | `scripts/test-backend.py` | Stdlib-only checks: argv shape, the CLI exit-code mapping, and the Steam configset editor. |
 | `plugin.json` · `update.json` | Decky manifest; CI-baked update channel. |
 
@@ -184,10 +197,11 @@ visible, stateless library entry that opens console home.
   stream to set expectations, which is a patch rather than a fix; teaching the session's connect
   screen the same "waiting for approval" copy the console shell already has would pay off for every
   shell.
-- **A game-page stream shows as "Punktfunk" in Steam**, not as the game: the hidden shortcut
-  carries it, so the game's own page keeps its Play button and Steam's "now playing" names the
-  shortcut. MoonDeck answers this with one shortcut per game and a MobX overview swap; that is
-  the next step if the mismatch bothers people.
+- **The game's native Play button stays Play while it streams.** The per-game shortcut is what
+  Steam sees running, so "now playing" and the overlay name the game, but the Steam app's own
+  running state is Steam's to derive. Our button carries the Stop instead. MoonDeck's overview
+  patcher only mirrors *last played* onto the game; that touch (so the title climbs the Recent
+  shelf after a stream) is the one piece left on the table.
 - **The button's position is a fixed offset** in the play bar (MoonDeck's default offsets). A
   Steam UI change, or another plugin's button in the same corner, can crowd it; the offsets live
   in one `STYLE` constant in `library-page.tsx`.

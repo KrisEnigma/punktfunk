@@ -98,8 +98,10 @@ stream — plus a door into the client's own gamepad UI for everything else.
   pointed at your Punktfunk host. It works whether or not the Deck has the game installed, so a
   page that says **Install** can stream instead of downloading. If more than one host has the
   game, a picker asks which. A sleeping host is woken first when the client knows how (see
-  [Wake-on-LAN](/docs/wake-on-lan)). The button is on by default; the switch is in the panel
-  under **Punktfunk → Stream button on game pages**.
+  [Wake-on-LAN](/docs/wake-on-lan)). While it streams, Steam shows the **game** as running —
+  its name, its art, in the overlay and to your friends — and the button reads **Stop**. The
+  button is on by default; the switch is in the panel under **Punktfunk → Stream button on game
+  pages**.
 - **Open Punktfunk** — opens the client's console home: the host picker, adding a host by address,
   pairing, browsing a host's [game library](/docs/game-library), and the **full settings screen** —
   resolution, bitrate, codec, audio, controllers and the stats overlay.
@@ -196,7 +198,8 @@ The plugin check follows the [channel](/docs/channels) you installed from: a plu
 | A request-access stream sits there | That's it waiting — somebody has to approve the Deck on the host. It gives up after about three minutes. |
 | Stream launches but doesn't focus | Start it from the panel (not by launching the client by hand) so Steam/gamescope focuses it. |
 | No **Stream** button on a game's page | The host must be **paired** (not just trusted) and have been online since the plugin loaded, and the game must be in the host's library as a Steam title. Open the panel once to rescan, then reopen the page. The switch under **Punktfunk** in the panel must be on. |
-| Steam shows **Punktfunk** running, not the game | Expected: the stream is carried by the plugin's hidden shortcut. The host is running the game you picked. |
+| The game's own **Play** button doesn't turn into **Stop** while streaming | Expected: Steam derives that from its own state. The plugin's **Stream** button is the one that reads **Stop**, and Steam's overlay names the game. |
+| Hidden entries named after games pile up in "show hidden" | Each game streamed from its page has one. Panel → **About** → **Remove game shortcuts** clears them; they return on the next Stream. |
 | The stream wedges — black, or won't close | Panel → **About** → **Force-stop**, then start it again. |
 | The **Punktfunk** library entry disappeared | Panel → **Recreate library shortcut**; it puts the entry back in place. |
 | You want a clean slate | **Open Punktfunk → Settings** for stream settings, or `punktfunk reset` in Desktop Mode to forget every saved host. Your paired identity is kept either way. |
@@ -211,11 +214,12 @@ Removing the plugin through Decky removes the plugin and nothing else, so do the
 
 1. **Remove the plugin.** Quick Access Menu (`…`) → the **plug** icon (Decky) → the **gear**
    (Settings) → **Plugins** → **Punktfunk** → **Uninstall**.
-2. **Remove the Steam shortcuts it created.** The plugin adds two non-Steam entries, both named
-   **Punktfunk** — the one you see in your library, and a second one it keeps hidden to carry the
-   stream. Decky removes neither. In your library, right-click a **Punktfunk** entry →
-   **Manage → Remove non-Steam game from your library**, and repeat for the hidden one once you've
-   let the library show hidden games.
+2. **Remove the Steam shortcuts it created.** Before uninstalling, tap **About → Remove game
+   shortcuts** in the panel to clear the hidden per-game entries streamed from game pages. The
+   plugin also adds two non-Steam entries named **Punktfunk** — the one you see in your library,
+   and a second one it keeps hidden to carry the stream. Decky removes neither. In your library,
+   right-click a **Punktfunk** entry → **Manage → Remove non-Steam game from your library**, and
+   repeat for the hidden one once you've let the library show hidden games.
 3. **Remove the client**, if you're done streaming on this Deck. In Desktop Mode:
 
    ```sh

@@ -204,6 +204,23 @@ captured.clear()
 got = asyncio.run(main.Plugin().library("   "))
 check("library: an empty ref is refused the same way", "args" not in captured and got["ok"] is False)
 
+# ---- game_art: the inputs that become a URL and a file name are validated ----------------
+#
+# `appid` and `icon_hash` come from Steam's overview through the frontend; a bad one must fail
+# closed rather than fetch an arbitrary path or write an arbitrary file name.
+main._read_art = lambda appid, name: None  # no cache, no network in a unit check
+check("art: a non-numeric appid is refused", asyncio.run(main.Plugin().game_art("x")) == {
+    "ok": False, "error": "bad-appid",
+})
+check("art: zero is refused", asyncio.run(main.Plugin().game_art(0))["ok"] is False)
+got = asyncio.run(main.Plugin().game_art(570, "../../etc/passwd"))
+check("art: a hash that is not 40 hex chars fetches no icon", got == {"ok": True, "icon_path": ""})
+check("art: local cache is asked per-app dir first, flat file second", [
+    p.name for p in main._librarycache_candidates(570, "library_hero.jpg")
+] == ["library_hero.jpg", "570_library_hero.jpg"])
+check("art: the per-app dir is keyed by appid",
+      main._librarycache_candidates(570, "logo.png")[0].parent.name == "570")
+
 # ---- _field_from (flatpak info parsing, drives the client update check) ------------------
 info = "        ID: io.unom.Punktfunk\n    Origin: punktfunk-origin\n    Commit: abc123def\n"
 check("field: commit", main._field_from(info, "Commit") == "abc123def")

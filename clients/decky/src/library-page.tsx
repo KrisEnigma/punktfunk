@@ -24,9 +24,10 @@ import {
   showModal,
 } from "@decky/ui";
 import { FC, ReactElement, useEffect, useRef, useState } from "react";
-import { FaPlay } from "react-icons/fa";
+import { FaPlay, FaStop } from "react-icons/fa";
 import { hostsForApp, subscribeCatalog } from "./catalog";
-import { HostView, refreshHostsIfStale, startStream, useHostStore } from "./hooks";
+import { HostView, refreshHostsIfStale, startGameStream, useHostStore } from "./hooks";
+import { isGameStreaming, stopGameStream, subscribeRunning } from "./steam";
 
 const ROUTE = "/library/app/:appid";
 const ANCHOR_KEY = "punktfunk-stream";
@@ -69,27 +70,40 @@ function useHostsForApp(appId: number): HostView[] {
   return hostsForApp(appId, views);
 }
 
-function streamFrom(host: HostView, appId: number, title: string): void {
-  // Steam's launch UI is about to say "Punktfunk", not the game — say what is really starting.
-  toaster.toast({
-    title: "Punktfunk",
-    body: host.online
-      ? `Streaming ${title} from ${host.name}`
-      : `Waking ${host.name} to stream ${title}`,
-  });
-  void startStream(host, { gameId: `steam:${appId}` }, title);
+/** Is this title's stream up right now — live, from Steam's app lifetime feed. */
+function useGameStreaming(appId: number): boolean {
+  const [streaming, setStreaming] = useState(() => isGameStreaming(appId));
+  useEffect(() => {
+    setStreaming(isGameStreaming(appId));
+    return subscribeRunning(() => setStreaming(isGameStreaming(appId)));
+  }, [appId]);
+  return streaming;
+}
+
+/** What the game page knows about its title; what the per-game shortcut is dressed with. */
+interface Game {
+  appId: number;
+  title: string;
+  iconHash: string;
+}
+
+function streamFrom(host: HostView, game: Game): void {
+  // A sleeping host is the one case that takes a while and looks like nothing happened.
+  if (!host.online) {
+    toaster.toast({ title: "Punktfunk", body: `Waking ${host.name} to stream ${game.title}` });
+  }
+  void startGameStream(host, game.appId, game.title, game.iconHash);
 }
 
 /** More than one host has the title: the same choice Steam's own client dropdown offers. */
 const HostPicker: FC<{
   hosts: HostView[];
-  appId: number;
-  title: string;
+  game: Game;
   closeModal?: () => void;
-}> = ({ hosts, appId, title, closeModal }) => (
+}> = ({ hosts, game, closeModal }) => (
   <ModalRoot closeModal={closeModal}>
     <div style={{ fontWeight: "bold", fontSize: "1.3em", marginBottom: "0.3em" }}>
-      Stream {title} from…
+      Stream {game.title} from…
     </div>
     <Focusable style={{ display: "flex", flexDirection: "column", gap: "0.5em" }}>
       {hosts.map((h) => (
@@ -97,7 +111,7 @@ const HostPicker: FC<{
           key={h.ref}
           onClick={() => {
             closeModal?.();
-            streamFrom(h, appId, title);
+            streamFrom(h, game);
           }}
         >
           {h.name}
@@ -133,16 +147,19 @@ const STYLE = `
   }
 `;
 
-const StreamButton: FC<{ appId: number; title: string }> = ({ appId, title }) => {
-  const hosts = useHostsForApp(appId);
-  if (hosts.length === 0) {
+const StreamButton: FC<Game> = (game) => {
+  const hosts = useHostsForApp(game.appId);
+  const streaming = useGameStreaming(game.appId);
+  if (hosts.length === 0 && !streaming) {
     return null;
   }
   const onClick = () => {
-    if (hosts.length === 1) {
-      streamFrom(hosts[0], appId, title);
+    if (streaming) {
+      stopGameStream(game.appId); // Steam's Stop, for the stream this page started
+    } else if (hosts.length === 1) {
+      streamFrom(hosts[0], game);
     } else {
-      showModal(<HostPicker hosts={hosts} appId={appId} title={title} />);
+      showModal(<HostPicker hosts={hosts} game={game} />);
     }
   };
   return (
@@ -155,8 +172,8 @@ const StreamButton: FC<{ appId: number; title: string }> = ({ appId, title }) =>
           className={joinClassNames(playSectionClasses.MenuButton, "punktfunk-stream-button")}
           onClick={onClick}
         >
-          <FaPlay style={{ marginRight: "0.5em" }} />
-          Stream
+          {streaming ? <FaStop style={{ marginRight: "0.5em" }} /> : <FaPlay style={{ marginRight: "0.5em" }} />}
+          {streaming ? "Stop" : "Stream"}
         </DialogButton>
       </Focusable>
     </Focusable>
@@ -183,7 +200,7 @@ function findTopCapsule(anchor: HTMLDivElement | null): Element | null {
   return null;
 }
 
-const StreamButtonAnchor: FC<{ appId: number; title: string }> = (props) => {
+const StreamButtonAnchor: FC<Game> = (props) => {
   const [show, setShow] = useState(true);
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -223,6 +240,7 @@ interface OverviewLike {
   appid?: unknown;
   app_type?: unknown;
   display_name?: unknown;
+  icon_hash?: unknown;
 }
 
 type PanelChild = ReactElement<{ overview?: unknown; onShowLaunchingDetails?: unknown }>;
@@ -287,7 +305,12 @@ function patchLibraryApp(): RoutePatch {
         children.splice(
           panelIndex,
           0,
-          <StreamButtonAnchor key={ANCHOR_KEY} appId={appId} title={overview.display_name} />,
+          <StreamButtonAnchor
+            key={ANCHOR_KEY}
+            appId={appId}
+            title={overview.display_name}
+            iconHash={typeof overview.icon_hash === "string" ? overview.icon_hash : ""}
+          />,
         );
         return ret;
       },
