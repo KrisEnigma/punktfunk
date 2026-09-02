@@ -466,14 +466,18 @@ pub unsafe extern "C" fn assign_swap_chain(
 }
 
 /// The monitor went inactive: take its processor out and drop it with no lock held — the drop
-/// joins the worker thread, which deletes the swap-chain object before returning.
+/// joins the worker thread, which deletes the swap-chain object before returning. The join
+/// time is logged every time: the wake event should make it sub-millisecond, and a slow one
+/// here is a DDI or D3D call the worker was inside when the OS unassigned it.
 pub unsafe extern "C" fn unassign_swap_chain(monitor: iddcx::IDDCX_MONITOR) -> NTSTATUS {
     let had = crate::registry::find(|m| m.object() == Some(monitor)).and_then(|m| m.take_swap());
-    dbglog!(
-        "[pf-vd] unassign_swap_chain — dropped live processor: {}",
-        had.is_some()
-    );
+    let live = had.is_some();
+    let started = std::time::Instant::now();
     drop(had);
+    dbglog!(
+        "[pf-vd] unassign_swap_chain — live processor: {live}, join took {} us",
+        started.elapsed().as_micros()
+    );
     STATUS_SUCCESS
 }
 
