@@ -12,7 +12,8 @@
   catalog, and (with -Install) pnputil-installs it.
 
   Build first: from packaging/windows/drivers/, in an MSVC dev shell with LIBCLANG_PATH +
-  Version_Number=10.0.26100.0, run `cargo build`.
+  Version_Number=10.0.26100.0, run `cargo build --release` — the same profile the installer ships, so
+  the dev box exercises the binary that goes out.
 
   Re-deploying needs a HIGHER DriverVer than the installed one or pnputil silently keeps the old binary —
   hence the 9.9.MMdd.HHmm scheme (also what the installer build uses; a later-minute dev redeploy wins).
@@ -31,10 +32,10 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root  = Split-Path -Parent $MyInvocation.MyCommand.Path
-$dll   = Join-Path $root 'target\x86_64-pc-windows-msvc\debug\pf_vdisplay.dll'
+$dll   = Join-Path $root 'target\x86_64-pc-windows-msvc\release\pf_vdisplay.dll'
 $inx   = Join-Path $root 'pf-vdisplay\pf_vdisplay.inx'
 $clear = Join-Path $root '..\clear-force-integrity.ps1'
-if (-not (Test-Path $dll)) { throw "driver not built: $dll  (cargo build in packaging/windows/drivers first)" }
+if (-not (Test-Path $dll)) { throw "driver not built: $dll  (cargo build --release in packaging/windows/drivers first)" }
 
 $kits = 'C:\Program Files (x86)\Windows Kits\10\bin'
 function Find-Tool([string]$name, [string]$arch) {

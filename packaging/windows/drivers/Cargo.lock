@@ -799,15 +799,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wdk-probe"
-version = "0.0.1"
-dependencies = [
- "pf-driver-proto",
- "wdk-build",
- "wdk-sys",
-]
-
-[[package]]
 name = "wdk-sys"
 version = "0.5.1"
 dependencies = [

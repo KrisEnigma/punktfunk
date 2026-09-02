@@ -18,7 +18,7 @@
   Run ELEVATED. Use -Build only from an MSVC dev shell (the driver's cargo build needs LIBCLANG_PATH
   + Version_Number=10.0.26100.0, per drivers/deploy-dev.ps1); otherwise build separately and omit it.
 
-.PARAMETER Build       Run `cargo build` in packaging/windows/drivers first (needs the MSVC env).
+.PARAMETER Build       Run `cargo build --release` in packaging/windows/drivers first (needs the MSVC env).
 .PARAMETER Service     Host service name. Default PunktfunkHost.
 .PARAMETER Thumbprint  Passthrough to deploy-dev.ps1 (test-cert SHA-1). Omit to use its default.
 .PARAMETER Nefconc     Passthrough to deploy-dev.ps1 (nefconc.exe path). Omit to use its default.
@@ -52,11 +52,11 @@ foreach ($f in @($deploy, $reset)) { if (-not (Test-Path $f)) { throw "missing h
 
 # 1) Optional rebuild (MSVC dev shell only).
 if ($Build) {
-    Write-Host "==> cargo build  (pf-vdisplay driver, $driversDir)"
+    Write-Host "==> cargo build --release  (pf-vdisplay driver, $driversDir)"
     Push-Location $driversDir
     try {
-        cargo build
-        if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE) - is this an MSVC dev shell with LIBCLANG_PATH + Version_Number set?" }
+        cargo build --release
+        if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed ($LASTEXITCODE) - is this an MSVC dev shell with LIBCLANG_PATH + Version_Number set?" }
     }
     finally { Pop-Location }
 }
