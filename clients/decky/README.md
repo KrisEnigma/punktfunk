@@ -24,10 +24,16 @@ uses). Everything the panel doesn't do is one tap away in the client's own gamep
    and streams with that settings profile applied. Cards are the **shared** pinning model every
    other client speaks, stored on the host's record — so one you make in the desktop client shows
    up here, and vice versa. The plugin renders them; it doesn't create or edit them.
-5. **Open Punktfunk** — launches the client's **console home**: the host picker, add-host by
+5. **Stream button on game pages** — a Steam game's own page gets a **Stream** button when a
+   paired host has that game in its library (the host's Steam library plugin reports it as
+   `steam:<appid>`). Tap it and the host launches the game into a stream, whether or not the
+   Deck has it installed — Steam Remote Play's "Stream" for a Punktfunk host. See
+   [The game-page button](#the-game-page-button).
+6. **Open Punktfunk** — launches the client's **console home**: the host picker, add-host by
    address, PIN pairing, the game library browser, and the **full settings screen**. This is where
-   everything the panel no longer does now lives.
-6. **About** — plugin version, "Check for updates", "Recreate library shortcut", and a force-stop
+   everything the panel no longer does now lives. The toggle for the game-page button lives here
+   too.
+7. **About** — plugin version, "Check for updates", "Recreate library shortcut", and a force-stop
    for a wedged stream.
 
 To leave a stream: the in-client controller chord (**L1 + R1 + Start + Select**), or close the
@@ -45,6 +51,34 @@ to **paired** so every later stream is silent.
 standing between a 185-second wait and an impostor answering for the host, so a host you typed in
 by address gets the PIN path only — and the sheet says why. The plugin never trusts-on-first-use
 past a missing fingerprint.
+
+### The game-page button
+
+Steam Remote Play draws a game's Play button as **Stream** when another of your Steam clients has
+the title installed: the page reads the app's per-client data and acts for the selected client.
+A plugin cannot join that list, so the Punktfunk button is a **sibling** in the play bar, drawn
+with the bar's own button class — the approach MoonDeck has used in the field for years. The
+route `/library/app/:appid` is patched, the render is walked to the play panel, and the button is
+spliced in just before it. Every lookup is defensive: a Steam UI change leaves the page as Steam
+drew it, with no button, rather than a broken page.
+
+What decides whether the button shows:
+
+- **The catalog.** Every scan (plugin load, each QAM open, a game page opened more than a
+  minute after the last one) asks each **paired, online** host for its library
+  (`punktfunk library <host> --json`) and keeps the set of `steam:<appid>` ids per host record in
+  localStorage. A host that is asleep keeps its last set, so its titles still show the button —
+  the launch wakes it (when the client's auto-wake is on and the MAC is known). A host that
+  answers `needs-pairing` or `refused` loses its set; a forgotten record is pruned.
+- **The match** is Steam's own appid against that set. Non-Steam shortcuts never match.
+- **One host** streams on tap; **several** open a picker (online first, then most recently used),
+  the same choice Steam's client dropdown offers.
+
+A tap runs the ordinary stream launch with `PF_GAME=steam:<appid>`, which the wrapper turns into
+`punktfunk launch <host> --game steam:<appid>`. The Deck names the title; the host resolves it
+against its library and launches it, so no launch recipe ever rides the Steam launch options.
+While it streams, Steam shows **Punktfunk** running, not the game — the stream is carried by the
+hidden shortcut, and the page's Play button is not touched.
 
 ## Install on the Deck
 
@@ -114,12 +148,14 @@ the client's data files and re-implements none of its rules.
 | File | Role |
 | --- | --- |
 | `src/index.tsx` | Plugin entry + the QAM panel: update banner, hosts (with nested pinned cards), the console-home door, about. |
-| `src/hooks.ts` | `useHosts` (one call merging discovery and the saved store), the update hooks, and the launch action. Also the trust-state model the rows render. |
+| `src/hooks.ts` | The module-level host store (one scan merging discovery and the saved store, shared by the panel and the game page), the update hooks, and the launch action. Also the trust-state model the rows render. |
+| `src/catalog.ts` | Which paired hosts have which Steam appids — one `punktfunk library` call per online host per scan, cached per host record in localStorage. |
+| `src/library-page.tsx` | The Stream button on Steam's game page: the `/library/app/:appid` route patch, the button, the host picker, and the on/off preference. |
 | `src/trust.tsx` · `src/pair.tsx` | The trust sheet (Request access / Use a PIN instead / Cancel) and the gamepad-navigable PIN keypad. |
 | `src/steam.ts` | Steam-shortcut launch (`AddShortcut` / `SetAppLaunchOptions` / `RunGame`) — the focus-correct stream start. The shortcut's exe is `/bin/sh` with the wrapper passed as an argument, so the script never needs an exec bit (Decky's zip extraction drops it and the root-owned plugins dir can't be chmodded by the unprivileged backend). |
 | `src/backend.ts` · `src/boundary.tsx` · `src/os-icon.tsx` | Typed `callable` bridges to `main.py`; the render error boundary; the host row's OS mark. |
-| `bin/punktfunkrun.sh` | The launch wrapper the Steam shortcut runs (so the window is focusable). Reads `PF_REF` / `PF_PROFILE` / `PF_REQUEST_ACCESS` / `PF_BROWSE` and runs `punktfunk launch` — or the session's `--browse` for console home. |
-| `main.py` | Backend: four thin CLI shells (`discover` / `hosts` / `pair` / `trust_host`) plus the Steam-side work only a plugin can do — `runner_info`, `shortcut_art`, `apply_controller_config`, `kill_stream`, `check_update` / `update_client` (with an explicit CA-bundle search — Decky's embedded Python has no usable default TLS roots on SteamOS). |
+| `bin/punktfunkrun.sh` | The launch wrapper the Steam shortcut runs (so the window is focusable). Reads `PF_REF` / `PF_PROFILE` / `PF_GAME` / `PF_REQUEST_ACCESS` / `PF_BROWSE` and runs `punktfunk launch` — or the session's `--browse` for console home. |
+| `main.py` | Backend: five thin CLI shells (`discover` / `hosts` / `pair` / `trust_host` / `library`) plus the Steam-side work only a plugin can do — `runner_info`, `shortcut_art`, `apply_controller_config`, `kill_stream`, `check_update` / `update_client` (with an explicit CA-bundle search — Decky's embedded Python has no usable default TLS roots on SteamOS). |
 | `scripts/test-backend.py` | Stdlib-only checks: argv shape, the CLI exit-code mapping, and the Steam configset editor. |
 | `plugin.json` · `update.json` | Decky manifest; CI-baked update channel. |
 
@@ -148,6 +184,13 @@ visible, stateless library entry that opens console home.
   stream to set expectations, which is a patch rather than a fix; teaching the session's connect
   screen the same "waiting for approval" copy the console shell already has would pay off for every
   shell.
+- **A game-page stream shows as "Punktfunk" in Steam**, not as the game: the hidden shortcut
+  carries it, so the game's own page keeps its Play button and Steam's "now playing" names the
+  shortcut. MoonDeck answers this with one shortcut per game and a MobX overview swap; that is
+  the next step if the mismatch bothers people.
+- **The button's position is a fixed offset** in the play bar (MoonDeck's default offsets). A
+  Steam UI change, or another plugin's button in the same corner, can crowd it; the offsets live
+  in one `STYLE` constant in `library-page.tsx`.
 
 ## Related
 

@@ -178,6 +178,32 @@ got = asyncio.run(main._cli_json(["discover", "--json"]))
 check("json: old client surfaces as client-outdated", got["error"] == "client-outdated")
 check("json: detail carries the CLI's own last line", "unknown command" in got["detail"])
 
+# ---- Plugin.library: the argv shape, and a ref that would read as a flag ------------------
+#
+# The game page's Stream button keys off this call, one per paired host per scan. The ref is
+# a positional argument to the CLI, so one starting with `-` must never leave this backend.
+captured: dict = {}
+
+
+async def _capture_cli(args, timeout=20.0, stdin_text=None):
+    captured["args"] = args
+    return 0, '{"games": [{"id": "steam:570", "store": "steam", "title": "Dota 2"}]}', ""
+
+
+main._run_cli = _capture_cli
+got = asyncio.run(main.Plugin().library("2f1c-desk"))
+check("library: argv is `library <ref> --json`", captured.get("args") == ["library", "2f1c-desk", "--json"])
+check("library: games merged under ok", got["ok"] is True and got["games"][0]["id"] == "steam:570")
+captured.clear()
+got = asyncio.run(main.Plugin().library("--exec"))
+check("library: a flag-shaped ref never reaches the CLI", "args" not in captured)
+check("library: ...and is reported as unresolved", got == {
+    "ok": False, "error": "unresolved", "detail": "bad host reference",
+})
+captured.clear()
+got = asyncio.run(main.Plugin().library("   "))
+check("library: an empty ref is refused the same way", "args" not in captured and got["ok"] is False)
+
 # ---- _field_from (flatpak info parsing, drives the client update check) ------------------
 info = "        ID: io.unom.Punktfunk\n    Origin: punktfunk-origin\n    Commit: abc123def\n"
 check("field: commit", main._field_from(info, "Commit") == "abc123def")

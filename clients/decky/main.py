@@ -825,6 +825,21 @@ class Plugin:
         decky.logger.warning("trust_host failed (rc=%s): %s", rc, detail)
         return {"ok": False, "error": _cli_error(rc, err), "detail": detail}
 
+    async def library(self, ref: str) -> dict:
+        """The host's game library (``punktfunk library <host-ref> --json``).
+
+        ``{ok: True, games: [{id, store, title}]}`` — ``id`` is store-qualified (``steam:570``),
+        which is what lets the game page match a host title to a Steam appid. Paired hosts
+        only: the CLI answers ``needs-pairing`` for a host that merely has a pinned fingerprint
+        and ``unreachable`` for one that is off.
+
+        The ref is a positional argument, so one that starts with ``-`` is refused here rather
+        than handed to the CLI as a flag."""
+        ref = str(ref).strip()
+        if not ref or ref.startswith("-"):
+            return {"ok": False, "error": "unresolved", "detail": "bad host reference"}
+        return await _cli_json(["library", ref, "--json"], timeout=20.0)
+
     async def shortcut_art(self) -> dict:
         """The Steam-shortcut artwork shipped with the plugin (committed under ``assets/``):
         base64 PNGs (grid/gridwide/hero/logo) for SetCustomArtworkForApp plus the icon's

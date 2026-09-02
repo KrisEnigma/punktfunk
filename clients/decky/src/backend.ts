@@ -89,6 +89,21 @@ export interface PairResult extends CliResult {
   fp?: string;
 }
 
+/**
+ * One title of a host's library (`punktfunk library <ref> --json`). `id` is store-qualified —
+ * `steam:570`, `custom:…` — and is the handle a launch names; the Steam ones are what the game
+ * page matches against Steam's own appids.
+ */
+export interface LibraryGame {
+  id: string;
+  store: string;
+  title: string;
+}
+
+export interface LibraryResult extends CliResult {
+  games?: LibraryGame[];
+}
+
 export interface RunnerInfo {
   runner: string; // absolute path to bin/punktfunkrun.sh
   app_id: string; // flatpak app id
@@ -158,6 +173,11 @@ export const trustHost = callable<
   [addr: string, port: number, fp: string, name: string],
   CliResult
 >("trust_host");
+/**
+ * The host's game library. Paired hosts only: the library routes take the paired identity
+ * over mTLS, so a host that merely has a pinned fingerprint answers `needs-pairing`.
+ */
+export const library = callable<[ref: string], LibraryResult>("library");
 
 // ---- Steam / plugin business (only a Decky plugin can do these) ------------------------
 

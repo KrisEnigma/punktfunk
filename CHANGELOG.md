@@ -34,6 +34,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **Decky: a Stream button on Steam's game pages.** The plugin patches `/library/app/:appid`
+  and shows **Stream** when a paired host's library carries `steam:<appid>`, launching through
+  the hidden shortcut with `PF_GAME=steam:<appid>`, which the wrapper passes as
+  `punktfunk launch --game`. Anyone wrapping `bin/punktfunkrun.sh` gains that variable and the
+  backend gains a `library(ref)` shell over `punktfunk library <ref> --json`; nothing else on the
+  launch path changes.
 - **Capture health on the Status page and in `GET /api/v1/status`.** A native Windows session's
   `session.capture` block carries the live capture-health class (`healthy`, `idle`, `suspect`,
   `stalled` with its class, `recovering`, `rebuilding`, `secure_desktop`), the evidence behind

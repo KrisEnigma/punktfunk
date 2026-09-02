@@ -515,6 +515,11 @@ export interface LaunchOpts {
   /** A pinned card: stream with this settings profile, one-off (PF_PROFILE → `--profile`). */
   profileId?: string;
   /**
+   * A title in the host's library to launch into the stream (PF_GAME → `--game`), by its
+   * store-qualified id (`steam:570`). The host resolves it; the Deck only names it.
+   */
+  gameId?: string;
+  /**
    * Ask the host's operator to admit this Deck rather than typing a PIN (PF_REQUEST_ACCESS).
    * The connect PARKS until somebody approves it, and the launch runs SUPERVISED — see the
    * wrapper for why `--exec` is dropped on this path alone.
@@ -564,6 +569,9 @@ export async function launchStream(ref: string, opts: LaunchOpts = {}): Promise<
   if (opts.profileId && !isSafeLaunchId(opts.profileId)) {
     throw new Error(`unsupported profile id: ${opts.profileId}`);
   }
+  if (opts.gameId && !isSafeLaunchId(opts.gameId)) {
+    throw new Error(`unsupported game id: ${opts.gameId}`);
+  }
   const { appId, runner, clientBin } = await ensureStreamShortcut();
   const env = [`PF_REF=${ref}`];
   // Set only for a NATIVE client install; absent, the wrapper takes its flatpak default, so every
@@ -579,6 +587,9 @@ export async function launchStream(ref: string, opts: LaunchOpts = {}): Promise<
   }
   if (opts.profileId) {
     env.push(`PF_PROFILE=${opts.profileId}`);
+  }
+  if (opts.gameId) {
+    env.push(`PF_GAME=${opts.gameId}`);
   }
   if (opts.requestAccess) {
     env.push("PF_REQUEST_ACCESS=1");
