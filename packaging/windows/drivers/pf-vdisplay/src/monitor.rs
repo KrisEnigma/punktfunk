@@ -749,7 +749,7 @@ pub fn create_monitor(
     height: u32,
     refresh: u32,
     preferred_id: u32,
-    client_lum: crate::edid::ClientLuminance,
+    client_lum: pf_driver_proto::edid::ClientLuminance,
     hw_cursor: bool,
 ) -> Option<(u32, u32, u32, i32)> {
     let adapter = crate::adapter::adapter()?;
@@ -814,13 +814,13 @@ pub fn create_monitor(
 
     // EDID (serial = id) describes the monitor; the OS calls back into parse_monitor_description.
     // The session's own mode becomes the preferred-timing DTD when it fits the encoding.
-    let mut edid = crate::edid::Edid::generate_with(id, client_lum, Some((width, height, refresh)));
+    let mut edid = pf_driver_proto::edid::generate(id, client_lum, Some((width, height, refresh)));
     let mut desc = pod_init!(iddcx::IDDCX_MONITOR_DESCRIPTION);
     desc.Size = core::mem::size_of::<iddcx::IDDCX_MONITOR_DESCRIPTION>() as u32;
     desc.Type = iddcx::IDDCX_MONITOR_DESCRIPTION_TYPE::IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
     desc.DataSize = edid.len() as u32;
-    // SAFETY: `edid` is a local Vec that outlives this `create_monitor` call; IddCxMonitorCreate (below)
-    // reads through `pData` SYNCHRONOUSLY, before `edid` drops — the pointer never escapes the call.
+    // SAFETY: `edid` is a local array that outlives this `create_monitor` call; IddCxMonitorCreate
+    // (below) reads through `pData` SYNCHRONOUSLY, before `edid` drops — the pointer never escapes.
     desc.pData = edid.as_mut_ptr().cast();
 
     let mut info = pod_init!(iddcx::IDDCX_MONITOR_INFO);

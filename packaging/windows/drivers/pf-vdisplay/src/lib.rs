@@ -22,7 +22,6 @@ mod callbacks;
 mod control;
 mod cursor_worker;
 mod direct_3d_device;
-mod edid;
 mod entry;
 mod frame_transport;
 mod monitor;

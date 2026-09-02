@@ -165,7 +165,7 @@ fn add(request: Request) {
         req.height,
         req.refresh_hz,
         req.preferred_monitor_id,
-        crate::edid::ClientLuminance {
+        pf_driver_proto::edid::ClientLuminance {
             max_nits: req.max_luminance_nits,
             max_frame_avg_nits: req.max_frame_avg_nits,
             min_millinits: req.min_luminance_millinits,

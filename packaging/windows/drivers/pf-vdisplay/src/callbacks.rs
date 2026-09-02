@@ -89,7 +89,7 @@ pub unsafe extern "C" fn parse_monitor_description(
             in_args.MonitorDescription.DataSize as usize,
         )
     };
-    let Ok(id) = crate::edid::Edid::get_serial(edid) else {
+    let Ok(id) = pf_driver_proto::edid::get_serial(edid) else {
         return STATUS_INVALID_PARAMETER;
     };
     let Some(modes) = crate::monitor::modes_for_id(id) else {
@@ -139,7 +139,7 @@ pub unsafe extern "C" fn parse_monitor_description2(
             in_args.MonitorDescription.DataSize as usize,
         )
     };
-    let Ok(id) = crate::edid::Edid::get_serial(edid) else {
+    let Ok(id) = pf_driver_proto::edid::get_serial(edid) else {
         return STATUS_INVALID_PARAMETER;
     };
     let Some(modes) = crate::monitor::modes_for_id(id) else {

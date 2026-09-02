@@ -309,13 +309,20 @@ pub mod control {
     };
 }
 
-/// CTA-861.3 Desired Content Luminance coding for the pf-vdisplay EDID HDR Static Metadata
-/// block. The host fills [`control::AddRequest`] from the client's real display; the driver
-/// codes those nits here so games tone-map to the panel the stream lands on.
+/// The 256-byte EDID the `pf-vdisplay` driver hands IddCx for each virtual monitor: an EDID 1.4
+/// base block plus a CTA-861.3 extension carrying a BT.2020 Colorimetry block and an HDR Static
+/// Metadata block declaring the SMPTE ST 2084 (PQ) EOTF. Windows reads a display's HDR capability
+/// from that CTA block; without it the monitor is SDR-only whatever the IddCx adapter's FP16 /
+/// wide-gamut / 10-bit caps say.
 ///
-/// Lives in this crate, not the driver: the driver only builds under the WDK, and this coding
-/// wants unit tests on every machine before a sign/deploy cycle. `no_std` + integer-only, so
-/// it drops into the driver unchanged.
+/// Identity: manufacturer "PNK", product name "Punktfunk" (the 0xFC descriptor Windows shows), and
+/// a per-monitor serial at base offset 0x0C that [`get_serial`] reads back out of the EDID the OS
+/// hands to the mode callbacks. No HDMI Vendor-Specific Data Block: a VSDB carries physical-sink
+/// facts (CEC address, TMDS limits) a virtual display does not have, and Windows drives the
+/// monitor without one.
+///
+/// Lives here, not in the driver: the driver only builds under the WDK, and one wrong byte drops
+/// HDR silently. `no_std` + integer-only, so it drops into the driver unchanged.
 pub mod edid {
     /// `2^(k/32)` for `k = 0..32` in Q16 fixed point (`round(2^(k/32) * 65536)`) — the fractional
     /// step table for the CTA-861.3 luminance exponent.
@@ -426,6 +433,143 @@ pub mod edid {
         // Bytes 12..16 (image size mm, borders) stay 0 = undefined.
         d[17] = 0x1E;
         Some(d)
+    }
+
+    /// Per-monitor serial number: base-block offset 0x0C, little-endian u32.
+    const SERIAL_OFFSET: usize = 0x0C;
+
+    /// EDID 1.4 base block. Differs from a plain SDR virtual EDID by revision 1.4 (byte 19),
+    /// 10-bit digital video input (byte 20 = 0xB0) and one extension present (byte 126 = 0x01).
+    /// The checksum (byte 127), the serial at 0x0C and the preferred DTD are patched in
+    /// [`generate`], so editing the name here needs no hand-computed checksum.
+    #[rustfmt::skip]
+    const BASE: [u8; 128] = [
+        0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, // fixed header
+        0x41, 0xCB, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // mfr "PNK", product code 1 (0 = "unset" to EDID tooling), serial (patched)
+        0xFF, 0x21, 0x01, 0x04, 0xB0, 0x32, 0x1F, 0x78, // week/year, EDID 1.4, 10-bit digital, size, gamma
+        0x03, 0x78, 0xB1, 0xB5, 0x4A, 0x2B, 0xCC, 0x21, // feature (sRGB-default CLEARED), BT.2020 primaries...
+        0x0B, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, // ...BT.2020 primaries, established timings, std timings
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x3A, // std timings, DTD 1 (placeholder preferred timing)
+        0x80, 0x18, 0x71, 0x38, 0x2D, 0x40, 0x58, 0x2C,
+        0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E,
+        0x00, 0x00, 0x00, 0xFD, 0x08, 0x17, 0xF0, 0x0F, // range-limits: offsets H-max+255, 23-240 Hz, min-H 15 kHz...
+        0xFF, 0xFF, 0x00, 0x0A, 0x20, 0x20, 0x20, 0x20, // ...max-H 510 kHz, max clock 2550 MHz (150 was below the driver's own 1080p120 default)
+        0x20, 0x20, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x50, // name descriptor "Punktfunk"
+        0x75, 0x6E, 0x6B, 0x74, 0x66, 0x75, 0x6E, 0x6B,
+        0x0A, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00, // empty 4th descriptor...
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // ...byte 126 = 1 extension, byte 127 = checksum
+    ];
+
+    /// CTA-861.3 extension block header (block 1, bytes 0..4). What follows is a Data Block
+    /// Collection holding the Colorimetry and HDR Static Metadata blocks; the rest of the block is
+    /// padding up to the checksum at byte 255.
+    #[rustfmt::skip]
+    const CTA_HEADER: [u8; 4] = [
+        0x02, // CTA Extension tag
+        0x03, // revision 3 (CTA-861.3 — required for the extended-tag data blocks below)
+        0x0F, // D = 15: the (empty) DTD region starts at block byte 15, i.e. data blocks occupy bytes 4..15
+        0x00, // 0 native DTDs; no basic audio; no YCbCr 4:4:4/4:2:2 (RGB-only, matching the wire format)
+    ];
+
+    /// Colorimetry Data Block (CTA extended tag 0x05): declare BT.2020 RGB. YCbCr variants stay
+    /// clear — the IddCx wire format is RGB-only — and the gamut-metadata flags are 0.
+    #[rustfmt::skip]
+    const COLORIMETRY_DB: [u8; 4] = [
+        0xE3, // tag 0b111 (use-extended-tag) | length 3
+        0x05, // extended tag: Colorimetry
+        0x80, // BT2020RGB (bit 7); xvYCC/sYCC/opRGB/BT2020 YCC/cYCC all clear
+        0x00, // gamut metadata profiles MD0..MD3: none
+    ];
+
+    /// HDR Static Metadata Data Block (CTA extended tag 0x06): EOTFs = Traditional SDR (ET_0) plus
+    /// SMPTE ST 2084 / PQ (ET_2), Static Metadata Type 1 (SM_0). The desired-content luminance tail
+    /// holds the BUILT-IN defaults, used when the host reported no client volume; [`generate`]
+    /// overwrites bytes 4..7 with the client display's coded volume otherwise.
+    #[rustfmt::skip]
+    const HDR_STATIC_METADATA_DB: [u8; 7] = [
+        0xE6, // tag 0b111 (use-extended-tag) | length 6
+        0x06, // extended tag: HDR Static Metadata
+        0x05, // Supported EOTFs: ET_0 (traditional SDR) | ET_2 (SMPTE ST 2084 / PQ)
+        0x01, // Supported Static Metadata Descriptors: SM_0 (Static Metadata Type 1)
+        0x8A, // Desired Content Max Luminance      (code 138 ≈ 993 nits)
+        0x60, // Desired Content Max Frame-avg Lum. (code  96 = 400 nits)
+        0x12, // Desired Content Min Luminance      (code  18 ≈ 0.05 nits)
+    ];
+
+    /// The client display's luminance volume for the CTA HDR block — the
+    /// [`crate::control::AddRequest`] luminance tail, same units. `max_nits == 0` means unknown (an
+    /// SDR client, or an un-upgraded host whose short ADD zero-fills the tail) and keeps the
+    /// built-in defaults.
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct ClientLuminance {
+        /// Peak luminance, nits. `0` = unknown → keep the built-in default block.
+        pub max_nits: u32,
+        /// Max frame-average luminance, nits. `0` = unknown ("no data" on the wire).
+        pub max_frame_avg_nits: u32,
+        /// Min luminance, milli-nits. `0` = unknown/true black ("no data" on the wire).
+        pub min_millinits: u32,
+    }
+
+    /// Build the 256-byte EDID for the monitor identified by `serial`, with both block checksums
+    /// recomputed — the serial patch at 0x0C and the CTA edits below both invalidate them.
+    ///
+    /// `lum` is the CLIENT display's luminance volume, coded into the HDR block's desired-content
+    /// bytes so apps tone-map to the panel the stream lands on; all-zero keeps the built-in
+    /// ~993-nit defaults. `preferred` is the session's `(width, height, refresh)`: it replaces the
+    /// hard-coded 1080p60 preferred-timing DTD when it fits the encoding (4K120-class does not).
+    /// The modes the OS OFFERS still come from the IddCx mode list, not this descriptor.
+    #[must_use]
+    pub fn generate(
+        serial: u32,
+        lum: ClientLuminance,
+        preferred: Option<(u32, u32, u32)>,
+    ) -> [u8; 256] {
+        let mut edid = [0u8; 256];
+        edid[..128].copy_from_slice(&BASE);
+        edid[SERIAL_OFFSET..SERIAL_OFFSET + 4].copy_from_slice(&serial.to_le_bytes());
+        if let Some(d) = preferred.and_then(|(w, h, r)| dtd(w, h, r)) {
+            edid[54..72].copy_from_slice(&d);
+        }
+        edid[128..132].copy_from_slice(&CTA_HEADER);
+        edid[132..136].copy_from_slice(&COLORIMETRY_DB);
+        let mut hdr_db = HDR_STATIC_METADATA_DB;
+        if lum.max_nits > 0 {
+            let max_code = cta_max_luminance_code(lum.max_nits);
+            hdr_db[4] = max_code;
+            hdr_db[5] = if lum.max_frame_avg_nits > 0 {
+                cta_max_luminance_code(lum.max_frame_avg_nits)
+            } else {
+                0 // "no data" — valid per CTA-861.3
+            };
+            hdr_db[6] = cta_min_luminance_code(lum.min_millinits, max_code);
+        }
+        edid[136..143].copy_from_slice(&hdr_db);
+        fix_block_checksum(&mut edid, 0);
+        fix_block_checksum(&mut edid, 128);
+        edid
+    }
+
+    /// Read the per-monitor serial (base offset 0x0C, little-endian) out of an EDID the OS handed
+    /// back, so a monitor-description callback can find the monitor it belongs to. Takes the full
+    /// 256-byte EDID or just the 128-byte base block, and errors rather than panics on a short
+    /// buffer so the caller can reject a malformed descriptor.
+    pub fn get_serial(edid: &[u8]) -> Result<u32, core::array::TryFromSliceError> {
+        let bytes: [u8; 4] = edid
+            .get(SERIAL_OFFSET..SERIAL_OFFSET + 4)
+            .unwrap_or(&[])
+            .try_into()?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    /// Set the trailing byte of the 128-byte block at `start` so the block's bytes sum to 0
+    /// (mod 256) — the standard EDID block checksum, without which a parser rejects the block.
+    fn fix_block_checksum(edid: &mut [u8], start: usize) {
+        let sum = edid[start..start + 127]
+            .iter()
+            .fold(0u8, |acc, &b| acc.wrapping_add(b));
+        edid[start + 127] = 0u8.wrapping_sub(sum);
     }
 }
 
@@ -1847,6 +1991,133 @@ mod tests {
         // Degenerate and over-wide modes are refused, not mis-encoded.
         assert_eq!(edid::dtd(0, 1080, 60), None);
         assert_eq!(edid::dtd(5000, 1080, 10), None);
+    }
+
+    /// Sum of a 128-byte EDID block: the trailing checksum byte is what drives this to 0.
+    fn block_sum(block: &[u8]) -> u8 {
+        block.iter().fold(0u8, |acc, &b| acc.wrapping_add(b))
+    }
+
+    #[test]
+    fn edid_matches_the_golden_bytes() {
+        // Byte-for-byte capture of what the driver shipped before this code moved here. One byte
+        // out of place and Windows drops HDR, so nothing below may drift silently.
+        #[rustfmt::skip]
+        const GOLDEN: [u8; 256] = [
+            0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+            0x41, 0xCB, 0x01, 0x00, 0x07, 0x00, 0x00, 0x00,
+            0xFF, 0x21, 0x01, 0x04, 0xB0, 0x32, 0x1F, 0x78,
+            0x03, 0x78, 0xB1, 0xB5, 0x4A, 0x2B, 0xCC, 0x21,
+            0x0B, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xC4, 0xB7,
+            0x00, 0x50, 0xA0, 0xA0, 0x2D, 0x50, 0x08, 0x20,
+            0x35, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E,
+            0x00, 0x00, 0x00, 0xFD, 0x08, 0x17, 0xF0, 0x0F,
+            0xFF, 0xFF, 0x00, 0x0A, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x50,
+            0x75, 0x6E, 0x6B, 0x74, 0x66, 0x75, 0x6E, 0x6B,
+            0x0A, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x3F,
+            0x02, 0x03, 0x0F, 0x00, 0xE3, 0x05, 0x80, 0x00,
+            0xE6, 0x06, 0x05, 0x01, 0x72, 0x52, 0x0F, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xBF,
+        ];
+        let lum = edid::ClientLuminance {
+            max_nits: 600,
+            max_frame_avg_nits: 300,
+            min_millinits: 20,
+        };
+        assert_eq!(edid::generate(7, lum, Some((2560, 1440, 120))), GOLDEN);
+    }
+
+    #[test]
+    fn edid_blocks_checksum_to_zero() {
+        let lum = edid::ClientLuminance {
+            max_nits: 1000,
+            max_frame_avg_nits: 400,
+            min_millinits: 50,
+        };
+        for (serial, l, mode) in [
+            (0, edid::ClientLuminance::default(), None),
+            (1, lum, Some((1920, 1080, 60))),
+            (u32::MAX, lum, Some((3840, 2160, 120))),
+        ] {
+            let e = edid::generate(serial, l, mode);
+            assert_eq!(block_sum(&e[..128]), 0, "base block, serial {serial}");
+            assert_eq!(block_sum(&e[128..]), 0, "CTA block, serial {serial}");
+        }
+    }
+
+    #[test]
+    fn edid_serial_lands_at_0x0c_and_rechecksums() {
+        for serial in [0u32, 1, 7, 0x00FF_00FF, u32::MAX] {
+            let e = edid::generate(serial, edid::ClientLuminance::default(), None);
+            assert_eq!(e[0x0C..0x10], serial.to_le_bytes());
+            assert_eq!(edid::get_serial(&e).unwrap(), serial);
+            // The base block alone is what the mode callbacks sometimes get handed back.
+            assert_eq!(edid::get_serial(&e[..128]).unwrap(), serial);
+            assert_eq!(block_sum(&e[..128]), 0);
+        }
+        // A short descriptor is rejected, not read out of bounds.
+        assert!(edid::get_serial(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn edid_swaps_the_preferred_dtd_only_when_the_mode_fits() {
+        let lum = edid::ClientLuminance::default();
+        let placeholder = edid::generate(1, lum, None);
+        // The stock descriptor is the 148.50 MHz 1080p60 timing baked into the base block.
+        assert_eq!(
+            u16::from_le_bytes([placeholder[54], placeholder[55]]),
+            14_850
+        );
+        // A mode that fits replaces all 18 bytes; 4K120 does not fit, so the stock one stays.
+        let swapped = edid::generate(1, lum, Some((2560, 1440, 120)));
+        assert_eq!(swapped[54..72], edid::dtd(2560, 1440, 120).unwrap());
+        let too_fast = edid::generate(1, lum, Some((3840, 2160, 120)));
+        assert_eq!(too_fast[54..72], placeholder[54..72]);
+    }
+
+    #[test]
+    fn edid_hdr_block_tracks_the_client_volume() {
+        // No client volume reported: the built-in ~993 / 400 / 0.05 nit defaults stay.
+        let stock = edid::generate(1, edid::ClientLuminance::default(), None);
+        assert_eq!(stock[136..143], [0xE6, 0x06, 0x05, 0x01, 0x8A, 0x60, 0x12]);
+        // A known peak overrides all three; the EOTF and descriptor bytes never move.
+        let lum = edid::ClientLuminance {
+            max_nits: 400,
+            max_frame_avg_nits: 400,
+            min_millinits: 50,
+        };
+        let coded = edid::generate(1, lum, None);
+        assert_eq!(coded[136..140], [0xE6, 0x06, 0x05, 0x01]);
+        assert_eq!(coded[140], edid::cta_max_luminance_code(400));
+        // Unknown frame-average and unknown min both code as 0 = "no data" on the wire.
+        let partial = edid::generate(
+            1,
+            edid::ClientLuminance {
+                max_nits: 400,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(partial[141], 0);
+        assert_eq!(partial[142], 0);
     }
 
     #[test]
