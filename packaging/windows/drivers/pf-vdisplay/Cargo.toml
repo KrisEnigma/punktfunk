@@ -29,11 +29,9 @@ pf-umdf-util.workspace = true
 # Casts the Pod `pf-driver-proto` control structs to/from the request buffers. Version pinned to
 # pf-driver-proto's so the graph resolves ONE bytemuck.
 bytemuck = "1.19"
-# STEP 5: the swap-chain processor's render-side D3D11 device + worker. 0.58.0 matches the wdk-build
-# transitive `windows` already in the workspace lock (one resolved version) AND the proven oracle's
-# version, so the ported D3D/DXGI/threading calls compile verbatim.
-thiserror = "2.0"
 
+# The swap-chain processor's render-side D3D11 device + worker. 0.58.0 matches the wdk-build transitive
+# `windows` already in the workspace lock, so the graph resolves ONE `windows`.
 [dependencies.windows]
 version = "0.58.0"
 features = [

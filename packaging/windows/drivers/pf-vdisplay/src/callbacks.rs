@@ -1,11 +1,13 @@
 //! The IddCx client-config callbacks + the PnP `EvtDeviceD0Entry`.
 //!
-//! The mode/EDID logic (STEP 4), adapter init (STEP 3), and swap-chain handoff (STEP 5) are wired in; the
-//! `*2`/HDR-metadata/gamma callbacks remain stubs (STEP 7). Every callback is `unsafe extern "C"` to match
-//! the wdk-sys `PFN_IDD_CX_*` types; a panic unwinding across that `extern "C"` boundary aborts the process
-//! (Rust >= 1.81 default) rather than being UB. (The swap-chain WORKER is a plain `thread::spawn`, so a
-//! panic there only unwinds + ends that thread — it must not panic.) `query_target_info` is implemented
-//! because it gates HDR (`HIGH_COLOR_SPACE`) and the adapter (STEP 3) sets FP16.
+//! Every callback is `unsafe extern "C"` to match the wdk-sys `PFN_IDD_CX_*` types. The driver builds
+//! with `panic = "abort"`, so a panic in any of them — or in the swap-chain worker thread — takes
+//! WUDFHost down instead of unwinding across the FFI boundary.
+//!
+//! The `*2` (HDR) mode and commit callbacks are registered ALONGSIDE their v1 twins, not instead of
+//! them: the OS prefers the `*2` on IddCx 1.10 and falls back down-level, and the adapter's
+//! `CAN_PROCESS_FP16` cap obligates the whole `*2` + gamma/HDR-metadata set. Each mode pair shares one
+//! fill helper ([`fill_monitor_modes`], [`fill_target_modes`]); only the emitted struct differs.
 
 use wdk_sys::iddcx;
 use wdk_sys::{NTSTATUS, WDFDEVICE, WDFOBJECT, WDFREQUEST, call_unsafe_wdf_function_binding};
@@ -74,72 +76,45 @@ pub unsafe extern "C" fn device_cleanup(_object: WDFOBJECT) {
     crate::monitor::cleanup_for_device_removal();
 }
 
-/// SDR mode list for an EDID monitor: EDID-serial lookup → count-then-fill `IDDCX_MONITOR_MODE`.
-pub unsafe extern "C" fn parse_monitor_description(
-    p_in: *const iddcx::IDARG_IN_PARSEMONITORDESCRIPTION,
-    p_out: *mut iddcx::IDARG_OUT_PARSEMONITORDESCRIPTION,
-) -> NTSTATUS {
-    // SAFETY: the framework supplies a valid, live input-args pointer for the call.
-    let in_args = unsafe { &*p_in };
-    // SAFETY: the framework supplies a valid, live output-args pointer for the call.
-    let out_args = unsafe { &mut *p_out };
-    // SAFETY: the framework supplies a valid EDID buffer of `DataSize` bytes.
-    let edid = unsafe {
-        core::slice::from_raw_parts(
-            in_args.MonitorDescription.pData.cast::<u8>(),
-            in_args.MonitorDescription.DataSize as usize,
-        )
-    };
-    let Ok(id) = pf_driver_proto::edid::get_serial(edid) else {
-        return STATUS_INVALID_PARAMETER;
-    };
-    let Some(modes) = crate::monitor::modes_for_id(id) else {
-        return STATUS_NOT_FOUND;
-    };
-    let count = crate::monitor::flatten(&modes).count() as u32;
-    out_args.MonitorModeBufferOutputCount = count;
-    if in_args.MonitorModeBufferInputCount < count {
-        // A zero input count is a count-only probe (success); a non-zero too-small buffer is an error.
-        return if in_args.MonitorModeBufferInputCount > 0 {
-            STATUS_BUFFER_TOO_SMALL
-        } else {
-            STATUS_SUCCESS
-        };
-    }
-    // SAFETY: `pMonitorModes` points to >= `count` IDDCX_MONITOR_MODE entries (validated above).
-    let out = unsafe { core::slice::from_raw_parts_mut(in_args.pMonitorModes, count as usize) };
-    for (item, slot) in crate::monitor::flatten(&modes).zip(out.iter_mut()) {
-        let mut mode = pod_init!(iddcx::IDDCX_MONITOR_MODE);
-        mode.Size = core::mem::size_of::<iddcx::IDDCX_MONITOR_MODE>() as u32;
-        mode.Origin = iddcx::IDDCX_MONITOR_MODE_ORIGIN::IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
-        mode.MonitorVideoSignalInfo =
-            crate::monitor::display_info(item.width, item.height, item.refresh_rate);
-        *slot = mode;
-    }
-    out_args.PreferredMonitorModeIdx = 0;
-    STATUS_SUCCESS
+/// One `IDDCX_MONITOR_MODE` (SDR) for the description mode list.
+fn monitor_mode(width: u32, height: u32, refresh_rate: u32) -> iddcx::IDDCX_MONITOR_MODE {
+    let mut mode = pod_init!(iddcx::IDDCX_MONITOR_MODE);
+    mode.Size = core::mem::size_of::<iddcx::IDDCX_MONITOR_MODE>() as u32;
+    mode.Origin = iddcx::IDDCX_MONITOR_MODE_ORIGIN::IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
+    mode.MonitorVideoSignalInfo = crate::monitor::display_info(width, height, refresh_rate);
+    mode
 }
 
-/// HDR (`*2`) mode list — writes `IDDCX_MONITOR_MODE2` (+BitsPerComponent). Mandatory under FP16. Mirrors
-/// the v1 `parse_monitor_description` exactly (EDID-serial lookup → count-then-fill, same
-/// BUFFER_TOO_SMALL/SUCCESS logic), but emits `IDDCX_MONITOR_MODE2` with the per-mode wire bit-depth so the
-/// OS offers HDR10 modes. `IDARG_OUT_PARSEMONITORDESCRIPTION` is the SAME out struct as v1 (shared by the C
-/// header); only the in-args / mode struct are the `*2` variants.
-pub unsafe extern "C" fn parse_monitor_description2(
-    p_in: *const iddcx::IDARG_IN_PARSEMONITORDESCRIPTION2,
-    p_out: *mut iddcx::IDARG_OUT_PARSEMONITORDESCRIPTION,
+/// One `IDDCX_MONITOR_MODE2`: the SDR mode plus the per-mode wire bit-depth, which is what makes the
+/// OS offer HDR10 modes on this monitor.
+fn monitor_mode2(width: u32, height: u32, refresh_rate: u32) -> iddcx::IDDCX_MONITOR_MODE2 {
+    let mut mode = pod_init!(iddcx::IDDCX_MONITOR_MODE2);
+    mode.Size = core::mem::size_of::<iddcx::IDDCX_MONITOR_MODE2>() as u32;
+    mode.Origin = iddcx::IDDCX_MONITOR_MODE_ORIGIN::IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
+    mode.MonitorVideoSignalInfo = crate::monitor::display_info(width, height, refresh_rate);
+    mode.BitsPerComponent = crate::monitor::wire_bits();
+    mode
+}
+
+/// The body both `EvtIddCxParseMonitorDescription` variants share: the EDID serial selects the
+/// monitor's mode list, then `make` writes one entry per flattened mode.
+///
+/// The out struct is the same for v1 and v2 (the C header shares it), so only `M` and the in-args
+/// differ. A zero `in_count` is a count-only probe: report the count and succeed. A smaller non-zero
+/// buffer is `STATUS_BUFFER_TOO_SMALL`. `tag` names the caller in the log that shows which list
+/// generation a re-parse served, and is `None` on the v1 path, which logs nothing.
+///
+/// # Safety
+/// `edid` must cover the framework's description buffer, and `p_modes` must point at `in_count`
+/// writable `M` entries.
+unsafe fn fill_monitor_modes<M>(
+    edid: &[u8],
+    in_count: u32,
+    p_modes: *mut M,
+    out_args: &mut iddcx::IDARG_OUT_PARSEMONITORDESCRIPTION,
+    tag: Option<&str>,
+    make: impl Fn(u32, u32, u32) -> M,
 ) -> NTSTATUS {
-    // SAFETY: the framework supplies a valid, live input-args pointer for the call.
-    let in_args = unsafe { &*p_in };
-    // SAFETY: the framework supplies a valid, live output-args pointer for the call.
-    let out_args = unsafe { &mut *p_out };
-    // SAFETY: the framework supplies a valid EDID buffer of `DataSize` bytes.
-    let edid = unsafe {
-        core::slice::from_raw_parts(
-            in_args.MonitorDescription.pData.cast::<u8>(),
-            in_args.MonitorDescription.DataSize as usize,
-        )
-    };
     let Ok(id) = pf_driver_proto::edid::get_serial(edid) else {
         return STATUS_INVALID_PARAMETER;
     };
@@ -147,38 +122,80 @@ pub unsafe extern "C" fn parse_monitor_description2(
         return STATUS_NOT_FOUND;
     };
     let count = crate::monitor::flatten(&modes).count() as u32;
-    // Bring-up/diagnostic visibility (P2): does the OS ever RE-parse the description after an
-    // UPDATE_MODES? The head mode names which list generation this call served.
-    if let Some(head) = crate::monitor::flatten(&modes).next() {
+    if let Some(tag) = tag
+        && let Some(head) = crate::monitor::flatten(&modes).next()
+    {
         dbglog!(
-            "[pf-vd] parse_monitor_description2(id={id}): {count} modes, head {}x{}@{}",
+            "[pf-vd] {tag}(id={id}): {count} modes, head {}x{}@{}",
             head.width,
             head.height,
             head.refresh_rate
         );
     }
     out_args.MonitorModeBufferOutputCount = count;
-    if in_args.MonitorModeBufferInputCount < count {
-        // A zero input count is a count-only probe (success); a non-zero too-small buffer is an error.
-        return if in_args.MonitorModeBufferInputCount > 0 {
+    if in_count < count {
+        return if in_count > 0 {
             STATUS_BUFFER_TOO_SMALL
         } else {
             STATUS_SUCCESS
         };
     }
-    // SAFETY: `pMonitorModes` points to >= `count` IDDCX_MONITOR_MODE2 entries (validated above).
-    let out = unsafe { core::slice::from_raw_parts_mut(in_args.pMonitorModes, count as usize) };
+    // SAFETY: `p_modes` is the caller's mode buffer, whose `in_count` capacity was checked against
+    // `count` above, so >= `count` `M` entries are writable.
+    let out = unsafe { core::slice::from_raw_parts_mut(p_modes, count as usize) };
     for (item, slot) in crate::monitor::flatten(&modes).zip(out.iter_mut()) {
-        let mut mode = pod_init!(iddcx::IDDCX_MONITOR_MODE2);
-        mode.Size = core::mem::size_of::<iddcx::IDDCX_MONITOR_MODE2>() as u32;
-        mode.Origin = iddcx::IDDCX_MONITOR_MODE_ORIGIN::IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
-        mode.MonitorVideoSignalInfo =
-            crate::monitor::display_info(item.width, item.height, item.refresh_rate);
-        mode.BitsPerComponent = crate::monitor::wire_bits();
-        *slot = mode;
+        *slot = make(item.width, item.height, item.refresh_rate);
     }
     out_args.PreferredMonitorModeIdx = 0;
     STATUS_SUCCESS
+}
+
+/// SDR mode list for an EDID monitor. Registered next to [`parse_monitor_description2`]; the OS calls
+/// this one only on a framework below IddCx 1.10.
+pub unsafe extern "C" fn parse_monitor_description(
+    p_in: *const iddcx::IDARG_IN_PARSEMONITORDESCRIPTION,
+    p_out: *mut iddcx::IDARG_OUT_PARSEMONITORDESCRIPTION,
+) -> NTSTATUS {
+    // SAFETY: the framework supplies live in/out args for the call, an EDID buffer of `DataSize`
+    // bytes, and `pMonitorModes` room for `MonitorModeBufferInputCount` IDDCX_MONITOR_MODE entries.
+    unsafe {
+        let in_args = &*p_in;
+        fill_monitor_modes(
+            core::slice::from_raw_parts(
+                in_args.MonitorDescription.pData.cast::<u8>(),
+                in_args.MonitorDescription.DataSize as usize,
+            ),
+            in_args.MonitorModeBufferInputCount,
+            in_args.pMonitorModes,
+            &mut *p_out,
+            None,
+            monitor_mode,
+        )
+    }
+}
+
+/// HDR mode list: the same fill, emitting `IDDCX_MONITOR_MODE2`. Mandatory under FP16, and the variant
+/// the OS actually calls on IddCx 1.10.
+pub unsafe extern "C" fn parse_monitor_description2(
+    p_in: *const iddcx::IDARG_IN_PARSEMONITORDESCRIPTION2,
+    p_out: *mut iddcx::IDARG_OUT_PARSEMONITORDESCRIPTION,
+) -> NTSTATUS {
+    // SAFETY: the framework supplies live in/out args for the call, an EDID buffer of `DataSize`
+    // bytes, and `pMonitorModes` room for `MonitorModeBufferInputCount` IDDCX_MONITOR_MODE2 entries.
+    unsafe {
+        let in_args = &*p_in;
+        fill_monitor_modes(
+            core::slice::from_raw_parts(
+                in_args.MonitorDescription.pData.cast::<u8>(),
+                in_args.MonitorDescription.DataSize as usize,
+            ),
+            in_args.MonitorModeBufferInputCount,
+            in_args.pMonitorModes,
+            &mut *p_out,
+            Some("parse_monitor_description2"),
+            monitor_mode2,
+        )
+    }
 }
 
 /// Only called for EDID-less monitors; ours always carry an EDID, so this stays NOT_IMPLEMENTED.
@@ -190,68 +207,93 @@ pub unsafe extern "C" fn monitor_get_default_modes(
     STATUS_NOT_IMPLEMENTED
 }
 
-/// SDR target (scan-out) modes: pointer-match the monitor → fill `IDDCX_TARGET_MODE`.
-pub unsafe extern "C" fn monitor_query_modes(
+/// The body both `EvtIddCxMonitorQueryTargetModes` variants share: the monitor handle selects the mode
+/// list, then `make` writes one scan-out mode per flattened entry.
+///
+/// The out struct is the same for v1 and v2, so only `M` and the in-args differ. Unlike the description
+/// DDI there is no too-small error: the count is always reported, and the buffer is filled only when it
+/// already holds `count` entries. `tag` names the caller in the log that shows whether the OS re-queries
+/// after an UPDATE_MODES, and is `None` on the v1 path, which logs nothing.
+///
+/// # Safety
+/// `p_modes` must point at `in_count` writable `M` entries.
+unsafe fn fill_target_modes<M>(
     monitor: iddcx::IDDCX_MONITOR,
-    p_in: *const iddcx::IDARG_IN_QUERYTARGETMODES,
-    p_out: *mut iddcx::IDARG_OUT_QUERYTARGETMODES,
+    in_count: u32,
+    p_modes: *mut M,
+    out_args: &mut iddcx::IDARG_OUT_QUERYTARGETMODES,
+    tag: Option<&str>,
+    make: impl Fn(u32, u32, u32) -> M,
 ) -> NTSTATUS {
-    // SAFETY: the framework supplies a valid, live input-args pointer for the call.
-    let in_args = unsafe { &*p_in };
-    // SAFETY: the framework supplies a valid, live output-args pointer for the call.
-    let out_args = unsafe { &mut *p_out };
     let Some(modes) = crate::monitor::modes_for_object(monitor) else {
         return STATUS_NOT_FOUND;
     };
     let count = crate::monitor::flatten(&modes).count() as u32;
+    if let Some(tag) = tag
+        && let Some(head) = crate::monitor::flatten(&modes).next()
+    {
+        dbglog!(
+            "[pf-vd] {tag}: {count} modes, head {}x{}@{} (fill={})",
+            head.width,
+            head.height,
+            head.refresh_rate,
+            in_count >= count
+        );
+    }
     out_args.TargetModeBufferOutputCount = count;
-    if in_args.TargetModeBufferInputCount >= count {
-        // SAFETY: `pTargetModes` points to >= `count` IDDCX_TARGET_MODE entries.
-        let out = unsafe { core::slice::from_raw_parts_mut(in_args.pTargetModes, count as usize) };
+    if in_count >= count {
+        // SAFETY: `p_modes` is the caller's mode buffer, whose `in_count` capacity was checked
+        // against `count` above, so >= `count` `M` entries are writable.
+        let out = unsafe { core::slice::from_raw_parts_mut(p_modes, count as usize) };
         for (item, slot) in crate::monitor::flatten(&modes).zip(out.iter_mut()) {
-            *slot = crate::monitor::target_mode(item.width, item.height, item.refresh_rate);
+            *slot = make(item.width, item.height, item.refresh_rate);
         }
     }
     STATUS_SUCCESS
 }
 
-/// HDR (`*2`) target modes — writes `IDDCX_TARGET_MODE2`. Mandatory under FP16. Mirrors the v1
-/// `monitor_query_modes` exactly (pointer-match the monitor → count → fill), but emits `IDDCX_TARGET_MODE2`
-/// (with per-mode wire bit-depth) via `monitor::target_mode2`. `IDARG_OUT_QUERYTARGETMODES` is the SAME out
-/// struct as v1.
+/// SDR target (scan-out) modes. Registered next to [`monitor_query_modes2`]; the OS calls this one only
+/// on a framework below IddCx 1.10.
+pub unsafe extern "C" fn monitor_query_modes(
+    monitor: iddcx::IDDCX_MONITOR,
+    p_in: *const iddcx::IDARG_IN_QUERYTARGETMODES,
+    p_out: *mut iddcx::IDARG_OUT_QUERYTARGETMODES,
+) -> NTSTATUS {
+    // SAFETY: the framework supplies live in/out args for the call, with `pTargetModes` room for
+    // `TargetModeBufferInputCount` IDDCX_TARGET_MODE entries.
+    unsafe {
+        let in_args = &*p_in;
+        fill_target_modes(
+            monitor,
+            in_args.TargetModeBufferInputCount,
+            in_args.pTargetModes,
+            &mut *p_out,
+            None,
+            crate::monitor::target_mode,
+        )
+    }
+}
+
+/// HDR target modes: the same fill, emitting `IDDCX_TARGET_MODE2` with the per-mode wire bit-depth.
+/// Mandatory under FP16, and the variant the OS actually calls on IddCx 1.10.
 pub unsafe extern "C" fn monitor_query_modes2(
     monitor: iddcx::IDDCX_MONITOR,
     p_in: *const iddcx::IDARG_IN_QUERYTARGETMODES2,
     p_out: *mut iddcx::IDARG_OUT_QUERYTARGETMODES,
 ) -> NTSTATUS {
-    // SAFETY: the framework supplies a valid, live input-args pointer for the call.
-    let in_args = unsafe { &*p_in };
-    // SAFETY: the framework supplies a valid, live output-args pointer for the call.
-    let out_args = unsafe { &mut *p_out };
-    let Some(modes) = crate::monitor::modes_for_object(monitor) else {
-        return STATUS_NOT_FOUND;
-    };
-    let count = crate::monitor::flatten(&modes).count() as u32;
-    // Diagnostic visibility (P2): shows whether/when the OS re-queries target modes after an
-    // UPDATE_MODES (the head mode names the list generation this call served).
-    if let Some(head) = crate::monitor::flatten(&modes).next() {
-        dbglog!(
-            "[pf-vd] monitor_query_modes2: {count} modes, head {}x{}@{} (fill={})",
-            head.width,
-            head.height,
-            head.refresh_rate,
-            in_args.TargetModeBufferInputCount >= count
-        );
+    // SAFETY: the framework supplies live in/out args for the call, with `pTargetModes` room for
+    // `TargetModeBufferInputCount` IDDCX_TARGET_MODE2 entries.
+    unsafe {
+        let in_args = &*p_in;
+        fill_target_modes(
+            monitor,
+            in_args.TargetModeBufferInputCount,
+            in_args.pTargetModes,
+            &mut *p_out,
+            Some("monitor_query_modes2"),
+            crate::monitor::target_mode2,
+        )
     }
-    out_args.TargetModeBufferOutputCount = count;
-    if in_args.TargetModeBufferInputCount >= count {
-        // SAFETY: `pTargetModes` points to >= `count` IDDCX_TARGET_MODE2 entries.
-        let out = unsafe { core::slice::from_raw_parts_mut(in_args.pTargetModes, count as usize) };
-        for (item, slot) in crate::monitor::flatten(&modes).zip(out.iter_mut()) {
-            *slot = crate::monitor::target_mode2(item.width, item.height, item.refresh_rate);
-        }
-    }
-    STATUS_SUCCESS
 }
 
 /// Read an `IDDCX_PATH*`'s `Flags` field as its underlying `u32`, without depending on the bindgen

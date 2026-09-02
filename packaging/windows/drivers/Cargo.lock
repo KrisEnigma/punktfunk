@@ -436,7 +436,6 @@ dependencies = [
  "bytemuck",
  "pf-driver-proto",
  "pf-umdf-util",
- "thiserror",
  "wdk-build",
  "wdk-iddcx",
  "wdk-sys",

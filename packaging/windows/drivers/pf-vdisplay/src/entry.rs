@@ -12,26 +12,6 @@ use wdk_sys::{
 
 use crate::callbacks;
 
-/// A WDF device context, attached to the WDFDEVICE at WdfDeviceCreate. The working virtual-display-rs +
-/// oracle both create the device with a context-typed `DeviceContext` (we previously passed
-/// WDF_NO_OBJECT_ATTRIBUTES). `WDF_OBJECT_CONTEXT_TYPE_INFO` holds raw pointers (Sync wrapper for the
-/// `static`); `UniqueType` self-references per `WDF_DECLARE_CONTEXT_TYPE`.
-#[repr(C)]
-struct DeviceContext {
-    _device: WDFDEVICE,
-}
-#[repr(transparent)]
-struct DevCtxInfo(wdk_sys::WDF_OBJECT_CONTEXT_TYPE_INFO);
-// SAFETY: immutable 'static type metadata; the inner raw pointers are 'static and never written.
-unsafe impl Sync for DevCtxInfo {}
-static DEVICE_CTX: DevCtxInfo = DevCtxInfo(wdk_sys::WDF_OBJECT_CONTEXT_TYPE_INFO {
-    Size: core::mem::size_of::<wdk_sys::WDF_OBJECT_CONTEXT_TYPE_INFO>() as u32,
-    ContextName: c"PfVdDeviceCtx".as_ptr().cast(),
-    ContextSize: core::mem::size_of::<DeviceContext>(),
-    UniqueType: &DEVICE_CTX.0,
-    EvtDriverGetUniqueContextType: None,
-});
-
 #[unsafe(export_name = "DriverEntry")]
 pub unsafe extern "system" fn driver_entry(
     driver: PDRIVER_OBJECT,
@@ -99,17 +79,17 @@ extern "C" fn driver_add(_driver: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTSTA
     }
 
     let mut device: WDFDEVICE = core::ptr::null_mut();
-    // Attach a device context type (like the working virtual-display-rs/oracle), not WDF_NO_OBJECT_ATTRIBUTES.
+    // Attributes rather than WDF_NO_OBJECT_ATTRIBUTES, only for the cleanup callback: it drops every
+    // monitor's swap-chain worker on device removal (PnP / unload) so the worker threads don't linger
+    // into teardown. Execution/Synchronization must be spelled out — a zeroed field is *Invalid*, not
+    // InheritFromParent. No context type; nothing reads state back off the WDFDEVICE.
     let mut dev_attr = pod_init!(wdk_sys::WDF_OBJECT_ATTRIBUTES);
     dev_attr.Size = core::mem::size_of::<wdk_sys::WDF_OBJECT_ATTRIBUTES>() as u32;
     dev_attr.ExecutionLevel = wdk_sys::_WDF_EXECUTION_LEVEL::WdfExecutionLevelInheritFromParent;
     dev_attr.SynchronizationScope =
         wdk_sys::_WDF_SYNCHRONIZATION_SCOPE::WdfSynchronizationScopeInheritFromParent;
-    dev_attr.ContextTypeInfo = &DEVICE_CTX.0;
-    // Drop every monitor's swap-chain worker when the device is removed (PnP / unload), so the worker
-    // threads don't linger into teardown (E1 device cleanup). IddCx-free; see callbacks::device_cleanup.
     dev_attr.EvtCleanupCallback = Some(callbacks::device_cleanup);
-    // SAFETY: init configured above; dev_attr is a valid context-typed attributes block.
+    // SAFETY: init configured above; dev_attr is a valid attributes block.
     let status = unsafe {
         call_unsafe_wdf_function_binding!(WdfDeviceCreate, &mut init, &mut dev_attr, &mut device)
     };
