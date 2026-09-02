@@ -171,7 +171,7 @@ impl Drop for FrameChannel {
 }
 
 // NB: `FrameChannel` is plain integers, so it is auto-`Send` — it crosses from the control-plane
-// dispatch thread (stash) to the swap-chain worker (attach) with `MONITOR_MODES` serializing the
+// dispatch thread to the swap-chain worker through `Monitor.chan`, whose mutex serializes the
 // hand-off; no manual impl needed (handle values are process-global tokens, not thread-affine).
 
 /// The MONITOR-owned half of an attached ring (immunity plan D4 / WP5): the mapped header, the

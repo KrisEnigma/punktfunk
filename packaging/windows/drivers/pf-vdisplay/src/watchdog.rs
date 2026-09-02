@@ -129,7 +129,7 @@ unsafe extern "C" fn evt_timer(_timer: WDFTIMER) {
     }
     // Only reap when there is something to reap.
     if SILENT_TICKS.fetch_add(1, Ordering::Relaxed) + 1 < TICKS_TO_REAP
-        || !crate::monitor::has_monitors()
+        || !crate::registry::has_monitors()
     {
         return;
     }

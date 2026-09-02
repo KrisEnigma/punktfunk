@@ -25,6 +25,7 @@ mod direct_3d_device;
 mod entry;
 mod frame_transport;
 mod monitor;
+mod registry;
 mod swap_chain_processor;
 mod watchdog;
 mod worker;

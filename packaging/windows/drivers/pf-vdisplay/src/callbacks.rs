@@ -9,6 +9,8 @@
 //! `CAN_PROCESS_FP16` cap obligates the whole `*2` + gamma/HDR-metadata set. Each mode pair shares one
 //! fill helper ([`fill_monitor_modes`], [`fill_target_modes`]); only the emitted struct differs.
 
+use std::sync::Arc;
+
 use wdk_sys::iddcx;
 use wdk_sys::{NTSTATUS, WDFDEVICE, WDFOBJECT, WDFREQUEST, call_unsafe_wdf_function_binding};
 
@@ -118,7 +120,7 @@ unsafe fn fill_monitor_modes<M>(
     let Ok(id) = pf_driver_proto::edid::get_serial(edid) else {
         return STATUS_INVALID_PARAMETER;
     };
-    let Some(modes) = crate::monitor::modes_for_id(id) else {
+    let Some(modes) = crate::registry::find(|m| m.id == id).map(|m| m.modes()) else {
         return STATUS_NOT_FOUND;
     };
     let count = crate::monitor::flatten(&modes).count() as u32;
@@ -225,7 +227,8 @@ unsafe fn fill_target_modes<M>(
     tag: Option<&str>,
     make: impl Fn(u32, u32, u32) -> M,
 ) -> NTSTATUS {
-    let Some(modes) = crate::monitor::modes_for_object(monitor) else {
+    let Some(modes) = crate::registry::find(|m| m.object() == Some(monitor)).map(|m| m.modes())
+    else {
         return STATUS_NOT_FOUND;
     };
     let count = crate::monitor::flatten(&modes).count() as u32;
@@ -392,9 +395,11 @@ pub unsafe extern "C" fn set_gamma_ramp(
     STATUS_SUCCESS
 }
 
-/// A swap-chain was assigned to the monitor. STEP 5: spawn the `SwapChainProcessor` that drains it (so
-/// the monitor is a usable display). Always returns `STATUS_SUCCESS` — on D3D-init failure we delete the
-/// swap-chain so the OS makes a fresh one and re-assigns (the oracle pattern).
+/// A swap-chain was assigned to the monitor: spawn the `SwapChainProcessor` that drains it (so
+/// the monitor is a usable display), holding a `Weak` to the monitor it serves. Always returns
+/// `STATUS_SUCCESS` — on D3D-init failure the swap-chain is deleted so the OS makes a fresh one
+/// and re-assigns. Every processor this drops — the one it replaces, or one built for a monitor
+/// the registry no longer has — joins its thread with no lock held.
 pub unsafe extern "C" fn assign_swap_chain(
     monitor: iddcx::IDDCX_MONITOR,
     p_in: *const iddcx::IDARG_IN_SETSWAPCHAIN,
@@ -418,33 +423,35 @@ pub unsafe extern "C" fn assign_swap_chain(
         render_adapter.LowPart
     );
 
-    // FIRST drop any existing processor on this monitor (RAII-joins its worker), OUTSIDE the lock.
-    drop(crate::monitor::take_swap_chain_processor(monitor));
-
-    // The OS target id (stamped on the monitor at creation, after IddCxMonitorArrival) keys the
-    // frame-channel stash STEP 6's worker attaches from (the host addresses its IOCTL_SET_FRAME_CHANNEL
-    // delivery by this id). 0 (default) if the monitor isn't found — the worker then never attaches.
-    let target_id = crate::monitor::target_id_for_object(monitor).unwrap_or(0);
+    let entry = crate::registry::find(|m| m.object() == Some(monitor));
+    // FIRST drop any existing processor on this monitor (joins its worker), with no lock held.
+    if let Some(m) = &entry {
+        drop(m.take_swap());
+    }
 
     if let Some(device) = crate::direct_3d_device::pooled_device(luid) {
         let mut processor = crate::swap_chain_processor::SwapChainProcessor::new();
-        // STEP 6: the publisher reports this render LUID into the host header so the host detects a
-        // render-adapter mismatch (it created the ring textures on its own GPU). `luid` is the OS-picked
-        // render adapter built above.
+        // The publisher reports this render LUID into the host header so the host detects a
+        // render-adapter mismatch (it created the ring textures on its own GPU).
         processor.run(
             swap_chain,
             device,
             new_frame_event,
-            target_id,
-            luid.LowPart,
-            luid.HighPart,
+            entry.as_ref().map(Arc::downgrade).unwrap_or_default(),
+            luid,
         );
-        // Install on the monitor; drop any processor it replaced (a race lost above) OUTSIDE the lock.
-        drop(crate::monitor::set_swap_chain_processor(monitor, processor));
+        match &entry {
+            // Install; drop what it displaced (a race lost above) with no lock held.
+            Some(m) => drop(m.set_swap(processor)),
+            // No such monitor: the worker has nothing to attach to and joins right here.
+            None => drop(processor),
+        }
         // A mode is now committed on this path — re-declare the hardware cursor (the OS reverts
         // to a software cursor on every mode commit, which otherwise makes the cursor worker's
         // QueryHardwareCursor fail STATUS_NOT_SUPPORTED). No-op unless a cursor worker is live.
-        crate::monitor::resetup_cursor(monitor);
+        if let Some(m) = &entry {
+            m.resetup_cursor();
+        }
     } else {
         // D3D init failed: delete the swap-chain so the OS generates a fresh one + retries.
         dbglog!(
@@ -458,11 +465,10 @@ pub unsafe extern "C" fn assign_swap_chain(
     STATUS_SUCCESS
 }
 
-/// The monitor went inactive. STEP 5: drop the processor (RAII joins the worker thread, which deletes the
-/// swap-chain object before returning).
+/// The monitor went inactive: take its processor out and drop it with no lock held — the drop
+/// joins the worker thread, which deletes the swap-chain object before returning.
 pub unsafe extern "C" fn unassign_swap_chain(monitor: iddcx::IDDCX_MONITOR) -> NTSTATUS {
-    // Take + drop OUTSIDE any lock (the take releases `MONITOR_MODES` before the join).
-    let had = crate::monitor::take_swap_chain_processor(monitor);
+    let had = crate::registry::find(|m| m.object() == Some(monitor)).and_then(|m| m.take_swap());
     dbglog!(
         "[pf-vd] unassign_swap_chain — dropped live processor: {}",
         had.is_some()

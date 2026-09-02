@@ -21,7 +21,7 @@
 use std::{
     mem::size_of,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread::{self, JoinHandle},
@@ -43,7 +43,7 @@ use wdk_sys::iddcx::{
 use wdk_sys::{HANDLE, NTSTATUS, WDFOBJECT, call_unsafe_wdf_function_binding};
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE as WHANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Foundation::{CloseHandle, HANDLE as WHANDLE, LUID, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Graphics::{
             Direct3D11::ID3D11Texture2D,
             Dxgi::{IDXGIDevice, IDXGIResource},
@@ -60,6 +60,7 @@ use windows::{
 use crate::{
     direct_3d_device::Direct3DDevice,
     frame_transport::{FramePublisher, FrameStash, PublishOutcome, RingEndpoint},
+    monitor::Monitor,
     worker::Sendable,
 };
 
@@ -171,8 +172,8 @@ impl SwapChainProcessor {
     }
 
     /// Release the worker's idle wait so it re-runs the loop top — after a frame-channel delivery
-    /// lands, and from `Drop`. `SetEvent` never blocks, so a caller may hold `MONITOR_MODES`
-    /// across it. No-op when the event could not be created (the worker polls instead).
+    /// lands, and from `Drop`. `SetEvent` never blocks, so a caller may hold the monitor's
+    /// `swap` guard across it. No-op when the event could not be created (the worker polls).
     pub fn wake(&self) {
         if let Some(h) = self.wake {
             // SAFETY: `h` is our own event handle; `Drop` closes it only after joining the worker.
@@ -182,21 +183,24 @@ impl SwapChainProcessor {
 
     /// Spawn the drain worker for a freshly assigned swap-chain. It runs at MMCSS `Distribution`
     /// priority (TIME_CRITICAL if MMCSS declines), owns `swap_chain` for its lifetime and deletes
-    /// that object before returning. Its idle wait covers `available_buffer_event` (the
-    /// framework's surface-available event) AND this processor's wake event, so a delivery or a
-    /// stop reaches an idle display immediately rather than at the next timeout.
+    /// that object before returning. `monitor` is the weak link to its owner: the worker never
+    /// keeps the monitor alive, and the owner's teardown joins it. Its idle wait covers
+    /// `available_buffer_event` (the framework's surface-available event) AND this processor's
+    /// wake event, so a delivery or a stop reaches an idle display immediately.
     pub fn run(
         &mut self,
         swap_chain: IDDCX_SWAPCHAIN,
         device: Arc<Direct3DDevice>,
         available_buffer_event: HANDLE,
-        target_id: u32,
-        render_luid_low: u32,
-        render_luid_high: i32,
+        monitor: Weak<Monitor>,
+        render_luid: LUID,
     ) {
         let events = Sendable((self.wake, available_buffer_event));
         let swap_chain = Sendable(swap_chain);
         let terminate = self.terminate.clone();
+        // For the log lines and the ring binding check: 0 for a monitor the registry does not
+        // hold, whose worker only drains.
+        let target_id = monitor.upgrade().map_or(0, |m| m.target_id());
 
         let join_handle = thread::spawn(move || {
             // Rust 2021 disjoint closure captures would otherwise grab the raw `swap_chain.0` /
@@ -244,9 +248,9 @@ impl SwapChainProcessor {
                 &device,
                 events.0,
                 &terminate,
+                &monitor,
                 target_id,
-                render_luid_low,
-                render_luid_high,
+                render_luid,
             );
 
             dbglog!(
@@ -275,6 +279,11 @@ impl SwapChainProcessor {
         self.thread = Some(join_handle);
     }
 
+    /// The drain loop. It upgrades `monitor` once per pass for the delivery gate and releases
+    /// the strong count before it blocks, so the owner's teardown — which joins this thread
+    /// before the last `Arc` goes — is the only thing that ends the monitor. A failed upgrade
+    /// means this worker was never installed on a live monitor; it exits and the epilogue
+    /// deletes the swap-chain.
     fn run_core(
         swap_chain: IDDCX_SWAPCHAIN,
         device: &Direct3DDevice,
@@ -282,9 +291,9 @@ impl SwapChainProcessor {
         // surface-available event); one parameter so the argument count stays under the lint.
         events: (Option<WHANDLE>, HANDLE),
         terminate: &AtomicBool,
+        monitor: &Weak<Monitor>,
         target_id: u32,
-        render_luid_low: u32,
-        render_luid_high: i32,
+        render_luid: LUID,
     ) {
         let (wake, available_buffer_event) = events;
         let assignment_epoch = ASSIGNMENT_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
@@ -348,8 +357,8 @@ impl SwapChainProcessor {
         let open = |ep: Arc<RingEndpoint>| {
             FramePublisher::open(
                 ep,
-                render_luid_low,
-                render_luid_high,
+                render_luid.LowPart,
+                render_luid.HighPart,
                 &device.device,
                 &device.device_context,
                 assignment_epoch,
@@ -360,8 +369,10 @@ impl SwapChainProcessor {
         // on the monitor's endpoint, so a swap-chain flap (a SIBLING display churning the topology)
         // resumes the same host ring without any COM object crossing device epochs — a TDR
         // recreate or adapter move just makes the open fail, reported in the header.
-        let mut publisher: Option<FramePublisher> =
-            crate::monitor::endpoint(target_id).and_then(|ep| match open(ep) {
+        let mut publisher: Option<FramePublisher> = monitor
+            .upgrade()
+            .and_then(|m| m.endpoint())
+            .and_then(|ep| match open(ep) {
                 Ok(p) => {
                     dbglog!(
                         "[pf-vd] swap-chain run_core: re-opened the monitor's ring endpoint (target={target_id}) — resuming across the swap-chain flap"
@@ -383,11 +394,14 @@ impl SwapChainProcessor {
 
         let mut logged_pending = false;
         let mut logged_frame = false;
-        // The frame-channel delivery gate (see `monitor::frame_channel_gen`): the loop only takes
-        // the monitors mutex when a delivery LANDED since it last looked. Seeded one behind the
-        // current generation so a delivery that arrived before this worker started (host delivered
-        // ahead of the swap-chain assign) is checked on the very first pass.
-        let mut seen_chan_gen = crate::monitor::frame_channel_gen().wrapping_sub(1);
+        // The frame-channel delivery gate (see `Monitor::chan_gen`): the loop only locks the
+        // channel slot when a delivery LANDED since it last looked. Seeded one behind the
+        // current generation so a delivery that arrived before this worker started (host
+        // delivered ahead of the swap-chain assign) is checked on the very first pass.
+        let mut seen_chan_gen = monitor
+            .upgrade()
+            .map_or(0, |m| m.chan_gen.load(Ordering::Acquire))
+            .wrapping_sub(1);
         loop {
             // Check terminate at the TOP, every iteration. The success branch below does NOT re-check it,
             // so during a CONTINUOUS frame burst (DWM rendering the freshly-activated desktop) a thread the
@@ -409,12 +423,14 @@ impl SwapChainProcessor {
                 break;
             }
 
-            // The lock-free delivery gate: `chan_pending` is true only when a `set_frame_channel`
-            // landed since the last pass — the two mutex-taking checks below (`has_frame_channel`,
-            // `take_frame_channel`) used to run EVERY pass (≥60 locks/s per worker on a mutex
-            // contended by the whole control plane, the mode DDIs and the watchdog); now the
-            // steady state takes no lock at all.
-            let chan_gen = crate::monitor::frame_channel_gen();
+            let Some(owner) = monitor.upgrade() else {
+                dbglog!("[pf-vd] swap-chain run_core: monitor gone (target={target_id}) — exiting");
+                break;
+            };
+            // The delivery gate: `chan_pending` is true only when a delivery landed since the
+            // last pass, so the two slot-locking checks below (`has_frame_channel`,
+            // `take_frame_channel`) run only then and the steady state locks nothing.
+            let chan_gen = owner.chan_gen.load(Ordering::Acquire);
             let chan_pending = chan_gen != seen_chan_gen;
             // Re-attach triggers: `is_stale` (the host recreated the ring mid-session — HDR flip —
             // and bumped OUR header's generation; publishing on would mismatch every frame and
@@ -422,9 +438,7 @@ impl SwapChainProcessor {
             // whole NEW ring with a different header mapping, which `is_stale` can never see; the
             // host only delivers after fully creating a ring, so a pending delivery supersedes).
             if publisher.as_ref().is_some_and(FramePublisher::is_stale)
-                || (publisher.is_some()
-                    && chan_pending
-                    && crate::monitor::has_frame_channel(target_id))
+                || (publisher.is_some() && chan_pending && owner.has_frame_channel())
             {
                 // Harvest the superseded ring's last-published frame into the stash BEFORE dropping
                 // the publisher: between sessions the driver keeps publishing into the (host-side
@@ -444,14 +458,14 @@ impl SwapChainProcessor {
             // delivery). `from_channel` refuses a ring that does not name THIS monitor.
             if publisher.is_none()
                 && chan_pending
-                && let Some(channel) = crate::monitor::take_frame_channel(target_id)
+                && let Some(channel) = owner.take_frame_channel()
             {
-                let source_seq = crate::monitor::source_seq(target_id).unwrap_or_default();
+                let source_seq = owner.source_seq.clone();
                 if let Ok(ep) = RingEndpoint::from_channel(channel, target_id, source_seq) {
                     let ep = Arc::new(ep);
                     // Install BEFORE opening: the endpoint is the monitor's whatever this worker's
                     // device makes of it.
-                    crate::monitor::set_endpoint(target_id, ep.clone());
+                    owner.set_endpoint(ep.clone());
                     match open(ep.clone()) {
                         Ok(mut p) => {
                             // FIRST-FRAME GUARANTEE: republish the retained desktop image into the
@@ -474,7 +488,7 @@ impl SwapChainProcessor {
                             dbglog!(
                                 "[pf-vd] frame-push(driver): open of the fresh ring failed ({e:?}, target={target_id}) — retiring the endpoint"
                             );
-                            crate::monitor::clear_endpoint(target_id, ep.generation());
+                            owner.clear_endpoint(ep.generation());
                         }
                     }
                 }
@@ -486,6 +500,9 @@ impl SwapChainProcessor {
             if chan_pending {
                 seen_chan_gen = chan_gen;
             }
+            // Blocking from here on: hand the strong count back so this thread never decides
+            // when its own monitor drops.
+            drop(owner);
 
             // ...Buffer2 is required once CAN_PROCESS_FP16 is set. AcquireSystemMemoryBuffer=FALSE keeps
             // the GPU surface (out.MetaData.pSurface) — STEP 6 publishes it into the shared ring in the

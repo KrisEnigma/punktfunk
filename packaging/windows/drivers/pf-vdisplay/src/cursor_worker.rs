@@ -101,12 +101,10 @@ pub fn setup_hardware_cursor(monitor: iddcx::IDDCX_MONITOR, data_event: isize) -
     unsafe { wdk_iddcx::IddCxMonitorSetupHardwareCursor(monitor, &setup) }
 }
 
-// NOTE: there is NO un-declare path. Re-issuing `IddCxMonitorSetupHardwareCursor` with empty
-// caps (no alpha, XOR NONE, zero max dims) is rejected `STATUS_INVALID_PARAMETER` — observed
-// on-glass (26100, driver 9.9.0722.1407). The composite flip therefore works by FLAG + MODE
-// RE-COMMIT: `monitor::set_cursor_forward(false)` stores the flag, the host forces a same-mode
-// re-commit, and the OS's per-commit software-cursor default sticks because
-// `monitor::resetup_cursor` skips the flagged monitor.
+// There is NO un-declare path: empty caps are rejected `STATUS_INVALID_PARAMETER`. The
+// composite flip is a flag plus a mode re-commit: `monitor::set_cursor_forward(false)` stores
+// the flag, the host forces a same-mode re-commit, and the OS's per-commit software-cursor
+// default sticks because `Monitor::resetup_cursor` skips the flagged monitor.
 
 /// Map the delivered section and start the query→publish worker for `monitor`.
 ///
