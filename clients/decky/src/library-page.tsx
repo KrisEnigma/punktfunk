@@ -226,11 +226,13 @@ const STYLE = `
 `;
 
 /**
- * The button is always on a Steam title's page, as a status as much as a control: the lens mark
- * is violet when a paired host can stream the title, gray when none can. Several hosts add a
- * chevron segment with Steam's own menu; the main segment streams from the best host.
+ * The button is always on a Steam title's page, as a status as much as a control: violet when a
+ * paired host can stream the title, gray when none can. Several hosts add a chevron segment with
+ * Steam's own menu; the main segment streams from the best host. `inFlow` is the normal case —
+ * spliced into the play bar's own button group, so it lays out and navigates as one of them;
+ * without it the button floats from the anchor (the fallback when that group cannot be found).
  */
-const StreamButton: FC<Game> = (game) => {
+const StreamButton: FC<Game & { inFlow?: boolean }> = ({ inFlow, ...game }) => {
   const hosts = useHostsForApp(game.appId);
   const streaming = useGameStreaming(game.appId);
   const ready = hosts.length > 0;
@@ -247,10 +249,8 @@ const StreamButton: FC<Game> = (game) => {
     }
   };
   const hasMore = ready && !streaming && hosts.length > 1;
-  return (
-    <Focusable
-      className={joinClassNames(basicAppDetailsSectionStylerClasses.AppButtons, "punktfunk-stream")}
-    >
+  const row = (
+    <>
       <style>{STYLE}</style>
       <Focusable
         className={joinClassNames("punktfunk-stream-row", hasMore ? "has-more" : "")}
@@ -280,6 +280,16 @@ const StreamButton: FC<Game> = (game) => {
           </DialogButton>
         )}
       </Focusable>
+    </>
+  );
+  if (inFlow) {
+    return row;
+  }
+  return (
+    <Focusable
+      className={joinClassNames(basicAppDetailsSectionStylerClasses.AppButtons, "punktfunk-stream")}
+    >
+      {row}
     </Focusable>
   );
 };
@@ -354,6 +364,245 @@ type PanelChild = ReactElement<{
 }>;
 type InnerContainer = ReactElement<{ children: PanelChild[]; className?: string }>;
 
+// ---- Into the play bar itself --------------------------------------------------------------
+//
+// Measured on a Deck: from the InnerContainer, the play section is a Focusable whose child
+// (props `overview` + `onGameInfoButtonToggle`) renders a chain of "section" components (props
+// `setSections` + `overview`), several of which come in identical-looking pairs, until one
+// renders the play bar row: [Play group, stats, button group]. The button group is the
+// Focusable with the AppButtons class holding the controller and settings buttons. Landing
+// INSIDE that group is what makes the button lay out and navigate as one of Steam's own.
+//
+// Every section-shaped child is patched (one wrap per component type, cached by Decky's
+// patcher) and the shared handler either splices the button into the group it finds in its
+// output or keeps descending. A branch that never reaches the group costs one tree walk.
+
+/** The title of the page being rendered; set by the route handler before the descent runs. */
+let currentGame: Game | null = null;
+let placedInFlow = false;
+let deepFailed = false;
+let deepTimer: ReturnType<typeof setTimeout> | null = null;
+
+const isPlaySection = (x: any): boolean => !!x?.props && "onGameInfoButtonToggle" in x.props && "overview" in x.props;
+const isSectionShaped = (x: any): boolean => !!x?.props && "setSections" in x.props && "overview" in x.props;
+
+/** Every element under `node` matching `pred`, not descending into a match (its subtree is
+ *  rendered by the match itself). Bounded, because Steam's trees are deep and this runs per
+ *  render. */
+function collectElements(node: any, pred: (x: any) => boolean, out: any[] = [], depth = 0): any[] {
+  if (!node || depth > 40) {
+    return out;
+  }
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      collectElements(n, pred, out, depth + 1);
+    }
+    return out;
+  }
+  if (typeof node !== "object") {
+    return out;
+  }
+  if (pred(node)) {
+    out.push(node);
+    return out;
+  }
+  const children = node.props?.children;
+  if (children) {
+    collectElements(children, pred, out, depth + 1);
+  }
+  return out;
+}
+
+/** Splice the button into the play bar's button group if `out` contains it; otherwise patch
+ *  every section-shaped child so their renders come back through here. Never throws: a miss
+ *  leaves Steam's output untouched, because an exception here is Steam's error screen. */
+function onSectionRender(_args: unknown[], out?: ReactElement): ReactElement | undefined {
+  try {
+    if (!out || !currentGame) {
+      return out;
+    }
+    const group = findInReactTree(
+      out,
+      (x: any) =>
+        Array.isArray(x?.props?.children) &&
+        typeof x?.props?.className === "string" &&
+        x.props.className.includes(basicAppDetailsSectionStylerClasses.AppButtons),
+    ) as InnerContainer | undefined;
+    if (group) {
+      const kids = group.props.children as any[];
+      if (!kids.some((c) => c?.key === ANCHOR_KEY)) {
+        kids.splice(0, 0, <StreamButton key={ANCHOR_KEY} inFlow {...currentGame} />);
+      }
+      if (verbose()) {
+        diag(`deep: group found in ${describe(out)} → ${kids.length} kids, frozen=${Object.isFrozen(kids)}`);
+      }
+      if (!placedInFlow) {
+        placedInFlow = true;
+        deepFailed = false; // the in-flow button is showing; the anchor must not join it
+        diag(`game page ${currentGame.appId}: button placed in the play bar's button group`);
+      }
+      return out;
+    }
+    const next = collectElements(out, isSectionShaped);
+    if (verbose()) {
+      diag(`deep: ${describe(out)} → ${next.length} section child(ren): ${next.map(describe).join(", ")}`);
+    }
+    if (next.length === 0 && !placedInFlow) {
+      // A dead end: say what this output's Focusables are called, so a moved class is visible.
+      const classes = collectElements(out, (x: any) => typeof x?.props?.className === "string")
+        .map((x: any) => String(x.props.className).split(" ")[0])
+        .slice(0, 6);
+      diag(`deep: no group in [${classes.join(" ")}] (want ${basicAppDetailsSectionStylerClasses.AppButtons})`);
+    }
+    for (const child of next) {
+      patchRender(child);
+    }
+  } catch (e) {
+    diag(`deep: handler failed: ${e}`);
+  }
+  return out;
+}
+
+/** A short name for a React element, for the trace. */
+function describe(el: any): string {
+  const t = el?.type;
+  if (!t) {
+    return String(el);
+  }
+  if (typeof t === "string") {
+    return `<${t} ${String(el.props?.className ?? "").split(" ")[0]}>`;
+  }
+  if (typeof t === "function") {
+    return `${t.displayName || t.name || "fn"}${t.prototype?.isReactComponent ? "(class)" : "(fn)"}`;
+  }
+  return t.render ? `fwd:${t.render.name || "?"}` : t.type ? `memo:${t.type.name || "?"}` : "obj";
+}
+
+// One wrapper per component type, reused across renders so React sees a stable type; the
+// originals are never mutated. A class component gets a SUBCLASS whose render wraps the output:
+// a prototype patch is not enough, because Steam's page sections are MobX observers, which
+// install a reactive `render` on each instance at first render and shadow the prototype (that
+// is also why Decky's tree patcher, which wraps a class in a plain function, throws "cannot be
+// invoked without new" on them). Function components, memo and forwardRef get a wrapped copy.
+const wrappedTypes = new Map<any, any>();
+
+/** Run the original with the same `this` and arguments, naming it in the trace if it throws. */
+function callOriginal(fn: any, self: unknown, args: any[], what: string): any {
+  try {
+    return fn.apply(self, args);
+  } catch (e) {
+    diag(`deep: ${what} threw: ${e instanceof Error ? e.message : String(e)}`);
+    throw e;
+  }
+}
+
+function wrapClass(orig: any): any {
+  class Wrapped extends orig {
+    render(): any {
+      // Steam's sections are MobX observers: the first render defines a reactive `render` on the
+      // instance, read-only and non-configurable, that every later render goes through. It can
+      // only be wrapped while it is being defined, so this one synchronous call watches
+      // defineProperty for our own instance's `render` and installs a wrapped value instead.
+      const define = Object.defineProperty;
+      const self = this;
+      (Object as any).defineProperty = function (o: any, k: PropertyKey, d: PropertyDescriptor) {
+        if (o === self && k === "render" && d && typeof d.value === "function" && !(d.value as any).__punktfunk) {
+          const inner = d.value;
+          const reactive = function (this: unknown) {
+            return onSectionRender([], inner.call(this));
+          };
+          Object.setPrototypeOf(reactive, inner); // MobX finds its reaction on the render itself
+          (reactive as any).__punktfunk = true;
+          d = { ...d, value: reactive };
+        }
+        return define.call(Object, o, k, d);
+      };
+      try {
+        return onSectionRender([], callOriginal(super.render, this, [], describe({ type: orig })));
+      } finally {
+        (Object as any).defineProperty = define;
+      }
+    }
+  }
+  (Wrapped as any).__punktfunk = true;
+  try {
+    Object.defineProperty(Wrapped, "name", { value: orig.name });
+  } catch {
+    /* cosmetic */
+  }
+  return Wrapped;
+}
+
+function patchRender(el: any): void {
+  const orig = el?.type;
+  if (!orig) {
+    return;
+  }
+  const cached = wrappedTypes.get(orig);
+  if (cached) {
+    el.type = cached;
+    return;
+  }
+  let wrapped: any = orig;
+  if (typeof orig === "function") {
+    if (orig.prototype?.isReactComponent) {
+      wrapped = wrapClass(orig);
+    } else {
+      const fn = function (this: unknown, ...args: any[]) {
+        return onSectionRender(args, callOriginal(orig, this, args, describe({ type: orig })));
+      };
+      Object.assign(fn, orig);
+      (fn as any).__punktfunk = true;
+      wrapped = fn;
+    }
+  } else if (typeof orig === "object") {
+    if (typeof orig.render === "function") {
+      const render = orig.render;
+      wrapped = {
+        ...orig,
+        __punktfunk: true,
+        render: function (this: unknown, ...args: any[]) {
+          return onSectionRender(args, callOriginal(render, this, args, describe({ type: orig })));
+        },
+      };
+    } else if (orig.type) {
+      const inner = { type: orig.type };
+      patchRender(inner);
+      wrapped = { ...orig, __punktfunk: true, type: inner.type };
+    }
+  }
+  wrappedTypes.set(orig, wrapped);
+  el.type = wrapped;
+}
+
+/** Forget the wrappers — for dismount. Steam's originals were never touched. */
+function unpatchSections(): void {
+  wrappedTypes.clear();
+  placedInFlow = false;
+}
+
+/** Start the descent from the InnerContainer's render. Returns false when the play section
+ *  itself is missing — then the anchor fallback is the only option this render. */
+function placeInPlayBar(ret: ReactElement, game: Game): boolean {
+  const section = findInReactTree(ret, isPlaySection);
+  if (!section) {
+    return false;
+  }
+  currentGame = game;
+  patchRender(section);
+  if (!placedInFlow && !deepTimer) {
+    // The group only shows up once the children have rendered. If it has not within a few
+    // seconds of the first attempt, Steam's tree has moved: fall back to the floating anchor.
+    deepTimer = setTimeout(() => {
+      if (!placedInFlow) {
+        deepFailed = true;
+        diag("game page: play-bar group not found — using the anchor fallback");
+      }
+    }, 4000);
+  }
+  return true;
+}
+
 /**
  * Patch the game page: find the route's render function, and after each render splice the
  * anchor in just before the play panel (the child that carries the app overview and the launch
@@ -368,8 +617,15 @@ declare global {
   }
 }
 let lastDiag = "";
+function verbose(): boolean {
+  try {
+    return localStorage.getItem("punktfunk:diagVerbose") === "1";
+  } catch {
+    return false;
+  }
+}
 function diag(msg: string): void {
-  if (msg === lastDiag) {
+  if (msg === lastDiag && !verbose()) {
     return; // the page renders several times per open; one line per change is enough
   }
   lastDiag = msg;
@@ -407,6 +663,19 @@ function patchLibraryApp(): RoutePatch {
         },
       ],
       (_: unknown[], ret?: ReactElement) => {
+        // Guarded: an exception in a route patch is Steam's error screen for the whole page.
+        try {
+          return placeOnPage(ret);
+        } catch (e) {
+          diag(`game page: handler failed: ${e}`);
+          return ret;
+        }
+      },
+      "punktfunk-stream",
+    );
+    afterPatch(routeProps, "renderFunc", handler);
+
+    function placeOnPage(ret?: ReactElement): ReactElement | undefined {
         if (!ret || !gamePageStreamEnabled()) {
           diag(`game page: ${ret ? "button disabled by preference" : "empty render"}`);
           return ret;
@@ -434,6 +703,16 @@ function patchLibraryApp(): RoutePatch {
         if (children.some((c) => c?.key === ANCHOR_KEY)) {
           return ret; // already spliced into this render's tree
         }
+        const game: Game = {
+          appId,
+          title: overview.display_name,
+          iconHash: typeof overview.icon_hash === "string" ? overview.icon_hash : "",
+        };
+        // Normal path: into the play bar's own button group (see placeInPlayBar). The anchor
+        // below is the fallback for a Steam tree where that group cannot be reached.
+        if (placeInPlayBar(ret, game) && !(deepFailed && !placedInFlow)) {
+          return ret;
+        }
         // The children are [header, play section, launching-details] — the last carries the
         // overview and the launch callback but draws nothing, so it is only a witness that this
         // is the page. The anchor goes right AFTER THE HEADER (the child with the `fullscreen`
@@ -456,21 +735,9 @@ function patchLibraryApp(): RoutePatch {
           `game page ${appId}: anchor spliced at ${at}/${children.length}, ` +
             `${hostsForApp(appId, getHostStore().views).length} host(s) have it`,
         );
-        children.splice(
-          at,
-          0,
-          <StreamButtonAnchor
-            key={ANCHOR_KEY}
-            appId={appId}
-            title={overview.display_name}
-            iconHash={typeof overview.icon_hash === "string" ? overview.icon_hash : ""}
-          />,
-        );
+        children.splice(at, 0, <StreamButtonAnchor key={ANCHOR_KEY} {...game} />);
         return ret;
-      },
-      "punktfunk-stream",
-    );
-    afterPatch(routeProps, "renderFunc", handler);
+    }
     return tree;
   });
 }
@@ -480,5 +747,6 @@ export function installGamePageStream(): () => void {
   const patch = patchLibraryApp();
   return () => {
     routerHook.removePatch(ROUTE, patch);
+    unpatchSections();
   };
 }

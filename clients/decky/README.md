@@ -69,13 +69,23 @@ drew it, with no button, rather than a broken page.
 The button is always there on a Steam title's page, as a status as much as a control: the whole
 button is brand violet when a host can stream the title and Steam's muted gray when none can (a
 tap then says so in a toast), with the lens mark from the Punktfunk logo as its icon. Steam's
-focus rule for that button class turns it white; the violet state outranks it by one class and
-brightens instead, the way Play stays green under focus. Placement was measured on a Deck: the
-anchor sits at the boundary
-between the header and the play section, and the button occupies the slot before Steam's ⚙ / ℹ
-pair, drawn with Steam's own play-bar button class so height, radius and focus ring match. Several
-hosts add a chevron segment that opens Steam's own context menu, the way the Play button's dropdown
-lists the clients a game could run on; the main segment streams from the best host.
+focus rule for that button class turns it white; the violet state is `!important` and brightens
+instead, the way Play stays green under focus.
+
+**It lives inside Steam's own button group**, as the first of the three (Stream, controller,
+settings), so it lays out and — what matters on a Deck — **navigates** as one of them: the d-pad
+reaches it in order rather than skipping from the stats to the controller icon. Getting there
+means rendering through five of Steam's section components below the route. The play section is a
+MobX observer class, so a prototype patch never runs (MobX installs a read-only, non-configurable
+reactive `render` on each instance), and a plain function wrapper around a class throws — which
+is how Decky's tree patcher took the page down during development. Each class is therefore
+replaced by a subclass that wraps MobX's render at the moment it is defined; function, memo and
+forwardRef components get wrapped copies; every render handler is guarded so a miss leaves
+Steam's output untouched. If the group cannot be reached within a few seconds, the button falls
+back to a floating anchor at the same spot. `localStorage["punktfunk:diagVerbose"] = "1"` traces
+every step. Several hosts add a chevron segment that opens Steam's own context menu, the way the
+Play button's dropdown lists the clients a game could run on; the main segment streams from the
+best host.
 
 What decides whether the button is violet:
 
