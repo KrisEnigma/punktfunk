@@ -206,19 +206,6 @@ iddcx_ddi!(
         @ IddCxSwapChainFinishedProcessingFrameTableIndex as PFN_IDDCXSWAPCHAINFINISHEDPROCESSINGFRAME
 );
 iddcx_ddi!(
-    /// Report per-frame processing statistics for the last processed frame (frame number, status,
-    /// acquire/send QPC times). The OS-side per-output scheduling consumes these; the canonical MS
-    /// sample leaves the call as a TODO, and this driver historically never made it — added for the
-    /// 2026-08 case-#4 A/B (virtual-head-selective compose starvation: DWM composes a lit sibling
-    /// head at full rate while this head's swap-chain drains E_PENDING for 150–2200 ms with damage
-    /// pending). HRESULT-shaped.
-    IddCxSwapChainReportFrameStatistics(
-        swap_chain: iddcx::IDDCX_SWAPCHAIN,
-        in_args: *const iddcx::IDARG_IN_REPORTFRAMESTATISTICS,
-    ) @ IddCxSwapChainReportFrameStatisticsTableIndex as PFN_IDDCXSWAPCHAINREPORTFRAMESTATISTICS
-);
-
-iddcx_ddi!(
     /// Raise the swap-chain's processing D3D device to realtime GPU scheduling priority — "higher
     /// than any regular application can set" (IddCx 1.9) — so buffer processing outruns ordinary
     /// GPU contention. It does NOT help against adapter-wide display servicing (modeset-class DDIs

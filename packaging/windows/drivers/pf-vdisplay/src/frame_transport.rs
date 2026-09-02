@@ -866,12 +866,18 @@ impl FramePublisher {
         self.ep.is_stale()
     }
 
-    /// v2 telemetry tail, drain side (stall attribution): stamp the heartbeat on EVERY drain-loop
-    /// pass — and the last-acquire on a pass that actually acquired a composed frame — so the host
-    /// can split a capture stall into "our worker starved" (heartbeat went stale) vs "the worker
-    /// drained E_PENDING the whole hole — DWM composed nothing" (heartbeat fresh, last-acquire
-    /// stale). Gated on the host's stamped header version (see the `telemetry` field docs);
-    /// best-effort Relaxed stores, the `driver_status` visibility contract.
+    /// v2 telemetry tail, drain side (stall attribution): stamp the heartbeat — and, on a pass
+    /// that acquired a composed frame, the last-acquire — so the host can split a capture stall
+    /// into "our worker starved" (heartbeat went stale) vs "the worker drained E_PENDING the whole
+    /// hole — DWM composed nothing" (heartbeat fresh, last-acquire stale).
+    ///
+    /// Stamped AFTER `IddCxSwapChainFinishedProcessingFrame` on the success path, and before the
+    /// surface-available wait on E_PENDING — never between acquire and Finished. That window is
+    /// the one DWM waits on for this head, so anything the drain loop does inside it lands on the
+    /// frame's own latency; outside it, the stores are free.
+    ///
+    /// Gated on the host's stamped header version (see the `telemetry` field docs); best-effort
+    /// Relaxed stores, the `driver_status` visibility contract.
     pub fn note_drain(&self, acquired: bool) {
         if !self.ep.telemetry {
             return;
