@@ -18,7 +18,7 @@ import { ReactElement } from "react";
 import { hostsForApp } from "./catalog";
 import { diag, verbose } from "./diag";
 import { Game } from "./game";
-import { getHostStore } from "./hooks";
+import { getHostStore, refreshHostsIfStale } from "./hooks";
 import { collectElements, createRenderPatcher, describe } from "./patch";
 import { patchPlayGroup, resetPlayFrom } from "./play-from";
 import { steamAppIdForShortcut } from "./steam";
@@ -48,6 +48,10 @@ export function setGamePageStreamEnabled(on: boolean): void {
 
 /** Steam's `app_type` for a non-Steam shortcut — never a host's `steam:<appid>`. */
 const APP_TYPE_SHORTCUT = 1073741824;
+
+/** A game page opened this long after the last scan rescans in the background, so a title
+ *  installed on the host since then shows up in the ▾ menu without a trip to the panel. */
+const STALE_MS = 60_000;
 
 // Steam shows the page of the app it launched or just closed. For a stream that is the hidden
 // per-game shortcut, whose page is nothing a user should see; the place to be is the Steam
@@ -259,6 +263,7 @@ function patchLibraryApp(): RoutePatch {
       if (!reachPlayBar(ret, game)) {
         diag(`game page ${appId}: no play section in the page`);
       }
+      void refreshHostsIfStale(STALE_MS);
       return ret;
     }
     return tree;
