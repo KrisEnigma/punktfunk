@@ -89,7 +89,10 @@ display name and dressed in the game's own grid, hero, logo, header and icon (`g
 `appcache/librarycache` first, the store CDN second). So the overlay, the "now playing" surfaces
 and the friends list show the game, not Punktfunk. Steam keys controller layouts by a shortcut's
 lowercase name, so the native-touch layout is bound per game name too. The shortcut is reused on
-later streams and recreated if removed; **About → Remove game shortcuts** deletes them all. The
+later streams and recreated if removed; **About → Remove game shortcuts** deletes them all. Steam
+shows the page of the app it launched or just closed — for a stream that would be the hidden
+shortcut's page, so the route patch sends that page back to the title's own page (back first,
+then navigate if back landed elsewhere). The
 shortcut's last-played time is mirrored onto the title at each launch and again at load, so the
 game climbs the Deck's **Recent** shelf and stays there across a reboot.
 

@@ -12,6 +12,7 @@ import {
   basicAppDetailsSectionStylerClasses,
   createReactTreePatcher,
   findInReactTree,
+  Navigation,
 } from "@decky/ui";
 import { ReactElement } from "react";
 import { hostsForApp } from "./catalog";
@@ -20,6 +21,7 @@ import { Game } from "./game";
 import { getHostStore } from "./hooks";
 import { collectElements, createRenderPatcher, describe } from "./patch";
 import { patchPlayGroup, resetPlayFrom } from "./play-from";
+import { steamAppIdForShortcut } from "./steam";
 
 const ROUTE = "/library/app/:appid";
 const STYLE_KEY = "punktfunk-style";
@@ -46,6 +48,33 @@ export function setGamePageStreamEnabled(on: boolean): void {
 
 /** Steam's `app_type` for a non-Steam shortcut — never a host's `steam:<appid>`. */
 const APP_TYPE_SHORTCUT = 1073741824;
+
+// Steam shows the page of the app it launched or just closed. For a stream that is the hidden
+// per-game shortcut, whose page is nothing a user should see; the place to be is the Steam
+// title's own page. Back first — the title's page is normally what lies beneath — and only if
+// that landed elsewhere, navigate to it. Throttled per shortcut so a stuck stack cannot spin.
+const redirectedAt = new Map<number, number>();
+function redirectShortcutPage(shortcutAppId: number, steamAppId: number): void {
+  const now = Date.now();
+  if (now - (redirectedAt.get(shortcutAppId) ?? 0) < 1500) {
+    return;
+  }
+  redirectedAt.set(shortcutAppId, now);
+  diag(`game page: shortcut ${shortcutAppId} stands for ${steamAppId} — returning to its page`);
+  const target = `/library/app/${steamAppId}`;
+  setTimeout(() => {
+    try {
+      Navigation.NavigateBack();
+      setTimeout(() => {
+        if (!window.location.pathname.endsWith(target)) {
+          Navigation.Navigate(target);
+        }
+      }, 350);
+    } catch (e) {
+      diag(`game page: redirect failed: ${e}`);
+    }
+  }, 0);
+}
 
 // Steam's own Play button while a Punktfunk host is chosen in its dropdown (play-from.tsx adds
 // the class). Steam's Play is gray at rest and green only under focus or hover, a sliding
@@ -203,6 +232,13 @@ function patchLibraryApp(): RoutePatch {
         return ret;
       }
       const appId = overview?.appid;
+      if (typeof appId === "number" && overview?.app_type === APP_TYPE_SHORTCUT) {
+        const steamAppId = steamAppIdForShortcut(appId);
+        if (steamAppId != null) {
+          redirectShortcutPage(appId, steamAppId);
+        }
+        return ret;
+      }
       if (
         typeof appId !== "number" ||
         overview?.app_type === APP_TYPE_SHORTCUT ||

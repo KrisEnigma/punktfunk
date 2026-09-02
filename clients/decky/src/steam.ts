@@ -555,7 +555,8 @@ function gameShortcutPairs(): Array<[number, number]> {
   return pairs;
 }
 
-function steamAppIdForShortcut(shortcutAppId: number): number | null {
+/** The Steam title a per-game shortcut stands for, or null for any other appid. */
+export function steamAppIdForShortcut(shortcutAppId: number): number | null {
   return gameShortcutPairs().find(([, s]) => s === shortcutAppId)?.[0] ?? null;
 }
 

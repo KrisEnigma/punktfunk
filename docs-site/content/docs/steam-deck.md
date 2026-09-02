@@ -99,7 +99,8 @@ stream — plus a door into the client's own gamepad UI for everything else.
   or not the Deck has the game installed, so a page that says **Install** can stream instead of
   downloading. A sleeping host is woken first when the client knows how (see
   [Wake-on-LAN](/docs/wake-on-lan)). While it streams, Steam shows the **game** as running — its
-  name, its art, in the overlay and to your friends — and the button reads **Stop**. Pick "This
+  name, its art, in the overlay and to your friends — and the button reads **Stop**; quitting from the Steam menu returns you to the game's page.
+  Pick "This
   device" or a Steam PC to hand the button back to Steam. The entries are on by default; the
   switch is in the panel under **Punktfunk → Punktfunk in Steam's Play menu**.
 - **Open Punktfunk** — opens the client's console home: the host picker, adding a host by address,
