@@ -106,12 +106,13 @@ export async function refreshLibraries(views: HostView[]): Promise<void> {
           const steamAppIds = (r.games ?? [])
             .map((g) => steamAppId(g.id))
             .filter((n): n is number => n != null);
-          // The feature is invisible until a game page is opened, so the first time a host's
-          // titles arrive, say so — once per host record, never again while it stays known.
+          // The feature is invisible until a game's ▾ menu is opened, so the first time a host's
+          // titles arrive, say so — once per host record. A Decky toast body clips past roughly
+          // forty characters, so this is a count and a name, nothing more.
           if (!snapshots.has(v.ref) && steamAppIds.length > 0) {
             toaster.toast({
-              title: "Punktfunk",
-              body: `${steamAppIds.length} Steam ${steamAppIds.length === 1 ? "game" : "games"} on ${v.name} now have a Stream button on their pages`,
+              title: `Stream from ${v.name}`,
+              body: `${steamAppIds.length} Steam ${steamAppIds.length === 1 ? "game" : "games"} ready in Play menus`,
               duration: 8_000,
             });
           }
