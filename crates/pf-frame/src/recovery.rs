@@ -5,7 +5,7 @@
 //! An EPISODE opens on a `Stalled` verdict and walks the ladder from the class's first actuator:
 //!
 //! ```text
-//! EncoderReset -> RingReset -> SwapChainReset -> PresentationReset -> DriverCycle -> Failed
+//! EncoderReset -> SwapChainReset -> PresentationReset -> DriverCycle -> Failed
 //! ```
 //!
 //! Each stage runs ONCE per episode under a deadline and records its outcome; a stage that
@@ -25,10 +25,8 @@ use crate::health::{HealthClass, StallClass};
 /// tells the coordinator through [`Event::StageDone`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
-    /// Video-worker / encoder reset — the conversion class's first actuator (WP14).
+    /// Video-worker / encoder reset — the conversion and transport classes' first actuator.
     EncoderReset,
-    /// New ring endpoint generation, no topology write.
-    RingReset,
     /// The driver asks the OS for a new swap-chain and fresh device objects.
     SwapChainReset,
     /// One actor-mediated same-mode reset, only for presentation evidence.
@@ -38,9 +36,8 @@ pub enum Stage {
 }
 
 impl Stage {
-    const LADDER: [Stage; 5] = [
+    const LADDER: [Stage; 4] = [
         Stage::EncoderReset,
-        Stage::RingReset,
         Stage::SwapChainReset,
         Stage::PresentationReset,
         Stage::DriverCycle,
@@ -49,8 +46,9 @@ impl Stage {
     /// The first actuator for a stall class (D7 table).
     pub fn first_for(class: StallClass) -> Stage {
         match class {
-            StallClass::Conversion => Stage::EncoderReset,
-            StallClass::Transport => Stage::RingReset,
+            // One transport: an access-unit hole with a live source is the encoder's, and
+            // the ladder's own escalation carries it to the driver cycle.
+            StallClass::Conversion | StallClass::Transport => Stage::EncoderReset,
             StallClass::Worker => Stage::SwapChainReset,
             StallClass::Presentation => Stage::PresentationReset,
             StallClass::Driver => Stage::DriverCycle,
@@ -395,7 +393,7 @@ mod tests {
 
     #[test]
     fn ladder_order_and_class_entry_points() {
-        assert_eq!(Stage::first_for(StallClass::Transport), Stage::RingReset);
+        assert_eq!(Stage::first_for(StallClass::Transport), Stage::EncoderReset);
         assert_eq!(Stage::first_for(StallClass::Worker), Stage::SwapChainReset);
         assert_eq!(
             Stage::first_for(StallClass::Presentation),
@@ -413,7 +411,7 @@ mod tests {
             s = next;
             n += 1;
         }
-        assert_eq!((s, n), (Stage::DriverCycle, 5));
+        assert_eq!((s, n), (Stage::DriverCycle, 4));
     }
 
     #[test]
@@ -423,7 +421,7 @@ mod tests {
         assert_eq!(c.step(t0, Event::Verdict(HealthClass::Idle)), Action::None);
         assert_eq!(
             c.step(t0, stalled(StallClass::Transport)),
-            Action::Run(Stage::RingReset)
+            Action::Run(Stage::EncoderReset)
         );
         assert!(c.owns_episode());
         // A second stalled verdict while the episode runs is not a new incident.
@@ -431,7 +429,7 @@ mod tests {
         assert_eq!(
             c.step(
                 t0 + S,
-                Event::StageDone(Stage::RingReset, StageOutcome::Applied)
+                Event::StageDone(Stage::EncoderReset, StageOutcome::Applied)
             ),
             Action::None
         );
@@ -443,7 +441,7 @@ mod tests {
         let s = c.last_summary().unwrap();
         assert!(s.recovered);
         assert_eq!(s.stages.len(), 1);
-        assert_eq!(s.stages[0].stage, Stage::RingReset);
+        assert_eq!(s.stages[0].stage, Stage::EncoderReset);
         assert_eq!((s.consecutive_failures, s.cooldown), (0, Duration::ZERO));
         assert_eq!(c.cooldown_until(), None);
     }
@@ -459,7 +457,6 @@ mod tests {
             Action::Run(Stage::EncoderReset)
         );
         let expect = [
-            Stage::RingReset,
             Stage::SwapChainReset,
             Stage::PresentationReset,
             Stage::DriverCycle,
@@ -482,7 +479,7 @@ mod tests {
         assert_eq!(c.step(t, Event::Tick), Action::Failed);
         let s = c.last_summary().unwrap();
         assert!(!s.recovered);
-        assert_eq!(s.stages.len(), 5, "each stage exactly once");
+        assert_eq!(s.stages.len(), 4, "each stage exactly once");
         assert_eq!(s.consecutive_failures, 1);
         assert_eq!(s.cooldown, b.cooldown_base);
         // In cooldown the next stall is suppressed, not re-fought.
@@ -549,10 +546,13 @@ mod tests {
             let t = t0 + Duration::from_secs(20 * u64::from(i));
             assert_eq!(
                 c.step(t, stalled(StallClass::Transport)),
-                Action::Run(Stage::RingReset)
+                Action::Run(Stage::EncoderReset)
             );
             assert_eq!(
-                c.step(t, Event::StageDone(Stage::RingReset, StageOutcome::Applied)),
+                c.step(
+                    t,
+                    Event::StageDone(Stage::EncoderReset, StageOutcome::Applied)
+                ),
                 Action::None
             );
             assert_eq!(c.step(t + S, frames(3)), Action::Recovered);
@@ -564,7 +564,7 @@ mod tests {
         let t = t0 + b.episode_window + S;
         assert_eq!(
             c.step(t, stalled(StallClass::Transport)),
-            Action::Run(Stage::RingReset)
+            Action::Run(Stage::EncoderReset)
         );
         assert_eq!(c.suppressed(), 0);
     }
@@ -620,7 +620,7 @@ mod tests {
         c.step(t0, stalled(StallClass::Transport));
         c.step(
             t0,
-            Event::StageDone(Stage::RingReset, StageOutcome::Applied),
+            Event::StageDone(Stage::EncoderReset, StageOutcome::Applied),
         );
         assert_ne!(c.step(t0 + S, frames(1)), Action::Recovered);
         assert_ne!(c.step(t0 + S, frames(1)), Action::Recovered);

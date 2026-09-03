@@ -330,8 +330,7 @@ impl Encoder for TrackedEncoder {
 }
 
 /// openh264 rate-control misconfigures if handed a hardware-session bitrate.
-/// Shared by both OS software arms.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "linux")]
 const SW_BITRATE_CEIL: u64 = 100_000_000;
 
 /// Linux half of [`open_video_backend`] with the pref injected. `set_var`
@@ -599,196 +598,26 @@ fn open_video_backend(
     }
     #[cfg(target_os = "windows")]
     {
-        // Negotiated PyroWave first, like Linux. Own Vulkan device; H.26x
-        // selection below is moot. See `design/pyrowave-windows-host-zerocopy.md`.
-        if codec == Codec::PyroWave {
-            #[cfg(feature = "pyrowave")]
-            {
-                let _ = (format, cuda);
-                // PCI ids, not the LUID — see `PyroWaveEncoder::open`.
-                let (vendor_id, device_id) = pf_gpu::selected_gpu()
-                    .map(|s| (s.info.vendor_id, s.info.device_id))
-                    .unwrap_or((0, 0));
-                return pyrowave::PyroWaveEncoder::open(
-                    width,
-                    height,
-                    fps,
-                    bitrate_bps,
-                    chroma,
-                    bit_depth,
-                    vendor_id,
-                    device_id,
-                )
-                .map(|e| (Box::new(e) as Box<dyn Encoder>, "pyrowave"));
-            }
-            #[cfg(not(feature = "pyrowave"))]
-            anyhow::bail!(
-                "session negotiated PyroWave but this host was built without --features \
-                 punktfunk-host/pyrowave (the advertisement bit should not have been set)"
-            );
-        }
-        let _ = cuda; // always false on Windows (no Cuda payload)
-        let backend = windows_resolved_backend();
-        // Pin vs selected-vendor mismatch is overridden; honoring it can only
-        // fail. Warn so the stale pin is removed from host.env.
-        if windows_pinned_backend().is_some_and(|pin| pin != backend) {
-            tracing::warn!(
-                adapter = pf_gpu::selected_gpu()
-                    .map(|s| s.info.name)
-                    .as_deref()
-                    .unwrap_or("?"),
-                pinned = %pf_host_config::config().encoder_pref,
-                using = ?backend,
-                "explicit PUNKTFUNK_ENCODER pin does not match the selected GPU's vendor — the \
-                 pin is overridden (remove it from host.env, or point the GPU preference at the \
-                 pinned vendor's adapter)"
-            );
-        }
-        match backend {
-            WindowsBackend::Nvenc => {
-                // DXGI capturer uses `FramePayload::D3d11` under the same env
-                // so capture and encode share textures.
-                #[cfg(feature = "nvenc")]
-                {
-                    nvenc::NvencD3d11Encoder::open(
-                        codec,
-                        format,
-                        width,
-                        height,
-                        fps,
-                        bitrate_bps,
-                        bit_depth,
-                        chroma,
-                        max_slices,
-                        pf_gpu::resolve_render_adapter_luid(),
-                    )
-                    .map(|e| (Box::new(e) as Box<dyn Encoder>, "nvenc"))
-                }
-                #[cfg(not(feature = "nvenc"))]
-                {
-                    anyhow::bail!(
-                        "NVENC requested/detected but this host was built without it — rebuild \
-                         with `--features nvenc`"
-                    )
-                }
-            }
-            WindowsBackend::Amf => {
-                // Native AMF only; no build feature (`amfrt64.dll` at runtime).
-                // A missing runtime fails here — no silent FFmpeg degrade.
-                // See `design/native-amf-encoder.md`.
-                amf::AmfEncoder::open(
-                    codec,
-                    format,
-                    width,
-                    height,
-                    fps,
-                    bitrate_bps,
-                    bit_depth,
-                    chroma,
-                    pf_gpu::resolve_render_adapter_luid(),
-                )
-                .map(|e| (Box::new(e) as Box<dyn Encoder>, "amf"))
-                .map_err(|e| {
-                    e.context(
-                        "native AMF encode failed to open (update the AMD driver / amfrt64.dll \
-                         runtime)",
-                    )
-                })
-            }
-            WindowsBackend::Qsv => {
-                // Native VPL first. ffmpeg on open-failure, or
-                // `PUNKTFUNK_QSV_FFMPEG=1`. See `design/native-qsv-encoder.md`.
-                #[cfg(feature = "qsv")]
-                {
-                    // Trim so `"1 "` from a shell/`.env` takes effect. Keep
-                    // `TRUE` — a bare `matches!` would drop that spelling.
-                    let ffmpeg_forced = std::env::var("PUNKTFUNK_QSV_FFMPEG").is_ok_and(|v| {
-                        matches!(
-                            v.trim().to_ascii_lowercase().as_str(),
-                            "1" | "true" | "yes" | "on"
-                        )
-                    });
-                    if !ffmpeg_forced {
-                        match qsv::QsvEncoder::open(
-                            codec,
-                            format,
-                            width,
-                            height,
-                            fps,
-                            bitrate_bps,
-                            bit_depth,
-                            chroma,
-                            pf_gpu::resolve_render_adapter_luid(),
-                        ) {
-                            Ok(e) => return Ok((Box::new(e) as Box<dyn Encoder>, "qsv")),
-                            Err(e) => {
-                                #[cfg(feature = "amf-qsv")]
-                                tracing::warn!(
-                                    error = %format!("{e:#}"),
-                                    "native QSV open failed — falling back to the ffmpeg QSV path"
-                                );
-                                #[cfg(not(feature = "amf-qsv"))]
-                                return Err(e.context(
-                                    "native QSV encode failed to open (update the Intel driver / \
-                                     no VPL runtime on this box)",
-                                ));
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            "PUNKTFUNK_QSV_FFMPEG=1 — skipping native QSV (bring-up escape hatch)"
-                        );
-                    }
-                }
-                // Native open-failure fallback and the `PUNKTFUNK_QSV_FFMPEG` hatch.
-                #[cfg(feature = "amf-qsv")]
-                {
-                    ffmpeg_win::FfmpegWinEncoder::open(
-                        ffmpeg_win::WinVendor::Qsv,
-                        codec,
-                        format,
-                        width,
-                        height,
-                        fps,
-                        bitrate_bps,
-                        bit_depth,
-                        chroma,
-                    )
-                    .map(|e| (Box::new(e) as Box<dyn Encoder>, "qsv"))
-                }
-                #[cfg(all(not(feature = "amf-qsv"), not(feature = "qsv")))]
-                {
-                    anyhow::bail!(
-                        "Intel (QSV) encode requested/detected but this host was built without \
-                         it — rebuild with `--features qsv` (native VPL) or `--features amf-qsv` \
-                         (libavcodec)"
-                    )
-                }
-                #[cfg(all(not(feature = "amf-qsv"), feature = "qsv"))]
-                {
-                    anyhow::bail!(
-                        "native QSV was skipped via PUNKTFUNK_QSV_FFMPEG but this host was built \
-                         without the ffmpeg fallback (`amf-qsv`)"
-                    )
-                }
-            }
-            WindowsBackend::Software => {
-                anyhow::ensure!(
-                    codec == Codec::H264,
-                    "the Windows software encoder supports H.264 only; client negotiated {codec:?} \
-                     (build a GPU backend: --features nvenc or amf-qsv, or request H264)"
-                );
-                let _ = (bit_depth, chroma); // the software H.264 path is 8-bit 4:2:0 only
-                sw::OpenH264Encoder::open(
-                    format,
-                    width,
-                    height,
-                    fps,
-                    bitrate_bps.min(SW_BITRATE_CEIL),
-                )
-                .map(|e| (Box::new(e) as Box<dyn Encoder>, "software"))
-            }
-        }
+        // The pf-vdisplay driver holds the only Windows encoder: it opens the backend on the
+        // pooled device inside WUDFHost and publishes access units into the session's AU
+        // section, which `pf_capture::open_driver_encoder` wraps as the loop's `Encoder`.
+        // Reaching here means a Windows session resolved to a non-IDD-push capture source,
+        // which no longer exists.
+        let _ = (
+            codec,
+            format,
+            width,
+            height,
+            fps,
+            bitrate_bps,
+            cuda,
+            bit_depth,
+            chroma,
+        );
+        anyhow::bail!(
+            "on Windows the pf-vdisplay driver encodes; the host opens no local video encoder \
+             (the session must come from the IDD-push capture source)"
+        )
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
@@ -1706,7 +1535,10 @@ pub fn can_open_another_session() -> bool {
 
 // `#[path]` keeps `crate::*` names flat. The Windows backends and the shared
 // NVENC/RFI/policy/PyroWave-wire modules arrive through the `pf_encode_win` glob.
+// Only the two capability probes here are production users since the driver took the
+// Windows encode; `FfmpegWinEncoder` survives as the live tests' reference encoder.
 #[cfg(all(target_os = "windows", feature = "amf-qsv"))]
+#[cfg_attr(not(test), allow(dead_code))]
 #[path = "enc/windows/ffmpeg_win.rs"]
 mod ffmpeg_win;
 #[cfg(target_os = "linux")]
@@ -1721,8 +1553,9 @@ mod nvenc_cuda;
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "amf-qsv")))]
 #[path = "enc/libav.rs"]
 mod libav;
-// Software (openh264) H.264 — GPU-less path on both Windows and Linux.
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+// Software (openh264) H.264 — the GPU-less Linux path. Windows has none: the driver
+// needs a render adapter to exist at all (plan §9-1).
+#[cfg(target_os = "linux")]
 #[path = "enc/sw.rs"]
 mod sw;
 #[cfg(target_os = "linux")]

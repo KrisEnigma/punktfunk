@@ -41,14 +41,12 @@ struct Episode {
     worst: Duration,
 }
 
-/// Driver telemetry for one stall window (v2 header tail:
-/// `pf_driver_proto::frame::SharedHeader`), sampled between the last pre-gap
-/// frame and the frame that ended the stall.
+/// Driver telemetry for one stall window (the AU section header), sampled
+/// between the last pre-gap frame and the frame that ended the stall.
 pub(super) struct StallEvidence {
-    /// Delta of `offered_total` in the window. `None` = pre-telemetry driver (no tail).
-    pub(super) offered_delta: Option<u64>,
-    /// Max `now − heartbeat` over the window, in milliseconds.
-    pub(super) max_heartbeat_age_ms: u64,
+    /// Max `now − drain heartbeat` over the window, in milliseconds. `None` before the
+    /// encoder is open, when the driver reports nothing.
+    pub(super) max_heartbeat_age_ms: Option<u64>,
     pub(super) probes: Option<ProbeWindow>,
     /// DxgKrnl DDI summary for the window. `None` when the ETW session is unavailable.
     pub(super) etw: Option<String>,
@@ -115,8 +113,6 @@ impl std::fmt::Display for ProbeWindow {
 pub(super) enum StallClass {
     /// Drain worker starved (CPU / MMCSS / dead WUDFHost).
     OursWorker,
-    /// Composed and offered, never consumable (ring / publish / consume).
-    OursDelivery,
     /// Engine-liveness fences stalled with the hole: the adapter froze
     /// (link train, power transition, mux).
     AdapterFreeze,
@@ -142,7 +138,6 @@ impl std::fmt::Display for StallClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::OursWorker => "OURS-worker (drain thread starved)",
-            Self::OursDelivery => "OURS-delivery (ring/publish/consume lost composed frames)",
             Self::AdapterFreeze => {
                 "CLASS-1 adapter freeze (engines stalled below the OS — link/power/mux servicing)"
             }
@@ -210,7 +205,6 @@ pub(super) fn classify(
 ) -> StallClass {
     match verdict {
         StallVerdict::WorkerStalled => return StallClass::OursWorker,
-        StallVerdict::DeliveryLeg => return StallClass::OursDelivery,
         StallVerdict::ComposeSilence | StallVerdict::NoTelemetry => {}
     }
     let Some(p) = probes else {
@@ -224,8 +218,8 @@ pub(super) fn classify(
     if covers(p.dwm_tick_frozen_us) || covers(p.dwm_flush_max_us) {
         return StallClass::CompositorBlocked;
     }
-    // Only the driver's E_PENDING pins silence on the present path. Without
-    // it (pre-telemetry) the delivery leg is equally possible.
+    // Only the driver's own heartbeat pins silence on the present path; without
+    // it the hole has no owner.
     if matches!(verdict, StallVerdict::ComposeSilence) {
         match etw_counts {
             Some(c) if c.present_history => {
@@ -253,23 +247,21 @@ pub(super) fn classify(
 /// Attribution from driver telemetry alone, before the probe/ETW matrix.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum StallVerdict {
-    /// Pre-telemetry driver: host observation only.
+    /// No driver telemetry yet: host observation only.
     NoTelemetry,
     /// Drain heartbeat silent for a large share of the hole (CPU/MMCSS or dead WUDFHost).
     WorkerStalled,
-    /// Worker drained E_PENDING: DWM composed nothing. Below capture; probes + ETW split it.
+    /// The worker kept draining and the pool took nothing: DWM composed nothing. Below
+    /// capture; probes + ETW split it.
     ComposeSilence,
-    /// Frames composed and offered, none consumable — our publish/ring/consume leg.
-    DeliveryLeg,
 }
 
 impl std::fmt::Display for StallVerdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::NoTelemetry => "pre-telemetry driver (no verdict)",
+            Self::NoTelemetry => "no driver telemetry yet (no verdict)",
             Self::WorkerStalled => "driver-worker-stalled (heartbeat silent) — host CPU/MMCSS or a dead WUDFHost, NOT the display path",
-            Self::ComposeSilence => "compose-silence (driver drained E_PENDING) — DWM composed nothing; the disturbance is below capture",
-            Self::DeliveryLeg => "delivery-leg (frames were composed + offered but never consumable) — OUR ring/publish/consume leg",
+            Self::ComposeSilence => "compose-silence (the driver's pool took no frame) — DWM composed nothing; the disturbance is below capture",
         })
     }
 }
@@ -277,17 +269,15 @@ impl std::fmt::Display for StallVerdict {
 /// Fold one stall window into a [`StallVerdict`].
 ///
 /// Heartbeat ever `max(gap/2, 250 ms)` stale convicts the worker (cadence is
-/// ≤16 ms, so 250 ms is starvation; gap/2 scales long holes). `offered_delta
-/// ≥ 8` acquits DWM — same sustained-flow bar as [`StallWatch::RECENT`].
+/// ≤16 ms, so 250 ms is starvation; gap/2 scales long holes). A heartbeat that
+/// stayed fresh through the hole acquits it: DWM composed nothing.
 pub(super) fn attribute(gap: Duration, evidence: &StallEvidence) -> StallVerdict {
-    let Some(offered) = evidence.offered_delta else {
+    let Some(hb_age_ms) = evidence.max_heartbeat_age_ms else {
         return StallVerdict::NoTelemetry;
     };
     let gap_ms = gap.as_millis() as u64;
-    if evidence.max_heartbeat_age_ms >= (gap_ms / 2).max(250) {
+    if hb_age_ms >= (gap_ms / 2).max(250) {
         StallVerdict::WorkerStalled
-    } else if offered >= 8 {
-        StallVerdict::DeliveryLeg
     } else {
         StallVerdict::ComposeSilence
     }
@@ -309,9 +299,9 @@ pub(super) struct StallWatch {
     with_os_events: u32,
     /// Per-verdict counts in [`StallVerdict`] order. The metronomic WARN prints
     /// the session, not just the stall that tripped the beat.
-    verdicts: [u32; 4],
+    verdicts: [u32; 3],
     /// Per-class counts in [`StallClass`] declaration order.
-    classes: [u32; 8],
+    classes: [u32; 7],
     /// Open stretch; every stall-sized hole feeds it until sustained flow returns.
     episode: Option<Episode>,
     pending_recovery: Option<Recovery>,
@@ -350,8 +340,8 @@ impl StallWatch {
             cadence: pf_frame::metronome::Metronome::new(),
             seen: 0,
             with_os_events: 0,
-            verdicts: [0; 4],
-            classes: [0; 8],
+            verdicts: [0; 3],
+            classes: [0; 7],
             episode: None,
             pending_recovery: None,
             rate_window: std::collections::VecDeque::new(),
@@ -388,30 +378,29 @@ impl StallWatch {
     /// worker, compose-silence, delivery-leg, no-telemetry.
     fn verdict_tally(&self) -> String {
         format!(
-            "worker-stalled {}, compose-silence {}, delivery-leg {}, no-telemetry {}",
-            self.verdicts[1], self.verdicts[2], self.verdicts[3], self.verdicts[0]
+            "worker-stalled {}, compose-silence {}, no-telemetry {}",
+            self.verdicts[1], self.verdicts[2], self.verdicts[0]
         )
     }
 
     /// Per-class log token in [`StallClass`] order.
     fn class_tally(&self) -> String {
         format!(
-            "ours-worker {}, ours-delivery {}, adapter-freeze {}, compositor-blocked {}, \
-             content-silence {}, frame-generation {}, damage-idle {}, unattributed {}",
+            "ours-worker {}, adapter-freeze {}, compositor-blocked {}, content-silence {}, \
+             frame-generation {}, damage-idle {}, unattributed {}",
             self.classes[0],
             self.classes[1],
             self.classes[2],
             self.classes[3],
             self.classes[4],
             self.classes[5],
-            self.classes[6],
-            self.classes[7]
+            self.classes[6]
         )
     }
 
-    /// Drop flow history. A ring-recreate gap is self-inflicted; without this the
-    /// first post-recreate frame reads as a stall. Open episodes still close —
-    /// those holes predate the recreate.
+    /// Drop flow history. A presentation-restart gap is self-inflicted; without this the
+    /// first frame after it reads as a stall. Open episodes still close — those holes
+    /// predate the restart.
     pub(super) fn reset(&mut self) {
         self.recent.clear();
         self.close_episode();
@@ -521,7 +510,6 @@ impl StallWatch {
             StallVerdict::NoTelemetry => 0,
             StallVerdict::WorkerStalled => 1,
             StallVerdict::ComposeSilence => 2,
-            StallVerdict::DeliveryLeg => 3,
         }] += 1;
         let class = classify(
             stall.gap,
@@ -532,13 +520,12 @@ impl StallWatch {
         );
         self.classes[match class {
             StallClass::OursWorker => 0,
-            StallClass::OursDelivery => 1,
-            StallClass::AdapterFreeze => 2,
-            StallClass::CompositorBlocked => 3,
-            StallClass::ContentSilence => 4,
-            StallClass::FrameGeneration => 5,
-            StallClass::DamageIdle => 6,
-            StallClass::Unattributed => 7,
+            StallClass::AdapterFreeze => 1,
+            StallClass::CompositorBlocked => 2,
+            StallClass::ContentSilence => 3,
+            StallClass::FrameGeneration => 4,
+            StallClass::DamageIdle => 5,
+            StallClass::Unattributed => 6,
         }] += 1;
         // Damage-idle is still a delivery hole (episode/recovery count it) but
         // not display-disturbance evidence: skip metronome, rate WARN, and
@@ -562,10 +549,9 @@ impl StallWatch {
             // presents = damage existed and DWM composed none of it.
             cursor_moved_px_during_gap = evidence.cursor_moved_px,
             flow_dwm_only = evidence.etw_counts.map(|c| c.flow_dwm_only),
-            offered_during_gap = evidence.offered_delta,
             max_heartbeat_age_ms = evidence.max_heartbeat_age_ms,
-            "IDD-push capture stall — the desktop was composing at speed, then the ring \
-             delivered no frame for the gap; the class names the leg that lost them"
+            "IDD-push capture stall — the desktop was composing at speed, then the driver's \
+             pool took no frame for the gap; the class names the leg that lost them"
         );
         // Aperiodic 150+ ms holes still need the triage payload. Skip when
         // this stall completed a metronomic cycle (richer arms below) or is

@@ -2,48 +2,29 @@
 //! synthetic test sources and the [`Capturer`] trait.
 //!
 //! Speaks [`pf_frame`] and the display leaves. Encode-backend facts arrive
-//! pre-resolved in [`ZeroCopyPolicy`]; Windows sealed-channel delivery arrives
-//! as a [`FrameChannelSender`] closure. Never `pf-encode` or the host
-//! orchestrator.
+//! pre-resolved in [`ZeroCopyPolicy`]; Windows sealed-section delivery arrives
+//! as [`SetEncodeSender`] / [`CursorChannelSender`] closures. Never `pf-encode`
+//! or the host orchestrator.
 //!
 //! Evidence: `design/idd-push-security.md`, `packaging/gamescope`.
 
 use anyhow::Result;
 use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 
-/// A FATAL frame-transport fault: the delivery ring's current generation is dead, and retrying
-/// `try_latest` cannot help — the caller must rebuild the capture attachment or fail the session.
-/// Carried inside the `anyhow::Error` a capture call returns (downcast to route on it), so a
-/// fatal ring result can never again collapse into an ordinary `Ok(None)` repeat.
+/// A FATAL capture fault: retrying `try_latest` cannot help — the caller must rebuild the
+/// capture attachment or fail the session. Carried inside the `anyhow::Error` a capture call
+/// returns (downcast to route on it), so it can never collapse into an ordinary `Ok(None)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RingFault {
-    /// The producer died (or a producer thread crashed) holding a slot's keyed mutex
-    /// (`WAIT_ABANDONED`): the surface's consistency is unknown, the generation is poisoned.
-    Abandoned,
-    /// A fatal synchronization HRESULT (`hr`); `removed` is `GetDeviceRemovedReason`'s code at
-    /// the time (0 = the device still reports healthy).
-    DeviceLost { hr: i32, removed: i32 },
-    /// A slot `ReleaseSync` failed (`hr`; `removed` as above) — the slot may be wedged for the
-    /// producer, so the generation cannot be trusted either.
-    ReleaseFailed { hr: i32, removed: i32 },
-    /// A known-ACTIVE display (input/cursor moving, or the driver still offering frames)
-    /// delivered no new source frame through the stale floor and the staged recovery ladder
-    /// (immunity plan WP13) — its terminal verdict; `secs` is the source gap at that point.
+pub enum CaptureFault {
+    /// A known-ACTIVE display (input/cursor moving) delivered no new source frame through the
+    /// stale floor and the staged recovery ladder (immunity plan WP13) — its terminal verdict;
+    /// `secs` is the source gap at that point.
     SourceStalled { secs: u32 },
 }
 
-impl std::fmt::Display for RingFault {
+impl std::fmt::Display for CaptureFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Abandoned => write!(f, "slot keyed mutex abandoned (producer died holding it)"),
-            Self::DeviceLost { hr, removed } => write!(
-                f,
-                "fatal slot synchronization result {hr:#x} (device-removed reason {removed:#x})"
-            ),
-            Self::ReleaseFailed { hr, removed } => write!(
-                f,
-                "slot release failed {hr:#x} (device-removed reason {removed:#x})"
-            ),
             Self::SourceStalled { secs } => write!(
                 f,
                 "no source frame for {secs}s on a known-active display, through a rebuild"
@@ -52,7 +33,7 @@ impl std::fmt::Display for RingFault {
     }
 }
 
-impl std::error::Error for RingFault {}
+impl std::error::Error for CaptureFault {}
 
 /// The capturer's live health for the operator surface (immunity plan WP18): the classifier's
 /// last verdict, the ring's self-report, and the last recovery episode. Plain data, no I/O —
@@ -68,11 +49,11 @@ pub struct CaptureHealth {
     pub source_gap: std::time::Duration,
     /// The evidence the verdict rests on: `recent_source` / `input` / `canary` / `presents`.
     pub evidence: Option<&'static str>,
-    /// The ring's own state word (`active` / `rebuilding` / `dead` / `initializing`); `None` on a
-    /// pre-v3 driver.
+    /// Reserved for the driver's own state word; always `None` since the cutover.
     pub ring_state: Option<&'static str>,
-    /// The fence protocol is negotiated on the current ring.
+    /// Reserved; always `false` since the cutover.
     pub fence_ring: bool,
+    /// Access units the driver published, and frames it dropped at the encode pool.
     pub published_total: u64,
     pub dropped_total: u64,
     /// The recovery stage running now, if an episode is open.
@@ -210,11 +191,11 @@ pub trait Capturer: Send {
         false
     }
 
-    /// Recreate the delivery ring at the current mode and re-run the driver
-    /// attach handshake. Exclusive-topology eviction rebuilds the swap-chain
-    /// while this capturer waits on the old ring; the descriptor is unchanged,
-    /// so the two-strike debounce never trips. `true` handled; `false` unrecoverable.
-    fn recreate_ring_in_place(&mut self) -> bool {
+    /// Make the OS present to this display again at the current mode. An
+    /// exclusive-topology eviction leaves the target active but unpresented, so the
+    /// descriptor never changes and the two-strike debounce never trips. `true`
+    /// handled; `false` unrecoverable.
+    fn restart_presentation_in_place(&mut self) -> bool {
         false
     }
 
@@ -255,7 +236,7 @@ pub trait Capturer: Send {
 
     /// The monitor and WUDFHost an in-driver encoder opens against
     /// ([`open_driver_encoder`]). `None` = not an IDD-push source.
-    #[cfg(all(target_os = "windows", feature = "driver-encode"))]
+    #[cfg(target_os = "windows")]
     fn driver_endpoint(&self) -> Option<DriverEndpoint> {
         None
     }
@@ -432,7 +413,7 @@ pub struct ZeroCopyPolicy {
 /// snapshot taken before launch never sees the game display.
 ///
 /// Built by the host facade (`pf_vdisplay::gamescope_xwayland_cursor_targets`)
-/// so the capture→host edge stays one-way — same shape as [`FrameChannelSender`].
+/// so the capture→host edge stays one-way.
 #[cfg(target_os = "linux")]
 pub type GamescopeCursorTargets =
     std::sync::Arc<dyn Fn() -> Vec<(String, Option<String>)> + Send + Sync>;
@@ -540,17 +521,9 @@ pub static HID_COMPOSE_KICK: std::sync::OnceLock<HidKickFn> = std::sync::OnceLoc
 #[cfg(target_os = "windows")]
 pub type HidKickFn = fn((i32, i32, i32, i32), (i32, i32, i32, i32)) -> bool;
 
-/// Delivers a monitor's sealed frame channel to the pf-vdisplay driver
-/// (`IOCTL_SET_FRAME_CHANNEL`). Host-built so this crate never reaches the
-/// orchestrator. Called once per ring generation, never per-frame. On IOCTL
-/// success the driver owns the handles duplicated into WUDFHost.
-#[cfg(target_os = "windows")]
-pub type FrameChannelSender = std::sync::Arc<
-    dyn Fn(&pf_driver_proto::control::SetFrameChannelRequestV2) -> Result<()> + Send + Sync,
->;
-
-/// v5 hardware-cursor channel (`IOCTL_SET_CURSOR_CHANNEL`) — same facade
-/// contract as [`FrameChannelSender`]. `Some` opts in: the capturer creates
+/// v5 hardware-cursor channel (`IOCTL_SET_CURSOR_CHANNEL`). Host-built so this
+/// crate never reaches the orchestrator; on IOCTL success the driver owns the
+/// handle duplicated into WUDFHost. `Some` opts in: the capturer creates
 /// the cursor section only when the host hands a sender; a plain session
 /// keeps DWM's pointer.
 #[cfg(target_os = "windows")]
@@ -566,9 +539,9 @@ pub type CursorChannelSender = std::sync::Arc<
 pub type CursorForwardSender = std::sync::Arc<dyn Fn(bool) -> Result<()> + Send + Sync>;
 
 /// v7 in-driver encode open (`IOCTL_SET_ENCODE`) — same facade contract as
-/// [`FrameChannelSender`]: the driver adopts the request's handle values iff the
+/// [`CursorChannelSender`]: the driver adopts the request's handle values iff the
 /// IOCTL succeeds. Once per encoder generation.
-#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+#[cfg(target_os = "windows")]
 pub type SetEncodeSender = std::sync::Arc<
     dyn Fn(
             &pf_driver_proto::encode::SetEncodeRequest,
@@ -579,13 +552,13 @@ pub type SetEncodeSender = std::sync::Arc<
 
 /// v7 one-shot encoder control (`IOCTL_ENCODE_CTL`): the `Encoder` calls the
 /// stream loop makes, forwarded by the driver proxy.
-#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+#[cfg(target_os = "windows")]
 pub type EncodeCtlSender =
     std::sync::Arc<dyn Fn(&pf_driver_proto::encode::EncodeCtlRequest) -> Result<()> + Send + Sync>;
 
 /// Where an in-driver encoder is opened: the monitor's driver target and the WUDFHost the AU
 /// section is duplicated into ([`Capturer::driver_endpoint`]).
-#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+#[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DriverEndpoint {
     pub target_id: u32,
@@ -612,10 +585,9 @@ mod idd_push;
 #[cfg(target_os = "windows")]
 pub use idd_push::verify_is_wudfhost;
 // The AU section's reader half. Pure over a mapped view, so its tests run on every target.
-#[cfg(feature = "driver-encode")]
 #[path = "windows/au_reader.rs"]
 mod au_reader;
-#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+#[cfg(target_os = "windows")]
 pub use idd_push::driver_encode::{open_driver_encoder, DriverEncodeOpenError, DriverEncodeParams};
 #[cfg(target_os = "linux")]
 #[path = "linux/mod.rs"]
@@ -696,7 +668,6 @@ pub fn open_idd_push(
     want_444: bool,
     pyrowave: bool,
     keepalive: Box<dyn Send>,
-    sender: FrameChannelSender,
     cursor_sender: Option<CursorChannelSender>,
     cursor_forward: Option<CursorForwardSender>,
 ) -> std::result::Result<Box<dyn Capturer>, (anyhow::Error, Box<dyn Send>)> {
@@ -708,7 +679,6 @@ pub fn open_idd_push(
         want_444,
         pyrowave,
         keepalive,
-        sender,
         cursor_sender,
         cursor_forward,
     )

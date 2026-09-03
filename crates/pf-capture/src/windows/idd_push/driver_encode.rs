@@ -1,10 +1,10 @@
-//! In-driver encode (video-plane overhaul Phase 3, behind `driver-encode`): the AU section
-//! the driver's encode thread publishes into, delivered with `IOCTL_SET_ENCODE`, and the
-//! [`Encoder`] the stream loop drives — every control call forwarded over `IOCTL_ENCODE_CTL`.
+//! In-driver encode: the AU section the driver's encode thread publishes into, delivered with
+//! `IOCTL_SET_ENCODE`, and the [`Encoder`] the stream loop drives — every control call
+//! forwarded over `IOCTL_ENCODE_CTL`. The only Windows video transport.
 //!
-//! Sealing and handle duplication mirror the ring's (`open.rs`, `channel.rs`): unnamed,
-//! SYSTEM-only DACL, duplicated into WUDFHost by a [`ChannelBroker`], adopt-on-success. The
-//! reader over the mapped section is [`crate::au_reader`].
+//! Sealing and handle duplication follow `open.rs` / `channel.rs`: unnamed, SYSTEM-only DACL,
+//! duplicated into WUDFHost by a [`ChannelBroker`], adopt-on-success. The reader over the
+//! mapped section is [`crate::au_reader`].
 
 use super::*;
 use crate::au_reader::{AuReader, AuView, Taken};
@@ -100,8 +100,8 @@ fn caps_from_wire(w: &encode::EncoderCapsWire) -> EncoderCaps {
     }
 }
 
-/// A driver `qpc_pts` as the wire's epoch-nanosecond `pts_ns`: now minus the stamp's age, the
-/// ring's QPC conversion. `0` (no stamp) reads as now.
+/// A driver `qpc_pts` as the wire's epoch-nanosecond `pts_ns`: now minus the stamp's age.
+/// `0` (no stamp) reads as now.
 fn pts_from_qpc(qpc: u64) -> u64 {
     if qpc == 0 {
         return now_ns();
@@ -196,7 +196,7 @@ pub fn open_driver_encoder(
 ) -> Result<Box<dyn Encoder>> {
     let heap = au::heap_bytes_for(params.bitrate_kbps, params.fps);
     let section = AuSection::create(heap, params.wire_seq_base)?;
-    let broker = ChannelBroker::open_dup_only(endpoint.wudf_pid)?;
+    let broker = ChannelBroker::open(endpoint.wudf_pid)?;
     // SAFETY: both handles are live members of `section`, borrowed for the duplication.
     let (section_v, event_v) = unsafe {
         let s = broker.dup_into(
@@ -281,6 +281,7 @@ pub fn open_driver_encoder(
         last_wire_seq: 0,
         last_source_seq: 0,
         opened_at: Instant::now(),
+        backend: backend_name(reply.backend_opened),
     }))
 }
 
@@ -306,6 +307,8 @@ pub struct EncoderProxy {
     /// Stands in for `last_au_qpc` until the first publish, so a never-producing encoder is
     /// silent from a known instant rather than invisible.
     opened_at: Instant,
+    /// The backend the driver opened, for the status surface.
+    backend: &'static str,
 }
 
 // SAFETY: `!Send` only through the mapping's raw pointers. Built on the prep thread, used on
@@ -477,16 +480,22 @@ impl Encoder for EncoderProxy {
 
     fn telemetry(&self) -> Option<pf_frame::health::EncoderTelemetry> {
         let h = self.snapshot();
-        let last_au = if h.last_au_qpc == 0 {
-            self.opened_at
-        } else {
-            let age = Duration::from_micros(IddPushCapturer::qpc_age_us(h.last_au_qpc));
-            Instant::now().checked_sub(age).unwrap_or(self.opened_at)
+        let stamp = |qpc: u64| {
+            (qpc != 0)
+                .then(|| Duration::from_micros(IddPushCapturer::qpc_age_us(qpc)))
+                .and_then(|age| Instant::now().checked_sub(age))
         };
         Some(pf_frame::health::EncoderTelemetry {
-            last_au,
+            // Before the first access unit the encoder's open time stands in, so a
+            // never-producing encoder is silent from a known instant.
+            last_au: stamp(h.last_au_qpc).unwrap_or(self.opened_at),
             published_total: h.published_total,
             detached: h.detached,
+            source_seq: h.source_seq,
+            dropped_total: h.dropped_total,
+            drain_heartbeat: stamp(h.drain_heartbeat_qpc),
+            state: h.encoder_state,
+            backend: self.backend,
         })
     }
 

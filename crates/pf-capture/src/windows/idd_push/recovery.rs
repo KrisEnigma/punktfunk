@@ -12,7 +12,6 @@
 use std::time::{Duration, Instant};
 
 use crate::{CaptureEpisode, CaptureHealth};
-use pf_driver_proto::frame::HealthState;
 use pf_frame::health::{
     Activity, ActivityKind, Classifier, EncoderTelemetry, HealthClass, RingState, Snapshot,
     StallClass, Thresholds,
@@ -32,7 +31,6 @@ fn stall_name(c: StallClass) -> &'static str {
 fn stage_name(s: Stage) -> &'static str {
     match s {
         Stage::EncoderReset => "encoder_reset",
-        Stage::RingReset => "ring_reset",
         Stage::SwapChainReset => "swap_chain_reset",
         Stage::PresentationReset => "presentation_reset",
         Stage::DriverCycle => "driver_cycle",
@@ -56,19 +54,11 @@ pub(super) struct Inputs {
     /// The last `FrameOrigin::Source` frame.
     pub last_source: Instant,
     pub source_seq: u64,
-    /// Age of the driver worker's drain heartbeat (v2 telemetry); `None` before the first one.
+    /// Age of the driver worker's drain heartbeat; `None` before the encoder is open.
     pub heartbeat_age: Option<Duration>,
-    /// Composed frames the driver acquired that the ring has NOT delivered: `offered_total`
-    /// minus its value at the last source frame. `None` on a pre-v2 driver. The raw counter is
-    /// unusable here — read one tick after a delivered frame it is "newer than the source" on
-    /// every desktop pause, and a static desktop became a 15 s transport stall.
-    pub offered_undelivered: Option<u64>,
-    /// Age of the ring's last publish (v3 health tail); `None` when unknown.
-    pub publish_age: Option<Duration>,
     /// Cursor travel since the last source frame.
     pub cursor_gap_px: u32,
-    pub ring: Option<HealthState>,
-    /// A ring recreate is in flight (`recovering_since`).
+    /// A presentation restart is in flight (`recovering_since`).
     pub recreating: bool,
     pub secure_desktop: bool,
     pub topology_held: bool,
@@ -103,10 +93,6 @@ pub(super) struct Supervisor {
     last_gap: Duration,
     /// The source gap when the open episode began, and when: together they measure the outage.
     opened: Option<(Duration, Instant)>,
-    undelivered_last: u64,
-    /// When the undelivered-offer count last grew (the driver acquired a composed frame the
-    /// ring did not deliver).
-    offered_at: Option<Instant>,
     /// When cursor travel first crossed the evidence bar in this gap.
     input_at: Option<Instant>,
     /// When the last canary went out.
@@ -123,8 +109,6 @@ impl Supervisor {
             last_tick: now,
             last_gap: Duration::ZERO,
             opened: None,
-            undelivered_last: 0,
-            offered_at: None,
             input_at: None,
             canary_at: None,
             published_last: 0,
@@ -136,9 +120,9 @@ impl Supervisor {
         self.coordinator.owns_episode()
     }
 
-    /// The operator-surface report (WP18): the last verdict, the ring's self-report, and the
-    /// last closed episode, with every enum spelled as its lowercase name.
-    pub(super) fn report(&self, now: Instant, ring: Option<&super::RingHealth>) -> CaptureHealth {
+    /// The operator-surface report (WP18): the last verdict, the driver encoder's own counters,
+    /// and the last closed episode, with every enum spelled as its lowercase name.
+    pub(super) fn report(&self, now: Instant, enc: Option<&EncoderTelemetry>) -> CaptureHealth {
         let verdict = self.classifier.last();
         let (class, stall_class) = match verdict.map(|v| v.class) {
             None => ("healthy", None),
@@ -160,16 +144,10 @@ impl Supervisor {
                 ActivityKind::Canary => "canary",
                 ActivityKind::Presents => "presents",
             }),
-            ring_state: ring.map(|r| match r.state {
-                HealthState::Initializing => "initializing",
-                HealthState::Active => "active",
-                HealthState::Rebuilding => "rebuilding",
-                HealthState::Dead => "dead",
-            }),
-            fence_ring: ring
-                .is_some_and(|r| r.negotiated & pf_driver_proto::frame::CAP_FENCE_RING != 0),
-            published_total: ring.map_or(0, |r| r.published_total),
-            dropped_total: ring.map_or(0, |r| r.dropped_total),
+            ring_state: None,
+            fence_ring: false,
+            published_total: enc.map_or(0, |e| e.published_total),
+            dropped_total: enc.map_or(0, |e| e.dropped_total),
             current_stage: self.coordinator.current_stage().map(stage_name),
             last_episode: self.coordinator.last_summary().map(|s| CaptureEpisode {
                 stall_class: stall_name(s.class),
@@ -212,31 +190,23 @@ impl Supervisor {
             self.published_last = t.published_total;
             n.min(u64::from(u32::MAX)) as u32
         });
-        if let Some(undelivered) = i.offered_undelivered {
-            if undelivered != self.undelivered_last {
-                self.undelivered_last = undelivered;
-                self.offered_at = (undelivered > 0).then_some(i.now);
-            }
-        }
         if i.cursor_gap_px >= INPUT_EVIDENCE_PX && self.input_at.is_none() {
             self.input_at = Some(i.now);
         }
         let snap = Snapshot {
             now: i.now,
             worker_heartbeat: i.heartbeat_age.and_then(|a| i.now.checked_sub(a)),
-            last_acquire: self.offered_at,
-            last_publish: i.publish_age.and_then(|a| i.now.checked_sub(a)),
+            last_acquire: None,
+            last_publish: None,
             last_source: Some(i.last_source),
             source_seq: i.source_seq,
             last_encoded: i.encoder.map(|t| t.last_au),
-            activity: evidence(
-                i.now,
-                i.last_source,
-                self.input_at,
-                self.offered_at,
-                self.canary_at,
-            ),
-            ring: ring_state(i.ring, i.recreating),
+            activity: evidence(i.now, i.last_source, self.input_at, self.canary_at),
+            ring: if i.recreating {
+                RingState::Rebuilding
+            } else {
+                RingState::Unknown
+            },
             topology_in_transaction: i.topology_held,
             secure_desktop: i.secure_desktop,
             encoder_detached: i.encoder.map_or(0, |t| t.detached),
@@ -349,34 +319,20 @@ impl Supervisor {
     }
 }
 
-/// Undelivered offers count as "presents continue" only while they keep coming: a single
-/// trailing frame the ring dropped (slot busy, descriptor mismatch) before the desktop went
-/// static is a stale image, not a stalled transport, and a ring reset would cost more than it
-/// returns. A stalled transport under a changing desktop grows the count every tick.
-const PRESENTS_CONTINUE: Duration = Duration::from_secs(3);
-
-/// The strongest activity evidence newer than the last source frame. An unanswered canary and
-/// driver-side acquire progress are strong; cursor travel alone is weak (a hardware-cursor
-/// desktop composes nothing while the pointer moves).
+/// The strongest activity evidence newer than the last source frame. An unanswered canary is
+/// strong; cursor travel alone is weak (a hardware-cursor desktop composes nothing while the
+/// pointer moves).
 fn evidence(
     now: Instant,
     last_source: Instant,
     input_at: Option<Instant>,
-    offered_at: Option<Instant>,
     canary_at: Option<Instant>,
 ) -> Option<Activity> {
-    let mut all = Vec::with_capacity(3);
+    let mut all = Vec::with_capacity(2);
     if let Some(at) = input_at {
         all.push(Activity {
             at,
             kind: ActivityKind::Input,
-        });
-    }
-    if let Some(at) = offered_at.filter(|t| now.saturating_duration_since(*t) <= PRESENTS_CONTINUE)
-    {
-        all.push(Activity {
-            at,
-            kind: ActivityKind::Presents,
         });
     }
     if let Some(at) = canary_at.filter(|t| now.saturating_duration_since(*t) >= CANARY_ANSWER) {
@@ -388,37 +344,35 @@ fn evidence(
     Activity::strongest_since(&all, Some(last_source))
 }
 
-fn ring_state(state: Option<HealthState>, recreating: bool) -> RingState {
-    if recreating {
-        return RingState::Rebuilding;
-    }
-    match state {
-        Some(HealthState::Active) => RingState::Active,
-        Some(HealthState::Rebuilding) => RingState::Rebuilding,
-        Some(HealthState::Dead) => RingState::Dead,
-        Some(HealthState::Initializing) | None => RingState::Unknown,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn inputs(now: Instant, last_source: Instant, cursor_gap_px: u32, undelivered: u64) -> Inputs {
+    fn inputs(now: Instant, last_source: Instant, cursor_gap_px: u32) -> Inputs {
         Inputs {
             now,
             last_source,
             source_seq: 1,
             heartbeat_age: Some(Duration::from_millis(5)),
-            offered_undelivered: Some(undelivered),
-            publish_age: None,
             cursor_gap_px,
-            ring: Some(HealthState::Active),
             recreating: false,
             secure_desktop: false,
             topology_held: false,
             encoder: None,
         }
+    }
+
+    fn enc(last_au: Instant, published_total: u64, detached: u32) -> Option<EncoderTelemetry> {
+        Some(EncoderTelemetry {
+            last_au,
+            published_total,
+            detached,
+            source_seq: 0,
+            dropped_total: 0,
+            drain_heartbeat: Some(last_au),
+            state: 0,
+            backend: "nvenc",
+        })
     }
 
     /// A driver encoder wedged under a flowing source: the ladder opens at the encoder reset,
@@ -427,20 +381,13 @@ mod tests {
     fn encoder_silence_under_flowing_source_is_proven_by_access_units() {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
-        let enc = |last_au: Instant, published_total: u64| {
-            Some(EncoderTelemetry {
-                last_au,
-                published_total,
-                detached: 0,
-            })
-        };
         let mut sv = Supervisor::new(t0);
-        let mut i = inputs(s(1), s(1), 0, 0);
-        i.encoder = enc(s(1), 60);
+        let mut i = inputs(s(1), s(1), 0);
+        i.encoder = enc(s(1), 60, 0);
         assert_eq!(sv.tick(i), Step::Nothing);
         // Source keeps flowing (fresh `last_source`), the encoder has published nothing for 16 s.
-        let mut i = inputs(s(17), s(17), 0, 0);
-        i.encoder = enc(s(1), 60);
+        let mut i = inputs(s(17), s(17), 0);
+        i.encoder = enc(s(1), 60, 0);
         assert_eq!(sv.tick(i), Step::Run(Stage::EncoderReset));
         assert_eq!(
             sv.stage_done(s(17), Stage::EncoderReset, StageOutcome::Applied),
@@ -454,8 +401,8 @@ mod tests {
             );
         }
         assert!(sv.owns_episode());
-        let mut i = inputs(s(18), s(18), 0, 0);
-        i.encoder = enc(s(18), 63);
+        let mut i = inputs(s(18), s(18), 0);
+        i.encoder = enc(s(18), 63, 0);
         match sv.tick(i) {
             Step::Recovered { summary, outage } => {
                 assert!(summary.recovered);
@@ -468,43 +415,33 @@ mod tests {
     }
 
     /// The WP3b contract survives the hand-over: under the floor nothing runs; over it, cursor
-    /// travel alone asks for a canary and never an actuator; undelivered driver offers past the
-    /// floor open a TRANSPORT episode whose first rung is the ring reset, and three new source
-    /// frames close it.
+    /// travel alone asks for a canary and never an actuator; an unanswered canary opens the
+    /// presentation ladder, and three new source frames close it.
     #[test]
-    fn supervisor_walks_idle_canary_ring_reset_recovered() {
+    fn supervisor_walks_idle_canary_presentation_reset_recovered() {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
         let mut sv = Supervisor::new(t0);
         // Static desktop, no evidence: idle forever.
-        assert_eq!(sv.tick(inputs(s(60), t0, 0, 0)), Step::Nothing);
+        assert_eq!(sv.tick(inputs(s(60), t0, 0)), Step::Nothing);
         // Cursor travel past the floor: canary, not an actuator (weak evidence).
-        assert_eq!(sv.tick(inputs(s(61), t0, 200, 0)), Step::Canary);
+        assert_eq!(sv.tick(inputs(s(61), t0, 200)), Step::Canary);
         // An unanswered canary is strong: the presentation ladder opens.
         assert_eq!(
-            sv.tick(inputs(s(62), t0, 200, 0)),
+            sv.tick(inputs(s(62), t0, 200)),
             Step::Run(Stage::PresentationReset)
         );
         assert!(sv.owns_episode());
-
-        // A fresh supervisor: the driver keeps acquiring frames the ring never delivers.
-        let mut sv = Supervisor::new(t0);
-        assert_eq!(sv.tick(inputs(s(1), t0, 0, 0)), Step::Nothing);
-        assert_eq!(sv.tick(inputs(s(10), t0, 0, 5)), Step::Nothing);
         assert_eq!(
-            sv.tick(inputs(s(16), t0, 0, 9)),
-            Step::Run(Stage::RingReset)
-        );
-        assert_eq!(
-            sv.stage_done(s(16), Stage::RingReset, StageOutcome::Applied),
+            sv.stage_done(s(62), Stage::PresentationReset, StageOutcome::Applied),
             Step::Nothing
         );
-        assert_eq!(sv.source_frame(s(17)), None);
-        assert_eq!(sv.source_frame(s(17)), None);
-        let (summary, outage) = sv.source_frame(s(17)).expect("three source frames recover");
+        assert_eq!(sv.source_frame(s(63)), None);
+        assert_eq!(sv.source_frame(s(63)), None);
+        let (summary, outage) = sv.source_frame(s(63)).expect("three source frames recover");
         assert!(summary.recovered);
-        // The outage is the whole hole: 16 s of missed source before the episode plus 1 s in it.
-        assert_eq!(outage, Duration::from_secs(17));
+        // The outage is the whole hole: 62 s of missed source before the episode plus 1 s in it.
+        assert_eq!(outage, Duration::from_secs(63));
         assert!(!sv.owns_episode());
     }
 
@@ -515,37 +452,11 @@ mod tests {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
         let mut sv = Supervisor::new(t0);
-        let mut i = inputs(s(1), s(1), 0, 0);
-        i.encoder = Some(EncoderTelemetry {
-            last_au: s(1),
-            published_total: 60,
-            detached: 2,
-        });
+        let mut i = inputs(s(1), s(1), 0);
+        i.encoder = enc(s(1), 60, 2);
         assert_eq!(sv.tick(i), Step::Nothing);
-        let mut i = inputs(s(17), s(17), 0, 0);
-        i.encoder = Some(EncoderTelemetry {
-            last_au: s(1),
-            published_total: 60,
-            detached: 2,
-        });
+        let mut i = inputs(s(17), s(17), 0);
+        i.encoder = enc(s(1), 60, 2);
         assert_eq!(sv.tick(i), Step::Run(Stage::DriverCycle));
-    }
-
-    /// One undelivered offer left behind by a dropped frame, then a static desktop: the evidence
-    /// goes stale and the gap is idle — no ring reset for a stale image. Offers that keep coming
-    /// past the floor are the transport stall they always were.
-    #[test]
-    fn single_trailing_undelivered_offer_is_idle_not_a_transport_stall() {
-        let t0 = Instant::now();
-        let s = |n: u64| t0 + Duration::from_secs(n);
-        let mut sv = Supervisor::new(t0);
-        assert_eq!(sv.tick(inputs(s(1), t0, 0, 1)), Step::Nothing);
-        assert_eq!(sv.tick(inputs(s(16), t0, 0, 1)), Step::Nothing);
-        assert_eq!(sv.tick(inputs(s(30), t0, 0, 1)), Step::Nothing);
-        assert!(!sv.owns_episode());
-        assert_eq!(
-            sv.tick(inputs(s(31), t0, 0, 2)),
-            Step::Run(Stage::RingReset)
-        );
     }
 }

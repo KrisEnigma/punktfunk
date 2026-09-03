@@ -69,7 +69,9 @@ pub enum RingState {
 }
 
 /// What an encoder that runs outside the loop's submit path (the driver's, over the AU
-/// section) says about itself: the clocks the supervisor classifies the encode leg on.
+/// section) says about itself: the clocks the supervisor classifies the encode leg on, plus
+/// the state words the operator surface reports. On Windows this is the whole view the host
+/// has of the display's frame path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EncoderTelemetry {
     /// The last access unit's publish time; the encoder's open time before the first one, so
@@ -79,6 +81,17 @@ pub struct EncoderTelemetry {
     pub published_total: u64,
     /// Encode threads the driver abandoned after a wedge.
     pub detached: u32,
+    /// Frames the driver's drain worker handed its encode pool: DWM's own cadence, and the
+    /// only source clock a host that owns no pixels has.
+    pub source_seq: u64,
+    /// Frames dropped at the pool or skipped for a full slot table.
+    pub dropped_total: u64,
+    /// The drain worker's last completed pass; `None` before the first heartbeat.
+    pub drain_heartbeat: Option<Instant>,
+    /// The driver's encoder state word (`pf_driver_proto::encode::ENCODER_*`).
+    pub state: u32,
+    /// The backend the driver opened, for the status surface.
+    pub backend: &'static str,
 }
 
 /// Everything the classifier looks at, sampled at `now`. `None` clocks mean "never observed".

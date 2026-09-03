@@ -3341,7 +3341,7 @@ fn try_inplace_resize(
         return false;
     }
     let ring_ok = if recover_ring {
-        capturer.recreate_ring_in_place()
+        capturer.restart_presentation_in_place()
     } else {
         capturer.resize_output(new_mode.width, new_mode.height)
     };
@@ -3351,6 +3351,9 @@ fn try_inplace_resize(
     trace.mark("ring_recreated");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let new_frame = loop {
+        // The driver-encode capturer reads the display's progress off the encoder, and this
+        // loop is the one place that polls it without the stream loop's own tick.
+        capturer.observe_encoder(enc.telemetry());
         match capturer.try_latest() {
             Ok(Some(f)) if (f.width, f.height) == (new_mode.width, new_mode.height) => break f,
             Ok(_) => {
@@ -3377,6 +3380,7 @@ fn try_inplace_resize(
         let first_pts = new_frame.pts_ns;
         let live_deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
+            capturer.observe_encoder(enc.telemetry());
             match capturer.try_latest() {
                 Ok(Some(f)) if source_advanced(first_seq, first_pts, &f.provenance, f.pts_ns) => {
                     break f
@@ -3667,8 +3671,8 @@ fn announce_pipeline_gap(gap: &tokio::sync::mpsc::UnboundedSender<u32>, gap_ms: 
 }
 
 /// Open the session's encoder at `frame`'s geometry with the plan's chunking and the
-/// capturer's ring depth applied. Under `driver-encode` an IDD-push source gets the driver's
-/// encoder instead, its wire-index domain continuing at `wire_seq_base` (the loop's `au_seq`).
+/// capturer's ring depth applied. An IDD-push source gets the driver's encoder instead, its
+/// wire-index domain continuing at `wire_seq_base` (the loop's `au_seq`).
 #[allow(clippy::too_many_arguments)]
 fn open_session_encoder(
     plan: &crate::session_plan::SessionPlan,
@@ -3679,7 +3683,7 @@ fn open_session_encoder(
     bit_depth: u8,
     wire_seq_base: u32,
 ) -> Result<Box<dyn crate::encode::Encoder>> {
-    #[cfg(all(target_os = "windows", feature = "driver-encode"))]
+    #[cfg(target_os = "windows")]
     if plan.capture == crate::session_plan::CaptureBackend::IddPush {
         return crate::capture::open_driver_encoder(
             plan,

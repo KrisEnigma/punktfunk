@@ -328,7 +328,7 @@ pub struct HdrP010Converter {
 
 impl HdrP010Converter {
     /// `w`/`h` are the source size baked into the immutable chroma constant buffer.
-    /// Rebuild if they change (`recreate_ring` already drops this converter).
+    /// Rebuild if they change — a session that re-opens at a new mode drops this converter.
     pub fn new(device: &ID3D11Device, w: u32, h: u32) -> Result<Self> {
         // SAFETY: every call is a `?`-checked D3D11 method on the live `device` borrow, over
         // fully-initialized stack descriptors and live `Option` out-params; `compile_shader` receives

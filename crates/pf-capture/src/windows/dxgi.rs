@@ -24,7 +24,7 @@ use windows::core::s;
 /// never reached the export on this build.
 static HYBRID_HOOK_HITS: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn hybrid_hook_hits() -> u64 {
+pub fn hybrid_hook_hits() -> u64 {
     HYBRID_HOOK_HITS.load(Ordering::Relaxed)
 }
 
@@ -52,8 +52,8 @@ unsafe extern "system" fn hybrid_query_hook(gpu_preference: *mut u32) -> i32 {
 
 /// Fake `D3DKMT_GPU_PREFERENCE_STATE_UNSPECIFIED` so DXGI skips hybrid
 /// GPU-preference resolution. Without this, DXGI reparents outputs onto the
-/// preferred render GPU and ignores `SET_RENDER_ADAPTER`, so the IDD-push ring
-/// and the driver's swap-chain land on different adapters (`DRV_STATUS_TEX_FAIL`).
+/// preferred render GPU and ignores `SET_RENDER_ADAPTER`, so the driver's
+/// swap-chain lands on an adapter its encoder cannot open.
 ///
 /// Call once from `main.rs` before the first DXGI factory. Lasts the process
 /// lifetime. [`hybrid_hook_hits`] reports whether DXGI actually calls it.

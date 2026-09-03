@@ -3,8 +3,8 @@
 //! Re-exports the shared frame types and capturer traits at the historical
 //! `crate::capture::*` paths. Host-only entry points — [`open_portal_monitor`],
 //! [`capture_virtual_output`] — resolve [`pf_capture::ZeroCopyPolicy`] and, on
-//! Windows, the [`pf_capture::FrameChannelSender`] so the capturer never
-//! reaches back into encode or vdisplay.
+//! Windows, the driver-IOCTL senders so the capturer never reaches back into
+//! encode or vdisplay.
 
 use anyhow::Result;
 
@@ -186,35 +186,17 @@ pub fn capture_virtual_output(
     )));
     let pref = vout.preferred_mode;
     let keep = vout.keepalive;
-    // Resolve the pf-vdisplay control device once and wrap `send_frame_channel`
-    // for the IDD-push capturer. This is the one host reach into `crate::vdisplay`
-    // the capturer would otherwise make.
+    // Resolve the pf-vdisplay control device once and wrap its cursor IOCTLs for the
+    // IDD-push capturer. This is the one host reach into `crate::vdisplay` the capturer
+    // would otherwise make.
     let control = crate::vdisplay::manager::control_device_handle().ok_or_else(|| {
         anyhow::anyhow!(
             "pf-vdisplay control device not open (monitor not created via the manager?)"
         )
     })?;
-    // Each closure clones the `Arc<OwnedHandle>`, so the handle stays open for
-    // the closure's life and closes when the manager retires it and the last
-    // session drops. An open control handle vetoes the wake-from-sleep PnP cycle.
-    let control_frame = control.clone();
-    let sender: pf_capture::FrameChannelSender = std::sync::Arc::new(
-        move |req: &pf_driver_proto::control::SetFrameChannelRequestV2| {
-            // SAFETY: the captured `control_frame` Arc keeps the control handle open across this
-            // call — `send_frame_channel`'s precondition.
-            unsafe {
-                crate::vdisplay::driver::send_frame_channel(
-                    windows::Win32::Foundation::HANDLE(
-                        std::os::windows::io::AsRawHandle::as_raw_handle(&*control_frame),
-                    ),
-                    req,
-                )
-            }
-        },
-    );
-    // IDD direct-push is the only Windows capture path: frames from the driver's
-    // shared ring, in-process. A fresh monitor + ring per session; `want.hdr`
-    // enables advanced color. No fallback — open/attach failure fails the session.
+    // Each closure clones the `Arc<OwnedHandle>`, so the handle stays open for the closure's
+    // life and closes when the manager retires it and the last session drops. An open control
+    // handle vetoes the wake-from-sleep PnP cycle.
 
     // Presence of this closure opts the session into v5 cursor-channel delivery
     // (capturer creates CursorShm; driver declares the IddCx hardware cursor). A target an
@@ -270,19 +252,17 @@ pub fn capture_virtual_output(
         want.chroma_444,
         want.pyrowave,
         keep,
-        sender,
         cursor_sender,
         cursor_forward,
     )
     .map_err(|(e, _keep)| e.context("IDD-push capture open (no fallback)"))
 }
 
-/// Open the in-driver encoder for an IDD-push session (`driver-encode`): the plan as the
-/// driver numbers it, the resolved Windows backend as a one-entry preference list, the two
-/// IOCTL senders over the manager's control handle, and the `pf_gpu` session record the
-/// local encoders keep. The heap is sized from the opening rate; ABR climbs past twice it
-/// eat the burst margin.
-#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+/// Open the in-driver encoder for an IDD-push session: the plan as the driver numbers it, the
+/// resolved Windows backend as a one-entry preference list, the two IOCTL senders over the
+/// manager's control handle, and the `pf_gpu` session record. The heap is sized from the
+/// opening rate; ABR climbs past twice it eat the burst margin.
+#[cfg(target_os = "windows")]
 pub fn open_driver_encoder(
     plan: &crate::session_plan::SessionPlan,
     capturer: &dyn Capturer,
@@ -674,7 +654,7 @@ mod live_tests {
                 // box whose exclusive watchdog is re-asserting, that can be before the floor —
                 // so the end time is reported, not bounded from below.
                 // The two typed ends: the death watch ("WUDFHost … exited") or the ladder's
-                // `RingFault::SourceStalled` ("no source frame for Ns …").
+                // `CaptureFault::SourceStalled` ("no source frame for Ns …").
                 assert!(
                     e.contains("WUDFHost") || e.contains("no source frame"),
                     "the plane must end with a typed driver/source fault, got: {e}"

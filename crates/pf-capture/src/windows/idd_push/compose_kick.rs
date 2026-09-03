@@ -14,7 +14,7 @@
 use super::*;
 
 /// LAST-RESORT fallback: nudge DWM into composing THE TARGET virtual display. DWM presents a
-/// display only when something DIRTIES it, so a freshly-attached ring over an idle desktop can
+/// display only when something DIRTIES it, so a session opened over an idle desktop can
 /// sit at E_PENDING forever. The PRIMARY first-frame mechanism is the driver's `FrameStash`
 /// republish; this kick remains for pre-stash drivers and the never-composed cold start.
 /// Synthetic input is inherently unreliable (secure desktop, ClipCursor, user-visible on a

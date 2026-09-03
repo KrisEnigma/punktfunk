@@ -297,33 +297,9 @@ unsafe fn set_render_adapter(h: HANDLE, luid: LUID) -> Result<()> {
     .context("pf-vdisplay SET_RENDER_ADAPTER")
 }
 
-/// Deliver a monitor's sealed frame channel. On IOCTL success the driver owns the handles
-/// duplicated into WUDFHost; the caller reaps remote duplicates on failure so none leak. Always
-/// the v2 shape (WP7): a pre-fence driver reads the v1 prefix of the longer buffer unchanged.
-///
-/// # Safety
-/// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
-pub unsafe fn send_frame_channel(
-    dev: HANDLE,
-    req: &control::SetFrameChannelRequestV2,
-) -> Result<()> {
-    let mut none: [u8; 0] = [];
-    // SAFETY: `dev` is the live control handle by this fn's contract. `bytes_of(req)` borrows the
-    // caller's request for this synchronous call; `none` is empty, so there is no output buffer.
-    unsafe {
-        ioctl(
-            dev,
-            control::IOCTL_SET_FRAME_CHANNEL,
-            bytemuck::bytes_of(req),
-            &mut none,
-        )
-    }
-    .map(|_| ())
-    .context("pf-vdisplay SET_FRAME_CHANNEL")
-}
-
-/// Deliver a monitor's hardware-cursor section (`IOCTL_SET_CURSOR_CHANNEL`, proto v5). Same
-/// delivery/ownership contract as [`send_frame_channel`].
+/// Deliver a monitor's hardware-cursor section (`IOCTL_SET_CURSOR_CHANNEL`, proto v5). On IOCTL
+/// success the driver owns the handle duplicated into WUDFHost; the caller reaps the remote
+/// duplicate on failure so none leaks.
 ///
 /// # Safety
 /// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
@@ -371,7 +347,7 @@ pub unsafe fn send_cursor_forward(
 }
 
 /// Open a monitor's in-driver encoder (`IOCTL_SET_ENCODE`, proto v7) and adopt its AU section.
-/// Same handle contract as [`send_frame_channel`]: the section and event VALUES in `req` are
+/// Same handle contract as [`send_cursor_channel`]: the section and event VALUES in `req` are
 /// already duplicated into WUDFHost, the driver owns them iff the IOCTL succeeds, and the
 /// caller reaps them on `Err`. A short reply fails closed: every field feeds the session.
 ///
