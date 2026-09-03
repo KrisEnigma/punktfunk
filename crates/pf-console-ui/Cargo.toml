@@ -18,10 +18,16 @@ repository.workspace = true
 # for aarch64/x86_64/i686-linux-android. Neither key must drift or skia-bindings silently
 # builds Skia from source for hours.
 default = ["vulkan-overlay"]
-# `pf-client-core/desktop` because `skia_overlay` names `video::QueueLock`, and `video` is part
-# of the desktop half. The portable `Console` driver the GL hosts use needs none of it, which is
-# why the dependency below stays `default-features = false` and this feature adds it back.
-vulkan-overlay = ["dep:pf-presenter", "dep:ash", "dep:sdl3", "skia-safe/vulkan", "pf-client-core/desktop"]
+vulkan-overlay = ["dep:pf-presenter", "dep:ash", "dep:sdl3", "skia-safe/vulkan", "desktop"]
+
+# pf-client-core's desktop half, mirrored as a feature HERE so this crate's own sources can
+# test for it — `cfg(feature = "desktop")` in this crate means THIS feature, never the
+# dependency's, which is the trap that makes the two drift.
+#
+# Two things need it. `skia_overlay` names `video::QueueLock`. And `ring::actions` calls
+# `host_actions::cached`, whose cache only ever fills from a ureq fetch the desktop client
+# makes — so a GL host takes the same empty list Android already takes.
+desktop = ["pf-client-core/desktop"]
 
 # Skia's GL backend for a Linux consumer that has no Vulkan presenter and no SDL3 — a TV app
 # drawing on an EGL surface it owns (design/webos-skia-console-port.md §2.1). Android already
