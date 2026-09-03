@@ -192,6 +192,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **HDR plus 4:4:4 carries full chroma again on Windows.** The in-driver encoder took P010 for
+  every HDR session, so NVENC emitted 4:2:0 while the `SET_ENCODE` reply still promised 4:4:4.
+  Nothing to do: such a session now opens on the packed 10-bit RGB input.
 - **A re-run upgrades a box that already has every package.** The install phase skipped the
   packages entirely when the host, console and plugin runner were all present, so a box carrying
   a broken build could only be cleared by uninstalling first — nothing to do.

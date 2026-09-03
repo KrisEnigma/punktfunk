@@ -1,9 +1,11 @@
 //! Spike S5 (`--features encode-probe`, design/windows-video-plane-overhaul.md §3): the
 //! encoder backends opened and driven INSIDE WUDFHost. `IOCTL_ENCODE_PROBE_ARM` parks a
-//! request; the drain worker then copies each acquired surface into a three-slot BGRA ring
-//! ([`offer`]: one `CopyResource`, one `SetEvent`) and the `pf-vd-probe` thread does the rest —
-//! converts through [`Targets`], submits, polls, files the AUs. `IOCTL_ENCODE_PROBE_STATUS`
-//! reads the tally. A thin client of [`crate::encode`]; never shippable.
+//! request; the drain worker then copies each acquired surface into a three-slot ring in the
+//! desktop's own format ([`offer`]: one `CopyResource`, one `SetEvent`) and the `pf-vd-probe`
+//! thread does the rest — converts through [`Targets`], submits, polls, files the AUs.
+//! `IOCTL_ENCODE_PROBE_STATUS` reads the tally. The request's `flags` pick the depth and chroma,
+//! so the 10-bit and full-chroma inputs are reachable here too. A thin client of
+//! [`crate::encode`]; never shippable.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -11,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pf_driver_proto::control::{EncodeProbeReply, EncodeProbeRequest};
+use pf_driver_proto::control::{self, EncodeProbeReply, EncodeProbeRequest};
 use pf_encode_win::{ChromaFormat, EncodedFrame, Encoder};
 use wdk_sys::NTSTATUS;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
@@ -19,14 +21,12 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 use windows62::Win32::Graphics::Direct3D11 as d3d;
 
 use crate::direct_3d_device::{Direct3DDevice, pooled_device};
-use crate::encode::convert::{AdapterId, Fail, InputKind, Targets, bridge};
+use crate::encode::convert::{AdapterId, Fail, InputKind, Targets, bridge, source_format};
 use crate::encode::thread::{
     OpenSpec, codec_from_wire, open_backend, qpc_frequency, qpc_now, qpc_to_ns,
 };
@@ -158,10 +158,11 @@ pub fn arm(req: &EncodeProbeRequest) -> NTSTATUS {
     *lock(&SHARED) = Some(shared);
     ARMED.store(true, Ordering::Release);
     dbglog!(
-        "[pf-vd] probe: armed backend={} codec={} input={} frames={} target={}",
+        "[pf-vd] probe: armed backend={} codec={} input={} flags={:#x} frames={} target={}",
         BACKENDS[req.backend as usize - 1],
         CODECS[req.codec as usize - 1],
         req.input,
+        req.flags,
         req.frames,
         req.target_id
     );
@@ -276,15 +277,17 @@ fn run(stop: HANDLE, req: EncodeProbeRequest, shared: Arc<Shared>) {
     }
 }
 
-/// The request's backend, codec and input A/B as one `open` spec.
+/// The request's backend, codec, depth/chroma flags and input A/B as one `open` spec. The
+/// kind comes from [`InputKind::choose`], the same call `SET_ENCODE` makes, so a probe run
+/// exercises the shipping decision rather than a copy of it.
 fn spec(req: &EncodeProbeRequest, w: u32, h: u32) -> Result<OpenSpec, Fail> {
+    let hdr = (req.flags & control::PROBE_FLAG_HDR) != 0;
+    let chroma444 = (req.flags & control::PROBE_FLAG_444) != 0;
     let kind = match (req.backend, req.input) {
-        (4, _) => InputKind::Planar {
-            hdr: false,
-            chroma444: false,
-        },
-        (1, 0) => InputKind::Bgra,
-        _ => InputKind::Nv12,
+        (4, _) => InputKind::choose(4, hdr, chroma444),
+        // The colour A/B: BGRA→NV12 on the video engine instead of the backend's own CSC.
+        (_, 1) => InputKind::Nv12,
+        _ => InputKind::choose(req.backend, hdr, chroma444),
     };
     Ok(OpenSpec {
         backend: req.backend,
@@ -298,8 +301,12 @@ fn spec(req: &EncodeProbeRequest, w: u32, h: u32) -> Result<OpenSpec, Fail> {
         } else {
             req.bitrate_kbps
         }) * 1000,
-        bit_depth: 8,
-        chroma: ChromaFormat::Yuv420,
+        bit_depth: if hdr { 10 } else { 8 },
+        chroma: if chroma444 {
+            ChromaFormat::Yuv444
+        } else {
+            ChromaFormat::Yuv420
+        },
     })
 }
 
@@ -315,12 +322,20 @@ fn drive(stop: HANDLE, req: &EncodeProbeRequest, shared: &Arc<Shared>) -> Result
         primed.adapter.vendor_id,
         primed.adapter.device_id
     );
-    if primed.format != DXGI_FORMAT_B8G8R8A8_UNORM {
+    let (w, h) = (primed.width, primed.height);
+    let spec = spec(req, w, h)?;
+    // The ring holds DWM's surface as it comes, so the input the run asked for must be the one
+    // this desktop can feed: FP16 for an HDR run, BGRA otherwise. Flip advanced colour first.
+    let want = source_format(spec.kind);
+    if primed.format.0 != want.0 {
+        dbglog!(
+            "[pf-vd] probe: desktop presents {:?}, this input needs {want:?}",
+            primed.format
+        );
         return Err((-4, "fmt"));
     }
     let dev = pooled_device(primed.adapter.luid).ok_or((-5, "device"))?;
     shared.device_epoch.store(dev.epoch(), Ordering::Release);
-    let (w, h) = (primed.width, primed.height);
     let slots = (0..SLOTS)
         .map(|_| make_slot(&dev, w, h, primed.format))
         .collect::<Result<Vec<_>, _>>()?;
@@ -330,16 +345,21 @@ fn drive(stop: HANDLE, req: &EncodeProbeRequest, shared: &Arc<Shared>) -> Result
         .iter()
         .map(|s| bridge::<d3d::ID3D11Texture2D>(s))
         .collect::<Result<Vec<_>, _>>()?;
-    let spec = spec(req, w, h)?;
     let mut targets = Targets::new(spec.kind, &dev62, &ctx62, (w, h), SLOTS)?;
 
     let t0 = Instant::now();
     let mut enc = open_backend(&spec, &primed.adapter)?;
     let open_us = t0.elapsed().as_micros() as u32;
-    dbglog!("[pf-vd] probe: backend open OK in {open_us} us");
+    // The opened chroma, not the requested one: an input that cannot carry 4:4:4 reads false
+    // here, which is the whole point of running the probe at 10-bit.
+    dbglog!(
+        "[pf-vd] probe: backend open OK in {open_us} us (input {:?}, 4:4:4 {})",
+        spec.kind,
+        enc.caps().chroma_444
+    );
     {
         let mut p = lock(&PROBE);
-        p.reply.backend_opened = 1;
+        p.reply.backend_opened = req.backend;
         p.reply.open_us = open_us;
         p.reply.state = ST_RUNNING;
     }

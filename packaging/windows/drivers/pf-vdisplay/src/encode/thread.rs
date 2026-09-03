@@ -21,7 +21,7 @@ use pf_frame::HdrMeta;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
-use super::convert::{AdapterId, Fail, InputKind};
+use super::convert::{AdapterId, Fail, InputKind, pixel_format};
 use super::drive::Drive;
 use super::pool::Pool;
 use super::section::{AuSection, EncodeSession};
@@ -51,15 +51,12 @@ pub fn hdr_meta(bytes: &[u8; 28]) -> HdrMeta {
     unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<HdrMeta>()) }
 }
 
-/// The request's `open` spec for backend `backend` of its list.
+/// The request's `open` spec for backend `backend` of its list. The input comes from
+/// [`InputKind::choose`], so a 4:4:4 session gets an input that carries it (or a backend whose
+/// own caps already say 4:2:0) — never a P010 pick under a reply promising full chroma.
 pub fn spec_for(req: &SetEncodeRequest, backend: u32) -> Result<OpenSpec, Fail> {
     let (hdr, chroma444) = (req.hdr == 1, req.chroma == 1);
-    let kind = match (backend, hdr) {
-        (4, _) => InputKind::Planar { hdr, chroma444 },
-        (_, true) => InputKind::P010,
-        (1, false) => InputKind::Bgra,
-        _ => InputKind::Nv12,
-    };
+    let kind = InputKind::choose(backend, hdr, chroma444);
     Ok(OpenSpec {
         backend,
         codec: codec_from_wire(req.codec).ok_or((-4, "codec"))?,
@@ -296,7 +293,7 @@ pub fn disable_implicit_vulkan_layers() {
 pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Encoder>, Fail> {
     let (w, h, fps, bps) = (spec.width, spec.height, spec.fps, spec.bitrate_bps);
     let (depth, chroma) = (spec.bit_depth, spec.chroma);
-    let format = spec.kind.pixel_format();
+    let format = pixel_format(spec.kind);
     let luid = Some(adapter.luid62());
     let opened: anyhow::Result<Box<dyn Encoder>> = match spec.backend {
         1 => pf_encode_win::nvenc::NvencD3d11Encoder::open(

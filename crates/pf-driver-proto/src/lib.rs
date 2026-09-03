@@ -220,14 +220,22 @@ pub mod control {
         pub backend: u32,
         /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave (backend 4 only, and only with backend 4).
         pub codec: u32,
-        /// `0` = the backend's own input: BGRA straight into NVENC, NV12 for AMF/QSV, planar
-        /// Y + CbCr for PyroWave. `1` = BGRA→NV12 on the video engine (the NVENC colour A/B).
+        /// `0` = the backend's own input for `flags`, as `SET_ENCODE` would choose it.
+        /// `1` = force BGRA→NV12 on the video engine (the NVENC colour A/B); PyroWave ignores it.
         pub input: u32,
         pub frames: u32,
         pub bitrate_kbps: u32,
         pub fps: u32,
+        /// [`PROBE_FLAG_HDR`] | [`PROBE_FLAG_444`]; `0` is an 8-bit 4:2:0 SDR run.
         pub flags: u32,
     }
+
+    /// [`EncodeProbeRequest::flags`]: 10-bit BT.2020 PQ. The ring carries DWM's own surface, so
+    /// the desktop must already be in advanced colour or the run fails at `fmt`.
+    pub const PROBE_FLAG_HDR: u32 = 1 << 0;
+    /// [`EncodeProbeRequest::flags`]: full chroma. With [`PROBE_FLAG_HDR`] this is the packed
+    /// 10-bit RGB input NVENC CSCs under FREXT — the pairing `SET_ENCODE` silently lost once.
+    pub const PROBE_FLAG_444: u32 = 1 << 1;
 
     /// [`IOCTL_ENCODE_PROBE_STATUS`] reply. `mean_*` / `max_*` cover every AU after the first;
     /// `first_au_us` alone carries the backend's lazy session init. `name` is a short
@@ -881,6 +889,55 @@ pub mod encode {
         pub _pad_tail: u32,
     }
 
+    /// The encoder input one [`SetEncodeRequest`] resolves to, so the chroma the reply promises
+    /// and the pixels the backend is handed come from the same decision. The driver owns the
+    /// D3D targets behind each variant; this crate owns only the choice and what it can carry.
+    ///
+    /// [`Self::full_chroma`] is the honest ceiling for [`EncoderCapsWire::chroma_444`]: a
+    /// subsampled input cannot become 4:4:4 downstream, whatever the request asked for.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum EncodeInput {
+        /// BGRA straight into the backend, which does the RGB→YUV CSC.
+        Bgra,
+        /// Video-engine BGRA→NV12, 8-bit 4:2:0.
+        Nv12,
+        /// Shader FP16 scRGB→P010 PQ, 10-bit 4:2:0.
+        P010,
+        /// Shader FP16 scRGB→packed `R10G10B10A2` PQ BT.2020; the backend CSCs to 4:4:4 itself.
+        Rgb10,
+        /// Shareable Y + CbCr planes plus a fence, as PyroWave's own Vulkan device imports them.
+        Planar { hdr: bool, chroma444: bool },
+    }
+
+    impl EncodeInput {
+        /// The input for `backend` (the [`SetEncodeRequest::backends`] numbering) under the
+        /// request's HDR and 4:4:4 flags. Only NVENC ingests packed RGB, so only it can pair
+        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0.
+        #[must_use]
+        pub const fn choose(backend: u32, hdr: bool, chroma444: bool) -> Self {
+            match (backend, hdr, chroma444) {
+                (4, _, _) => Self::Planar { hdr, chroma444 },
+                (1, true, true) => Self::Rgb10,
+                (_, true, _) => Self::P010,
+                (1, false, _) => Self::Bgra,
+                _ => Self::Nv12,
+            }
+        }
+
+        /// Full chroma reaches the backend: packed RGB, or planes built at full resolution.
+        #[must_use]
+        pub const fn full_chroma(self) -> bool {
+            matches!(
+                self,
+                Self::Bgra
+                    | Self::Rgb10
+                    | Self::Planar {
+                        chroma444: true,
+                        ..
+                    }
+            )
+        }
+    }
     /// `pf_encode_win::EncoderCaps` as plain integers — this crate cannot depend on the encoder
     /// crate, which builds only in the driver's graph. Each `bool` there is `0`/`1` here; the
     /// driver fills this from `Encoder::caps()` after the open and the host maps it straight back,
@@ -3086,6 +3143,43 @@ mod tests {
         assert_eq!(offset_of!(EncodeCtlRequest, arg0), 8);
         assert_eq!(offset_of!(EncodeCtlRequest, arg1), 12);
         assert_eq!(offset_of!(EncodeCtlRequest, payload), 16);
+    }
+
+    /// A `SET_ENCODE` reply may promise only the chroma its chosen input can carry. The two
+    /// backends the host ever negotiates 4:4:4 for must therefore land on a full-chroma input at
+    /// both depths: HDR once picked P010 here, so the encoder emitted 4:2:0 while the reply — and
+    /// the client's Welcome — still said 4:4:4.
+    #[test]
+    fn a_444_request_picks_a_full_chroma_input() {
+        use encode::EncodeInput::{self, Bgra, Nv12, Planar, Rgb10, P010};
+
+        let table = [
+            ((1, false, false), Bgra),
+            ((1, false, true), Bgra),
+            ((1, true, false), P010),
+            ((1, true, true), Rgb10),
+            ((2, true, true), P010),
+            ((3, false, true), Nv12),
+            (
+                (4, true, true),
+                Planar {
+                    hdr: true,
+                    chroma444: true,
+                },
+            ),
+        ];
+        for ((backend, hdr, chroma444), want) in table {
+            let got = EncodeInput::choose(backend, hdr, chroma444);
+            assert_eq!(got, want, "backend {backend} hdr {hdr} 444 {chroma444}");
+        }
+        for backend in [1, 4] {
+            for hdr in [false, true] {
+                assert!(
+                    EncodeInput::choose(backend, hdr, true).full_chroma(),
+                    "backend {backend} hdr {hdr} asked 4:4:4 and got a subsampled input"
+                );
+            }
+        }
     }
 
     #[test]

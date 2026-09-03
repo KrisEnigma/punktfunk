@@ -1270,6 +1270,8 @@ mod tests {
     /// monitor and read its tally. Needs a driver built with `--features encode-probe`.
     /// `PF_PROBE_BACKEND` (nvenc|amf|qsv|pyrowave), `PF_PROBE_CODEC` (h264|hevc|av1|pyrowave),
     /// `PF_PROBE_INPUT` (default|nv12), `PF_PROBE_FRAMES` (300) pick the run.
+    /// `PF_PROBE_HDR=1` takes the 10-bit PQ input and `PF_PROBE_444=1` the full-chroma one;
+    /// an HDR run needs the desktop already in advanced colour, else the probe fails at `fmt`.
     #[test]
     #[ignore = "needs an encode-probe pf-vdisplay driver on real hardware; run with --ignored"]
     fn live_encode_probe() {
@@ -1304,7 +1306,15 @@ mod tests {
             frames,
             bitrate_kbps: 20_000,
             fps: 60,
-            flags: 0,
+            flags: (if env("PF_PROBE_HDR", "0") == "1" {
+                control::PROBE_FLAG_HDR
+            } else {
+                0
+            }) | (if env("PF_PROBE_444", "0") == "1" {
+                control::PROBE_FLAG_444
+            } else {
+                0
+            }),
         };
 
         let _policy = ExclusiveTopology::force();
@@ -1383,8 +1393,9 @@ mod tests {
             .trim_end_matches('\0')
             .to_string();
         println!(
-            "encode probe: backend={backend} codec={codec} input={input} state={} frames={} aus={} \
+            "encode probe: backend={backend} codec={codec} input={input} flags={:#x} state={} frames={} aus={} \
              bytes={} open_us={} first_au_us={} mean_us={} max_us={} drops={} error={} name={name}",
+            req.flags,
             reply.state,
             reply.frames_submitted,
             reply.aus,

@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::Win32::System::Threading::SetEvent;
 use windows62::Win32::Graphics::Direct3D11 as d3d;
 
-use super::convert::{Fail, InputKind, Targets, bridge};
+use super::convert::{Fail, InputKind, Targets, bridge, source_format};
 use super::section::EncodeSession;
 use super::thread::qpc_now;
 use crate::cursor_cell::CursorCell;
@@ -92,7 +92,7 @@ impl Pool {
             width: size.0,
             height: size.1,
             kind,
-            source_format: DXGI_FORMAT(kind.source_format().0),
+            source_format: DXGI_FORMAT(source_format(kind).0),
             state: Mutex::new(State {
                 targets,
                 free: (0..SLOTS).collect(),
