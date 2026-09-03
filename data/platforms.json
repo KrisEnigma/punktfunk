@@ -53,6 +53,7 @@
     "url": "https://punktfunk.unom.io/install.sh",
     "source": "https://git.unom.io/unom/punktfunk/raw/branch/main/scripts/install.sh",
     "oneLiner": "curl -fsSL https://punktfunk.unom.io/install.sh | sh",
+    "canaryOneLiner": "curl -fsSL https://punktfunk.unom.io/install.sh | sh -s -- --channel canary",
     "inspectFirst": [
       "curl -fsSLO https://punktfunk.unom.io/install.sh",
       "less install.sh",
