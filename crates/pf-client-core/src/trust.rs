@@ -372,7 +372,8 @@ impl KnownHosts {
         write_atomic(&p, serde_json::to_string_pretty(self)?.as_bytes())?;
         // Omarchy menu mirrors this store; save() is the one door every mutation walks.
         // No-op unless `--omarchy-menu on` — a scoped test HOME never has that.
-        #[cfg(target_os = "linux")]
+        // `desktop` too: `trust` is portable, and a TV build has no omarchy_menu to call.
+        #[cfg(all(feature = "desktop", target_os = "linux"))]
         crate::omarchy_menu::sync_if_enabled();
         Ok(())
     }

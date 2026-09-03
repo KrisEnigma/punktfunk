@@ -15,7 +15,7 @@ repository.workspace = true
 # `pyrowave` feature (which re-exports it below), never by inheriting the dependency's default.
 # Otherwise a consumer that deliberately builds us without `pyrowave` still drags the vendored
 # C++ in — fatal on Windows ARM64, where Granite has no SIMD path.
-pf-client-core = { path = "../pf-client-core", default-features = false }
+pf-client-core = { path = "../pf-client-core", default-features = false, features = ["desktop"] }
 punktfunk-core = { path = "../punktfunk-core", features = ["quic"] }
 # `--probe-decode` reports the driver's own video-format answers through pf-vkdecode's
 # query rather than a second copy of it — a probe that keeps its own copy is a probe

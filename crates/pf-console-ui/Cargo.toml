@@ -18,7 +18,19 @@ repository.workspace = true
 # for aarch64/x86_64/i686-linux-android. Neither key must drift or skia-bindings silently
 # builds Skia from source for hours.
 default = ["vulkan-overlay"]
-vulkan-overlay = ["dep:pf-presenter", "dep:ash", "dep:sdl3", "skia-safe/vulkan"]
+# `pf-client-core/desktop` because `skia_overlay` names `video::QueueLock`, and `video` is part
+# of the desktop half. The portable `Console` driver the GL hosts use needs none of it, which is
+# why the dependency below stays `default-features = false` and this feature adds it back.
+vulkan-overlay = ["dep:pf-presenter", "dep:ash", "dep:sdl3", "skia-safe/vulkan", "pf-client-core/desktop"]
+
+# Skia's GL backend for a Linux consumer that has no Vulkan presenter and no SDL3 — a TV app
+# drawing on an EGL surface it owns (design/webos-skia-console-port.md §2.1). Android already
+# asks for `gl` from its own target block; this is the same ask spelled for Linux, where the
+# default is Vulkan and there was previously no way to request a GPU canvas at all.
+# ⚠ Changes the prebuilt key to `gl-jpegd-jpege-pdf-textlayout`, for which rust-skia publishes
+# NO armv7-unknown-linux-gnueabi archive — that one is ours to build and host, exactly as the
+# armeabi-v7a one is (see the provenance note in clients/android/kit/build.gradle.kts).
+gl = ["skia-safe/gl"]
 
 # Same Linux+Windows gating as the rest of the client stack.
 [target.'cfg(any(target_os = "linux", windows))'.dependencies]
