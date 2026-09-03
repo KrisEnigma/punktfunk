@@ -18,7 +18,6 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
-#[cfg(feature = "driver-encode")]
 use windows::{
     Win32::Foundation::WAIT_OBJECT_0,
     Win32::System::Threading::{
@@ -179,7 +178,6 @@ impl Worker {
     /// = the thread is still inside something; it is DETACHED — this value is leaked whole, so
     /// the stop event it may still wait on stays open and signalled, and nothing here ever
     /// blocks on it again. A thread that never returns is the caller's accounting problem.
-    #[cfg(feature = "driver-encode")]
     #[must_use]
     pub fn stop_within(mut self, bound: Duration) -> bool {
         use std::os::windows::io::AsRawHandle;
@@ -217,10 +215,8 @@ impl Drop for Worker {
 /// An MMCSS "Distribution" registration for the calling thread, reverted on drop. The fallback
 /// when MMCSS declines under the WUDFHost token is TIME_CRITICAL, the highest band without the
 /// realtime class; the thread spends its life blocked on events, so it cannot starve others.
-#[cfg(feature = "driver-encode")]
 pub struct Mmcss(Option<HANDLE>);
 
-#[cfg(feature = "driver-encode")]
 impl Mmcss {
     pub fn distribution(what: &str) -> Self {
         let mut task = 0u32;
@@ -244,7 +240,6 @@ impl Mmcss {
     }
 }
 
-#[cfg(feature = "driver-encode")]
 impl Drop for Mmcss {
     fn drop(&mut self) {
         if let Some(h) = self.0.take() {

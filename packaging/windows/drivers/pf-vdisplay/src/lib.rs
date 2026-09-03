@@ -23,12 +23,10 @@ mod control;
 mod cursor_cell;
 mod cursor_worker;
 mod direct_3d_device;
-#[cfg(feature = "driver-encode")]
 mod encode;
 #[cfg(feature = "encode-probe")]
 mod encode_probe;
 mod entry;
-mod frame_transport;
 mod monitor;
 mod registry;
 mod swap_chain_processor;

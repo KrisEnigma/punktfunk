@@ -1,5 +1,5 @@
-//! In-driver encode (`--features driver-encode`, design/windows-video-plane-overhaul.md §2):
-//! the encoder backends opened and driven inside WUDFHost. [`convert`] bridges the driver's
+//! In-driver encode (design/windows-video-plane-overhaul.md §2): the encoder backends opened
+//! and driven inside WUDFHost — the driver's only video transport. [`convert`] bridges the driver's
 //! `windows` 0.58 objects to the backends' 0.62 and owns the input targets a pool slot is
 //! written in; [`section`] is the host's AU section and the session installed on a monitor;
 //! [`thread`] opens a backend, reports, and publishes. The S5 probe (`encode_probe.rs`) is a

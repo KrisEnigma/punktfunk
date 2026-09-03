@@ -120,11 +120,10 @@ pub(crate) fn adapter() -> Option<iddcx::IDDCX_ADAPTER> {
         .map(|a| a.0)
 }
 
-/// Honor the host's `IOCTL_SET_RENDER_ADAPTER`: pin the GPU the IddCx swap-chain renders on. On a hybrid
-/// iGPU+dGPU box the OS may otherwise pick the iGPU to render the virtual monitor, so the host's shared
-/// ring textures (created on the NVENC dGPU) can't be opened → `DRV_STATUS_TEX_FAIL` → the host's 20 s
-/// black bail. Pinning the render adapter to the encode GPU fixes that. Unconditional — NOT the
-/// SudoVDA-parity default-off branch (`design/windows-host-rewrite.md` §2.8). Returns
+/// Honor the host's `IOCTL_SET_RENDER_ADAPTER`: pin the GPU the IddCx swap-chain renders on. On a
+/// hybrid iGPU+dGPU box the OS may otherwise pick the iGPU to render the virtual monitor, and the
+/// encode pool then opens on an adapter whose encoder the host never selected. Unconditional —
+/// NOT the SudoVDA-parity default-off branch (`design/windows-host-rewrite.md` §2.8). Returns
 /// `STATUS_NOT_FOUND` if called before the adapter exists.
 pub fn set_render_adapter(luid_low: u32, luid_high: i32) -> NTSTATUS {
     let Some(adapter) = adapter() else {

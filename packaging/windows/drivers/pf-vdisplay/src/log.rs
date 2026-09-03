@@ -3,7 +3,7 @@
 //! `OutputDebugStringA` used to fire unconditionally, a syscall + CString + `format!` alloc per
 //! logged event on paths that run per IOCTL/frame. The file tee (WUDFHost temp dir, not
 //! world-writable — audit §4.4) rides the same gate. Best-effort; ignores all errors. Production
-//! driver-state visibility is the SharedHeader `driver_status` channel, not this module.
+//! driver-state visibility is the AU header's `driver_status` word, not this module.
 
 unsafe extern "system" {
     fn OutputDebugStringA(s: *const u8);

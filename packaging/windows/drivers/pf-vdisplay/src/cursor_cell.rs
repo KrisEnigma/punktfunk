@@ -13,7 +13,6 @@ use pf_driver_proto::cursor::{CursorShm, ShapeRgba};
 
 /// Straight-alpha RGBA at its frame-relative top-left. `serial` is the OS shape id.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "driver-encode"), allow(dead_code))]
 pub struct CursorImage {
     pub x: i32,
     pub y: i32,
@@ -38,7 +37,6 @@ pub struct CursorCell {
 impl CursorCell {
     /// The pointer to blend now: `None` unless blending is on and a visible shape was
     /// published. The scale is the FP16 SDR-white factor (1.0 when the host stamped none).
-    #[cfg(feature = "driver-encode")]
     pub fn to_blend(&self) -> Option<(CursorImage, f32)> {
         if !self.blend.load(Ordering::Relaxed) {
             return None;

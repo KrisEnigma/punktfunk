@@ -21,30 +21,19 @@ wdk-build.workspace = true
 
 [features]
 default = []
-# Phase 3 (design/windows-video-plane-overhaul.md §4): the encoder backends opened and driven
-# inside WUDFHost, publishing access units into the host's AU section. Never ships next to the
-# ring transport; the 3.5 cutover turns it on for good.
-driver-encode = [
-    "dep:pf-encode-win",
-    "dep:pf-frame",
-    "dep:windows62",
-    "dep:anyhow",
-    "pf-encode-win/nvenc",
-    "pf-encode-win/qsv",
-    "pf-encode-win/pyrowave",
-]
-# Spike S5: the probe IOCTLs (`encode_probe.rs`) on top of the same backends. CI builds it so
-# the backends keep linking under the WDK toolchain.
-encode-probe = ["driver-encode"]
+# Spike S5: the probe IOCTLs (`encode_probe.rs`) on top of the shipping backends. CI builds it so
+# the probe keeps compiling under the WDK toolchain.
+encode-probe = []
 
 [dependencies]
-pf-encode-win = { workspace = true, optional = true }
-pf-frame = { workspace = true, optional = true }
+# The encoder backends this driver opens inside WUDFHost — the only Windows video transport.
+pf-encode-win = { workspace = true, features = ["nvenc", "qsv", "pyrowave"] }
+pf-frame.workspace = true
 # The backends' error type; the driver only formats it.
-anyhow = { version = "1", optional = true }
+anyhow = "1"
 # The `windows` the encoder backends speak. The driver's own stays 0.58 (below); `encode::convert`
-# bridges the two by `QueryInterface`, so both resolve — but only under `driver-encode`.
-windows62 = { package = "windows", version = "0.62", optional = true, features = [
+# bridges the two by `QueryInterface`, so both resolve.
+windows62 = { package = "windows", version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Threading",

@@ -1,7 +1,7 @@
 //! The `pf-driver-proto` control plane (`EvtIddCxDeviceIoControl`). The host opens the device
 //! interface (`PF_VDISPLAY_INTERFACE_GUID`) and drives the low-frequency IOCTLs: GET_INFO (version
 //! handshake), PING (watchdog keepalive), ADD/REMOVE/CLEAR_ALL (virtual monitors),
-//! SET_RENDER_ADAPTER, UPDATE_MODES, and the frame/cursor channel deliveries.
+//! SET_RENDER_ADAPTER, UPDATE_MODES, the cursor channel, and the encoder verbs.
 //!
 //! [`dispatch`] wraps the raw `WDFREQUEST` in a [`Request`] token once and hands it to a handler BY
 //! VALUE; completing consumes the token, so "every path completes exactly once" (the
@@ -44,13 +44,10 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
             request.complete(STATUS_SUCCESS);
         }
         control::IOCTL_SET_RENDER_ADAPTER => set_render_adapter(request),
-        control::IOCTL_SET_FRAME_CHANNEL => set_frame_channel(request),
         control::IOCTL_UPDATE_MODES => update_modes(request),
         control::IOCTL_SET_CURSOR_CHANNEL => set_cursor_channel(request),
         control::IOCTL_SET_CURSOR_FORWARD => set_cursor_forward(request),
-        #[cfg(feature = "driver-encode")]
         pf_driver_proto::encode::IOCTL_SET_ENCODE => set_encode(request),
-        #[cfg(feature = "driver-encode")]
         pf_driver_proto::encode::IOCTL_ENCODE_CTL => encode_ctl(request),
         #[cfg(feature = "encode-probe")]
         control::IOCTL_ENCODE_PROBE_ARM => encode_probe_arm(request),
@@ -67,7 +64,6 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
 /// for a live monitor always completes successfully with the structured reply — the driver
 /// owns the two handles from there — and only a malformed or unmatched one fails the IOCTL
 /// with nothing adopted (`SetEncodeReply` docs).
-#[cfg(feature = "driver-encode")]
 fn set_encode(request: Request) {
     use pf_driver_proto::encode::{SetEncodeReply, SetEncodeRequest};
     let Some(req) = read_input::<SetEncodeRequest>(&request) else {
@@ -81,7 +77,6 @@ fn set_encode(request: Request) {
 }
 
 /// `IOCTL_ENCODE_CTL` (v7): one control op on a monitor's live encoder; `reset` reopens it.
-#[cfg(feature = "driver-encode")]
 fn encode_ctl(request: Request) {
     let Some(req) = read_input::<pf_driver_proto::encode::EncodeCtlRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
@@ -197,54 +192,10 @@ fn set_cursor_forward(request: Request) {
     }
 }
 
-/// `IOCTL_SET_FRAME_CHANNEL`: adopt the handle values the host duplicated into this process and
-/// stash them on the target monitor for the swap-chain worker to attach with. The ownership
-/// contract with the host is **adopt-on-success only**: this driver owns (and eventually closes)
-/// the handles iff the IOCTL completes successfully; on ANY error completion it leaves them
-/// untouched, because the host reaps its remote duplicates whenever the IOCTL fails — a close on
-/// both sides would double-close values the OS may already have reused for unrelated handles.
-fn set_frame_channel(request: Request) {
-    // The v2 request (two shared-fence handles behind the v1 prefix) is told apart by input
-    // LENGTH; a v1-sized buffer fails the v2 read and takes the v1 path. Either way a malformed
-    // request adopts nothing (no FrameChannel is built, so no Drop can close anything).
-    let (target_id, ch) =
-        if let Some(req) = read_input::<control::SetFrameChannelRequestV2>(&request) {
-            (
-                req.v1.target_id,
-                crate::frame_transport::FrameChannel::from_request_v2(&req),
-            )
-        } else if let Some(req) = read_input::<control::SetFrameChannelRequest>(&request) {
-            (
-                req.target_id,
-                crate::frame_transport::FrameChannel::from_request(&req),
-            )
-        } else {
-            request.complete(STATUS_INVALID_PARAMETER);
-            return;
-        };
-    let Some(ch) = ch else {
-        request.complete(STATUS_INVALID_PARAMETER);
-        return;
-    };
-    match crate::monitor::set_frame_channel(target_id, ch) {
-        Ok(()) => request.complete(STATUS_SUCCESS),
-        Err(ch) => {
-            dbglog!(
-                "[pf-vd] SET_FRAME_CHANNEL: no monitor with target_id {} — rejecting (host reaps the handles)",
-                target_id
-            );
-            // NOT adopted: disarm the channel so its Drop does NOT close the handles (see the contract
-            // above — the host's error path reaps them remotely).
-            ch.into_unowned();
-            request.complete(STATUS_NOT_FOUND);
-        }
-    }
-}
-
 /// `IOCTL_UPDATE_MODES` (v4): refresh a LIVE monitor's target-mode list to a new preferred mode —
 /// the in-place mid-stream resize (`design/first-frame-and-resize-latency.md` P2). The monitor is
-/// NOT departed: its OS identity, swap-chain machinery and retained frame stash all survive; the
-/// host force-sets the freshly-advertised mode afterwards.
+/// NOT departed: its OS identity, swap-chain machinery and encode session all survive; the host
+/// force-sets the freshly-advertised mode afterwards.
 fn update_modes(request: Request) {
     let Some(req) = read_input::<control::UpdateModesRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);

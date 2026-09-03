@@ -1,6 +1,6 @@
 //! Virtual monitors: the [`Monitor`] type and the control-plane verbs on it — create + arrive
-//! (`IOCTL_ADD`), the in-place mode update, remove, clear, the watchdog reap, and the frame- and
-//! cursor-channel deliveries — plus the mode-struct stamping the DDIs fill from.
+//! (`IOCTL_ADD`), the in-place mode update, remove, clear, the watchdog reap, the cursor-channel
+//! delivery and the encode session — plus the mode-struct stamping the DDIs fill from.
 //!
 //! Ownership: [`crate::registry`] holds the only strong `Arc<Monitor>`; the drain worker holds a
 //! `Weak`. Every field a worker, a DDI callback or an IOCTL can race on sits behind its own
@@ -8,8 +8,8 @@
 //! handle. Lock order is `REGISTRY → Monitor.*`, never reversed; workers never take the registry.
 //!
 //! Removal is two steps with no lock held between them: the registry hands the `Arc` back, then
-//! [`Monitor::teardown`] stops the workers (cursor first, then the drain worker, the ring, an
-//! unconsumed delivery), and only then does the caller run `IddCxMonitorDeparture`.
+//! [`Monitor::teardown`] stops the workers (cursor first, then the encode session, the drain
+//! worker, the pool), and only then does the caller run `IddCxMonitorDeparture`.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,9 +20,7 @@ use wdk_sys::{NTSTATUS, WDFOBJECT, call_unsafe_wdf_function_binding, iddcx};
 
 use crate::cursor_cell::CursorCell;
 use crate::cursor_worker::CursorChannel;
-#[cfg(feature = "driver-encode")]
 use crate::encode::section::EncodeSession;
-use crate::frame_transport::{FrameChannel, RingEndpoint};
 use crate::registry::{self, lock};
 use crate::swap_chain_processor::SwapChainProcessor;
 use crate::worker::{OwnedHandle, Worker};
@@ -104,34 +102,19 @@ pub struct Monitor {
     modes: Mutex<Vec<Mode>>,
     /// The live swap-chain drain worker; dropping it joins the thread.
     swap: Mutex<Option<SwapChainProcessor>>,
-    /// A frame-channel delivery awaiting the drain worker's pickup. Exactly one owner per
-    /// delivery: replacing or dropping it closes an unconsumed channel's handles.
-    chan: Mutex<Option<FrameChannel>>,
-    /// Bumped (Release) by every delivery landing in `chan`. The drain loop compares it
-    /// (Acquire) with its last-seen value and locks `chan` only when one did, so its steady
-    /// state (≥ 60 passes/s) takes no lock.
-    pub chan_gen: AtomicU32,
-    /// The monitor-owned ring endpoint of the current generation. Every drain worker — the next
-    /// one after a swap-chain flap too — opens its own device-bound publisher on it, so nothing
-    /// device-bound crosses assignments. The last `Arc` holder unmaps and closes it.
-    endpoint: Mutex<Option<Arc<RingEndpoint>>>,
-    /// The source sequence: advanced only by new desktop frames, monotonic across ring rebuilds
-    /// — shared with every endpoint this monitor gets.
+    /// The source sequence: advanced only by frames the drain worker hands the pool, and
+    /// monotonic across encode sessions — shared with every pool this monitor gets.
     pub source_seq: Arc<AtomicU64>,
     cursor: Mutex<CursorState>,
     /// The live encode session (`SET_ENCODE`); its thread stops with no lock held.
-    #[cfg(feature = "driver-encode")]
     encode: Mutex<Option<Arc<EncodeSession>>>,
     /// The encode pool, kept across sessions for its retained slot; dropped at teardown.
-    #[cfg(feature = "driver-encode")]
     pool: Mutex<Option<Arc<crate::encode::pool::Pool>>>,
     /// Bumped (Release) by every session install or removal, and by every pool change. The
     /// drain loop compares it with its last-seen value and re-reads the slots only then.
-    #[cfg(feature = "driver-encode")]
     pub encode_gen: AtomicU32,
     /// The render LUID of the last swap-chain assignment, packed; `0` = none yet. The pool
-    /// and the encoder open on this device, the one the drain worker copies from.
-    #[cfg(feature = "driver-encode")]
+    /// and the encoder open on this device, the one the drain worker acquires from.
     render_luid: std::sync::atomic::AtomicI64,
     gone: AtomicBool,
 }
@@ -153,9 +136,6 @@ impl Monitor {
             arrival: OnceLock::new(),
             modes: Mutex::new(modes),
             swap: Mutex::new(None),
-            chan: Mutex::new(None),
-            chan_gen: AtomicU32::new(0),
-            endpoint: Mutex::new(None),
             source_seq: Arc::new(AtomicU64::new(0)),
             cursor: Mutex::new(CursorState {
                 data_event: None,
@@ -163,27 +143,21 @@ impl Monitor {
                 forward_on: true,
                 cell: Arc::default(),
             }),
-            #[cfg(feature = "driver-encode")]
             encode: Mutex::new(None),
-            #[cfg(feature = "driver-encode")]
             pool: Mutex::new(None),
-            #[cfg(feature = "driver-encode")]
             encode_gen: AtomicU32::new(0),
-            #[cfg(feature = "driver-encode")]
             render_luid: std::sync::atomic::AtomicI64::new(0),
             gone: AtomicBool::new(false),
         }
     }
 
     /// Record the render adapter a swap-chain was just assigned on.
-    #[cfg(feature = "driver-encode")]
     pub fn set_render_luid(&self, luid: windows::Win32::Foundation::LUID) {
         let packed = (i64::from(luid.HighPart) << 32) | i64::from(luid.LowPart);
         self.render_luid.store(packed, Ordering::Release);
     }
 
     /// The render adapter of the last assignment; `None` before the first.
-    #[cfg(feature = "driver-encode")]
     pub fn render_luid(&self) -> Option<windows::Win32::Foundation::LUID> {
         let packed = self.render_luid.load(Ordering::Acquire);
         (packed != 0).then(|| windows::Win32::Foundation::LUID {
@@ -193,13 +167,11 @@ impl Monitor {
     }
 
     /// The cursor the encode pool blends ([`CursorCell`]); the same `Arc` for the monitor's life.
-    #[cfg(feature = "driver-encode")]
     pub fn cursor_cell(&self) -> Arc<CursorCell> {
         lock(&self.cursor).cell.clone()
     }
 
     /// The next publish-token generation: one per `SET_ENCODE`, never 0.
-    #[cfg(feature = "driver-encode")]
     pub fn next_encode_generation(&self) -> u32 {
         static GENERATION: AtomicU32 = AtomicU32::new(0);
         GENERATION.fetch_add(1, Ordering::Relaxed) + 1
@@ -208,7 +180,6 @@ impl Monitor {
     /// Install an encode session and wake the drain worker so an idle display picks it up
     /// now. Returns the session it displaced — `Err(session)` once the monitor is torn down —
     /// for the caller to stop with no lock held.
-    #[cfg(feature = "driver-encode")]
     pub fn set_encode(
         &self,
         session: Arc<EncodeSession>,
@@ -225,20 +196,17 @@ impl Monitor {
     }
 
     /// The live session, if any.
-    #[cfg(feature = "driver-encode")]
     pub fn encode(&self) -> Option<Arc<EncodeSession>> {
         lock(&self.encode).clone()
     }
 
     /// The encode pool, if one was ever built.
-    #[cfg(feature = "driver-encode")]
     pub fn pool(&self) -> Option<Arc<crate::encode::pool::Pool>> {
         lock(&self.pool).clone()
     }
 
     /// Install a freshly built pool (the encode thread, once its session's kind is known) and
     /// wake the drain worker. The replaced pool's textures drop after the guard.
-    #[cfg(feature = "driver-encode")]
     pub fn set_pool(&self, pool: Arc<crate::encode::pool::Pool>) {
         let replaced = lock(&self.pool).replace(pool);
         self.bump_encode_gen();
@@ -247,7 +215,6 @@ impl Monitor {
 
     /// Bump the encode generation and wake the drain worker (`SetEvent` never blocks, so the
     /// `swap` guard may span it).
-    #[cfg(feature = "driver-encode")]
     fn bump_encode_gen(&self) {
         self.encode_gen.fetch_add(1, Ordering::Release);
         let swap = lock(&self.swap);
@@ -270,72 +237,6 @@ impl Monitor {
     /// A clone of the advertised list, for a lock-free DDI fill.
     pub fn modes(&self) -> Vec<Mode> {
         lock(&self.modes).clone()
-    }
-
-    /// Stash a host frame-channel delivery for the drain worker and wake its idle wait, so an
-    /// idle display attaches now instead of at its next timeout. The generation bump follows
-    /// the store: a pass that read the old value attaches on its next. A superseded delivery —
-    /// or `ch` itself, handed back as `Err` once the monitor is torn down — closes its handles
-    /// only after every guard here has dropped.
-    pub fn set_frame_channel(&self, ch: FrameChannel) -> Result<(), FrameChannel> {
-        let superseded = {
-            let mut slot = lock(&self.chan);
-            if self.gone.load(Ordering::Acquire) {
-                return Err(ch);
-            }
-            slot.replace(ch)
-        };
-        self.chan_gen.fetch_add(1, Ordering::Release);
-        // `SetEvent` never blocks, so the `swap` guard may span it.
-        let swap = lock(&self.swap);
-        if let Some(p) = &*swap {
-            p.wake();
-        }
-        drop(swap);
-        drop(superseded);
-        Ok(())
-    }
-
-    /// Whether a delivery is pending. The drain worker treats one as newest-wins over an
-    /// attached publisher: the host only re-delivers after recreating the ring, and a retry-
-    /// created ring is a different header mapping whose generation bump the old publisher can
-    /// never observe.
-    pub fn has_frame_channel(&self) -> bool {
-        lock(&self.chan).is_some()
-    }
-
-    /// Take the pending delivery; the caller owns its handles from here.
-    pub fn take_frame_channel(&self) -> Option<FrameChannel> {
-        take(&self.chan)
-    }
-
-    /// The current ring endpoint, for a freshly assigned worker to open on its own device.
-    pub fn endpoint(&self) -> Option<Arc<RingEndpoint>> {
-        lock(&self.endpoint).clone()
-    }
-
-    /// Install the endpoint a worker built from a delivery, replacing the previous generation's.
-    /// Whichever `Arc` this releases — the old one, or `ep` once the monitor is torn down —
-    /// drops after the guard: as the last holder it unmaps the header and closes the ring.
-    pub fn set_endpoint(&self, ep: Arc<RingEndpoint>) {
-        let released = {
-            let mut slot = lock(&self.endpoint);
-            if self.gone.load(Ordering::Acquire) {
-                Some(ep)
-            } else {
-                slot.replace(ep)
-            }
-        };
-        drop(released);
-    }
-
-    /// Retire the endpoint if it is still ring generation `generation`: a worker whose open of
-    /// a fresh delivery failed keeps that failure terminal for the delivery (the host reads the
-    /// status; a retry is a new delivery). A newer endpoint is left alone. The retired `Arc`
-    /// drops after the guard.
-    pub fn clear_endpoint(&self, generation: u32) {
-        let retired = lock(&self.endpoint).take_if(|e| e.generation() == generation);
-        drop(retired);
     }
 
     /// Install the drain worker for a fresh swap-chain assignment. Returns the processor it
@@ -403,10 +304,9 @@ impl Monitor {
     /// Stop everything whose drop blocks, each taken under its own guard and dropped after it:
     /// the cursor worker (it can be inside a hardware-cursor query against the handle the
     /// caller departs next), then the event it waited on, then the encode session (its thread
-    /// stops within a bound or is detached), the drain worker, the ring (its last `Arc` unmaps
-    /// the header) and any delivery no worker picked up. `gone` is set first, so a racing
-    /// install hands its value back instead of landing here unjoined. Run by the caller that
-    /// removed this monitor from the registry, with the registry lock released.
+    /// stops within a bound or is detached), the drain worker and the pool. `gone` is set
+    /// first, so a racing install hands its value back instead of landing here unjoined. Run
+    /// by the caller that removed this monitor, with the registry lock released.
     pub fn teardown(&self) {
         self.gone.store(true, Ordering::Release);
         let started = Instant::now();
@@ -416,16 +316,12 @@ impl Monitor {
         };
         drop(worker);
         drop(event);
-        #[cfg(feature = "driver-encode")]
         if let Some(session) = take(&self.encode) {
             session.stop();
             drop(session);
         }
         drop(take(&self.swap));
-        #[cfg(feature = "driver-encode")]
         drop(take(&self.pool));
-        drop(take(&self.endpoint));
-        drop(take(&self.chan));
         let took = started.elapsed();
         if took > Duration::from_millis(250) {
             dbglog!("[pf-vd] monitor teardown took {} ms", took.as_millis());
@@ -538,20 +434,6 @@ pub fn target_mode2(width: u32, height: u32, refresh_rate: u32) -> iddcx::IDDCX_
     tm.TargetVideoSignalInfo = m1.TargetVideoSignalInfo;
     tm.BitsPerComponent = wire_bits();
     tm
-}
-
-/// Stash a host frame-channel delivery on the arrived monitor with `target_id`. `Err(ch)` if
-/// there is none — the caller must NOT close those handles (the host only sees the error status
-/// and reaps its remote duplicates itself; closing here too would double-close values the OS
-/// may have reused).
-pub fn set_frame_channel(target_id: u32, ch: FrameChannel) -> Result<(), FrameChannel> {
-    if target_id == 0 {
-        return Err(ch);
-    }
-    let Some(m) = registry::find(|m| m.target_id() == target_id) else {
-        return Err(ch);
-    };
-    m.set_frame_channel(ch)
 }
 
 /// Adopt a hardware-cursor channel delivery (`IOCTL_SET_CURSOR_CHANNEL`, proto v5): create the
@@ -788,7 +670,7 @@ pub fn create_monitor(
 
 /// `IOCTL_UPDATE_MODES` (v4): lead the live monitor's mode list with a new preferred mode and
 /// push the target list to the OS via `IddCxMonitorUpdateModes2` — the in-place mid-stream
-/// resize. No departure: OS identity, drain worker and ring all survive.
+/// resize. No departure: OS identity, drain worker and encode session all survive.
 ///
 /// The list is a union — new mode first, every previously advertised mode kept (deduped, capped
 /// at [`vdisplay::MODE_LIST_CAP`]) — because the OS pins a monitor's settable set at arrival, so
@@ -858,9 +740,9 @@ pub fn clear_all() {
 }
 
 /// `EvtCleanupCallback` (device removal, [`crate::callbacks::device_cleanup`]): empty the
-/// registry and release every monitor's heavy resources — drain workers, cursor workers, rings,
-/// unconsumed deliveries — WITHOUT `IddCxMonitorDeparture`: the framework tears the IddCx
-/// monitors down with the departing device, and departing here would double-tear.
+/// registry and release every monitor's heavy resources — drain workers, cursor workers and
+/// encode sessions — WITHOUT `IddCxMonitorDeparture`: the framework tears the IddCx monitors
+/// down with the departing device, and departing here would double-tear.
 pub fn cleanup_for_device_removal() {
     for m in registry::remove(|_| true) {
         m.teardown();
