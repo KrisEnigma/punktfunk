@@ -3297,7 +3297,8 @@ type Pipeline = (
     u32,
 );
 
-/// Mode-set the live monitor, resize the ring, swap only the encoder. `false` → full rebuild.
+/// Mode-set the live monitor, restore its presentation, swap only the encoder. `false` → full
+/// rebuild.
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn try_inplace_resize(
@@ -3340,15 +3341,15 @@ fn try_inplace_resize(
         );
         return false;
     }
-    let ring_ok = if recover_ring {
+    let restored = if recover_ring {
         capturer.restart_presentation_in_place()
     } else {
         capturer.resize_output(new_mode.width, new_mode.height)
     };
-    if !ring_ok {
+    if !restored {
         return false;
     }
-    trace.mark("ring_recreated");
+    trace.mark("presentation_restored");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let new_frame = loop {
         // The driver-encode capturer reads the display's progress off the encoder, and this

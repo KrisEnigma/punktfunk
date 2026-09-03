@@ -25,6 +25,29 @@ const WEDGE_AFTER: Duration = Duration::from_secs(2);
 /// a keyframe requested; longer would stall the encoder behind a host that stopped reading.
 const SLOT_WAIT: Duration = Duration::from_millis(250);
 
+/// G3 fault injection: encode this many frames, then never return from the encode work
+/// (`PFVD_ENCODE_BLOCK_AFTER`, a frame count; unset or unparsable disables it). Read once per
+/// encoder open, so a `reset` reopens blocked again until the knob is cleared.
+#[cfg(feature = "encode-probe")]
+fn block_after() -> Option<u64> {
+    crate::log::knob("PFVD_ENCODE_BLOCK_AFTER")?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Park forever, holding the pool slot and the session, once `encoded` passes the knob. Nothing
+/// unparks this thread: the drain worker has to keep composing against a thread that is gone.
+#[cfg(feature = "encode-probe")]
+fn block_if_armed(limit: Option<u64>, encoded: u64) {
+    if limit.is_some_and(|n| encoded > n) {
+        dbglog!("[pf-vd] encode: PFVD_ENCODE_BLOCK_AFTER — wedging at frame {encoded}");
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
 fn stop_signalled(stop: HANDLE) -> bool {
     // SAFETY: `stop` is the worker's stop event, alive until the worker joins or leaks.
     unsafe { WaitForSingleObject(stop, 0) == WAIT_OBJECT_0 }
@@ -99,6 +122,8 @@ impl Drive<'_> {
 
     pub fn run(&mut self) {
         self.pool.set_live(true);
+        #[cfg(feature = "encode-probe")]
+        let (block, mut encoded) = (block_after(), 0u64);
         while !self.stopped() {
             self.drain_ctl();
             let Some((slot, qpc, seq)) = self.pool.take_full() else {
@@ -120,6 +145,11 @@ impl Drive<'_> {
                     continue;
                 }
             };
+            #[cfg(feature = "encode-probe")]
+            {
+                encoded += 1;
+                block_if_armed(block, encoded);
+            }
             let index = self.wire_seq.wrapping_add(self.inflight.len() as u32);
             if let Err(e) = self.enc.submit_indexed(&frame, index) {
                 dbglog!("[pf-vd] encode: submit failed: {e:#}");
