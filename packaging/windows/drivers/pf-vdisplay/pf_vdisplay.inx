@@ -46,7 +46,7 @@ HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
 ; reasons from the dedicated-WUDFHost guarantee, so the group id was dead weight.)
 ; Only the host (LocalSystem service) + admins may open the control device. Deliberately NO Everyone
 ; ACE (SudoVDA ships one for its user-mode host): the control plane creates/removes monitors and
-; bootstraps the sealed frame channel (IOCTL_SET_FRAME_CHANNEL), so it is not for unprivileged callers.
+; opens the encoder on the sealed AU section (IOCTL_SET_ENCODE), so it is not for unprivileged callers.
 HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 
 [pf_vdisplay_Install.NT.Services]
