@@ -18,7 +18,7 @@ repository.workspace = true
 # (`pf-console-ui`) now runs inside the Android client too, and everything IT needs from
 # this crate is data — `trust::Settings`, the menu-event vocabulary + synthesizer, the
 # library model, the deep-link grammar, the overlay action/session-phase types. Those
-# modules are gated `any(linux, windows, android)` in lib.rs; the session pump, decoders,
+# modules are gated `any(linux, windows, android, wasm)` in lib.rs; the session pump, decoders,
 # audio, SDL gamepad service and the ureq fetches stay desktop-only, so this block carries
 # only what the portable modules touch. `quic` (not `ureq-tls`): `trust` names
 # `NativeClient`/`endpoint` for identity + pairing; nothing here fetches over HTTPS.
@@ -29,6 +29,18 @@ serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
 # `profiles` mints profile ids.
+rand = "0.9"
+
+# The web client (design/web-client-implementation-plan.md WP0.1), `wasm32-unknown-emscripten`.
+# The same portable subset Android takes, minus `quic`: WebTransport IS the QUIC layer there, so
+# quinn/tokio/aws-lc-rs never build for this target and `trust`'s three identity/pair/probe
+# entry points are `cfg`'d out with them.
+[target.'cfg(target_family = "wasm")'.dependencies]
+punktfunk-core = { path = "../punktfunk-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
 rand = "0.9"
 
 [target.'cfg(any(target_os = "linux", windows))'.dependencies]

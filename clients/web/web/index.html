@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Punktfunk</title>
+
+<!--
+  Two canvases, from day one (design/web-client-implementation-plan.md §1 R1). Video goes on the
+  lower one, the Skia console on the upper one with alpha, and CSS composites them. It is the
+  layout HDR needs (§2.1 of web-client.md) and, more importantly, the reason swapping WebGL2 for
+  WebGPU later touches only the LOWER canvas and one JavaScript file.
+
+  `#pf-video` is empty until Phase 2; it is here now because retro-fitting a second canvas is
+  exactly the change R1 exists to prevent.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #pf-stack { position: fixed; inset: 0; }
+  #pf-stack canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* Video below, console above. The console canvas is transparent where it draws nothing. */
+  #pf-video { z-index: 0; }
+  #pf-ui    { z-index: 1; }
+  /* The UI is authored SDR and stays that way when the video plane goes HDR (§1 R5). */
+  #pf-ui    { dynamic-range-limit: standard; }
+  #pf-fail {
+    position: fixed; inset: 0; z-index: 2; display: none;
+    place-content: center; padding: 2rem; color: #eee; background: #000;
+    font: 15px/1.5 system-ui, sans-serif; text-align: center;
+  }
+</style>
+
+<div id="pf-stack">
+  <canvas id="pf-video"></canvas>
+  <canvas id="pf-ui"></canvas>
+</div>
+<div id="pf-fail"><p id="pf-fail-text"></p></div>
+
+<!-- `pf-glue.js` is not loaded here: it is emscripten's `--js-library`, linked INTO the module
+     at build time so its functions run in the module's own scope (where `GL` lives). -->
+<script src="punktfunk-client-web.js"></script>
+<script>
+  // The page owns the loop and the canvas size; the wasm side owns what is drawn. Keeping
+  // pacing here is deliberate — plan §5.3 measures rAF against the native presenter, and a
+  // number is easier to take where the browser's own timestamps already are.
+  PunktfunkWeb().then((mod) => {
+    const ui = document.getElementById("pf-ui");
+    const video = document.getElementById("pf-video");
+
+    // Device pixels, capped at 2× — beyond that a 4K panel costs more than it shows, and the
+    // console has its own "draw the menus at 1080p" setting for exactly this trade.
+    const sizeCanvases = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(1, Math.round(ui.clientWidth * dpr));
+      const h = Math.max(1, Math.round(ui.clientHeight * dpr));
+      for (const c of [ui, video]) {
+        if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+      }
+      return [w, h];
+    };
+
+    const [w0, h0] = sizeCanvases();
+    if (!mod._pf_start(w0, h0)) {
+      const fail = document.getElementById("pf-fail");
+      document.getElementById("pf-fail-text").textContent =
+        "This browser could not bring up a WebGL2 canvas for the Punktfunk console.";
+      fail.style.display = "grid";
+      return;
+    }
+
+    const frame = () => {
+      const [w, h] = sizeCanvases();
+      mod._pf_frame(w, h);
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+
+    // Index into the console's key table (`KEYS` in src/host.rs). Anything absent stays the
+    // browser's — reload, devtools and find keep working while the console has focus.
+    const KEYS = {
+      ArrowLeft: 0, ArrowRight: 1, ArrowUp: 2, ArrowDown: 3,
+      Enter: 4, NumpadEnter: 4, Space: 5, Escape: 6, Backspace: 7,
+      PageUp: 8, PageDown: 9, Tab: 10, KeyY: 11, KeyX: 12,
+    };
+    addEventListener("keydown", (e) => {
+      const k = KEYS[e.code];
+      if (k === undefined || e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
+      mod._pf_key(k, e.shiftKey ? 1 : 0, e.repeat ? 1 : 0);
+    });
+  });
+</script>

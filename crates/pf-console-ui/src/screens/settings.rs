@@ -1324,8 +1324,8 @@ fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                  for games), Desktop leaves it free and sends absolute positions. \
                  Ctrl+Alt+Shift+M switches live while streaming."
             }
-            // No live chord to name: neither host binds one.
-            Platform::Android | Platform::WebOS => {
+            // No live chord to name: none of these hosts binds one.
+            Platform::Android | Platform::WebOS | Platform::Web => {
                 "How a physical mouse drives the host: Capture locks the pointer (relative, \
                  for games), Desktop leaves it free and sends absolute positions."
             }
@@ -1373,7 +1373,7 @@ fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                 "How much the overlay shows: Compact (one line) → Normal → Detailed. \
                  Ctrl+Alt+Shift+S cycles it live while streaming."
             }
-            Platform::Android | Platform::WebOS => {
+            Platform::Android | Platform::WebOS | Platform::Web => {
                 "How much the overlay shows: Compact (one line) → Normal → Detailed."
             }
         },

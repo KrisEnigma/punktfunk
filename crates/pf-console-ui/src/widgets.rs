@@ -165,7 +165,7 @@ impl MenuList {
 
     /// True while an entrance, ease, or spring is still moving. The damage-gated
     /// stream overlay redraws until this is false; the console paints every frame.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
     pub(crate) fn animating(&self) -> bool {
         !self.settled
     }

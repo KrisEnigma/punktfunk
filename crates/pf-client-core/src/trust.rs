@@ -10,8 +10,16 @@
 //! `design/client-settings-profiles.md`.
 
 use crate::profiles::{ProfilesFile, Resolution, StreamProfile};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
+// The `quic` half of the store. wasm takes punktfunk-core WITHOUT `quic` — WebTransport is
+// the QUIC layer in a browser, so quinn never builds for that target — and these are the
+// only items here that reach for it. Everything else in this file is data the console reads
+// on every platform.
+#[cfg(not(target_family = "wasm"))]
+use anyhow::anyhow;
+#[cfg(not(target_family = "wasm"))]
 use punktfunk_core::client::NativeClient;
+#[cfg(not(target_family = "wasm"))]
 use punktfunk_core::quic::endpoint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -65,6 +73,7 @@ pub fn config_dir() -> Result<PathBuf> {
 }
 
 /// Persistent mTLS identity, generated once and presented on every connect.
+#[cfg(not(target_family = "wasm"))]
 pub fn load_or_create_identity() -> Result<(String, String)> {
     let dir = config_dir()?;
     let (cp, kp) = (dir.join("client-cert.pem"), dir.join("client-key.pem"));
@@ -92,6 +101,7 @@ pub fn load_or_create_identity() -> Result<(String, String)> {
 
 /// Write the mTLS private key. Unix: create 0600 — `fs::write` then chmod would briefly
 /// expose it at the umask default. Elsewhere: std perms + %APPDATA% ACL.
+#[cfg(not(target_family = "wasm"))]
 fn write_private_key(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
@@ -112,7 +122,7 @@ fn write_private_key(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 /// Best-effort dir 0700 / key 0600 on an existing store. Errors ignored: this never
 /// loosens perms, so a failure leaves what was already there.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_family = "wasm")))]
 fn lock_identity_perms(dir: &std::path::Path, key: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
@@ -532,6 +542,7 @@ pub fn persist_host(name: &str, addr: &str, port: u16, fp_hex: &str, paired: boo
 }
 
 /// Label a host files this client under. Re-export of `punktfunk_core::client::device_name`.
+#[cfg(not(target_family = "wasm"))]
 pub fn device_name() -> String {
     punktfunk_core::client::device_name()
 }
@@ -660,6 +671,7 @@ pub fn learn_mgmt_port_by_fp(fp_hex: &str, mgmt_port: u16) {
 
 /// SPAKE2 PIN ceremony. `device_name` is the label the host stores; 90 s covers a
 /// human-typed PIN. Returns the verified host certificate fingerprint.
+#[cfg(not(target_family = "wasm"))]
 pub fn pair_with_host(
     addr: &str,
     port: u16,
@@ -751,6 +763,7 @@ pub fn pair_error_message(err: &punktfunk_core::PunktfunkError) -> String {
 
 /// Probe several hosts in parallel — wall-clock is ~one `timeout`, not the sum. Result
 /// index matches `targets`. Wraps [`NativeClient::probe`].
+#[cfg(not(target_family = "wasm"))]
 pub fn probe_reachable_many(
     targets: Vec<(String, u16)>,
     timeout: std::time::Duration,
@@ -1197,6 +1210,7 @@ impl Settings {
     }
 
     /// The `codec` setting as a `quic::CODEC_*` preference bit (`0` = auto).
+    #[cfg(not(target_family = "wasm"))]
     pub fn preferred_codec(&self) -> u8 {
         match self.codec.as_str() {
             "h264" | "avc" => punktfunk_core::quic::CODEC_H264,

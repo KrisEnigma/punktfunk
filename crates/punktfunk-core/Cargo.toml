@@ -65,7 +65,8 @@ zeroize = "1"
 # enumeration silently changes depending on who else is in the selection is the worst of both. On
 # means fe80::/169.254 interfaces are enumerated too, which for WoL is the behaviour we want: a NIC
 # is wake-capable whether or not it currently holds a routable address.
-if-addrs = { version = "0.15", features = ["link-local"] }
+# Declared in the `cfg(not(wasm))` block near the bottom of this file, not here: its Linux path is
+# netlink, which emscripten's libc does not declare.
 
 # Crypto backend is aws-lc-rs, and rustls/quinn/rcgen must all name it: they each select a
 # backend independently, so one dissenter pulls a SECOND crypto stack in via feature unification.
@@ -126,6 +127,13 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_QoS",
 ] }
+
+# Interface enumeration for Wake-on-LAN and for `discovery`'s address ranking — everywhere but
+# wasm. if-addrs' Linux path is netlink (`sockaddr_nl`, `NETLINK_ROUTE`), which emscripten's libc
+# does not declare, and a browser has no interface list to enumerate. Both callers already treat
+# enumeration failure as an empty list, which is exactly what the wasm arms return.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+if-addrs = { version = "0.15", features = ["link-local"] }
 
 [dev-dependencies]
 proptest = "1"

@@ -34,6 +34,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **A browser client, `clients/web`.** `pf-console-ui` compiled to `wasm32-unknown-emscripten`
+  draws the console on a WebGL2 canvas; there is no transport, decoder or pairing yet. Build it
+  with `clients/web/build.sh` and read that directory's README first — it needs emsdk 4.0.9
+  specifically, and it is the one target that builds Skia from source.
+- **`Platform::Web` in `pf-console-ui`.** The browser takes the desktop's glyphs and ring but the
+  no-live-chord settings wording, since a page binds none. An embedder switching on `Platform`
+  gains an arm to handle.
 - **Capture health on the Status page and in `GET /api/v1/status`.** A native Windows session's
   `session.capture` block carries the live capture-health class (`healthy`, `idle`, `suspect`,
   `stalled` with its class, `recovering`, `rebuilding`, `secure_desktop`), the evidence behind
@@ -160,6 +167,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **`pf-client-core` and `pf-console-ui` build for `wasm32-unknown-emscripten`.** Their portable
+  module gates name `target_family = "wasm"` beside android, and `punktfunk-core` now takes
+  `if-addrs` off wasm only, keeps its Apple `recv_batch` off it, and `trust`'s identity, pair,
+  probe and `preferred_codec` entry points are absent there — a browser has no quinn. No other
+  target changes.
 - **The Windows installers are punktfunk's own.** `punktfunk-host-setup-<version>.exe` and
   `punktfunk-client-setup-<version>_<arch>.exe` are now built by `punktfunk-setup-win`, the
   engine behind the Linux installer, with a self-contained WinUI 3 wizard (Recommended or

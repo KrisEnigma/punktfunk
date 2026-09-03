@@ -42,6 +42,7 @@ members = [
     "clients/session",
     "clients/windows",
     "clients/android/native",
+    "clients/web",
     "tools/cursor-probe",
     "tools/display-disturb",
     "tools/fence-ring-spike",

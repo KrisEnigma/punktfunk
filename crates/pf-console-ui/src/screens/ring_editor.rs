@@ -36,7 +36,9 @@ const RING_W: f64 = 2.0 * RING_ABOVE + 24.0;
 /// Same platform mapping the in-stream ring uses to pick a default blob.
 pub(crate) fn ring_platform(platform: crate::platform::Platform) -> RingPlatform {
     match platform {
-        crate::platform::Platform::Desktop => RingPlatform::Desktop,
+        crate::platform::Platform::Desktop | crate::platform::Platform::Web => {
+            RingPlatform::Desktop
+        }
         crate::platform::Platform::Android => RingPlatform::Touch,
         // Not `Touch`: the TV's ring is driven by a pad or the remote's D-pad, so it wants the
         // keyboard/pad default blob. The Magic Remote is a pointer, but it never makes the

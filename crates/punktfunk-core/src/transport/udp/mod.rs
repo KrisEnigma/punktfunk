@@ -13,7 +13,12 @@ use super::Transport;
 use crate::packet::MAX_DATAGRAM_BYTES;
 use std::net::UdpSocket;
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+// Emscripten is `unix` too, but has no `recvmsg_x` and no `libc::sockaddr_nl` — it takes the
+// trait's scalar `recv_batch` instead.
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_family = "wasm"))
+))]
 mod apple;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
@@ -257,7 +262,10 @@ impl Transport for UdpTransport {
         linux::recv_batch(self, out, lens)
     }
 
-    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    #[cfg(all(
+        unix,
+        not(any(target_os = "linux", target_os = "android", target_family = "wasm"))
+    ))]
     fn recv_batch(&self, out: &mut [Vec<u8>], lens: &mut [usize]) -> std::io::Result<usize> {
         apple::recv_batch(self, out, lens)
     }

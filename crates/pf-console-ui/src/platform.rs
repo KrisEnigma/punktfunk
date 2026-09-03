@@ -13,6 +13,10 @@ pub enum Platform {
     /// pad, no touch and no window manager — so it shares Android's glyph legend but none of
     /// its phone-sensor rows.
     WebOS,
+    /// The browser client (`design/web-client.md`). Keyboard, mouse and pad like the desktop,
+    /// so it takes the desktop's glyphs and ring — but the page binds no live chords, so the
+    /// rows that name one describe the setting alone.
+    Web,
 }
 
 /// A native screen the platform owns. The shell sends

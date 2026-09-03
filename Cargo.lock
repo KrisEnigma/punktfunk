@@ -3613,6 +3613,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "punktfunk-client-web"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "pf-client-core",
+ "pf-console-ui",
+ "skia-safe",
+]
+
+[[package]]
 name = "punktfunk-client-windows"
 version = "0.34.0"
 dependencies = [
