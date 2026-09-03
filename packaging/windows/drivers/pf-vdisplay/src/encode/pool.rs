@@ -24,6 +24,7 @@ use windows62::Win32::Graphics::Direct3D11 as d3d;
 use super::convert::{Fail, InputKind, Targets, bridge};
 use super::section::EncodeSession;
 use super::thread::qpc_now;
+use crate::cursor_cell::CursorCell;
 use crate::direct_3d_device::Direct3DDevice;
 use crate::monitor::Monitor;
 use crate::registry::lock;
@@ -68,6 +69,9 @@ pub struct Pool {
     source_seq: Arc<AtomicU64>,
     /// Frames dropped at the pool or skipped by the encode thread for a full slot table.
     dropped: AtomicU64,
+    /// The monitor's cursor: read at every pass for the blend decision, at every frame for
+    /// the shape.
+    cursor: Arc<CursorCell>,
 }
 
 impl Pool {
@@ -77,6 +81,7 @@ impl Pool {
         kind: InputKind,
         size: (u32, u32),
         source_seq: Arc<AtomicU64>,
+        cursor: Arc<CursorCell>,
     ) -> Result<Arc<Self>, Fail> {
         let dev62: d3d::ID3D11Device = bridge(&device.device)?;
         let ctx62: d3d::ID3D11DeviceContext = bridge(&device.device_context)?;
@@ -98,6 +103,7 @@ impl Pool {
             event,
             source_seq,
             dropped: AtomicU64::new(0),
+            cursor,
         }))
     }
 
@@ -136,7 +142,9 @@ impl Pool {
         let Some(i) = st.free.pop().or(recycled) else {
             return self.drop_one();
         };
-        let passed = bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| st.targets.pass(&src, i));
+        let blend = self.cursor.blend.load(Ordering::Relaxed);
+        let passed =
+            bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| st.targets.pass(&src, i, blend));
         if passed.is_err() {
             st.free.push(i);
             return self.drop_one();
@@ -206,9 +214,11 @@ impl Pool {
         }
     }
 
-    /// Wrap slot `slot` as the frame `submit` takes (the planar pair signals its fence here).
+    /// Wrap slot `slot` as the frame `submit` takes, the pointer blended in when the client
+    /// draws none (the planar pair signals its fence here).
     pub fn frame(&self, slot: usize, pts_ns: u64) -> Result<CapturedFrame, Fail> {
-        lock(&self.state).targets.frame(slot, pts_ns)
+        let cursor = self.cursor.to_blend();
+        lock(&self.state).targets.frame(slot, pts_ns, cursor)
     }
 }
 

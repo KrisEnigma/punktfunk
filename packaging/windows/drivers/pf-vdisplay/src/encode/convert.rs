@@ -3,12 +3,19 @@
 //! from a BGRA or FP16 source. [`Targets::pass`] is the fused pass the drain worker runs in the
 //! acquire window; [`Targets::frame`] wraps a filled slot as the `CapturedFrame` `submit` takes.
 //!
+//! A blended pointer costs the window nothing: the pass then only copies the source into a
+//! slot-sized RGB scratch, and `frame` (the encode thread) draws the cursor quad and runs the
+//! converter from there. NVENC's BGRA slot is its own scratch, so that kind copies once either
+//! way; the converter kinds pay one extra full-frame copy while the client draws no pointer.
+//!
 //! Every COM object the backends see is a [`bridge`]d `QueryInterface` of the driver's own
 //! 0.58 object, so the two crates never wrap each other's pointer.
 
-use pf_encode_win::convert::{BgraToYuvPlanes, HdrP010Converter, VideoConverter};
+use std::sync::Arc;
+
+use pf_encode_win::convert::{BgraToYuvPlanes, CursorBlendPass, HdrP010Converter, VideoConverter};
 use pf_frame::dxgi::{D3d11Frame, PyroFrameShare};
-use pf_frame::{CapturedFrame, FramePayload, PixelFormat, Provenance};
+use pf_frame::{CapturedFrame, CursorOverlay, FramePayload, PixelFormat, Provenance};
 use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::Interface;
@@ -17,6 +24,7 @@ use windows62::Win32::Graphics::Direct3D11 as d3d;
 use windows62::Win32::Graphics::Dxgi::Common as dxgi;
 use windows62::core::{Interface as _, PCWSTR};
 
+use crate::cursor_cell::CursorImage;
 use crate::direct_3d_device::Direct3DDevice;
 
 /// A driver-domain failure: a small code for the reply and a stage tag; the log has the rest.
@@ -24,6 +32,7 @@ pub type Fail = (i32, &'static str);
 
 type Tex = d3d::ID3D11Texture2D;
 type Rtv = d3d::ID3D11RenderTargetView;
+type Srv = d3d::ID3D11ShaderResourceView;
 
 /// The pooled device's adapter, as the backends want it named: the LUID for NVENC/AMF/QSV,
 /// the PCI ids for PyroWave (LUIDs are invalid in session 0).
@@ -119,7 +128,7 @@ fn rtv(dev: &d3d::ID3D11Device, t: &Tex) -> Result<Rtv, Fail> {
     v.ok_or((-2, "rtv"))
 }
 
-fn srv(dev: &d3d::ID3D11Device, t: &Tex) -> Result<d3d::ID3D11ShaderResourceView, Fail> {
+fn srv(dev: &d3d::ID3D11Device, t: &Tex) -> Result<Srv, Fail> {
     let mut v = None;
     // SAFETY: `t` is a live shader-resource texture on `dev`; `v` a valid out-param.
     unsafe { dev.CreateShaderResourceView(t, None, Some(&mut v)) }.map_err(|_| (-2, "srv"))?;
@@ -239,6 +248,14 @@ pub struct Targets {
     width: u32,
     height: u32,
     planes: Planes,
+    /// Per slot: the source copy a deferred pass left for [`Self::frame`], in the source
+    /// format with render-target and shader-resource binds. Made on first use.
+    rgb: Vec<Option<(Tex, Srv)>>,
+    /// Per slot: `rgb` holds the frame and the converter has not run yet.
+    deferred: Vec<bool>,
+    /// The cursor quad, built on first use; `None` after a build failure, logged once.
+    blend: Option<CursorBlendPass>,
+    blend_failed: bool,
 }
 
 impl Targets {
@@ -318,53 +335,146 @@ impl Targets {
             width: w,
             height: h,
             planes,
+            rgb: (0..slots).map(|_| None).collect(),
+            deferred: vec![false; slots],
+            blend: None,
+            blend_failed: false,
         })
     }
 
     /// One GPU pass from `src` (BGRA or FP16, the pool's size) into slot `i`: a copy for BGRA,
-    /// the video engine for NV12, a draw for P010 and the planar pair. `src` needs no bind
-    /// flags beyond what the shader kinds read through an SRV created per call.
-    pub fn pass(&mut self, src: &Tex, i: usize) -> Result<(), Fail> {
+    /// the video engine for NV12, a draw for P010 and the planar pair. With `defer` the
+    /// converter kinds copy into the slot's RGB scratch instead and convert in [`Self::frame`],
+    /// after the cursor blend. `src` needs no bind flags beyond what the shader kinds read
+    /// through an SRV created per call.
+    pub fn pass(&mut self, src: &Tex, i: usize, defer: bool) -> Result<(), Fail> {
+        self.deferred[i] = false;
+        if let Planes::Bgra(slots) = &self.planes {
+            // SAFETY: `src` and the slot are live same-size textures on the same device, whose
+            // immediate context is multithread-protected (`Direct3DDevice`).
+            unsafe { self.ctx.CopyResource(&slots[i], src) };
+            return Ok(());
+        }
+        if !defer {
+            return self.convert(src, None, i);
+        }
+        if self.rgb[i].is_none() {
+            let bind = (d3d::D3D11_BIND_RENDER_TARGET.0 | d3d::D3D11_BIND_SHADER_RESOURCE.0) as u32;
+            let t = make_tex62(
+                &self.dev,
+                (self.width, self.height),
+                self.kind.source_format(),
+                bind,
+                0,
+            )?;
+            let v = srv(&self.dev, &t)?;
+            self.rgb[i] = Some((t, v));
+        }
+        let (scratch, _) = self.rgb[i].as_ref().ok_or((-2, "scratch"))?;
+        // SAFETY: as the BGRA copy — same size and format by construction, same device.
+        unsafe { self.ctx.CopyResource(scratch, src) };
+        self.deferred[i] = true;
+        Ok(())
+    }
+
+    /// The converter for slot `i` from `src`; `view` is its cached SRV, else one is made.
+    fn convert(&self, src: &Tex, view: Option<&Srv>, i: usize) -> Result<(), Fail> {
         let convert_err = |e: anyhow::Error| {
             dbglog!("[pf-vd] encode: convert failed: {e:#}");
             (-2, "convert")
         };
+        let view = || match view {
+            Some(v) => Ok(v.clone()),
+            None => srv(&self.dev, src),
+        };
         match &self.planes {
-            // SAFETY: `src` and the slot are live same-size textures on the same device, whose
-            // immediate context is multithread-protected (`Direct3DDevice`).
-            Planes::Bgra(slots) => unsafe { self.ctx.CopyResource(&slots[i], src) },
+            Planes::Bgra(_) => {}
             Planes::Nv12 { conv, out } => conv.convert(src, &out[i]).map_err(convert_err)?,
-            Planes::P010 { conv, out } => {
-                let view = srv(&self.dev, src)?;
-                conv.convert(
+            Planes::P010 { conv, out } => conv
+                .convert(
                     &self.ctx,
-                    &view,
+                    &view()?,
                     &out[i].1,
                     &out[i].2,
                     self.width,
                     self.height,
                 )
-                .map_err(convert_err)?;
-            }
-            Planes::Planar { conv, y, cbcr, .. } => {
-                let view = srv(&self.dev, src)?;
-                conv.convert(
+                .map_err(convert_err)?,
+            Planes::Planar { conv, y, cbcr, .. } => conv
+                .convert(
                     &self.ctx,
-                    &view,
+                    &view()?,
                     &y[i].1,
                     &cbcr[i].1,
                     self.width,
                     self.height,
                 )
-                .map_err(convert_err)?;
-            }
+                .map_err(convert_err)?,
         }
         Ok(())
     }
 
-    /// Wrap filled slot `i` as the frame `submit` takes. The planar pair signals its fence here,
+    /// Draw `cursor` over slot `i`'s RGB image — the BGRA slot itself, or the deferred scratch.
+    /// A failure loses the pointer, never the frame, and is logged once.
+    fn blend(&mut self, i: usize, cursor: &CursorImage, scale: f32) {
+        let fp16 = self.kind.source_format() == dxgi::DXGI_FORMAT_R16G16B16A16_FLOAT;
+        let dst = match &self.planes {
+            Planes::Bgra(slots) => slots[i].clone(),
+            _ if self.deferred[i] => match &self.rgb[i] {
+                Some((t, _)) => t.clone(),
+                None => return,
+            },
+            _ => return,
+        };
+        if self.blend.is_none() && !self.blend_failed {
+            match CursorBlendPass::new(&self.dev) {
+                Ok(p) => self.blend = Some(p),
+                Err(e) => {
+                    self.blend_failed = true;
+                    dbglog!("[pf-vd] encode: cursor blend pass failed to build: {e:#}");
+                }
+            }
+        }
+        let Some(pass) = self.blend.as_mut() else {
+            return;
+        };
+        let overlay = CursorOverlay {
+            x: cursor.x,
+            y: cursor.y,
+            w: cursor.w,
+            h: cursor.h,
+            rgba: Arc::clone(&cursor.rgba),
+            serial: u64::from(cursor.serial),
+            hot_x: cursor.hot_x,
+            hot_y: cursor.hot_y,
+            visible: true,
+        };
+        let linear_scale = if fp16 { scale } else { 0.0 };
+        if let Err(e) = pass.blend(&self.dev, &self.ctx, &dst, &overlay, linear_scale)
+            && !self.blend_failed
+        {
+            self.blend_failed = true;
+            dbglog!("[pf-vd] encode: cursor blend draw failed: {e:#}");
+        }
+    }
+
+    /// Wrap filled slot `i` as the frame `submit` takes, after the cursor blend and the
+    /// converter a deferred pass left for this thread. The planar pair signals its fence here,
     /// so the Vulkan wait orders after the pass however far apart the two threads ran.
-    pub fn frame(&mut self, i: usize, pts_ns: u64) -> Result<CapturedFrame, Fail> {
+    pub fn frame(
+        &mut self,
+        i: usize,
+        pts_ns: u64,
+        cursor: Option<(CursorImage, f32)>,
+    ) -> Result<CapturedFrame, Fail> {
+        if let Some((image, scale)) = cursor {
+            self.blend(i, &image, scale);
+        }
+        if self.deferred[i] {
+            self.deferred[i] = false;
+            let (t, v) = self.rgb[i].clone().ok_or((-2, "scratch"))?;
+            self.convert(&t, Some(&v), i)?;
+        }
         let (texture, pyro) = match &mut self.planes {
             Planes::Bgra(slots) => (slots[i].clone(), None),
             Planes::Nv12 { out, .. } => (out[i].clone(), None),

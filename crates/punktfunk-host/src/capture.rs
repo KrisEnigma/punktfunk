@@ -217,9 +217,12 @@ pub fn capture_virtual_output(
     // enables advanced color. No fallback — open/attach failure fails the session.
 
     // Presence of this closure opts the session into v5 cursor-channel delivery
-    // (capturer creates CursorShm; driver declares the IddCx hardware cursor).
+    // (capturer creates CursorShm; driver declares the IddCx hardware cursor). A target an
+    // earlier session's declare already excludes gets one too: the driver's blend is the only
+    // pointer such a session can have.
     let control_cursor = control.clone();
-    let cursor_sender: Option<pf_capture::CursorChannelSender> = want.hw_cursor.then(|| {
+    let want_channel = want.hw_cursor || target.cursor_excluded;
+    let cursor_sender: Option<pf_capture::CursorChannelSender> = want_channel.then(|| {
         std::sync::Arc::new(
             move |req: &pf_driver_proto::control::SetCursorChannelRequest| {
                 // SAFETY: the captured `control_cursor` Arc keeps the control handle open across
@@ -235,15 +238,12 @@ pub fn capture_virtual_output(
             },
         ) as pf_capture::CursorChannelSender
     });
-    // Secure-desktop actuator (`IOCTL_SET_CURSOR_FORWARD`): drop the hardware
-    // cursor declare while UAC/Winlogon is up. Stand-down needs a real mode-set
-    // under the vdisplay manager lock, which pf-capture cannot take.
-
-    // Built for every session: a channel-less reuse can still have a live cursor
-    // worker from an earlier session. Never-declared targets answer NOT_FOUND,
-    // which the capturer logs and ignores.
+    // The cursor render model (`IOCTL_SET_CURSOR_FORWARD`): `false` = the client draws no
+    // pointer (capture model, UAC/Winlogon), so the driver blends the excluded one into its
+    // frames. Built for every session: a channel-less reuse can still have a live cursor
+    // worker from an earlier session. Never-declared targets answer NOT_FOUND, which the
+    // capturer logs and ignores.
     let target_id = target.target_id;
-    let ccd = pf_win_display::win_display::CcdTargetKey::new(target.adapter_luid, target_id);
     let cursor_forward: Option<pf_capture::CursorForwardSender> = Some({
         std::sync::Arc::new(move |enable: bool| {
             let req = pf_driver_proto::control::SetCursorForwardRequest {
@@ -258,12 +258,8 @@ pub fn capture_virtual_output(
                         std::os::windows::io::AsRawHandle::as_raw_handle(&*control),
                     ),
                     &req,
-                )?;
+                )
             }
-            if !enable {
-                crate::vdisplay::manager::force_recommit(ccd);
-            }
-            Ok(())
         }) as pf_capture::CursorForwardSender
     });
     pf_capture::open_idd_push(

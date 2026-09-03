@@ -1394,10 +1394,16 @@ impl IddPushCapturer {
     /// display-config lock, and the blend holds the slot's keyed mutex.
     fn refresh_sdr_white_scale(&mut self) {
         if !self.display_hdr {
+            if let Some(cs) = self.cursor_shared.as_ref() {
+                cs.set_sdr_white_scale(0.0);
+            }
             return;
         }
         let queried = pf_win_display::win_display::sdr_white_level_scale(self.ccd);
         self.sdr_white_scale = queried.unwrap_or(self.sdr_white_scale);
+        if let Some(cs) = self.cursor_shared.as_ref() {
+            cs.set_sdr_white_scale(self.sdr_white_scale);
+        }
         tracing::info!(
             target_id = self.target_id,
             queried = ?queried,
@@ -2329,8 +2335,9 @@ impl Capturer for IddPushCapturer {
     }
 
     fn set_cursor_forward(&mut self, on: bool) {
-        // Capture model: hardware cursor stays declared (no working un-declare);
-        // host blends. `composite_forced` cannot turn off — no client draws.
+        // Capture model: the declared hardware cursor stays excluded (no working un-declare);
+        // the driver blends it into the frames it encodes, and this side into its own.
+        // `composite_forced` cannot turn off — no client draws.
         let composite = (!on && self.cursor_shared.is_some()) || self.composite_forced;
         if self.composite_cursor != composite {
             self.composite_cursor = composite;
@@ -2344,6 +2351,16 @@ impl Capturer for IddPushCapturer {
                     "OFF (client draws locally)"
                 }
             );
+            if let (Some(_), Some(fwd)) =
+                (self.cursor_shared.as_ref(), self.cursor_forward.as_ref())
+                && let Err(e) = fwd(!composite)
+            {
+                tracing::warn!(
+                    composite,
+                    error = %format!("{e:#}"),
+                    "cursor render model: the driver did not take the flip"
+                );
+            }
         }
     }
 

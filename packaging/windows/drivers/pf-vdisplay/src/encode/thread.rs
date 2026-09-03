@@ -202,7 +202,13 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         .filter(|p| p.matches(&ctx.device, spec.kind, size));
     let pool = match reused {
         Some(p) => p,
-        None => match Pool::build(&ctx.device, spec.kind, size, monitor.source_seq.clone()) {
+        None => match Pool::build(
+            &ctx.device,
+            spec.kind,
+            size,
+            monitor.source_seq.clone(),
+            monitor.cursor_cell(),
+        ) {
             Ok(p) => {
                 monitor.set_pool(p.clone());
                 p

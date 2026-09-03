@@ -11,14 +11,17 @@
 //! Coordinates are published VERBATIM in the OS's desktop space (`IDARG_OUT_QUERY_HWCURSOR::X/Y`
 //! = the shape's top-left, can be negative); the host subtracts its monitor's desktop origin.
 //! Shape pixels are the OS's 32-bpp rows at `Pitch` — BGRA for ALPHA cursors, color+mask for
-//! MASKED_COLOR — copied raw; the host converts (keeping this thread dumb and allocation-free
-//! after startup).
+//! MASKED_COLOR — copied raw; the host converts.
+//!
+//! The same publish also lands in the monitor's [`CursorCell`] as frame-relative RGBA, which
+//! the encode pool blends into its slots when the client draws no pointer.
 
 use core::sync::atomic::{AtomicU32, Ordering, fence};
+use std::sync::Arc;
 
 use pf_driver_proto::cursor::{
     CURSOR_MAGIC, CURSOR_SHAPE_BYTES, CURSOR_SHAPE_MAX, CURSOR_SHAPE_OFFSET, CURSOR_SHM_SIZE,
-    CursorShm,
+    CursorShm, shape_extent, shape_rgba,
 };
 use wdk_iddcx::nt_success;
 use wdk_sys::iddcx;
@@ -26,6 +29,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOU
 use windows::Win32::System::Memory::{FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile};
 use windows::Win32::System::Threading::WaitForMultipleObjects;
 
+use crate::cursor_cell::{CursorCell, CursorImage};
 use crate::worker::{OwnedHandle, OwnedView, Sendable, Worker};
 
 /// The host's `IOCTL_SET_CURSOR_CHANNEL` delivery: the [`CursorShm`] mapping handle VALUE,
@@ -121,6 +125,7 @@ pub fn setup_and_spawn(
     ch: CursorChannel,
     declare: bool,
     data_event: isize,
+    cell: Arc<CursorCell>,
 ) -> Option<Worker> {
     // SAFETY: the host duplicated this section handle into our process and `CursorChannel` hands
     // its ownership over here — `into_unowned` below disarms its own close.
@@ -175,7 +180,7 @@ pub fn setup_and_spawn(
     let view = Sendable(view);
     Worker::spawn("pf-vd-cursor", move |stop| {
         let view = view; // the wrapper, not the field: the view unmaps when this thread returns
-        run_worker(monitor_v, view.0.base() as usize, data_event, stop);
+        run_worker(monitor_v, view.0.base() as usize, data_event, stop, &cell);
     })
 }
 
@@ -185,7 +190,7 @@ pub fn setup_and_spawn(
 /// and `data_v` to the monitor entry, both of which close after the join; the mapping behind
 /// `view_v` is unmapped by the [`OwnedView`] the spawning closure moved in here. Returning is
 /// the whole cleanup.
-fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE) {
+fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE, cell: &CursorCell) {
     let monitor = monitor_v as iddcx::IDDCX_MONITOR;
     let shm = view_v as *mut CursorShm;
     let shape_dst = (view_v + CURSOR_SHAPE_OFFSET) as *mut u8;
@@ -193,14 +198,13 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE) {
     let mut last_shape_id: u32 = 0;
     let mut query_warned = false;
     let mut published = false;
+    // The pool's copy of the latest publish; its position outlives shape-less ticks.
+    let mut image: Option<CursorImage> = None;
     let handles = [stop, HANDLE(data_v as *mut core::ffi::c_void)];
     loop {
-        // POLL, not pure event-wait: the OS fires `hNewCursorDataAvailable` only for cursors it
-        // routes through the hardware plane — masked/monochrome cursors (I-beam, hand, move,
-        // resize) don't fire it. Polling does NOT recover them either (they are simply not in
-        // this query's world — see the caps comment above); the ~30 Hz timeout just keeps the
-        // seqlock's position/visibility fresh across missed events, and the query with the
-        // current `LastShapeId` is a cheap no-op when nothing changed.
+        // Poll as well as wait: the OS signals the event only for hardware-plane cursors, so
+        // a ~30 Hz timeout keeps position and visibility fresh across the ones it never
+        // signals for. The query with the current `LastShapeId` is a no-op when nothing moved.
         const POLL_MS: u32 = 33;
         // SAFETY: both handles are live for the worker's lifetime (owner drops after join).
         let w = unsafe { WaitForMultipleObjects(&handles, false, POLL_MS) };
@@ -260,36 +264,45 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE) {
         let s = seq.load(Ordering::Relaxed);
         seq.store(s.wrapping_add(1), Ordering::Relaxed); // odd = mid-update
         fence(Ordering::Release);
-        // SAFETY: exclusive writer (single worker per section); plain volatile field writes.
-        unsafe {
-            core::ptr::addr_of_mut!((*shm).visible).write_volatile(if out.IsCursorVisible != 0 {
-                1
-            } else {
-                0
-            });
+        let visible = out.IsCursorVisible != 0;
+        let mut shape = None;
+        // SAFETY: exclusive writer (single worker per section); plain volatile field writes,
+        // then one volatile read of the header for the host-stamped origin and scale.
+        let hdr = unsafe {
+            core::ptr::addr_of_mut!((*shm).visible).write_volatile(u32::from(visible));
             // v3 `X`/`Y` are only meaningful when `PositionValid`; otherwise keep the prior
             // position (a position-invalid tick still carries a shape/visibility update).
             if out.PositionValid != 0 {
                 core::ptr::addr_of_mut!((*shm).x).write_volatile(out.X);
                 core::ptr::addr_of_mut!((*shm).y).write_volatile(out.Y);
             }
-            if out.IsCursorShapeUpdated != 0 && out.IsCursorVisible != 0 {
+            if out.IsCursorShapeUpdated != 0 && visible {
                 let info = &out.CursorShapeInfo;
-                let rows = info.Height.min(CURSOR_SHAPE_MAX);
-                let bytes = (rows as usize * info.Pitch as usize).min(CURSOR_SHAPE_BYTES);
-                core::ptr::copy_nonoverlapping(shape_buf.as_ptr(), shape_dst, bytes);
-                core::ptr::addr_of_mut!((*shm).cursor_type).write_volatile(info.CursorType as u32);
-                core::ptr::addr_of_mut!((*shm).width)
-                    .write_volatile(info.Width.min(CURSOR_SHAPE_MAX));
-                core::ptr::addr_of_mut!((*shm).height).write_volatile(rows);
+                let stamp = CursorShm {
+                    cursor_type: info.CursorType as u32,
+                    width: info.Width,
+                    height: info.Height,
+                    pitch: info.Pitch,
+                    hot_x: info.XHot,
+                    hot_y: info.YHot,
+                    ..bytemuck::Zeroable::zeroed()
+                };
+                let (width, rows, pitch) = shape_extent(&stamp);
+                core::ptr::copy_nonoverlapping(shape_buf.as_ptr(), shape_dst, rows * pitch);
+                core::ptr::addr_of_mut!((*shm).cursor_type).write_volatile(stamp.cursor_type);
+                core::ptr::addr_of_mut!((*shm).width).write_volatile(width as u32);
+                core::ptr::addr_of_mut!((*shm).height).write_volatile(rows as u32);
                 core::ptr::addr_of_mut!((*shm).pitch).write_volatile(info.Pitch);
                 core::ptr::addr_of_mut!((*shm).hot_x).write_volatile(info.XHot);
                 core::ptr::addr_of_mut!((*shm).hot_y).write_volatile(info.YHot);
                 core::ptr::addr_of_mut!((*shm).shape_id).write_volatile(info.ShapeId);
                 last_shape_id = info.ShapeId;
+                shape = Some(shape_rgba(&stamp, &shape_buf));
             }
-        }
+            core::ptr::read_volatile(shm)
+        };
         fence(Ordering::Release);
         seq.store(s.wrapping_add(2), Ordering::Release); // even = consistent
+        cell.publish(&mut image, &hdr, shape, visible);
     }
 }

@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use pf_driver_proto::vdisplay;
 use wdk_sys::{NTSTATUS, WDFOBJECT, call_unsafe_wdf_function_binding, iddcx};
 
+use crate::cursor_cell::CursorCell;
 use crate::cursor_worker::CursorChannel;
 #[cfg(feature = "driver-encode")]
 use crate::encode::section::EncodeSession;
@@ -53,12 +54,28 @@ pub struct Arrival {
 /// `data_event` is the OS cursor-data event the hardware cursor is declared against. It is owned
 /// here, not by the worker thread: the declare paths copy its raw value out and call the setup
 /// DDI after the guard drops, so it may close only after the worker's join — every path that
-/// replaces the pair drops the worker first. `forward_on == false` is the composite render mode:
-/// the cursor stays un-declared and the per-mode-commit re-declare is skipped.
+/// replaces the pair drops the worker first. `forward_on == false` is the composite render
+/// mode: the client draws no pointer, so the encode pool blends the worker's shape into every
+/// frame DWM excludes it from (`cell.blend`, [`CursorState::set_blend`]).
 struct CursorState {
     data_event: Option<OwnedHandle>,
     worker: Option<Worker>,
     forward_on: bool,
+    /// Shared with the worker (writer) and the encode pool (reader); one per monitor life.
+    cell: Arc<CursorCell>,
+}
+
+impl CursorState {
+    /// Blend iff the client draws nothing and a hardware cursor is declared on this adapter —
+    /// the declare excludes the pointer from every frame for the WUDFHost's life, and the
+    /// worker is the only shape source. `excluded` is [`registry::any_declared`], read before
+    /// the caller took this monitor's lock.
+    fn set_blend(&self, excluded: bool) {
+        self.cell.blend.store(
+            !self.forward_on && self.worker.is_some() && excluded,
+            Ordering::Release,
+        );
+    }
 }
 
 /// A live (or pending) virtual monitor.
@@ -144,6 +161,7 @@ impl Monitor {
                 data_event: None,
                 worker: None,
                 forward_on: true,
+                cell: Arc::default(),
             }),
             #[cfg(feature = "driver-encode")]
             encode: Mutex::new(None),
@@ -172,6 +190,12 @@ impl Monitor {
             LowPart: packed as u32,
             HighPart: (packed >> 32) as i32,
         })
+    }
+
+    /// The cursor the encode pool blends ([`CursorCell`]); the same `Arc` for the monitor's life.
+    #[cfg(feature = "driver-encode")]
+    pub fn cursor_cell(&self) -> Arc<CursorCell> {
+        lock(&self.cursor).cell.clone()
     }
 
     /// The next publish-token generation: one per `SET_ENCODE`, never 0.
@@ -350,18 +374,21 @@ impl Monitor {
     /// Re-declare the hardware cursor after a swap-chain assign: a mode commit reverts the OS
     /// to a software cursor, and without this `IddCxMonitorQueryHardwareCursor` fails
     /// STATUS_NOT_SUPPORTED for good. No-op without a live worker, and in the composite render
-    /// mode, whose software cursor is the point. The event value is copied out under the guard
-    /// and the DDI runs after it: the DDI can re-enter the mode callbacks, and the event stays
-    /// open because this monitor closes it only after joining the worker.
+    /// mode on an adapter that never declared, whose software cursor is the point; once any
+    /// target declared, the pointer is excluded for good and the worker's shape is the only
+    /// one the pool can blend. The event value is copied out under the guard and the DDI runs
+    /// after it: the DDI can re-enter the mode callbacks, and the event stays open because
+    /// this monitor closes it only after joining the worker.
     pub fn resetup_cursor(&self) {
         let Some(object) = self.object() else {
             return;
         };
+        let excluded = registry::any_declared();
         let data_event = {
             let c = lock(&self.cursor);
             c.data_event
                 .as_ref()
-                .filter(|_| c.forward_on && c.worker.is_some())
+                .filter(|_| (c.forward_on || excluded) && c.worker.is_some())
                 .map(|h| h.as_raw().0 as isize)
         };
         if let Some(ev) = data_event {
@@ -529,8 +556,10 @@ pub fn set_frame_channel(target_id: u32, ch: FrameChannel) -> Result<(), FrameCh
 
 /// Adopt a hardware-cursor channel delivery (`IOCTL_SET_CURSOR_CHANNEL`, proto v5): create the
 /// cursor-data event, declare the hardware cursor to the OS, start the worker. `Err(ch)` when no
-/// arrived hw-cursor monitor has `target_id`, or the event could not be made. A re-delivery
-/// replaces both — the host only re-sends after recreating the section.
+/// arrived monitor has `target_id`, or the event could not be made. A re-delivery replaces
+/// both — the host only re-sends after recreating the section. A monitor added without
+/// `hw_cursor` gets one only because the adapter already excludes the pointer: its client
+/// draws nothing, so the channel exists for the pool's blend alone.
 ///
 /// A replaced worker is joined before the event it waited on closes, and both the setup DDI and
 /// every join run with no lock held: the DDI can re-enter the mode callbacks, and a join under
@@ -539,15 +568,24 @@ pub fn set_cursor_channel(target_id: u32, ch: CursorChannel) -> Result<(), Curso
     if target_id == 0 {
         return Err(ch);
     }
-    let Some(m) = registry::find(|m| m.target_id() == target_id && m.hw_cursor) else {
+    let Some(m) = registry::find(|m| m.target_id() == target_id) else {
         return Err(ch);
     };
     let Some(object) = m.object() else {
         return Err(ch);
     };
-    let (declare, old_worker, old_event) = {
+    let excluded = registry::any_declared();
+    let (declare, old_worker, old_event, cell) = {
         let mut c = lock(&m.cursor);
-        (c.forward_on, c.worker.take(), c.data_event.take())
+        if !m.hw_cursor {
+            c.forward_on = false;
+        }
+        (
+            c.forward_on || excluded,
+            c.worker.take(),
+            c.data_event.take(),
+            c.cell.clone(),
+        )
     };
     drop(old_worker); // join a replaced worker BEFORE the event it waits on closes
     drop(old_event);
@@ -556,12 +594,17 @@ pub fn set_cursor_channel(target_id: u32, ch: CursorChannel) -> Result<(), Curso
         dbglog!("[pf-vd] cursor: data event creation failed — keeping composited cursor");
         return Err(ch);
     };
-    // `declare = false`: the session is in the composite render mode (the mid-stream flip) —
-    // adopt the channel and spawn the worker WITHOUT declaring the hardware cursor, so DWM
-    // keeps compositing; a later enable-flip declares against this event.
-    let Some(worker) =
-        crate::cursor_worker::setup_and_spawn(object, ch, declare, data_event.as_raw().0 as isize)
-    else {
+    // `declare = false`: the composite render mode on an adapter that never declared — adopt
+    // the channel and spawn the worker WITHOUT declaring, so DWM keeps compositing; a later
+    // enable-flip declares against this event. Once anything declared, the pointer is gone
+    // from every frame and the worker's shape is what the pool blends, so declare regardless.
+    let Some(worker) = crate::cursor_worker::setup_and_spawn(
+        object,
+        ch,
+        declare,
+        data_event.as_raw().0 as isize,
+        cell,
+    ) else {
         // setup_and_spawn consumed the channel and released everything it mapped; `data_event`
         // drops here. The host detects the missing publish and keeps its composited cursor.
         return Ok(());
@@ -571,6 +614,8 @@ pub fn set_cursor_channel(target_id: u32, ch: CursorChannel) -> Result<(), Curso
         registry::mark_declared(target_id);
     }
     let (displaced_worker, displaced_event) = m.set_cursor(worker, data_event);
+    let excluded = registry::any_declared();
+    lock(&m.cursor).set_blend(excluded);
     drop(displaced_worker); // join outside every lock, then close the event it waited on
     drop(displaced_event);
     Ok(())
@@ -578,9 +623,9 @@ pub fn set_cursor_channel(target_id: u32, ch: CursorChannel) -> Result<(), Curso
 
 /// The mid-stream cursor-render flip (`IOCTL_SET_CURSOR_FORWARD`, proto v6): `enable` declares
 /// the hardware cursor again (DWM excludes the pointer; per-mode-commit re-declares resume);
-/// disable only stores the flag, which stops the per-commit re-declare — there is no un-declare
-/// DDI, so the host forces a same-mode re-commit whose software-cursor default then sticks.
-/// `false` when no hw-cursor monitor has `target_id`.
+/// disable stores the flag, which stops the per-commit re-declare on an adapter that never
+/// declared and turns the pool's blend on where one did — there is no un-declare DDI.
+/// `false` when no monitor has `target_id`.
 ///
 /// The flip is state, not an edge on one monitor generation: the desired value persists per
 /// target in the registry (a fresh entry inherits it at arrival) and is stamped on every live
@@ -589,15 +634,17 @@ pub fn set_cursor_channel(target_id: u32, ch: CursorChannel) -> Result<(), Curso
 /// event value copied out of the entry, which closes it only after joining its worker.
 pub fn set_cursor_forward(target_id: u32, enable: bool) -> bool {
     registry::set_cursor_forward_desired(target_id, enable);
-    let matching = registry::find_all(|m| m.target_id() == target_id && m.hw_cursor);
+    let matching = registry::find_all(|m| m.target_id() == target_id);
     if matching.is_empty() {
-        return false; // no hw-cursor monitor with this target at all
+        return false; // no monitor with this target at all
     }
+    let excluded = registry::any_declared();
     // Only a present worker gets the immediate declare DDI call.
     let mut declare_on: Option<(Option<iddcx::IDDCX_MONITOR>, Option<isize>)> = None;
     for m in &matching {
         let mut c = lock(&m.cursor);
         c.forward_on = enable;
+        c.set_blend(excluded);
         if c.worker.is_some() {
             declare_on = Some((
                 m.object(),

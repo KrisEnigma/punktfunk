@@ -20,6 +20,7 @@ mod log;
 mod adapter;
 mod callbacks;
 mod control;
+mod cursor_cell;
 mod cursor_worker;
 mod direct_3d_device;
 #[cfg(feature = "driver-encode")]

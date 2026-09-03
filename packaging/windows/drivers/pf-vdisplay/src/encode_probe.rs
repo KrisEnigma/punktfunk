@@ -367,8 +367,8 @@ fn drive(stop: HANDLE, req: &EncodeProbeRequest, shared: &Arc<Shared>) -> Result
     for n in 0..frames {
         let (slot, qpc) = wait_frame(stop, shared)?;
         let pts_ns = qpc_to_ns(if qpc == 0 { qpc_now() } else { qpc }, qpc_hz);
-        targets.pass(&slots62[slot], slot)?;
-        let frame = targets.frame(slot, pts_ns)?;
+        targets.pass(&slots62[slot], slot, false)?;
+        let frame = targets.frame(slot, pts_ns, None)?;
         let submitted = Instant::now();
         enc.submit(&frame).map_err(|e| {
             dbglog!("[pf-vd] probe: submit #{n} failed: {e:#}");

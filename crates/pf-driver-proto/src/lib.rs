@@ -2694,8 +2694,9 @@ pub mod cursor {
 
     /// Section header; shape pixels follow at [`CURSOR_SHAPE_OFFSET`]. `x`/`y` are the shape's
     /// top-left in desktop coordinates (IddCx `IDARG_OUT_QUERY_HWCURSOR::X/Y` — position −
-    /// hotspot, can be negative). `shape_id` bumps on every shape set. Pixels are 32-bpp rows at
-    /// `pitch` (BGRA for ALPHA; color+mask for MASKED_COLOR — the host converts).
+    /// hotspot, can be negative); both readers subtract the host-stamped `origin_*`.
+    /// `shape_id` bumps on every shape set. Pixels are 32-bpp rows at `pitch` (BGRA for
+    /// ALPHA; color+mask for MASKED_COLOR); [`shape_rgba`] converts them on either side.
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
     pub struct CursorShm {
@@ -2712,7 +2713,71 @@ pub mod cursor {
         pub pitch: u32,
         pub hot_x: u32,
         pub hot_y: u32,
-        pub _reserved: [u32; 4],
+        /// Host-stamped before the magic: the monitor's top-left on the desktop.
+        pub origin_x: i32,
+        pub origin_y: i32,
+        /// Host-stamped `f32` bits: where the HDR desktop puts SDR white (1.0 = 80 nits), for
+        /// the driver's blend onto an FP16 frame. `0` = not stamped, the driver uses 1.0.
+        pub sdr_white_scale: u32,
+        pub _reserved: u32,
+    }
+
+    /// One shape as straight-alpha RGBA, `w * h * 4` bytes.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ShapeRgba {
+        pub rgba: alloc::vec::Vec<u8>,
+        pub w: u32,
+        pub h: u32,
+        pub hot_x: u32,
+        pub hot_y: u32,
+    }
+
+    /// `(width, rows, pitch)` of the shape bytes a reader copies out for `hdr`, clamped to the
+    /// section so a corrupt header can never index past it.
+    #[must_use]
+    pub fn shape_extent(hdr: &CursorShm) -> (usize, usize, usize) {
+        let rows = hdr.height.min(CURSOR_SHAPE_MAX) as usize;
+        let width = hdr.width.min(CURSOR_SHAPE_MAX) as usize;
+        let pitch = (hdr.pitch as usize).min(CURSOR_SHAPE_BYTES / rows.max(1));
+        (width, rows, pitch)
+    }
+
+    /// Pack the pitch-strided 32-bpp rows of `raw` (at least `rows * pitch` bytes, see
+    /// [`shape_extent`]) into straight RGBA. ALPHA is BGRA (swap R↔B). MASKED_COLOR: `alpha ==
+    /// 0` is opaque color; `0xFF` is XOR, which no blend can honor — mid-gray keeps inversion
+    /// cursors visible instead of vanishing.
+    #[must_use]
+    pub fn shape_rgba(hdr: &CursorShm, raw: &[u8]) -> ShapeRgba {
+        let (width, rows, pitch) = shape_extent(hdr);
+        let masked = hdr.cursor_type == CURSOR_TYPE_MASKED_COLOR;
+        let mut rgba = alloc::vec::Vec::with_capacity(width * rows * 4);
+        for y in 0..rows {
+            let row = raw.get(y * pitch..).unwrap_or(&[]);
+            for x in 0..width {
+                let o = x * 4;
+                let Some(px) = row.get(o..o + 4) else {
+                    rgba.extend_from_slice(&[0, 0, 0, 0]);
+                    continue;
+                };
+                let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
+                if masked {
+                    if a == 0 {
+                        rgba.extend_from_slice(&[r, g, b, 0xFF]);
+                    } else {
+                        rgba.extend_from_slice(&[0x80, 0x80, 0x80, 0xB4]);
+                    }
+                } else {
+                    rgba.extend_from_slice(&[r, g, b, a]);
+                }
+            }
+        }
+        ShapeRgba {
+            rgba,
+            w: width as u32,
+            h: rows as u32,
+            hot_x: hdr.hot_x.min(width.saturating_sub(1) as u32),
+            hot_y: hdr.hot_y.min(rows.saturating_sub(1) as u32),
+        }
     }
 
     // Layout is load-bearing across the process boundary — pin it.
@@ -2732,6 +2797,9 @@ pub mod cursor {
         assert!(offset_of!(CursorShm, pitch) == 36);
         assert!(offset_of!(CursorShm, hot_x) == 40);
         assert!(offset_of!(CursorShm, hot_y) == 44);
+        assert!(offset_of!(CursorShm, origin_x) == 48);
+        assert!(offset_of!(CursorShm, origin_y) == 52);
+        assert!(offset_of!(CursorShm, sdr_white_scale) == 56);
     };
 }
 
@@ -3329,11 +3397,61 @@ mod tests {
             pitch: 128,
             hot_x: 4,
             hot_y: 5,
-            _reserved: [0; 4],
+            origin_x: -1920,
+            origin_y: 0,
+            sdr_white_scale: 2.5f32.to_bits(),
+            _reserved: 0,
         };
         let bytes = bytemuck::bytes_of(&hdr);
         assert_eq!(*bytemuck::from_bytes::<CursorShm>(bytes), hdr);
         assert_eq!(bytes[16..20], (-3i32).to_le_bytes());
+        assert_eq!(bytes[48..52], (-1920i32).to_le_bytes());
+        assert_eq!(f32::from_bits(hdr.sdr_white_scale), 2.5);
+    }
+
+    /// Both readers of the cursor section share one conversion: ALPHA swaps B↔R, MASKED
+    /// turns the mask into opaque colour or the mid-gray XOR stand-in, and a header whose
+    /// extent exceeds the section is clamped rather than indexed.
+    #[test]
+    fn cursor_shape_converts_alpha_and_masked_rows() {
+        use cursor::*;
+        let hdr = CursorShm {
+            cursor_type: CURSOR_TYPE_ALPHA,
+            width: 2,
+            height: 1,
+            pitch: 16,
+            hot_x: 9,
+            hot_y: 9,
+            ..CursorShm::zeroed()
+        };
+        // Two BGRA pixels, then pitch padding.
+        let raw = [1u8, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0];
+        let s = shape_rgba(&hdr, &raw);
+        assert_eq!(s.rgba, [3, 2, 1, 4, 7, 6, 5, 8]);
+        assert_eq!((s.w, s.h, s.hot_x, s.hot_y), (2, 1, 1, 0));
+        let masked = CursorShm {
+            cursor_type: CURSOR_TYPE_MASKED_COLOR,
+            ..hdr
+        };
+        let raw = [1u8, 2, 3, 0, 5, 6, 7, 0xFF];
+        assert_eq!(
+            shape_rgba(&masked, &raw).rgba,
+            [3, 2, 1, 0xFF, 0x80, 0x80, 0x80, 0xB4]
+        );
+        // Short rows read as transparent; an oversized header stays inside the section.
+        assert_eq!(
+            shape_rgba(&hdr, &[9, 9, 9, 9]).rgba,
+            [9, 9, 9, 9, 0, 0, 0, 0]
+        );
+        let huge = CursorShm {
+            width: u32::MAX,
+            height: u32::MAX,
+            pitch: u32::MAX,
+            ..hdr
+        };
+        let (w, rows, pitch) = shape_extent(&huge);
+        assert_eq!((w, rows), (256, 256));
+        assert!(rows * pitch <= CURSOR_SHAPE_BYTES);
     }
 
     #[test]

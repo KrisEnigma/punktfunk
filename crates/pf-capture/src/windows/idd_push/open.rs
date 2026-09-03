@@ -544,9 +544,11 @@ impl IddPushCapturer {
             });
             // Previous session may have died on the secure desktop with desired
             // state `false`; delivery would then start undeclared. Fresh sessions
-            // start declared; `poll_secure_desktop` re-disables if still locked.
+            // start declared; `poll_secure_desktop` re-disables if still locked. A
+            // forced-composite session starts the other way: the driver blends from
+            // the first frame.
             if let (Some(_), Some(fwd)) = (cursor_shared.as_ref(), cursor_forward.as_ref()) {
-                if let Err(e) = fwd(true) {
+                if let Err(e) = fwd(!composite_forced) {
                     tracing::debug!("cursor-forward reset at open failed (pre-v6 driver?): {e:#}");
                 }
             }
