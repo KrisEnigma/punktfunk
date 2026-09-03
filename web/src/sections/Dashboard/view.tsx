@@ -190,7 +190,9 @@ export const DashboardView: FC<{
 														(s.session.capture.stall_class
 															? ` (${s.session.capture.stall_class})`
 															: "") +
-														(s.session.capture.fence_ring ? " · fence ring" : "")
+														(s.session.capture.backend_opened
+															? ` · ${s.session.capture.backend_opened}`
+															: "")
 													}
 												/>
 											)}
