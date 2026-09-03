@@ -209,6 +209,11 @@ impl IddPushCapturer {
         else {
             return;
         };
+        tracing::info!(
+            target_id = self.target_id,
+            composite = self.composite_cursor,
+            "cursor channel: re-delivering after the monitor re-arrival"
+        );
         if !deliver_cursor_channel(&self.broker, self.target_id, cs, send) {
             tracing::warn!(
                 target_id = self.target_id,

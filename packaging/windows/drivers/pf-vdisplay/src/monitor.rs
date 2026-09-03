@@ -523,10 +523,13 @@ pub fn set_cursor_forward(target_id: u32, enable: bool) -> bool {
     let excluded = registry::any_declared();
     // Only a present worker gets the immediate declare DDI call.
     let mut declare_on: Option<(Option<iddcx::IDDCX_MONITOR>, Option<isize>)> = None;
+    let (mut had_worker, mut blend_now) = (false, false);
     for m in &matching {
         let mut c = lock(&m.cursor);
         c.forward_on = enable;
         c.set_blend(excluded);
+        had_worker |= c.worker.is_some();
+        blend_now |= c.cell.blend.load(Ordering::Acquire);
         if c.worker.is_some() {
             declare_on = Some((
                 m.object(),
@@ -545,14 +548,21 @@ pub fn set_cursor_forward(target_id: u32, enable: bool) -> bool {
             }
         }
         (false, _, _) => {
+            // Blend needs all three. Naming them is the difference between "the flip did not
+            // arrive" and "it arrived and there was nothing to blend from".
             dbglog!(
-                "[pf-vd] cursor: forward flip enable=0 stored — awaiting the host's mode \
-                 re-commit (software cursor from then on)"
+                "[pf-vd] cursor: forward flip enable=0 — blend={} (forward_on=0 worker={} \
+                 declared={}); a false worker/declared means nothing composites",
+                u8::from(blend_now),
+                u8::from(had_worker),
+                u8::from(excluded)
             );
         }
         _ => dbglog!(
-            "[pf-vd] cursor: forward flip enable=1 stored (no live worker — applies at the \
-             next channel delivery)"
+            "[pf-vd] cursor: forward flip enable=1 stored (worker={} declared={}) — applies at \
+             the next channel delivery",
+            u8::from(had_worker),
+            u8::from(excluded)
         ),
     }
     true
