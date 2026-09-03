@@ -275,14 +275,12 @@ a single explicit client preference wins if the host can also produce it, and ot
 
 This is a **GPU and encoder** question, not a compositor one, which is why it is not a column above.
 
-- **Windows** — frames never leave the GPU. All three native backends (NVENC, AMF, QSV) are
-  zero-copy by construction: each takes the capturer's D3D11 texture on the capturer's *own*
-  device and has no readback path at all — a capturer that fell back to BGRA, RGB10A2 or CPU
-  frames is rejected at open rather than read back. The one non-zero-copy path left is the
-  **libavcodec QSV fallback**, reached only when the native VPL open fails (or you set
-  `PUNKTFUNK_QSV_FFMPEG=1`); there the frame does take a GPU → CPU → GPU round-trip, and its own
-  zero-copy variant stays opt-in (`PUNKTFUNK_ZEROCOPY=1`) only because no Intel Windows box has
-  validated it.
+- **Windows** — frames never leave the GPU, and since the encoder moved into the display driver
+  they never leave that process either: the driver encodes what the compositor composed, on the
+  pooled device its swap chain was assigned to, and publishes a bitstream the host only packetises.
+  All three native backends (NVENC, AMF, QSV) take that surface directly and have no readback path
+  at all. The **libavcodec QSV fallback** that once backed a failed native VPL open is no longer
+  reachable, so no GPU → CPU → GPU round-trip is left on this platform.
 - **Linux** — VAAPI takes the captured buffer directly; NVIDIA imports it through an isolated
   worker process; PyroWave imports it on any vendor. Two compositor-shaped edges matter: gamescope
   offers only linear buffers, and GNOME on NVIDIA allocates tiled-only — which PyroWave can still
