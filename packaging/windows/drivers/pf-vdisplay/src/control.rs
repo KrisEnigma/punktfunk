@@ -48,6 +48,8 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
         control::IOCTL_UPDATE_MODES => update_modes(request),
         control::IOCTL_SET_CURSOR_CHANNEL => set_cursor_channel(request),
         control::IOCTL_SET_CURSOR_FORWARD => set_cursor_forward(request),
+        #[cfg(feature = "driver-encode")]
+        pf_driver_proto::encode::IOCTL_SET_ENCODE => set_encode(request),
         #[cfg(feature = "encode-probe")]
         control::IOCTL_ENCODE_PROBE_ARM => encode_probe_arm(request),
         #[cfg(feature = "encode-probe")]
@@ -56,6 +58,23 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
             write_output_prefix_complete(request, &reply, size_of::<control::EncodeProbeReply>());
         }
         _ => request.complete(STATUS_NOT_FOUND),
+    }
+}
+
+/// `IOCTL_SET_ENCODE` (v7): open an encoder on the delivered AU section. A well-formed request
+/// for a live monitor always completes successfully with the structured reply — the driver
+/// owns the two handles from there — and only a malformed or unmatched one fails the IOCTL
+/// with nothing adopted (`SetEncodeReply` docs).
+#[cfg(feature = "driver-encode")]
+fn set_encode(request: Request) {
+    use pf_driver_proto::encode::{SetEncodeReply, SetEncodeRequest};
+    let Some(req) = read_input::<SetEncodeRequest>(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
+        return;
+    };
+    match crate::encode::set_encode(&req) {
+        Ok(reply) => write_output_prefix_complete(request, &reply, size_of::<SetEncodeReply>()),
+        Err(st) => request.complete(st),
     }
 }
 

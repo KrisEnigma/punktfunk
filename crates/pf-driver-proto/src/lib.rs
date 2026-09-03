@@ -1526,15 +1526,36 @@ pub mod encode {
         pub blends_cursor: u32,
     }
 
+    /// [`SetEncodeReply::status`]: an encoder is open.
+    pub const SET_ENCODE_OK: u32 = 0;
+    /// No arrived monitor has the request's `target_id`.
+    pub const SET_ENCODE_NO_MONITOR: u32 = 1;
+    /// The section did not pass [`au::au_readable`], or is smaller than its header claims.
+    pub const SET_ENCODE_BAD_SECTION: u32 = 2;
+    /// The monitor has no render device yet: no swap-chain has been assigned since arrival.
+    pub const SET_ENCODE_NO_DEVICE: u32 = 3;
+    /// Every backend in the list refused; `error` and `name` are the last one's.
+    pub const SET_ENCODE_NO_BACKEND: u32 = 4;
+    /// The pool or its converters could not be built on the render device.
+    pub const SET_ENCODE_POOL: u32 = 5;
+    /// The encode thread could not be started.
+    pub const SET_ENCODE_THREAD: u32 = 6;
+    /// The open did not finish within the driver's bound; the thread was abandoned.
+    pub const SET_ENCODE_TIMEOUT: u32 = 7;
+
     /// [`IOCTL_SET_ENCODE`] output. `status` is the driver's own failure domain, not an HRESULT:
-    /// `0` means an encoder is open, anything else means none is and the session ends with a
-    /// structured error — `error` carries the backend's raw code and `name` a short NUL-padded tag
-    /// (the driver log has the rest). `backend_opened` names the entry from
+    /// [`SET_ENCODE_OK`] means an encoder is open, anything else means none is and the session
+    /// ends with a structured error — `error` carries the backend's raw code and `name` a short
+    /// NUL-padded tag (the driver log has the rest). `backend_opened` names the entry from
     /// [`SetEncodeRequest::backends`] that took, never a guess.
+    ///
+    /// The IOCTL itself completes successfully whenever the request was well-formed and named a
+    /// monitor; from that point the driver owns the two handles and closes them itself when
+    /// `status` is non-zero. Only an NTSTATUS failure leaves them for the host to reap.
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
     pub struct SetEncodeReply {
-        /// `0` = open. Non-zero = the driver's failure domain for this open, paired with `error`.
+        /// One of the `SET_ENCODE_*` codes.
         pub status: u32,
         /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave; `0` when `status` is non-zero.
         pub backend_opened: u32,

@@ -1,14 +1,216 @@
-//! Opening a backend inside WUDFHost, and the QPC clock its frames are stamped with.
+//! The encode thread (`pf-vd-encode`): opens a backend inside WUDFHost, reports the outcome to
+//! the `SET_ENCODE` caller, then feeds the encoder from the pool and publishes into the AU
+//! section. One per [`EncodeSession`]; a wedged one is detached, never joined without a bound.
 //!
-//! [`open_backend`] is one `open` per [`OpenSpec::backend`]; the caller walks its preference
-//! list and reports what took. PyroWave's private Vulkan instance goes through the box's
-//! implicit layers unless [`disable_implicit_vulkan_layers`] ran first: overlays hang in
-//! session 0, where there is no desktop to hook.
+//! [`open_backend`] is one `open` per [`OpenSpec::backend`]; [`EncodeThread`] walks the
+//! request's preference list and reports what took. PyroWave's private Vulkan instance goes
+//! through the box's implicit layers unless [`disable_implicit_vulkan_layers`] ran first:
+//! overlays hang in session 0, where there is no desktop to hook.
 
-use pf_encode_win::{ChromaFormat, Codec, Encoder};
+use std::mem::offset_of;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::SyncSender;
+use std::time::Duration;
+
+use pf_driver_proto::encode::au::{self, AuHeader};
+use pf_driver_proto::encode::{self as wire, EncoderCapsWire, SetEncodeReply, SetEncodeRequest};
+use pf_encode_win::{ChromaFormat, Codec, Encoder, EncoderCaps};
+use pf_frame::HdrMeta;
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::System::Threading::WaitForSingleObject;
 
 use super::convert::{AdapterId, Fail, InputKind};
+use super::section::{AuSection, EncodeSession};
+use crate::direct_3d_device::Direct3DDevice;
+use crate::worker::{Mmcss, Worker};
+
+const BACKEND_NAMES: [&str; 4] = ["nvenc", "amf", "qsv", "pyrowave"];
+
+/// A failed `SET_ENCODE` as the wire reply: `status` from the driver's domain, the stage tag
+/// in `name`.
+pub fn fail_reply(status: u32, (error, name): Fail) -> SetEncodeReply {
+    let mut reply = SetEncodeReply {
+        status,
+        error,
+        ..bytemuck::Zeroable::zeroed()
+    };
+    let n = name.len().min(32);
+    reply.name[..n].copy_from_slice(&name.as_bytes()[..n]);
+    reply
+}
+
+/// `pf_frame::HdrMeta` from its 28 `repr(C)` bytes.
+pub fn hdr_meta(bytes: &[u8; 28]) -> HdrMeta {
+    // SAFETY: `HdrMeta` is `repr(C)`, 28 bytes of plain integers with no invalid bit pattern;
+    // `read_unaligned` copies them out of the request's byte array.
+    unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<HdrMeta>()) }
+}
+
+/// The request's `open` spec for backend `backend` of its list.
+pub fn spec_for(req: &SetEncodeRequest, backend: u32) -> Result<OpenSpec, Fail> {
+    let (hdr, chroma444) = (req.hdr == 1, req.chroma == 1);
+    let kind = match (backend, hdr) {
+        (4, _) => InputKind::Planar { hdr, chroma444 },
+        (_, true) => InputKind::P010,
+        (1, false) => InputKind::Bgra,
+        _ => InputKind::Nv12,
+    };
+    Ok(OpenSpec {
+        backend,
+        codec: codec_from_wire(req.codec).ok_or((-4, "codec"))?,
+        kind,
+        width: req.width,
+        height: req.height,
+        fps: req.fps.max(1),
+        bitrate_bps: u64::from(req.bitrate_kbps) * 1000,
+        bit_depth: if req.bit_depth >= 10 { 10 } else { 8 },
+        chroma: if chroma444 {
+            ChromaFormat::Yuv444
+        } else {
+            ChromaFormat::Yuv420
+        },
+    })
+}
+
+fn caps_wire(c: EncoderCaps) -> EncoderCapsWire {
+    EncoderCapsWire {
+        supports_rfi: u32::from(c.supports_rfi),
+        chroma_444: u32::from(c.chroma_444),
+        intra_refresh: u32::from(c.intra_refresh),
+        intra_refresh_recovery: u32::from(c.intra_refresh_recovery),
+        intra_refresh_period: c.intra_refresh_period,
+        blends_cursor: u32::from(c.blends_cursor),
+    }
+}
+
+/// Walk the request's backend list in order; the first that opens wins. `Err` is the last
+/// failure as the wire reply — no silent fallback past the list.
+fn open_listed(
+    req: &SetEncodeRequest,
+    adapter: &AdapterId,
+) -> Result<(Box<dyn Encoder>, OpenSpec, SetEncodeReply), SetEncodeReply> {
+    let mut last: Fail = (-1, "nobackend");
+    for &backend in req.backends.iter().take_while(|&&b| b != 0) {
+        let spec = match spec_for(req, backend) {
+            Ok(s) => s,
+            Err(f) => {
+                last = f;
+                continue;
+            }
+        };
+        match open_backend(&spec, adapter) {
+            Ok(mut enc) => {
+                if req.wire_chunk_bytes != 0 {
+                    enc.set_wire_chunking(req.wire_chunk_bytes as usize);
+                }
+                if req.hdr == 1 {
+                    enc.set_hdr_meta(Some(hdr_meta(&req.hdr_meta)));
+                }
+                let applied = enc.applied_bitrate_bps().unwrap_or(spec.bitrate_bps);
+                let mut reply = fail_reply(
+                    wire::SET_ENCODE_OK,
+                    (0, BACKEND_NAMES[backend as usize - 1]),
+                );
+                reply.backend_opened = backend;
+                reply.caps = caps_wire(enc.caps());
+                reply.applied_bitrate_kbps = (applied / 1000) as u32;
+                return Ok((enc, spec, reply));
+            }
+            Err(f) => last = f,
+        }
+    }
+    Err(fail_reply(wire::SET_ENCODE_NO_BACKEND, last))
+}
+
+/// What the thread runs with. The `opened` channel carries exactly one reply: the open's.
+pub struct ThreadCtx {
+    pub session: Arc<EncodeSession>,
+    pub device: Arc<Direct3DDevice>,
+    pub opened: SyncSender<SetEncodeReply>,
+}
+
+/// The running encode thread of one session.
+pub struct EncodeThread {
+    worker: Option<Worker>,
+    /// Cleared on detach: the thread touches neither pool nor section once this is false.
+    live: Arc<AtomicBool>,
+}
+
+impl EncodeThread {
+    /// How long a stop waits before the thread is detached. A healthy thread is between two
+    /// backend calls within one frame; ~250 ms is ten of them at 60 Hz.
+    pub const STOP_BOUND: Duration = Duration::from_millis(250);
+
+    /// Start the thread. `None` when the OS refused a thread or event; the caller replies
+    /// [`wire::SET_ENCODE_THREAD`].
+    pub fn spawn(ctx: ThreadCtx) -> Option<Self> {
+        let live = Arc::new(AtomicBool::new(true));
+        let thread_live = live.clone();
+        let worker = Worker::spawn("pf-vd-encode", move |stop| run(stop, ctx, thread_live))?;
+        Some(Self {
+            worker: Some(worker),
+            live,
+        })
+    }
+
+    /// Stop within [`Self::STOP_BOUND`]; a thread that does not return is detached and counted
+    /// in the section's `detached` word — the host's `DriverCycle` threshold reads it.
+    pub fn stop(mut self, section: &AuSection) {
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        if !worker.stop_within(Self::STOP_BOUND) {
+            self.live.store(false, Ordering::Release);
+            let n = section.add_u32(offset_of!(AuHeader, detached), 1);
+            dbglog!("[pf-vd] encode: thread detached (total {n})");
+        }
+    }
+}
+
+fn stop_signalled(stop: HANDLE) -> bool {
+    // SAFETY: `stop` is the worker's stop event, alive until the worker joins or leaks.
+    unsafe { WaitForSingleObject(stop, 0) == WAIT_OBJECT_0 }
+}
+
+/// The thread body: open, report, then run until stopped.
+fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
+    let _mmcss = Mmcss::distribution("encode");
+    let section = &ctx.session.section;
+    let Some(adapter) = AdapterId::of(&ctx.device) else {
+        let _ = ctx
+            .opened
+            .send(fail_reply(wire::SET_ENCODE_NO_DEVICE, (-5, "adapter")));
+        return;
+    };
+    let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter) {
+        Ok(x) => x,
+        Err(reply) => {
+            let _ = ctx.opened.send(reply);
+            return;
+        }
+    };
+    dbglog!(
+        "[pf-vd] encode: backend {} open {}x{} {:?} (target {})",
+        reply.backend_opened,
+        spec.width,
+        spec.height,
+        spec.kind,
+        ctx.session.request.target_id
+    );
+    section.store_u32(offset_of!(AuHeader, encoder_state), au::ENCODER_OPEN);
+    if ctx.opened.send(reply).is_err() {
+        // The caller gave up waiting: nothing will install this session.
+        return;
+    }
+    while live.load(Ordering::Acquire) && !stop_signalled(stop) {
+        // SAFETY: `stop` is the worker's stop event, alive until the worker joins or leaks.
+        let _ = unsafe { WaitForSingleObject(stop, 1000) };
+    }
+    drop(enc);
+    section.store_u32(offset_of!(AuHeader, encoder_state), au::ENCODER_CLOSED);
+}
 
 /// Everything one backend `open` takes, in the backends' own vocabulary.
 #[derive(Clone, Copy, Debug)]

@@ -430,6 +430,11 @@ pub unsafe extern "C" fn assign_swap_chain(
     }
 
     if let Some(device) = crate::direct_3d_device::pooled_device(luid) {
+        // The encode session opens on the device this worker drains into.
+        #[cfg(feature = "driver-encode")]
+        if let Some(m) = &entry {
+            m.set_render_luid(luid);
+        }
         let mut processor = crate::swap_chain_processor::SwapChainProcessor::new();
         // The publisher reports this render LUID into the host header so the host detects a
         // render-adapter mismatch (it created the ring textures on its own GPU).

@@ -18,6 +18,15 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
+#[cfg(feature = "driver-encode")]
+use windows::{
+    Win32::Foundation::WAIT_OBJECT_0,
+    Win32::System::Threading::{
+        AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, GetCurrentThread,
+        SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL, WaitForSingleObject,
+    },
+    core::w,
+};
 
 /// Carries a raw handle or pointer across a thread spawn.
 ///
@@ -162,10 +171,83 @@ impl Worker {
             dbglog!("[pf-vd] worker {name} join took {} ms", took.as_millis());
         }
     }
+
+    /// Signal the stop event and wait at most `bound` for the thread. `true` = joined. `false`
+    /// = the thread is still inside something; it is DETACHED — this value is leaked whole, so
+    /// the stop event it may still wait on stays open and signalled, and nothing here ever
+    /// blocks on it again. A thread that never returns is the caller's accounting problem.
+    #[cfg(feature = "driver-encode")]
+    #[must_use]
+    pub fn stop_within(mut self, bound: Duration) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        let Some(join) = self.join.take() else {
+            return true;
+        };
+        // SAFETY: our own manual-reset event, alive until `self` drops or leaks.
+        unsafe {
+            let _ = SetEvent(self.stop.as_raw());
+        }
+        let thread = HANDLE(join.as_raw_handle());
+        // SAFETY: `thread` is the live native handle `join` owns for the duration of the wait.
+        let waited = unsafe { WaitForSingleObject(thread, bound.as_millis() as u32) };
+        if waited == WAIT_OBJECT_0 {
+            let _ = join.join();
+            return true;
+        }
+        dbglog!(
+            "[pf-vd] worker {} did not stop within {} ms — detached",
+            join.thread().name().unwrap_or("?"),
+            bound.as_millis()
+        );
+        std::mem::forget(join);
+        std::mem::forget(self);
+        false
+    }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// An MMCSS "Distribution" registration for the calling thread, reverted on drop. The fallback
+/// when MMCSS declines under the WUDFHost token is TIME_CRITICAL, the highest band without the
+/// realtime class; the thread spends its life blocked on events, so it cannot starve others.
+#[cfg(feature = "driver-encode")]
+pub struct Mmcss(Option<HANDLE>);
+
+#[cfg(feature = "driver-encode")]
+impl Mmcss {
+    pub fn distribution(what: &str) -> Self {
+        let mut task = 0u32;
+        // SAFETY: `w!("Distribution")` is a 'static null-terminated UTF-16 task name; `task` is
+        // a valid local out-param. The returned handle is reverted in `Drop`.
+        let res = unsafe { AvSetMmThreadCharacteristicsW(w!("Distribution"), &mut task) };
+        match res {
+            Ok(h) => Self(Some(h)),
+            Err(e) => {
+                // SAFETY: plain FFI; `GetCurrentThread` is a pseudo-handle (never fails, nothing
+                // to close) and `SetThreadPriority` on it affects only this thread.
+                let fallback =
+                    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) };
+                dbglog!(
+                    "[pf-vd] {what}: MMCSS declined ({e:?}) — TIME_CRITICAL fallback ok={}",
+                    fallback.is_ok()
+                );
+                Self(None)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "driver-encode")]
+impl Drop for Mmcss {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            // SAFETY: `h` is the live characteristics handle `distribution` registered, reverted
+            // exactly once here.
+            let _ = unsafe { AvRevertMmThreadCharacteristics(h) };
+        }
     }
 }

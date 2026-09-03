@@ -19,6 +19,8 @@ use pf_driver_proto::vdisplay;
 use wdk_sys::{NTSTATUS, WDFOBJECT, call_unsafe_wdf_function_binding, iddcx};
 
 use crate::cursor_worker::CursorChannel;
+#[cfg(feature = "driver-encode")]
+use crate::encode::section::EncodeSession;
 use crate::frame_transport::{FrameChannel, RingEndpoint};
 use crate::registry::{self, lock};
 use crate::swap_chain_processor::SwapChainProcessor;
@@ -100,6 +102,17 @@ pub struct Monitor {
     /// — shared with every endpoint this monitor gets.
     pub source_seq: Arc<AtomicU64>,
     cursor: Mutex<CursorState>,
+    /// The live encode session (`SET_ENCODE`); its thread stops with no lock held.
+    #[cfg(feature = "driver-encode")]
+    encode: Mutex<Option<Arc<EncodeSession>>>,
+    /// Bumped (Release) by every session install or removal, and by every pool change. The
+    /// drain loop compares it with its last-seen value and re-reads the slots only then.
+    #[cfg(feature = "driver-encode")]
+    pub encode_gen: AtomicU32,
+    /// The render LUID of the last swap-chain assignment, packed; `0` = none yet. The pool
+    /// and the encoder open on this device, the one the drain worker copies from.
+    #[cfg(feature = "driver-encode")]
+    render_luid: std::sync::atomic::AtomicI64,
     gone: AtomicBool,
 }
 
@@ -129,7 +142,82 @@ impl Monitor {
                 worker: None,
                 forward_on: true,
             }),
+            #[cfg(feature = "driver-encode")]
+            encode: Mutex::new(None),
+            #[cfg(feature = "driver-encode")]
+            encode_gen: AtomicU32::new(0),
+            #[cfg(feature = "driver-encode")]
+            render_luid: std::sync::atomic::AtomicI64::new(0),
             gone: AtomicBool::new(false),
+        }
+    }
+
+    /// Record the render adapter a swap-chain was just assigned on.
+    #[cfg(feature = "driver-encode")]
+    pub fn set_render_luid(&self, luid: windows::Win32::Foundation::LUID) {
+        let packed = (i64::from(luid.HighPart) << 32) | i64::from(luid.LowPart);
+        self.render_luid.store(packed, Ordering::Release);
+    }
+
+    /// The render adapter of the last assignment; `None` before the first.
+    #[cfg(feature = "driver-encode")]
+    pub fn render_luid(&self) -> Option<windows::Win32::Foundation::LUID> {
+        let packed = self.render_luid.load(Ordering::Acquire);
+        (packed != 0).then(|| windows::Win32::Foundation::LUID {
+            LowPart: packed as u32,
+            HighPart: (packed >> 32) as i32,
+        })
+    }
+
+    /// The next publish-token generation: one per `SET_ENCODE`, never 0.
+    #[cfg(feature = "driver-encode")]
+    pub fn next_encode_generation(&self) -> u32 {
+        static GENERATION: AtomicU32 = AtomicU32::new(0);
+        GENERATION.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Install an encode session and wake the drain worker so an idle display picks it up
+    /// now. Returns the session it displaced — `Err(session)` once the monitor is torn down —
+    /// for the caller to stop with no lock held.
+    #[cfg(feature = "driver-encode")]
+    pub fn set_encode(
+        &self,
+        session: Arc<EncodeSession>,
+    ) -> Result<Option<Arc<EncodeSession>>, Arc<EncodeSession>> {
+        let displaced = {
+            let mut slot = lock(&self.encode);
+            if self.gone.load(Ordering::Acquire) {
+                return Err(session);
+            }
+            slot.replace(session)
+        };
+        self.bump_encode_gen();
+        Ok(displaced)
+    }
+
+    /// The live session, if any.
+    #[cfg(feature = "driver-encode")]
+    pub fn encode(&self) -> Option<Arc<EncodeSession>> {
+        lock(&self.encode).clone()
+    }
+
+    /// Take the session out; the caller stops its thread with no lock held.
+    #[cfg(feature = "driver-encode")]
+    #[must_use]
+    pub fn take_encode(&self) -> Option<Arc<EncodeSession>> {
+        let taken = take(&self.encode);
+        self.bump_encode_gen();
+        taken
+    }
+
+    /// Bump the encode generation and wake the drain worker (`SetEvent` never blocks, so the
+    /// `swap` guard may span it).
+    #[cfg(feature = "driver-encode")]
+    fn bump_encode_gen(&self) {
+        self.encode_gen.fetch_add(1, Ordering::Release);
+        let swap = lock(&self.swap);
+        if let Some(p) = &*swap {
+            p.wake();
         }
     }
 
@@ -276,10 +364,11 @@ impl Monitor {
 
     /// Stop everything whose drop blocks, each taken under its own guard and dropped after it:
     /// the cursor worker (it can be inside a hardware-cursor query against the handle the
-    /// caller departs next), then the event it waited on, then the drain worker, the ring (its
-    /// last `Arc` unmaps the header) and any delivery no worker picked up. `gone` is set first,
-    /// so a racing install hands its value back instead of landing here unjoined. Run by the
-    /// caller that removed this monitor from the registry, with the registry lock released.
+    /// caller departs next), then the event it waited on, then the encode session (its thread
+    /// stops within a bound or is detached), the drain worker, the ring (its last `Arc` unmaps
+    /// the header) and any delivery no worker picked up. `gone` is set first, so a racing
+    /// install hands its value back instead of landing here unjoined. Run by the caller that
+    /// removed this monitor from the registry, with the registry lock released.
     pub fn teardown(&self) {
         self.gone.store(true, Ordering::Release);
         let started = Instant::now();
@@ -289,6 +378,11 @@ impl Monitor {
         };
         drop(worker);
         drop(event);
+        #[cfg(feature = "driver-encode")]
+        if let Some(session) = take(&self.encode) {
+            session.stop();
+            drop(session);
+        }
         drop(take(&self.swap));
         drop(take(&self.endpoint));
         drop(take(&self.chan));
