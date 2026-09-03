@@ -526,6 +526,14 @@ pub fn serve(
              the native punktfunk/1 plane + clients for untrusted/WAN use."
         );
     }
+    if let Some(port) = native.webtransport_port {
+        tracing::warn!(
+            port,
+            "WebTransport browser plane ENABLED (--webtransport): a second, externally-reachable \
+             transport whose certificate hash is published unauthenticated. Pairing over it is not \
+             implemented yet, so it currently echoes and carries no session."
+        );
+    }
     let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
     rt.block_on(async move {
         // rustls needs a process-wide crypto provider before any TLS config is built.
@@ -534,6 +542,21 @@ pub fn serve(
         // Hook runner consumes the live event tail for the host's lifetime. Spawned
         // before `host.started` so operator hooks observe the full lifecycle.
         tokio::spawn(crate::hooks::runner());
+        // The browser plane, when the operator asked for it. Spawned rather than joined with the
+        // planes below: this tier is explicitly secondary (`design/web-client.md` §1), so a port
+        // it cannot bind must not take the streaming host down with it. A failure is loud.
+        if let Some(port) = native.webtransport_port {
+            let sans = vec![
+                state.host.local_ip().to_string(),
+                "localhost".to_string(),
+                "127.0.0.1".to_string(),
+            ];
+            tokio::spawn(async move {
+                if let Err(e) = crate::webtransport::serve(port, sans).await {
+                    tracing::error!(port, error = %e, "WebTransport plane stopped");
+                }
+            });
+        }
         // `host.started` as the planes come up; `host.stopping` on clean or error exit
         // so a consumer that reconnects still sees it.
         crate::events::emit(crate::events::EventKind::HostStarted {

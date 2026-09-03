@@ -4405,6 +4405,40 @@
           }
         }
       }
+    },
+    "/api/v1/webtransport": {
+      "get": {
+        "tags": [
+          "host"
+        ],
+        "summary": "Where to reach the browser plane",
+        "operationId": "getWebTransport",
+        "responses": {
+          "200": {
+            "description": "The live certificate hash and port",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebTransportInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The browser plane is not enabled on this host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
     }
   },
   "components": {
@@ -9393,6 +9427,38 @@
               "null"
             ],
             "description": "One-click apply is possible but not opted in — command to run\n(Linux: join `punktfunk-update`)."
+          }
+        }
+      },
+      "WebTransportInfo": {
+        "type": "object",
+        "description": "Everything `new WebTransport(url, { serverCertificateHashes })` needs.",
+        "required": [
+          "port",
+          "cert_hash_sha256",
+          "expires_at",
+          "allow_pooling"
+        ],
+        "properties": {
+          "allow_pooling": {
+            "type": "boolean",
+            "description": "`allowPooling: true` is a `TypeError` when combined with `serverCertificateHashes`, so a\nclient must pass this. Stated here because a browser that ignores it fails at Web PKI\nvalidation with no useful error."
+          },
+          "cert_hash_sha256": {
+            "type": "string",
+            "description": "Lowercase hex SHA-256 of the leaf certificate DER — the bytes that go in\n`serverCertificateHashes[0].value`."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds. Past this the certificate has rotated and the hash above is stale; fetch\nagain rather than cache. Always under two weeks out — the spec refuses anything longer.",
+            "minimum": 0
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "UDP port the plane listens on. Not the management port, and not the native plane's.",
+            "minimum": 0
           }
         }
       }

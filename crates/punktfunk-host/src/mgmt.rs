@@ -43,6 +43,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 mod update;
+mod webtransport;
 
 /// `library::plugin_launch` tests inject a stub plugin.
 #[cfg(test)]
@@ -297,6 +298,7 @@ fn api_router_parts() -> (Router<Arc<MgmtState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(clients::get_pairing_status))
         .routes(routes!(clients::submit_pairing_pin));
     let api_v1 = api_v1
+        .routes(routes!(webtransport::get_webtransport))
         .routes(routes!(native::get_native_pairing))
         .routes(routes!(native::arm_native_pairing))
         .routes(routes!(native::disarm_native_pairing))

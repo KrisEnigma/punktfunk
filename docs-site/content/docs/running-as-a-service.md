@@ -42,6 +42,19 @@ guide's firewall step has the commands.
 Windows is the same by default — GameStream **off** unless you tick it in the installer, through
 its own mechanism — see [Windows](#windows).
 
+## The browser client (preview)
+
+Punktfunk can also accept a browser over WebTransport. It is **off** by default and still a
+preview — it connects and carries no session yet — so turn it on only if you are trying it out:
+
+```ini
+PUNKTFUNK_WEBTRANSPORT=1
+PUNKTFUNK_WEBTRANSPORT_PORT=9778
+```
+
+The port is UDP and separate from the native plane's, so open it in your firewall alongside
+`punktfunk-native`. Leave `PUNKTFUNK_WEBTRANSPORT_PORT` out unless 9778 is taken.
+
 ## A. A desktop you log into
 
 If you sit at the machine (or it auto-logs-in to a desktop), run the host as a **systemd user

@@ -247,6 +247,9 @@ pub(crate) struct NativeServe {
     pub data_port: Option<u16>,
     /// Gates `_punktfunk._udp` and GameStream `_nvstream` together. See [`Punktfunk1Options::mdns`].
     pub mdns: bool,
+    /// The browser plane's port, or `None` when it is off — which is the default
+    /// (`--webtransport` / `PUNKTFUNK_WEBTRANSPORT`). See `crate::webtransport`.
+    pub webtransport_port: Option<u16>,
 }
 
 /// NVENC session cap (high-res split-encode holds two). Overflow waits in the accept queue.
