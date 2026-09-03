@@ -478,7 +478,7 @@ impl Targets {
             width: self.width,
             height: self.height,
             pts_ns,
-            format: self.kind.pixel_format(),
+            format: pixel_format(self.kind),
             payload: FramePayload::D3d11(D3d11Frame {
                 texture: src.clone(),
                 device: self.dev.clone(),
