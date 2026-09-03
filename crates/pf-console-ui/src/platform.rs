@@ -9,6 +9,10 @@ pub enum Platform {
     Desktop,
     /// Android client's GL host.
     Android,
+    /// LG webOS TV client's GL host (`design/webos-skia-console-port.md`). A TV remote and a
+    /// pad, no touch and no window manager — so it shares Android's glyph legend but none of
+    /// its phone-sensor rows.
+    WebOS,
 }
 
 /// A native screen the platform owns. The shell sends

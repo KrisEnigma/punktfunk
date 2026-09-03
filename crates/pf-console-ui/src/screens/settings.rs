@@ -862,33 +862,38 @@ impl SettingsScreen {
 /// A concept the platform does not have is absent, never a no-op control.
 fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
     use crate::platform::Platform;
-    let android_only = matches!(
-        id,
-        RowId::LowLatency
-            | RowId::PhoneRumble
-            | RowId::PhoneGyro
-            | RowId::Sc2Passthrough
-            | RowId::DsCapture
-            | RowId::GamepadUi
-            | RowId::GamepadUiMode
-            | RowId::ReduceUiResolution
-            | RowId::Controllers
-            | RowId::Licenses
-    );
-    let desktop_only = matches!(
-        id,
+    // Rows that are NOT universal name the platforms that offer them, rather than the ones
+    // that do not. With two platforms "everything except the other one's rows" was well
+    // defined; with three it is not, and a new platform would silently inherit every row it
+    // was never considered for. Naming the offering platforms makes adding one a decision per
+    // row instead of an omission. Rows absent here are universal, which is what an unlisted
+    // row already meant.
+    use Platform::{Android, Desktop, WebOS};
+    let on: &[Platform] = match id {
+        // Phone sensors and the Steam Controller 2 dongle: hardware a TV does not have.
+        RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => &[Android],
+        // Android's own render-scale knob. webOS gets a 1080p surface from the compositor
+        // whatever it asks for, so the quantity does not exist there.
+        RowId::ReduceUiResolution => &[Android],
+        // The touch shell exists only where there is a touch shell to fall back to.
+        RowId::LowLatency | RowId::GamepadUi | RowId::GamepadUiMode => &[Android],
+        // A pad list and a licences screen: both real on a TV.
+        RowId::Controllers | RowId::Licenses => &[Android, WebOS],
+        // DualSense capture — the pad reaches webOS over Bluetooth HID, not hidraw, so the
+        // concept is real there too (punktfunk-webos docs/NOTES.md).
+        RowId::DsCapture => &[Android, WebOS],
+        // Decoder choice, chroma/bit-depth and the window-manager knobs: the TV decodes
+        // through NDL and has no window manager, so none of these is a control it could obey.
         RowId::Decoder
-            | RowId::Chroma444
-            | RowId::TenBitSdr
-            | RowId::Vsync
-            | RowId::AllowVrr
-            | RowId::Fullscreen
-            | RowId::Shortcuts
-    );
-    match platform {
-        Platform::Desktop => !android_only,
-        Platform::Android => !desktop_only,
-    }
+        | RowId::Chroma444
+        | RowId::TenBitSdr
+        | RowId::Vsync
+        | RowId::AllowVrr
+        | RowId::Fullscreen
+        | RowId::Shortcuts => &[Desktop],
+        _ => &[Desktop, Android, WebOS],
+    };
+    on.contains(&platform)
 }
 
 /// Offered this frame, as opposed to offered-but-inert.
@@ -1322,7 +1327,8 @@ fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                  for games), Desktop leaves it free and sends absolute positions. \
                  Ctrl+Alt+Shift+M switches live while streaming."
             }
-            Platform::Android => {
+            // No live chord to name: neither host binds one.
+            Platform::Android | Platform::WebOS => {
                 "How a physical mouse drives the host: Capture locks the pointer (relative, \
                  for games), Desktop leaves it free and sends absolute positions."
             }
@@ -1370,7 +1376,7 @@ fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                 "How much the overlay shows: Compact (one line) → Normal → Detailed. \
                  Ctrl+Alt+Shift+S cycles it live while streaming."
             }
-            Platform::Android => {
+            Platform::Android | Platform::WebOS => {
                 "How much the overlay shows: Compact (one line) → Normal → Detailed."
             }
         },
