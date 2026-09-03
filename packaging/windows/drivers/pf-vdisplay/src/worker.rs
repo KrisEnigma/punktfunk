@@ -44,6 +44,9 @@ pub struct OwnedHandle(HANDLE);
 // SAFETY: a Win32 handle is a process-wide token, not thread-affine; this wrapper hands out only
 // borrowed copies and is the handle's sole closer, so moving it between threads is sound.
 unsafe impl Send for OwnedHandle {}
+// SAFETY: as above — a shared reference yields only by-value copies, and the OS serializes
+// every operation on the handle itself.
+unsafe impl Sync for OwnedHandle {}
 
 impl OwnedHandle {
     /// An unnamed event owned by the returned value. `manual_reset` keeps it signalled until

@@ -6,6 +6,8 @@
 //! thin client of the same pieces. [`set_encode`] is the control-plane verb.
 
 pub mod convert;
+pub mod drive;
+pub mod pool;
 pub mod section;
 pub mod thread;
 
@@ -67,6 +69,7 @@ pub fn set_encode(req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
     let (tx, rx) = sync_channel(1);
     let Some(thread) = EncodeThread::spawn(ThreadCtx {
         session: session.clone(),
+        monitor: Arc::downgrade(&monitor),
         device,
         opened: tx,
     }) else {

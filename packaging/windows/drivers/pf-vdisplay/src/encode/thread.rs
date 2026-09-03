@@ -8,22 +8,25 @@
 //! overlays hang in session 0, where there is no desktop to hook.
 
 use std::mem::offset_of;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use pf_driver_proto::encode::au::{self, AuHeader};
 use pf_driver_proto::encode::{self as wire, EncoderCapsWire, SetEncodeReply, SetEncodeRequest};
+use pf_driver_proto::frame::DRV_STATUS_OPENED;
 use pf_encode_win::{ChromaFormat, Codec, Encoder, EncoderCaps};
 use pf_frame::HdrMeta;
-use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
-use windows::Win32::System::Threading::WaitForSingleObject;
 
 use super::convert::{AdapterId, Fail, InputKind};
+use super::drive::Drive;
+use super::pool::Pool;
 use super::section::{AuSection, EncodeSession};
 use crate::direct_3d_device::Direct3DDevice;
+use crate::monitor::Monitor;
 use crate::worker::{Mmcss, Worker};
 
 const BACKEND_NAMES: [&str; 4] = ["nvenc", "amf", "qsv", "pyrowave"];
@@ -125,8 +128,10 @@ fn open_listed(
 }
 
 /// What the thread runs with. The `opened` channel carries exactly one reply: the open's.
+/// `monitor` is used during set-up only — a detached thread must not pin its monitor.
 pub struct ThreadCtx {
     pub session: Arc<EncodeSession>,
+    pub monitor: Weak<Monitor>,
     pub device: Arc<Direct3DDevice>,
     pub opened: SyncSender<SetEncodeReply>,
 }
@@ -169,20 +174,20 @@ impl EncodeThread {
     }
 }
 
-fn stop_signalled(stop: HANDLE) -> bool {
-    // SAFETY: `stop` is the worker's stop event, alive until the worker joins or leaks.
-    unsafe { WaitForSingleObject(stop, 0) == WAIT_OBJECT_0 }
-}
-
-/// The thread body: open, report, then run until stopped.
+/// The thread body: open, build or reuse the monitor's pool, report, then drive until stopped.
+/// The pool is reused — retained slot included — when it already fits this session's device,
+/// size and input kind; anything else is a fresh pool installed on the monitor.
 fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
     let _mmcss = Mmcss::distribution("encode");
     let section = &ctx.session.section;
+    let fail = |status, f| {
+        let _ = ctx.opened.send(fail_reply(status, f));
+    };
     let Some(adapter) = AdapterId::of(&ctx.device) else {
-        let _ = ctx
-            .opened
-            .send(fail_reply(wire::SET_ENCODE_NO_DEVICE, (-5, "adapter")));
-        return;
+        return fail(wire::SET_ENCODE_NO_DEVICE, (-5, "adapter"));
+    };
+    let Some(monitor) = ctx.monitor.upgrade() else {
+        return fail(wire::SET_ENCODE_NO_MONITOR, (-6, "gone"));
     };
     let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter) {
         Ok(x) => x,
@@ -191,6 +196,21 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
             return;
         }
     };
+    let size = (spec.width, spec.height);
+    let reused = monitor
+        .pool()
+        .filter(|p| p.matches(&ctx.device, spec.kind, size));
+    let pool = match reused {
+        Some(p) => p,
+        None => match Pool::build(&ctx.device, spec.kind, size, monitor.source_seq.clone()) {
+            Ok(p) => {
+                monitor.set_pool(p.clone());
+                p
+            }
+            Err(f) => return fail(wire::SET_ENCODE_POOL, f),
+        },
+    };
+    drop(monitor);
     dbglog!(
         "[pf-vd] encode: backend {} open {}x{} {:?} (target {})",
         reply.backend_opened,
@@ -199,17 +219,20 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         spec.kind,
         ctx.session.request.target_id
     );
+    section.store_u32(offset_of!(AuHeader, driver_status), DRV_STATUS_OPENED);
+    section.store_u32(
+        offset_of!(AuHeader, driver_status_detail),
+        reply.backend_opened,
+    );
     section.store_u32(offset_of!(AuHeader, encoder_state), au::ENCODER_OPEN);
     if ctx.opened.send(reply).is_err() {
         // The caller gave up waiting: nothing will install this session.
         return;
     }
-    while live.load(Ordering::Acquire) && !stop_signalled(stop) {
-        // SAFETY: `stop` is the worker's stop event, alive until the worker joins or leaks.
-        let _ = unsafe { WaitForSingleObject(stop, 1000) };
+    Drive::new(enc, &pool, &ctx.session, stop, &live).run();
+    if live.load(Ordering::Acquire) {
+        section.store_u32(offset_of!(AuHeader, encoder_state), au::ENCODER_CLOSED);
     }
-    drop(enc);
-    section.store_u32(offset_of!(AuHeader, encoder_state), au::ENCODER_CLOSED);
 }
 
 /// Everything one backend `open` takes, in the backends' own vocabulary.

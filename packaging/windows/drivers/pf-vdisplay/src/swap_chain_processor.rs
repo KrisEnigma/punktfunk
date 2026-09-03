@@ -349,6 +349,11 @@ impl SwapChainProcessor {
         // a reassigned worker starts empty and the first compose refills it.
         let mut stash = FrameStash::new();
 
+        // The encode pool + session this worker feeds, re-read only when the monitor's encode
+        // generation moves (see `Monitor::encode_gen`).
+        #[cfg(feature = "driver-encode")]
+        let mut attached = crate::encode::pool::Attached::new();
+
         let mut logged_pending = false;
         let mut logged_frame = false;
         // The frame-channel delivery gate (see `Monitor::chan_gen`): the loop only locks the
@@ -457,6 +462,8 @@ impl SwapChainProcessor {
             if chan_pending {
                 seen_chan_gen = chan_gen;
             }
+            #[cfg(feature = "driver-encode")]
+            attached.refresh(&owner);
             // Blocking from here on: hand the strong count back so this thread never decides
             // when its own monitor drops.
             drop(owner);
@@ -549,7 +556,10 @@ impl SwapChainProcessor {
                         // the copy is ordered before the consumer via the slot keyed mutex).
                         let res = unsafe { IDXGIResource::from_raw(raw) };
                         if let Ok(tex) = res.cast::<ID3D11Texture2D>() {
-                            // Spike S5: one `CopyResource` into the probe's pool, or nothing.
+                            // The fused pass into the encode pool, or nothing (§2.2).
+                            #[cfg(feature = "driver-encode")]
+                            attached.offer(device, &tex, display_qpc);
+                            // Spike S5: one `CopyResource` into the probe's ring, or nothing.
                             #[cfg(feature = "encode-probe")]
                             crate::encode_probe::offer(device, &tex, display_qpc, target_id);
                             match publisher.as_mut().map(|p| p.publish(&tex, display_qpc)) {
@@ -607,6 +617,8 @@ impl SwapChainProcessor {
                 if let Some(p) = publisher.as_ref() {
                     p.note_drain(true);
                 }
+                #[cfg(feature = "driver-encode")]
+                attached.note_drain();
             } else {
                 // The swap-chain was likely abandoned (e.g. DXGI_ERROR_ACCESS_LOST) — exit the loop.
                 break;

@@ -1808,6 +1808,77 @@ pub mod encode {
                 && header.heap_bytes <= HEAP_MAX_BYTES
         }
 
+        /// The writer's bookkeeping over the heap and the slot table: which slot an access
+        /// unit (or one chunk of it) goes into and where its bytes land. Pure over a snapshot
+        /// of the slot states the caller loads, so it runs under `cargo test` anywhere.
+        ///
+        /// Bytes are placed by a bump pointer that wraps at the heap's end and never straddles
+        /// it. A placement that overlaps the recorded range of a slot the host still holds
+        /// ([`PUBLISHED`] or [`READING`]) is refused, never moved past it: the writer then waits
+        /// or drops at the pool. One access unit's chunks therefore sit at ascending offsets
+        /// except across a single wrap — the order the host reads a multi-chunk AU in.
+        #[derive(Clone, Debug)]
+        pub struct HeapRing {
+            heap_offset: u32,
+            heap_bytes: u32,
+            /// Next write offset, section-relative.
+            head: u32,
+            /// Round-robin start for the slot pick.
+            next_slot: usize,
+            /// `(offset, len)` last handed out per slot; `len == 0` = nothing recorded.
+            ranges: [(u32, u32); AU_SLOTS as usize],
+        }
+
+        impl HeapRing {
+            #[must_use]
+            pub const fn new(heap_offset: u32, heap_bytes: u32) -> Self {
+                Self {
+                    heap_offset,
+                    heap_bytes,
+                    head: heap_offset,
+                    next_slot: 0,
+                    ranges: [(0, 0); AU_SLOTS as usize],
+                }
+            }
+
+            /// A [`FREE`] slot and a heap range of `len` bytes for it, recorded as the slot's.
+            /// `None` when no slot is free, `len` exceeds the heap, or both placements — in
+            /// place and after a wrap — overlap a range the host still holds.
+            pub fn take(
+                &mut self,
+                len: u32,
+                states: &[u32; AU_SLOTS as usize],
+            ) -> Option<(usize, u32)> {
+                if len > self.heap_bytes {
+                    return None;
+                }
+                let n = AU_SLOTS as usize;
+                let slot = (0..n)
+                    .map(|k| (self.next_slot + k) % n)
+                    .find(|&i| states[i] == FREE)?;
+                let end = self.heap_offset + self.heap_bytes;
+                let in_place = (self.head + len <= end).then_some(self.head);
+                let offset = in_place
+                    .into_iter()
+                    .chain(core::iter::once(self.heap_offset))
+                    .find(|&at| !self.overlaps(at, len, states))?;
+                self.ranges[slot] = (offset, len);
+                self.head = offset + len;
+                self.next_slot = (slot + 1) % n;
+                Some((slot, offset))
+            }
+
+            /// Whether `[at, at + len)` touches a range a non-[`FREE`] slot still names.
+            fn overlaps(&self, at: u32, len: u32, states: &[u32; AU_SLOTS as usize]) -> bool {
+                self.ranges
+                    .iter()
+                    .zip(states)
+                    .any(|(&(off, held), &state)| {
+                        state != FREE && held != 0 && at < off + held && off < at + len
+                    })
+            }
+        }
+
         // Layout crosses the process boundary; Pod rejects internal padding and these pin the
         // externally-visible sizes, so a same-size field reorder is a compile error.
         const _: () = {
@@ -3941,5 +4012,84 @@ mod tests {
         let zero = SetEncodeRequest::zeroed();
         assert_eq!(zero.backends, [0; 4]);
         assert_eq!(bytemuck::bytes_of(&zero), [0u8; 120]);
+    }
+
+    #[test]
+    fn heap_ring_back_pressures_on_the_slot_table() {
+        use encode::au::{self, HeapRing};
+
+        let n = au::AU_SLOTS as usize;
+        let mut ring = HeapRing::new(au::HEAP_OFFSET as u32, au::HEAP_MIN_BYTES);
+        let mut states = [au::FREE; au::AU_SLOTS as usize];
+        // Sixteen publishes fill the table; the writer claims by storing PUBLISHED itself.
+        let mut offsets = Vec::new();
+        for k in 0..n {
+            let (slot, offset) = ring.take(1000, &states).expect("a free slot");
+            assert_eq!(slot, k, "slots hand out round-robin");
+            states[slot] = au::PUBLISHED;
+            offsets.push(offset);
+        }
+        assert!(offsets.windows(2).all(|w| w[1] == w[0] + 1000));
+        assert_eq!(offsets[0], au::HEAP_OFFSET as u32);
+        println!(
+            "16 slots placed from {} to {}",
+            offsets[0],
+            offsets[n - 1] + 1000
+        );
+        // All unread: the seventeenth is refused — the drop lands on the pool, not on an AU.
+        assert_eq!(ring.take(1000, &states), None);
+        // The host takes one READING then frees it; only then is a slot available again.
+        states[5] = au::READING;
+        assert_eq!(ring.take(1000, &states), None);
+        states[5] = au::FREE;
+        let (slot, offset) = ring.take(1000, &states).expect("the freed slot");
+        assert_eq!(slot, 5);
+        assert_eq!(
+            offset,
+            offsets[n - 1] + 1000,
+            "bytes keep bumping, slots recycle"
+        );
+        // Zero-length chunks and over-heap chunks are answered, never placed wrongly.
+        assert_eq!(ring.take(au::HEAP_MIN_BYTES + 1, &states), None);
+    }
+
+    #[test]
+    fn heap_ring_wraps_without_overwriting_held_bytes() {
+        use encode::au::{self, HeapRing};
+
+        let heap = au::HEAP_MIN_BYTES;
+        let base = au::HEAP_OFFSET as u32;
+        let mut ring = HeapRing::new(base, heap);
+        let mut states = [au::FREE; au::AU_SLOTS as usize];
+        let chunk = heap / 4 + 1;
+        // Three chunks fit; the fourth does not fit at the end and must wrap, never straddle.
+        let mut placed = Vec::new();
+        for _ in 0..3 {
+            let (slot, off) = ring.take(chunk, &states).unwrap();
+            states[slot] = au::PUBLISHED;
+            placed.push((slot, off));
+            assert!(off + chunk <= base + heap);
+        }
+        // The wrap target overlaps slot 0's bytes while the host holds them.
+        assert_eq!(ring.take(chunk, &states), None);
+        states[placed[0].0] = au::FREE;
+        let (slot, off) = ring.take(chunk, &states).unwrap();
+        println!("wrapped to slot {slot} at {off} after {:?}", placed);
+        assert_eq!(
+            off, base,
+            "a chunk that does not fit at the end starts the heap over"
+        );
+        states[slot] = au::PUBLISHED;
+        // The next one continues after the wrap and still refuses slot 1's held bytes.
+        assert_eq!(ring.take(chunk, &states), None);
+        states[placed[1].0] = au::FREE;
+        let (_, off2) = ring.take(chunk, &states).unwrap();
+        assert_eq!(off2, base + chunk);
+        // A freed slot's stale range never blocks: FREE ranges are ignored.
+        states = [au::FREE; au::AU_SLOTS as usize];
+        assert!(
+            ring.take(heap, &states).is_some(),
+            "a whole-heap AU fits an empty heap"
+        );
     }
 }

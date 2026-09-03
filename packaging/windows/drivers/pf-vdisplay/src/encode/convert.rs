@@ -135,6 +135,12 @@ pub struct SharedFence {
     pub handle: HANDLE,
 }
 
+// SAFETY: the NT handle is a process-wide token this value alone closes; the COM objects are
+// agile. Every use is serialized by the pool's state mutex.
+unsafe impl Send for SharedFence {}
+// SAFETY: as above — a shared reference hands out only by-value copies of the handle.
+unsafe impl Sync for SharedFence {}
+
 impl SharedFence {
     pub fn new(dev: &d3d::ID3D11Device, ctx: &d3d::ID3D11DeviceContext) -> Result<Self, Fail> {
         let fail = |what: &str, e: windows62::core::Error| {
@@ -313,10 +319,6 @@ impl Targets {
             height: h,
             planes,
         })
-    }
-
-    pub fn kind(&self) -> InputKind {
-        self.kind
     }
 
     /// One GPU pass from `src` (BGRA or FP16, the pool's size) into slot `i`: a copy for BGRA,

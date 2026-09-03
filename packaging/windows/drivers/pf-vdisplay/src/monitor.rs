@@ -105,6 +105,9 @@ pub struct Monitor {
     /// The live encode session (`SET_ENCODE`); its thread stops with no lock held.
     #[cfg(feature = "driver-encode")]
     encode: Mutex<Option<Arc<EncodeSession>>>,
+    /// The encode pool, kept across sessions for its retained slot; dropped at teardown.
+    #[cfg(feature = "driver-encode")]
+    pool: Mutex<Option<Arc<crate::encode::pool::Pool>>>,
     /// Bumped (Release) by every session install or removal, and by every pool change. The
     /// drain loop compares it with its last-seen value and re-reads the slots only then.
     #[cfg(feature = "driver-encode")]
@@ -144,6 +147,8 @@ impl Monitor {
             }),
             #[cfg(feature = "driver-encode")]
             encode: Mutex::new(None),
+            #[cfg(feature = "driver-encode")]
+            pool: Mutex::new(None),
             #[cfg(feature = "driver-encode")]
             encode_gen: AtomicU32::new(0),
             #[cfg(feature = "driver-encode")]
@@ -201,13 +206,19 @@ impl Monitor {
         lock(&self.encode).clone()
     }
 
-    /// Take the session out; the caller stops its thread with no lock held.
+    /// The encode pool, if one was ever built.
     #[cfg(feature = "driver-encode")]
-    #[must_use]
-    pub fn take_encode(&self) -> Option<Arc<EncodeSession>> {
-        let taken = take(&self.encode);
+    pub fn pool(&self) -> Option<Arc<crate::encode::pool::Pool>> {
+        lock(&self.pool).clone()
+    }
+
+    /// Install a freshly built pool (the encode thread, once its session's kind is known) and
+    /// wake the drain worker. The replaced pool's textures drop after the guard.
+    #[cfg(feature = "driver-encode")]
+    pub fn set_pool(&self, pool: Arc<crate::encode::pool::Pool>) {
+        let replaced = lock(&self.pool).replace(pool);
         self.bump_encode_gen();
-        taken
+        drop(replaced);
     }
 
     /// Bump the encode generation and wake the drain worker (`SetEvent` never blocks, so the
@@ -384,6 +395,8 @@ impl Monitor {
             drop(session);
         }
         drop(take(&self.swap));
+        #[cfg(feature = "driver-encode")]
+        drop(take(&self.pool));
         drop(take(&self.endpoint));
         drop(take(&self.chan));
         let took = started.elapsed();
