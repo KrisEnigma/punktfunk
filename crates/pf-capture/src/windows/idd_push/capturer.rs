@@ -280,6 +280,10 @@ impl Capturer for IddPushCapturer {
         );
         self.width = width;
         self.height = height;
+        // A mode outside the driver's frozen advertised list re-arrives the monitor, and a fresh
+        // monitor composes SDR whatever the session negotiated. Re-assert before the encoder
+        // re-opens, or it opens for FP16 against a BGRA surface the pool can only refuse.
+        self.display_hdr = self.pin_negotiated_depth();
         true
     }
 
