@@ -67,6 +67,29 @@ fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
+/// `PUNKTFUNK_IDD_DIAG` — the one gate for this capturer's diagnostics: the micro-probe engine,
+/// the DxgKrnl ETW session and the access-unit dump. All three are off in a normal session,
+/// because standing fence/scanline/DWM traffic and an ETW session alter the very path a
+/// disturbance report describes.
+///
+/// `1` puts the dump beside the driver log (`%SystemRoot%\Temp`); any other non-empty value is
+/// the directory it goes in. Read once per process, so an env edited mid-session is stale.
+pub(super) fn diag_dir() -> Option<&'static std::path::Path> {
+    static DIAG: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    DIAG.get_or_init(|| {
+        let raw = std::env::var("PUNKTFUNK_IDD_DIAG").ok()?;
+        match raw.trim() {
+            "" | "0" | "off" | "false" => None,
+            "1" | "on" | "true" => {
+                let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+                Some(std::path::PathBuf::from(root).join("Temp"))
+            }
+            path => Some(std::path::PathBuf::from(path)),
+        }
+    })
+    .as_deref()
+}
+
 /// File mapping + mapped view. Drop unmaps, then [`OwnedHandle`] closes.
 /// Borrowers hold the pointer, so declare this before whatever borrows it.
 struct MappedSection {
@@ -261,10 +284,10 @@ pub struct IddPushCapturer {
     cursor_gap_px: u32,
     cursor_pending_px: u32,
     cursor_sampled_at: Instant,
-    /// Micro-probe singleton. `None` when `PUNKTFUNK_STALL_PROBES=0`; the matrix
-    /// treats a missing window as never-stalled, so reports never invent legs.
+    /// Micro-probe singleton; `None` unless [`diag_dir`] is on. A missing window reads as
+    /// never-stalled, so a report never invents a leg.
     probes: Option<Arc<probes::ProbeEngine>>,
-    /// DxgKrnl ETW; `None` when the session cannot start it (reports `etw=unavailable`).
+    /// DxgKrnl ETW; `None` unless [`diag_dir`] is on, or the session refused to start.
     etw: Option<Arc<dxgkrnl_etw::EtwWatch>>,
     /// `PowerRequestDisplayRequired` for this capturer's life: DWM composes nothing
     /// once the console goes dark. Waking an already-off display is the HID kick.

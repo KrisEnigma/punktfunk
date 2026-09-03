@@ -273,12 +273,21 @@ impl IddPushCapturer {
             want_hdr,
             ten_bit_sdr,
             want_444,
-            // The diagnostic POSTURE, recorded once per session (immunity plan WP3): a field
-            // log must say whether active micro-probes were running — they alter the very
-            // path a disturbance report describes, so every report needs this A/B label.
-            stall_probes = pf_host_config::config().stall_probes,
             "IDD push(host): virtual display bound; the driver encodes what DWM composes"
         );
+        // The diagnostic posture, once per session: active probes and an ETW session alter the
+        // very path a disturbance report describes, so every report needs this A/B label.
+        match super::diag_dir() {
+            Some(dir) => tracing::info!(
+                au_dump_dir = %dir.display(),
+                "IDD push: PUNKTFUNK_IDD_DIAG is ON — micro-probes, the DxgKrnl ETW session and \
+                 the access-unit dump are running for this session"
+            ),
+            None => tracing::info!(
+                "IDD push: diagnostics off (set PUNKTFUNK_IDD_DIAG=1 for probes, DxgKrnl ETW and \
+                 an access-unit dump)"
+            ),
+        }
         let mut me = Self {
             target_id: target.target_id,
             ccd,
@@ -321,10 +330,8 @@ impl IddPushCapturer {
             cursor_gap_px: 0,
             cursor_pending_px: 0,
             cursor_sampled_at: Instant::now(),
-            probes: pf_host_config::config()
-                .stall_probes
-                .then(super::probes::acquire),
-            etw: super::dxgkrnl_etw::acquire(),
+            probes: super::diag_dir().map(|_| super::probes::acquire()),
+            etw: super::diag_dir().and_then(|_| super::dxgkrnl_etw::acquire()),
             cursor_shared,
             cursor_poll,
             cursor_forward,

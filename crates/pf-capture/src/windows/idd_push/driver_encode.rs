@@ -109,6 +109,45 @@ fn pts_from_qpc(qpc: u64) -> u64 {
     now_ns().saturating_sub(IddPushCapturer::qpc_age_us(qpc).saturating_mul(1000))
 }
 
+/// Access units to disk while [`diag_dir`] is on, in the framing the S5 encode probe wrote —
+/// `[u32 len][u64 pts_ns][u8 keyframe][bytes]` per chunk — so a field failure replays through
+/// the same corpus tooling. A write error drops the dump; the stream never fails for it.
+struct AuDump(std::io::BufWriter<std::fs::File>);
+
+impl AuDump {
+    /// One file per encoder open, named by pid and target so two sessions never share one.
+    fn create(target_id: u32) -> Option<Self> {
+        let dir = diag_dir()?;
+        let path = dir.join(format!("pfvd-au-{}-{target_id}.bin", std::process::id()));
+        match std::fs::File::create(&path) {
+            Ok(f) => {
+                tracing::info!(path = %path.display(), "driver encode: dumping access units");
+                Some(Self(std::io::BufWriter::new(f)))
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "driver encode: no AU dump");
+                None
+            }
+        }
+    }
+
+    /// Append one chunk; `false` means the caller drops the dump.
+    fn write(&mut self, c: &AuChunk) -> bool {
+        use std::io::Write;
+        let r = self
+            .0
+            .write_all(&(c.data.len() as u32).to_le_bytes())
+            .and_then(|()| self.0.write_all(&c.pts_ns.to_le_bytes()))
+            .and_then(|()| self.0.write_all(&[u8::from(c.keyframe)]))
+            .and_then(|()| self.0.write_all(&c.data));
+        if let Err(e) = r {
+            tracing::warn!(error = %e, "driver encode: AU dump write failed — dump disabled");
+            return false;
+        }
+        true
+    }
+}
+
 /// The mapped AU section and its ready event, alive for the encoder's life. The driver holds
 /// its own duplicates; dropping this unmaps and closes only the host's handles.
 struct AuSection {
@@ -281,6 +320,7 @@ pub fn open_driver_encoder(
         last_wire_seq: 0,
         last_source_seq: 0,
         last_arrival: None,
+        dump: AuDump::create(endpoint.target_id),
         opened_at: Instant::now(),
         backend: backend_name(reply.backend_opened),
     }))
@@ -307,6 +347,8 @@ pub struct EncoderProxy {
     last_source_seq: u32,
     /// Age of the last taken chunk's `qpc_pts` when the host took it — present→arrival.
     last_arrival: Option<Duration>,
+    /// Bitstream capture while `PUNKTFUNK_IDD_DIAG` is on; dropped on the first write error.
+    dump: Option<AuDump>,
     /// Stands in for `last_au_qpc` until the first publish, so a never-producing encoder is
     /// silent from a known instant rather than invisible.
     opened_at: Instant,
@@ -349,13 +391,14 @@ impl EncoderProxy {
 
     /// One taken slot as a wire chunk, recording the progress clocks on the way through:
     /// the sequence pair the supervisor reads as encoder progress, and how old the OS present
-    /// stamp already is — the ground truth for "late, not missing".
+    /// stamp already is — the ground truth for "late, not missing". The diagnostic dump takes
+    /// its copy here, so a chunked session writes the same bytes in the same order.
     fn chunk(&mut self, t: Taken) -> AuChunk {
         self.last_wire_seq = t.wire_seq;
         self.last_source_seq = t.source_seq;
         self.last_arrival =
             (t.qpc_pts != 0).then(|| Duration::from_micros(IddPushCapturer::qpc_age_us(t.qpc_pts)));
-        AuChunk {
+        let chunk = AuChunk {
             data: t.data,
             pts_ns: pts_from_qpc(t.qpc_pts),
             keyframe: t.flags & au::AU_KEYFRAME != 0,
@@ -363,7 +406,11 @@ impl EncoderProxy {
             chunk_aligned: t.flags & au::AU_CHUNK_ALIGNED != 0,
             first: t.flags & au::AU_FIRST != 0,
             last: t.flags & au::AU_LAST != 0,
+        };
+        if self.dump.as_mut().is_some_and(|d| !d.write(&chunk)) {
+            self.dump = None;
         }
+        chunk
     }
 
     /// The header telemetry the driver keeps (`encoder_state`, `detached`, `last_au_qpc`,

@@ -148,6 +148,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **`capture_health` reports the classes the driver's clocks support.** `stall_class` is now
+  `worker` / `encoder` / `presentation` / `driver` (`transport` and `conversion` are gone),
+  `evidence` is `input` / `canary`, and the object gains `present_to_arrival_ms` plus a
+  `late_frames` flag for frames that arrive late rather than not at all. A dashboard matching the
+  old strings needs the new ones.
+- **`PUNKTFUNK_IDD_DIAG` replaces `PUNKTFUNK_STALL_PROBES`.** One gate now turns on the Windows
+  capture micro-probes, the DxgKrnl ETW session and a raw access-unit dump, none of which run in
+  a normal session. Set it to `1` when diagnosing a box, or to a directory to put the dump there.
 - **`VIDEO_CAP_*` negotiation is unchanged on Windows.** The driver allocates its encode-pool
   slots in whatever format the opened backend asked for, so HDR, 10-bit and 4:4:4 resolve
   exactly as they did when the host converted. Nothing to do.
