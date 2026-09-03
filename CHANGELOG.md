@@ -172,6 +172,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `if-addrs` off wasm only, keeps its Apple `recv_batch` off it, and `trust`'s identity, pair,
   probe and `preferred_codec` entry points are absent there — a browser has no quinn. No other
   target changes.
+- **`punktfunk_core`'s C ABI is absent on wasm.** Nothing in a browser embeds this crate over the
+  C ABI, and its `#[no_mangle]` roots made the cdylib cargo builds regardless unlinkable there. An
+  embedder is unaffected on every target that has one.
 - **The Windows installers are punktfunk's own.** `punktfunk-host-setup-<version>.exe` and
   `punktfunk-client-setup-<version>_<arch>.exe` are now built by `punktfunk-setup-win`, the
   engine behind the Linux installer, with a self-contained WinUI 3 wizard (Recommended or
