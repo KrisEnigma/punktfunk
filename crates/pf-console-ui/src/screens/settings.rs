@@ -862,12 +862,9 @@ impl SettingsScreen {
 /// A concept the platform does not have is absent, never a no-op control.
 fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
     use crate::platform::Platform;
-    // Rows that are NOT universal name the platforms that offer them, rather than the ones
-    // that do not. With two platforms "everything except the other one's rows" was well
-    // defined; with three it is not, and a new platform would silently inherit every row it
-    // was never considered for. Naming the offering platforms makes adding one a decision per
-    // row instead of an omission. Rows absent here are universal, which is what an unlisted
-    // row already meant.
+    // Rows name the platforms that OFFER them. "Everything except the other one's rows" is
+    // well defined for two platforms and ambiguous for three: a new host would inherit every
+    // row nobody weighed it against. Unlisted here means universal, as it always did.
     use Platform::{Android, Desktop, WebOS};
     let on: &[Platform] = match id {
         // Phone sensors and the Steam Controller 2 dongle: hardware a TV does not have.
