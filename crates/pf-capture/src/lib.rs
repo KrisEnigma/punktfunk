@@ -49,10 +49,13 @@ pub struct CaptureHealth {
     pub source_gap: std::time::Duration,
     /// The evidence the verdict rests on: `recent_source` / `input` / `canary` / `presents`.
     pub evidence: Option<&'static str>,
-    /// Reserved for the driver's own state word; always `None` since the cutover.
-    pub ring_state: Option<&'static str>,
-    /// Reserved; always `false` since the cutover.
-    pub fence_ring: bool,
+    /// The driver encoder's own state word: `closed` / `open` / `encoding` / `wedged`.
+    /// `None` until the first `SET_ENCODE`.
+    pub encoder_state: Option<&'static str>,
+    /// The backend the driver opened (`nvenc` / `amf` / `qsv` / `pyrowave`); `None` as above.
+    pub backend_opened: Option<&'static str>,
+    /// Encode threads the driver abandoned after a wedge. Two opens the driver cycle.
+    pub detached: u32,
     /// Access units the driver published, and frames it dropped at the encode pool.
     pub published_total: u64,
     pub dropped_total: u64,

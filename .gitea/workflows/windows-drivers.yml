@@ -132,8 +132,8 @@ jobs:
         shell: pwsh
         # In-tree target dir on purpose: wdk-build's find_top_level_cargo_manifest() walks UP from OUT_DIR
         # to the first ancestor with a Cargo.lock, so a relocated CARGO_TARGET_DIR (C:\t\…) hides the
-        # workspace lock and it panics. The driver deps have no deep CMake-from-source crates, so the
-        # default in-tree target stays well under MAX_PATH (unlike the SDL3/audiopus client build).
+        # workspace lock and it panics. pf-vdisplay's encoder deps build PyroWave and oneVPL from
+        # source here, so watch MAX_PATH if this job ever moves deeper.
         working-directory: packaging/windows/drivers
     env:
       # wdk-build otherwise picks 10.0.28000.0 (no km/crt) and bindgen fails — pin the WDK SDK version.

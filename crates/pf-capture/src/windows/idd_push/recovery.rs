@@ -28,6 +28,18 @@ fn stall_name(c: StallClass) -> &'static str {
     }
 }
 
+/// `AuHeader::encoder_state` as its lowercase name; an unknown word reads as wedged, never as
+/// encoding.
+fn encoder_state(w: u32) -> &'static str {
+    use pf_driver_proto::encode::au;
+    match w {
+        au::ENCODER_CLOSED => "closed",
+        au::ENCODER_OPEN => "open",
+        au::ENCODER_ENCODING => "encoding",
+        _ => "wedged",
+    }
+}
+
 fn stage_name(s: Stage) -> &'static str {
     match s {
         Stage::EncoderReset => "encoder_reset",
@@ -144,8 +156,9 @@ impl Supervisor {
                 ActivityKind::Canary => "canary",
                 ActivityKind::Presents => "presents",
             }),
-            ring_state: None,
-            fence_ring: false,
+            encoder_state: enc.map(|e| encoder_state(e.state)),
+            backend_opened: enc.map(|e| e.backend),
+            detached: enc.map_or(0, |e| e.detached),
             published_total: enc.map_or(0, |e| e.published_total),
             dropped_total: enc.map_or(0, |e| e.dropped_total),
             current_stage: self.coordinator.current_stage().map(stage_name),
