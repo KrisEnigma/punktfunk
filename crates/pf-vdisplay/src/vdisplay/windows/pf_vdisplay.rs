@@ -1221,6 +1221,162 @@ mod tests {
         drop(vout); // REMOVE + stop the pinger
     }
 
+    /// Spike S5 (`#[ignore]`): arm the driver's in-process encode probe on a fresh 1080p60
+    /// monitor and read its tally. Needs a driver built with `--features encode-probe`.
+    /// `PF_PROBE_BACKEND` (nvenc|amf|qsv|pyrowave), `PF_PROBE_CODEC` (h264|hevc|av1|pyrowave),
+    /// `PF_PROBE_INPUT` (default|nv12), `PF_PROBE_FRAMES` (300) pick the run.
+    #[test]
+    #[ignore = "needs an encode-probe pf-vdisplay driver on real hardware; run with --ignored"]
+    fn live_encode_probe() {
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let backend = env("PF_PROBE_BACKEND", "nvenc");
+        let codec = env("PF_PROBE_CODEC", "hevc");
+        let input = env("PF_PROBE_INPUT", "default");
+        let frames: u32 = env("PF_PROBE_FRAMES", "300")
+            .parse()
+            .expect("PF_PROBE_FRAMES");
+        let id = |names: [&str; 4], v: &str, what: &str| -> u32 {
+            let i = names.iter().position(|n| *n == v);
+            i.unwrap_or_else(|| panic!("{what}={v:?} is not one of {names:?}")) as u32 + 1
+        };
+        let req = control::EncodeProbeRequest {
+            target_id: 0,
+            backend: id(
+                ["nvenc", "amf", "qsv", "pyrowave"],
+                &backend,
+                "PF_PROBE_BACKEND",
+            ),
+            codec: id(
+                ["h264", "hevc", "av1", "pyrowave"],
+                &codec,
+                "PF_PROBE_CODEC",
+            ),
+            input: match input.as_str() {
+                "default" => 0,
+                "nv12" => 1,
+                other => panic!("PF_PROBE_INPUT={other:?} is not default|nv12"),
+            },
+            frames,
+            bitrate_kbps: 20_000,
+            fps: 60,
+            flags: 0,
+        };
+
+        let _policy = ExclusiveTopology::force();
+        let mut vd = PfVdisplayDisplay::new().expect("open pf-vdisplay");
+        let vout = vd
+            .create(Mode {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            })
+            .expect("create virtual display");
+        let target_id = vout
+            .win_capture
+            .as_ref()
+            .expect("no capture target")
+            .target_id;
+        // The swap-chain assign and the first composes settle, as the other live cases wait.
+        thread::sleep(Duration::from_secs(3));
+        let req = control::EncodeProbeRequest { target_id, ..req };
+        let dev = open_device().expect("open the pf-vdisplay control device");
+        let h = HANDLE(dev.as_raw_handle());
+        let mut none: [u8; 0] = [];
+        // SAFETY: `h` borrows the live `OwnedHandle` above; `bytes_of(&req)` is a local that
+        // outlives the synchronous call; ARM writes no output.
+        unsafe {
+            ioctl(
+                h,
+                control::IOCTL_ENCODE_PROBE_ARM,
+                bytemuck::bytes_of(&req),
+                &mut none,
+            )
+        }
+        .expect("IOCTL_ENCODE_PROBE_ARM — is the driver built with --features encode-probe?");
+
+        // DWM presents only what something dirties: a 1 px pointer wiggle keeps frames flowing
+        // on the (isolated, so pointer-holding) virtual display.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let jiggle = {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                use windows::Win32::Foundation::POINT;
+                use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+                let mut p = POINT::default();
+                // SAFETY: `p` is a valid out-param.
+                if unsafe { GetCursorPos(&mut p) }.is_err() {
+                    return;
+                }
+                let mut flip = false;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    flip = !flip;
+                    // SAFETY: plain integer coordinates, restored on the next flip.
+                    let _ = unsafe { SetCursorPos(p.x + i32::from(flip), p.y) };
+                    thread::sleep(Duration::from_millis(4));
+                }
+                // SAFETY: restores the position observed above.
+                let _ = unsafe { SetCursorPos(p.x, p.y) };
+            })
+        };
+        let started = Instant::now();
+        let reply = loop {
+            thread::sleep(Duration::from_millis(100));
+            let mut out = [0u8; size_of::<control::EncodeProbeReply>()];
+            // SAFETY: `h` is the live control handle; STATUS takes no input and writes into
+            // `out`, whose length is the output size.
+            let n = unsafe { ioctl(h, control::IOCTL_ENCODE_PROBE_STATUS, &[], &mut out) }
+                .expect("IOCTL_ENCODE_PROBE_STATUS");
+            assert_eq!(n as usize, out.len(), "short STATUS reply");
+            let r: control::EncodeProbeReply = bytemuck::pod_read_unaligned(&out);
+            if r.state >= 3 || started.elapsed() > Duration::from_secs(60) {
+                break r;
+            }
+        };
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = jiggle.join();
+        let name = String::from_utf8_lossy(&reply.name)
+            .trim_end_matches('\0')
+            .to_string();
+        println!(
+            "encode probe: backend={backend} codec={codec} input={input} state={} frames={} aus={} \
+             bytes={} open_us={} first_au_us={} mean_us={} max_us={} drops={} error={} name={name}",
+            reply.state,
+            reply.frames_submitted,
+            reply.aus,
+            reply.bytes,
+            reply.open_us,
+            reply.first_au_us,
+            reply.mean_submit_to_au_us,
+            reply.max_submit_to_au_us,
+            reply.drops,
+            reply.error
+        );
+        // WUDFHost's temp dir — `C:\Windows\Temp` under the SCM, the LocalService profile otherwise.
+        let file = format!("pfvd-probe-{backend}-{codec}.bin");
+        for dir in [
+            r"C:\Windows\Temp",
+            r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Temp",
+        ] {
+            let path = format!(r"{dir}\{file}");
+            match std::fs::metadata(&path) {
+                Ok(m) => println!("encode probe: output {path} ({} bytes)", m.len()),
+                Err(_) => println!("encode probe: no output at {path}"),
+            }
+        }
+        drop(vout); // REMOVE before the asserts so a red run never leaks the monitor
+        assert_eq!(
+            reply.state, 3,
+            "probe did not finish: state={} error={} name={name}",
+            reply.state, reply.error
+        );
+        assert!(
+            reply.aus + reply.drops + 2 >= frames,
+            "aus={} < frames({frames}) - drops({}) - 2",
+            reply.aus,
+            reply.drops
+        );
+    }
+
     /// Forces `Topology::Exclusive` **and `KeepAlive::Off`** for the duration of a case and puts
     /// the operator's real policy back on drop — including when the case panics.
     ///
