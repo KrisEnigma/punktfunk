@@ -230,7 +230,7 @@ const playButtonPatcher = createRenderPatcher((out, self) => {
   const iconIdx = kids.findIndex((k) => k && typeof k === "object" && k.type && typeof k.type !== "string");
   const labelIdx = kids.findIndex((k) => k && k.type === "div");
   if (iconIdx >= 0) {
-    kids[iconIdx] = <PunktfunkMark key="pf-mark" size={26} back="#e2ddff" deep="#ffffff" />;
+    kids[iconIdx] = <PunktfunkMark key="pf-mark" size={26} />;
   }
   if (labelIdx >= 0) {
     kids[labelIdx] = cloneElement(kids[labelIdx], {}, streaming ? "Stop" : "Stream");

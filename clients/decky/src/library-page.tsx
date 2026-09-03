@@ -80,15 +80,16 @@ function redirectShortcutPage(shortcutAppId: number, steamAppId: number): void {
   }, 0);
 }
 
-// Steam's own Play button while a Punktfunk host is chosen in its dropdown (play-from.tsx adds
-// the class). Steam's Play is gray at rest and green only under focus or hover, a sliding
-// gradient; ours is the same gradient in the brand violet on the same states, and Steam's own
-// gray otherwise. Steam styles the element through `:enabled` selectors, hence the `!important`.
-// The stylesheet rides in the play bar's button group as a 0×0 element.
+// Steam's Play button while a Punktfunk host is chosen (play-from.tsx adds the class): Steam's
+// gray at rest, our brand violet under focus or hover where Steam's is green. `!important`
+// because Steam styles the element through `:enabled` selectors. The lens mark's own violets
+// vanish on that fill, so those states swap it for the light pair. Rides the group as a 0×0 element.
 const STYLE = `
   .punktfunk-play.gpfocus,
   .punktfunk-play:focus,
   .punktfunk-play:hover {
+    --pf-back: #ffffff;
+    --pf-deep: #cec9fb;
     background: linear-gradient(to right, #8c7ef5 0%, #5b4ce0 60%) 0% center / 330% 100% !important;
     color: #ffffff !important;
   }
