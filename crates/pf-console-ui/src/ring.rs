@@ -376,14 +376,15 @@ impl Ring {
         }
     }
 
-    /// Desktop shell cache; empty on Android, where the editor previews via
-    /// [`preview_host_label`].
+    /// Desktop shell cache; empty on Android and on a GL host, where the editor previews via
+    /// [`preview_host_label`]. Gated on `desktop`, not the OS: webOS is Linux too, and there
+    /// the fetch that fills this cache does not exist.
     fn actions(&self) -> Vec<ActionInfo> {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
         {
             pf_client_core::host_actions::cached(&self.facts.fp_hex)
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(all(feature = "desktop", any(target_os = "linux", windows))))]
         {
             Vec::new()
         }

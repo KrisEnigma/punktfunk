@@ -17,6 +17,7 @@ use std::mem::offset_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use pf_driver_proto::encode as wire;
 use pf_driver_proto::encode::au::AuHeader;
 use pf_frame::CapturedFrame;
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
@@ -25,7 +26,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::Win32::System::Threading::{SetEvent, WaitForSingleObject};
 use windows62::Win32::Graphics::Direct3D11 as d3d;
 
-use super::convert::{Fail, InputKind, Targets, bridge};
+use super::convert::{Fail, InputKind, Targets, bridge, source_format};
 use super::section::EncodeSession;
 use super::thread::{qpc_frequency, qpc_now};
 use crate::cursor_cell::CursorCell;
@@ -66,8 +67,13 @@ pub enum Offer {
     Taken(u64),
     /// Counted; the new drop total.
     Dropped(u64),
-    /// Not this pool's surface (device epoch, size or format) — nothing counted.
-    Refused,
+    /// Not this pool's surface — nothing counted. Carries what arrived against what the pool
+    /// was built for, because the three reasons are indistinguishable from the outside and a
+    /// stuck session shows only this line.
+    Refused {
+        got: (u32, u32, u32),
+        want: (u32, u32, u32),
+    },
 }
 
 struct State {
@@ -77,6 +83,10 @@ struct State {
     full: VecDeque<(usize, u64, u64)>,
     /// Handed to the encoder, AU still owed.
     encoding: Vec<usize>,
+    /// `(slot, qpc, seq)` of the newest frame the encoder took. Its pixels survive in the slot
+    /// until a later pass reuses it, which is what lets a keyframe request re-encode the last
+    /// picture when the desktop composed nothing since.
+    stash: Option<(usize, u64, u64)>,
     /// An encode thread is consuming. Without one the newest frame recycles the oldest full
     /// slot, so the retained image is always the current desktop.
     live: bool,
@@ -133,12 +143,13 @@ impl Pool {
             width: size.0,
             height: size.1,
             kind,
-            source_format: DXGI_FORMAT(kind.source_format().0),
+            source_format: DXGI_FORMAT(source_format(kind).0),
             state: Mutex::new(State {
                 targets,
                 free: (0..SLOTS).collect(),
                 full: VecDeque::new(),
                 encoding: Vec::new(),
+                stash: None,
                 live: false,
                 held: None,
             }),
@@ -174,14 +185,19 @@ impl Pool {
     /// live consumer. Under [`bypass_enabled`] there is no pass: the surface itself becomes
     /// the encoder's input and only one may be out at a time.
     pub fn offer(&self, device: &Direct3DDevice, tex: &ID3D11Texture2D, qpc: u64) -> Offer {
+        let want = (self.width, self.height, self.source_format.0 as u32);
         if device.epoch() != self.device_epoch {
-            return Offer::Refused;
+            return Offer::Refused {
+                got: (0, 0, device.epoch()),
+                want: (self.width, self.height, self.device_epoch),
+            };
         }
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: `tex` is the live acquired surface; `desc` is a valid local out-param.
         unsafe { tex.GetDesc(&mut desc) };
-        if (desc.Width, desc.Height, desc.Format) != (self.width, self.height, self.source_format) {
-            return Offer::Refused;
+        let got = (desc.Width, desc.Height, desc.Format.0 as u32);
+        if got != want {
+            return Offer::Refused { got, want };
         }
         let Ok(mut st) = self.state.try_lock() else {
             return self.drop_one();
@@ -244,12 +260,32 @@ impl Pool {
         }
     }
 
-    /// The oldest full slot, now the encoder's.
+    /// The oldest full slot, now the encoder's, remembered as the stash for [`Self::republish`].
     pub fn take_full(&self) -> Option<(usize, u64, u64)> {
         let mut st = lock(&self.state);
         let f = st.full.pop_front()?;
         st.encoding.push(f.0);
+        st.stash = Some(f);
         Some(f)
+    }
+
+    /// The stash again, for a client that asked for a keyframe while the desktop composed
+    /// nothing. DWM presents only what something dirties, so a session whose client draws its
+    /// own pointer can go quiet with the client holding no picture at all; its keyframe request
+    /// is then the only signal that anyone needs one, and there is no frame for the ordinary
+    /// path to mark as an IDR.
+    ///
+    /// Yields nothing unless the slot is idle and no composed frame is queued
+    /// ([`wire::republish_slot`]), and moves it out of `free` so no drain pass can overwrite
+    /// the pixels the encoder is about to read.
+    pub fn republish(&self) -> Option<(usize, u64, u64)> {
+        let mut st = lock(&self.state);
+        let (slot, qpc, seq) = st.stash?;
+        let queued = st.full.len();
+        wire::republish_slot(Some(slot), queued, &st.free)?;
+        st.free.retain(|&s| s != slot);
+        st.encoding.push(slot);
+        Some((slot, qpc, seq))
     }
 
     /// Hand a slot back, whether its AU was published or it was skipped. In bypass this is
@@ -390,12 +426,18 @@ impl Attached {
                     s.section.store_u64(offset_of!(AuHeader, source_seq), seq);
                 }
             }
-            Offer::Refused => {
+            Offer::Refused { got, want } => {
                 if let Some(s) = session
                     && !s.stale.swap(true, Ordering::AcqRel)
                 {
                     dbglog!(
-                        "[pf-vd] encode: pool cannot take the surface (device epoch {} vs pool {}) — session stale until the next SET_ENCODE",
+                        "[pf-vd] encode: pool cannot take the surface - got {}x{} fmt {}, pool wants {}x{} fmt {} (epoch {} vs {}) - session stale until the next SET_ENCODE",
+                        got.0,
+                        got.1,
+                        got.2,
+                        want.0,
+                        want.1,
+                        want.2,
                         device.epoch(),
                         pool.device_epoch
                     );

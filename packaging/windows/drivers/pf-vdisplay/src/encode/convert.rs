@@ -13,7 +13,10 @@
 
 use std::sync::Arc;
 
-use pf_encode_win::convert::{BgraToYuvPlanes, CursorBlendPass, HdrP010Converter, VideoConverter};
+use pf_driver_proto::encode::EncodeInput;
+use pf_encode_win::convert::{
+    BgraToYuvPlanes, CursorBlendPass, HdrP010Converter, HdrRgb10Converter, VideoConverter,
+};
 use pf_frame::dxgi::{D3d11Frame, PyroFrameShare};
 use pf_frame::{CapturedFrame, CursorOverlay, FramePayload, PixelFormat, Provenance};
 use windows::Win32::Foundation::LUID;
@@ -188,36 +191,28 @@ impl Drop for SharedFence {
     }
 }
 
-/// What a backend reads per frame, decided by the backend that opened and the session's HDR
-/// and chroma flags.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InputKind {
-    /// NVENC reads the BGRA slot as-is.
-    Bgra,
-    /// Video-engine BGRA→NV12 (AMF, QSV, the NVENC colour A/B).
-    Nv12,
-    /// Shader FP16 scRGB→P010 PQ (every HDR session but PyroWave).
-    P010,
-    /// BGRA/FP16→Y + CbCr shareable planes plus one shared fence, as the host feeds PyroWave.
-    Planar { hdr: bool, chroma444: bool },
+/// What a backend reads per frame. The choice itself is [`EncodeInput::choose`] in the wire
+/// crate, so the reply's `chroma_444` and these targets cannot disagree; this side owns only
+/// the D3D formats behind each variant.
+pub type InputKind = EncodeInput;
+
+/// The `PixelFormat` label the frame carries into `submit`.
+pub fn pixel_format(kind: InputKind) -> PixelFormat {
+    match kind {
+        InputKind::Bgra => PixelFormat::Bgra,
+        InputKind::Nv12 | InputKind::Planar { hdr: false, .. } => PixelFormat::Nv12,
+        InputKind::P010 | InputKind::Planar { hdr: true, .. } => PixelFormat::P010,
+        InputKind::Rgb10 => PixelFormat::Rgb10a2,
+    }
 }
 
-impl InputKind {
-    /// The `PixelFormat` label the frame carries into `submit`.
-    pub fn pixel_format(self) -> PixelFormat {
-        match self {
-            Self::Bgra => PixelFormat::Bgra,
-            Self::Nv12 | Self::Planar { hdr: false, .. } => PixelFormat::Nv12,
-            Self::P010 | Self::Planar { hdr: true, .. } => PixelFormat::P010,
+/// The source the pass reads: FP16 under advanced colour, BGRA otherwise.
+pub fn source_format(kind: InputKind) -> dxgi::DXGI_FORMAT {
+    match kind {
+        InputKind::P010 | InputKind::Rgb10 | InputKind::Planar { hdr: true, .. } => {
+            dxgi::DXGI_FORMAT_R16G16B16A16_FLOAT
         }
-    }
-
-    /// The source the pass reads: FP16 under advanced colour, BGRA otherwise.
-    pub fn source_format(self) -> dxgi::DXGI_FORMAT {
-        match self {
-            Self::P010 | Self::Planar { hdr: true, .. } => dxgi::DXGI_FORMAT_R16G16B16A16_FLOAT,
-            _ => dxgi::DXGI_FORMAT_B8G8R8A8_UNORM,
-        }
+        _ => dxgi::DXGI_FORMAT_B8G8R8A8_UNORM,
     }
 }
 
@@ -230,6 +225,10 @@ enum Planes {
     P010 {
         conv: HdrP010Converter,
         out: Vec<(Tex, Rtv, Rtv)>,
+    },
+    Rgb10 {
+        conv: HdrRgb10Converter,
+        out: Vec<(Tex, Rtv)>,
     },
     Planar {
         conv: BgraToYuvPlanes,
@@ -299,6 +298,16 @@ impl Targets {
                 }
                 Planes::P010 { conv, out }
             }
+            InputKind::Rgb10 => {
+                let conv = HdrRgb10Converter::new(dev).map_err(convert_err)?;
+                let mut out = Vec::with_capacity(slots);
+                for _ in 0..slots {
+                    let t = make_tex62(dev, (w, h), dxgi::DXGI_FORMAT_R10G10B10A2_UNORM, rt, 0)?;
+                    let v = HdrRgb10Converter::rtv(dev, &t).map_err(convert_err)?;
+                    out.push((t, v));
+                }
+                Planes::Rgb10 { conv, out }
+            }
             InputKind::Planar { hdr, chroma444 } => {
                 let conv = BgraToYuvPlanes::new(dev, hdr, chroma444).map_err(convert_err)?;
                 let shared = (d3d::D3D11_RESOURCE_MISC_SHARED.0
@@ -363,7 +372,7 @@ impl Targets {
             let t = make_tex62(
                 &self.dev,
                 (self.width, self.height),
-                self.kind.source_format(),
+                source_format(self.kind),
                 bind,
                 0,
             )?;
@@ -400,6 +409,9 @@ impl Targets {
                     self.height,
                 )
                 .map_err(convert_err)?,
+            Planes::Rgb10 { conv, out } => conv
+                .convert(&self.ctx, &view()?, &out[i].1, self.width, self.height)
+                .map_err(convert_err)?,
             Planes::Planar { conv, y, cbcr, .. } => conv
                 .convert(
                     &self.ctx,
@@ -417,7 +429,7 @@ impl Targets {
     /// Draw `cursor` over slot `i`'s RGB image — the BGRA slot itself, or the deferred scratch.
     /// A failure loses the pointer, never the frame, and is logged once.
     fn blend(&mut self, i: usize, cursor: &CursorImage, scale: f32) {
-        let fp16 = self.kind.source_format() == dxgi::DXGI_FORMAT_R16G16B16A16_FLOAT;
+        let fp16 = source_format(self.kind) == dxgi::DXGI_FORMAT_R16G16B16A16_FLOAT;
         let dst = match &self.planes {
             Planes::Bgra(slots) => slots[i].clone(),
             _ if self.deferred[i] => match &self.rgb[i] {
@@ -498,6 +510,7 @@ impl Targets {
             Planes::Bgra(slots) => (slots[i].clone(), None),
             Planes::Nv12 { out, .. } => (out[i].clone(), None),
             Planes::P010 { out, .. } => (out[i].0.clone(), None),
+            Planes::Rgb10 { out, .. } => (out[i].0.clone(), None),
             Planes::Planar {
                 y,
                 cbcr,
@@ -528,7 +541,7 @@ impl Targets {
             width: self.width,
             height: self.height,
             pts_ns,
-            format: self.kind.pixel_format(),
+            format: pixel_format(self.kind),
             payload: FramePayload::D3d11(D3d11Frame {
                 texture,
                 device: self.dev.clone(),

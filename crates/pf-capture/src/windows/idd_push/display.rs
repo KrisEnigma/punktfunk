@@ -41,6 +41,47 @@ impl IddPushCapturer {
         }
     }
 
+    /// Re-assert the session's NEGOTIATED colour depth on the display, settling like `open` does.
+    ///
+    /// A monitor that re-arrives mid-stream (`re_add`: REMOVE then ADD, for a mode outside the
+    /// frozen advertised list) comes back with advanced colour OFF whatever the session
+    /// negotiated. It carries the client's HDR volume in its EDID, so it still looks like an HDR
+    /// display — but composition drops to BGRA while the encoder was opened for FP16, and the
+    /// driver's pool then refuses every frame with no way to recover. Returns the depth the
+    /// display actually settled at, which is what the caller must open the encoder for.
+    pub(super) fn pin_negotiated_depth(&self) -> bool {
+        let want = self.want_hdr;
+        let set = pf_win_display::win_display::set_advanced_color(self.ccd, want);
+        let settle = Instant::now();
+        while settle.elapsed() < Duration::from_millis(250) {
+            if pf_win_display::win_display::advanced_color_enabled(self.ccd) == Some(want) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let observed = pf_win_display::win_display::advanced_color_enabled(self.ccd);
+        let got = observed.unwrap_or(want && set);
+        if got == want {
+            tracing::info!(
+                target_id = self.target_id,
+                want_hdr = want,
+                settle_ms = settle.elapsed().as_millis() as u64,
+                "IDD push: re-asserted the negotiated depth after the monitor re-arrived"
+            );
+        } else {
+            tracing::error!(
+                target_id = self.target_id,
+                want_hdr = want,
+                observed_hdr = ?observed,
+                set_advanced_color_returned = set,
+                "IDD push: the re-arrived monitor would NOT take the negotiated depth - the \
+                 encoder opens for what it actually composes, so the stream's depth will not \
+                 match the negotiation"
+            );
+        }
+        got
+    }
+
     /// Re-open the encoder when two consecutive poller samples agree on a new descriptor
     /// (~½ s), so a topology re-probe blip never costs a session rebuild.
     pub(super) fn poll_display_hdr(&mut self) {

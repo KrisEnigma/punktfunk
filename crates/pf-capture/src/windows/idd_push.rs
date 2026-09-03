@@ -234,6 +234,9 @@ pub struct IddPushCapturer {
     /// `IOCTL_SET_CURSOR_FORWARD`. A declared IddCx hardware cursor blocks the
     /// OS software-cursor path; [`Self::poll_secure_desktop`] stands it down at UAC/Winlogon.
     cursor_forward: Option<crate::CursorForwardSender>,
+    /// Kept so a re-arrived monitor can be handed the cursor channel again. The driver's worker
+    /// does not survive a re-arrival, and the composite render model has no other shape source.
+    cursor_sender: Option<crate::CursorChannelSender>,
     /// Poller reports a secure input desktop and the declare is stood down.
     secure_active: bool,
     /// The client draws no pointer, so the driver blends the excluded one into what it encodes.

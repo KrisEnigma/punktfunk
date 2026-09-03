@@ -337,6 +337,7 @@ impl IddPushCapturer {
             cursor_shared,
             cursor_poll,
             cursor_forward,
+            cursor_sender,
             secure_active: false,
             composite_cursor: composite_forced,
             composite_forced,

@@ -1270,6 +1270,9 @@ mod tests {
     /// monitor and read its tally. Needs a driver built with `--features encode-probe`.
     /// `PF_PROBE_BACKEND` (nvenc|amf|qsv|pyrowave), `PF_PROBE_CODEC` (h264|hevc|av1|pyrowave),
     /// `PF_PROBE_INPUT` (default|nv12), `PF_PROBE_FRAMES` (300) pick the run.
+    /// `PF_PROBE_HDR=1` takes the 10-bit PQ input and `PF_PROBE_444=1` the full-chroma one. The
+    /// run puts the virtual display into the colour mode its depth needs and prints what stuck —
+    /// a probe fed the wrong surface format fails at `fmt` rather than encoding something else.
     #[test]
     #[ignore = "needs an encode-probe pf-vdisplay driver on real hardware; run with --ignored"]
     fn live_encode_probe() {
@@ -1277,6 +1280,8 @@ mod tests {
         let backend = env("PF_PROBE_BACKEND", "nvenc");
         let codec = env("PF_PROBE_CODEC", "hevc");
         let input = env("PF_PROBE_INPUT", "default");
+        let want_hdr = env("PF_PROBE_HDR", "0") == "1";
+        let want_444 = env("PF_PROBE_444", "0") == "1";
         let frames: u32 = env("PF_PROBE_FRAMES", "300")
             .parse()
             .expect("PF_PROBE_FRAMES");
@@ -1304,7 +1309,8 @@ mod tests {
             frames,
             bitrate_kbps: 20_000,
             fps: 60,
-            flags: 0,
+            flags: (if want_hdr { control::PROBE_FLAG_HDR } else { 0 })
+                | (if want_444 { control::PROBE_FLAG_444 } else { 0 }),
         };
 
         let _policy = ExclusiveTopology::force();
@@ -1316,11 +1322,16 @@ mod tests {
                 refresh_hz: 60,
             })
             .expect("create virtual display");
-        let target_id = vout
-            .win_capture
-            .as_ref()
-            .expect("no capture target")
-            .target_id;
+        let wc = vout.win_capture.as_ref().expect("no capture target");
+        let target_id = wc.target_id;
+        // The probe converts from DWM's surface as it comes, so the run's depth decides the
+        // display's colour mode: FP16 under advanced colour, BGRA without it. The host service is
+        // stopped for this test, so nobody else sets it — set it here and report what stuck.
+        let key = pf_win_display::win_display::CcdTargetKey::new(wc.adapter_luid, target_id);
+        let set_ok = pf_win_display::win_display::set_advanced_color(key, want_hdr);
+        thread::sleep(Duration::from_millis(750));
+        let color_on = pf_win_display::win_display::advanced_color_enabled(key);
+        println!("probe hdr-state: want={want_hdr} set_ok={set_ok} enabled={color_on:?}");
         // The swap-chain assign and the first composes settle, as the other live cases wait.
         thread::sleep(Duration::from_secs(3));
         let req = control::EncodeProbeRequest { target_id, ..req };
@@ -1383,8 +1394,9 @@ mod tests {
             .trim_end_matches('\0')
             .to_string();
         println!(
-            "encode probe: backend={backend} codec={codec} input={input} state={} frames={} aus={} \
+            "encode probe: backend={backend} codec={codec} input={input} flags={:#x} state={} frames={} aus={} \
              bytes={} open_us={} first_au_us={} mean_us={} max_us={} drops={} error={} name={name}",
+            req.flags,
             reply.state,
             reply.frames_submitted,
             reply.aus,

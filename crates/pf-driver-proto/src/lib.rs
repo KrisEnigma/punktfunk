@@ -220,18 +220,27 @@ pub mod control {
         pub backend: u32,
         /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave (backend 4 only, and only with backend 4).
         pub codec: u32,
-        /// `0` = the backend's own input: BGRA straight into NVENC, NV12 for AMF/QSV, planar
-        /// Y + CbCr for PyroWave. `1` = BGRA→NV12 on the video engine (the NVENC colour A/B).
+        /// `0` = the backend's own input for `flags`, as `SET_ENCODE` would choose it.
+        /// `1` = force BGRA→NV12 on the video engine (the NVENC colour A/B); PyroWave ignores it.
         pub input: u32,
         pub frames: u32,
         pub bitrate_kbps: u32,
         pub fps: u32,
+        /// [`PROBE_FLAG_HDR`] | [`PROBE_FLAG_444`]; `0` is an 8-bit 4:2:0 SDR run.
         pub flags: u32,
     }
 
+    /// [`EncodeProbeRequest::flags`]: 10-bit BT.2020 PQ. The ring carries DWM's own surface, so
+    /// the desktop must already be in advanced colour or the run fails at `fmt`.
+    pub const PROBE_FLAG_HDR: u32 = 1 << 0;
+    /// [`EncodeProbeRequest::flags`]: full chroma. With [`PROBE_FLAG_HDR`] this is the packed
+    /// 10-bit RGB input NVENC CSCs under FREXT — the pairing `SET_ENCODE` silently lost once.
+    pub const PROBE_FLAG_444: u32 = 1 << 1;
+
     /// [`IOCTL_ENCODE_PROBE_STATUS`] reply. `mean_*` / `max_*` cover every AU after the first;
-    /// `first_au_us` alone carries the backend's lazy session init. `name` is a short
-    /// NUL-padded failure tag (the driver log has the full error).
+    /// `first_au_us` alone carries the backend's lazy session init. `name` is a short NUL-padded
+    /// tag: once open, the chosen input paired with the chroma the encoder reports (`Rgb10+444`);
+    /// on failure, the failing stage (the driver log has the full error).
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
     pub struct EncodeProbeReply {
@@ -520,6 +529,23 @@ pub mod edid {
         pub min_millinits: u32,
     }
 
+    /// EDID screen-size bytes 0x15/0x16 hold the image size in CENTIMETRES, and Windows derives a
+    /// display's DPI from resolution over that size. A FIXED size therefore makes the virtual
+    /// display's scale ride its mode: the 50 cm this EDID used to declare reads as ~97 DPI at
+    /// 1080p but ~260 DPI at 5120 px wide, so the OS quite correctly scales the desktop up and
+    /// hands out a cursor to match. Sizing from the mode pins the display near 96 DPI, which
+    /// leaves scaling where it belongs — the client's own choice, not an artefact of our EDID.
+    ///
+    /// One byte each, so `1..=255`: 0 means "undefined" (projectors) and would put the DPI
+    /// decision back with the OS.
+    fn size_cm(px: u32) -> u8 {
+        (u64::from(px) * 254 / 9600).clamp(1, 255) as u8
+    }
+
+    /// Base-block offsets of the horizontal and vertical image size.
+    const H_SIZE_CM_OFFSET: usize = 0x15;
+    const V_SIZE_CM_OFFSET: usize = 0x16;
+
     /// Build the 256-byte EDID for the monitor identified by `serial`, with both block checksums
     /// recomputed — the serial patch at 0x0C and the CTA edits below both invalidate them.
     ///
@@ -539,6 +565,12 @@ pub mod edid {
         edid[SERIAL_OFFSET..SERIAL_OFFSET + 4].copy_from_slice(&serial.to_le_bytes());
         if let Some(d) = preferred.and_then(|(w, h, r)| dtd(w, h, r)) {
             edid[54..72].copy_from_slice(&d);
+        }
+        // Declare a size that puts this mode near 96 DPI, or the OS scales the desktop for a
+        // panel we only claimed to be.
+        if let Some((w, h, _)) = preferred {
+            edid[H_SIZE_CM_OFFSET] = size_cm(w);
+            edid[V_SIZE_CM_OFFSET] = size_cm(h);
         }
         edid[128..132].copy_from_slice(&CTA_HEADER);
         edid[132..136].copy_from_slice(&COLORIMETRY_DB);
@@ -881,6 +913,55 @@ pub mod encode {
         pub _pad_tail: u32,
     }
 
+    /// The encoder input one [`SetEncodeRequest`] resolves to, so the chroma the reply promises
+    /// and the pixels the backend is handed come from the same decision. The driver owns the
+    /// D3D targets behind each variant; this crate owns only the choice and what it can carry.
+    ///
+    /// [`Self::full_chroma`] is the honest ceiling for [`EncoderCapsWire::chroma_444`]: a
+    /// subsampled input cannot become 4:4:4 downstream, whatever the request asked for.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum EncodeInput {
+        /// BGRA straight into the backend, which does the RGB→YUV CSC.
+        Bgra,
+        /// Video-engine BGRA→NV12, 8-bit 4:2:0.
+        Nv12,
+        /// Shader FP16 scRGB→P010 PQ, 10-bit 4:2:0.
+        P010,
+        /// Shader FP16 scRGB→packed `R10G10B10A2` PQ BT.2020; the backend CSCs to 4:4:4 itself.
+        Rgb10,
+        /// Shareable Y + CbCr planes plus a fence, as PyroWave's own Vulkan device imports them.
+        Planar { hdr: bool, chroma444: bool },
+    }
+
+    impl EncodeInput {
+        /// The input for `backend` (the [`SetEncodeRequest::backends`] numbering) under the
+        /// request's HDR and 4:4:4 flags. Only NVENC ingests packed RGB, so only it can pair
+        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0.
+        #[must_use]
+        pub const fn choose(backend: u32, hdr: bool, chroma444: bool) -> Self {
+            match (backend, hdr, chroma444) {
+                (4, _, _) => Self::Planar { hdr, chroma444 },
+                (1, true, true) => Self::Rgb10,
+                (_, true, _) => Self::P010,
+                (1, false, _) => Self::Bgra,
+                _ => Self::Nv12,
+            }
+        }
+
+        /// Full chroma reaches the backend: packed RGB, or planes built at full resolution.
+        #[must_use]
+        pub const fn full_chroma(self) -> bool {
+            matches!(
+                self,
+                Self::Bgra
+                    | Self::Rgb10
+                    | Self::Planar {
+                        chroma444: true,
+                        ..
+                    }
+            )
+        }
+    }
     /// `pf_encode_win::EncoderCaps` as plain integers — this crate cannot depend on the encoder
     /// crate, which builds only in the driver's graph. Each `bool` there is `0`/`1` here; the
     /// driver fills this from `Encoder::caps()` after the open and the host maps it straight back,
@@ -959,6 +1040,17 @@ pub mod encode {
     pub const ENCODE_CTL_RESET: u32 = 6;
     /// Push the encoder's in-flight AUs into the section.
     pub const ENCODE_CTL_FLUSH: u32 = 7;
+
+    /// Which pool slot a keyframe request re-encodes when the desktop composed nothing:
+    /// `stash`, the newest slot the encode thread took, but only while `queued` is 0 — a
+    /// composed frame already carries the IDR — and the slot sits in `idle`, so no drain pass
+    /// can be writing the pixels the encoder is about to read. `None` means do nothing.
+    ///
+    /// The driver's pool is Windows-only; the rule lives here so it is covered everywhere.
+    #[must_use]
+    pub fn republish_slot(stash: Option<usize>, queued: usize, idle: &[usize]) -> Option<usize> {
+        stash.filter(|s| queued == 0 && idle.contains(s))
+    }
 
     /// [`IOCTL_ENCODE_CTL`] input: one op against one monitor's live encoder. Unused `arg*` /
     /// `payload` bytes are zero. The ops are the `Encoder` trait calls the stream loop already
@@ -2216,12 +2308,14 @@ mod tests {
     #[test]
     fn edid_matches_the_golden_bytes() {
         // Byte-for-byte capture of what the driver shipped before this code moved here. One byte
-        // out of place and Windows drops HDR, so nothing below may drift silently.
+        // out of place and Windows drops HDR, so nothing below may drift silently. Two bytes DO
+        // differ from that capture on purpose: 0x15/0x16 now size the panel from the mode
+        // (2560x1440 -> 67x38 cm), which moves the checksum at 0x7F by the same 24.
         #[rustfmt::skip]
         const GOLDEN: [u8; 256] = [
             0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
             0x41, 0xCB, 0x01, 0x00, 0x07, 0x00, 0x00, 0x00,
-            0xFF, 0x21, 0x01, 0x04, 0xB0, 0x32, 0x1F, 0x78,
+            0xFF, 0x21, 0x01, 0x04, 0xB0, 0x43, 0x26, 0x78,
             0x03, 0x78, 0xB1, 0xB5, 0x4A, 0x2B, 0xCC, 0x21,
             0x0B, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01,
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -2234,7 +2328,7 @@ mod tests {
             0x75, 0x6E, 0x6B, 0x74, 0x66, 0x75, 0x6E, 0x6B,
             0x0A, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x3F,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x27,
             0x02, 0x03, 0x0F, 0x00, 0xE3, 0x05, 0x80, 0x00,
             0xE6, 0x06, 0x05, 0x01, 0x72, 0x52, 0x0F, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -2258,6 +2352,25 @@ mod tests {
             min_millinits: 20,
         };
         assert_eq!(edid::generate(7, lum, Some((2560, 1440, 120))), GOLDEN);
+    }
+
+    /// The declared panel size must track the mode, or the display's DPI rides its resolution:
+    /// a fixed 50 cm reads as ~97 DPI at 1080p but ~260 at 5120 wide, and the OS then scales the
+    /// desktop (and the cursor) for a panel we only claimed to be.
+    #[test]
+    fn the_declared_panel_size_keeps_every_mode_near_96_dpi() {
+        for (w, h) in [(1920u32, 1080u32), (2560, 1440), (3840, 2160), (5120, 1440)] {
+            let e = edid::generate(1, edid::ClientLuminance::default(), Some((w, h, 60)));
+            let (cm_w, cm_h) = (u32::from(e[0x15]), u32::from(e[0x16]));
+            assert!(cm_w > 0 && cm_h > 0, "{w}x{h}: zero means undefined");
+            // dpi = px / (cm / 2.54). Rounding to whole centimetres is the only error here.
+            let dpi_w = w * 254 / (cm_w * 100);
+            let dpi_h = h * 254 / (cm_h * 100);
+            assert!(
+                (92..=100).contains(&dpi_w) && (92..=100).contains(&dpi_h),
+                "{w}x{h} declared {cm_w}x{cm_h} cm = {dpi_w}x{dpi_h} DPI, wanted ~96"
+            );
+        }
     }
 
     #[test]
@@ -3088,6 +3201,43 @@ mod tests {
         assert_eq!(offset_of!(EncodeCtlRequest, payload), 16);
     }
 
+    /// A `SET_ENCODE` reply may promise only the chroma its chosen input can carry. The two
+    /// backends the host ever negotiates 4:4:4 for must therefore land on a full-chroma input at
+    /// both depths: HDR once picked P010 here, so the encoder emitted 4:2:0 while the reply — and
+    /// the client's Welcome — still said 4:4:4.
+    #[test]
+    fn a_444_request_picks_a_full_chroma_input() {
+        use encode::EncodeInput::{self, Bgra, Nv12, Planar, Rgb10, P010};
+
+        let table = [
+            ((1, false, false), Bgra),
+            ((1, false, true), Bgra),
+            ((1, true, false), P010),
+            ((1, true, true), Rgb10),
+            ((2, true, true), P010),
+            ((3, false, true), Nv12),
+            (
+                (4, true, true),
+                Planar {
+                    hdr: true,
+                    chroma444: true,
+                },
+            ),
+        ];
+        for ((backend, hdr, chroma444), want) in table {
+            let got = EncodeInput::choose(backend, hdr, chroma444);
+            assert_eq!(got, want, "backend {backend} hdr {hdr} 444 {chroma444}");
+        }
+        for backend in [1, 4] {
+            for hdr in [false, true] {
+                assert!(
+                    EncodeInput::choose(backend, hdr, true).full_chroma(),
+                    "backend {backend} hdr {hdr} asked 4:4:4 and got a subsampled input"
+                );
+            }
+        }
+    }
+
     #[test]
     fn encode_ctl_ops_are_distinct() {
         use encode::*;
@@ -3104,6 +3254,19 @@ mod tests {
         assert_eq!(ops, [1, 2, 3, 4, 5, 6, 7]);
         // `0` stays unassigned: a zeroed request is not a silent keyframe.
         assert!(!ops.contains(&0));
+    }
+
+    #[test]
+    fn keyframe_republishes_the_stash_only_when_nothing_composed() {
+        use encode::republish_slot;
+        // Idle desktop, slot back in the free list: the request re-encodes the stash as an IDR.
+        assert_eq!(republish_slot(Some(1), 0, &[1, 2]), Some(1));
+        // A composed frame is queued — the ordinary path already produces the IDR.
+        assert_eq!(republish_slot(Some(1), 1, &[1, 2]), None);
+        // The slot is in use again (a drain pass or an AU still owed on it).
+        assert_eq!(republish_slot(Some(1), 0, &[2]), None);
+        // Nothing was ever encoded on this pool.
+        assert_eq!(republish_slot(None, 0, &[1, 2]), None);
     }
 
     #[test]

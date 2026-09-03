@@ -103,7 +103,7 @@ pub fn render(header: &str) -> String {
 /// POST the ring to the paired host; returns the stored bundle id. Same TLS
 /// client auth and pin as the library fetch. Errors reuse that classification
 /// (`NotPaired`, `PinMismatch`) so existing shell strings apply.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn send_to_host(
     addr: &str,
     mgmt_port: u16,
@@ -146,16 +146,16 @@ pub fn send_to_host(
 /// DEBUG/TRACE from [`NOISY_DEBUG_TARGETS`] is dropped. The vendored H.265
 /// parser logs DPB bookkeeping every frame; at 120 fps that turns the ring over
 /// in seconds and flushes the session the bundle exists to keep.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub struct RingLayer;
 
 /// DEBUG/TRACE from these module-path prefixes is chatter, not diagnostics.
 /// Prefix-matched on `::` boundaries so `cros_codecs::…` is gated and
 /// `cros_codecs_probe` is not. Same shape as the host's `NOISY_DEBUG_TARGETS`.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 const NOISY_DEBUG_TARGETS: &[&str] = &["cros_codecs"];
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 fn is_noisy_debug(target: &str) -> bool {
     NOISY_DEBUG_TARGETS.iter().any(|t| {
         target
@@ -164,7 +164,7 @@ fn is_noisy_debug(target: &str) -> bool {
     })
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingLayer {
     fn on_event(
         &self,
@@ -212,7 +212,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingLayer {
 /// Line-buffered tee of a spawned session child's stderr into ours and the ring.
 /// Returns immediately; the thread dies with the pipe. WinUI has its own
 /// forwarder (it also tees the client log file); this is for `orchestrate`'s spawn.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn forward_child_stderr(stderr: impl std::io::Read + Send + 'static) {
     let _ = std::thread::Builder::new()
         .name("pf-session-log".into())
@@ -255,7 +255,7 @@ mod tests {
         assert!(text.contains('…'));
     }
 
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
     #[test]
     fn noisy_gate_matches_the_crate_and_its_modules_only() {
         assert!(is_noisy_debug("cros_codecs"));
@@ -266,7 +266,7 @@ mod tests {
     }
 
     /// Markers, not ring size: the ring is process-global.
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
     #[test]
     fn bridged_decoder_debug_is_dropped_and_the_audio_line_survives() {
         use tracing_subscriber::layer::SubscriberExt;

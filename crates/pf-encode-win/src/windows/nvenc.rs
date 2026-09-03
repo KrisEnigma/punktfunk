@@ -567,11 +567,35 @@ impl ChunkState {
     }
 }
 
+/// The NVENC input format for a captured [`PixelFormat`]. Shared by `open` and the first
+/// `submit` so the format `caps()` answers from is the one the session will init with.
+const fn buffer_format(format: PixelFormat) -> nv::NV_ENC_BUFFER_FORMAT {
+    match format {
+        PixelFormat::P010 => nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV420_10BIT,
+        // Same packed layout for both: `Rgb10a2Sdr` is sRGB, so its session takes BT.709 VUI.
+        PixelFormat::Rgb10a2 | PixelFormat::Rgb10a2Sdr => {
+            nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
+        }
+        PixelFormat::Nv12 => nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
+        _ => nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
+    }
+}
+
+/// FREXT `chromaFormatIDC = 3` needs packed RGB, which NVENC CSCs itself. Subsampled YUV in
+/// means 4:2:0 out however the session was negotiated, so `chroma_444` must follow this.
+const fn full_chroma_input(fmt: nv::NV_ENC_BUFFER_FORMAT) -> bool {
+    matches!(
+        fmt,
+        nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB
+            | nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
+    )
+}
+
 impl NvencD3d11Encoder {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         codec: Codec,
-        _format: PixelFormat,
+        format: PixelFormat,
         width: u32,
         height: u32,
         fps: u32,
@@ -588,6 +612,9 @@ impl NvencD3d11Encoder {
         // DLL load is the real availability gate: fail open with a reason instead of an opaque
         // first-frame session error. Later NVENC calls sit behind this, so `api()` is sound.
         try_api().map_err(|e| anyhow!("NVENC unavailable: {e}"))?;
+        // 4:4:4 is HEVC-only; the GPU-support gate is in `query_caps`.
+        let want_444 = chroma.is_444() && codec == Codec::H265;
+        let buffer_fmt = buffer_format(format);
         Ok(Self {
             encoder: ptr::null_mut(),
             codec,
@@ -596,11 +623,12 @@ impl NvencD3d11Encoder {
             height,
             fps,
             bitrate_bps,
-            buffer_fmt: nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
+            buffer_fmt,
             bit_depth,
-            // 4:4:4 is HEVC-only; the GPU-support gate is in `query_caps`.
-            chroma_444: chroma.is_444() && codec == Codec::H265,
-            chroma_444_requested: chroma.is_444() && codec == Codec::H265,
+            // Effective from the open, not from the first frame: callers read `caps()` to
+            // answer the client, and a subsampled input never becomes 4:4:4 later.
+            chroma_444: want_444 && full_chroma_input(buffer_fmt),
+            chroma_444_requested: want_444,
             hdr_requested: false,
             hdr_unsupported: false,
             yuv444_supported: false,
@@ -1402,40 +1430,19 @@ impl Encoder for NvencD3d11Encoder {
             // first subsampled-YUV frame would permanently demote the session.
             self.chroma_444 = self.chroma_444_requested;
             // YUV (NV12/P010): native encode, no RGB→YUV CSC. RGB is the shader path.
-            // 10-bit forces Main10.
-            self.buffer_fmt = match captured.format {
-                PixelFormat::P010 => {
+            // 10-bit forces Main10; NV12 pins 8 — `register_resource` rejects it in a
+            // 10-bit session, unlike ARGB.
+            self.buffer_fmt = buffer_format(captured.format);
+            match captured.format {
+                PixelFormat::P010 | PixelFormat::Rgb10a2 | PixelFormat::Rgb10a2Sdr => {
                     self.bit_depth = 10;
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV420_10BIT
                 }
-                PixelFormat::Rgb10a2 => {
-                    self.bit_depth = 10;
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
-                }
-                PixelFormat::Rgb10a2Sdr => {
-                    // 10-bit SDR: same packed layout as Rgb10a2, but sRGB — `hdr` is false, so
-                    // the session opens Main10 with BT.709 SDR VUI.
-                    self.bit_depth = 10;
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
-                }
-                PixelFormat::Nv12 => {
-                    // NV12 is 8-bit 4:2:0. Unlike ARGB, NV12 cannot feed a 10-bit session:
-                    // `register_resource` rejects it as InvalidParam.
-                    self.bit_depth = 8;
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12
-                }
-                _ => nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
-            };
-            // FREXT/chromaFormatIDC=3 only on RGB input. Clear the effective flag so
-            // `caps().chroma_444` reports what the stream carries; keep `chroma_444_requested`
-            // so a later RGB re-init recovers 4:4:4.
-            if self.chroma_444
-                && !matches!(
-                    self.buffer_fmt,
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB
-                        | nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
-                )
-            {
+                PixelFormat::Nv12 => self.bit_depth = 8,
+                _ => {}
+            }
+            // Clear the effective flag so `caps().chroma_444` reports what the stream carries;
+            // keep `chroma_444_requested` so a later RGB re-init recovers 4:4:4.
+            if self.chroma_444 && !full_chroma_input(self.buffer_fmt) {
                 tracing::warn!(
                     format = ?captured.format,
                     "4:4:4 negotiated but the capturer delivered subsampled YUV — encoding 4:2:0"

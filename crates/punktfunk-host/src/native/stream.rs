@@ -3350,6 +3350,30 @@ fn try_inplace_resize(
         return false;
     }
     trace.mark("presentation_restored");
+    // The driver's pool is still built for the OLD geometry, so it refuses every composed frame
+    // and stays stale until the next SET_ENCODE - which only this re-open sends. Waiting for a
+    // new-size frame first can therefore never succeed. The open wants the geometry, which the
+    // accepted mode already carries, not a frame.
+    let pre_opened = if plan.capture == crate::session_plan::CaptureBackend::IddPush {
+        match crate::capture::open_driver_encoder(
+            &plan,
+            &**capturer,
+            (new_mode.width, new_mode.height),
+            effective_hz,
+            enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+            bit_depth,
+            wire_seq_base,
+        ) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "resize: re-opening the driver encoder at the new mode failed - full rebuild");
+                return false;
+            }
+        }
+    } else {
+        None
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let new_frame = loop {
         // The driver-encode capturer reads the display's progress off the encoder, and this
@@ -3407,21 +3431,24 @@ fn try_inplace_resize(
         new_frame
     };
     trace.mark("first_new_frame");
-    let new_enc = match open_session_encoder(
-        &plan,
-        &**capturer,
-        &new_frame,
-        effective_hz,
-        enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
-        bit_depth,
-        wire_seq_base,
-    ) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"),
-                "resize: encoder open failed after the in-place mode set — running the full rebuild");
-            return false;
-        }
+    let new_enc = match pre_opened {
+        Some(e) => e,
+        None => match open_session_encoder(
+            &plan,
+            &**capturer,
+            &new_frame,
+            effective_hz,
+            enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+            bit_depth,
+            wire_seq_base,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "resize: encoder open failed after the in-place mode set - full rebuild");
+                return false;
+            }
+        },
     };
     *enc = new_enc;
     *frame = new_frame;
@@ -3689,7 +3716,7 @@ fn open_session_encoder(
         return crate::capture::open_driver_encoder(
             plan,
             capturer,
-            frame,
+            (frame.width, frame.height),
             hz,
             bitrate_bps,
             bit_depth,
