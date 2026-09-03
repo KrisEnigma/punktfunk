@@ -138,8 +138,9 @@ async fn session(incoming: wtransport::endpoint::IncomingSession) -> Result<()> 
     let path = request.path().to_string();
     let connection = request.accept().await.context("accept session")?;
     tracing::info!(path = %path, "WebTransport session accepted");
-    // One control stream and datagrams, mirroring the native plane's split.
-    let mut control = [0u8; 4096];
+    // One control stream and datagrams, mirroring the native plane's split. The control stream
+    // gets its own task: it lives as long as the session, and reading it here would park the
+    // media arm for that whole time — media and control have to run at once.
     loop {
         tokio::select! {
             datagram = connection.receive_datagram() => {
@@ -148,10 +149,53 @@ async fn session(incoming: wtransport::endpoint::IncomingSession) -> Result<()> 
             }
             stream = connection.accept_bi() => {
                 let (mut tx, mut rx) = stream.context("accept control stream")?;
-                while let Some(n) = rx.read(&mut control).await.context("read control")? {
-                    tx.write_all(&control[..n]).await.context("echo control")?;
-                }
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(Some(n)) = rx.read(&mut buf).await {
+                        if tx.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two-week ceiling is a hard refusal in the browser, and a certificate that misses it
+    /// fails at connect time with nothing useful to read. Check what we publish, and that the hash
+    /// is the 64 lowercase hex characters `serverCertificateHashes` parses.
+    #[test]
+    fn minted_identity_is_short_lived_and_publishes_a_usable_hash() {
+        let before = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        mint(9778, &["localhost".to_string()]).expect("mint");
+        let p = published().expect("minting publishes");
+
+        assert_eq!(p.port, 9778);
+        assert_eq!(p.cert_hash.len(), 64, "SHA-256 as hex");
+        assert!(
+            p.cert_hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex only: {}",
+            p.cert_hash
+        );
+        let lifetime = p.expires_at - before;
+        assert!(
+            lifetime < 14 * 24 * 60 * 60,
+            "must stay under the spec's two weeks, got {lifetime}s"
+        );
+        assert!(lifetime > 12 * 24 * 60 * 60, "and not be pointlessly short");
+        assert!(
+            ROTATE_AFTER.as_secs() < lifetime,
+            "rotation must come before expiry"
+        );
     }
 }
