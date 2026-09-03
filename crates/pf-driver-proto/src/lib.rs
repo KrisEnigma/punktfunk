@@ -238,8 +238,9 @@ pub mod control {
     pub const PROBE_FLAG_444: u32 = 1 << 1;
 
     /// [`IOCTL_ENCODE_PROBE_STATUS`] reply. `mean_*` / `max_*` cover every AU after the first;
-    /// `first_au_us` alone carries the backend's lazy session init. `name` is a short
-    /// NUL-padded failure tag (the driver log has the full error).
+    /// `first_au_us` alone carries the backend's lazy session init. `name` is a short NUL-padded
+    /// tag: once open, the chosen input paired with the chroma the encoder reports (`Rgb10+444`);
+    /// on failure, the failing stage (the driver log has the full error).
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
     pub struct EncodeProbeReply {

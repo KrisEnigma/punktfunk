@@ -277,6 +277,24 @@ fn run(stop: HANDLE, req: EncodeProbeRequest, shared: Arc<Shared>) {
     }
 }
 
+/// The chosen input paired with the chroma the opened encoder reports, as the reply's tag:
+/// `Rgb10+444` is the HDR full-chroma pairing, `P010+444` would be the reply outrunning the
+/// encoder again. Readable from the test's output, so a run needs no driver log.
+fn outcome_tag(kind: InputKind, chroma444: bool) -> [u8; 32] {
+    let k = match kind {
+        InputKind::Bgra => "Bgra",
+        InputKind::Nv12 => "Nv12",
+        InputKind::P010 => "P010",
+        InputKind::Rgb10 => "Rgb10",
+        InputKind::Planar { .. } => "Planar",
+    };
+    let tag = format!("{k}+{}", if chroma444 { "444" } else { "420" });
+    let mut out = [0u8; 32];
+    let n = tag.len().min(32);
+    out[..n].copy_from_slice(&tag.as_bytes()[..n]);
+    out
+}
+
 /// The request's backend, codec, depth/chroma flags and input A/B as one `open` spec. The
 /// kind comes from [`InputKind::choose`], the same call `SET_ENCODE` makes, so a probe run
 /// exercises the shipping decision rather than a copy of it.
@@ -362,6 +380,7 @@ fn drive(stop: HANDLE, req: &EncodeProbeRequest, shared: &Arc<Shared>) -> Result
         p.reply.backend_opened = req.backend;
         p.reply.open_us = open_us;
         p.reply.state = ST_RUNNING;
+        p.reply.name = outcome_tag(spec.kind, enc.caps().chroma_444);
     }
     *lock(&shared.ring) = Ring::Live {
         slots,
