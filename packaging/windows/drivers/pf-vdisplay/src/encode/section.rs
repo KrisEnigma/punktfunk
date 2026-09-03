@@ -7,6 +7,7 @@
 //! host-stamped layout is written through atomic views over the mapping — the encode thread
 //! is the only writer, the host reads under the `latest` token's generation check.
 
+use std::collections::VecDeque;
 use std::mem::offset_of;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -179,6 +180,21 @@ impl AuSection {
     }
 }
 
+/// One `ENCODE_CTL` op for the encode thread, drained between frames. One-shot: the host
+/// sends the next only after this IOCTL returned, so the queue never holds more than a few.
+#[derive(Clone, Copy, Debug)]
+pub enum Ctl {
+    RequestKeyframe,
+    /// Wire indexes `first..=last`.
+    InvalidateRefFrames(u32, u32),
+    DistrustReferences,
+    /// kbps.
+    ReconfigureBitrate(u32),
+    /// `pf_frame::HdrMeta` as its 28 bytes.
+    SetHdrMeta([u8; 28]),
+    Flush,
+}
+
 /// One monitor's live encode: the request it was opened from, the section it publishes into
 /// and the thread doing it. The monitor holds one `Arc`; the encode thread holds another for
 /// as long as it runs, so a detached thread keeps the section mapped until it really exits.
@@ -192,6 +208,8 @@ pub struct EncodeSession {
     /// The drain worker saw a different device epoch than the pool was built on (TDR): frames
     /// stop, the host's next `SET_ENCODE` rebuilds on the new device.
     pub stale: AtomicBool,
+    /// The control mailbox ([`Ctl`]); the pool event wakes the thread to drain it.
+    pub ctl: Mutex<VecDeque<Ctl>>,
     thread: Mutex<Option<EncodeThread>>,
 }
 
@@ -206,8 +224,19 @@ impl EncodeSession {
             generation,
             wire_seq_base: AtomicU32::new(request.wire_seq_base),
             stale: AtomicBool::new(false),
+            ctl: Mutex::new(VecDeque::new()),
             thread: Mutex::new(None),
         }
+    }
+
+    /// Queue one op for the thread; the caller wakes it.
+    pub fn push_ctl(&self, op: Ctl) {
+        crate::registry::lock(&self.ctl).push_back(op);
+    }
+
+    /// Everything queued, in order.
+    pub fn take_ctl(&self) -> Vec<Ctl> {
+        crate::registry::lock(&self.ctl).drain(..).collect()
     }
 
     /// Install the running thread; whatever it displaces is handed back to stop with no lock

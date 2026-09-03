@@ -186,6 +186,26 @@ impl Pool {
         }
     }
 
+    /// Every slot a departed encoder still held, freed — after a detach, whose encoder may be
+    /// mid-read on the GPU; a torn first frame is the price of not waiting for it.
+    pub fn reclaim(&self) {
+        let mut st = lock(&self.state);
+        let held = core::mem::take(&mut st.encoding);
+        for slot in held {
+            if !st.free.contains(&slot) {
+                st.free.push(slot);
+            }
+        }
+    }
+
+    /// Wake the encode thread without a frame — a control op landed in its mailbox.
+    pub fn wake(&self) {
+        // SAFETY: our own event, alive as long as `self`.
+        unsafe {
+            let _ = SetEvent(self.event.as_raw());
+        }
+    }
+
     /// Wrap slot `slot` as the frame `submit` takes (the planar pair signals its fence here).
     pub fn frame(&self, slot: usize, pts_ns: u64) -> Result<CapturedFrame, Fail> {
         lock(&self.state).targets.frame(slot, pts_ns)

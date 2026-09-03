@@ -14,8 +14,8 @@ use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{WaitForMultipleObjects, WaitForSingleObject};
 
 use super::pool::{Offer, Pool};
-use super::section::EncodeSession;
-use super::thread::{qpc_frequency, qpc_now, qpc_to_ns};
+use super::section::{Ctl, EncodeSession};
+use super::thread::{hdr_meta, qpc_frequency, qpc_now, qpc_to_ns};
 
 /// Submits allowed ahead of the oldest AU — the host's pipeline depth.
 const MAX_INFLIGHT: usize = 2;
@@ -100,6 +100,7 @@ impl Drive<'_> {
     pub fn run(&mut self) {
         self.pool.set_live(true);
         while !self.stopped() {
+            self.drain_ctl();
             let Some((slot, qpc, seq)) = self.pool.take_full() else {
                 self.wait();
                 continue;
@@ -129,11 +130,45 @@ impl Drive<'_> {
             self.inflight.push_back((slot, qpc, seq));
             self.collect(MAX_INFLIGHT);
         }
-        // No flush on the way out: a stopped session has nowhere to send the last AUs.
-        for (slot, ..) in self.inflight.drain(..) {
-            self.pool.release(slot);
+        // No flush on the way out: a stopped session has nowhere to send the last AUs. A
+        // detached thread owns nothing in the pool any more — its successor reclaimed it.
+        if self.live.load(Ordering::Acquire) {
+            for (slot, ..) in self.inflight.drain(..) {
+                self.pool.release(slot);
+            }
+            self.pool.set_live(false);
         }
-        self.pool.set_live(false);
+    }
+
+    /// The `ENCODE_CTL` ops queued since the last frame, in order. An RFI the backend cannot
+    /// honour becomes a keyframe request, the host's own fallback.
+    fn drain_ctl(&mut self) {
+        for op in self.session.take_ctl() {
+            match op {
+                Ctl::RequestKeyframe => self.enc.request_keyframe(),
+                Ctl::InvalidateRefFrames(first, last) => {
+                    if !self
+                        .enc
+                        .invalidate_ref_frames(i64::from(first), i64::from(last))
+                    {
+                        self.enc.request_keyframe();
+                    }
+                }
+                Ctl::DistrustReferences => self.enc.distrust_references(),
+                Ctl::ReconfigureBitrate(kbps) => {
+                    if !self.enc.reconfigure_bitrate(u64::from(kbps) * 1000) {
+                        dbglog!("[pf-vd] encode: backend declined bitrate {kbps} kbps in place");
+                    }
+                }
+                Ctl::SetHdrMeta(bytes) => self.enc.set_hdr_meta(Some(hdr_meta(&bytes))),
+                Ctl::Flush => {
+                    if let Err(e) = self.enc.flush() {
+                        dbglog!("[pf-vd] encode: flush failed: {e:#}");
+                    }
+                    self.collect(1);
+                }
+            }
+        }
     }
 
     /// One bounded wait on `{stop, pool event}`; a signal raised while nobody waited latches.
@@ -153,6 +188,9 @@ impl Drive<'_> {
     }
 
     fn count_drop(&self) {
+        if !self.live.load(Ordering::Acquire) {
+            return;
+        }
         if let Offer::Dropped(n) = self.pool.drop_one() {
             self.session
                 .section
@@ -198,11 +236,15 @@ impl Drive<'_> {
         }
     }
 
-    /// One chunk of the oldest in-flight AU: published, or dropped with the rest of its AU.
+    /// One chunk of the oldest in-flight AU: published, or dropped with the rest of its AU. A
+    /// detached thread returning from its wedge touches neither the pool nor the section.
     fn on_chunk(&mut self, chunk: AuChunk) {
         let Some(&(slot, qpc, seq)) = self.inflight.front() else {
             return;
         };
+        if !self.live.load(Ordering::Acquire) {
+            return;
+        }
         self.mid_au = !chunk.last;
         if chunk.first {
             self.dropping_au = false;

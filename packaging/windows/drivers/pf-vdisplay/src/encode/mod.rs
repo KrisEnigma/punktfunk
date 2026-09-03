@@ -11,16 +11,22 @@ pub mod pool;
 pub mod section;
 pub mod thread;
 
+use std::mem::offset_of;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::time::Duration;
 
-use pf_driver_proto::encode::{self as wire, SetEncodeReply, SetEncodeRequest};
+use pf_driver_proto::encode::au::AuHeader;
+use pf_driver_proto::encode::{self as wire, EncodeCtlRequest, SetEncodeReply, SetEncodeRequest};
 use wdk_sys::NTSTATUS;
 
-use self::section::{AuSection, EncodeSession};
+use self::section::{AuSection, Ctl, EncodeSession};
 use self::thread::{EncodeThread, ThreadCtx, fail_reply};
-use crate::{STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, registry};
+use crate::monitor::Monitor;
+use crate::{STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS, registry};
+
+const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as NTSTATUS;
 
 /// How long `SET_ENCODE` waits for the thread's open. NVENC opens in under a millisecond, AMF
 /// in tens; a backend that takes seconds is stuck in a driver, and the host's watchdog window
@@ -99,6 +105,82 @@ pub fn set_encode(req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
             session.stop();
             Ok(fail_reply(wire::SET_ENCODE_NO_MONITOR, (-6, "gone")))
         }
+    }
+}
+
+/// `IOCTL_ENCODE_CTL`: one op on the live encoder of the monitor with `req.target_id`.
+/// Everything but `reset` is queued for the encode thread and wakes it; `reset` is
+/// [`reset`], on this thread.
+pub fn encode_ctl(req: &EncodeCtlRequest) -> NTSTATUS {
+    let Some(monitor) = registry::find(|m| m.target_id() == req.target_id) else {
+        return STATUS_NOT_FOUND;
+    };
+    let Some(session) = monitor.encode() else {
+        return STATUS_NOT_FOUND;
+    };
+    let op = match req.op {
+        wire::ENCODE_CTL_REQUEST_KEYFRAME => Ctl::RequestKeyframe,
+        wire::ENCODE_CTL_INVALIDATE_REF_FRAMES => Ctl::InvalidateRefFrames(req.arg0, req.arg1),
+        wire::ENCODE_CTL_DISTRUST_REFERENCES => Ctl::DistrustReferences,
+        wire::ENCODE_CTL_RECONFIGURE_BITRATE => Ctl::ReconfigureBitrate(req.arg0),
+        wire::ENCODE_CTL_SET_HDR_META => Ctl::SetHdrMeta(req.payload),
+        wire::ENCODE_CTL_FLUSH => Ctl::Flush,
+        wire::ENCODE_CTL_RESET => return reset(&monitor, &session, req.arg0),
+        _ => return STATUS_INVALID_PARAMETER,
+    };
+    session.push_ctl(op);
+    if let Some(pool) = monitor.pool() {
+        pool.wake();
+    }
+    STATUS_SUCCESS
+}
+
+/// `ENCODE_CTL::reset` — the §2.5 first rung. The current thread is asked to stop within
+/// [`EncodeThread::STOP_BOUND`]; one that will not return is detached (counted, logged) and
+/// its pool slots reclaimed. A fresh encoder opens on a fresh thread, on the same session and
+/// section, and the wire sequence restarts at `wire_seq_base`. Costs one open plus one IDR,
+/// never a compose hitch. Fails `STATUS_UNSUCCESSFUL` when nothing would open — the session
+/// then has no thread, which the host's `DriverCycle` rung answers.
+fn reset(monitor: &Arc<Monitor>, session: &Arc<EncodeSession>, wire_seq_base: u32) -> NTSTATUS {
+    if let Some(thread) = session.take_thread() {
+        thread.stop(&session.section);
+    }
+    if let Some(pool) = monitor.pool() {
+        pool.reclaim();
+    }
+    session
+        .wire_seq_base
+        .store(wire_seq_base, Ordering::Release);
+    session.stale.store(false, Ordering::Release);
+    session
+        .section
+        .store_u32(offset_of!(AuHeader, wire_seq_base), wire_seq_base);
+    let Some(device) = monitor
+        .render_luid()
+        .and_then(crate::direct_3d_device::pooled_device)
+    else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    let (tx, rx) = sync_channel(1);
+    let Some(thread) = EncodeThread::spawn(ThreadCtx {
+        session: session.clone(),
+        monitor: Arc::downgrade(monitor),
+        device,
+        opened: tx,
+    }) else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    let reply = rx.recv_timeout(OPEN_BOUND).ok();
+    dbglog!(
+        "[pf-vd] encode: reset -> wire_seq {wire_seq_base}, reopen status {:?}",
+        reply.map(|r| r.status)
+    );
+    if reply.is_some_and(|r| r.status == wire::SET_ENCODE_OK) {
+        drop(session.set_thread(thread));
+        STATUS_SUCCESS
+    } else {
+        thread.stop(&session.section);
+        STATUS_UNSUCCESSFUL
     }
 }
 

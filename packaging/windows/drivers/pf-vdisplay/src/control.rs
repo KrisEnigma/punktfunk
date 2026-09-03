@@ -50,6 +50,8 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
         control::IOCTL_SET_CURSOR_FORWARD => set_cursor_forward(request),
         #[cfg(feature = "driver-encode")]
         pf_driver_proto::encode::IOCTL_SET_ENCODE => set_encode(request),
+        #[cfg(feature = "driver-encode")]
+        pf_driver_proto::encode::IOCTL_ENCODE_CTL => encode_ctl(request),
         #[cfg(feature = "encode-probe")]
         control::IOCTL_ENCODE_PROBE_ARM => encode_probe_arm(request),
         #[cfg(feature = "encode-probe")]
@@ -76,6 +78,16 @@ fn set_encode(request: Request) {
         Ok(reply) => write_output_prefix_complete(request, &reply, size_of::<SetEncodeReply>()),
         Err(st) => request.complete(st),
     }
+}
+
+/// `IOCTL_ENCODE_CTL` (v7): one control op on a monitor's live encoder; `reset` reopens it.
+#[cfg(feature = "driver-encode")]
+fn encode_ctl(request: Request) {
+    let Some(req) = read_input::<pf_driver_proto::encode::EncodeCtlRequest>(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
+        return;
+    };
+    request.complete(crate::encode::encode_ctl(&req));
 }
 
 /// `IOCTL_ENCODE_PROBE_ARM` (spike S5): start an in-process encode run on one monitor's frames.
