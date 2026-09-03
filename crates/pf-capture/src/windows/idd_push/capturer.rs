@@ -197,6 +197,37 @@ impl IddPushCapturer {
             cursor: None,
         }))
     }
+    /// Hand the re-arrived monitor its cursor channel again.
+    ///
+    /// The driver's cursor worker does not survive a re-arrival: the desired forward flag is
+    /// inherited, but the worker is gone until a channel is delivered, and the composite render
+    /// model has no other shape source. A mid-stream flip to capture-the-cursor then stores
+    /// cleanly on both sides and blends nothing — the driver logs "no live worker" and waits for
+    /// a delivery that never comes. Idempotent driver-side, so re-delivering costs one IOCTL.
+    fn redeliver_cursor_channel(&mut self) {
+        let (Some(cs), Some(send)) = (self.cursor_shared.as_ref(), self.cursor_sender.as_ref())
+        else {
+            return;
+        };
+        if !deliver_cursor_channel(&self.broker, self.target_id, cs, send) {
+            tracing::warn!(
+                target_id = self.target_id,
+                "cursor channel re-delivery failed after the re-arrival — a flip to the capture \
+                 model will have no shape to blend"
+            );
+            return;
+        }
+        // Delivery starts the worker declared; restore the model this session negotiated.
+        if let Some(fwd) = self.cursor_forward.as_ref()
+            && let Err(e) = fwd(!self.composite_cursor)
+        {
+            tracing::warn!(
+                composite = self.composite_cursor,
+                error = %format!("{e:#}"),
+                "cursor render model not re-applied after the re-arrival"
+            );
+        }
+    }
 }
 
 impl Capturer for IddPushCapturer {
@@ -284,6 +315,7 @@ impl Capturer for IddPushCapturer {
         // monitor composes SDR whatever the session negotiated. Re-assert before the encoder
         // re-opens, or it opens for FP16 against a BGRA surface the pool can only refuse.
         self.display_hdr = self.pin_negotiated_depth();
+        self.redeliver_cursor_channel();
         true
     }
 
