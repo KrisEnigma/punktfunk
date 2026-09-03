@@ -18,12 +18,12 @@ pub unsafe extern "system" fn driver_entry(
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     dbglog!("[pf-vd] DriverEntry");
-    // Names the backends whose addresses the probe build pinned, so a loaded probe DLL
-    // says so on glass instead of only in the linker's output.
-    #[cfg(feature = "encode-probe")]
+    // Names the backends whose addresses the encode build pinned, so a loaded DLL says so on
+    // glass instead of only in the linker's output.
+    #[cfg(feature = "driver-encode")]
     dbglog!(
-        "[pf-vd] encode-probe: {} linked",
-        crate::encode_probe::backends_linked().join(" ")
+        "[pf-vd] driver-encode: {} linked",
+        crate::encode::backends_linked().join(" ")
     );
     let mut config = pod_init!(WDF_DRIVER_CONFIG);
     config.Size = core::mem::size_of::<WDF_DRIVER_CONFIG>() as ULONG;
