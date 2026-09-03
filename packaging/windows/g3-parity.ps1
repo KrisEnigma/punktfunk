@@ -23,7 +23,9 @@
   all. Read that section - it is the honest bound on the result.
 
 .PARAMETER Tag     Log suffix. Writes C:\Users\Public\live-<Tag>.log. Default g3.
-.PARAMETER Vendor  Adapter for the selftest: nvidia, amd or intel. Default nvidia.
+.PARAMETER Vendor  Adapter for the selftest: nvidia, amd, intel, or any to leave
+                   the pin off. A PASS only ever speaks for the adapter it ran on.
+                   Default nvidia.
 .PARAMETER Stage   Directory holding the two staged binaries. Default C:\Users\Public\g3.
 .PARAMETER SkipEncode  Run only the converter leg (no NVENC session opened).
 
@@ -87,7 +89,9 @@ else {
     foreach ($size in @('1920x1080', '2560x1440')) {
         Say ''
         Say "--- hdr-p010-selftest $size $Vendor ---"
-        $raw = & $hostExe hdr-p010-selftest $size $Vendor 2>&1
+        # `any` leaves the adapter arg off, which takes the default hardware device.
+        $raw = if ($Vendor -eq 'any') { & $hostExe hdr-p010-selftest $size 2>&1 }
+        else { & $hostExe hdr-p010-selftest $size $Vendor 2>&1 }
         $code = $LASTEXITCODE
         $raw | ForEach-Object { Say "  | $_" }
 
