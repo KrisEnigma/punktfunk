@@ -1,13 +1,15 @@
 //! Safe-ish typed wrappers over the wdk-sys IddCx DDIs, dispatched through the `IddFunctions` table
 //! (indexed by `_IDDFUNCENUM::<Name>TableIndex`, with `IddDriverGlobals` as the implicit first arg) —
-//! the same model wdk-sys uses for WDF. Graduates the proven dispatch from `wdk-probe/src/iddcx_rt.rs`
-//! (M1 step 1) and adds the full DDI set the pf-vdisplay driver needs (M1 step 2 / §14).
+//! the same model wdk-sys uses for WDF. Covers the whole DDI set the pf-vdisplay driver needs.
 //!
 //! Each DDI pins its `(_IDDFUNCENUM index, PFN_* type)` pair in exactly ONE place (the macro invocation)
 //! — a wrong pairing is the only way the table dispatch can be UB, so it must never be expressed twice
 //! (port-plan unsafe_hotspot #1). All wrappers return the raw `NTSTATUS`; the caller classifies it with
 //! [`nt_success`] (or, for the HRESULT-shaped SwapChain DDIs, treats a nonzero as the documented retry
 //! code — handled at the call site in STEP 5).
+//!
+//! The `const _` items at the tail assert that the wdk-sys `iddcx` bindgen still emits and resolves
+//! the whole struct + callback surface, so an allowlist regression fails CI instead of the box.
 #![no_std]
 #![allow(non_snake_case, clippy::missing_safety_doc)]
 // P0 lint (audit §8): require explicit `unsafe {}` blocks inside `unsafe fn`s + a `// SAFETY:` proof on
@@ -184,7 +186,8 @@ iddcx_ddi!(
     ) @ IddCxMonitorUpdateModes2TableIndex as PFN_IDDCXMONITORUPDATEMODES2
 );
 iddcx_ddi!(
-    /// Bind a D3D device to an assigned swap-chain. HRESULT-shaped (0x887A0026 → retry on monitor flap).
+    /// Bind a D3D device to an assigned swap-chain. HRESULT-shaped; a failure means the OS has
+    /// already unassigned it, so the caller drops the swap-chain and waits for the reassign.
     IddCxSwapChainSetDevice(
         swap_chain: iddcx::IDDCX_SWAPCHAIN,
         in_args: *const iddcx::IDARG_IN_SWAPCHAINSETDEVICE,
@@ -205,19 +208,6 @@ iddcx_ddi!(
         @ IddCxSwapChainFinishedProcessingFrameTableIndex as PFN_IDDCXSWAPCHAINFINISHEDPROCESSINGFRAME
 );
 iddcx_ddi!(
-    /// Report per-frame processing statistics for the last processed frame (frame number, status,
-    /// acquire/send QPC times). The OS-side per-output scheduling consumes these; the canonical MS
-    /// sample leaves the call as a TODO, and this driver historically never made it — added for the
-    /// 2026-08 case-#4 A/B (virtual-head-selective compose starvation: DWM composes a lit sibling
-    /// head at full rate while this head's swap-chain drains E_PENDING for 150–2200 ms with damage
-    /// pending). HRESULT-shaped.
-    IddCxSwapChainReportFrameStatistics(
-        swap_chain: iddcx::IDDCX_SWAPCHAIN,
-        in_args: *const iddcx::IDARG_IN_REPORTFRAMESTATISTICS,
-    ) @ IddCxSwapChainReportFrameStatisticsTableIndex as PFN_IDDCXSWAPCHAINREPORTFRAMESTATISTICS
-);
-
-iddcx_ddi!(
     /// Raise the swap-chain's processing D3D device to realtime GPU scheduling priority — "higher
     /// than any regular application can set" (IddCx 1.9) — so buffer processing outruns ordinary
     /// GPU contention. It does NOT help against adapter-wide display servicing (modeset-class DDIs
@@ -233,3 +223,80 @@ iddcx_ddi!(
         in_args: *const iddcx::IDARG_IN_SETREALTIMEGPUPRIORITY,
     ) @ IddCxSetRealtimeGPUPriorityTableIndex as PFN_IDDCXSETREALTIMEGPUPRIORITY
 );
+
+/// Every struct the driver constructs or reads must be `Sized` — which fails to compile if the
+/// wdk-sys `iddcx` bindgen ever stops emitting one, or if a field type (DISPLAYCONFIG_*, LUID,
+/// GUID, DXGI_*) falls out of the allowlist and no longer resolves.
+macro_rules! assert_sized {
+    ($($t:ident),+ $(,)?) => { $( const _: usize = core::mem::size_of::<iddcx::$t>(); )+ };
+}
+
+assert_sized!(
+    // adapter / device init
+    IDD_CX_CLIENT_CONFIG,
+    IDARG_IN_ADAPTER_INIT,
+    IDARG_OUT_ADAPTER_INIT,
+    IDDCX_ADAPTER_CAPS,
+    IDDCX_ENDPOINT_VERSION,
+    // monitor create / arrival
+    IDARG_IN_MONITORCREATE,
+    IDARG_OUT_MONITORCREATE,
+    IDARG_OUT_MONITORARRIVAL,
+    IDDCX_MONITOR_INFO,
+    // mode reporting — v1 + the *2 variants that embed DISPLAYCONFIG_*
+    IDDCX_MONITOR_MODE,
+    IDDCX_MONITOR_MODE2,
+    IDDCX_TARGET_MODE,
+    IDDCX_TARGET_MODE2,
+    IDDCX_PATH,
+    IDDCX_PATH2,
+    IDARG_IN_PARSEMONITORDESCRIPTION,
+    IDARG_OUT_PARSEMONITORDESCRIPTION,
+    IDARG_IN_QUERYTARGETMODES,
+    IDARG_OUT_QUERYTARGETMODES,
+    IDARG_IN_COMMITMODES,
+    // swap-chain + frame acquire (HDR *2 path)
+    IDARG_IN_SETSWAPCHAIN,
+    IDARG_IN_ADAPTERSETRENDERADAPTER,
+    IDARG_IN_RELEASEANDACQUIREBUFFER2,
+    IDARG_OUT_RELEASEANDACQUIREBUFFER2,
+    IDDCX_METADATA2,
+);
+
+/// Every inbound `IDD_CX_CLIENT_CONFIG` callback type must exist and stay a nullable `extern fn`.
+macro_rules! assert_pfn {
+    ($($t:ident),+ $(,)?) => { $( const _: iddcx::$t = None; )+ };
+}
+
+assert_pfn!(
+    PFN_IDD_CX_DEVICE_IO_CONTROL,
+    PFN_IDD_CX_ADAPTER_INIT_FINISHED,
+    PFN_IDD_CX_ADAPTER_COMMIT_MODES,
+    PFN_IDD_CX_ADAPTER_COMMIT_MODES2,
+    PFN_IDD_CX_PARSE_MONITOR_DESCRIPTION,
+    PFN_IDD_CX_PARSE_MONITOR_DESCRIPTION2,
+    PFN_IDD_CX_MONITOR_GET_DEFAULT_DESCRIPTION_MODES,
+    PFN_IDD_CX_MONITOR_QUERY_TARGET_MODES,
+    PFN_IDD_CX_MONITOR_QUERY_TARGET_MODES2,
+    PFN_IDD_CX_MONITOR_ASSIGN_SWAPCHAIN,
+    PFN_IDD_CX_MONITOR_UNASSIGN_SWAPCHAIN,
+    PFN_IDD_CX_MONITOR_SET_GAMMA_RAMP,
+    PFN_IDD_CX_MONITOR_SET_DEFAULT_HDR_METADATA,
+    PFN_IDD_CX_ADAPTER_QUERY_TARGET_INFO,
+);
+
+/// The versioned struct-size machinery (`IDD_STRUCTURE_SIZE!` in C) must exist and link, so a
+/// config can be sized against the live framework instead of by guessing `size_of`.
+/// `IddStructures` / `IddStructureCount` are stub-provided statics.
+const _: fn() = || {
+    let _structs = &raw const iddcx::IddStructures;
+    let _count = &raw const iddcx::IddStructureCount;
+    let _higher = &raw const iddcx::IddClientVersionHigherThanFramework;
+    let _i0 = iddcx::_IDDSTRUCTENUM::INDEX_IDD_CX_CLIENT_CONFIG;
+    let _i1 = iddcx::_IDDSTRUCTENUM::INDEX_IDARG_IN_ADAPTER_INIT;
+};
+
+// The FP16/HDR adapter flag + high-color-space target cap gate the whole `*2` callback
+// requirement. These two enums have no `_`-prefixed module (unlike `_IDDFUNCENUM`).
+const _: u32 = iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16;
+const _: u32 = iddcx::IDDCX_TARGET_CAPS::IDDCX_TARGET_CAPS_HIGH_COLOR_SPACE;

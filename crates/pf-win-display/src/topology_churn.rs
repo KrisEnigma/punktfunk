@@ -5,7 +5,7 @@
 //! evicts or restores displays. The IDD-push descriptor follower (`pf-capture`) skips
 //! samples while [`held`] is true: a reassert bounce is a transient mode, and acting
 //! on it recreates the capture ring at a mode the recovery is about to undo. The
-//! generation-keyed recovery rebuild (`recreate_ring_in_place`) is not gated — only
+//! generation-keyed recovery rebuild (`restart_presentation_in_place`) is not gated — only
 //! passive following is.
 //!
 //! [`hold`] is a deadline, not a flag: it self-expires so a holder that dies mid-churn

@@ -176,14 +176,6 @@ pub struct HostConfig {
     /// `PUNKTFUNK_VDISPLAY` — Windows virtual-display backend. IddCx is the only
     /// backend; kept for shipped `host.env`.
     pub vdisplay: Option<String>,
-    /// `PUNKTFUNK_STALL_PROBES` — run the Windows IDD-push capture's micro-probe engine (per-GPU
-    /// fence probes, DWM tick/flush watchdogs, scanline + CPU sentinels — `idd_push/probes.rs`),
-    /// the corroborating evidence legs on every stall report. Default OFF (immunity plan WP3:
-    /// standing fence/scanline/DWM traffic alters the hottest path while diagnosing it — an
-    /// observer effect the disturbance reports must not carry by default); `=1` opts a box under
-    /// diagnosis in. Off, stall lines still carry the driver telemetry + the ETW present/queue
-    /// discriminator (cheap, session-filtered); only the probe legs read absent.
-    pub stall_probes: bool,
     /// `PUNKTFUNK_GAMESCOPE_STEAM` — force `--steam` on every bare headless gamescope
     /// launch. Steam titles already pass it; this is for non-Steam. Managed
     /// gamescope-session-plus/SteamOS sessions ignore it.
@@ -278,8 +270,6 @@ impl HostConfig {
             audio_redundancy: env_on("PUNKTFUNK_AUDIO_REDUNDANCY"),
             audio_hires: env_on("PUNKTFUNK_AUDIO_HIRES").unwrap_or(true),
             perf: flag("PUNKTFUNK_PERF"),
-            // Default OFF (immunity plan WP3 — no standing observer effect); opt-in per box.
-            stall_probes: env_on("PUNKTFUNK_STALL_PROBES").unwrap_or(false),
             // Defaults to `virtual` — the flagship per-client virtual output. It used to be unset,
             // which fell through to the synthetic test pattern: fine for a dev box that always has
             // a host.env, wrong for a packaged install, whose unit no longer requires that file at

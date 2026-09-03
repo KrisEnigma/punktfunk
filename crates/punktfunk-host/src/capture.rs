@@ -3,8 +3,8 @@
 //! Re-exports the shared frame types and capturer traits at the historical
 //! `crate::capture::*` paths. Host-only entry points — [`open_portal_monitor`],
 //! [`capture_virtual_output`] — resolve [`pf_capture::ZeroCopyPolicy`] and, on
-//! Windows, the [`pf_capture::FrameChannelSender`] so the capturer never
-//! reaches back into encode or vdisplay.
+//! Windows, the driver-IOCTL senders so the capturer never reaches back into
+//! encode or vdisplay.
 
 use anyhow::Result;
 
@@ -186,40 +186,25 @@ pub fn capture_virtual_output(
     )));
     let pref = vout.preferred_mode;
     let keep = vout.keepalive;
-    // Resolve the pf-vdisplay control device once and wrap `send_frame_channel`
-    // for the IDD-push capturer. This is the one host reach into `crate::vdisplay`
-    // the capturer would otherwise make.
+    // Resolve the pf-vdisplay control device once and wrap its cursor IOCTLs for the
+    // IDD-push capturer. This is the one host reach into `crate::vdisplay` the capturer
+    // would otherwise make.
     let control = crate::vdisplay::manager::control_device_handle().ok_or_else(|| {
         anyhow::anyhow!(
             "pf-vdisplay control device not open (monitor not created via the manager?)"
         )
     })?;
-    // Each closure clones the `Arc<OwnedHandle>`, so the handle stays open for
-    // the closure's life and closes when the manager retires it and the last
-    // session drops. An open control handle vetoes the wake-from-sleep PnP cycle.
-    let control_frame = control.clone();
-    let sender: pf_capture::FrameChannelSender = std::sync::Arc::new(
-        move |req: &pf_driver_proto::control::SetFrameChannelRequestV2| {
-            // SAFETY: the captured `control_frame` Arc keeps the control handle open across this
-            // call — `send_frame_channel`'s precondition.
-            unsafe {
-                crate::vdisplay::driver::send_frame_channel(
-                    windows::Win32::Foundation::HANDLE(
-                        std::os::windows::io::AsRawHandle::as_raw_handle(&*control_frame),
-                    ),
-                    req,
-                )
-            }
-        },
-    );
-    // IDD direct-push is the only Windows capture path: frames from the driver's
-    // shared ring, in-process. A fresh monitor + ring per session; `want.hdr`
-    // enables advanced color. No fallback — open/attach failure fails the session.
+    // Each closure clones the `Arc<OwnedHandle>`, so the handle stays open for the closure's
+    // life and closes when the manager retires it and the last session drops. An open control
+    // handle vetoes the wake-from-sleep PnP cycle.
 
     // Presence of this closure opts the session into v5 cursor-channel delivery
-    // (capturer creates CursorShm; driver declares the IddCx hardware cursor).
+    // (capturer creates CursorShm; driver declares the IddCx hardware cursor). A target an
+    // earlier session's declare already excludes gets one too: the driver's blend is the only
+    // pointer such a session can have.
     let control_cursor = control.clone();
-    let cursor_sender: Option<pf_capture::CursorChannelSender> = want.hw_cursor.then(|| {
+    let want_channel = want.hw_cursor || target.cursor_excluded;
+    let cursor_sender: Option<pf_capture::CursorChannelSender> = want_channel.then(|| {
         std::sync::Arc::new(
             move |req: &pf_driver_proto::control::SetCursorChannelRequest| {
                 // SAFETY: the captured `control_cursor` Arc keeps the control handle open across
@@ -235,15 +220,12 @@ pub fn capture_virtual_output(
             },
         ) as pf_capture::CursorChannelSender
     });
-    // Secure-desktop actuator (`IOCTL_SET_CURSOR_FORWARD`): drop the hardware
-    // cursor declare while UAC/Winlogon is up. Stand-down needs a real mode-set
-    // under the vdisplay manager lock, which pf-capture cannot take.
-
-    // Built for every session: a channel-less reuse can still have a live cursor
-    // worker from an earlier session. Never-declared targets answer NOT_FOUND,
-    // which the capturer logs and ignores.
+    // The cursor render model (`IOCTL_SET_CURSOR_FORWARD`): `false` = the client draws no
+    // pointer (capture model, UAC/Winlogon), so the driver blends the excluded one into its
+    // frames. Built for every session: a channel-less reuse can still have a live cursor
+    // worker from an earlier session. Never-declared targets answer NOT_FOUND, which the
+    // capturer logs and ignores.
     let target_id = target.target_id;
-    let ccd = pf_win_display::win_display::CcdTargetKey::new(target.adapter_luid, target_id);
     let cursor_forward: Option<pf_capture::CursorForwardSender> = Some({
         std::sync::Arc::new(move |enable: bool| {
             let req = pf_driver_proto::control::SetCursorForwardRequest {
@@ -258,12 +240,8 @@ pub fn capture_virtual_output(
                         std::os::windows::io::AsRawHandle::as_raw_handle(&*control),
                     ),
                     &req,
-                )?;
+                )
             }
-            if !enable {
-                crate::vdisplay::manager::force_recommit(ccd);
-            }
-            Ok(())
         }) as pf_capture::CursorForwardSender
     });
     pf_capture::open_idd_push(
@@ -274,11 +252,94 @@ pub fn capture_virtual_output(
         want.chroma_444,
         want.pyrowave,
         keep,
-        sender,
         cursor_sender,
         cursor_forward,
     )
     .map_err(|(e, _keep)| e.context("IDD-push capture open (no fallback)"))
+}
+
+/// Open the in-driver encoder for an IDD-push session: the plan as the driver numbers it, the
+/// resolved Windows backend as a one-entry preference list, the two IOCTL senders over the
+/// manager's control handle, and the `pf_gpu` session record. The heap is sized from the
+/// opening rate; ABR climbs past twice it eat the burst margin.
+#[cfg(target_os = "windows")]
+pub fn open_driver_encoder(
+    plan: &crate::session_plan::SessionPlan,
+    capturer: &dyn Capturer,
+    size: (u32, u32),
+    fps: u32,
+    bitrate_bps: u64,
+    bit_depth: u8,
+    wire_seq_base: u32,
+) -> Result<Box<dyn crate::encode::Encoder>> {
+    use crate::encode::{Codec, WindowsBackend};
+    let endpoint = capturer
+        .driver_endpoint()
+        .ok_or_else(|| anyhow::anyhow!("driver encode: the capture source is not IDD-push"))?;
+    let control = crate::vdisplay::manager::control_device_handle().ok_or_else(|| {
+        anyhow::anyhow!(
+            "pf-vdisplay control device not open (monitor not created via the manager?)"
+        )
+    })?;
+    let control_open = control.clone();
+    let set_encode: pf_capture::SetEncodeSender =
+        std::sync::Arc::new(move |req: &pf_driver_proto::encode::SetEncodeRequest| {
+            // SAFETY: the captured Arc keeps the control handle open across this call
+            // (`send_set_encode`'s precondition).
+            unsafe {
+                crate::vdisplay::driver::send_set_encode(
+                    windows::Win32::Foundation::HANDLE(
+                        std::os::windows::io::AsRawHandle::as_raw_handle(&*control_open),
+                    ),
+                    req,
+                )
+            }
+        });
+    let encode_ctl: pf_capture::EncodeCtlSender =
+        std::sync::Arc::new(move |req: &pf_driver_proto::encode::EncodeCtlRequest| {
+            // SAFETY: the captured Arc keeps the control handle open across this call
+            // (`send_encode_ctl`'s precondition).
+            unsafe {
+                crate::vdisplay::driver::send_encode_ctl(
+                    windows::Win32::Foundation::HANDLE(
+                        std::os::windows::io::AsRawHandle::as_raw_handle(&*control),
+                    ),
+                    req,
+                )
+            }
+        });
+    let (backend, label) = match plan.codec {
+        Codec::PyroWave => (4, "driver-pyrowave"),
+        _ => match crate::encode::windows_resolved_backend() {
+            WindowsBackend::Nvenc => (1, "driver-nvenc"),
+            WindowsBackend::Amf => (2, "driver-amf"),
+            WindowsBackend::Qsv => (3, "driver-qsv"),
+            WindowsBackend::Software => anyhow::bail!(
+                "driver encode: the resolved backend is software, which the driver cannot run"
+            ),
+        },
+    };
+    let params = pf_capture::DriverEncodeParams {
+        codec: match plan.codec {
+            Codec::H264 => 1,
+            Codec::H265 => 2,
+            Codec::Av1 => 3,
+            Codec::PyroWave => 4,
+        },
+        chroma: u32::from(plan.chroma.is_444()),
+        bit_depth: u32::from(bit_depth),
+        width: size.0,
+        height: size.1,
+        fps,
+        bitrate_kbps: (bitrate_bps / 1000).min(u64::from(u32::MAX)) as u32,
+        hdr: plan.hdr,
+        hdr_meta: capturer.hdr_meta(),
+        wire_chunk_bytes: plan.wire_chunk.unwrap_or(0) as u32,
+        backends: [backend, 0, 0, 0],
+        wire_seq_base,
+    };
+    let enc = pf_capture::open_driver_encoder(endpoint, &params, set_encode, encode_ctl)?;
+    Ok(crate::encode::track_session(enc, label))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -593,7 +654,7 @@ mod live_tests {
                 // box whose exclusive watchdog is re-asserting, that can be before the floor —
                 // so the end time is reported, not bounded from below.
                 // The two typed ends: the death watch ("WUDFHost … exited") or the ladder's
-                // `RingFault::SourceStalled` ("no source frame for Ns …").
+                // `CaptureFault::SourceStalled` ("no source frame for Ns …").
                 assert!(
                     e.contains("WUDFHost") || e.contains("no source frame"),
                     "the plane must end with a typed driver/source fault, got: {e}"

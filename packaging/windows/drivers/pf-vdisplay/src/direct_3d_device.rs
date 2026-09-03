@@ -1,23 +1,21 @@
-//! The render-side D3D11 device the swap-chain processor binds to the IddCx swap-chain (STEP 5).
+//! The render-side D3D11 device the swap-chain processor binds to the IddCx swap-chain.
 //!
-//! Ported verbatim from the proven oracle (`packaging/windows/vdisplay-driver/pf-vdisplay/src/
-//! direct_3d_device.rs` + the `DEVICE_POOL`/`pooled_device` that lived in its `context.rs`). The
-//! D3D/DXGI types are the `windows` crate (refcounted COM, no manual Drop); the swap-chain/LUID hand-off
-//! to the wdk-sys IddCx world happens via raw pointers in `swap_chain_processor.rs`.
+//! The D3D/DXGI types are the `windows` crate (refcounted COM, no manual Drop); the swap-chain/LUID
+//! hand-off to the wdk-sys IddCx world happens via raw pointers in `swap_chain_processor.rs`.
 //!
-//! STEP 5 binds this device to the swap-chain to keep the monitor a live display; STEP 6 reuses the
-//! device's immediate context in the frame publisher's `CopyResource` on each swap-chain processor
-//! thread. The device is POOLED across processors (one per render LUID, [`pooled_device`]), so with
-//! two live monitors two worker threads share it concurrently — creation must NOT pass
-//! `D3D11_CREATE_DEVICE_SINGLETHREADED` (that was sound only pre-pooling, device-per-processor), and
-//! the immediate context is `SetMultithreadProtected` (it has no internal locking of its own).
+//! Binding this device to the swap-chain keeps the monitor a live display, and the frame publisher
+//! reuses its immediate context in `CopyResource` on each swap-chain processor thread. The device is
+//! POOLED across processors (one per render LUID, [`pooled_device`]), so two live monitors' worker
+//! threads share it concurrently — creation must NOT pass `D3D11_CREATE_DEVICE_SINGLETHREADED` (sound
+//! only pre-pooling, device-per-processor), and the immediate context is `SetMultithreadProtected`
+//! (it has no internal locking of its own).
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::{
     Win32::{
-        Foundation::{BOOL, LUID},
+        Foundation::{BOOL, E_FAIL, LUID},
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
             Direct3D11::{
@@ -31,24 +29,6 @@ use windows::{
     },
     core::{Error, Interface},
 };
-
-#[derive(thiserror::Error, Debug)]
-pub enum Direct3DError {
-    #[error("Direct3DError({0:?})")]
-    Win32(#[from] Error),
-    #[error("Direct3DError(\"{0}\")")]
-    Other(&'static str),
-}
-
-impl From<&'static str> for Direct3DError {
-    fn from(value: &'static str) -> Self {
-        Direct3DError::Other(value)
-    }
-}
-
-/// DIAGNOSTIC: live `Direct3DDevice` count. Each one holds an `ID3D11Device` whose NVIDIA UMD spawns
-/// ~dozens of worker threads; if this climbs without bound across reconnects, devices are leaking.
-pub static LIVE_DEVICES: AtomicI32 = AtomicI32::new(0);
 
 #[derive(Debug)]
 pub struct Direct3DDevice {
@@ -92,7 +72,9 @@ impl Direct3DDevice {
         }
     }
 
-    pub fn init(adapter_luid: LUID) -> Result<Self, Direct3DError> {
+    /// Create the render device for `adapter_luid`. Go through [`pooled_device`], which owns the
+    /// one-device-per-LUID rule and the reason for it.
+    pub fn init(adapter_luid: LUID) -> Result<Self, Error> {
         // SAFETY: a plain DXGI factory-creation call; `?` returns the error on failure.
         let dxgi_factory =
             unsafe { CreateDXGIFactory2::<IDXGIFactory5>(DXGI_CREATE_FACTORY_FLAGS(0))? };
@@ -123,8 +105,9 @@ impl Direct3DDevice {
             )?;
         }
 
-        let device = device.ok_or("ID3D11Device not found")?;
-        let device_context = device_context.ok_or("ID3D11DeviceContext not found")?;
+        let device = device.ok_or_else(|| Error::new(E_FAIL, "ID3D11Device not found"))?;
+        let device_context =
+            device_context.ok_or_else(|| Error::new(E_FAIL, "ID3D11DeviceContext not found"))?;
 
         // The pool hands this device (and its immediate context) to every processor on the LUID, and
         // an immediate context is not thread-safe by itself — turn on the runtime's per-call critical
@@ -143,9 +126,8 @@ impl Direct3DDevice {
             ),
         }
 
-        let live = LIVE_DEVICES.fetch_add(1, Ordering::Relaxed) + 1;
         let epoch = DEVICE_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
-        dbglog!("[pf-vd] Direct3DDevice::init OK — epoch {epoch}, live D3D devices = {live}");
+        dbglog!("[pf-vd] Direct3DDevice::init OK — epoch {epoch}");
 
         Ok(Self {
             _dxgi_factory: dxgi_factory,
@@ -155,13 +137,6 @@ impl Direct3DDevice {
             epoch,
             removed: AtomicBool::new(false),
         })
-    }
-}
-
-impl Drop for Direct3DDevice {
-    fn drop(&mut self) {
-        let live = LIVE_DEVICES.fetch_sub(1, Ordering::Relaxed) - 1;
-        dbglog!("[pf-vd] Direct3DDevice::drop — live D3D devices = {live}");
     }
 }
 

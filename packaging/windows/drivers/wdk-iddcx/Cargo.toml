@@ -1,5 +1,5 @@
-# Safe-ish typed wrappers over the wdk-sys IddCx DDIs (table dispatch). Graduates the proven dispatch
-# from wdk-probe/src/iddcx_rt.rs (M1 step 1) into a reusable crate the pf-vdisplay driver depends on.
+# Safe-ish typed wrappers over the wdk-sys IddCx DDIs (table dispatch), plus the compile-time asserts
+# that keep the iddcx bindgen surface honest. The pf-vdisplay driver depends on it.
 # A plain lib (rlib) — no build.rs; it rides on wdk-sys's iddcx bindgen.
 [package]
 name = "wdk-iddcx"

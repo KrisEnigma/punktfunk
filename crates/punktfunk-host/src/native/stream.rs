@@ -1120,7 +1120,7 @@ pub(super) struct SessionContext {
     pub(super) launch: Option<String>,
     pub(super) launch_target: Option<crate::library::LaunchTarget>,
     /// Threaded into the EDID CTA HDR block before `create` so host apps tone-map to the client's panel.
-    pub(super) client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+    pub(super) client_hdr: Option<pf_frame::HdrMeta>,
     pub(super) bringup: Arc<crate::bringup::Trace>,
     pub(super) resize_ms: Arc<AtomicU32>,
     #[cfg(target_os = "linux")]
@@ -1439,6 +1439,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 &stop,
                 8,
                 Some(bringup.as_ref()),
+                0,
             )?;
             (vd, pipe)
         }
@@ -1717,7 +1718,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     const MAX_ENCODER_RESETS: u32 = 5;
     let mut encoder_resets: u32 = 0;
     let mut last_au_at = std::time::Instant::now();
-    let mut last_hdr_meta: Option<punktfunk_core::quic::HdrMeta> = None;
+    let mut last_hdr_meta: Option<pf_frame::HdrMeta> = None;
     let mut inflight: std::collections::VecDeque<(u64, u64, std::time::Instant)> =
         std::collections::VecDeque::new();
     // Diagnostic: distinguish NEW captured frames (the source produced a fresh frame) from REPEATS (the
@@ -1836,6 +1837,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                             &stop,
                             8,
                             None,
+                            au_seq,
                         )?;
                         Ok((new_vd, pipe))
                     })();
@@ -1916,6 +1918,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     &quit,
                     resize_trace.as_ref(),
                     false,
+                    au_seq,
                 );
             #[cfg(not(target_os = "windows"))]
             let fast_done = false;
@@ -1933,6 +1936,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     cur_display_gen,
                     None,
                     Some(resize_trace.as_ref()),
+                    au_seq,
                 ) {
                     Ok(next_pipe) => {
                         let old_display_gen = cur_display_gen;
@@ -2015,6 +2019,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     &quit,
                     trace.as_ref(),
                     true,
+                    au_seq,
                 ) {
                     enc_src = (frame.format, frame.width, frame.height);
                     inflight.clear();
@@ -2090,20 +2095,16 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             } else {
                 let hz = interval_hz(interval);
                 let rebuild_t0 = std::time::Instant::now();
-                match crate::encode::open_video(
-                    plan.codec,
-                    frame.format,
-                    frame.width,
-                    frame.height,
+                match open_session_encoder(
+                    &plan,
+                    &*capturer,
+                    &frame,
                     hz,
                     ed.enc_kbps(new_kbps) as u64 * 1000,
-                    frame.is_cuda(),
                     bit_depth,
-                    plan.chroma,
-                    plan.cursor_blend,
-                    plan.max_slices,
+                    au_seq,
                 ) {
-                    Ok(mut new_enc) => {
+                    Ok(new_enc) => {
                         let applied_kbps = new_enc
                             .applied_bitrate_bps()
                             .map(|b| (b / 1000) as u32)
@@ -2116,10 +2117,6 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                             requested_kbps = new_kbps,
                             "encoder rebuilt at new bitrate (adaptive bitrate)"
                         );
-                        if let Some(c) = plan.wire_chunk {
-                            new_enc.set_wire_chunking(c);
-                        }
-                        new_enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
                         enc = new_enc;
                         if applied_kbps < new_kbps {
                             encoder_ceiling_kbps.store(applied_kbps, Ordering::Relaxed);
@@ -2328,6 +2325,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         }
         let measure = perf || stats.is_armed();
         let t_cap = std::time::Instant::now();
+        capturer.observe_encoder(enc.telemetry());
         let cap_result = capturer.try_latest();
         let cap_us = if measure {
             t_cap.elapsed().as_micros() as u32
@@ -2336,6 +2334,13 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         };
         if perf {
             st_cap.push(cap_us);
+        }
+        // A recovery rung the capturer's ladder chose but this loop must run (the encoder is
+        // ours). Its outcome goes straight back; a reset forfeited every in-flight AU.
+        if let Some(stage) = capturer.take_pending_stage() {
+            let outcome = run_loop_stage(stage, &mut enc, &mut inflight);
+            capturer.stage_done(stage, outcome);
+            last_au_at = std::time::Instant::now();
         }
         let mut repeat = false;
         match cap_result {
@@ -2548,6 +2553,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         &stop,
                         1,
                         None,
+                        au_seq,
                     ) {
                         Ok(p) => break p,
                         Err(e2) => {
@@ -2744,18 +2750,14 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             } else {
                 bitrate_kbps
             };
-            let opened = crate::encode::open_video(
-                plan.codec,
-                frame.format,
-                frame.width,
-                frame.height,
+            let opened = open_session_encoder(
+                &plan,
+                &*capturer,
+                &frame,
                 actual.refresh_hz,
                 src_kbps as u64 * 1000,
-                frame.is_cuda(),
                 bit_depth,
-                plan.chroma,
-                plan.cursor_blend,
-                plan.max_slices,
+                au_seq,
             )
             .with_context(|| {
                 format!(
@@ -2764,7 +2766,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     frame.width, frame.height, frame.format
                 )
             });
-            let mut new_enc = match opened {
+            let new_enc = match opened {
                 Ok(e) => e,
                 Err(e) => {
                     encoder_resets += 1;
@@ -2783,10 +2785,6 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     continue;
                 }
             };
-            if let Some(c) = plan.wire_chunk {
-                new_enc.set_wire_chunking(c);
-            }
-            new_enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
             tracing::info!(
                 from = %format!("{}x{} {:?}", enc_src.1, enc_src.2, enc_src.0),
                 to = %format!("{}x{} {:?}", frame.width, frame.height, frame.format),
@@ -2835,7 +2833,21 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         }
         let t_submit = std::time::Instant::now();
         let wire_index = au_seq.wrapping_add(inflight.len() as u32);
-        if let Err(e) = enc.submit_indexed(&frame, wire_index) {
+        // An encoder the loop does not feed (the Windows driver) already holds `owed` access
+        // units — waited for after a fresh frame, never on a repeat — and drains them at
+        // depth 1; every other backend takes this tick's frame.
+        let au_wait = if repeat {
+            t_submit
+        } else {
+            t_submit + interval
+        };
+        let owed = enc.ready_aus(au_wait);
+        let depth = if owed.is_some() { 1 } else { depth };
+        let submitted = match owed {
+            Some(_) => Ok(()),
+            None => enc.submit_indexed(&frame, wire_index),
+        };
+        if let Err(e) = submitted {
             if e.downcast_ref::<crate::encode::TerminalEncoderError>()
                 .is_some()
             {
@@ -2883,7 +2895,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         } else {
             next + interval
         };
-        inflight.push_back((capture_ns, submit_ns, next));
+        for _ in 0..owed.unwrap_or(1) {
+            inflight.push_back((capture_ns, submit_ns, next));
+        }
         let mut send_gone = false;
         let mut poll_err: Option<anyhow::Error> = None;
         while inflight.len() >= depth {
@@ -2930,7 +2944,10 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         if let Some(m) = last_hdr_meta {
                             if c.keyframe || resend_meta {
                                 let _ = conn.send_datagram(
-                                    punktfunk_core::quic::encode_hdr_meta_datagram(&m).into(),
+                                    punktfunk_core::quic::encode_hdr_meta_datagram(
+                                        &crate::encode::hdr_meta_to_wire(m),
+                                    )
+                                    .into(),
                                 );
                                 resend_meta = false;
                             }
@@ -3029,8 +3046,12 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
             if let Some(m) = last_hdr_meta {
                 if au.keyframe || resend_meta {
-                    let _ = conn
-                        .send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&m).into());
+                    let _ = conn.send_datagram(
+                        punktfunk_core::quic::encode_hdr_meta_datagram(
+                            &crate::encode::hdr_meta_to_wire(m),
+                        )
+                        .into(),
+                    );
                     resend_meta = false;
                 }
             }
@@ -3276,7 +3297,8 @@ type Pipeline = (
     u32,
 );
 
-/// Mode-set the live monitor, resize the ring, swap only the encoder. `false` → full rebuild.
+/// Mode-set the live monitor, restore its presentation, swap only the encoder. `false` → full
+/// rebuild.
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn try_inplace_resize(
@@ -3293,6 +3315,7 @@ fn try_inplace_resize(
     quit: &Arc<AtomicBool>,
     trace: &crate::bringup::Trace,
     recover_ring: bool,
+    wire_seq_base: u32,
 ) -> bool {
     let Some(cur_target) = capturer.capture_target_id() else {
         return false;
@@ -3318,17 +3341,44 @@ fn try_inplace_resize(
         );
         return false;
     }
-    let ring_ok = if recover_ring {
-        capturer.recreate_ring_in_place()
+    let restored = if recover_ring {
+        capturer.restart_presentation_in_place()
     } else {
         capturer.resize_output(new_mode.width, new_mode.height)
     };
-    if !ring_ok {
+    if !restored {
         return false;
     }
-    trace.mark("ring_recreated");
+    trace.mark("presentation_restored");
+    // The driver's pool is still built for the OLD geometry, so it refuses every composed frame
+    // and stays stale until the next SET_ENCODE - which only this re-open sends. Waiting for a
+    // new-size frame first can therefore never succeed. The open wants the geometry, which the
+    // accepted mode already carries, not a frame.
+    let pre_opened = if plan.capture == crate::session_plan::CaptureBackend::IddPush {
+        match crate::capture::open_driver_encoder(
+            &plan,
+            &**capturer,
+            (new_mode.width, new_mode.height),
+            effective_hz,
+            enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+            bit_depth,
+            wire_seq_base,
+        ) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "resize: re-opening the driver encoder at the new mode failed - full rebuild");
+                return false;
+            }
+        }
+    } else {
+        None
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let new_frame = loop {
+        // The driver-encode capturer reads the display's progress off the encoder, and this
+        // loop is the one place that polls it without the stream loop's own tick.
+        capturer.observe_encoder(enc.telemetry());
         match capturer.try_latest() {
             Ok(Some(f)) if (f.width, f.height) == (new_mode.width, new_mode.height) => break f,
             Ok(_) => {
@@ -3355,6 +3405,7 @@ fn try_inplace_resize(
         let first_pts = new_frame.pts_ns;
         let live_deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
+            capturer.observe_encoder(enc.telemetry());
             match capturer.try_latest() {
                 Ok(Some(f)) if source_advanced(first_seq, first_pts, &f.provenance, f.pts_ns) => {
                     break f
@@ -3380,30 +3431,25 @@ fn try_inplace_resize(
         new_frame
     };
     trace.mark("first_new_frame");
-    let mut new_enc = match crate::encode::open_video(
-        plan.codec,
-        new_frame.format,
-        new_frame.width,
-        new_frame.height,
-        effective_hz,
-        enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
-        new_frame.is_cuda(),
-        bit_depth,
-        plan.chroma,
-        plan.cursor_blend,
-        plan.max_slices,
-    ) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"),
-                "resize: encoder open failed after the in-place mode set — running the full rebuild");
-            return false;
-        }
+    let new_enc = match pre_opened {
+        Some(e) => e,
+        None => match open_session_encoder(
+            &plan,
+            &**capturer,
+            &new_frame,
+            effective_hz,
+            enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+            bit_depth,
+            wire_seq_base,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "resize: encoder open failed after the in-place mode set - full rebuild");
+                return false;
+            }
+        },
     };
-    if let Some(c) = plan.wire_chunk {
-        new_enc.set_wire_chunking(c);
-    }
-    new_enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
     *enc = new_enc;
     *frame = new_frame;
     *interval = std::time::Duration::from_secs_f64(1.0 / effective_hz.max(1) as f64);
@@ -3430,7 +3476,7 @@ pub(super) fn prepare_display(
     compositor: crate::vdisplay::Compositor,
     mode: punktfunk_core::Mode,
     client_identity: Option<[u8; 32]>,
-    client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+    client_hdr: Option<pf_frame::HdrMeta>,
     cursor_forward: bool,
     multi_slice: bool,
     bitrate_kbps: u32,
@@ -3488,6 +3534,7 @@ pub(super) fn prepare_display(
         stop,
         8,
         Some(trace),
+        0,
     )?;
     Ok(PreparedDisplay { vd, pipeline })
 }
@@ -3507,6 +3554,7 @@ fn build_pipeline_with_retry(
     stop: &Arc<AtomicBool>,
     max_attempts: u32,
     trace: Option<&crate::bringup::Trace>,
+    wire_seq_base: u32,
 ) -> Result<Pipeline> {
     // IDD-push: hold one lease across attempts so a failed capturer drop does not Lingering-preempt.
     let _retry_hold = if matches!(plan.capture, crate::session_plan::CaptureBackend::IddPush) {
@@ -3540,6 +3588,7 @@ fn build_pipeline_with_retry(
             None,
             first_frame_budget,
             trace,
+            wire_seq_base,
         ) {
             Ok(pipe) => {
                 if attempt > 1 {
@@ -3585,6 +3634,7 @@ fn is_permanent_build_error(chain: &str) -> bool {
         "must be a node id",
         "is it installed",
         "capture/encoder negotiation mismatch",
+        "driver encoder open failed",
     ];
     let lower = chain.to_ascii_lowercase();
     PERMANENT.iter().any(|p| lower.contains(p))
@@ -3648,6 +3698,52 @@ fn announce_pipeline_gap(gap: &tokio::sync::mpsc::UnboundedSender<u32>, gap_ms: 
     let _ = gap.send(gap_ms);
 }
 
+/// Open the session's encoder at `frame`'s geometry with the plan's chunking and the
+/// capturer's ring depth applied. An IDD-push source gets the driver's encoder instead, its
+/// wire-index domain continuing at `wire_seq_base` (the loop's `au_seq`).
+#[allow(clippy::too_many_arguments)]
+fn open_session_encoder(
+    plan: &crate::session_plan::SessionPlan,
+    capturer: &dyn crate::capture::Capturer,
+    frame: &crate::capture::CapturedFrame,
+    hz: u32,
+    bitrate_bps: u64,
+    bit_depth: u8,
+    wire_seq_base: u32,
+) -> Result<Box<dyn crate::encode::Encoder>> {
+    #[cfg(target_os = "windows")]
+    if plan.capture == crate::session_plan::CaptureBackend::IddPush {
+        return crate::capture::open_driver_encoder(
+            plan,
+            capturer,
+            (frame.width, frame.height),
+            hz,
+            bitrate_bps,
+            bit_depth,
+            wire_seq_base,
+        );
+    }
+    let _ = wire_seq_base;
+    let mut enc = crate::encode::open_video(
+        plan.codec,
+        frame.format,
+        frame.width,
+        frame.height,
+        hz,
+        bitrate_bps,
+        frame.is_cuda(),
+        bit_depth,
+        plan.chroma,
+        plan.cursor_blend,
+        plan.max_slices,
+    )?;
+    if let Some(c) = plan.wire_chunk {
+        enc.set_wire_chunking(c);
+    }
+    enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
+    Ok(enc)
+}
+
 /// Rebuild the encoder in place and drop owed in-flight AUs. `false` = no in-place reset.
 fn reset_stalled_encoder(
     enc: &mut Box<dyn crate::encode::Encoder>,
@@ -3659,6 +3755,53 @@ fn reset_stalled_encoder(
     inflight.clear();
     enc.request_keyframe();
     true
+}
+
+/// The ladder rungs whose actuator this loop owns because the encoder or the display manager
+/// does. `EncoderReset` is [`reset_stalled_encoder`] plus a bounded wait for the first access
+/// unit — the rung's whole cost, one IDR included. `DriverCycle` reaps the WUDFHost and reloads
+/// the adapter (seconds, the display black for the cycle); its `Applied` ends the capturer so
+/// the pipeline rebuild reopens SET_ENCODE and the ring against the fresh host.
+fn run_loop_stage(
+    stage: pf_frame::recovery::Stage,
+    enc: &mut Box<dyn crate::encode::Encoder>,
+    inflight: &mut std::collections::VecDeque<(u64, u64, std::time::Instant)>,
+) -> pf_frame::recovery::StageOutcome {
+    use pf_frame::recovery::{Stage, StageOutcome, ENCODER_RESET_FIRST_AU};
+    match stage {
+        Stage::EncoderReset => {
+            let t0 = std::time::Instant::now();
+            if !reset_stalled_encoder(enc, inflight) {
+                return StageOutcome::Failed;
+            }
+            let first_au = enc.ready_aus(t0 + ENCODER_RESET_FIRST_AU).map(|n| n > 0);
+            tracing::warn!(
+                cost_ms = t0.elapsed().as_millis() as u64,
+                first_au,
+                "recovery: encoder reset applied — one IDR plus the first-AU wait"
+            );
+            StageOutcome::Applied
+        }
+        #[cfg(target_os = "windows")]
+        Stage::DriverCycle => {
+            let t0 = std::time::Instant::now();
+            match crate::vdisplay::driver::force_driver_cycle() {
+                Ok(()) => {
+                    tracing::warn!(
+                        cost_ms = t0.elapsed().as_millis() as u64,
+                        "recovery: driver cycle — adapter reloaded, display black for the cycle; \
+                         the session rebuilds against the fresh WUDFHost"
+                    );
+                    StageOutcome::Applied
+                }
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "recovery: driver cycle failed");
+                    StageOutcome::Failed
+                }
+            }
+        }
+        _ => StageOutcome::Unsupported,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3674,6 +3817,7 @@ fn build_pipeline(
     supersedes: Option<u64>,
     first_frame_budget: Option<std::time::Duration>,
     trace: Option<&crate::bringup::Trace>,
+    wire_seq_base: u32,
 ) -> Result<Pipeline> {
     let display_mode = display_mode_for(mode);
     let vout = crate::vdisplay::registry::acquire(vd, display_mode, quit.clone(), supersedes)
@@ -3765,27 +3909,19 @@ fn build_pipeline(
     } else {
         bitrate_kbps
     };
-    let mut enc = crate::encode::open_video(
-        plan.codec,
-        frame.format,
-        frame.width,
-        frame.height,
+    let enc = open_session_encoder(
+        &plan,
+        &*capturer,
+        &frame,
         effective_hz,
         enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
-        frame.is_cuda(),
         bit_depth,
-        plan.chroma,
-        plan.cursor_blend,
-        plan.max_slices,
+        wire_seq_base,
     )
     .context("open video encoder")?;
     if let Some(t) = trace {
         t.mark("encoder_open");
     }
-    if let Some(c) = plan.wire_chunk {
-        enc.set_wire_chunking(c);
-    }
-    enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
     let opened_444 = enc.caps().chroma_444;
     if opened_444 != plan.chroma.is_444() {
         tracing::warn!(

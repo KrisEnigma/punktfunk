@@ -73,7 +73,7 @@ impl CursorPoller {
     /// A SEED, not the value: the poll thread re-queries the rect on its [`Self::REATTACH`] cadence.
     /// It used to be captured once here and used forever for BOTH the desktop→frame offset and the
     /// `in_rect` test, while both mid-session mode-change paths (`resize_output` and
-    /// `poll_display_hdr` → `recreate_ring`) keep the same poller — so after an in-place resize the
+    /// `poll_display_hdr`) keep the same poller — so after an in-place resize the
     /// pointer was clipped to the OLD rect and offset by a stale origin. Re-querying on the poll
     /// thread is what keeps the CCD call off the capture/encode thread, which is the whole reason
     /// this poller exists (see `DescriptorPoller`).

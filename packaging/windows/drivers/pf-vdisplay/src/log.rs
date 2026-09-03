@@ -3,18 +3,61 @@
 //! `OutputDebugStringA` used to fire unconditionally, a syscall + CString + `format!` alloc per
 //! logged event on paths that run per IOCTL/frame. The file tee (WUDFHost temp dir, not
 //! world-writable — audit §4.4) rides the same gate. Best-effort; ignores all errors. Production
-//! driver-state visibility is the SharedHeader `driver_status` channel, not this module.
+//! driver-state visibility is the AU header's `driver_status` word, not this module.
 
 unsafe extern "system" {
     fn OutputDebugStringA(s: *const u8);
 }
 
 /// Whether driver logging (debug string + bring-up file) is enabled (resolved once). Off in release
-/// builds unless `PFVD_DEBUG_LOG` is set. `pub(crate)` so `dbglog!` can skip its `format!` too.
+/// builds unless the `PFVD_DEBUG_LOG` knob is set. `pub(crate)` so `dbglog!` can skip its
+/// `format!` too.
 pub(crate) fn file_log_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| cfg!(debug_assertions) || std::env::var_os("PFVD_DEBUG_LOG").is_some())
+    *ON.get_or_init(|| cfg!(debug_assertions) || knob("PFVD_DEBUG_LOG").is_some())
+}
+
+/// A driver knob: the process environment first, then the MACHINE environment in the registry
+/// (where `setx /M` writes). WUDFHost inherits its environment from the SCM at boot and the SCM
+/// never refreshes it, so a `setx /M` set today is invisible to `std::env` until a reboot; the
+/// registry read makes a device restart enough.
+pub(crate) fn knob(name: &str) -> Option<String> {
+    std::env::var(name).ok().or_else(|| machine_env(name))
+}
+
+/// Read a MACHINE environment variable from the registry (see [`knob`]).
+fn machine_env(name: &str) -> Option<String> {
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::{HSTRING, PCWSTR};
+    const KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+    let (subkey, value) = (HSTRING::from(KEY), HSTRING::from(name));
+    let mut buf = [0u16; 256];
+    let mut size = std::mem::size_of_val(&buf) as u32;
+    // SAFETY: both name pointers address NUL-terminated HSTRING buffers alive for the call;
+    // `buf`/`size` are a matched out-buffer and its byte length. RRF_RT_REG_SZ makes the call
+    // reject any non-string value rather than write a foreign type into the buffer.
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if rc.is_err() {
+        return None;
+    }
+    // `size` is bytes INCLUDING the terminator; trim to chars and drop trailing NULs.
+    let chars = (size as usize / 2).min(buf.len());
+    Some(
+        String::from_utf16_lossy(&buf[..chars])
+            .trim_end_matches('\0')
+            .to_string(),
+    )
 }
 
 /// Process-lifetime append handle to the bring-up log, opened ONCE (by whichever thread logs first) and

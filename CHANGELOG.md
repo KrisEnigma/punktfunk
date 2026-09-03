@@ -23,6 +23,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
+- **The Windows driver protocol floor is 7.** The pf-vdisplay driver encodes what DWM composes
+  and the host reads access units, so a host and a driver from different releases no longer
+  share a video transport. Install the matching pair — they ship in one installer, and a
+  mismatch ends the session with a "driver outdated" error naming both versions.
+- **A Windows driver update restarts the display device.** The encoder lives inside
+  `pf_vdisplay.dll` now, so applying one flaps the virtual display where a host-only update did
+  not. Schedule it like a driver update: expect a brief black screen on the release that carries
+  a new driver.
 - **`--yes` joins the `punktfunk` group on every box.** It used to do that only on Bazzite and
   Nobara. The group grants usbip attach, so a fleet script that installs unattended on desktops
   now grants it there too — pass `--no-punktfunk-group`, or set
@@ -37,12 +45,16 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **Capture health on the Status page and in `GET /api/v1/status`.** A native Windows session's
   `session.capture` block carries the live capture-health class (`healthy`, `idle`, `suspect`,
   `stalled` with its class, `recovering`, `rebuilding`, `secure_desktop`), the evidence behind
-  it, the ring's own state and whether the fence-ring protocol is negotiated, the stage running
-  now, and the last staged-recovery episode (stall class, recovered or not, each rung's outcome
-  and time, cooldown). A host-wide `display` block reports the topology generation, the last
+  it, the driver encoder's own state and the backend it opened, the stage running now, and the
+  last staged-recovery episode (stall class, recovered or not, each rung's outcome and time,
+  cooldown). A host-wide `display` block reports the topology generation, the last
   topology transaction and the outstanding monitor-devnode leases. The console's session card
   shows the class and the last recovery line, so a freeze is read there instead of grepped
   out of the logs.
+- **`session.capture` reports the driver's encoder.** The block carries `encoder_state`
+  (`closed` / `open` / `encoding` / `wedged`), the `backend_opened` and the `detached` thread
+  count, all read from the driver's access-unit header, in place of the removed `ring_state` and
+  `fence_ring`. Nothing to do unless a dashboard read those two fields.
 - **Windows connector and PnP mutations are leases.** Every monitor devnode the stream disables
   is journaled before the mutation as a lease naming the node, its prior state, which selector
   picked it (the default standby-sink treatment stays limited to displays that were dark before
@@ -69,34 +81,19 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   The exclusive re-assert watchdog bumps the stream's recovery generation only on an observed
   change, and after four consecutive fights concedes the fixed cadence (2 s doubling to 60 s).
   Descriptor samples name the generation they were taken under, so two strikes straddling a
-  transaction never pass the debounce, and a same-mode ring recovery refuses a target with no
-  active display path.
+  transaction never pass the debounce, and a same-mode presentation restart refuses a target with
+  no active display path.
 - **`pf_frame::recovery` sequences staged recovery.** A pure coordinator opens one episode per
-  `Stalled` verdict and walks the ladder EncoderReset, RingReset, SwapChainReset,
-  PresentationReset, MonitorCycle, DriverCycle, CaptureFallback from the class's first actuator,
-  running each stage once under a deadline; a stage that applied still has to prove itself with
-  three new source sequences (republishes and cursor regens never count). Four episodes per ten
-  minutes, a doubling cooldown after failed ones (10 s to 5 min), one summary per episode, and
-  `owns_episode` so passive descriptor reactions stand down. Actuators wire in with WP6/WP7/WP14.
-- **IDD-push fence-ring protocol layer (`pf_driver_proto::frame::fence`).** A v4 header appends
-  a 32-byte per-slot record (state, seq, producer-ready and consumer-retire fence values) after
-  the v3 tail; `SetFrameChannelRequestV2` carries the two shared fence handles behind the v1
-  request as an exact prefix, on the same IOCTL. Pure claim/pick rules (free, else oldest
-  published, else drop; newest-wins consume with older publishes freed) and a randomized
-  two-party trace test. The pf-vdisplay driver implements its arm: it opens delivered fences
-  with `ID3D11Device5::OpenSharedFence`, advertises `CAP_FENCE_RING` when that succeeds, and
-  runs the fence protocol only where the host advertised it too (CAS claim, GPU `Wait` on the
-  consumer-retire value, copy, `Signal` producer-ready, then PUBLISHED); the v2 request is told
-  from v1 by input length. The host arm: every ring carries two fresh shared fences per
-  generation; the first ring on a box is a keyed-mutex probe, the attach teaches whether the driver
-  opened the fences (remembered process-wide), and a capable driver's probe ring is rebuilt on the
-  fence protocol before the first frame flows. The consumer takes the newest published slot from
-  the table, frees older and foreign-generation records, GPU-waits producer-ready, converts, and
-  signals consumer-retire before freeing the slot. A pre-D3D11.4 device or a driver without fences
-  keeps the keyed-mutex arm.
-  from v1 by input length. The host arm follows; until then every ring stays on the keyed mutex.
-  two-party trace test. Both sides still run the keyed-mutex ring; the driver and host arms
-  that negotiate `CAP_FENCE_RING` follow.
+  `Stalled` verdict and walks the ladder EncoderReset, SwapChainReset, PresentationReset,
+  DriverCycle from the class's first actuator, running each stage once under a
+  deadline; a stage that applied still has to prove itself with three new source sequences
+  (republishes and cursor regens never count). Four episodes per ten minutes, a doubling cooldown
+  after failed ones (10 s to 5 min), one summary per episode, and `owns_episode` so passive
+  descriptor reactions stand down. Actuators wire in with WP6/WP7/WP14.
+- **The recovery rungs act.** An `encoder_reset` restarts the wedged encode thread over
+  `ENCODE_CTL`, and a `driver_cycle` reaps the WUDFHost and reloads the adapter when two resets
+  did not hold or the host is gone. The status `stage` enum drops `monitor_cycle`,
+  `capture_fallback` and `ring_reset`, and a `driver` stall class joins the four.
 - **`pf_win_display` has a display actor with a cached snapshot.** The display-events pump now
   owns the CCD inventory read for hot paths: every `WM_DISPLAYCHANGE` / device broadcast schedules
   one coalesced refresh (150 ms) instead of querying inside the window procedure, a 15 s safety
@@ -112,22 +109,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   topology generation instead of polling. At rest a session makes zero CCD reads beyond the
   actor's 15 s safety refresh. The host starts the actor at `serve`, and a not-yet-started actor
   falls back to one direct read (`snapshot_or_query`).
-- **IDD-push shared header v3 carries ring health.** The 88-byte header grows a 64-byte tail:
-  a health state (`Initializing`/`Active`/`Rebuilding`/`Dead`), driver and host capability
-  words negotiated by intersection, assignment and D3D-device epochs, a source sequence that
-  advances only on new desktop frames, the last publish QPC, published/dropped totals and a
-  terminal error. `SetFrameChannelRequest` spends its padding word on `header_bytes`; the driver
-  touches the tail only when the version AND the declared size both allow it, so any v2/v3
-  pairing keeps working on the 88-byte prefix.
-- **The pf-vdisplay monitor owns its ring endpoint.** A frame-channel delivery becomes a
-  monitor-scoped `RingEndpoint` (header mapping, retained sealed handles, generation, publish and
-  source sequences); every swap-chain assignment opens its own device-bound textures on it and
-  drops them on exit, so no D3D object crosses a device epoch. The D3D device pool is a bounded
-  per-adapter map with per-device epochs and a removal flag every worker honours. The first-frame
-  stash no longer survives a swap-chain reassignment; the next compose refills it.
+- **The pf-vdisplay D3D device pool is per adapter, with epochs.** A bounded per-adapter map
+  hands every swap-chain worker the same device, stamps a new epoch on each creation (a TDR
+  recreate mints one; LUID equality is never device-compatibility proof) and carries a removal
+  flag every worker honours. Nothing to do.
 - **`pf_frame::health` classifies a capture gap by evidence.** A pure state machine over the
-  independent progress clocks (worker heartbeat, driver acquire, ring publish, source frame,
-  encoded AU) names a gap Healthy / Idle / Suspect / Stalled(Worker | Transport | Conversion |
+  independent progress clocks (worker heartbeat, source frame, encoded AU) names a gap
+  Healthy / Idle / Suspect / Stalled(Worker | Transport | Conversion |
   Presentation) / Recovering, with the 15 s stall floor the interim watchdog already uses. Cursor
   or input evidence alone only raises suspicion and asks for a composition canary; presents or a
   failed canary carry a gap into a recovery verdict. No I/O and no actuator: the recovery
@@ -160,6 +148,17 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **`capture_health` reports the classes the driver's clocks support.** `stall_class` is now
+  `worker` / `encoder` / `presentation` / `driver` (`transport` and `conversion` are gone),
+  `evidence` is `input` / `canary`, and the object gains `present_to_arrival_ms` plus a
+  `late_frames` flag for frames that arrive late rather than not at all. A dashboard matching the
+  old strings needs the new ones.
+- **`PUNKTFUNK_IDD_DIAG` replaces `PUNKTFUNK_STALL_PROBES`.** One gate now turns on the Windows
+  capture micro-probes, the DxgKrnl ETW session and a raw access-unit dump, none of which run in
+  a normal session. Set it to `1` when diagnosing a box, or to a directory to put the dump there.
+- **`VIDEO_CAP_*` negotiation is unchanged on Windows.** The driver allocates its encode-pool
+  slots in whatever format the opened backend asked for, so HDR, 10-bit and 4:4:4 resolve
+  exactly as they did when the host converted. Nothing to do.
 - **The Windows installers are punktfunk's own.** `punktfunk-host-setup-<version>.exe` and
   `punktfunk-client-setup-<version>_<arch>.exe` are now built by `punktfunk-setup-win`, the
   engine behind the Linux installer, with a self-contained WinUI 3 wizard (Recommended or
@@ -193,6 +192,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **HDR plus 4:4:4 carries full chroma again on Windows.** The in-driver encoder took P010 for
+  every HDR session, so NVENC emitted 4:2:0 while the `SET_ENCODE` reply still promised 4:4:4.
+  Nothing to do: such a session now opens on the packed 10-bit RGB input.
 - **A re-run upgrades a box that already has every package.** The install phase skipped the
   packages entirely when the host, console and plugin runner were all present, so a box carrying
   a broken build could only be cleared by uninstalling first — nothing to do.

@@ -433,8 +433,9 @@ dependencies = [
 name = "pf-vdisplay"
 version = "0.0.1"
 dependencies = [
+ "bytemuck",
  "pf-driver-proto",
- "thiserror",
+ "pf-umdf-util",
  "wdk-build",
  "wdk-iddcx",
  "wdk-sys",
@@ -794,15 +795,6 @@ dependencies = [
  "serde",
  "serde_json",
  "syn",
-]
-
-[[package]]
-name = "wdk-probe"
-version = "0.0.1"
-dependencies = [
- "pf-driver-proto",
- "wdk-build",
- "wdk-sys",
 ]
 
 [[package]]

@@ -5041,16 +5041,24 @@
       },
       "CaptureHealth": {
         "type": "object",
-        "description": "Per-session capture health (Windows IDD-push): the live classifier verdict, the ring's\nself-report and the last staged-recovery episode.",
+        "description": "Per-session capture health (Windows IDD-push): the live classifier verdict, the driver\nencoder's self-report and the last staged-recovery episode.",
         "required": [
           "class",
           "source_gap_ms",
-          "fence_ring",
+          "late_frames",
+          "detached",
           "published_total",
           "dropped_total",
           "episodes_suppressed"
         ],
         "properties": {
+          "backend_opened": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The backend the driver opened: `nvenc` / `amf` / `qsv` / `pyrowave`. Absent as above."
+          },
           "class": {
             "type": "string",
             "description": "`healthy` / `idle` / `suspect` / `stalled` / `recovering` / `rebuilding` / `secure_desktop`.",
@@ -5072,10 +5080,23 @@
             ],
             "description": "The recovery stage running now, while an episode is open."
           },
+          "detached": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Encode threads the driver abandoned after a wedge; two opens the driver cycle.",
+            "minimum": 0
+          },
           "dropped_total": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "encoder_state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The driver encoder's own state word: `closed` / `open` / `encoding` / `wedged`.\nAbsent until the session's first `SET_ENCODE`."
           },
           "episodes_suppressed": {
             "type": "integer",
@@ -5088,11 +5109,7 @@
               "string",
               "null"
             ],
-            "description": "Activity evidence behind the verdict: `recent_source` / `input` / `canary` / `presents`."
-          },
-          "fence_ring": {
-            "type": "boolean",
-            "description": "The shared-fence ring protocol is negotiated on the current ring."
+            "description": "Activity evidence behind the verdict: `input` / `canary`."
           },
           "last_episode": {
             "oneOf": [
@@ -5105,17 +5122,24 @@
               }
             ]
           },
+          "late_frames": {
+            "type": "boolean",
+            "description": "`present_to_arrival_ms` is past the classifier's bound: frames come late rather than not\nat all. Reported only — no recovery rung fires on it."
+          },
+          "present_to_arrival_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The newest access unit's OS present stamp against the moment the host took it.",
+            "minimum": 0
+          },
           "published_total": {
             "type": "integer",
             "format": "int64",
+            "description": "Access units the driver published, and frames it dropped at its encode pool.",
             "minimum": 0
-          },
-          "ring_state": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The ring's own state word; absent on a driver without the health tail."
           },
           "source_gap_ms": {
             "type": "integer",
@@ -5128,7 +5152,7 @@
               "string",
               "null"
             ],
-            "description": "When `class` is `stalled`: `worker` / `transport` / `conversion` / `presentation`."
+            "description": "When `class` is `stalled`: `worker` / `encoder` / `presentation` / `driver`."
           }
         }
       },
@@ -5219,7 +5243,7 @@
           },
           "stage": {
             "type": "string",
-            "description": "`encoder_reset` / `ring_reset` / `swap_chain_reset` / `presentation_reset` / `monitor_cycle` / `driver_cycle` / `capture_fallback`."
+            "description": "`encoder_reset` / `swap_chain_reset` / `presentation_reset` / `driver_cycle`."
           },
           "took_ms": {
             "type": "integer",
@@ -7085,7 +7109,7 @@
             "items": {
               "$ref": "#/components/schemas/ApiCodec"
             },
-            "description": "Codecs this host can encode (`Codec::host_wire_caps`, not the compile-time list)."
+            "description": "Codecs this host can encode (`host_wire_caps`, not the compile-time list)."
           },
           "gamestream": {
             "type": "boolean",

@@ -1,6 +1,6 @@
 //! WDK link flags for the cdylib (wdk-build) + `IddCxStub` (the driver calls IddCx DDIs via wdk-iddcx,
 //! and exports `IddMinimumVersionRequired`). `/INTEGRITYCHECK` (set by wdk-build) is cleared by the CI
-//! packaging step. Glob recipe matches wdk-probe/build.rs.
+//! packaging step.
 fn main() -> Result<(), wdk_build::ConfigError> {
     wdk_build::configure_wdk_binary_build()?;
     link_iddcx_stub();
