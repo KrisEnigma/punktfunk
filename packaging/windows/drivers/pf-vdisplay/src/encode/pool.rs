@@ -40,8 +40,13 @@ pub enum Offer {
     Taken(u64),
     /// Counted; the new drop total.
     Dropped(u64),
-    /// Not this pool's surface (device epoch, size or format) — nothing counted.
-    Refused,
+    /// Not this pool's surface — nothing counted. Carries what arrived against what the pool
+    /// was built for, because the three reasons are indistinguishable from the outside and a
+    /// stuck session shows only this line.
+    Refused {
+        got: (u32, u32, u32),
+        want: (u32, u32, u32),
+    },
 }
 
 struct State {
@@ -130,14 +135,19 @@ impl Pool {
     /// the event. Never blocks — a contended lock is a counted drop, as is a full pool with a
     /// live consumer.
     pub fn offer(&self, device: &Direct3DDevice, tex: &ID3D11Texture2D, qpc: u64) -> Offer {
+        let want = (self.width, self.height, self.source_format.0 as u32);
         if device.epoch() != self.device_epoch {
-            return Offer::Refused;
+            return Offer::Refused {
+                got: (0, 0, device.epoch()),
+                want: (self.width, self.height, self.device_epoch),
+            };
         }
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: `tex` is the live acquired surface; `desc` is a valid local out-param.
         unsafe { tex.GetDesc(&mut desc) };
-        if (desc.Width, desc.Height, desc.Format) != (self.width, self.height, self.source_format) {
-            return Offer::Refused;
+        let got = (desc.Width, desc.Height, desc.Format.0 as u32);
+        if got != want {
+            return Offer::Refused { got, want };
         }
         let Ok(mut st) = self.state.try_lock() else {
             return self.drop_one();
@@ -293,12 +303,18 @@ impl Attached {
                     s.section.store_u64(offset_of!(AuHeader, source_seq), seq);
                 }
             }
-            Offer::Refused => {
+            Offer::Refused { got, want } => {
                 if let Some(s) = session
                     && !s.stale.swap(true, Ordering::AcqRel)
                 {
                     dbglog!(
-                        "[pf-vd] encode: pool cannot take the surface (device epoch {} vs pool {}) — session stale until the next SET_ENCODE",
+                        "[pf-vd] encode: pool cannot take the surface - got {}x{} fmt {}, pool wants {}x{} fmt {} (epoch {} vs {}) - session stale until the next SET_ENCODE",
+                        got.0,
+                        got.1,
+                        got.2,
+                        want.0,
+                        want.1,
+                        want.2,
                         device.epoch(),
                         pool.device_epoch
                     );
