@@ -143,7 +143,7 @@ mod cursor;
 mod cursor_poll;
 #[path = "idd_push/descriptor.rs"]
 mod descriptor;
-// Stall attribution: DxgKrnl ETW, micro-probes, and the verdict matrix that folds them.
+// Stall reporting: the driver-clock verdict, plus DxgKrnl ETW and micro-probes as evidence.
 #[path = "idd_push/dxgkrnl_etw.rs"]
 mod dxgkrnl_etw;
 #[path = "idd_push/probes.rs"]
@@ -752,10 +752,16 @@ impl IddPushCapturer {
         self.driver_source_seq = driver_seq;
         self.delivered = Some(geometry);
         let now = Instant::now();
+        // The newest access unit's OS present stamp against the moment the host took it: the
+        // ground-truth clock that tells "DWM stopped presenting" from "we were late".
+        let arrival_ms = self
+            .encoder
+            .and_then(|t| t.present_to_arrival)
+            .map(|d| d.as_millis() as u64);
         if self.recovering_since.take().is_some() {
             // Self-inflicted gap (the presentation restart). Reset so it is not a DWM stall.
             self.stall_watch.reset();
-        } else if let Some(stall) = self.stall_watch.note_fresh(now) {
+        } else if let Some(stall) = self.stall_watch.note_fresh(now, arrival_ms) {
             // ETW prose uses gap + 300 ms lead-in (the cause lands just before);
             // discriminator counts use the gap only — presents from healthy flow
             // would falsely acquit.
@@ -784,11 +790,15 @@ impl IddPushCapturer {
         }
         // Sustained ~2 fps stretch: per-hole lines gate on prior ACTIVE flow.
         if let Some(r) = self.stall_watch.take_recovery() {
+            let arrival = r.arrival_ms();
             tracing::info!(
                 degraded_ms = r.degraded.as_millis() as u64,
                 holes = r.holes,
                 hole_time_ms = r.hole_time.as_millis() as u64,
                 worst_hole_ms = r.worst.as_millis() as u64,
+                // last/mean/max between the OS present and the access unit reaching us.
+                present_to_arrival_ms = arrival.as_deref().unwrap_or("absent"),
+                present_to_arrival_n = r.arrival_n,
                 "IDD-push capture recovered from a degraded stretch — fresh frames arrived \
                  only between stall-sized holes for its whole span; the per-stall lines \
                  above cover at most its first hole"
@@ -1127,7 +1137,7 @@ mod tests {
             .iter()
             .map(|ms| {
                 let at = base + Duration::from_millis(*ms);
-                w.note_fresh(at).map(|s| {
+                w.note_fresh(at, None).map(|s| {
                     let period = w.cycle(at, false);
                     (s, period)
                 })
@@ -1169,12 +1179,14 @@ mod tests {
     }
 
     /// First degraded-stretch summary, checked after every frame like the capture loop.
+    /// Every frame reports the same 40 ms present→arrival, so the folded tally is
+    /// assertable without modelling which frames land inside the stretch.
     fn watch_recovery(offsets_ms: &[u64]) -> (StallWatch, Option<super::stall::Recovery>) {
         let base = Instant::now();
         let mut w = StallWatch::new();
         let mut recovery = None;
         for ms in offsets_ms {
-            w.note_fresh(base + Duration::from_millis(*ms));
+            w.note_fresh(base + Duration::from_millis(*ms), Some(40));
             if let Some(r) = w.take_recovery() {
                 recovery.get_or_insert(r);
             }
@@ -1195,6 +1207,9 @@ mod tests {
         assert_eq!(r.hole_time.as_millis(), 5000);
         assert_eq!(r.worst.as_millis(), 500);
         assert_eq!(r.degraded.as_millis(), 5000);
+        // Every stamped frame reported 40 ms, at least one per hole.
+        assert_eq!(r.arrival_ms().as_deref(), Some("40/40/40"));
+        assert!(r.arrival_n >= r.holes, "n={}", r.arrival_n);
     }
 
     #[test]
@@ -1273,7 +1288,7 @@ mod tests {
             flow(&mut t, cycle * 4_000, 232);
             for ms in t {
                 let at = base + Duration::from_millis(ms);
-                if let Some(_stall) = w.note_fresh(at) {
+                if let Some(_stall) = w.note_fresh(at, None) {
                     // 2nd stall is damage-idle (cursor still on a dwm-only desktop).
                     let damage_idle = periods.len() == 1;
                     periods.push(w.cycle(at, damage_idle));
@@ -1294,15 +1309,18 @@ mod tests {
         let at = |ms: u64| base + Duration::from_millis(ms);
         let mut w = StallWatch::new();
         for i in 0..20u64 {
-            assert!(w.note_fresh(at(i * 16)).is_none());
+            assert!(w.note_fresh(at(i * 16), None).is_none());
         }
         w.reset();
-        assert!(w.note_fresh(at(1_104)).is_none(), "restart gap swallowed");
+        assert!(
+            w.note_fresh(at(1_104), None).is_none(),
+            "restart gap swallowed"
+        );
         for i in 1..20u64 {
-            assert!(w.note_fresh(at(1_104 + i * 16)).is_none());
+            assert!(w.note_fresh(at(1_104 + i * 16), None).is_none());
         }
         assert!(
-            w.note_fresh(at(1_104 + 19 * 16 + 300)).is_some(),
+            w.note_fresh(at(1_104 + 19 * 16 + 300), None).is_some(),
             "detection re-armed after the reset"
         );
     }
@@ -1335,11 +1353,11 @@ mod tests {
         );
     }
 
-    /// [`stall::attribute`] verdict table.
+    /// [`stall::attribute`] verdict table: the drain heartbeat, then the cursor witness.
     #[test]
     fn stall_attribution_verdicts() {
         use super::stall::{attribute, StallVerdict};
-        let verdict = |gap_ms: u64, hb_age_ms: Option<u64>| {
+        let verdict = |gap_ms: u64, hb_age_ms: Option<u64>, moved: Option<u32>| {
             attribute(
                 Duration::from_millis(gap_ms),
                 &StallEvidence {
@@ -1347,238 +1365,63 @@ mod tests {
                     probes: None,
                     etw: None,
                     etw_counts: None,
-                    cursor_moved_px: None,
+                    cursor_moved_px: moved,
                 },
             )
         };
         // No encoder open yet: no heartbeat, no verdict.
-        assert_eq!(verdict(300, None), StallVerdict::NoTelemetry);
+        assert_eq!(verdict(300, None, None), StallVerdict::NoTelemetry);
         // Heartbeat silent for most of the hole → worker starved.
-        assert_eq!(verdict(600, Some(400)), StallVerdict::WorkerStalled);
+        assert_eq!(verdict(600, Some(400), None), StallVerdict::WorkerStalled);
         // ≤16 ms heartbeat; 200 ms silence on a 300 ms gap is under max(gap/2, 250 ms).
-        assert_eq!(verdict(300, Some(200)), StallVerdict::ComposeSilence);
-        assert_eq!(verdict(300, Some(20)), StallVerdict::ComposeSilence);
+        assert_eq!(verdict(300, Some(200), None), StallVerdict::ComposeSilence);
+        assert_eq!(
+            verdict(300, Some(20), Some(312)),
+            StallVerdict::ComposeSilence
+        );
         // Long holes scale the bar: 900 ms silence on a 3 s gap is not half.
-        assert_eq!(verdict(3_000, Some(900)), StallVerdict::ComposeSilence);
-        assert_eq!(verdict(3_000, Some(1_600)), StallVerdict::WorkerStalled);
-    }
-
-    /// [`stall::classify`]: probes + ETW present/queue counts refine the telemetry verdict.
-    #[test]
-    fn stall_classification_matrix() {
-        use super::dxgkrnl_etw::EtwWindowCounts;
-        use super::stall::{ProbeWindow, StallClass, StallVerdict};
-        let gap = Duration::from_millis(600);
-        let probes = |fence: Option<u64>, dwm: Option<u64>, flush: Option<u64>| ProbeWindow {
-            fence_max_us: fence,
-            dwm_tick_frozen_us: dwm,
-            dwm_flush_max_us: flush,
-            ..ProbeWindow::default()
-        };
-        let counts = |presents: u32, queue_adds: u32| EtwWindowCounts {
-            presents,
-            queue_adds,
-            present_history: true,
-            queue_history: true,
-            flow_dwm_only: false,
-        };
-        // `cursor_moved_px = None` is pre-witness classification (`damage_idle_split`
-        // owns the witness). Nested fn, not a closure: each call site's temporaries
-        // need their own lifetime.
-        fn classify(
-            gap: Duration,
-            verdict: &StallVerdict,
-            p: Option<&ProbeWindow>,
-            c: Option<&EtwWindowCounts>,
-        ) -> StallClass {
-            super::stall::classify(gap, verdict, p, c, None)
-        }
-        // The driver verdict wins — probes cannot overrule "the worker was starved".
         assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::WorkerStalled,
-                Some(&probes(Some(500_000), None, None)),
-                None
-            ),
-            StallClass::OursWorker
-        );
-        // No probes: compose-silence alone cannot name a class.
-        assert_eq!(
-            classify(gap, &StallVerdict::ComposeSilence, None, None),
-            StallClass::Unattributed
-        );
-        // Fences stalled >= gap/2 -> adapter froze (even without driver telemetry).
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(400_000), Some(400_000), None)),
-                None
-            ),
-            StallClass::AdapterFreeze
+            verdict(3_000, Some(900), None),
+            StallVerdict::ComposeSilence
         );
         assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::NoTelemetry,
-                Some(&probes(Some(400_000), None, None)),
-                None
-            ),
-            StallClass::AdapterFreeze
+            verdict(3_000, Some(1_600), None),
+            StallVerdict::WorkerStalled
         );
-        // Fences fine (16 ms) but DWM's tick froze; DwmFlush counts too.
+        // The cursor never moved through the hole: nothing was dirty.
+        assert_eq!(verdict(600, Some(16), Some(0)), StallVerdict::DamageIdle);
+        // A starved worker is never demoted by a still cursor.
         assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(16_000), Some(500_000), None)),
-                None
-            ),
-            StallClass::CompositorBlocked
-        );
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(16_000), Some(20_000), Some(450_000))),
-                None
-            ),
-            StallClass::CompositorBlocked
-        );
-        // Alive + nothing composed, but no working present witness: Unattributed, never a guess.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(16_000), Some(20_000), Some(30_000))),
-                None
-            ),
-            StallClass::Unattributed
-        );
-        // A witness that has never produced an event is not a working witness.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(16_000), Some(20_000), Some(30_000))),
-                Some(&EtwWindowCounts {
-                    present_history: false,
-                    ..EtwWindowCounts::default()
-                })
-            ),
-            StallClass::Unattributed
-        );
-        // Presents through the hole while the virtual queue starved -> FrameGeneration.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(16_000), Some(20_000), Some(30_000))),
-                Some(&counts(54, 0))
-            ),
-            StallClass::FrameGeneration
-        );
-        // Stall-ending frame + caret blink stay under the bar -> ContentSilence.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(16_000), Some(20_000), Some(30_000))),
-                Some(&counts(2, 1))
-            ),
-            StallClass::ContentSilence
-        );
-        // Live witness (history true) reading exact zero is a measurement, not an absence.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(16_000), Some(20_000), Some(30_000))),
-                Some(&counts(0, 0))
-            ),
-            StallClass::ContentSilence
-        );
-        // Present witness only refines compose-silence; it does not overrule harder classes.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(Some(400_000), Some(400_000), None)),
-                Some(&counts(54, 0))
-            ),
-            StallClass::AdapterFreeze
-        );
-        // Healthy probes with no driver telemetry: the hole has no owner.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::NoTelemetry,
-                Some(&probes(Some(16_000), Some(20_000), None)),
-                Some(&counts(54, 0))
-            ),
-            StallClass::Unattributed
-        );
-        // Absent probe never reads as stalled; a working present witness still splits.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&probes(None, Some(20_000), Some(30_000))),
-                Some(&counts(1, 0))
-            ),
-            StallClass::ContentSilence
+            verdict(600, Some(400), Some(0)),
+            StallVerdict::WorkerStalled
         );
     }
 
-    /// Present-free hole on a dwm-only desktop: still cursor -> DamageIdle; moving
-    /// cursor -> ContentSilence. A game session (not dwm-only) is never demoted.
+    /// With the ETW leg on (`PUNKTFUNK_IDD_DIAG`), a game presenting through the hole keeps
+    /// compose-silence even under a still cursor; dwm-only flow still demotes.
     #[test]
-    fn damage_idle_split() {
+    fn a_present_witness_blocks_the_damage_idle_demotion() {
         use super::dxgkrnl_etw::EtwWindowCounts;
-        use super::stall::{classify, ProbeWindow, StallClass, StallVerdict};
-        let gap = Duration::from_millis(600);
-        let healthy = ProbeWindow {
-            fence_max_us: Some(16_000),
-            dwm_tick_frozen_us: Some(20_000),
-            dwm_flush_max_us: Some(30_000),
-            ..ProbeWindow::default()
-        };
-        let counts = |dwm_only: bool| EtwWindowCounts {
-            presents: 0,
-            queue_adds: 0,
-            present_history: true,
-            queue_history: true,
-            flow_dwm_only: dwm_only,
-        };
-        let run = |dwm_only: bool, moved: Option<u32>| {
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&healthy),
-                Some(&counts(dwm_only)),
-                moved,
+        use super::stall::{attribute, StallVerdict};
+        let verdict = |dwm_only: bool| {
+            attribute(
+                Duration::from_millis(600),
+                &StallEvidence {
+                    max_heartbeat_age_ms: Some(16),
+                    probes: None,
+                    etw: None,
+                    etw_counts: Some(EtwWindowCounts {
+                        presents: 40,
+                        queue_adds: 0,
+                        present_history: true,
+                        queue_history: true,
+                        flow_dwm_only: dwm_only,
+                    }),
+                    cursor_moved_px: Some(0),
+                },
             )
         };
-        assert_eq!(run(true, Some(0)), StallClass::DamageIdle);
-        assert_eq!(run(true, Some(312)), StallClass::ContentSilence);
-        // Game in the lookback: hole is real evidence even with a still cursor.
-        assert_eq!(run(false, Some(0)), StallClass::ContentSilence);
-        // No witness (`GetCursorPos` failing): pre-witness behavior.
-        assert_eq!(run(true, None), StallClass::ContentSilence);
-        // Witness never overrules a harder conviction: stalled fences stay AdapterFreeze.
-        assert_eq!(
-            classify(
-                gap,
-                &StallVerdict::ComposeSilence,
-                Some(&ProbeWindow {
-                    fence_max_us: Some(400_000),
-                    ..ProbeWindow::default()
-                }),
-                Some(&counts(true)),
-                Some(0),
-            ),
-            StallClass::AdapterFreeze
-        );
+        assert_eq!(verdict(false), StallVerdict::ComposeSilence);
+        assert_eq!(verdict(true), StallVerdict::DamageIdle);
     }
 }
