@@ -88,56 +88,13 @@ fn hr_success(hr: NTSTATUS) -> bool {
 /// masked that still-unattributed stall — confirmed cases kept arriving with the raise off —
 /// while regressing loaded NVIDIA boxes into feed starvation, so it was reverted. The per-box
 /// A/B escape hatch remains: `setx /M PFVD_NO_RT_GPU 1` (any value) + a device restart disables
-/// the raise — read via [`machine_env`] as well as the process environment, because WUDFHost's
+/// the raise — read via [`crate::log::knob`] (process environment, then the machine one, because WUDFHost's
 /// own environment is stale until a reboot. The old `PFVD_RT_GPU` opt-in ladder
 /// (off/thread/realtime) is gone; a stale `PFVD_RT_GPU` now just matches the default.
 fn rt_gpu_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var_os("PFVD_NO_RT_GPU").is_none() && machine_env("PFVD_NO_RT_GPU").is_none()
-    })
-}
-
-/// Read a MACHINE environment variable from the registry — where `setx /M` writes it.
-///
-/// `std::env` is NOT enough in this process: WUDFHost inherits its environment from WUDFSvc,
-/// which inherited it from the SCM at boot, and the SCM never refreshes on `WM_SETTINGCHANGE`.
-/// So a `setx /M` set today is invisible to `std::env::var_os` until a REBOOT — measured on
-/// .173 (2026-08-29): the toggle below had no effect across device restarts with fresh WUDFHost
-/// PIDs until this read was added. [`rt_gpu_enabled`]'s opt-out reads through here for the same
-/// reason.
-fn machine_env(name: &str) -> Option<String> {
-    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
-    use windows::core::{HSTRING, PCWSTR};
-    const KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
-    let (subkey, value) = (HSTRING::from(KEY), HSTRING::from(name));
-    let mut buf = [0u16; 256];
-    let mut size = std::mem::size_of_val(&buf) as u32;
-    // SAFETY: both name pointers address NUL-terminated HSTRING buffers alive for the call;
-    // `buf`/`size` are a matched out-buffer and its byte length. RRF_RT_REG_SZ makes the call
-    // reject any non-string value rather than write a foreign type into the buffer.
-    let rc = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(subkey.as_ptr()),
-            PCWSTR(value.as_ptr()),
-            RRF_RT_REG_SZ,
-            None,
-            Some(buf.as_mut_ptr().cast()),
-            Some(&mut size),
-        )
-    };
-    if rc.is_err() {
-        return None;
-    }
-    // `size` is bytes INCLUDING the terminator; trim to chars and drop trailing NULs.
-    let chars = (size as usize / 2).min(buf.len());
-    Some(
-        String::from_utf16_lossy(&buf[..chars])
-            .trim_end_matches('\0')
-            .to_string(),
-    )
+    *ON.get_or_init(|| crate::log::knob("PFVD_NO_RT_GPU").is_none())
 }
 
 pub struct SwapChainProcessor {
