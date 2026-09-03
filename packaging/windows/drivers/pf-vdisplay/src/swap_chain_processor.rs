@@ -549,6 +549,9 @@ impl SwapChainProcessor {
                         // the copy is ordered before the consumer via the slot keyed mutex).
                         let res = unsafe { IDXGIResource::from_raw(raw) };
                         if let Ok(tex) = res.cast::<ID3D11Texture2D>() {
+                            // Spike S5: one `CopyResource` into the probe's pool, or nothing.
+                            #[cfg(feature = "encode-probe")]
+                            crate::encode_probe::offer(device, &tex, display_qpc, target_id);
                             match publisher.as_mut().map(|p| p.publish(&tex, display_qpc)) {
                                 // Ring took it (or the host is alive and busy) — nothing to retain.
                                 Some(

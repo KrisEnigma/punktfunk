@@ -48,8 +48,25 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
         control::IOCTL_UPDATE_MODES => update_modes(request),
         control::IOCTL_SET_CURSOR_CHANNEL => set_cursor_channel(request),
         control::IOCTL_SET_CURSOR_FORWARD => set_cursor_forward(request),
+        #[cfg(feature = "encode-probe")]
+        control::IOCTL_ENCODE_PROBE_ARM => encode_probe_arm(request),
+        #[cfg(feature = "encode-probe")]
+        control::IOCTL_ENCODE_PROBE_STATUS => {
+            let reply = crate::encode_probe::status();
+            write_output_prefix_complete(request, &reply, size_of::<control::EncodeProbeReply>());
+        }
         _ => request.complete(STATUS_NOT_FOUND),
     }
+}
+
+/// `IOCTL_ENCODE_PROBE_ARM` (spike S5): start an in-process encode run on one monitor's frames.
+#[cfg(feature = "encode-probe")]
+fn encode_probe_arm(request: Request) {
+    let Some(req) = read_input::<control::EncodeProbeRequest>(&request) else {
+        request.complete(STATUS_INVALID_PARAMETER);
+        return;
+    };
+    request.complete(crate::encode_probe::arm(&req));
 }
 
 /// `IOCTL_SET_RENDER_ADAPTER`: pin the IddCx render adapter (hybrid-GPU IDD-push).
