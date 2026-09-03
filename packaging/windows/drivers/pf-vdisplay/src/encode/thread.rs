@@ -13,9 +13,9 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use pf_driver_proto::encode::DRV_STATUS_OPENED;
 use pf_driver_proto::encode::au::{self, AuHeader};
 use pf_driver_proto::encode::{self as wire, EncoderCapsWire, SetEncodeReply, SetEncodeRequest};
-use pf_driver_proto::frame::DRV_STATUS_OPENED;
 use pf_encode_win::{ChromaFormat, Codec, Encoder, EncoderCaps};
 use pf_frame::HdrMeta;
 use windows::Win32::Foundation::HANDLE;

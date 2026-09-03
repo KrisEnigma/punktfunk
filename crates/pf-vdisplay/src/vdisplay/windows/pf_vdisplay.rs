@@ -558,6 +558,27 @@ fn probe_device() -> Probe {
     probe
 }
 
+/// The installed driver speaks a protocol this host cannot drive. Typed so a session can name
+/// the remedy — install the matching pair — instead of reporting an IOCTL error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriverOutdated {
+    pub driver: u32,
+    pub host: u32,
+}
+
+impl std::fmt::Display for DriverOutdated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pf-vdisplay driver outdated: the driver speaks protocol {}, this host needs {} — \
+             install the matching host + driver (they ship in one installer)",
+            self.driver, self.host
+        )
+    }
+}
+
+impl std::error::Error for DriverOutdated {}
+
 /// pf-vdisplay IOCTL surface behind [`VirtualDisplayManager`](super::manager::VirtualDisplayManager).
 /// Wire contract: `pf_driver_proto::control` (versioned, hard-checked).
 pub(crate) struct PfVdisplayDriver;
@@ -592,53 +613,23 @@ impl VdisplayDriver for PfVdisplayDriver {
         }
         let info: control::InfoReply =
             bytemuck::pod_read_unaligned(&info_buf[..size_of::<control::InfoReply>()]);
-        // Floor/ceiling, not equality: v4+ is additive, so a v3 driver still works and the
-        // in-place path is gated on the reported version. Below the floor or above this host fails.
+        // v7 replaced the video transport outright, so the floor equals this host's version: a
+        // v6 driver has no encoder to open and a future one may have moved the section again.
         if info.protocol_version < pf_driver_proto::MIN_DRIVER_PROTOCOL_VERSION
             || info.protocol_version > pf_driver_proto::PROTOCOL_VERSION
         {
-            anyhow::bail!(
-                "pf-vdisplay protocol mismatch: host drives {}..={}, driver reports {} — install \
-                 matching host + driver",
-                pf_driver_proto::MIN_DRIVER_PROTOCOL_VERSION,
-                pf_driver_proto::PROTOCOL_VERSION,
-                info.protocol_version
-            );
+            return Err(anyhow::Error::new(DriverOutdated {
+                driver: info.protocol_version,
+                host: pf_driver_proto::PROTOCOL_VERSION,
+            }));
         }
         let watchdog_s = info.watchdog_timeout_s.max(1);
         // Only log of the negotiated watchdog; pinger cadence is `watchdog/3`.
         tracing::info!(
-            "pf-vdisplay protocol {} (host drives {}..={}, watchdog timeout {}s)",
+            "pf-vdisplay protocol {} (watchdog timeout {}s)",
             info.protocol_version,
-            pf_driver_proto::MIN_DRIVER_PROTOCOL_VERSION,
-            pf_driver_proto::PROTOCOL_VERSION,
             watchdog_s
         );
-        // Per-version gaps. Bumps since v3 are additive; a blanket `< PROTOCOL_VERSION` named
-        // the wrong missing capability (told a v4 driver it lacked a v4 feature).
-        if info.protocol_version < 4 {
-            tracing::warn!(
-                "pf-vdisplay protocol {}: driver lacks the in-place mid-stream resize \
-                 (IOCTL_UPDATE_MODES, added in v4) — every mid-stream resize costs a monitor \
-                 re-arrival (one hotplug per switch) until the driver is updated",
-                info.protocol_version
-            );
-        }
-        if info.protocol_version < 5 {
-            tracing::warn!(
-                "pf-vdisplay protocol {}: driver lacks the IddCx hardware-cursor channel (added in \
-                 v5) — the pointer stays composited into the captured frame",
-                info.protocol_version
-            );
-        }
-        if info.protocol_version < 6 {
-            tracing::info!(
-                "pf-vdisplay protocol {}: driver lacks the mid-stream cursor-forward flip \
-                 (IOCTL_SET_CURSOR_FORWARD, added in v6) — the cursor model declared at monitor ADD \
-                 stands for the whole session",
-                info.protocol_version
-            );
-        }
         // CLEAR_ALL only on the first open of the process. A reopen can race sessions that still
         // believe they are live; an unconditional CLEAR_ALL would raze them.
         if !reap_orphans {

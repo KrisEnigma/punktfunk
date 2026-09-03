@@ -2,13 +2,13 @@
 //!
 //! Two planes:
 //! * [`control`] — `DeviceIoControl` (add/remove, adapter pin, keepalive, info, clear-all,
-//!   frame-channel delivery). Owned and versioned — not the SudoVDA ABI.
-//! * [`frame`] — IDD-push transport. The host creates unnamed keyed-mutex textures plus a
-//!   header and a frame-ready event, duplicates handles into WUDFHost, and delivers the
-//!   values over [`control::IOCTL_SET_FRAME_CHANNEL`]. No object-name scheme: unnamed
-//!   objects cannot be enumerated, opened by name, or squatted. This crate owns
-//!   [`frame::SharedHeader`], [`frame::FrameToken`], the channel-delivery struct, and the
-//!   status codes. Evidence: `design/idd-push-security.md`.
+//!   cursor delivery). Owned and versioned — not the SudoVDA ABI.
+//! * [`encode`] — the video transport. The host creates an unnamed section plus a ready event,
+//!   duplicates the handles into WUDFHost over [`encode::IOCTL_SET_ENCODE`], and the driver's
+//!   encoder publishes access units into it. No object-name scheme: unnamed objects cannot be
+//!   enumerated, opened by name, or squatted. This crate owns [`encode::au::AuHeader`], the
+//!   [`encode::FrameToken`] publish cell and the status codes.
+//!   Evidence: `design/idd-push-security.md`.
 //!
 //! GUID and LUID travel as integers; each side converts to its own `windows` / bindgen types.
 //! `Pod` + `offset_of!` asserts make a one-sided layout edit a compile error.
@@ -38,21 +38,21 @@ pub const fn interface_guid_fields() -> (u32, u16, u16, [u8; 8]) {
 /// Bumped on any incompatible change to either plane. Exchanged via [`control::IOCTL_GET_INFO`];
 /// host and driver assert a match at startup.
 ///
-/// v6 is additive over v3–v5: [`control::IOCTL_UPDATE_MODES`], hardware-cursor channel
-/// ([`control::IOCTL_SET_CURSOR_CHANNEL`]), mid-stream cursor flip
-/// ([`control::IOCTL_SET_CURSOR_FORWARD`]). A v3 driver lacks only UPDATE_MODES; the host
-/// gates that IOCTL on the handshake and falls back to re-arrival. Ship driver+host together
-/// for v4+ features. Evidence: `design/first-frame-and-resize-latency.md`.
+/// v7 is NOT additive: the pixel ring is gone. The driver encodes what DWM composes and
+/// publishes access units into the host's section ([`encode::IOCTL_SET_ENCODE`],
+/// [`encode::IOCTL_ENCODE_CTL`]), and `IOCTL_SET_FRAME_CHANNEL` no longer exists — so the floor
+/// rises with it and a v6 driver fails the session with a structured error. Host and driver ship
+/// in one installer. Evidence: `design/windows-video-plane-overhaul.md` §2.3.
 ///
 /// [`control::AddRequest`] luminance tail and [`control::AddReply::cursor_excluded`] are
 /// prefix-compatible (no bump): a short read/write sees zeros = unknown. A hardware-cursor
 /// declare is irrevocable on the adapter — DWM excludes the pointer from every later monitor
-/// until the adapter resets — so the host self-composites when the cursor channel is absent.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// until the adapter resets — so the driver blends the pointer when the client draws none.
+pub const PROTOCOL_VERSION: u32 = 7;
 
-/// Oldest driver this host still drives. v4+ IOCTLs are additive; a v3 driver lacks only
-/// `IOCTL_UPDATE_MODES`, which the host gates on the handshake and covers with re-arrival.
-pub const MIN_DRIVER_PROTOCOL_VERSION: u32 = 3;
+/// Oldest driver this host still drives. Equal to [`PROTOCOL_VERSION`]: v7 replaced the video
+/// transport outright, so there is no older driver a v7 host can talk to.
+pub const MIN_DRIVER_PROTOCOL_VERSION: u32 = 7;
 
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN = 0x22, func, METHOD_BUFFERED = 0, FILE_ANY_ACCESS = 0)`.
 pub const fn ctl_code(func: u32) -> u32 {
@@ -62,7 +62,6 @@ pub const fn ctl_code(func: u32) -> u32 {
 /// Control (`DeviceIoControl`) plane: add/remove, adapter pin, keepalive, frame-channel delivery.
 pub mod control {
     use super::ctl_code;
-    use super::frame::RING_LEN;
     use bytemuck::{Pod, Zeroable};
 
     // Contiguous op space at 0x900 — distinct from SudoVDA's gappy 0x800/0x888/0x8FF numbering.
@@ -79,9 +78,8 @@ pub mod control {
     /// Tear down every virtual monitor (host-startup orphan reap). First-class op — not the
     /// SudoVDA "send-and-hope-it's-ignored" hack.
     pub const IOCTL_CLEAR_ALL: u32 = ctl_code(0x905);
-    /// Deliver handle VALUES of unnamed frame objects duplicated into WUDFHost. Input
-    /// [`SetFrameChannelRequest`]. Sent again on every mid-session ring recreate (HDR-mode flip).
-    pub const IOCTL_SET_FRAME_CHANNEL: u32 = ctl_code(0x906);
+    // 0x906 was `IOCTL_SET_FRAME_CHANNEL` (the pixel ring, retired at v7); never reuse it —
+    // a v6 driver still answers it.
     /// Refresh a LIVE monitor's target-mode list via `IddCxMonitorUpdateModes2`. Input
     /// [`UpdateModesRequest`]. CCD then forces the new mode on the same monitor — no REMOVE→ADD,
     /// so OS identity and the driver's swap-chain survive. A v3 driver fails the unknown IOCTL;
@@ -194,48 +192,6 @@ pub mod control {
         pub watchdog_timeout_s: u32,
     }
 
-    /// `IOCTL_SET_FRAME_CHANNEL` input. Every handle is a VALUE already duplicated into WUDFHost.
-    /// Adopt-on-success-only (`design/idd-push-security.md` invariant 5): the driver owns (and
-    /// closes) the handles IFF the IOCTL succeeds. On any error the host reaps via
-    /// `DUPLICATE_CLOSE_SOURCE`. Closing on error double-closes possibly-reused handle values.
-    #[repr(C)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
-    pub struct SetFrameChannelRequest {
-        pub target_id: u32,
-        /// Must match the shared header's generation at attach; a stale delivery is dropped.
-        pub generation: u32,
-        /// Leading valid entries of `texture_handles` (`1..=`[`RING_LEN`]).
-        pub ring_len: u32,
-        /// Bytes the host allocated for the shared header section (v3; the former `_pad`, same
-        /// offset — a pre-v3 host leaves it 0, which every v3 gate reads as "v2 prefix only").
-        /// Together with the header's stamped `version` this is the ONLY permission to touch the
-        /// v3 tail: see [`frame::v3_readable`](crate::frame::v3_readable).
-        pub header_bytes: u32,
-        /// The shared-header file-mapping handle (the driver maps it and writes status/publish tokens).
-        pub header_handle: u64,
-        pub event_handle: u64,
-        /// Shared NT handles; the driver opens them via `ID3D11Device1::OpenSharedResource1`.
-        pub texture_handles: [u64; RING_LEN_USIZE],
-    }
-
-    /// [`RING_LEN`] as usize. The array is sized at the compile-time max; `ring_len` is live count.
-    pub const RING_LEN_USIZE: usize = RING_LEN as usize;
-
-    /// `IOCTL_SET_FRAME_CHANNEL` input from a fence-ring host (immunity plan WP7): the v1 request
-    /// verbatim as a prefix, then the two shared `ID3D11Fence` handle values (duplicated into
-    /// WUDFHost like the textures). Same IOCTL code — the driver tells the two apart by input
-    /// length (`>= size_of::<SetFrameChannelRequestV2>()`), and a pre-fence driver reads the v1
-    /// prefix of a v2 request unchanged (the ownership contract covers the fence handles too: the
-    /// host reaps them on error, the driver closes them on success). Zero fence handles = no fences
-    /// (a v2-shaped request from a host that negotiated the keyed-mutex arm).
-    #[repr(C)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
-    pub struct SetFrameChannelRequestV2 {
-        pub v1: SetFrameChannelRequest,
-        pub ready_fence_handle: u64,
-        pub retire_fence_handle: u64,
-    }
-
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
     pub struct SetCursorChannelRequest {
@@ -322,14 +278,6 @@ pub mod control {
         assert!(offset_of!(AddReply, wudf_pid) == 16);
         // cursor_excluded starts at the legacy boundary (prefix-compat).
         assert!(offset_of!(AddReply, cursor_excluded) == ADD_REPLY_LEGACY_SIZE);
-
-        assert!(size_of::<SetFrameChannelRequest>() == 32 + 8 * RING_LEN_USIZE);
-        assert!(offset_of!(SetFrameChannelRequest, target_id) == 0);
-        assert!(offset_of!(SetFrameChannelRequest, generation) == 4);
-        assert!(offset_of!(SetFrameChannelRequest, ring_len) == 8);
-        assert!(offset_of!(SetFrameChannelRequest, header_handle) == 16);
-        assert!(offset_of!(SetFrameChannelRequest, event_handle) == 24);
-        assert!(offset_of!(SetFrameChannelRequest, texture_handles) == 32);
 
         assert!(size_of::<RemoveRequest>() == 8);
         assert!(offset_of!(RemoveRequest, session_id) == 0);
@@ -821,253 +769,28 @@ pub mod vdisplay {
     }
 }
 
-/// IDD-push frame transport: shared ring header, publish token, driver-status codes.
-/// Textures are unnamed D3D11 keyed-mutex objects; the driver reaches them only through
-/// handles duplicated into its process and delivered via [`crate::control::IOCTL_SET_FRAME_CHANNEL`].
-/// Layout/contract only.
-pub mod frame {
+/// Protocol v7: the driver encodes, and the host reads access units instead of pixels.
+///
+/// It replaced the pixel ring rather than joining it — one transport, as
+/// `design/windows-video-plane-overhaul.md` §1.1 decided. The host still owns the memory: it
+/// creates an unnamed section plus a ready event, duplicates both into WUDFHost and delivers the
+/// values over [`IOCTL_SET_ENCODE`], which also carries codec, mode, bitrate, HDR metadata and an
+/// ordered backend preference list. The driver opens the first backend that works and answers with
+/// [`SetEncodeReply`] — the backend that took, its [`EncoderCapsWire`] and the applied bitrate, or
+/// a named failure. No silent fallback.
+///
+/// Steady state lives in [`au`]: a 128-byte header, a 16-entry slot table and a bitstream heap the
+/// encode thread writes into. Publishing goes through [`FrameToken`], so the host takes a slot only
+/// under a generation check. Runtime control — keyframe, RFI, bitrate, HDR metadata, reset, flush —
+/// travels as one-shot [`IOCTL_ENCODE_CTL`] calls on the framework queue that already carries
+/// `PING`.
+pub mod encode {
+    use super::ctl_code;
     use bytemuck::{Pod, Zeroable};
 
-    /// Header magic (`"PFVD"` LE). The host stamps it last (after the ring textures exist) so the
-    /// driver only attaches to a fully-published ring.
-    pub const MAGIC: u32 = 0x4456_4650;
-    /// Frame-plane version (independent bump of the header layout). v2 appended the stall-attribution
-    /// telemetry tail (`drain_heartbeat_qpc`/`last_acquire_qpc`/`offered_total`); v3 appended the
-    /// ring-health tail (state, capabilities, epochs, source sequence, terminal error, counters) —
-    /// see [`VERSION_TELEMETRY`] and [`VERSION_HEALTH`] for the two compatibility gates.
-    pub const VERSION: u32 = 3;
-    /// The header version that grew the ring-health tail (immunity plan WP4). Reading or writing
-    /// past [`HEADER_V2_SIZE`] needs BOTH gates — see [`v3_readable`]: the host-stamped `version`
-    /// says the layout exists, the delivery's `header_bytes` says the section is that large. A v2
-    /// section is never touched past byte 88; a v3 host may allocate the larger section for a v2
-    /// driver, which reads only the prefix and writes no v3 field.
-    pub const VERSION_HEALTH: u32 = 3;
-    /// The v2 (telemetry-tail) header size — the prefix every driver since v2 understands.
-    pub const HEADER_V2_SIZE: usize = 88;
-    /// The v3 (ring-health-tail) header size — the section a v3 host allocates.
-    pub const HEADER_V3_SIZE: usize = 152;
-
-    /// Both endpoints may read/write the v3 tail only when the host stamped a v3 layout AND the
-    /// delivery declared a section at least that large. One gate, shared, so neither side can
-    /// guess: an old host leaves `header_bytes` zero (its request `_pad`), which fails here.
-    #[must_use]
-    pub const fn v3_readable(version: u32, header_bytes: u32) -> bool {
-        version >= VERSION_HEALTH && header_bytes as usize >= HEADER_V3_SIZE
-    }
-
-    // Capability bits, stamped by each side into its own header word (`host_capabilities` /
-    // `capabilities`). A transport or actuator activates only where BOTH sides agree
-    // ([`negotiate`]); a mismatch never selects a protocol by guesswork.
-    /// Understands the v3 ring-health tail.
-    pub const CAP_RING_HEALTH_V3: u32 = 1 << 0;
-    /// The driver keeps the ring endpoint across a swap-chain assignment (WP5).
-    pub const CAP_ENDPOINT_SURVIVES_ASSIGNMENT: u32 = 1 << 1;
-    /// CAS + shared-fence slot transport (WP7).
-    pub const CAP_FENCE_RING: u32 = 1 << 2;
-    /// The driver accepts a swap-chain reset actuator (WP13).
-    pub const CAP_SWAPCHAIN_RESET: u32 = 1 << 3;
-    /// The driver stamps `source_sequence` and `qpc_pts` (source present QPC) per real frame.
-    pub const CAP_SOURCE_SEQUENCE_QPC: u32 = 1 << 4;
-
-    /// The capabilities both sides advertise — the only ones either may act on.
-    #[must_use]
-    pub const fn negotiate(host: u32, driver: u32) -> u32 {
-        host & driver
-    }
-
-    /// `SharedHeader::health_state` values (v3). The driver stores the state LAST, with Release,
-    /// after the epoch/sequence fields it describes; a reader loads it with Acquire before
-    /// trusting them, and re-reads it after to detect a torn snapshot ([`snapshot_consistent`]).
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    #[repr(u32)]
-    pub enum HealthState {
-        /// Header created, no publisher attached yet (also what a pre-v3 driver leaves: 0).
-        Initializing = 0,
-        /// A publisher is attached and the ring is live.
-        Active = 1,
-        /// The publisher retired its attachment (generation superseded / worker exit); a fresh
-        /// attach is expected.
-        Rebuilding = 2,
-        /// The generation is poisoned (abandoned slot, fatal sync/device result). `terminal_error_*`
-        /// name the cause. Only a rebuild helps.
-        Dead = 3,
-    }
-
-    impl HealthState {
-        /// Decode a stored word; unknown values read as [`Self::Dead`] — an unrecognised state is
-        /// not one to keep streaming on.
-        #[must_use]
-        pub const fn from_u32(v: u32) -> Self {
-            match v {
-                0 => Self::Initializing,
-                1 => Self::Active,
-                2 => Self::Rebuilding,
-                _ => Self::Dead,
-            }
-        }
-    }
-
-    /// `terminal_error_domain` values (v3), paired with a raw `terminal_error_code`.
-    pub const ERR_DOMAIN_NONE: u32 = 0;
-    /// Slot synchronization: an abandoned or failed keyed-mutex/fence operation (code = HRESULT).
-    pub const ERR_DOMAIN_TRANSPORT: u32 = 1;
-    /// The D3D device: removed/reset (code = `GetDeviceRemovedReason`).
-    pub const ERR_DOMAIN_DEVICE: u32 = 2;
-
-    /// Torn-read resistance for a v3 snapshot: the state word read before and after the epoch/
-    /// sequence fields must match, or the snapshot spans a driver transition and is discarded.
-    #[must_use]
-    pub const fn snapshot_consistent(state_before: u32, state_after: u32) -> bool {
-        state_before == state_after
-    }
-    /// Header version that grew the telemetry tail. Gated on the host-stamped `version` field, not
-    /// mapping size: a v2 driver writes the tail only when `version >= VERSION_TELEMETRY` (a v1
-    /// host mapped 64 bytes — never write past it). A v2 host reads `drain_heartbeat_qpc == 0` as
-    /// pre-telemetry (same zero-means-absent as [`OPENED_DETAIL_LIVE`]). Neither side rejects the
-    /// other's version — the tail is diagnostics.
-    pub const VERSION_TELEMETRY: u32 = 2;
-    /// Ring slots. Headroom so a 0 ms-timeout publish always finds a free slot while the host holds
-    /// one across convert/copy + pipelined encode.
-    pub const RING_LEN: u32 = 6;
-
-    /// `driver_status` values the driver writes into the host header (logged on a timeout).
-    pub const DRV_STATUS_NONE: u32 = 0;
-    pub const DRV_STATUS_OPENED: u32 = 1;
-    /// Could not open the host's textures — render-adapter mismatch. Detail carries the HRESULT.
-    pub const DRV_STATUS_TEX_FAIL: u32 = 2;
-    /// No `ID3D11Device1` to open shared resources.
-    pub const DRV_STATUS_NO_DEVICE1: u32 = 3;
-    /// Ring [`SharedHeader::target_id`] ≠ the monitor this delivery landed on. Fail-closed
-    /// (`design/idd-push-security.md`); detail carries the target id the ring claims.
-    pub const DRV_STATUS_BIND_FAIL: u32 = 4;
-
-    /// Live `driver_status_detail` while [`DRV_STATUS_OPENED`]. Bit 31 (this constant) distinguishes
-    /// a pre-detail driver (field = 0) from "zero frames offered". Bits 30..16: surfaces offered
-    /// (15-bit, saturating). Bits 15..0: publishes dropped for a descriptor mismatch (16-bit,
-    /// saturating). `offered == 0` → DWM never composed; `offered > 0` with `seq` still 0 → every
-    /// compose was dropped mismatched (ring sized from a stale GDI mode).
-    pub const OPENED_DETAIL_LIVE: u32 = 0x8000_0000;
-
-    /// Pack the live OPENED diagnostic word; both counters saturate.
-    #[must_use]
-    pub const fn pack_opened_detail(offered: u32, mismatched: u32) -> u32 {
-        let o = if offered > 0x7FFF { 0x7FFF } else { offered };
-        let m = if mismatched > 0xFFFF {
-            0xFFFF
-        } else {
-            mismatched
-        };
-        OPENED_DETAIL_LIVE | (o << 16) | m
-    }
-
-    /// Unpack → `(offered, mismatched)`. `None` when [`OPENED_DETAIL_LIVE`] was never stamped.
-    #[must_use]
-    pub const fn unpack_opened_detail(detail: u32) -> Option<(u32, u32)> {
-        if detail & OPENED_DETAIL_LIVE == 0 {
-            return None;
-        }
-        Some(((detail >> 16) & 0x7FFF, detail & 0xFFFF))
-    }
-
-    /// Shared metadata header. Atomic fields (`magic`, `latest`, `generation`) are accessed via
-    /// each side's own atomic view over the mapping; this is the layout.
-    #[repr(C)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug)]
-    pub struct SharedHeader {
-        pub magic: u32,
-        pub version: u32,
-        /// Bumped on ring recreate (HDR-mode flip → new texture format + a fresh
-        /// [`control::IOCTL_SET_FRAME_CHANNEL`](crate::control::IOCTL_SET_FRAME_CHANNEL)).
-        /// A publish carries it so the host rejects a stale-ring publish.
-        pub generation: u32,
-        pub ring_len: u32,
-        pub width: u32,
-        pub height: u32,
-        pub dxgi_format: u32,
-        /// OS target id of the monitor this ring belongs to (former `_pad`, same offset).
-        /// Host-stamped before the magic and never changed afterwards. Attach proceeds only when
-        /// it equals the monitor's own target id ([`check_attach`]); mismatch → [`DRV_STATUS_BIND_FAIL`].
-        pub target_id: u32,
-        /// Driver-written after each copy; host loads `Acquire`. See [`FrameToken`].
-        pub latest: u64,
-        pub qpc_pts: u64,
-        /// Adapter the swap-chain actually renders on (mismatch detection).
-        pub driver_render_luid_low: u32,
-        pub driver_render_luid_high: i32,
-        /// Driver-written status. UMDF hides OutputDebugString and the restricted token blocks
-        /// file writes, so this header is how the driver reports state.
-        pub driver_status: u32,
-        pub driver_status_detail: u32,
-        /// QPC of the swap-chain worker's most recent drain-loop iteration, E_PENDING included.
-        /// Relaxed stores; `0` = pre-v2 driver never wrote it. Fresh heartbeat + stale
-        /// [`Self::last_acquire_qpc`] = worker running, DWM composing nothing; stale heartbeat =
-        /// worker starved.
-        pub drain_heartbeat_qpc: u64,
-        /// QPC of the most recent successful swap-chain acquire — last instant DWM composed this
-        /// display.
-        pub last_acquire_qpc: u64,
-        /// Wrapping count of surfaces offered to the publisher — full-width sibling of the packed
-        /// 15-bit [`OPENED_DETAIL_LIVE`] counter, which saturates and cannot be delta'd over a stall.
-        pub offered_total: u64,
-        // ---- v3 ring-health tail (offset 88..152). Every write is gated on `v3_readable`. ----
-        /// [`HealthState`], driver-written with Release AFTER the fields below it describes.
-        pub health_state: u32,
-        /// Driver capability bits (`CAP_*`), stamped at attach.
-        pub capabilities: u32,
-        /// Host capability bits (`CAP_*`), stamped before the magic.
-        pub host_capabilities: u32,
-        /// Bumped by the driver on every swap-chain assignment it attaches under.
-        pub assignment_epoch: u32,
-        /// Bumped by the driver on every D3D device creation — even on the same LUID (a TDR
-        /// recreate mints a new epoch; LUID equality is never device-compatibility proof).
-        pub device_epoch: u32,
-        /// `ERR_DOMAIN_*` for a [`HealthState::Dead`] generation.
-        pub terminal_error_domain: u32,
-        /// Raw code for `terminal_error_domain` (HRESULT / removed reason).
-        pub terminal_error_code: i32,
-        pub _pad_v3: u32,
-        /// Monotonic count of NEW source frames published (a stash republish does not advance it)
-        /// — the driver-side twin of the host's provenance sequence.
-        pub source_sequence: u64,
-        /// QPC of the most recent successful publish.
-        pub last_publish_qpc: u64,
-        /// Wrapping counts of publishes that landed and frames dropped (busy/mismatch/fatal).
-        pub published_total: u64,
-        pub dropped_total: u64,
-    }
-
-    /// Why the publisher must not attach a delivered channel — the two [`check_attach`] rejects.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum AttachReject {
-        /// Magic missing, or the host recreated the ring before attach. Drop silently; no status.
-        Stale,
-        /// `SharedHeader::target_id` mismatch. Fail closed: write [`DRV_STATUS_BIND_FAIL`].
-        BindMismatch,
-    }
-
-    /// Attach precondition: header `magic`/`generation`/`target_id` vs delivery generation and
-    /// the monitor's own target id. Staleness is checked first — a superseded delivery's binding
-    /// is meaningless, so it never false-alarms as a bind failure. Pure so the reject paths are
-    /// unit-tested here (the driver workspace is `panic = "abort"`).
-    pub fn check_attach(
-        magic: u32,
-        header_generation: u32,
-        header_target_id: u32,
-        delivery_generation: u32,
-        monitor_target_id: u32,
-    ) -> Result<(), AttachReject> {
-        if magic != MAGIC || header_generation != delivery_generation {
-            return Err(AttachReject::Stale);
-        }
-        if header_target_id != monitor_target_id {
-            return Err(AttachReject::BindMismatch);
-        }
-        Ok(())
-    }
-
-    /// `SharedHeader.latest` token: `(generation << 40) | (seq << 8) | slot`.
-    /// `generation` 24-bit, `seq` 32-bit, `slot` 8-bit. The generation tag lets the host reject a
-    /// stale-ring publish so it never consumes an unwritten new-ring slot.
+    /// The publish cell of [`au::AuHeader::latest`]: `(generation << 40) | (seq << 8) | slot`,
+    /// with `generation` 24-bit, `seq` 32-bit and `slot` 8-bit. `generation` is bumped on every
+    /// [`IOCTL_SET_ENCODE`], so a publish an old encoder left behind is rejected, never consumed.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct FrameToken {
         pub generation: u32,
@@ -1079,12 +802,14 @@ pub mod frame {
         /// Low 24 bits of `generation` are significant.
         pub const GENERATION_MASK: u32 = 0x00FF_FFFF;
 
+        #[must_use]
         pub const fn pack(self) -> u64 {
             (((self.generation & Self::GENERATION_MASK) as u64) << 40)
                 | (((self.seq as u64) & 0xFFFF_FFFF) << 8)
                 | (self.slot as u64)
         }
 
+        #[must_use]
         pub const fn unpack(v: u64) -> Self {
             Self {
                 generation: ((v >> 40) as u32) & Self::GENERATION_MASK,
@@ -1094,360 +819,11 @@ pub mod frame {
         }
     }
 
-    // Both sides access these via raw atomic views; a same-size reorder silently corrupts.
-    // `target_id` (former `_pad`) after `dxgi_format` is what 8-aligns `u64 latest` at offset 32.
-    const _: () = {
-        use core::mem::{offset_of, size_of};
-
-        assert!(size_of::<SharedHeader>() == HEADER_V3_SIZE);
-        assert!(offset_of!(SharedHeader, health_state) == HEADER_V2_SIZE);
-        assert!(offset_of!(SharedHeader, capabilities) == 92);
-        assert!(offset_of!(SharedHeader, host_capabilities) == 96);
-        assert!(offset_of!(SharedHeader, assignment_epoch) == 100);
-        assert!(offset_of!(SharedHeader, device_epoch) == 104);
-        assert!(offset_of!(SharedHeader, terminal_error_domain) == 108);
-        assert!(offset_of!(SharedHeader, terminal_error_code) == 112);
-        assert!(offset_of!(SharedHeader, source_sequence) == 120);
-        assert!(offset_of!(SharedHeader, last_publish_qpc) == 128);
-        assert!(offset_of!(SharedHeader, published_total) == 136);
-        assert!(offset_of!(SharedHeader, dropped_total) == 144);
-        assert!(offset_of!(SharedHeader, magic) == 0);
-        assert!(offset_of!(SharedHeader, version) == 4);
-        assert!(offset_of!(SharedHeader, generation) == 8);
-        assert!(offset_of!(SharedHeader, ring_len) == 12);
-        assert!(offset_of!(SharedHeader, width) == 16);
-        assert!(offset_of!(SharedHeader, height) == 20);
-        assert!(offset_of!(SharedHeader, dxgi_format) == 24);
-        assert!(offset_of!(SharedHeader, target_id) == 28);
-        assert!(offset_of!(SharedHeader, latest) == 32);
-        assert!(offset_of!(SharedHeader, qpc_pts) == 40);
-        assert!(offset_of!(SharedHeader, driver_render_luid_low) == 48);
-        assert!(offset_of!(SharedHeader, driver_render_luid_high) == 52);
-        assert!(offset_of!(SharedHeader, driver_status) == 56);
-        assert!(offset_of!(SharedHeader, driver_status_detail) == 60);
-        assert!(offset_of!(SharedHeader, drain_heartbeat_qpc) == 64);
-        assert!(offset_of!(SharedHeader, last_acquire_qpc) == 72);
-        assert!(offset_of!(SharedHeader, offered_total) == 80);
-    };
-
-    /// The CAS + shared-fence slot transport (immunity plan WP7, decision D5; S2 GO on both
-    /// vendors). Replaces the keyed mutex as the slot handshake — the sealed handle broker, the
-    /// header and the textures stay as they are.
-    ///
-    /// Layout: a v4 header appends a [`SlotRecord`] table (one per [`RING_LEN`] slot) at
-    /// [`SLOT_TABLE_OFFSET`]; the delivery carries two shared `ID3D11Fence` handles
-    /// (`producer-ready`, `consumer-retire`) in [`SetFrameChannelRequestV2`](crate::control::
-    /// SetFrameChannelRequestV2). Both endpoints may run the fence protocol only when
-    /// [`v4_readable`] passes AND [`negotiate`] contains [`CAP_FENCE_RING`]; otherwise the ring is
-    /// the keyed-mutex one (WP2 poison rules), which stays negotiable for one compatibility release.
-    ///
-    /// Protocol (`FREE -> WRITING -> PUBLISHED -> READING -> FREE`, every transition a CAS):
-    /// the producer claims a FREE slot, else the OLDEST PUBLISHED (drop-oldest), else drops the
-    /// frame — it never touches READING/WRITING and never CPU-waits. It GPU-waits the slot's
-    /// `retire_value` on the retire fence, copies, signals `ready` with a new value, stamps
-    /// `seq`/`ready_value`, then releases PUBLISHED. The consumer takes the NEWEST PUBLISHED by
-    /// `seq` (dropping older ones — newest-wins, the S2 finding), CASes it READING, GPU-waits
-    /// `ready_value`, queues its read, signals `retire` with a new value, stamps `retire_value`,
-    /// then releases FREE. The pure claim/pick rules live here and are model-tested below.
-    pub mod fence {
-        use bytemuck::{Pod, Zeroable};
-
-        use super::HEADER_V3_SIZE;
-
-        const RING_LEN_USIZE: usize = super::RING_LEN as usize;
-
-        /// The header version that appends the slot table.
-        pub const VERSION_FENCE: u32 = 4;
-        /// Where the slot table starts: right after the v3 tail (8-aligned).
-        pub const SLOT_TABLE_OFFSET: usize = HEADER_V3_SIZE;
-        /// One [`SlotRecord`] per slot.
-        pub const SLOT_RECORD_SIZE: usize = 32;
-        /// The v4 header size — a v4 host allocates this.
-        pub const HEADER_V4_SIZE: usize = SLOT_TABLE_OFFSET + RING_LEN_USIZE * SLOT_RECORD_SIZE;
-
-        /// Both endpoints may touch the slot table only when the host stamped a v4 layout AND the
-        /// delivery declared a section at least that large (the v3 gate's shape, one version up).
-        #[must_use]
-        pub const fn v4_readable(version: u32, header_bytes: u32) -> bool {
-            version >= VERSION_FENCE && header_bytes as usize >= HEADER_V4_SIZE
-        }
-
-        /// Slot states (`SlotRecord::state`).
-        pub const FREE: u32 = 0;
-        pub const WRITING: u32 = 1;
-        pub const PUBLISHED: u32 = 2;
-        pub const READING: u32 = 3;
-
-        /// Per-slot protocol record in the shared header, accessed through atomic views like the
-        /// rest of the header. The producer stamps `seq` and `ready_value` before its
-        /// `WRITING -> PUBLISHED` release; the consumer stamps `retire_value` before its
-        /// `READING -> FREE` release.
-        #[repr(C)]
-        #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
-        pub struct SlotRecord {
-            pub state: u32,
-            pub _pad: u32,
-            /// The PACKED [`FrameToken`](super::FrameToken) of the publish these pixels belong to
-            /// (generation, seq, slot). The generation is what lets a consumer free a record a
-            /// superseded ring left behind instead of consuming it by sequence number; the pure
-            /// rules below compare the unpacked `seq` the caller hands them.
-            pub seq: u64,
-            /// Producer-ready fence value the consumer must GPU-wait before sampling.
-            pub ready_value: u64,
-            /// Consumer-retire fence value the producer must GPU-wait before overwriting.
-            pub retire_value: u64,
-        }
-
-        const _: () = {
-            use core::mem::size_of;
-            assert!(size_of::<SlotRecord>() == SLOT_RECORD_SIZE);
-            assert!(SLOT_TABLE_OFFSET % 8 == 0);
-            assert!(HEADER_V4_SIZE == 152 + 6 * 32);
-        };
-
-        /// Byte offset of slot `i`'s record inside the header section.
-        #[must_use]
-        pub const fn slot_offset(i: usize) -> usize {
-            SLOT_TABLE_OFFSET + i * SLOT_RECORD_SIZE
-        }
-
-        /// What the producer does with the next frame, from one scan of `(state, seq)` per slot.
-        /// Pure: the CAS that commits the claim is the caller's (a lost race rescans).
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum Claim {
-            /// Take this FREE slot.
-            Free(usize),
-            /// No FREE slot: overwrite this OLDEST PUBLISHED one (drop-oldest).
-            Overwrite(usize),
-            /// Everything is READING/WRITING: drop the frame, never wait.
-            Drop,
-        }
-
-        /// Producer claim rule: first FREE slot; else the PUBLISHED slot with the lowest `seq`;
-        /// else drop. READING and WRITING slots are never candidates.
-        #[must_use]
-        pub fn producer_claim(slots: &[(u32, u64)]) -> Claim {
-            if let Some(i) = slots.iter().position(|&(s, _)| s == FREE) {
-                return Claim::Free(i);
-            }
-            slots
-                .iter()
-                .enumerate()
-                .filter(|(_, slot)| slot.0 == PUBLISHED)
-                .min_by_key(|(_, slot)| slot.1)
-                .map_or(Claim::Drop, |(i, _)| Claim::Overwrite(i))
-        }
-
-        /// What the consumer does, from one scan: take the newest PUBLISHED slot whose `seq` is
-        /// above `last_delivered`, and name every PUBLISHED slot at or below it as stale (to be
-        /// CASed straight to FREE — a stream must never show an older frame after a newer one).
-        #[derive(Clone, Debug, PartialEq, Eq)]
-        pub struct Pick {
-            pub take: Option<(usize, u64)>,
-            pub stale: alloc::vec::Vec<usize>,
-        }
-
-        #[must_use]
-        pub fn consumer_pick(slots: &[(u32, u64)], last_delivered: u64) -> Pick {
-            let mut take: Option<(usize, u64)> = None;
-            let mut stale = alloc::vec::Vec::new();
-            for (i, &(s, seq)) in slots.iter().enumerate() {
-                if s != PUBLISHED {
-                    continue;
-                }
-                if seq <= last_delivered {
-                    stale.push(i);
-                } else if take.is_none_or(|(_, t)| seq > t) {
-                    take = Some((i, seq));
-                }
-            }
-            Pick { take, stale }
-        }
-
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-            use crate::control::{SetFrameChannelRequest, SetFrameChannelRequestV2};
-            use alloc::vec::Vec;
-
-            #[test]
-            fn v4_layout_and_gate() {
-                assert_eq!(HEADER_V4_SIZE, 344);
-                assert_eq!(slot_offset(0), 152);
-                assert_eq!(slot_offset(5), 152 + 5 * 32);
-                assert!(v4_readable(4, 344));
-                assert!(!v4_readable(3, 344), "a v3 host never stamped a slot table");
-                assert!(
-                    !v4_readable(4, 152),
-                    "a v4 version on a v3-sized section is not enough"
-                );
-                assert!(v4_readable(5, 4096));
-                // The v2 request is the v1 request as an exact prefix.
-                assert_eq!(core::mem::offset_of!(SetFrameChannelRequestV2, v1), 0);
-                assert_eq!(
-                    core::mem::offset_of!(SetFrameChannelRequestV2, ready_fence_handle),
-                    core::mem::size_of::<SetFrameChannelRequest>()
-                );
-                assert_eq!(
-                    core::mem::size_of::<SetFrameChannelRequestV2>(),
-                    core::mem::size_of::<SetFrameChannelRequest>() + 16
-                );
-            }
-
-            #[test]
-            fn producer_prefers_free_then_oldest_published_and_never_reading() {
-                assert_eq!(producer_claim(&[(PUBLISHED, 9), (FREE, 0)]), Claim::Free(1));
-                assert_eq!(
-                    producer_claim(&[(PUBLISHED, 9), (READING, 3), (PUBLISHED, 7)]),
-                    Claim::Overwrite(2)
-                );
-                assert_eq!(producer_claim(&[(READING, 1), (WRITING, 2)]), Claim::Drop);
-                assert_eq!(producer_claim(&[]), Claim::Drop);
-            }
-
-            #[test]
-            fn consumer_takes_newest_and_names_older_publishes_stale() {
-                let p = consumer_pick(
-                    &[(PUBLISHED, 5), (READING, 6), (PUBLISHED, 8), (FREE, 0)],
-                    5,
-                );
-                assert_eq!(p.take, Some((2, 8)));
-                assert_eq!(p.stale, alloc::vec![0], "seq 5 was already delivered");
-                let p = consumer_pick(&[(PUBLISHED, 3)], 7);
-                assert_eq!((p.take, p.stale), (None, alloc::vec![0]));
-                assert_eq!(consumer_pick(&[(FREE, 0); 6], 0).take, None);
-            }
-
-            /// Randomized two-party trace over the pure rules with a pixel model: the producer
-            /// writes `seq` into the slot's pixels between its WRITING and PUBLISHED steps, the
-            /// consumer reads them after READING. Proves the D5 invariants the driver/host arms
-            /// inherit: a READING slot is never selected, a delivered frame's pixels always carry
-            /// the seq the record names (no relabel), delivery is monotonic, and the producer never
-            /// waits (every step makes progress or drops).
-            #[test]
-            fn interleaved_trace_never_relabels_or_touches_a_reading_slot() {
-                struct Model {
-                    state: [u32; 6],
-                    seq: [u64; 6],
-                    pixels: [u64; 6],
-                    writing: Option<usize>,
-                    reading: Option<(usize, u64)>,
-                    next_seq: u64,
-                    last_delivered: u64,
-                    delivered: u64,
-                    dropped: u64,
-                    overwritten: u64,
-                }
-                let mut m = Model {
-                    state: [FREE; 6],
-                    seq: [0; 6],
-                    pixels: [0; 6],
-                    writing: None,
-                    reading: None,
-                    next_seq: 0,
-                    last_delivered: 0,
-                    delivered: 0,
-                    dropped: 0,
-                    overwritten: 0,
-                };
-                let mut rng = 0x9E37_79B9_7F4A_7C15u64;
-                let mut next = || {
-                    rng ^= rng << 13;
-                    rng ^= rng >> 7;
-                    rng ^= rng << 17;
-                    rng
-                };
-                for _ in 0..200_000 {
-                    let r = next();
-                    let view: Vec<(u32, u64)> = (0..6).map(|i| (m.state[i], m.seq[i])).collect();
-                    match r % 4 {
-                        // Producer step 1: claim.
-                        0 if m.writing.is_none() => match producer_claim(&view) {
-                            Claim::Free(i) | Claim::Overwrite(i) => {
-                                assert_ne!(m.state[i], READING, "claimed a READING slot");
-                                assert_ne!(m.state[i], WRITING, "claimed a WRITING slot");
-                                if m.state[i] == PUBLISHED {
-                                    m.overwritten += 1;
-                                }
-                                m.state[i] = WRITING;
-                                m.writing = Some(i);
-                            }
-                            Claim::Drop => m.dropped += 1,
-                        },
-                        // Producer step 2: copy + publish.
-                        0 | 1 => {
-                            if let Some(i) = m.writing.take() {
-                                m.next_seq += 1;
-                                m.pixels[i] = m.next_seq;
-                                m.seq[i] = m.next_seq;
-                                m.state[i] = PUBLISHED;
-                            }
-                        }
-                        // Consumer step 1: pick + claim.
-                        2 if m.reading.is_none() => {
-                            let p = consumer_pick(&view, m.last_delivered);
-                            for i in p.stale {
-                                assert_eq!(m.state[i], PUBLISHED);
-                                m.state[i] = FREE;
-                            }
-                            if let Some((i, seq)) = p.take {
-                                assert!(seq > m.last_delivered, "non-monotonic pick");
-                                m.state[i] = READING;
-                                m.reading = Some((i, seq));
-                            }
-                        }
-                        // Consumer step 2: read pixels + release.
-                        _ => {
-                            if let Some((i, seq)) = m.reading.take() {
-                                assert_eq!(m.state[i], READING, "someone touched a READING slot");
-                                assert_eq!(
-                                    m.pixels[i], seq,
-                                    "pixels relabelled under the consumer"
-                                );
-                                m.last_delivered = seq;
-                                m.delivered += 1;
-                                m.state[i] = FREE;
-                            }
-                        }
-                    }
-                }
-                assert!(
-                    m.delivered > 10_000,
-                    "the trace must actually deliver frames"
-                );
-                assert!(m.overwritten > 0, "drop-oldest must have exercised");
-                assert!(m.dropped < m.next_seq, "the producer must not be starved");
-            }
-        }
-    }
-}
-
-/// Protocol v7: the driver encodes, and the host reads access units instead of pixels.
-///
-/// Replaces the pixel ring ([`frame`](crate::frame)) rather than joining it — one transport, as
-/// `design/windows-video-plane-overhaul.md` §1.1 decided. The host still owns the memory: it
-/// creates an unnamed section plus a ready event, duplicates both into WUDFHost and delivers the
-/// values over [`IOCTL_SET_ENCODE`], which also carries codec, mode, bitrate, HDR metadata and an
-/// ordered backend preference list. The driver opens the first backend that works and answers with
-/// [`SetEncodeReply`] — the backend that took, its [`EncoderCapsWire`] and the applied bitrate, or
-/// a named failure. No silent fallback.
-///
-/// Steady state lives in [`au`]: a 128-byte header, a 16-entry slot table and a bitstream heap the
-/// encode thread writes into. Publishing reuses the ring's [`FrameToken`], so the host takes a slot
-/// only under a generation check. Runtime control — keyframe, RFI, bitrate, HDR metadata, reset,
-/// flush — travels as one-shot [`IOCTL_ENCODE_CTL`] calls on the framework queue that already
-/// carries `PING`.
-///
-/// Types and layout only. [`PROTOCOL_VERSION`](crate::PROTOCOL_VERSION) still names v6; the bump
-/// and the ring's removal are the Phase 3.5 cutover.
-pub mod encode {
-    use super::ctl_code;
-    use bytemuck::{Pod, Zeroable};
-
-    /// The publish token is the ring's, unchanged: `(generation << 40) | (seq << 8) | slot`.
-    /// `generation` is bumped on every [`IOCTL_SET_ENCODE`], so a publish an old encoder left in
-    /// [`au::AuHeader::latest`] is rejected instead of consumed.
-    pub use crate::frame::FrameToken;
+    /// [`au::AuHeader::driver_status`] values. UMDF hides `OutputDebugString` and the restricted
+    /// token blocks file writes, so this word is how a driver with no debugger reports state.
+    pub const DRV_STATUS_NONE: u32 = 0;
+    /// An encoder is open on this section.
+    pub const DRV_STATUS_OPENED: u32 = 1;
 
     /// Open the encoder for one monitor and adopt its AU section + ready event. Input
     /// [`SetEncodeRequest`], output [`SetEncodeReply`]. A resolution, codec or HDR change is a new
@@ -1672,9 +1048,8 @@ pub mod encode {
         /// forwards it as the wire's chunk-aligned user flag.
         pub const AU_CHUNK_ALIGNED: u32 = 1 << 4;
 
-        /// [`AuSlot::state`]: the encode thread may take this slot. Same FREE/PUBLISHED/READING
-        /// vocabulary as [`frame::fence`](crate::frame::fence), but NOT its values — there is no
-        /// WRITING here, because the encode thread fills the heap before it claims a slot.
+        /// [`AuSlot::state`]: the encode thread may take this slot. There is no WRITING state —
+        /// the encode thread fills the heap before it claims a slot.
         pub const FREE: u32 = 0;
         /// Written and published; the host may take it.
         pub const PUBLISHED: u32 = 1;
@@ -1722,7 +1097,7 @@ pub mod encode {
             pub dropped_total: u64,
             /// Access units published.
             pub published_total: u64,
-            /// Driver status word, as the ring header's — how a driver with no debugger reports.
+            /// One of the `DRV_STATUS_*` words — how a driver with no debugger reports.
             pub driver_status: u32,
             /// Raw detail for `driver_status`.
             pub driver_status_detail: u32,
@@ -3108,170 +2483,27 @@ mod tests {
         for (g, s, slot) in [
             (1u32, 0u32, 0u8),
             (5, 12_345, 3),
-            (frame::FrameToken::GENERATION_MASK, 0xFFFF_FFFF, 5),
+            (encode::FrameToken::GENERATION_MASK, 0xFFFF_FFFF, 5),
             (0, 1, 255),
         ] {
-            let t = frame::FrameToken {
+            let t = encode::FrameToken {
                 generation: g,
                 seq: s,
                 slot,
             };
-            assert_eq!(frame::FrameToken::unpack(t.pack()), t);
+            assert_eq!(encode::FrameToken::unpack(t.pack()), t);
         }
     }
 
     #[test]
     fn frame_token_packing_matches_legacy_layout() {
-        // Legacy packing was `(gen<<40)|(seq<<8)|slot` by hand; lock the bit positions.
-        let t = frame::FrameToken {
+        // Packing was `(gen<<40)|(seq<<8)|slot` by hand; lock the bit positions.
+        let t = encode::FrameToken {
             generation: 7,
             seq: 42,
             slot: 3,
         };
         assert_eq!(t.pack(), (7u64 << 40) | (42u64 << 8) | 3u64);
-    }
-
-    #[test]
-    fn opened_detail_roundtrips_and_saturates() {
-        use frame::{pack_opened_detail, unpack_opened_detail, OPENED_DETAIL_LIVE};
-        // Zero counters still stamp LIVE — "attached, nothing offered yet" is information.
-        assert_eq!(pack_opened_detail(0, 0), OPENED_DETAIL_LIVE);
-        assert_eq!(unpack_opened_detail(pack_opened_detail(0, 0)), Some((0, 0)));
-        assert_eq!(
-            unpack_opened_detail(pack_opened_detail(1234, 567)),
-            Some((1234, 567))
-        );
-        // Saturation: 15-bit offered, 16-bit mismatched.
-        assert_eq!(
-            unpack_opened_detail(pack_opened_detail(u32::MAX, u32::MAX)),
-            Some((0x7FFF, 0xFFFF))
-        );
-        // Any value without the LIVE bit carries no information.
-        assert_eq!(unpack_opened_detail(0), None);
-        assert_eq!(unpack_opened_detail(0x7FFF_FFFF), None);
-    }
-
-    /// The v3 tail is reachable only when BOTH the stamped layout and the declared section say so
-    /// — every old/new pairing from the plan's compatibility contract, pinned.
-    #[test]
-    fn v3_tail_gate_covers_every_pairing() {
-        use frame::{v3_readable, HEADER_V2_SIZE, HEADER_V3_SIZE};
-        let (v2, v3) = (HEADER_V2_SIZE as u32, HEADER_V3_SIZE as u32);
-        // new host + new driver: the only pairing that opens the tail.
-        assert!(v3_readable(3, v3));
-        // old host (v2 header, request `_pad` = 0) + new driver: prefix only.
-        assert!(!v3_readable(2, 0));
-        // new host that stamped v3 but a short section (a bug, or a truncated mapping): refused.
-        assert!(!v3_readable(3, v2));
-        assert!(!v3_readable(3, v3 - 1));
-        // a section large enough but a v2 layout stamp: refused — the stamp is the contract.
-        assert!(!v3_readable(2, v3));
-        // a future host: still readable as v3 (additive versions).
-        assert!(v3_readable(4, v3 + 64));
-    }
-
-    /// Capabilities activate only where both sides agree; an unknown bit on one side is inert.
-    #[test]
-    fn capabilities_negotiate_by_intersection() {
-        use frame::*;
-        let host = CAP_RING_HEALTH_V3 | CAP_FENCE_RING | CAP_SOURCE_SEQUENCE_QPC;
-        let old_driver = 0;
-        assert_eq!(
-            negotiate(host, old_driver),
-            0,
-            "a pre-v3 driver advertises nothing"
-        );
-        let driver = CAP_RING_HEALTH_V3 | CAP_SOURCE_SEQUENCE_QPC | CAP_SWAPCHAIN_RESET;
-        let n = negotiate(host, driver);
-        assert_eq!(n, CAP_RING_HEALTH_V3 | CAP_SOURCE_SEQUENCE_QPC);
-        assert_eq!(n & CAP_FENCE_RING, 0, "fence transport needs BOTH sides");
-        assert_eq!(
-            n & CAP_SWAPCHAIN_RESET,
-            0,
-            "an actuator the host did not ask for stays off"
-        );
-    }
-
-    /// State words decode exactly; anything unrecognised is Dead, never Active by accident.
-    #[test]
-    fn health_state_decodes_conservatively() {
-        use frame::HealthState;
-        assert_eq!(HealthState::from_u32(0), HealthState::Initializing);
-        assert_eq!(HealthState::from_u32(1), HealthState::Active);
-        assert_eq!(HealthState::from_u32(2), HealthState::Rebuilding);
-        assert_eq!(HealthState::from_u32(3), HealthState::Dead);
-        assert_eq!(HealthState::from_u32(0xdead_beef), HealthState::Dead);
-        assert!(frame::snapshot_consistent(1, 1));
-        assert!(
-            !frame::snapshot_consistent(1, 2),
-            "a state flip mid-read tears the snapshot"
-        );
-    }
-
-    #[test]
-    fn shared_header_is_pod_and_152_bytes() {
-        let mut h = frame::SharedHeader::zeroed();
-        h.magic = frame::MAGIC;
-        h.width = 5120;
-        h.height = 1440;
-        h.target_id = 262;
-        h.drain_heartbeat_qpc = 0x1234_5678_9abc_def0;
-        h.source_sequence = 77;
-        let bytes = bytemuck::bytes_of(&h);
-        assert_eq!(bytes.len(), frame::HEADER_V3_SIZE);
-        // The v2 prefix is byte-identical: a v2 driver mapping the first 88 bytes sees its layout.
-        assert_eq!(
-            bytes[80..88],
-            0u64.to_le_bytes(),
-            "offered_total sits at the v2 tail end"
-        );
-        assert_eq!(
-            bytes[120..128],
-            77u64.to_le_bytes(),
-            "source_sequence is v3-only, at 120"
-        );
-        let back: frame::SharedHeader = *bytemuck::from_bytes(bytes);
-        assert_eq!(back.magic, frame::MAGIC);
-        assert_eq!(back.width, 5120);
-        assert_eq!(back.height, 1440);
-        // Monitor binding occupies the old `_pad` slot at offset 28 — a v2 host left it zero there.
-        assert_eq!(bytes[28..32], 262u32.to_le_bytes());
-        // Telemetry tail is appended; the first 64 bytes are the v1 layout.
-        assert_eq!(bytes[64..72], 0x1234_5678_9abc_def0u64.to_le_bytes());
-        assert_eq!(back.last_acquire_qpc, 0);
-        assert_eq!(back.offered_total, 0);
-    }
-
-    #[test]
-    fn attach_check_binds_ring_to_monitor() {
-        use frame::{check_attach, AttachReject, MAGIC};
-        assert_eq!(check_attach(MAGIC, 7, 262, 7, 262), Ok(()));
-        // Missing magic / superseded generation → Stale. Staleness wins over a binding mismatch.
-        assert_eq!(
-            check_attach(0, 7, 262, 7, 262),
-            Err(AttachReject::Stale),
-            "no magic"
-        );
-        assert_eq!(
-            check_attach(MAGIC, 8, 262, 7, 262),
-            Err(AttachReject::Stale),
-            "recreated ring"
-        );
-        assert_eq!(
-            check_attach(0, 8, 999, 7, 262),
-            Err(AttachReject::Stale),
-            "stale outranks bind"
-        );
-        // A fresh, magic-valid ring naming a different monitor fails closed.
-        assert_eq!(
-            check_attach(MAGIC, 7, 999, 7, 262),
-            Err(AttachReject::BindMismatch)
-        );
-        // A v2-host header (target_id = 0) also fails closed; do not rely on the GET_INFO handshake.
-        assert_eq!(
-            check_attach(MAGIC, 7, 0, 7, 262),
-            Err(AttachReject::BindMismatch)
-        );
     }
 
     #[test]
@@ -3331,32 +2563,6 @@ mod tests {
     }
 
     #[test]
-    fn frame_channel_request_roundtrips_through_bytes() {
-        let mut req = control::SetFrameChannelRequest {
-            target_id: 262,
-            generation: 3,
-            ring_len: frame::RING_LEN,
-            header_bytes: frame::HEADER_V3_SIZE as u32,
-            header_handle: 0x0000_0000_0000_1a2c,
-            event_handle: 0x0000_0000_0000_1b30,
-            texture_handles: [0; control::RING_LEN_USIZE],
-        };
-        for (k, t) in req.texture_handles.iter_mut().enumerate() {
-            *t = 0x2000 + k as u64 * 4;
-        }
-        let bytes = bytemuck::bytes_of(&req);
-        assert_eq!(bytes.len(), 32 + 8 * control::RING_LEN_USIZE);
-        assert_eq!(
-            *bytemuck::from_bytes::<control::SetFrameChannelRequest>(bytes),
-            req
-        );
-        // Handle values ride 8-aligned from offset 16 (header, event, then the ring).
-        assert_eq!(bytes[16..24], 0x1a2cu64.to_le_bytes());
-        assert_eq!(bytes[24..32], 0x1b30u64.to_le_bytes());
-        assert_eq!(bytes[32..40], 0x2000u64.to_le_bytes());
-    }
-
-    #[test]
     fn update_modes_request_roundtrips_and_versions_cohere() {
         let req = control::UpdateModesRequest {
             session_id: 42,
@@ -3372,9 +2578,9 @@ mod tests {
             req
         );
         assert_eq!(bytes[8..12], 2560u32.to_le_bytes());
-        // v4–v6 are additive over v3, so the host floor stays at 3.
-        assert_eq!(PROTOCOL_VERSION, 6);
-        assert_eq!(MIN_DRIVER_PROTOCOL_VERSION, 3);
+        // v7 replaced the video transport, so the floor is the version itself.
+        assert_eq!(PROTOCOL_VERSION, 7);
+        assert_eq!(MIN_DRIVER_PROTOCOL_VERSION, PROTOCOL_VERSION);
     }
 
     #[test]
@@ -3494,7 +2700,6 @@ mod tests {
             control::IOCTL_PING,
             control::IOCTL_GET_INFO,
             control::IOCTL_CLEAR_ALL,
-            control::IOCTL_SET_FRAME_CHANNEL,
             control::IOCTL_UPDATE_MODES,
             control::IOCTL_SET_CURSOR_CHANNEL,
             control::IOCTL_SET_CURSOR_FORWARD,
@@ -3954,7 +3159,8 @@ mod tests {
         assert_eq!(au::slot_offset(au::AU_SLOTS as usize), au::HEAP_OFFSET);
         assert_eq!(au::HEAP_OFFSET, 640);
         assert_eq!(&au::AU_MAGIC.to_le_bytes(), b"PFAU");
-        assert_ne!(au::AU_MAGIC, frame::MAGIC);
+        // The retired ring header's magic — a v6 section must never read as an AU one.
+        assert_ne!(au::AU_MAGIC, 0x4456_4650);
     }
 
     #[test]
@@ -4038,7 +3244,7 @@ mod tests {
         assert!(!au_readable(&AuHeader::zeroed()));
         for bad in [
             AuHeader {
-                magic: frame::MAGIC,
+                magic: 0x4456_4650,
                 ..good
             },
             AuHeader { version: 6, ..good },
