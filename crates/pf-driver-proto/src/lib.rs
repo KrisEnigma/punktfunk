@@ -96,6 +96,12 @@ pub mod control {
     /// pointer into the frame. Only meaningful after [`IOCTL_SET_CURSOR_CHANNEL`]. Input
     /// [`SetCursorForwardRequest`].
     pub const IOCTL_SET_CURSOR_FORWARD: u32 = ctl_code(0x909);
+    /// Spike S5, `encode-probe` driver builds only: run the encoder backends inside WUDFHost on
+    /// one monitor's frames. Input [`EncodeProbeRequest`]. `STATUS_DEVICE_BUSY` while a run is
+    /// still going; `STATUS_NOT_FOUND` from a driver built without the feature.
+    pub const IOCTL_ENCODE_PROBE_ARM: u32 = ctl_code(0x90A);
+    /// The probe's tally → [`EncodeProbeReply`]. No input.
+    pub const IOCTL_ENCODE_PROBE_STATUS: u32 = ctl_code(0x90B);
 
     /// `IOCTL_ADD` input. `session_id` keys the monitor (host refcount owns collisions).
     /// The driver advertises this mode as preferred; the host still CCD-forces the active mode.
@@ -247,6 +253,48 @@ pub mod control {
         pub enable: u32,
     }
 
+    /// [`IOCTL_ENCODE_PROBE_ARM`] input. Zero `frames` / `bitrate_kbps` / `fps` take the
+    /// driver's defaults (300 / 20000 / 60).
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
+    pub struct EncodeProbeRequest {
+        /// OS target of the monitor to tap; `0` = whichever drain worker offers first.
+        pub target_id: u32,
+        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave.
+        pub backend: u32,
+        /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave (backend 4 only, and only with backend 4).
+        pub codec: u32,
+        /// `0` = the backend's own input: BGRA straight into NVENC, NV12 for AMF/QSV, planar
+        /// Y + CbCr for PyroWave. `1` = BGRA→NV12 on the video engine (the NVENC colour A/B).
+        pub input: u32,
+        pub frames: u32,
+        pub bitrate_kbps: u32,
+        pub fps: u32,
+        pub flags: u32,
+    }
+
+    /// [`IOCTL_ENCODE_PROBE_STATUS`] reply. `mean_*` / `max_*` cover every AU after the first;
+    /// `first_au_us` alone carries the backend's lazy session init. `name` is a short
+    /// NUL-padded failure tag (the driver log has the full error).
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
+    pub struct EncodeProbeReply {
+        /// 0 idle, 1 armed, 2 running, 3 done, 4 failed.
+        pub state: u32,
+        pub backend_opened: u32,
+        pub frames_submitted: u32,
+        pub aus: u32,
+        pub bytes: u64,
+        pub open_us: u32,
+        pub first_au_us: u32,
+        pub mean_submit_to_au_us: u32,
+        pub max_submit_to_au_us: u32,
+        /// Frames the drain worker had no free pool slot for.
+        pub drops: u32,
+        pub error: i32,
+        pub name: [u8; 32],
+    }
+
     // Layout is load-bearing across the process boundary. Pod rejects internal padding; these
     // assert the externally-visible sizes. `offset_of!` catches a same-size field reorder.
     const _: () = {
@@ -306,6 +354,18 @@ pub mod control {
         assert!(size_of::<InfoReply>() == 8);
         assert!(offset_of!(InfoReply, protocol_version) == 0);
         assert!(offset_of!(InfoReply, watchdog_timeout_s) == 4);
+
+        assert!(size_of::<EncodeProbeRequest>() == 32);
+        assert!(offset_of!(EncodeProbeRequest, target_id) == 0);
+        assert!(offset_of!(EncodeProbeRequest, backend) == 4);
+        assert!(offset_of!(EncodeProbeRequest, frames) == 16);
+        assert!(offset_of!(EncodeProbeRequest, flags) == 28);
+        assert!(size_of::<EncodeProbeReply>() == 80);
+        assert!(offset_of!(EncodeProbeReply, state) == 0);
+        assert!(offset_of!(EncodeProbeReply, bytes) == 16);
+        assert!(offset_of!(EncodeProbeReply, open_us) == 24);
+        assert!(offset_of!(EncodeProbeReply, error) == 44);
+        assert!(offset_of!(EncodeProbeReply, name) == 48);
     };
 }
 
@@ -2794,12 +2854,63 @@ mod tests {
             control::IOCTL_CLEAR_ALL,
             control::IOCTL_SET_FRAME_CHANNEL,
             control::IOCTL_UPDATE_MODES,
+            control::IOCTL_SET_CURSOR_CHANNEL,
+            control::IOCTL_SET_CURSOR_FORWARD,
+            control::IOCTL_ENCODE_PROBE_ARM,
+            control::IOCTL_ENCODE_PROBE_STATUS,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(a, b);
             }
         }
+        assert_eq!(control::IOCTL_ENCODE_PROBE_STATUS, ctl_code(0x90B));
+    }
+
+    #[test]
+    fn encode_probe_structs_roundtrip_through_bytes() {
+        let req = control::EncodeProbeRequest {
+            target_id: 7,
+            backend: 1,
+            codec: 2,
+            input: 0,
+            frames: 300,
+            bitrate_kbps: 20_000,
+            fps: 60,
+            flags: 0,
+        };
+        let bytes = bytemuck::bytes_of(&req);
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(
+            bytemuck::pod_read_unaligned::<control::EncodeProbeRequest>(bytes),
+            req
+        );
+        let mut name = [0u8; 32];
+        name[..4].copy_from_slice(b"open");
+        let reply = control::EncodeProbeReply {
+            state: 4,
+            backend_opened: 0,
+            frames_submitted: 0,
+            aus: 0,
+            bytes: 0x1_0000_0001,
+            open_us: 1234,
+            first_au_us: 0,
+            mean_submit_to_au_us: 0,
+            max_submit_to_au_us: 0,
+            drops: 3,
+            error: -1,
+            name,
+        };
+        let bytes = bytemuck::bytes_of(&reply);
+        assert_eq!(bytes.len(), 80);
+        // `bytes` rides 8-aligned at 16; `error` at 44; the tag opens at 48.
+        assert_eq!(bytes[16..24], 0x1_0000_0001u64.to_le_bytes());
+        assert_eq!(bytes[44..48], (-1i32).to_le_bytes());
+        assert_eq!(&bytes[48..52], b"open");
+        assert_eq!(
+            bytemuck::pod_read_unaligned::<control::EncodeProbeReply>(bytes),
+            reply
+        );
     }
 
     #[test]
