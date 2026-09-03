@@ -160,7 +160,7 @@ impl Monitor {
     /// The render adapter of the last assignment; `None` before the first.
     pub fn render_luid(&self) -> Option<windows::Win32::Foundation::LUID> {
         let packed = self.render_luid.load(Ordering::Acquire);
-        (packed != 0).then(|| windows::Win32::Foundation::LUID {
+        (packed != 0).then_some(windows::Win32::Foundation::LUID {
             LowPart: packed as u32,
             HighPart: (packed >> 32) as i32,
         })

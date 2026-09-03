@@ -322,6 +322,8 @@ impl IddPushCapturer {
             pending_desc_gen: 0,
             recovering_since: None,
             last_fresh: Instant::now(),
+            drain_seq: 0,
+            last_drain: Instant::now(),
             last_liveness: Instant::now(),
             last_kick: Instant::now(),
             stall_watch: StallWatch::new(),

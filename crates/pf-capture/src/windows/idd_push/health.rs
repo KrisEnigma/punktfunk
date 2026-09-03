@@ -51,10 +51,15 @@ impl IddPushCapturer {
     /// exhausted ladder ends the plane with the typed `CaptureFault::SourceStalled`.
     pub(super) fn recovery_tick(&mut self) -> Result<()> {
         let now = Instant::now();
+        let drain = self.encoder.map_or(0, |t| t.drain_progress());
+        if drain != self.drain_seq {
+            self.drain_seq = drain;
+            self.last_drain = now;
+        }
         let inputs = recovery::Inputs {
             now,
-            last_source: self.last_fresh,
-            source_seq: self.source_seq,
+            last_source: self.last_drain,
+            source_seq: self.drain_seq,
             heartbeat_age: self.heartbeat_age(),
             // With the pointer composited in the driver, cursor travel dirties nothing and the
             // input canary can never be answered: neither is evidence of a changed desktop.

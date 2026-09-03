@@ -280,6 +280,11 @@ pub struct IddPushCapturer {
     /// Last fresh driver frame. A dead WUDFHost and an idle desktop both stop
     /// advancing the driver's source counter.
     last_fresh: Instant,
+    /// Last drain-worker progress: frames the pool TOOK plus frames it DROPPED, and when that
+    /// total last moved. Takes alone freeze while the worker is healthy, so this is the clock
+    /// the classifier reads ([`Self::recovery_tick`]).
+    drain_seq: u64,
+    last_drain: Instant,
     /// One 0 ms wait per second, and only while stale.
     last_liveness: Instant,
     /// Mid-session [`kick_dwm_compose`] (recovery window only).

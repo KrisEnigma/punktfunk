@@ -79,6 +79,21 @@ pub struct EncoderTelemetry {
     pub backend: &'static str,
 }
 
+impl EncoderTelemetry {
+    /// The drain worker's progress clock, and the ONLY sound value for [`Snapshot::source_seq`].
+    ///
+    /// [`Self::source_seq`] counts frames the pool accepted. That is the wrong clock for health:
+    /// a wedged encode thread keeps its pool slot, the pool fills, and every later offer is a
+    /// drop — so takes freeze while the drain worker is still acquiring at DWM's cadence. Feed
+    /// takes alone to [`classify`] and the source gap grows, the encoder branch (which needs a
+    /// SMALL source gap beside a stale access unit) is unreachable, and a composited-cursor
+    /// session with no evidence lands on [`HealthClass::Idle`]: the wedge is invisible and no
+    /// rung fires. Counting drops keeps the clock moving for as long as the worker does.
+    pub fn drain_progress(&self) -> u64 {
+        self.source_seq.saturating_add(self.dropped_total)
+    }
+}
+
 /// Everything the classifier looks at, sampled at `now`. `None` clocks mean "never observed".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Snapshot {
@@ -389,6 +404,63 @@ mod tests {
     }
 
     const S: Duration = Duration::from_secs(1);
+
+    /// A wedged encode thread must read as `Stalled(Encoder)`, not as an idle desktop.
+    ///
+    /// The wedge's shape: the drain worker keeps acquiring, so its heartbeat is fresh and the
+    /// pool's DROP counter climbs, but the pool's TAKE counter is frozen at the slot the parked
+    /// thread holds, and no access unit lands. Feeding takes alone reproduces the bug this
+    /// guards — the source gap grows, the encoder branch is unreachable, and a session with a
+    /// composited cursor (no evidence) reads `Idle` while the client sits black.
+    #[test]
+    fn a_wedged_encoder_is_not_an_idle_desktop() {
+        let th = Thresholds::default();
+        let start = t0();
+        let wedged_at = start + S;
+        let now = wedged_at + th.stall_floor + S;
+        let t = EncoderTelemetry {
+            last_au: wedged_at,
+            published_total: 600,
+            detached: 0,
+            source_seq: 600,
+            dropped_total: 1_200,
+            drain_heartbeat: Some(now),
+            present_to_arrival: None,
+            state: 0,
+            backend: "nvenc",
+        };
+        assert_eq!(t.drain_progress(), 1_800, "takes plus drops");
+
+        let base = Snapshot {
+            last_au: Some(wedged_at),
+            ..quiet(start)
+        }
+        .at(now);
+
+        // The clock the capturer feeds: drops move it, so the source gap stays small.
+        let live = Snapshot {
+            last_source: Some(now),
+            source_seq: t.drain_progress(),
+            ..base
+        };
+        assert_eq!(
+            classify(&th, &live, start).class,
+            HealthClass::Stalled(StallClass::Encoder),
+            "drops prove the worker is alive, so the silence is the encoder's"
+        );
+
+        // Takes alone: the clock froze with the encoder, and the wedge disappears.
+        let frozen = Snapshot {
+            last_source: Some(wedged_at),
+            source_seq: t.source_seq,
+            ..base
+        };
+        assert_eq!(
+            classify(&th, &frozen, start).class,
+            HealthClass::Idle,
+            "the bug this guards: a wedged encoder hidden behind an idle verdict"
+        );
+    }
 
     #[test]
     fn defaults_are_the_plan_values() {
