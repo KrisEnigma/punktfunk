@@ -9,11 +9,11 @@
 //! portable. The ureq/rustls fetch path is desktop-gated (`linux` / `windows`).
 
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 use std::collections::VecDeque;
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 use std::sync::{Arc, Mutex};
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 use std::time::Duration;
 
 /// Matches host `mgmt::DEFAULT_PORT`. Discovered hosts override via mDNS `mgmt`
@@ -146,7 +146,7 @@ pub fn base_url(addr: &str, mgmt_port: u16) -> String {
 
 /// mTLS agent: client cert from `identity`, server checked by `pin`.
 /// `pin = None` is TOFU (accept any cert), same as the QUIC connect.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn agent(
     identity: &(String, String),
     pin: Option<[u8; 32]>,
@@ -182,7 +182,7 @@ pub fn agent(
 
 /// `GET /api/v1/library`. 401/403 → [`LibraryError::NotPaired`]; pin failure →
 /// [`LibraryError::PinMismatch`].
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn fetch_games(
     addr: &str,
     mgmt_port: u16,
@@ -228,7 +228,7 @@ impl RunningGame {
 
 /// `/status` slice the shelf needs. Other operator fields stay undecoded so a
 /// schema change there cannot break the library screen.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 #[derive(Deserialize)]
 struct HostStatus {
     #[serde(default)]
@@ -238,7 +238,7 @@ struct HostStatus {
 /// `GET /api/v1/status` `games[]`. Best-effort: older host, unreachable, or
 /// unknown shape → empty list, never an error. A missing Resume badge is
 /// cheaper than failing the library screen.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn fetch_running(
     addr: &str,
     mgmt_port: u16,
@@ -261,13 +261,13 @@ pub fn fetch_running(
 }
 
 /// 16 MiB. Steam heroes are a few MB; larger is not an image for the decoder.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 const ART_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Host-origin URLs (`base` prefix) use the pinned mTLS agent; the art proxy
 /// requires the paired cert. Any other origin (custom-entry CDN) uses ureq's
 /// default agent: webpki trust, no client cert.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn fetch_art(pinned: &ureq::Agent, base: &str, url: &str) -> Result<Vec<u8>, LibraryError> {
     let mut resp = if url.starts_with(base) {
         pinned.get(url).call()
@@ -291,13 +291,13 @@ pub fn fetch_art(pinned: &ureq::Agent, base: &str, url: &str) -> Result<Vec<u8>,
 }
 
 /// Three workers: enough for a LAN art proxy without a connection burst.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 const ART_WORKERS: usize = 3;
 
 /// Walk each job's candidate URLs until one loads; results arrive on the
 /// returned channel. Drop the receiver to stop the workers (page popped).
 /// Consumer decodes textures on the main loop.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn spawn_art_fetch(
     base: String,
     identity: (String, String),
@@ -340,7 +340,7 @@ pub fn spawn_art_fetch(
     rx
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub(crate) fn classify(e: ureq::Error) -> LibraryError {
     match e {
         ureq::Error::StatusCode(401 | 403) => LibraryError::NotPaired,

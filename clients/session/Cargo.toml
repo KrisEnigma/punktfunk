@@ -33,7 +33,7 @@ ui = ["dep:pf-console-ui", "dep:serde_json"]
 # way precisely to skip the vendored PyroWave C++, which has no ARM64 SIMD path.
 pf-presenter = { path = "../../crates/pf-presenter", default-features = false }
 pf-console-ui = { path = "../../crates/pf-console-ui", optional = true }
-pf-client-core = { path = "../../crates/pf-client-core", default-features = false }
+pf-client-core = { path = "../../crates/pf-client-core", default-features = false, features = ["desktop"] }
 punktfunk-core = { path = "../../crates/punktfunk-core", features = ["quic"] }
 # The fake-library dev hook (`PUNKTFUNK_FAKE_LIBRARY`, browse mode) parses GameEntry JSON.
 serde_json = { version = "1", optional = true }

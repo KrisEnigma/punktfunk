@@ -50,7 +50,7 @@ impl ActionInfo {
     }
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 #[derive(Deserialize)]
 struct ActionList {
     #[serde(default)]
@@ -60,7 +60,7 @@ struct ActionList {
 /// `GET /api/v1/actions`. Empty on any miss, never an error — same contract as [`crate::library::fetch_running`].
 ///
 /// An older host has no such route. A missing menu row is cheaper than failing the host card.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn fetch_actions(
     addr: &str,
     mgmt_port: u16,
@@ -89,7 +89,7 @@ pub fn fetch_actions(
 ///
 /// `Ok(())` is 202 Accepted: the host then ends every session and acts ~1 s later.
 /// 4xx becomes [`crate::library::LibraryError::Unreachable`]; other failures go through [`crate::library::classify`].
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn invoke(
     addr: &str,
     mgmt_port: u16,
@@ -115,25 +115,25 @@ pub fn invoke(
 
 /// 300 s. Grant and suspend-capability change when an operator edits access, not
 /// minute-to-minute; each refresh is a TLS handshake against an idle host.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub const TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Process-wide, keyed by host fingerprint.
 ///
 /// Settled before a menu draws: a row that appears under a cursor already moving toward
 /// it can shut the machine down. One cache so the console, GTK, and Windows tiles agree.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 type Cache =
     std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<ActionInfo>)>>;
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 fn cache() -> &'static Cache {
     static C: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
     C.get_or_init(Default::default)
 }
 
 /// Offerable rows last stored for this fingerprint. Empty until [`refresh`] answers, and for no-route / no-grant hosts.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn cached(fp_hex: &str) -> Vec<ActionInfo> {
     cache()
         .lock()
@@ -147,7 +147,7 @@ pub fn cached(fp_hex: &str) -> Vec<ActionInfo> {
 ///
 /// The freshness stamp is taken before the request so a hang cannot spawn another worker
 /// every tick. Identity is loaded on the worker so menus do not have to thread it through.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn refresh(addr: &str, mgmt_port: u16, fp_hex: &str) {
     if fp_hex.is_empty() {
         return; // empty fingerprint cannot authenticate or key the cache
@@ -183,7 +183,7 @@ pub fn refresh(addr: &str, mgmt_port: u16, fp_hex: &str) {
 }
 
 /// Drop the cache after [`invoke`]: otherwise the menu still offers Sleep until [`TTL`] lapses on an already-asleep host.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn invalidate(fp_hex: &str) {
     cache()
         .lock()
