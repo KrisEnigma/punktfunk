@@ -148,14 +148,20 @@ pub(crate) struct CaptureHealth {
     /// `healthy` / `idle` / `suspect` / `stalled` / `recovering` / `rebuilding` / `secure_desktop`.
     #[schema(example = "healthy")]
     class: String,
-    /// When `class` is `stalled`: `worker` / `transport` / `conversion` / `presentation` / `driver`.
+    /// When `class` is `stalled`: `worker` / `encoder` / `presentation` / `driver`.
     #[serde(skip_serializing_if = "Option::is_none")]
     stall_class: Option<String>,
     /// Time since the last real source frame.
     source_gap_ms: u64,
-    /// Activity evidence behind the verdict: `recent_source` / `input` / `canary` / `presents`.
+    /// Activity evidence behind the verdict: `input` / `canary`.
     #[serde(skip_serializing_if = "Option::is_none")]
     evidence: Option<String>,
+    /// The newest access unit's OS present stamp against the moment the host took it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    present_to_arrival_ms: Option<u64>,
+    /// `present_to_arrival_ms` is past the classifier's bound: frames come late rather than not
+    /// at all. Reported only — no recovery rung fires on it.
+    late_frames: bool,
     /// The driver encoder's own state word: `closed` / `open` / `encoding` / `wedged`.
     /// Absent until the session's first `SET_ENCODE`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,6 +216,8 @@ fn api_capture_health(h: &pf_capture::CaptureHealth) -> CaptureHealth {
         stall_class: h.stall_class.map(Into::into),
         source_gap_ms: ms(h.source_gap),
         evidence: h.evidence.map(Into::into),
+        present_to_arrival_ms: h.present_to_arrival.map(ms),
+        late_frames: h.late_frames,
         encoder_state: h.encoder_state.map(Into::into),
         backend_opened: h.backend_opened.map(Into::into),
         detached: h.detached,

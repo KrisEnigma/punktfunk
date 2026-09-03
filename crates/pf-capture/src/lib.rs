@@ -42,13 +42,18 @@ impl std::error::Error for CaptureFault {}
 pub struct CaptureHealth {
     /// `healthy` / `idle` / `suspect` / `stalled` / `recovering` / `rebuilding` / `secure_desktop`.
     pub class: &'static str,
-    /// The stall class when `class == "stalled"`: `worker` / `transport` / `conversion` /
-    /// `presentation` / `driver`.
+    /// The stall class when `class == "stalled"`: `worker` / `encoder` / `presentation` /
+    /// `driver`.
     pub stall_class: Option<&'static str>,
     /// Time since the last real source frame.
     pub source_gap: std::time::Duration,
-    /// The evidence the verdict rests on: `recent_source` / `input` / `canary` / `presents`.
+    /// The evidence the verdict rests on: `input` / `canary`.
     pub evidence: Option<&'static str>,
+    /// The newest access unit's OS present stamp against the moment the host took it.
+    pub present_to_arrival: Option<std::time::Duration>,
+    /// `present_to_arrival` is past the classifier's bound: frames arrive late rather than not
+    /// at all. A reported degradation — no recovery rung fires on it.
+    pub late_frames: bool,
     /// The driver encoder's own state word: `closed` / `open` / `encoding` / `wedged`.
     /// `None` until the first `SET_ENCODE`.
     pub encoder_state: Option<&'static str>,

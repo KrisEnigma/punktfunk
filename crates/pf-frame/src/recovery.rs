@@ -25,7 +25,7 @@ use crate::health::{HealthClass, StallClass};
 /// tells the coordinator through [`Event::StageDone`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
-    /// Video-worker / encoder reset — the conversion and transport classes' first actuator.
+    /// Encoder reset over `ENCODE_CTL` — the `Encoder` class's first actuator.
     EncoderReset,
     /// The driver asks the OS for a new swap-chain and fresh device objects.
     SwapChainReset,
@@ -48,7 +48,9 @@ impl Stage {
         match class {
             // One transport: an access-unit hole with a live source is the encoder's, and
             // the ladder's own escalation carries it to the driver cycle.
-            StallClass::Conversion | StallClass::Transport => Stage::EncoderReset,
+            StallClass::Encoder => Stage::EncoderReset,
+            // No host actuator today: the arm is the driver's, behind `CAP_SWAPCHAIN_RESET`.
+            // Until it exists the rung reports `Unsupported` and the ladder escalates.
             StallClass::Worker => Stage::SwapChainReset,
             StallClass::Presentation => Stage::PresentationReset,
             StallClass::Driver => Stage::DriverCycle,
@@ -127,7 +129,7 @@ pub enum Event {
     /// The running stage's actuator finished.
     StageDone(Stage, StageOutcome),
     /// `new_source_frames` NEW progress units of the episode's class arrived since the last
-    /// event — source sequences, or access units for a `Conversion` episode (never regens or
+    /// event — source sequences, or access units for an `Encoder` episode (never regens or
     /// holds); `assignment_changed` when a fresh swap-chain assignment was observed.
     Progress {
         new_source_frames: u32,
@@ -393,15 +395,11 @@ mod tests {
 
     #[test]
     fn ladder_order_and_class_entry_points() {
-        assert_eq!(Stage::first_for(StallClass::Transport), Stage::EncoderReset);
+        assert_eq!(Stage::first_for(StallClass::Encoder), Stage::EncoderReset);
         assert_eq!(Stage::first_for(StallClass::Worker), Stage::SwapChainReset);
         assert_eq!(
             Stage::first_for(StallClass::Presentation),
             Stage::PresentationReset
-        );
-        assert_eq!(
-            Stage::first_for(StallClass::Conversion),
-            Stage::EncoderReset
         );
         assert_eq!(Stage::first_for(StallClass::Driver), Stage::DriverCycle);
         let mut s = Stage::EncoderReset;
@@ -420,12 +418,12 @@ mod tests {
         let t0 = Instant::now();
         assert_eq!(c.step(t0, Event::Verdict(HealthClass::Idle)), Action::None);
         assert_eq!(
-            c.step(t0, stalled(StallClass::Transport)),
+            c.step(t0, stalled(StallClass::Encoder)),
             Action::Run(Stage::EncoderReset)
         );
         assert!(c.owns_episode());
         // A second stalled verdict while the episode runs is not a new incident.
-        assert_eq!(c.step(t0 + S, stalled(StallClass::Transport)), Action::None);
+        assert_eq!(c.step(t0 + S, stalled(StallClass::Encoder)), Action::None);
         assert_eq!(
             c.step(
                 t0 + S,
@@ -453,7 +451,7 @@ mod tests {
         let t0 = Instant::now();
         let mut t = t0;
         assert_eq!(
-            c.step(t, stalled(StallClass::Conversion)),
+            c.step(t, stalled(StallClass::Encoder)),
             Action::Run(Stage::EncoderReset)
         );
         let expect = [
@@ -483,7 +481,7 @@ mod tests {
         assert_eq!(s.consecutive_failures, 1);
         assert_eq!(s.cooldown, b.cooldown_base);
         // In cooldown the next stall is suppressed, not re-fought.
-        assert_eq!(c.step(t + S, stalled(StallClass::Transport)), Action::None);
+        assert_eq!(c.step(t + S, stalled(StallClass::Encoder)), Action::None);
         assert_eq!(c.suppressed(), 1);
         // Past the cooldown it opens again; a second failure doubles the cooldown.
         let t2 = t + b.cooldown_base + S;
@@ -545,7 +543,7 @@ mod tests {
         for i in 0..b.episode_cap {
             let t = t0 + Duration::from_secs(20 * u64::from(i));
             assert_eq!(
-                c.step(t, stalled(StallClass::Transport)),
+                c.step(t, stalled(StallClass::Encoder)),
                 Action::Run(Stage::EncoderReset)
             );
             assert_eq!(
@@ -558,12 +556,12 @@ mod tests {
             assert_eq!(c.step(t + S, frames(3)), Action::Recovered);
         }
         let t = t0 + Duration::from_secs(100);
-        assert_eq!(c.step(t, stalled(StallClass::Transport)), Action::None);
+        assert_eq!(c.step(t, stalled(StallClass::Encoder)), Action::None);
         assert_eq!(c.suppressed(), 1);
         // Once the oldest episode leaves the window, a new one opens.
         let t = t0 + b.episode_window + S;
         assert_eq!(
-            c.step(t, stalled(StallClass::Transport)),
+            c.step(t, stalled(StallClass::Encoder)),
             Action::Run(Stage::EncoderReset)
         );
         assert_eq!(c.suppressed(), 0);
@@ -588,10 +586,10 @@ mod tests {
         let mut c = Coordinator::new(b);
         let t0 = Instant::now();
         assert_eq!(
-            c.step(t0, stalled(StallClass::Conversion)),
+            c.step(t0, stalled(StallClass::Encoder)),
             Action::Run(Stage::EncoderReset)
         );
-        assert_eq!(c.current_class(), Some(StallClass::Conversion));
+        assert_eq!(c.current_class(), Some(StallClass::Encoder));
         let reset_done = t0 + ENCODER_RESET_FIRST_AU;
         assert_eq!(
             c.step(
@@ -617,7 +615,7 @@ mod tests {
     fn recovery_needs_the_budgeted_frame_count_not_one() {
         let mut c = Coordinator::new(Budget::default());
         let t0 = Instant::now();
-        c.step(t0, stalled(StallClass::Transport));
+        c.step(t0, stalled(StallClass::Encoder));
         c.step(
             t0,
             Event::StageDone(Stage::EncoderReset, StageOutcome::Applied),

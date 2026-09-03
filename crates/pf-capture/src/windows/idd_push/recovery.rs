@@ -5,7 +5,7 @@
 //! watchdog it retired; the ladder replaces the one-rebuild-then-terminal rule.
 //!
 //! It runs ON the capture thread. The presentation restart is capture-thread-owned; the encoder
-//! reset belongs to the stream loop, which polls for it and reports back. A `Conversion`
+//! reset belongs to the stream loop, which polls for it and reports back. An `Encoder`
 //! episode is proven by access units, every other class by new source frames. The host's
 //! pipeline rebuild (its own 5-attempt budget) is the rung above `Failed`.
 
@@ -13,16 +13,15 @@ use std::time::{Duration, Instant};
 
 use crate::{CaptureEpisode, CaptureHealth};
 use pf_frame::health::{
-    Activity, ActivityKind, Classifier, EncoderTelemetry, HealthClass, RingState, Snapshot,
-    StallClass, Thresholds,
+    Activity, ActivityKind, Classifier, EncoderTelemetry, HealthClass, Snapshot, StallClass,
+    Thresholds,
 };
 use pf_frame::recovery::{Action, Budget, Coordinator, Event, Stage, StageOutcome, Summary};
 
 fn stall_name(c: StallClass) -> &'static str {
     match c {
         StallClass::Worker => "worker",
-        StallClass::Transport => "transport",
-        StallClass::Conversion => "conversion",
+        StallClass::Encoder => "encoder",
         StallClass::Presentation => "presentation",
         StallClass::Driver => "driver",
     }
@@ -151,11 +150,11 @@ impl Supervisor {
             stall_class,
             source_gap: verdict.map_or(Duration::ZERO, |v| v.source_gap),
             evidence: verdict.and_then(|v| v.evidence).map(|k| match k {
-                ActivityKind::RecentSource => "recent_source",
                 ActivityKind::Input => "input",
                 ActivityKind::Canary => "canary",
-                ActivityKind::Presents => "presents",
             }),
+            present_to_arrival: enc.and_then(|e| e.present_to_arrival),
+            late_frames: verdict.is_some_and(|v| v.late),
             encoder_state: enc.map(|e| encoder_state(e.state)),
             backend_opened: enc.map(|e| e.backend),
             detached: enc.map_or(0, |e| e.detached),
@@ -191,7 +190,7 @@ impl Supervisor {
     }
 
     /// One tick of the classifier and coordinator over `i`. Access units published since the
-    /// last tick prove a `Conversion` episode here; source frames prove every other class
+    /// last tick prove an `Encoder` episode here; source frames prove every other class
     /// through [`Self::source_frame`].
     pub(super) fn tick(&mut self, i: Inputs) -> Step {
         if !self.owns_episode() && i.now.saturating_duration_since(self.last_tick) < TICK {
@@ -208,19 +207,14 @@ impl Supervisor {
         }
         let snap = Snapshot {
             now: i.now,
-            worker_heartbeat: i.heartbeat_age.and_then(|a| i.now.checked_sub(a)),
-            last_acquire: None,
-            last_publish: None,
+            drain_heartbeat: i.heartbeat_age.and_then(|a| i.now.checked_sub(a)),
             last_source: Some(i.last_source),
             source_seq: i.source_seq,
-            last_encoded: i.encoder.map(|t| t.last_au),
+            last_au: i.encoder.map(|t| t.last_au),
+            present_to_arrival: i.encoder.and_then(|t| t.present_to_arrival),
             activity: evidence(i.now, i.last_source, self.input_at, self.canary_at),
-            ring: if i.recreating {
-                RingState::Rebuilding
-            } else {
-                RingState::Unknown
-            },
             topology_in_transaction: i.topology_held,
+            rebuilding: i.recreating,
             secure_desktop: i.secure_desktop,
             encoder_detached: i.encoder.map_or(0, |t| t.detached),
         };
@@ -249,7 +243,7 @@ impl Supervisor {
             Step::Nothing => {}
             step => return step,
         }
-        if au_progress > 0 && self.coordinator.current_class() == Some(StallClass::Conversion) {
+        if au_progress > 0 && self.coordinator.current_class() == Some(StallClass::Encoder) {
             let progress = Event::Progress {
                 new_source_frames: au_progress,
                 assignment_changed: false,
@@ -280,12 +274,12 @@ impl Supervisor {
 
     /// A NEW source frame arrived (never a regen or hold). Clears the gap's evidence; closes a
     /// proving episode once the budgeted count has landed, returning its summary and the
-    /// measured outage. A `Conversion` episode is deaf to it: source frames kept flowing
+    /// measured outage. An `Encoder` episode is deaf to it: source frames kept flowing
     /// through that stall, so only access units can prove it.
     pub(super) fn source_frame(&mut self, now: Instant) -> Option<(Summary, Duration)> {
         self.input_at = None;
         self.canary_at = None;
-        if self.coordinator.current_class() == Some(StallClass::Conversion) {
+        if self.coordinator.current_class() == Some(StallClass::Encoder) {
             return None;
         }
         let progress = Event::Progress {
@@ -383,6 +377,7 @@ mod tests {
             source_seq: 0,
             dropped_total: 0,
             drain_heartbeat: Some(last_au),
+            present_to_arrival: None,
             state: 0,
             backend: "nvenc",
         })

@@ -280,6 +280,7 @@ pub fn open_driver_encoder(
         wire_chunk_warned: false,
         last_wire_seq: 0,
         last_source_seq: 0,
+        last_arrival: None,
         opened_at: Instant::now(),
         backend: backend_name(reply.backend_opened),
     }))
@@ -301,9 +302,11 @@ pub struct EncoderProxy {
     wire_chunk: usize,
     wire_chunk_warned: bool,
     /// The last taken chunk's `wire_seq` / `source_seq`: AU progress, the supervisor's second
-    /// ground-truth clock from Phase 4 on (`progress`).
+    /// ground-truth clock (`progress`).
     last_wire_seq: u32,
     last_source_seq: u32,
+    /// Age of the last taken chunk's `qpc_pts` when the host took it — present→arrival.
+    last_arrival: Option<Duration>,
     /// Stands in for `last_au_qpc` until the first publish, so a never-producing encoder is
     /// silent from a known instant rather than invisible.
     opened_at: Instant,
@@ -344,9 +347,14 @@ impl EncoderProxy {
         }
     }
 
+    /// One taken slot as a wire chunk, recording the progress clocks on the way through:
+    /// the sequence pair the supervisor reads as encoder progress, and how old the OS present
+    /// stamp already is — the ground truth for "late, not missing".
     fn chunk(&mut self, t: Taken) -> AuChunk {
         self.last_wire_seq = t.wire_seq;
         self.last_source_seq = t.source_seq;
+        self.last_arrival =
+            (t.qpc_pts != 0).then(|| Duration::from_micros(IddPushCapturer::qpc_age_us(t.qpc_pts)));
         AuChunk {
             data: t.data,
             pts_ns: pts_from_qpc(t.qpc_pts),
@@ -478,6 +486,8 @@ impl Encoder for EncoderProxy {
         }
     }
 
+    /// The classifier's two clocks straight from the AU header: the drain worker's heartbeat and
+    /// the encoder's publish stamp, both QPC ages turned into local instants.
     fn telemetry(&self) -> Option<pf_frame::health::EncoderTelemetry> {
         let h = self.snapshot();
         let stamp = |qpc: u64| {
@@ -494,6 +504,7 @@ impl Encoder for EncoderProxy {
             source_seq: h.source_seq,
             dropped_total: h.dropped_total,
             drain_heartbeat: stamp(h.drain_heartbeat_qpc),
+            present_to_arrival: self.last_arrival,
             state: h.encoder_state,
             backend: self.backend,
         })

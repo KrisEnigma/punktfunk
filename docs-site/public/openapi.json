@@ -5045,6 +5045,7 @@
         "required": [
           "class",
           "source_gap_ms",
+          "late_frames",
           "detached",
           "published_total",
           "dropped_total",
@@ -5108,7 +5109,7 @@
               "string",
               "null"
             ],
-            "description": "Activity evidence behind the verdict: `recent_source` / `input` / `canary` / `presents`."
+            "description": "Activity evidence behind the verdict: `input` / `canary`."
           },
           "last_episode": {
             "oneOf": [
@@ -5120,6 +5121,19 @@
                 "description": "The last closed recovery episode."
               }
             ]
+          },
+          "late_frames": {
+            "type": "boolean",
+            "description": "`present_to_arrival_ms` is past the classifier's bound: frames come late rather than not\nat all. Reported only — no recovery rung fires on it."
+          },
+          "present_to_arrival_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The newest access unit's OS present stamp against the moment the host took it.",
+            "minimum": 0
           },
           "published_total": {
             "type": "integer",
@@ -5138,7 +5152,7 @@
               "string",
               "null"
             ],
-            "description": "When `class` is `stalled`: `worker` / `transport` / `conversion` / `presentation` / `driver`."
+            "description": "When `class` is `stalled`: `worker` / `encoder` / `presentation` / `driver`."
           }
         }
       },
@@ -7095,7 +7109,7 @@
             "items": {
               "$ref": "#/components/schemas/ApiCodec"
             },
-            "description": "Codecs this host can encode (`Codec::host_wire_caps`, not the compile-time list)."
+            "description": "Codecs this host can encode (`host_wire_caps`, not the compile-time list)."
           },
           "gamestream": {
             "type": "boolean",
