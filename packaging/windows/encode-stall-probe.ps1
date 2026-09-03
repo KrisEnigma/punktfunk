@@ -168,8 +168,9 @@ try {
                 detached = $c.detached; pub = $c.published_total; drop = $c.dropped_total
             }
             Add-Content -Path $pollLog -Value ($row | ConvertTo-Json -Compress)
-            # The wedge: the encoder stopped publishing while the session was already streaming.
-            if (-not $blockedAt -and $c.published_total -gt 0 -and $c.published_total -eq $lastPub `
+            # The wedge: past the armed frame count, publishing stopped. An idle desktop also
+            # stops publishing, hence the frame-count floor — before it the thread cannot be parked.
+            if (-not $blockedAt -and $c.published_total -ge $BlockAfter -and $c.published_total -eq $lastPub `
                     -and ($now - $t0).TotalSeconds -gt $HealthySecs) {
                 $blockedAt = $now
                 Say "wedge at published_total=$($c.published_total) after $([int]($now - $t0).TotalSeconds) s"
@@ -190,7 +191,7 @@ if (-not $blockedAt) { Say 'NO WEDGE OBSERVED — the knob never fired (probe bu
 
 # --- 6. compose cadence across the block window -------------------------------------------------
 Say '--- compose cadence (drain-worker passes per second, from published+dropped) ---'
-$rows = Get-Content $pollLog | ForEach-Object { $_ | ConvertFrom-Json }
+$rows = @(Get-Content $pollLog -ErrorAction SilentlyContinue | ForEach-Object { $_ | ConvertFrom-Json })
 $rates = @()
 for ($i = 1; $i -lt $rows.Count; $i++) {
     $dt = ([datetime]$rows[$i].t - [datetime]$rows[$i - 1].t).TotalSeconds
@@ -206,7 +207,7 @@ if ($blockedAt) {
         Say ('intervals below 45 fps: ' + (($win | Where-Object { $_.fps -lt 45 }).Count))
     }
 }
-$all = $rates.fps | Sort-Object
+$all = @($rates.fps) | Sort-Object
 if ($all) { Say ("whole run n={0}  min={1}  median={2}" -f $all.Count, $all[0], $all[[int]($all.Count / 2)]) }
 
 # --- 7. the ladder: per-rung wall clock ---------------------------------------------------------
