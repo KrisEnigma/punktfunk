@@ -72,6 +72,7 @@ impl<'a> Drive<'a> {
             inflight: VecDeque::new(),
             mid_au: false,
             dropping_au: false,
+            want_republish: false,
             qpc_hz: qpc_frequency(),
             state: au::ENCODER_OPEN,
             stop,
@@ -100,6 +101,8 @@ pub struct Drive<'a> {
     mid_au: bool,
     /// The AU in progress could not be placed; its remaining chunks are dropped too.
     dropping_au: bool,
+    /// A keyframe was asked for; if nothing composes, re-encode the stash instead of waiting.
+    want_republish: bool,
     qpc_hz: u64,
     state: u32,
     stop: HANDLE,
@@ -126,7 +129,15 @@ impl Drive<'_> {
         let (block, mut encoded) = (block_after(), 0u64);
         while !self.stopped() {
             self.drain_ctl();
-            let Some((slot, qpc, seq)) = self.pool.take_full() else {
+            // Nothing composed and a client is waiting on a keyframe: re-encode the stash, or
+            // the request sits on a frame that never arrives (an idle desktop under a client
+            // that draws its own pointer dirties nothing at all).
+            let next = self
+                .pool
+                .take_full()
+                .or_else(|| self.want_republish.then(|| self.pool.republish()).flatten());
+            self.want_republish = false;
+            let Some((slot, qpc, seq)) = next else {
                 self.wait();
                 continue;
             };
@@ -175,13 +186,17 @@ impl Drive<'_> {
     fn drain_ctl(&mut self) {
         for op in self.session.take_ctl() {
             match op {
-                Ctl::RequestKeyframe => self.enc.request_keyframe(),
+                Ctl::RequestKeyframe => {
+                    self.enc.request_keyframe();
+                    self.want_republish = true;
+                }
                 Ctl::InvalidateRefFrames(first, last) => {
                     if !self
                         .enc
                         .invalidate_ref_frames(i64::from(first), i64::from(last))
                     {
                         self.enc.request_keyframe();
+                        self.want_republish = true;
                     }
                 }
                 Ctl::DistrustReferences => self.enc.distrust_references(),

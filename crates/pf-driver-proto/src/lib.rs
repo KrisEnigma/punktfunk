@@ -1018,6 +1018,17 @@ pub mod encode {
     /// Push the encoder's in-flight AUs into the section.
     pub const ENCODE_CTL_FLUSH: u32 = 7;
 
+    /// Which pool slot a keyframe request re-encodes when the desktop composed nothing:
+    /// `stash`, the newest slot the encode thread took, but only while `queued` is 0 — a
+    /// composed frame already carries the IDR — and the slot sits in `idle`, so no drain pass
+    /// can be writing the pixels the encoder is about to read. `None` means do nothing.
+    ///
+    /// The driver's pool is Windows-only; the rule lives here so it is covered everywhere.
+    #[must_use]
+    pub fn republish_slot(stash: Option<usize>, queued: usize, idle: &[usize]) -> Option<usize> {
+        stash.filter(|s| queued == 0 && idle.contains(s))
+    }
+
     /// [`IOCTL_ENCODE_CTL`] input: one op against one monitor's live encoder. Unused `arg*` /
     /// `payload` bytes are zero. The ops are the `Encoder` trait calls the stream loop already
     /// makes locally on Linux, forwarded by a control proxy — so the wire shape is deliberately
@@ -3199,6 +3210,19 @@ mod tests {
         assert_eq!(ops, [1, 2, 3, 4, 5, 6, 7]);
         // `0` stays unassigned: a zeroed request is not a silent keyframe.
         assert!(!ops.contains(&0));
+    }
+
+    #[test]
+    fn keyframe_republishes_the_stash_only_when_nothing_composed() {
+        use encode::republish_slot;
+        // Idle desktop, slot back in the free list: the request re-encodes the stash as an IDR.
+        assert_eq!(republish_slot(Some(1), 0, &[1, 2]), Some(1));
+        // A composed frame is queued — the ordinary path already produces the IDR.
+        assert_eq!(republish_slot(Some(1), 1, &[1, 2]), None);
+        // The slot is in use again (a drain pass or an AU still owed on it).
+        assert_eq!(republish_slot(Some(1), 0, &[2]), None);
+        // Nothing was ever encoded on this pool.
+        assert_eq!(republish_slot(None, 0, &[1, 2]), None);
     }
 
     #[test]

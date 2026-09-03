@@ -13,6 +13,7 @@ use std::mem::offset_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use pf_driver_proto::encode as wire;
 use pf_driver_proto::encode::au::AuHeader;
 use pf_frame::CapturedFrame;
 use windows::Win32::Foundation::HANDLE;
@@ -50,6 +51,10 @@ struct State {
     full: VecDeque<(usize, u64, u64)>,
     /// Handed to the encoder, AU still owed.
     encoding: Vec<usize>,
+    /// `(slot, qpc, seq)` of the newest frame the encoder took. Its pixels survive in the slot
+    /// until a later pass reuses it, which is what lets a keyframe request re-encode the last
+    /// picture when the desktop composed nothing since.
+    stash: Option<(usize, u64, u64)>,
     /// An encode thread is consuming. Without one the newest frame recycles the oldest full
     /// slot, so the retained image is always the current desktop.
     live: bool,
@@ -98,6 +103,7 @@ impl Pool {
                 free: (0..SLOTS).collect(),
                 full: VecDeque::new(),
                 encoding: Vec::new(),
+                stash: None,
                 live: false,
             }),
             event,
@@ -177,12 +183,32 @@ impl Pool {
         }
     }
 
-    /// The oldest full slot, now the encoder's.
+    /// The oldest full slot, now the encoder's, remembered as the stash for [`Self::republish`].
     pub fn take_full(&self) -> Option<(usize, u64, u64)> {
         let mut st = lock(&self.state);
         let f = st.full.pop_front()?;
         st.encoding.push(f.0);
+        st.stash = Some(f);
         Some(f)
+    }
+
+    /// The stash again, for a client that asked for a keyframe while the desktop composed
+    /// nothing. DWM presents only what something dirties, so a session whose client draws its
+    /// own pointer can go quiet with the client holding no picture at all; its keyframe request
+    /// is then the only signal that anyone needs one, and there is no frame for the ordinary
+    /// path to mark as an IDR.
+    ///
+    /// Yields nothing unless the slot is idle and no composed frame is queued
+    /// ([`wire::republish_slot`]), and moves it out of `free` so no drain pass can overwrite
+    /// the pixels the encoder is about to read.
+    pub fn republish(&self) -> Option<(usize, u64, u64)> {
+        let mut st = lock(&self.state);
+        let (slot, qpc, seq) = st.stash?;
+        let queued = st.full.len();
+        wire::republish_slot(Some(slot), queued, &st.free)?;
+        st.free.retain(|&s| s != slot);
+        st.encoding.push(slot);
+        Some((slot, qpc, seq))
     }
 
     /// Hand a slot back, whether its AU was published or it was skipped.
