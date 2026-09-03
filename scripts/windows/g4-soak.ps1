@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-  Gate G4 stall-immunity soak (windows-video-plane-overhaul.md §5) for one vendor.
+  Gate G4 stall-immunity soak (windows-video-plane-overhaul.md section 5) for one vendor.
 
 .DESCRIPTION
-  Runs the §5 matrix unattended on a box with the driver-encode host installed: a real client
+  Runs the section 5 matrix unattended on a box with the driver-encode host installed: a real client
   under a GPU load generator at the session resolution, N reconnects, in-place resizes,
   lock/unlock cycles on the secure desktop, and one sleep/resume. Every leg writes an EVENT
   marker into live-g4-<Tag>.log; a status poller writes one timed /api/v1/status sample every
-  two seconds into g4-<Tag>-status.jsonl. g4-report.ps1 cuts both into the six §5 criteria.
+  two seconds into g4-<Tag>-status.jsonl. g4-report.ps1 cuts both into the six section 5 criteria.
 
   Detached, so it survives the ssh drop and the sleep leg:
     kick-task.ps1 -Name pf-g4 -Script C:\Users\Public\g4-soak.ps1 -ScriptArgs "-Tag g4n -Minutes 240"
@@ -110,7 +110,7 @@ function Get-MgmtToken {
   (Get-Content -Raw 'C:\ProgramData\punktfunk\mgmt-token').Trim() -replace '^[A-Z_]+=', ''
 }
 
-# GET one management endpoint, timed. `ms` is the whole round trip — criterion 5's number.
+# GET one management endpoint, timed. `ms` is the whole round trip - criterion 5's number.
 function Get-Mgmt([string]$path, [string]$token) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   try {
@@ -367,7 +367,7 @@ $cycleSecs = [Math]::Max(45, [int]($Minutes * 60 / [Math]::Max(1, $Reconnects)) 
 $resizeEvery = if ($doResize -and $Resizes -gt 0) { [Math]::Max(1, [int][Math]::Ceiling($Reconnects / $Resizes)) } else { 0 }
 $lockEvery = if ($doLock -and $Locks -gt 0) { [Math]::Max(1, [int][Math]::Ceiling($Reconnects / $Locks)) } else { 0 }
 $sleepAt = [int]($Reconnects * 0.6)
-# §5 wants both 4 h AND 100 reconnects, so the loop runs until both are met; the hard cap
+# section 5 wants both 4 h AND 100 reconnects, so the loop runs until both are met; the hard cap
 # stops a run whose cycles are overrunning rather than letting it eat the day.
 $end = (Get-Date).AddMinutes($Minutes)
 $hardEnd = (Get-Date).AddMinutes($Minutes * 1.5)
@@ -410,7 +410,7 @@ try {
     if ($lockEvery -gt 0 -and ($n % $lockEvery) -eq 0 -and $state.locks -lt $Locks -and $state.lock_ok) {
       $state.locks++
       $state.lock_ok = Invoke-LockCycle $state.locks $token
-      if (-not $state.lock_ok) { Say 'LOCK-LEG-ABORTED — the console did not come back; remaining lock cycles are skipped' }
+      if (-not $state.lock_ok) { Say 'LOCK-LEG-ABORTED - the console did not come back; remaining lock cycles are skipped' }
     }
 
     if ($doSleep -and -not $state.sleep_done -and $n -ge $sleepAt) {
@@ -435,7 +435,7 @@ try {
     Mark 'cycle-end' "n=$n early_exit=$early stats=$(($stats | Measure-Object).Count) $h"
     if ($last) { Say "  $($last.Substring(0, [Math]::Min(240, $last.Length)))" }
     Remove-Item $out, $errf -ErrorAction SilentlyContinue
-    if ($poller.State -ne 'Running') { Say 'status poller died — criterion 5 has a hole here' }
+    if ($poller.State -ne 'Running') { Say 'status poller died - criterion 5 has a hole here' }
     $state | ConvertTo-Json -Compress | Set-Content $statePath
     Start-Sleep 6
     Start-Load ([Math]::Max(300, [int](($hardEnd - (Get-Date)).TotalSeconds)))

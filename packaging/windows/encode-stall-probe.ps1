@@ -9,13 +9,13 @@
   (probe builds only, packaging/windows/drivers/pf-vdisplay/src/encode/drive.rs). The G3 claim is
   that this costs one IDR and never a compose hitch, so the run measures three things:
 
-    * COMPOSE — `capture.dropped_total` + `capture.published_total` from `punktfunk-host ctl
+    * COMPOSE - `capture.dropped_total` + `capture.published_total` from `punktfunk-host ctl
       --json status`, polled twice a second. Every drain-worker pass through the block window
       bumps one of them (the pool has no free slot, so the frame is counted and dropped), so their
       combined rate IS the drain worker's cadence. A hitch shows as an interval below refresh.
-    * LADDER — the rungs the host ran, from `capture.last_episode.stages[]` (the coordinator's own
+    * LADDER - the rungs the host ran, from `capture.last_episode.stages[]` (the coordinator's own
       per-rung ms) and from the host.log timestamps of the lines each actuator writes.
-    * AU STREAM — the host's access-unit dump (PUNKTFUNK_IDD_DIAG, set as a per-service
+    * AU STREAM - the host's access-unit dump (PUNKTFUNK_IDD_DIAG, set as a per-service
       environment value so a service restart picks it up without a reboot): per-AU `qpc_pts`
       deltas and keyframe count, i.e. how many IDRs the recovery really cost.
 
@@ -123,7 +123,7 @@ if (-not $SkipDeploy) {
     $wudf = Get-Process WUDFHost -ErrorAction SilentlyContinue |
         Where-Object { $_.Modules.ModuleName -contains 'pf_vdisplay.dll' }
     if ($wudf -and ($wudf | Where-Object { $_.StartTime -lt $deployedAt })) {
-        Say 'stale WUDFHost still holds pf_vdisplay.dll — forcing a fresh one'
+        Say 'stale WUDFHost still holds pf_vdisplay.dll - forcing a fresh one'
         Stop-Service $Service -Force -ErrorAction SilentlyContinue
         $wudf | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
@@ -169,12 +169,12 @@ try {
             }
             Add-Content -Path $pollLog -Value ($row | ConvertTo-Json -Compress)
             # The wedge: past the armed frame count, publishing stopped. An idle desktop also
-            # stops publishing, hence the frame-count floor — before it the thread cannot be parked.
+            # stops publishing, hence the frame-count floor - before it the thread cannot be parked.
             if (-not $blockedAt -and $c.published_total -ge $BlockAfter -and $c.published_total -eq $lastPub `
                     -and ($now - $t0).TotalSeconds -gt $HealthySecs) {
                 $blockedAt = $now
                 Say "wedge at published_total=$($c.published_total) after $([int]($now - $t0).TotalSeconds) s"
-                if (-not $WalkLadder) { Set-BlockKnob 0; Say 'knob disarmed — the next reset may hold' }
+                if (-not $WalkLadder) { Set-BlockKnob 0; Say 'knob disarmed - the next reset may hold' }
             }
             $lastPub = $c.published_total
         }
@@ -187,7 +187,7 @@ finally {
     Set-BlockKnob 0
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
 }
-if (-not $blockedAt) { Say 'NO WEDGE OBSERVED — the knob never fired (probe build deployed?)' }
+if (-not $blockedAt) { Say 'NO WEDGE OBSERVED - the knob never fired (probe build deployed?)' }
 
 # --- 6. compose cadence across the block window -------------------------------------------------
 Say '--- compose cadence (drain-worker passes per second, from published+dropped) ---'
@@ -247,7 +247,7 @@ $dump = Get-ChildItem $dumpDir -Filter 'pfvd-au-*.bin' -ErrorAction SilentlyCont
     Sort-Object Length -Descending | Select-Object -First 1
 if (-not $dump) { Say '  no AU dump (PUNKTFUNK_IDD_DIAG did not reach the service)' }
 else {
-    # Framing: [u32 len][u64 pts_ns][u8 keyframe][len bytes]. Seek past the payload — the file is
+    # Framing: [u32 len][u64 pts_ns][u8 keyframe][len bytes]. Seek past the payload - the file is
     # the whole encoded stream.
     $s = [IO.File]::OpenRead($dump.FullName)
     $r = New-Object IO.BinaryReader($s)
@@ -282,4 +282,4 @@ else {
 }
 
 Set-ItemProperty -Path $svcEnv -Name 'Environment' -Type MultiString -Value @()
-Say "done — $runLog / $pollLog / $clientLog / $dumpDir"
+Say "done - $runLog / $pollLog / $clientLog / $dumpDir"
