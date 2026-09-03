@@ -82,23 +82,30 @@ seam may know the graphics API, and this is it — video will land on the lower 
 same file, which is what makes the eventual WebGPU swap a change to one file instead of a rewrite.
 Nothing in `src/` may name a GL or GPU type; that is a review rule.
 
+## Tests
+
+```sh
+RUSTFLAGS="-C link-arg=-sDEFAULT_TO_CXX=1 -C link-arg=-sALLOW_MEMORY_GROWTH=1 \
+  -C link-arg=-sMAX_WEBGL_VERSION=2 -C link-arg=-sNODERAWFS=1" \
+EMCC_CFLAGS="-fwasm-exceptions" \
+SKIA_BINARIES_URL="file://$HOME/.cache/punktfunk/skia-wasm/skia-binaries-{key}.tar.gz" \
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUNNER=node \
+cargo test -p pf-console-ui --target wasm32-unknown-emscripten --no-default-features
+```
+
+231 pass, including the `clients/shared/console-vectors.json` parity vectors. `NODERAWFS` is
+what lets the source-scanning lint read the crate's own `src`; without it that one test fails on a
+missing directory.
+
+The wasm harness is **single-threaded**, which makes it stricter than the desktop one: libtest
+normally gives every test its own thread, and `theme::reduce_motion` is a thread-local, so tests
+that disagree about motion only stay isolated by accident there. State what a test needs rather
+than inherit it.
+
 ## Known gaps
 
-- **`--release` and `cargo test` do not link yet, for the same reason.** Cargo emits every crate
-  type a dependency declares, so `punktfunk-core`'s `cdylib` — there for the Swift/Kotlin
-  embedders, wanted by nothing on wasm — is linked as an emscripten `SIDE_MODULE`. wasm-ld exports
-  its Rust symbols, and emcc rejects the first mangled name that is not a JS identifier:
-
-  ```
-  emcc: error: invalid export name: _ZN101_$LT$punktfunk_core..transport..udp..UdpTransport$u20$as…
-  ```
-
-  Which symbol survives depends on the profile, which is why the dev build links and the release
-  and test builds do not (thin LTO is already on and does not internalise them). The fix is to stop
-  emitting that cdylib for wasm — cargo has no per-target `crate-type`, so it means dropping
-  `cdylib`/`staticlib` from `punktfunk-core`'s manifest and having `scripts/build-xcframework.sh`
-  and the Android Gradle build ask for them with `cargo rustc --crate-type` instead. That touches
-  the Apple and Android build contracts, so it wants its own change with those builds in reach.
 - No `VideoSurface` yet. The lower canvas is present and empty by design — the seam arrives with
   the decoder in WP2.3, and inventing it before there is a frame to put through it would be
   guessing at the interface.
+- The release module is **8.0 MB of wasm plus 114 KB of JS**, unstripped and un-`wasm-opt`ed. Plan
+  §5.5 wants a measured heap ceiling; this is the payload half of it.

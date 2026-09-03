@@ -125,20 +125,29 @@ fn hosts() -> Vec<HostRow> {
     ]
 }
 
+/// `ConsoleOptions::desktop` leaves `store` unset, and the shell then resolves it to the file
+/// store — which exists only on the desktop. Off it, hand the tests the in-memory one so they
+/// exercise the same screens rather than the "no settings store on this platform" bail.
+fn test_options() -> ConsoleOptions {
+    #[allow(unused_mut)]
+    let mut opts = ConsoleOptions::desktop("deck".into(), false);
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        opts.store = Some(std::sync::Arc::new(crate::store::SnapshotStore::new(
+            pf_client_core::trust::Settings::default(),
+            Vec::new(),
+        )));
+    }
+    opts
+}
+
 fn shell(stack: Vec<Screen>) -> (Shell, ConsoleShared, LibraryShared) {
     fake_home();
     let console = ConsoleShared::default();
     console.set_hosts(hosts());
     let library = LibraryShared::default();
     let bus = ConsoleBus::default();
-    let shell = Shell::new(
-        console.clone(),
-        library.clone(),
-        bus,
-        ConsoleOptions::desktop("deck".into(), false),
-        stack,
-    )
-    .unwrap();
+    let shell = Shell::new(console.clone(), library.clone(), bus, test_options(), stack).unwrap();
     (shell, console, library)
 }
 
@@ -1144,7 +1153,7 @@ fn dump_console_screens() {
             console2,
             library.clone(),
             ConsoleBus::default(),
-            ConsoleOptions::desktop("deck".into(), false),
+            test_options(),
             vec![
                 Screen::Home(HomeScreen::new()),
                 Screen::Library(LibraryScreen::new(&hosts()[0], 0)),
@@ -1306,7 +1315,7 @@ fn collections_shell_inner(
         console.clone(),
         library.clone(),
         ConsoleBus::default(),
-        ConsoleOptions::desktop("deck".into(), false),
+        test_options(),
         vec![
             Screen::Home(HomeScreen::new()),
             Screen::Library(LibraryScreen::new(&hosts()[0], 0)),
