@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Cut a g4-soak.ps1 run into the six §5 pass criteria of windows-video-plane-overhaul.md.
+  Cut a g4-soak.ps1 run into the six section 5 pass criteria of windows-video-plane-overhaul.md.
 
 .DESCRIPTION
   Reads live-g4-<Tag>.log (leg markers), host.log over the run window, g4-<Tag>-status.jsonl
@@ -88,7 +88,7 @@ $events = Get-Content $runLog | Where-Object { $_ -match 'EVENT kind=' } | ForEa
   $t = ($_ -split ' ')[0].TrimEnd('Z')
   [pscustomobject]@{ t = $t; kind = (Field $_ 'kind'); line = $_ }
 }
-if (-not $events) { Write-Output 'no EVENT markers — the run never started'; exit 1 }
+if (-not $events) { Write-Output 'no EVENT markers - the run never started'; exit 1 }
 $from = ($events | Select-Object -First 1).t
 $to = ($events | Select-Object -Last 1).t
 $streamMarks = @($events | Where-Object { $_.kind -eq 'cycle-streaming' } | ForEach-Object { $_.t })
@@ -103,7 +103,7 @@ Emit "host.log lines in window: $(($hl | Measure-Object).Count)"
 $diagOn = ($hl | Where-Object { $_ -match 'PUNKTFUNK_IDD_DIAG is ON' } | Measure-Object).Count
 $etwOff = ($hl | Where-Object { $_ -match 'DxgKrnl ETW session unavailable' } | Measure-Object).Count
 Emit "diagnostics: IDD_DIAG sessions=$diagOn etw_unavailable_warnings=$etwOff"
-if ($diagOn -eq 0) { Emit 'WARNING: no session ran with PUNKTFUNK_IDD_DIAG — criterion 1 cannot be attributed' }
+if ($diagOn -eq 0) { Emit 'WARNING: no session ran with PUNKTFUNK_IDD_DIAG - criterion 1 cannot be attributed' }
 
 $stalls = $hl | Where-Object { $_ -match 'IDD-push capture stall' } | ForEach-Object {
   $etw = if ($_ -match 'etw=(.*?)\s+etw_presents=') { $Matches[1] } else { Field $_ 'etw' }
@@ -153,7 +153,7 @@ foreach ($g in $big) {
   $verdict = 'UNATTRIBUTED'; $why = 'no co-timed stall line'
   if ($near) {
     # The DxgKrnl bracket string is empty or the word `unavailable`/`none` when no display DDI
-    # was servicing; anything else names one, which is the adapter pause §5 asks for.
+    # was servicing; anything else names one, which is the adapter pause section 5 asks for.
     $adapterPause = ($near.etw -and $near.etw -notmatch '^(unavailable|none|)$')
     if ($near.verdict -like 'driver-worker-stalled*') { $verdict = 'OURS' }
     elseif ($near.verdict -like 'damage-idle*') { $verdict = 'IDLE' }
@@ -229,7 +229,7 @@ Emit 'A true per-frame qpc_pts cadence check needs a host-side instrument that d
 
 Emit ''
 Emit '-- 5. control plane answers within 1 s throughout'
-if (-not (Test-Path $statusPath)) { Emit 'no status samples — criterion 5 unevidenced' }
+if (-not (Test-Path $statusPath)) { Emit 'no status samples - criterion 5 unevidenced' }
 else {
   $ms = @(); $bad = 0; $n = 0
   Get-Content $statusPath | ForEach-Object {
