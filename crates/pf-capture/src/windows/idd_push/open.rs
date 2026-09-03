@@ -2,8 +2,8 @@
 //! broker, and the cursor opt-in.
 //!
 //! Types that exist only here: [`SharedObjectSa`], shared with the AU section's
-//! own create. Steady-state capture (`try_consume`, pollers, `Capturer`) stays
-//! in the parent. A `#[path]` child sees the parent's private items through
+//! own create. Steady-state capture (`try_consume`, pollers, `Capturer`) lives
+//! in `capturer`. A `#[path]` child sees the parent's private items through
 //! `use super::*`. Evidence: `design/idd-push-security.md`.
 
 use super::*;

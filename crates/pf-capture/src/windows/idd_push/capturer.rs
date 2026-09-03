@@ -1,0 +1,385 @@
+//! The frame-delivery endpoint: one tick of the capture loop, and the
+//! [`Capturer`] surface the stream loop drives.
+//!
+//! [`IddPushCapturer::try_consume`] runs the pollers, walks the recovery ladder
+//! and then reports the driver's frame cadence as a pixel-less
+//! [`CapturedFrame`] — the driver owns the pixels, so a delivery is only the
+//! news that its encode pool took a new composed frame, and `Ok(None)` means
+//! the desktop composed nothing. The trait impl adds the loop's control points:
+//! encoder telemetry in, recovery stages out, and the in-place presentation
+//! restart the ladder's first rung runs.
+
+use super::*;
+
+impl IddPushCapturer {
+    /// Age of a driver QPC stamp in µs (QPC is system-wide). 0 if the stamp is ahead.
+    pub(super) fn qpc_age_us(stamp: u64) -> u64 {
+        static FREQ: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let freq = *FREQ.get_or_init(|| {
+            let mut f = 0i64;
+            // SAFETY: plain FFI; `f` is a valid local out-param. Frequency is fixed at boot;
+            // 0 means the call failed — guarded below.
+            let _ = unsafe { QueryPerformanceFrequency(&mut f) };
+            f.max(0) as u64
+        });
+        if freq == 0 {
+            return 0;
+        }
+        let mut now = 0i64;
+        // SAFETY: plain FFI; `now` is a valid local out-param.
+        if unsafe { QueryPerformanceCounter(&mut now) }.is_err() {
+            return 0;
+        }
+        (now as u64).saturating_sub(stamp).saturating_mul(1_000_000) / freq
+    }
+
+    /// One tick: pollers, recovery, then the driver's frame cadence. A delivery carries no
+    /// pixels (the driver encodes them) — its geometry, format and provenance are what the
+    /// stream loop consumes, and `Ok(None)` means the desktop composed nothing since the last.
+    fn try_consume(&mut self) -> Result<Option<CapturedFrame>> {
+        if let Some(e) = self.pending_fault.take() {
+            return Err(e);
+        }
+        // Secure-desktop first: UAC/Winlogon may produce no frames until this edge.
+        self.poll_secure_desktop();
+        // Witness before any early return so every gap shape accumulates cursor motion.
+        self.sample_cursor_witness();
+        // A "Use HDR" flip or a resize re-opens the encoder at the matching format.
+        self.poll_display_hdr();
+        // Recover-or-drop: a presentation restart that never resumes ends the session.
+        if let Some(since) = self.recovering_since {
+            // Under a recovery episode the ladder's stage deadlines govern instead.
+            if since.elapsed() > Duration::from_secs(3) && !self.recovery.owns_episode() {
+                bail!(
+                    "IDD-push: the display was restarted in place and no frame followed within 3s \
+                     — dropping the session so the client reconnects"
+                );
+            }
+            // Idle desktop after the restart: no compose, and recover-or-drop would kill a
+            // healthy session. The driver's retained pool slot covers most of it; this kick is
+            // the fallback. Rate-limited; may block ~35 ms on the sibling-display branch.
+            if since.elapsed() > Duration::from_millis(600)
+                && self.last_kick.elapsed() > Duration::from_millis(800)
+            {
+                self.last_kick = Instant::now();
+                tracing::debug!(
+                    target_id = self.target_id,
+                    "IDD push: no frame after the presentation restart — falling back to a \
+                     synthetic compose kick"
+                );
+                kick_dwm_compose(self.ccd);
+            }
+        }
+        // A dead WUDFHost and an idle desktop both stop advancing the source counter. Probe
+        // while stale so the driver cycle fires instead of the session streaming nothing.
+        if self.last_fresh.elapsed() > Duration::from_secs(2)
+            && self.last_liveness.elapsed() > Duration::from_secs(1)
+        {
+            self.last_liveness = Instant::now();
+            if !self.broker.driver_alive() {
+                tracing::warn!(
+                    wudf_pid = self.broker.wudf_pid,
+                    "IDD push: the pf-vdisplay WUDFHost is gone — firing the driver cycle"
+                );
+                self.pending_stage = Some(pf_frame::recovery::Stage::DriverCycle);
+                return Ok(None);
+            }
+        }
+        // First frame: DWM presents a display only when something dirties it, and the driver's
+        // retained pool slot is empty on a monitor's first session. Kick until the pool takes
+        // one. Rate-limited, and only once the encoder is open — before that nobody would see it.
+        if self.driver_source_seq == 0
+            && self.encoder.is_some()
+            && self.last_kick.elapsed() > Duration::from_millis(800)
+        {
+            self.last_kick = Instant::now();
+            kick_dwm_compose(self.ccd);
+        }
+        // Staged recovery — after the driver-death watch, so an episode means the WUDFHost is
+        // ALIVE and the presentation path is what stopped.
+        self.recovery_tick()?;
+        // Stall-attribution evidence: the STALEST the driver's drain heartbeat ever reads
+        // between fresh frames. A heartbeat that goes quiet for the hole convicts the worker
+        // (starved/dead WUDFHost); one that stays fresh through it indicts the compose path.
+        if let Some(age) = self.heartbeat_age() {
+            self.max_hb_age_us = self.max_hb_age_us.max(age.as_micros() as u64);
+        }
+        // The driver's pool counter is the only source clock this side has. Before the
+        // encoder opens there is no counter at all, and the loop needs one frame to open it.
+        let opened = self.encoder.is_some();
+        let driver_seq = self.encoder.map_or(0, |t| t.source_seq);
+        let geometry = (self.width, self.height, self.out_format());
+        if opened && driver_seq == self.driver_source_seq && self.delivered == Some(geometry) {
+            return Ok(None);
+        }
+        self.driver_source_seq = driver_seq;
+        self.delivered = Some(geometry);
+        let now = Instant::now();
+        // The newest access unit's OS present stamp against the moment the host took it: the
+        // ground-truth clock that tells "DWM stopped presenting" from "we were late".
+        let arrival_ms = self
+            .encoder
+            .and_then(|t| t.present_to_arrival)
+            .map(|d| d.as_millis() as u64);
+        if self.recovering_since.take().is_some() {
+            // Self-inflicted gap (the presentation restart). Reset so it is not a DWM stall.
+            self.stall_watch.reset();
+        } else if let Some(stall) = self.stall_watch.note_fresh(now, arrival_ms) {
+            // ETW prose uses gap + 300 ms lead-in (the cause lands just before);
+            // discriminator counts use the gap only — presents from healthy flow
+            // would falsely acquit.
+            let (etw, etw_counts) = self
+                .etw
+                .as_ref()
+                .and_then(|w| {
+                    now.checked_sub(stall.gap)
+                        .map(|from| w.window_report(from, now, Duration::from_millis(300)))
+                })
+                .unzip();
+            let evidence = StallEvidence {
+                max_heartbeat_age_ms: (self.encoder.is_some())
+                    .then_some(self.max_hb_age_us / 1_000),
+                // Same window as the report's OS-event correlation (gap + cause lead-in).
+                probes: now
+                    .checked_sub(stall.gap + Duration::from_millis(300))
+                    .zip(self.probes.as_deref())
+                    .map(|(from, p)| p.window(from, now)),
+                etw,
+                etw_counts,
+                // Gap accumulator only; this call's pending (ending-frame move) is still unfolded.
+                cursor_moved_px: self.cursor_last.map(|_| self.cursor_gap_px),
+            };
+            self.stall_watch.report(&stall, now, &evidence);
+        }
+        // Sustained ~2 fps stretch: per-hole lines gate on prior ACTIVE flow.
+        if let Some(r) = self.stall_watch.take_recovery() {
+            let arrival = r.arrival_ms();
+            tracing::info!(
+                degraded_ms = r.degraded.as_millis() as u64,
+                holes = r.holes,
+                hole_time_ms = r.hole_time.as_millis() as u64,
+                worst_hole_ms = r.worst.as_millis() as u64,
+                // last/mean/max between the OS present and the access unit reaching us.
+                present_to_arrival_ms = arrival.as_deref().unwrap_or("absent"),
+                present_to_arrival_n = r.arrival_n,
+                "IDD-push capture recovered from a degraded stretch — fresh frames arrived \
+                 only between stall-sized holes for its whole span; the per-stall lines \
+                 above cover at most its first hole"
+            );
+        }
+        // A recovery episode closes only on the budgeted count of NEW source frames.
+        if let Some((summary, outage)) = self.recovery.source_frame(now) {
+            tracing::info!(
+                target = %self.ccd,
+                ?summary,
+                outage_ms = outage.as_millis() as u64,
+                "IDD push: recovery episode closed"
+            );
+            self.recovered_outage = Some(outage);
+        }
+        self.last_fresh = now;
+        self.max_hb_age_us = 0;
+        // Pending sample is the ending frame's move — discarded, never folded.
+        self.cursor_gap_px = 0;
+        self.cursor_pending_px = 0;
+        self.source_seq += 1;
+        Ok(Some(CapturedFrame {
+            // The driver stamps each access unit with the frame's own present QPC; this side
+            // reports the sequence only.
+            provenance: pf_frame::Provenance::source(self.source_seq, 0),
+            width: self.width,
+            height: self.height,
+            pts_ns: now_ns(),
+            format: geometry.2,
+            // No pixels cross the boundary: the loop sees `Encoder::ready_aus` answer `Some`
+            // and owes wire indexes instead of submitting this frame.
+            payload: FramePayload::Cpu(Vec::new()),
+            cursor: None,
+        }))
+    }
+}
+
+impl Capturer for IddPushCapturer {
+    fn cursor(&mut self) -> Option<pf_frame::CursorOverlay> {
+        self.live_cursor()
+    }
+
+    fn set_cursor_forward(&mut self, on: bool) {
+        // Capture model: the declared hardware cursor stays excluded (no working un-declare);
+        // the driver blends it into the frames it encodes. `composite_forced` cannot turn off
+        // — no client draws.
+        let composite = (!on && self.cursor_shared.is_some()) || self.composite_forced;
+        if self.composite_cursor != composite {
+            self.composite_cursor = composite;
+            tracing::info!(
+                composite,
+                "cursor render model: the driver composites {}",
+                if composite {
+                    "ON (capture model — blending the pointer into what it encodes)"
+                } else {
+                    "OFF (client draws locally)"
+                }
+            );
+            if let (Some(_), Some(fwd)) =
+                (self.cursor_shared.as_ref(), self.cursor_forward.as_ref())
+                && let Err(e) = fwd(!composite)
+            {
+                tracing::warn!(
+                    composite,
+                    error = %format!("{e:#}"),
+                    "cursor render model: the driver did not take the flip"
+                );
+            }
+        }
+    }
+
+    fn next_frame(&mut self) -> Result<CapturedFrame> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(f) = self.try_consume()? {
+                return Ok(f);
+            }
+            if Instant::now() > deadline {
+                bail!(
+                    "no IDD-push frame within 20s (target {}) — the driver's encode pool took no \
+                     composed frame: the swap-chain was never assigned, the display is powered \
+                     off, or DWM composes nothing for it",
+                    self.target_id
+                );
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+    }
+
+    fn try_latest(&mut self) -> Result<Option<CapturedFrame>> {
+        self.try_consume()
+    }
+
+    fn hdr_meta(&self) -> Option<pf_frame::HdrMeta> {
+        // BT.2020 PQ while HDR. The driver does not forward IDDCX_HDR10_METADATA;
+        // send the same generic HDR10 baseline as the native 0xCE path.
+        self.display_hdr.then(pf_frame::hdr::generic_hdr10)
+    }
+
+    fn capture_target_id(&self) -> Option<u32> {
+        Some(self.target_id)
+    }
+
+    fn resize_output(&mut self, width: u32, height: u32) -> bool {
+        // The session already committed the new mode. Adopt it now — no two-strike debounce
+        // (that stays for external HDR/game mode-sets); the loop's next frame carries the new
+        // geometry, which re-opens the driver's encoder.
+        if (width, height) == (self.width, self.height) {
+            return true;
+        }
+        tracing::info!(
+            target_id = self.target_id,
+            from = format!("{}x{}", self.width, self.height),
+            to = format!("{width}x{height}"),
+            "IDD push: host-initiated resize — re-opening the driver's encoder at the new mode"
+        );
+        self.width = width;
+        self.height = height;
+        true
+    }
+
+    fn take_recovered_outage(&mut self) -> Option<Duration> {
+        self.recovered_outage.take()
+    }
+
+    fn health(&self) -> Option<crate::CaptureHealth> {
+        Some(self.recovery.report(Instant::now(), self.encoder.as_ref()))
+    }
+
+    fn observe_encoder(&mut self, t: Option<pf_frame::health::EncoderTelemetry>) {
+        self.encoder = t;
+    }
+
+    fn take_pending_stage(&mut self) -> Option<pf_frame::recovery::Stage> {
+        self.pending_stage.take()
+    }
+
+    fn stage_done(
+        &mut self,
+        stage: pf_frame::recovery::Stage,
+        outcome: pf_frame::recovery::StageOutcome,
+    ) {
+        use pf_frame::recovery::{Stage, StageOutcome};
+        let step = self.finish_stage(stage, outcome);
+        // A driver cycle reaped the WUDFHost this capturer's encoder points at: end it here so
+        // the host rebuilds the whole pipeline (SET_ENCODE included) against the fresh host.
+        if matches!(stage, Stage::DriverCycle) && matches!(outcome, StageOutcome::Applied) {
+            self.pending_fault = Some(anyhow::anyhow!(
+                "IDD-push: the pf-vdisplay driver was cycled (adapter reload) — ending the \
+                 capturer so the session rebuilds its virtual output on the fresh WUDFHost"
+            ));
+            return;
+        }
+        if let Err(e) = self.drive(step) {
+            self.pending_fault = Some(e);
+        }
+    }
+
+    fn driver_endpoint(&self) -> Option<crate::DriverEndpoint> {
+        Some(crate::DriverEndpoint {
+            target_id: self.target_id,
+            wudf_pid: self.broker.wudf_pid,
+        })
+    }
+
+    fn restart_presentation_in_place(&mut self) -> bool {
+        // A target with no ACTIVE path cannot be recovered in place (immunity plan WP10 item 7):
+        // a same-mode reset would attach to a known-inactive display. Fail fast — on a FRESH
+        // snapshot only; a last-known-good one is not evidence either way.
+        let snap = pf_win_display::display_events::snapshot_or_query();
+        if snap.is_fresh() && !snap.target(self.ccd).is_some_and(|t| t.active) {
+            tracing::warn!(
+                target = %self.ccd,
+                "IDD push: same-mode recovery refused — the target has no active display path \
+                 (topology removed it); a topology recovery must precede a presentation restart"
+            );
+            return false;
+        }
+        // The eviction's topology commit leaves DWM not presenting to this display, so the
+        // driver's drain worker acquires nothing. CDS_RESET forces a real mode-set at the
+        // CURRENT mode — the same lever bring-up's ADD path relies on.
+        match pf_win_display::win_display::resolve_gdi_name(self.ccd) {
+            Some(gdi) => {
+                if !pf_win_display::win_display::force_mode_reset(&gdi) {
+                    tracing::warn!(
+                        target_id = self.target_id,
+                        "IDD push: presentation-restart mode reset failed"
+                    );
+                    return false;
+                }
+            }
+            None => {
+                tracing::warn!(
+                    target_id = self.target_id,
+                    "IDD push: no GDI name for the presentation-restart mode reset"
+                );
+                return false;
+            }
+        }
+        tracing::info!(
+            target_id = self.target_id,
+            mode = format!("{}x{}", self.width, self.height),
+            "IDD push: same-mode presentation restart"
+        );
+        self.recovering_since.get_or_insert_with(Instant::now);
+        true
+    }
+}
+
+impl Drop for IddPushCapturer {
+    fn drop(&mut self) {
+        // Must not leave per-target desired-state off: the next session would
+        // adopt undeclared and silently run the composite model. Open-time reset
+        // covers host crash; this is orderly teardown.
+        if self.secure_active && self.cursor_shared.is_some() {
+            if let Some(fwd) = self.cursor_forward.as_ref() {
+                let _ = fwd(true);
+            }
+        }
+    }
+}
