@@ -45,6 +45,12 @@ $outDir = 'C:\Users\Public\parity-post'
 $probeDir = 'C:\Users\Public'
 $log = Join-Path 'C:\Users\Public' "live-$Tag.log"
 
+# punktfunk-host link-imports avcodec/avutil/swscale, so it will not even load
+# without them. The stage carries its own copies; these are the fallbacks.
+foreach ($d in @($stage, 'C:\Users\Public\ffmpeg\bin', 'C:\Program Files\Punktfunk')) {
+    if (Test-Path $d) { $env:PATH = "$d;$env:PATH" }
+}
+
 function Say([string]$m) { Write-Output $m; Add-Content -Path $log -Value $m }
 function Head([string]$m) { Say ''; Say ('=' * 72); Say $m; Say ('=' * 72) }
 
@@ -202,9 +208,11 @@ Say '  combination really was full chroma. NVENC does catch it on the first fram
 Say '  and warns, but the SET_ENCODE reply carrying chroma_444 has already gone to'
 Say '  the host by then, and the warning stays inside WUDFHost.'
 Say ''
-Say '  qsv_live_hevc10_hdr needs an Intel iGPU this box does not have.'
-Say '  amf_hdr_encode_live_smoke feeds an uninitialised P010 texture at Yuv420 and'
-Say '  asserts only that access units appear, so it carries no colour reference.'
+Say '  The other two ignored live tests are not parity instruments at all, whatever'
+Say '  they run on. qsv_live_hevc10_hdr asserts only stream shape over 30 frames,'
+Say '  and amf_hdr_encode_live_smoke feeds an uninitialised P010 texture at Yuv420.'
+Say '  Neither is 4:4:4 and neither carries a colour reference to compare against.'
+Say '  Intel hardware for the QSV leg does exist on VM 9200 at 192.168.1.49.'
 
 Say ''
 Say "log: $log"
