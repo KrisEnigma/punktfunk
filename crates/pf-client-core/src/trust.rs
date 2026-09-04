@@ -1388,9 +1388,7 @@ pub(crate) fn resolve_profile(
         // disappears: the title's deleted profile leaves the host's default standing.
         None => {
             let find = |id: &str| catalog.find_by_id(id).cloned();
-            per_game
-                .and_then(find)
-                .or_else(|| bound.and_then(|id| find(id)))
+            per_game.and_then(find).or_else(|| bound.and_then(find))
         }
     }
 }
