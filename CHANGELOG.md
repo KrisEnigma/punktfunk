@@ -42,6 +42,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **A settings profile can be bound to one library title.** `KnownHost.game_profiles` maps a
+  title id to a profile id, and resolution now runs one-off ▸ title ▸ host ▸ globals — raise
+  Options on a cover and pick "Settings profile…". Nothing changes until you bind one; a
+  deleted profile drops the title back to the host's default rather than to raw globals.
+- **The controller-UI switch reaches webOS.** "Controller-optimized UI" and "Show it" are
+  offered wherever a client has a second interface to fall back to, which now includes the TV
+  client's cursor UI. The two stored keys lost their `android.` prefix (`gamepad_ui_enabled`,
+  `gamepad_ui_mode`); nothing persisted under the old names, so there is nothing to migrate.
 - **Decky: Punktfunk hosts in Steam's "Play from" menu.** The plugin patches
   `/library/app/:appid`, lists hosts whose library carries `steam:<appid>` in the Play button's
   ▾ menu, re-dresses Steam's Play button as Stream while one is chosen, and streams under a
