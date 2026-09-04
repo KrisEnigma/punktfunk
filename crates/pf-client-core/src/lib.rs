@@ -96,8 +96,18 @@ pub mod trust;
 pub mod update;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod video;
-#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
-mod video_color;
+// Colour vocabulary + the CSC coefficient rows. Portable (no ash, no decode ladder): the
+// PyroWave lane needs them on Android too, where `video` itself is not built.
+#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+pub mod video_color;
+// The `VkDevice` handoff + shared queue lock. `video` re-exports both, so desktop call
+// sites are unchanged; Android names this module directly.
+#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+pub mod video_vk;
+// Committed SPIR-V for the presenter shaders. Here rather than in pf-presenter because the
+// Android PyroWave lane builds the same planar CSC pipeline without that crate.
+#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+pub mod video_csc_spv;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 mod video_software;
 // Native VAAPI: pf-vaadec plans into dlopen'd libva, DRM-PRIME dmabufs for the presenter.
@@ -117,10 +127,16 @@ pub mod video_d3d11;
 // Only DXVA rung; in `auto` for H.264/H.265/AV1. Pin `PUNKTFUNK_DECODER=native-d3d11va`. Evidence: `video`.
 #[cfg(all(feature = "desktop", windows))]
 pub mod video_d3d11_native;
-// PyroWave: Vulkan compute on the presenter's device (no fds, no dmabuf, no D3D11 interop). Linux + Windows; Apple Metal is a separate port.
+// PyroWave: Vulkan compute on the device the frame is presented from (no fds, no dmabuf,
+// no D3D11 interop). Linux + Windows + Android; Apple Metal is a separate port.
+// 64-bit Android only, mirroring pyrowave-sys's own gate: Vulkan's armv7 calling
+// convention has no bindgen representation, so the sys crate is an empty stub there.
 #[cfg(all(
-    feature = "desktop",
-    any(target_os = "linux", windows),
+    any(
+        target_os = "linux",
+        windows,
+        all(target_os = "android", target_pointer_width = "64")
+    ),
     feature = "pyrowave"
 ))]
 pub mod video_pyrowave;

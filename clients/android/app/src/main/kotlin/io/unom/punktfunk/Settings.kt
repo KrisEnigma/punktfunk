@@ -878,10 +878,9 @@ val AUDIO_FORMAT_WIRE_UNSPECIFIED = 0 to 0
  * `"auto"` = host decides.
  *
  * Two rows are capability-gated by [codecOptionsFor] rather than dropped from the table: `"av1"`
- * needs a real `video/av01` decoder on this device, and `"pyrowave"` needs a PyroWave decoder,
- * which this platform does not have at all (it is a Vulkan-compute codec living in `pf-presenter`;
- * the JNI client decodes through MediaCodec and never advertises the bit, so preferring it would
- * be a dead setting that silently resolves to HEVC).
+ * needs a real `video/av01` decoder on this device, and `"pyrowave"` needs a Vulkan 1.3 GPU with
+ * the codec's compute feature set (`NativeBridge.nativePyrowaveCapable`) — it is the one codec
+ * here that is not a MediaCodec at all.
  */
 val CODEC_OPTIONS = listOf(
     "auto" to "Automatic",
@@ -897,11 +896,15 @@ val CODEC_OPTIONS = listOf(
  * always kept selectable so the selection can be rendered (the don't-clobber rule: a codec chosen
  * on another device, or by a newer build, must survive being looked at here).
  */
-fun codecOptionsFor(stored: String, av1Capable: Boolean): List<Pair<String, String>> =
+fun codecOptionsFor(
+    stored: String,
+    av1Capable: Boolean,
+    pyrowaveCapable: Boolean,
+): List<Pair<String, String>> =
     CODEC_OPTIONS.filter { (v, _) ->
         when (v) {
             "av1" -> av1Capable || stored == "av1"
-            "pyrowave" -> stored == "pyrowave" // no PyroWave decoder on Android — see above
+            "pyrowave" -> pyrowaveCapable || stored == "pyrowave"
             else -> true
         }
     }
@@ -916,7 +919,7 @@ fun Settings.systemButtonsForward(): Boolean = systemButtons != "local"
 fun Settings.guideGestureEnabled(): Boolean = guideGesture == "on"
 
 /** The [Settings.codec] string as a `quic::CODEC_*` preference byte (`0` = auto). H264=1, HEVC=2,
- * AV1=4, PyroWave=8 (never decodable here, but the byte is the shared contract). */
+ * AV1=4, PyroWave=8 — the shared cross-client contract. */
 fun Settings.preferredCodec(): Int = when (codec) {
     "h264" -> 1
     "hevc" -> 2
