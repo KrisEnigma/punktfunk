@@ -277,15 +277,18 @@ mod imp {
 #[cfg(all(target_os = "android", target_pointer_width = "64"))]
 pub(crate) use imp::{available, run};
 
-/// Off 64-bit Android the codec is not built (see the module docs), so the lane is absent
-/// and the client never advertises `CODEC_PYROWAVE`. [`run`] is unreachable behind
-/// [`available`]; it exists so the dispatch in `crate::decode` needs no `cfg`.
+/// Off 64-bit Android the codec is not built (see the module docs), so the lane is absent and
+/// the client never advertises `CODEC_PYROWAVE`. Ungated — `nativePyrowaveCapable` is one of
+/// the JNI entry points that links into the host workspace build too.
 #[cfg(not(all(target_os = "android", target_pointer_width = "64")))]
 pub(crate) fn available() -> bool {
     false
 }
 
-#[cfg(not(all(target_os = "android", target_pointer_width = "64")))]
+/// 32-bit Android only: unreachable behind [`available`], and here so the dispatch in
+/// `crate::decode` needs no `cfg` of its own. Not built off Android at all, where there is no
+/// `ndk` crate to name the window with (and no decode module to call it).
+#[cfg(all(target_os = "android", not(target_pointer_width = "64")))]
 pub(crate) fn run(
     _client: std::sync::Arc<punktfunk_core::client::NativeClient>,
     _window: ndk::native_window::NativeWindow,
