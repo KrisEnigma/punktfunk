@@ -526,9 +526,9 @@ pub fn serve(
              the native punktfunk/1 plane + clients for untrusted/WAN use."
         );
     }
-    if let Some(port) = native.webtransport_port {
+    if let Some(bind) = native.webtransport_bind {
         tracing::warn!(
-            port,
+            %bind,
             "WebTransport browser plane ENABLED (--webtransport): a second, externally-reachable \
              transport whose certificate hash is published unauthenticated. Pairing over it is not \
              implemented yet, so it currently echoes and carries no session."
@@ -545,15 +545,16 @@ pub fn serve(
         // The browser plane, when the operator asked for it. Spawned rather than joined with the
         // planes below: this tier is explicitly secondary (`design/web-client.md` §1), so a port
         // it cannot bind must not take the streaming host down with it. A failure is loud.
-        if let Some(port) = native.webtransport_port {
+        if let Some(bind) = native.webtransport_bind {
             let sans = vec![
                 state.host.local_ip().to_string(),
                 "localhost".to_string(),
                 "127.0.0.1".to_string(),
             ];
+            let origins = pf_host_config::config().webtransport_origins.clone();
             tokio::spawn(async move {
-                if let Err(e) = crate::webtransport::serve(port, sans).await {
-                    tracing::error!(port, error = %e, "WebTransport plane stopped");
+                if let Err(e) = crate::webtransport::serve(bind, sans, origins).await {
+                    tracing::error!(%bind, error = %e, "WebTransport plane stopped");
                 }
             });
         }

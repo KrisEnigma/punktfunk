@@ -18,6 +18,7 @@
 //! (Phase 3) this plane echoes and carries no session.
 
 use anyhow::{Context, Result};
+use std::net::SocketAddr;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 use wtransport::{Endpoint, Identity, ServerConfig};
@@ -109,11 +110,12 @@ fn mint(port: u16, sans: &[String]) -> Result<(Identity, Published)> {
 /// A rotation rebuilds the endpoint, which drops whatever is connected. Once every twelve days,
 /// and a browser reconnects on its own — cheaper than teaching quinn to swap a certificate under
 /// live sessions, and the reconnect path has to work anyway.
-pub async fn serve(port: u16, sans: Vec<String>) -> Result<()> {
+pub async fn serve(bind: SocketAddr, sans: Vec<String>, origins: Vec<String>) -> Result<()> {
+    let port = bind.port();
     loop {
         let (identity, publish) = mint(port, &sans)?;
         let config = ServerConfig::builder()
-            .with_bind_default(port)
+            .with_bind_address(bind)
             .with_identity(identity)
             // A browser tab that is throttled in the background must not look like a dead peer.
             .keep_alive_interval(Some(Duration::from_secs(3)))
@@ -130,10 +132,10 @@ pub async fn serve(port: u16, sans: Vec<String>) -> Result<()> {
         if let Ok(mut g) = PUBLISHED.write() {
             *g = Some(publish);
         }
-        tracing::info!(port, "WebTransport plane listening");
+        tracing::info!(%bind, "WebTransport plane listening");
         // Accept until the certificate is due for replacement, then fall out and re-mint.
         tokio::select! {
-            _ = accept_loop(endpoint) => {}
+            _ = accept_loop(endpoint, origins.clone()) => {}
             () = tokio::time::sleep(ROTATE_AFTER) => {
                 tracing::info!("WebTransport certificate due for rotation");
             }
@@ -141,20 +143,37 @@ pub async fn serve(port: u16, sans: Vec<String>) -> Result<()> {
     }
 }
 
-async fn accept_loop(endpoint: Endpoint<wtransport::endpoint::endpoint_side::Server>) {
+async fn accept_loop(
+    endpoint: Endpoint<wtransport::endpoint::endpoint_side::Server>,
+    origins: Vec<String>,
+) {
     loop {
         let incoming = endpoint.accept().await;
+        let origins = origins.clone();
         tokio::spawn(async move {
-            if let Err(e) = session(incoming).await {
+            if let Err(e) = session(incoming, &origins).await {
                 tracing::debug!(error = %e, "WebTransport session ended");
             }
         });
     }
 }
 
+/// Is this page allowed to open a session?
+///
+/// WebTransport is **not** subject to CORS, so without this any page the user happens to have
+/// open can reach the plane — the browser will not stop it. An empty allowlist means "anything",
+/// which is what a host with no configured origins has to mean until the console can offer the
+/// choice; the log line below is what tells an operator which value to set.
+fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
+    allowed.is_empty() || origin.is_some_and(|o| allowed.iter().any(|a| a == o))
+}
+
 /// One browser session. Phase 1 echoes: the plan's exit criterion is a page that connects and
 /// sends datagrams both ways, and everything real waits for the `Transport` impl in Phase 2.
-async fn session(incoming: wtransport::endpoint::IncomingSession) -> Result<()> {
+async fn session(
+    incoming: wtransport::endpoint::IncomingSession,
+    origins: &[String],
+) -> Result<()> {
     let request = incoming.await.context("await session request")?;
     // The peer picks `:path` and nothing upstream value-checks it, so control characters would
     // reach the log ring verbatim and let an unauthenticated peer forge log lines.
@@ -164,8 +183,27 @@ async fn session(incoming: wtransport::endpoint::IncomingSession) -> Result<()> 
         .filter(|c| !c.is_control())
         .take(128)
         .collect();
+    // Same treatment as `:path`: peer-chosen, and it reaches a log an operator reads back.
+    let origin: Option<String> = request.origin().map(|o| {
+        o.chars()
+            .filter(|c| !c.is_control())
+            .take(128)
+            .collect::<String>()
+    });
+    if !origin_allowed(origin.as_deref(), origins) {
+        request.forbidden().await;
+        tracing::warn!(
+            origin = origin.as_deref().unwrap_or("<none>"),
+            "WebTransport session refused: origin not in PUNKTFUNK_WEBTRANSPORT_ORIGINS"
+        );
+        return Ok(());
+    }
     let connection = request.accept().await.context("accept session")?;
-    tracing::info!(path = %path, "WebTransport session accepted");
+    tracing::info!(
+        path = %path,
+        origin = origin.as_deref().unwrap_or("<none>"),
+        "WebTransport session accepted"
+    );
     // One control stream and datagrams, mirroring the native plane's split. The control stream
     // gets its own task: it lives as long as the session, and reading it here would park the
     // media arm for that whole time — media and control have to run at once.
@@ -224,5 +262,27 @@ mod tests {
             ROTATE_AFTER.as_secs() < lifetime,
             "rotation must come before expiry"
         );
+    }
+
+    /// The gate that stands in for the same-origin policy WebTransport does not get.
+    #[test]
+    fn origin_gate_admits_only_what_was_configured() {
+        let allowed = vec!["https://host.local:47990".to_string()];
+        assert!(origin_allowed(Some("https://host.local:47990"), &allowed));
+        assert!(!origin_allowed(Some("https://evil.example"), &allowed));
+        // A peer that sends no Origin at all must not slip past a configured list.
+        assert!(!origin_allowed(None, &allowed));
+        // Exact match only: a prefix or a suffix is a different origin.
+        assert!(!origin_allowed(
+            Some("https://host.local:47990.evil.example"),
+            &allowed
+        ));
+        assert!(!origin_allowed(
+            Some("https://evil.host.local:47990"),
+            &allowed
+        ));
+        // Unconfigured means "any", which is what a host with no console setting has to mean.
+        assert!(origin_allowed(Some("https://anything"), &[]));
+        assert!(origin_allowed(None, &[]));
     }
 }
