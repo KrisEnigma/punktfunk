@@ -1379,6 +1379,25 @@ fn windows_pinned_backend() -> Option<WindowsBackend> {
     }
 }
 
+/// Has the selected adapter a hardware MFT? Cached per selected GPU, like
+/// [`can_encode_444`]: [`windows_resolved_backend`] is uncached and runs on every
+/// `/serverinfo` poll, where an `MFTEnum2` walk plus an adapter resolve would block the
+/// async executor and log on each one.
+#[cfg(target_os = "windows")]
+fn mf_has_hardware_encoder() -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let key = pf_gpu::selection_key();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return *v;
+    }
+    let has = mf::probe_has_hardware_encoder(pf_gpu::resolve_render_adapter_luid());
+    cache.lock().unwrap().insert(key, has);
+    has
+}
+
 /// Active Windows backend. `auto` → selected adapter's vendor; a contradicting
 /// pin is overridden ([`resolve_windows_backend`]). Shared with GameStream.
 #[cfg(target_os = "windows")]
@@ -1397,9 +1416,7 @@ pub fn windows_resolved_backend() -> WindowsBackend {
         // No vendor with a native SDK. An adapter that still has a hardware MFT (Adreno)
         // is a GPU backend, and must resolve to one: `Software` here would also flip the
         // capturer to CPU staging, so the D3D11 input MF needs would never materialise.
-        None if mf::probe_has_hardware_encoder(pf_gpu::resolve_render_adapter_luid()) => {
-            WindowsBackend::MediaFoundation
-        }
+        None if mf_has_hardware_encoder() => WindowsBackend::MediaFoundation,
         None => WindowsBackend::Software,
     })
 }

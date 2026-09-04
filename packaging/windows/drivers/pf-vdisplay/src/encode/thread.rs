@@ -29,7 +29,7 @@ use crate::direct_3d_device::Direct3DDevice;
 use crate::monitor::Monitor;
 use crate::worker::{Mmcss, Worker};
 
-const BACKEND_NAMES: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
+pub(crate) const BACKEND_NAMES: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
 
 /// A failed `SET_ENCODE` as the wire reply: `status` from the driver's domain, the stage tag
 /// in `name`.

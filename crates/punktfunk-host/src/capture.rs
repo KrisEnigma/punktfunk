@@ -260,7 +260,7 @@ pub fn capture_virtual_output(
 }
 
 /// Open the in-driver encoder for an IDD-push session: the plan as the driver numbers it, the
-/// resolved Windows backend as a one-entry preference list, the two IOCTL senders over the
+/// resolved Windows backend ahead of any fallback rung, the two IOCTL senders over the
 /// manager's control handle, and the `pf_gpu` session record. The heap is sized from the
 /// opening rate; ABR climbs past twice it eat the burst margin.
 #[cfg(target_os = "windows")]
@@ -321,9 +321,11 @@ pub fn open_driver_encoder(
             ),
         },
     };
-    // Media Foundation is the second rung for every H.26x session: a missing `amfrt64.dll`
-    // or a declined native open used to end the stream, and every vendor ships an MFT.
-    let fallback = u32::from(!matches!(backend, 4 | 5)) * 5;
+    // Media Foundation is the second rung for an H.26x session a missing `amfrt64.dll` or a
+    // declined native open would otherwise end, but only inside its 8-bit 4:2:0 ceiling: the
+    // plan is already negotiated here, so a wider one would open and then refuse every frame.
+    let mf_fits = !plan.hdr && !plan.chroma.is_444() && bit_depth <= 8;
+    let fallback = u32::from(!matches!(backend, 4 | 5) && mf_fits) * 5;
     let params = pf_capture::DriverEncodeParams {
         codec: match plan.codec {
             Codec::H264 => 1,
