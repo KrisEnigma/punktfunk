@@ -57,6 +57,8 @@ impl OwnedHandle {
         Some(Self(h))
     }
 
+    // unsafe-fn-no-op-ok: the marker IS the transfer. A safe fn here would let safe code hand in
+    // a borrowed or already-owned handle and get a second CloseHandle when this value drops.
     /// Adopt `h`: from here on this value alone decides when the handle closes.
     ///
     /// # Safety
@@ -93,6 +95,8 @@ pub struct OwnedView {
 }
 
 impl OwnedView {
+    // unsafe-fn-no-op-ok: same transfer as OwnedHandle::from_raw, plus mapped-exactly-once --
+    // UnmapViewOfFile cannot tell a second view of one mapping from the first.
     /// Adopt the view at `base` over `mapping`.
     ///
     /// # Safety
