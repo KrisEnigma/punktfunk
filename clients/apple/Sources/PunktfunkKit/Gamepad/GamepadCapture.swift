@@ -174,11 +174,12 @@ public final class GamepadCapture {
     public var ringOpen = false {
         didSet {
             guard ringOpen != oldValue else { return }
-            stickDir = nil
+            stickSector = nil
             if ringOpen { for slot in slots { flush(slot) } }
         }
     }
-    private var stickDir: RingNav?
+    /// The ring sector the left stick last resolved to — see `ringSector`.
+    private var stickSector: Int?
 
     /// Forward this device's controllers to the host at all (`Settings.gamepadForwarding`,
     /// default true). Off is for a couch whose controller reaches the host another way — USB
@@ -489,15 +490,14 @@ public final class GamepadCapture {
                 (GamepadWire.a, .confirm), (GamepadWire.b, .back), (GamepadWire.y, .centre),
             ]
             for (bit, nav) in map where pressed & bit != 0 { onRingNav?(nav) }
-            // The left stick steps like the D-pad, edge-triggered on leaving neutral.
+            // The left stick AIMS: its sector is the slot, so the ring follows the thumb the way
+            // a weapon wheel does. Sent on every sector change, neutral included — the D-pad is
+            // what steps disc by disc.
             let (lx, ly) = (g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value)
-            let dir: RingNav?
-            if ly > 0.6 { dir = .up } else if ly < -0.6 { dir = .down }
-            else if lx < -0.6 { dir = .left } else if lx > 0.6 { dir = .right }
-            else if abs(lx) < 0.4, abs(ly) < 0.4 { dir = nil } else { dir = stickDir }
-            if dir != stickDir {
-                stickDir = dir
-                if let dir { onRingNav?(dir) }
+            let sector = Self.ringSector(lx, ly, stickSector)
+            if sector != stickSector {
+                stickSector = sector
+                onRingNav?(.sector(sector))
             }
             return
         }
@@ -527,6 +527,29 @@ public final class GamepadCapture {
             slot.axes[i] = v
         }
         updateEscapeChord()
+    }
+
+    /// A sector, once engaged, keeps the stick until the angle is this far past its 30° edge — a
+    /// thumb resting on the boundary between two slots would otherwise flicker between them.
+    static let sectorOverlapDeg = 5.0
+
+    /// The ring slot the left stick points at, given the sector already engaged: past the dead
+    /// zone by MAGNITUDE (a diagonal counts) the angle falls into one of six 60° sectors centred
+    /// on the slots, slot `k` at `-90° + 60°·k`, 12 o'clock first, clockwise. The Swift half of
+    /// `pf_client_core::menu_nav::ring_sector` — same 0.5 engage / 0.3 release thresholds, so the
+    /// dial feels identical on a Mac and on a Steam Deck. GameController is +y = up.
+    nonisolated static func ringSector(_ lx: Float, _ ly: Float, _ current: Int?) -> Int? {
+        guard hypot(lx, ly) > (current == nil ? 0.5 : 0.3) else { return nil }
+        // Degrees clockwise from 12 o'clock, so slot k's centre is at 60·k. atan2 spans
+        // (-180°, 180°], so the +90 turn can only reach -90 — one wrap covers it.
+        var deg = Double(atan2(-ly, lx)) * 180 / .pi + 90
+        if deg < 0 { deg += 360 }
+        if let k = current {
+            // Signed distance from the engaged slot's centre, folded into ±180°.
+            let off = (deg - 60 * Double(k) + 540).truncatingRemainder(dividingBy: 360) - 180
+            if abs(off) <= 30 + sectorOverlapDeg { return k }
+        }
+        return Int((deg + 30) / 60) % 6
     }
 
     /// The six wire axes from a profile, in the wire's order and scale.

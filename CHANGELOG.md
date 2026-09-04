@@ -209,6 +209,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The quick-action dial follows the left stick on Apple and Android.** Both clients read the
+  stick as a four-way step, so reaching a slot walked the whole dial one disc at a time; they now
+  aim at the sector the thumb points at, as the desktop clients already did. Nothing to do — the
+  D-pad still steps.
 - **A Windows launch starts in its executable's own folder.** It inherited the host service's
   working directory instead, which sits under `C:\Program Files` — Ryujinx refuses to run there,
   and a title loading assets relative to the working directory read the host's folder; nothing

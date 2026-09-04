@@ -224,6 +224,11 @@ Quick Actions item); with a controller, **Select+A** (Select first) on every cli
 never sees the two presses. What the six buttons hold is the **Quick actions** setting, and the
 editor is the dial itself — on every client but Apple TV, which takes whatever the profile carries.
 
+While the dial is up the controller belongs to it and the host sees nothing. The **left stick
+aims**: the dial highlights whatever slot your thumb points at, and letting go returns to the
+centre — the D-pad is what steps disc by disc. **A** fires the highlight, the centre one opens the
+sheet, **Y** returns to the centre and **B** closes.
+
 A Mac hands your pointer back for as long as the dial is up, so you can click a button, and takes
 capture again when it closes. Buttons a platform cannot serve are dimmed and say why: **Touch
 mode**, **Virtual controller** and **Keyboard** on a Mac, which has no touch screen and no software
