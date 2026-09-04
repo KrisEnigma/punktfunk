@@ -150,7 +150,9 @@
 
     // The device key is loaded and Rust has it. Now dial.
     mod.__pfOnDeviceReady = () => {
-      const url = `https://${location.hostname}:${plane.port}/stream`;
+      // The host is whoever answered the management fetch, not whoever served this page. In
+      // production they are the same; behind a proxy they are not, and the plane is on the host.
+      const url = `https://${new URL(mgmt).hostname}:${plane.port}/stream`;
       const ok = withStr([url, plane.cert_hash_sha256], (u, _ul, h) =>
         mod._pf_wt_connect(u, h),
       );
@@ -176,9 +178,25 @@
     const NEEDS_SIGNATURE = 2;
     const PAIRED = 4;
     const FAILED = 5;
+    const OFFERED = 1;
     let settled = false;
+    let stalled = false;
+    let offeredSince = 0;
     const pumpCredential = () => {
       if (mod._pf_cred_phase() === NEEDS_SIGNATURE) mod._pf_device_sign();
+      // Offered and going nowhere means the host did not accept the credential — most often
+      // because it has since unpaired this browser. The host just closes, so nothing else says
+      // so, and a blank screen is the worst possible answer.
+      if (!stalled && !settled && mod._pf_session_phase() === OFFERED) {
+        offeredSince ||= performance.now();
+        if (performance.now() - offeredSince > 5000) {
+          // Its own flag, not `settled`: the prompt this raises leads to a pairing, and that
+          // pairing still has to be noticed below.
+          stalled = true;
+          say("pf-pair", "This host no longer knows this browser. Enter its PIN to pair again.");
+          document.getElementById("pf-pin").focus();
+        }
+      }
       if (settled || !plane) return;
       if (mod._pf_cred_phase() === PAIRED) {
         settled = true;

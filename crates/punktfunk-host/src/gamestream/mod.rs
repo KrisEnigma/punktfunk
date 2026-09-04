@@ -530,8 +530,8 @@ pub fn serve(
         tracing::warn!(
             %bind,
             "WebTransport browser plane ENABLED (--webtransport): a second, externally-reachable \
-             transport whose certificate hash is published unauthenticated. Pairing over it is not \
-             implemented yet, so it currently echoes and carries no session."
+             transport whose certificate hash is published unauthenticated. A browser pairs over \
+             PAKE with its own device key, which is what proves it — the published hash does not."
         );
     }
     let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;

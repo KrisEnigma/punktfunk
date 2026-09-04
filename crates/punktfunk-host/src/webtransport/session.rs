@@ -10,11 +10,12 @@
 //! testing's sake: it is what lets a headless box with no GPU serve a browser, which is what the
 //! browser tier is being proven against.
 //!
-//! **Identity, with no client certificate.** The stream opens with an [`AuthChallenge`], because
-//! a browser must be told the nonce before it can say anything. A first-time browser ignores it
-//! and sends a `PairRequest` carrying its WebCrypto device key; a paired one answers with a
-//! signature over that key, and the host looks the key's fingerprint up in the same store native
-//! clients live in. What mTLS does per packet, this does once — see
+//! **Identity, with no client certificate.** The browser speaks first — a stream it opens does
+//! not reach the host until it writes on it, so a host that greeted first would wait for a client
+//! that was waiting for it. A first-time browser sends a `PairRequest` carrying its WebCrypto
+//! device key; any other opens with `Hello`, and a host that requires pairing answers that with
+//! an [`AuthChallenge`] rather than a `Welcome`. The signature that comes back is looked up in
+//! the same store native clients live in. What mTLS does per packet, this does once — see
 //! `design/web-client-implementation-plan.md` Phase 3 for the honest comparison.
 
 use super::{Inbox, Serving, WebTransportPlane};
@@ -33,15 +34,6 @@ use wtransport::Connection;
 /// Read the handshake, then stream until the browser goes away.
 pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>, serving: Arc<Serving>) -> Result<()> {
     let (mut tx, mut rx) = conn.accept_bi().await.context("accept control stream")?;
-
-    // The nonce goes out before anything is read: a paired browser cannot speak without it, and
-    // one that is pairing ignores it. Fresh per connection, so a captured answer opens nothing.
-    let mut nonce = [0u8; 32];
-    rand::rng().fill_bytes(&mut nonce);
-    write_msg(&mut tx, &AuthChallenge { nonce }.encode())
-        .await
-        .context("write AuthChallenge")?;
-
     let first = read_msg(&mut rx).await.context("read the first message")?;
 
     // A `PairRequest` ends the session either way — pairing is its own connection, as on the
@@ -49,23 +41,22 @@ pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>, serving: Arc<Servin
     if let Ok(req) = PairRequest::decode(&first) {
         return pair(&conn, tx, rx, req, &serving).await;
     }
-    let hello_bytes = match AuthResponse::decode(&first) {
-        Ok(auth) => {
-            let name = admit(&auth, &nonce, &serving)?;
-            tracing::info!(device = %name, "browser authenticated");
-            read_msg(&mut rx).await.context("read Hello")?
-        }
-        // No credential offered. Allowed only where the operator has said pairing is not
-        // required, which is the same latitude `serve --open` gives native clients.
-        Err(_) => {
-            anyhow::ensure!(
-                !serving.plane.require_pairing,
-                "this host requires pairing — the browser sent no device signature"
-            );
-            first
-        }
-    };
-    let hello = Hello::decode(&hello_bytes).map_err(|e| anyhow::anyhow!("bad Hello: {e:?}"))?;
+    let hello = Hello::decode(&first).map_err(|e| anyhow::anyhow!("bad Hello: {e:?}"))?;
+
+    // Nothing is offered until the device answers. The nonce is fresh per connection, so a
+    // captured response does not open a second one.
+    if serving.plane.require_pairing {
+        let mut nonce = [0u8; 32];
+        rand::rng().fill_bytes(&mut nonce);
+        write_msg(&mut tx, &AuthChallenge { nonce }.encode())
+            .await
+            .context("write AuthChallenge")?;
+        let answer = read_msg(&mut rx).await.context("read AuthResponse")?;
+        let auth = AuthResponse::decode(&answer)
+            .map_err(|_| anyhow::anyhow!("this host requires pairing — no device signature"))?;
+        let name = admit(&auth, &nonce, &serving)?;
+        tracing::info!(device = %name, "browser authenticated");
+    }
     tracing::info!(
         width = hello.mode.width,
         height = hello.mode.height,
