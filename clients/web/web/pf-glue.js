@@ -80,6 +80,7 @@ mergeInto(LibraryManager.library, {
         ? pfNet.wt.datagrams.createWritable()
         : pfNet.wt.datagrams.writable;
       pfNet.writer = w.getWriter();
+      if (Module._pf_wt_ctl_open) Module._pf_wt_ctl_open();
       if (!pfNet.reading) {
         pfNet.reading = true;
         (function pump(reader) {

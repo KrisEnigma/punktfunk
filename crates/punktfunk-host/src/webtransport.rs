@@ -18,6 +18,7 @@
 //! (Phase 3) this plane echoes and carries no session.
 
 mod datagrams;
+mod session;
 
 pub(crate) use datagrams::{Inbox, WebTransportPlane};
 
@@ -208,9 +209,42 @@ async fn session(
         origin = origin.as_deref().unwrap_or("<none>"),
         "WebTransport session accepted"
     );
-    // One control stream and datagrams, mirroring the native plane's split. The control stream
-    // gets its own task: it lives as long as the session, and reading it here would park the
-    // media arm for that whole time — media and control have to run at once.
+
+    // `/echo` keeps Phase 1's behaviour so the measurement pages still work against a host that
+    // streams on every other path.
+    if path == "/echo" {
+        return echo(connection).await;
+    }
+
+    // The session's inbound queue: filled here, because only this task can await the connection,
+    // and drained by the pump's `Transport` on its own thread.
+    let inbox = std::sync::Arc::new(Inbox::default());
+    let mut pump = tokio::spawn(session::run(connection.clone(), inbox.clone()));
+    loop {
+        tokio::select! {
+            datagram = connection.receive_datagram() => {
+                match datagram {
+                    Ok(d) => inbox.push(d.to_vec()),
+                    // The peer is gone; let the pump notice and finish.
+                    Err(_) => break,
+                }
+            }
+            finished = &mut pump => {
+                match finished {
+                    Ok(Ok(())) => tracing::info!("browser session ended"),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "browser session failed"),
+                    Err(e) => tracing::warn!(error = %e, "browser session task panicked"),
+                }
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Phase 1's echo, still reachable at `/echo`: the page connects, sends datagrams and control
+/// bytes, and gets them back. It is what the seam's measurements run against.
+async fn echo(connection: wtransport::Connection) -> Result<()> {
     loop {
         tokio::select! {
             datagram = connection.receive_datagram() => {

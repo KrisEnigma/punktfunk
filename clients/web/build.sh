@@ -59,6 +59,10 @@ link=(
   # The shell's glyph atlases and poster decodes are not bounded at start-up; plan §5.5 turns the
   # ceiling into a measurement rather than a guess.
   -C link-arg=-sALLOW_MEMORY_GROWTH=1
+  # 64 KB is emscripten's default and far too little for Rust: a session's state is large,
+  # and an overflow surfaces as `Out of bounds memory access` from any export, not as a
+  # stack error, which is a miserable thing to debug.
+  -C link-arg=-sSTACK_SIZE=4MB
   # The ring's entry points are called from pf-glue.js's read loop, so they must be exported
   # even though no page names them.
   -C link-arg=-sEXPORTED_FUNCTIONS=_main,_pf_start,_pf_frame,_pf_key,_pf_rx_base,_pf_rx_stride,_pf_rx_claim,_pf_rx_commit,_pf_rx_dropped,_pf_net_blast,_pf_net_drain,_pf_wt_connect,_pf_wt_close,_pf_wt_ctl_open,_pf_ctl_recv,_pf_session_hello,_pf_session_pump,_pf_session_phase,_pf_session_frames,_malloc,_free

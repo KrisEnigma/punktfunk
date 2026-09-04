@@ -35,7 +35,10 @@ struct Client {
     phase: Phase,
     /// Control-stream bytes JavaScript has delivered but that do not yet form a whole message.
     inbox: Vec<u8>,
-    session: Option<Session>,
+    /// Boxed: `Session` carries the reassembly and replay state inline and is far larger
+    /// than emscripten's default stack. Constructing a `Client` that embedded one by value
+    /// overflowed before the function body ran, which surfaces as an out-of-bounds trap.
+    session: Option<Box<Session>>,
     /// The negotiated video format, for the page's `VideoDecoder.configure`.
     codec: u8,
     width: u32,
@@ -178,7 +181,7 @@ fn on_welcome(c: &mut Client, welcome: Welcome) {
     c.height = welcome.mode.height;
     match Session::new(cfg, Box::new(WebTransportDatagrams)) {
         Ok(session) => {
-            c.session = Some(session);
+            c.session = Some(Box::new(session));
             c.phase = Phase::Live;
             // The browser has one connection, so there is no second plane to punch and no port
             // to name — `Start` still marks "begin streaming".

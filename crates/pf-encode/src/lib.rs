@@ -1558,6 +1558,24 @@ mod libav;
 #[cfg(target_os = "linux")]
 #[path = "enc/sw.rs"]
 mod sw;
+
+/// Open the software H.264 encoder by name, bypassing the backend ladder.
+///
+/// [`open_video`] resolves a backend from `PUNKTFUNK_ENCODER`, which the host reads **once** and
+/// latches — so a caller that decides later cannot steer it, and `auto` never picks software
+/// anyway. The browser plane is exactly that caller: it serves a GPU-less host and wants this
+/// encoder specifically, not whatever the ladder would have chosen.
+#[cfg(target_os = "linux")]
+pub fn open_software_h264(
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_bps: u64,
+) -> Result<Box<dyn Encoder>> {
+    sw::OpenH264Encoder::open(format, width, height, fps, bitrate_bps.min(SW_BITRATE_CEIL))
+        .map(|e| Box::new(e) as Box<dyn Encoder>)
+}
 #[cfg(target_os = "linux")]
 #[path = "enc/linux/vaapi.rs"]
 mod vaapi;
