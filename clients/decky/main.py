@@ -262,11 +262,20 @@ def _fetch_json(url: str, timeout: float = 8.0) -> dict:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
+# A library hero is a few hundred KB; nothing fetched here is a tenth of this. The cap keeps a
+# wrong URL from reading a stream into the plugin's memory.
+_MAX_ART_BYTES = 8 * 1024 * 1024
+
+
 def _fetch_bytes(url: str, timeout: float = 10.0) -> bytes:
-    """Blocking HTTPS GET of a small binary (run in an executor). Raises on any failure."""
+    """Blocking HTTPS GET of a small binary (run in an executor). Raises on any failure, an
+    over-long body included — a truncated image is worse than falling through to the next CDN."""
     req = urllib.request.Request(url, headers={"User-Agent": "punktfunk-decky"})
     with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
-        return resp.read()
+        data = resp.read(_MAX_ART_BYTES + 1)
+    if len(data) > _MAX_ART_BYTES:
+        raise ValueError(f"image over {_MAX_ART_BYTES} bytes")
+    return data
 
 
 # --- a Steam game's own artwork, for the per-game stream shortcut -----------------------------

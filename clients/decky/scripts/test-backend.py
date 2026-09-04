@@ -239,6 +239,36 @@ got = asyncio.run(main.Plugin().save_icon(570, _b64.b64encode(b"\x89PNG\r\n\x1a\
 check("icon: a png lands as <appid>.png in the settings dir", got["ok"] and got["path"] == "/tmp/pf-test-settings/icons/570.png" and Path(got["path"]).is_file())
 check("art: Steam's current icon CDN is asked first", "shared.steamstatic.com" in main._ICON_CDNS[0])
 
+
+# ---- _fetch_bytes: a body over the cap is refused rather than truncated -------------------
+#
+# A short read would hand a half-decoded image to the shortcut; raising lets the caller fall
+# through to the next CDN instead.
+class _FakeResp:
+    def __init__(self, data):
+        self._data = data
+
+    def read(self, n=-1):
+        return self._data[:n] if n and n > 0 else self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+_body = b""
+main.urllib.request.urlopen = lambda req, timeout=None, context=None: _FakeResp(_body)
+_body = b"\xff\xd8small"
+check("fetch: a body under the cap comes back whole", main._fetch_bytes("https://x/a.jpg") == b"\xff\xd8small")
+_body = b"x" * (main._MAX_ART_BYTES + 1)
+try:
+    main._fetch_bytes("https://x/a.jpg")
+    check("fetch: a body over the cap raises", False)
+except ValueError:
+    check("fetch: a body over the cap raises", True)
+
 # ---- _field_from (flatpak info parsing, drives the client update check) ------------------
 info = "        ID: io.unom.Punktfunk\n    Origin: punktfunk-origin\n    Commit: abc123def\n"
 check("field: commit", main._field_from(info, "Commit") == "abc123def")
