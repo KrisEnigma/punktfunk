@@ -64,48 +64,18 @@ if (-not $env:Version_Number) { $env:Version_Number = '10.0.26100.0' }
 if (-not $env:LIBCLANG_PATH -and (Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')) {
     $env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
 }
-# The driver MUST build into its DEFAULT target dir (under the driver workspace), NOT an external one:
-# wdk-sys's build script calls wdk-build::find_top_level_cargo_manifest(), which walks UP from OUT_DIR
-# for the first ancestor holding a Cargo.lock (it explicitly "does not support non-default target
-# directories"). CI sets a shared CARGO_TARGET_DIR=C:\t, whose ancestors have no Cargo.lock -> the build
-# script panics "a Cargo.lock file should exist in the same directory as the top-level Cargo.toml". So
-# clear CARGO_TARGET_DIR for this build and let cargo use <driver-workspace>\target (its ancestors
-# include the driver Cargo.lock), and its own [workspace] keeps it isolated from the host's tree.
-#
-# That leaves MAX_PATH, because the driver DOES have a CMake-from-source dep now: pf-encode-win's
-# `pyrowave` feature pulls pyrowave-sys, and MSBuild writes .tlog paths under the target dir that
-# blow past 260 characters when the checkout itself is deep (the CI runner's is ~78). Since the
-# target dir cannot move, shorten the ROOT instead: subst a drive letter onto the REPO root and
-# build through it, so every path starts at "X:\" rather than the checkout. It must be the repo
-# root, not the driver workspace: the workspace's path deps (pf-encode-win, pf-frame) live in
-# crates/ and resolve UPWARD, which a drive mapped at the workspace has no parent for. Falls back
-# to building in place when no letter is free or subst is unavailable.
+# The build runs through drivers-cargo.ps1: it keeps the DEFAULT in-tree target dir (wdk-build
+# walks up from OUT_DIR for a Cargo.lock and rejects a relocated CARGO_TARGET_DIR) while substing
+# a drive onto the repo root, because the encoder deps build CMake projects whose MSBuild .tlog
+# paths overflow MAX_PATH on a deep checkout. That script owns the reasoning; do not duplicate it.
 $drvTarget = Join-Path $DriversDir 'target'
 $dll = Join-Path $drvTarget 'x86_64-pc-windows-msvc\release\pf_vdisplay.dll'
 
 # --- 1. build (release) -----------------------------------------------------------------------
 if (-not $SkipBuild) {
     Write-Host "==> cargo build --release (pf-vdisplay) in $DriversDir (default target -> $drvTarget)"
-    $prevTarget = $env:CARGO_TARGET_DIR
-    Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
-    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-    $rel = $DriversDir.Substring($repoRoot.Length).TrimStart('\')
-    $used = (Get-PSDrive -PSProvider FileSystem).Name
-    $letter = 'X','Y','W','V','U','T' | Where-Object { $used -notcontains $_ } | Select-Object -First 1
-    $subst = $null
-    if ($letter) {
-        & subst "${letter}:" $repoRoot 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0 -and (Test-Path "${letter}:\$rel")) { $subst = "${letter}:" }
-        elseif ($LASTEXITCODE -eq 0) { & subst "${letter}:" /D 2>&1 | Out-Null }
-    }
-    $buildDir = if ($subst) { "$subst\$rel" } else { $DriversDir }
-    if (-not $subst) { Write-Host '    (no free drive letter - building in place; deep checkouts may hit MAX_PATH)' }
-    Push-Location $buildDir
-    & cargo build --release
+    & (Join-Path $PSScriptRoot 'drivers-cargo.ps1') build --release
     $rc = $LASTEXITCODE
-    Pop-Location
-    if ($subst) { & subst $subst /D 2>&1 | Out-Null }
-    if ($prevTarget) { $env:CARGO_TARGET_DIR = $prevTarget } else { Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
     if ($rc -ne 0) { throw "pf-vdisplay cargo build failed ($rc)" }
 }
 if (-not (Test-Path $dll)) { throw "driver not built: $dll" }
