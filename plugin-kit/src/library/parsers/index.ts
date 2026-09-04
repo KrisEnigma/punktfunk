@@ -14,7 +14,11 @@ export {
 	steamCdnUrl,
 } from "./art.js";
 export {
+	type Access,
 	confinedJoin,
+	dirAccess,
+	fileAccess,
+	grantCommand,
 	isDir,
 	isFile,
 	listDir,

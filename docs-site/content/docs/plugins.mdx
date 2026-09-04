@@ -135,6 +135,7 @@ its catalog badge instead.
 | `punktfunk-host plugins enable` | Enable + start the runner. |
 | `punktfunk-host plugins disable` | Stop + disable the runner. |
 | `punktfunk-host plugins status` | Is the runner enabled and running? |
+| `punktfunk-host plugins grant <dir>` | Let the runner read one of your own directories (Windows). |
 
 A bare name resolves to the first-party package — `playnite` installs `@punktfunk/plugin-playnite`,
 always from Punktfunk's own package registry. Any other name (`punktfunk-plugin-*`, a foreign
@@ -143,6 +144,25 @@ always from Punktfunk's own package registry. Any other name (`punktfunk-plugin-
 
 > Plugins are operator-installed code with operator privileges — they can launch games and run
 > commands. Install only plugins you trust, from a registry you control.
+
+## Windows: a plugin that says "not installed"
+
+The runner is a de-privileged account (`NT AUTHORITY\LocalService`), so a plugin defect costs a
+throwaway service account rather than the whole box. The trade is that the runner cannot read
+anything inside **your** user profile. A launcher, emulator or database installed under
+`%AppData%` or `%LocalAppData%` is invisible to it, and reads exactly like one that is not
+installed at all.
+
+When a plugin reports a path it can see but not read, grant it that one directory:
+
+```powershell
+punktfunk-host plugins grant "C:\Users\you\AppData\Roaming\Ryujinx"
+```
+
+That adds read-only access for the runner to that folder and everything under it. The rest of your
+profile stays closed — Windows does not re-check the folders above the one you granted, so this is
+not a door into `%AppData%` generally. Nothing to do on Linux: the runner there is a systemd
+**user** unit, so it already runs as you.
 
 ## Updating and removing a plugin
 
