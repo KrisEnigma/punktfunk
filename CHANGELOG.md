@@ -42,11 +42,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
-- **A browser client, `clients/web`.** `pf-console-ui` compiled to `wasm32-unknown-emscripten`
+- **A browser client, in its own repo.** `pf-console-ui` compiled to `wasm32-unknown-emscripten`
   draws the console on a WebGL2 canvas, and video streams to it over WebTransport — handshake,
-  FEC, decrypt and reassembly are `punktfunk-core`'s, unchanged. There is no pairing, audio or
-  input yet. Build it with `clients/web/build.sh` and read that directory's README first: it needs
-  emsdk 4.0.9 specifically, and it is the one target that builds Skia from source.
+  FEC, decrypt, reassembly and pairing are this crate's, unchanged. It lives at
+  [punktfunk/client-web](https://github.com/punktfunk/client-web) and takes `punktfunk-core`,
+  `pf-console-ui` and `pf-client-core` as pinned git dependencies, the way client-webos does.
 - **A WebTransport plane on the host, off by default.** `--webtransport` /
   `PUNKTFUNK_WEBTRANSPORT` serves browsers on UDP 9778 with its own short-lived P-256 certificate,
   published at `GET /api/v1/webtransport`. Narrow it with `PUNKTFUNK_WEBTRANSPORT_BIND` and
