@@ -75,6 +75,7 @@ whole arrangement and go back to the download.
 | `src/main.rs` | Entry point. Off wasm it prints how to build; on wasm it hands the page the loop. |
 | `src/host.rs` | Skia `DirectContext` over the canvas, the `Console`, the exported `pf_*` calls. |
 | `web/index.html` | The two canvases, the `requestAnimationFrame` loop, key mapping. |
+| `src/transport.rs` | The datagram ring and `punktfunk_core`'s `Transport` over it. |
 | `web/pf-glue.js` | Emscripten `--js-library`. **The only file that names a browser or GL object.** |
 
 `web/pf-glue.js` is load-bearing, not a detail. Rule R2 of the implementation plan says exactly one
@@ -93,7 +94,15 @@ CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUNNER=node \
 cargo test -p pf-console-ui --target wasm32-unknown-emscripten --no-default-features
 ```
 
-231 pass, including the `clients/shared/console-vectors.json` parity vectors. `NODERAWFS` is
+231 pass, including the `clients/shared/console-vectors.json` parity vectors. The client's own
+tests (the datagram ring) need the glue linked as well, since the ring calls into it:
+
+```sh
+RUSTFLAGS="... -C link-arg=--js-library -C link-arg=$PWD/clients/web/web/pf-glue.js" \
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUNNER=node \
+cargo test -p punktfunk-client-web --target wasm32-unknown-emscripten
+```
+ `NODERAWFS` is
 what lets the source-scanning lint read the crate's own `src`; without it that one test fails on a
 missing directory.
 
@@ -109,3 +118,20 @@ than inherit it.
   guessing at the interface.
 - The release module is **8.0 MB of wasm plus 114 KB of JS**, unstripped and un-`wasm-opt`ed. Plan
   §5.5 wants a measured heap ceiling; this is the payload half of it.
+- The ring is wired but nothing decodes yet. `pf_net_blast` / `pf_net_drain` exist to measure the
+  seam (plan §5.4) and to keep it exercised until the session pump lands on it in WP2.2.
+
+## Measured, Safari 27 → a Linux host over the LAN
+
+5000 datagrams of 1200 B, echoed back by the host's browser plane:
+
+| | |
+|---|---|
+| Send crossing, Rust → JS → the wire | **1.8 µs** per datagram (5000 queued in 9 ms) |
+| Round trip, including LAN and the host echo | **97 µs** per datagram |
+| Sustained | **10,267 datagrams/s**, zero ring drops |
+
+Plan §3 sizes the hot path for 4–5k/s at 50 Mbps, so the ring has about twice the headroom it
+needs and is not the thing to optimise. One caveat worth keeping: drain on `requestAnimationFrame`,
+not `setTimeout`. A background tab throttles timers to 1 Hz, and the same run that drops nothing on
+rAF dropped 688 of 5000 on a 25 ms timer — the ring holds ~50 ms at this rate.

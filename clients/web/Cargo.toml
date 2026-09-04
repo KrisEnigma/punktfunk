@@ -22,6 +22,9 @@ pf-client-core = { path = "../../crates/pf-client-core", default-features = fals
 # build resolve two prebuilt keys, and the second one puts a source build of Skia on the critical
 # path. Only `host.rs` names it, to build the context and wrap the canvas.
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
+# `transport::Transport` and the wire's datagram ceiling. No features: the browser plane is
+# WebTransport, so nothing here wants `quic`.
+punktfunk-core = { path = "../../crates/punktfunk-core" }
 anyhow = "1"
 
 [lints]

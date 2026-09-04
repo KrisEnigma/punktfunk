@@ -3619,6 +3619,7 @@ dependencies = [
  "anyhow",
  "pf-client-core",
  "pf-console-ui",
+ "punktfunk-core",
  "skia-safe",
 ]
 

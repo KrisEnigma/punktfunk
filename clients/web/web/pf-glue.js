@@ -40,4 +40,79 @@ mergeInto(LibraryManager.library, {
     Module.__pfUiCtx = handle;
     return 1;
   },
+
+  // --- the datagram plane (design/web-client-implementation-plan.md §3) ----------------------
+  //
+  // Datagrams never become JavaScript objects that outlive one call. The read loop claims a ring
+  // slot from Rust and copies the bytes straight into wasm memory; nothing is allocated per
+  // packet on either side. At 4-5k/s a `Uint8Array` per datagram is garbage the collector would
+  // be chasing during the stream.
+  //
+  // `$` marks a JavaScript-only helper (not callable from Rust); `__deps` is how emscripten
+  // knows to keep one that only other library members use.
+  $pfNet: {
+    wt: null,
+    writer: null,
+    reading: false,
+  },
+
+  pf_wt_connect__deps: ["$pfNet", "$UTF8ToString"],
+  pf_wt_connect: function (urlPtr, hashPtr) {
+    var url = UTF8ToString(urlPtr);
+    var hex = UTF8ToString(hashPtr);
+    try {
+      var opts = { allowPooling: false };
+      if (hex && hex.length === 64) {
+        var bytes = new Uint8Array(32);
+        for (var i = 0; i < 32; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+        // allowPooling must stay false alongside this: the pair is a TypeError otherwise.
+        opts.serverCertificateHashes = [{ algorithm: "sha-256", value: bytes }];
+      }
+      pfNet.wt = new WebTransport(url, opts);
+    } catch (e) {
+      console.error("punktfunk: WebTransport constructor refused", e);
+      return 0;
+    }
+    pfNet.wt.ready.then(function () {
+      // WebKit follows the current spec with `createWritable()`; Chromium still exposes the
+      // older `writable` attribute. A client that knows only one fails on the other engine.
+      var w = pfNet.wt.datagrams.createWritable
+        ? pfNet.wt.datagrams.createWritable()
+        : pfNet.wt.datagrams.writable;
+      pfNet.writer = w.getWriter();
+      if (!pfNet.reading) {
+        pfNet.reading = true;
+        (function pump(reader) {
+          reader.read().then(function (r) {
+            if (r.done) { pfNet.reading = false; return; }
+            var slot = _pf_rx_claim();
+            if (slot >= 0) {
+              HEAPU8.set(r.value, _pf_rx_base() + slot * _pf_rx_stride());
+              _pf_rx_commit(slot, r.value.length);
+            }
+            pump(reader);
+          }, function () { pfNet.reading = false; });
+        })(pfNet.wt.datagrams.readable.getReader());
+      }
+    }, function (e) {
+      console.error("punktfunk: WebTransport session failed", e);
+    });
+    return 1;
+  },
+
+  pf_wt_send__deps: ["$pfNet"],
+  pf_wt_send: function (ptr, len) {
+    if (!pfNet.writer) return 0;
+    // `slice`, not `subarray`: the write is queued, and a view into wasm memory can be detached
+    // by a heap growth or overwritten by the next packet before it is read.
+    pfNet.writer.write(HEAPU8.slice(ptr, ptr + len)).catch(function () {});
+    return 1;
+  },
+
+  pf_wt_close__deps: ["$pfNet"],
+  pf_wt_close: function () {
+    if (pfNet.wt) { try { pfNet.wt.close(); } catch (e) {} }
+    pfNet.wt = null;
+    pfNet.writer = null;
+  },
 });
