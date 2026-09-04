@@ -22,10 +22,11 @@ use wtransport::Connection;
 
 /// Read the handshake, then stream until the browser goes away.
 pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>) -> Result<()> {
-    let (mut tx, mut rx) = conn.accept_bi().await.context("accept control stream")?;
+    let (mut tx, rx) = conn.accept_bi().await.context("accept control stream")?;
+    let mut rx: CtlReader = punktfunk_core::quic::io::MsgReader::new(rx);
 
     // The browser opens the control stream and sends `Hello` on it.
-    let hello_bytes = read_msg(&mut rx).await.context("read Hello")?;
+    let hello_bytes = rx.read_msg().await.context("read Hello")?;
     let hello = Hello::decode(&hello_bytes).map_err(|e| anyhow::anyhow!("bad Hello: {e:?}"))?;
     tracing::info!(
         width = hello.mode.width,
@@ -36,13 +37,13 @@ pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>) -> Result<()> {
     );
 
     let welcome = offer(&conn, &hello);
-    write_msg(&mut tx, &welcome.encode())
+    punktfunk_core::quic::io::write_msg(&mut tx, &welcome.encode())
         .await
         .context("write Welcome")?;
 
     // `Start` carries a UDP port on the native plane; a browser has no second plane, so the
     // message is only a "begin" marker here.
-    let start_bytes = read_msg(&mut rx).await.context("read Start")?;
+    let start_bytes = rx.read_msg().await.context("read Start")?;
     Start::decode(&start_bytes).map_err(|e| anyhow::anyhow!("bad Start: {e:?}"))?;
 
     let cfg = welcome.session_config(Role::Host);
@@ -177,37 +178,9 @@ fn stream(
     )
 }
 
-/// `u16` length then payload, the framing the control plane uses everywhere.
-async fn read_msg(rx: &mut wtransport::RecvStream) -> Result<Vec<u8>> {
-    let mut len = [0u8; 2];
-    read_exact(rx, &mut len).await?;
-    let mut body = vec![0u8; u16::from_le_bytes(len) as usize];
-    read_exact(rx, &mut body).await?;
-    Ok(body)
-}
-
-async fn read_exact(rx: &mut wtransport::RecvStream, out: &mut [u8]) -> Result<()> {
-    let mut filled = 0;
-    while filled < out.len() {
-        let n = rx
-            .read(&mut out[filled..])
-            .await
-            .context("control stream read")?
-            .context("control stream ended")?;
-        if n == 0 {
-            anyhow::bail!("control stream ended mid-message");
-        }
-        filled += n;
-    }
-    Ok(())
-}
-
-async fn write_msg(tx: &mut wtransport::SendStream, body: &[u8]) -> Result<()> {
-    let mut framed = Vec::with_capacity(body.len() + 2);
-    framed.extend_from_slice(&(body.len() as u16).to_le_bytes());
-    framed.extend_from_slice(body);
-    tx.write_all(&framed)
-        .await
-        .context("control stream write")?;
-    Ok(())
-}
+/// The control plane's own framing, on a WebTransport stream.
+///
+/// `punktfunk_core::quic::io` is generic over `AsyncRead`/`AsyncWrite`, and `wtransport`'s
+/// streams implement both — so this is the same reader the native plane uses, not a second
+/// implementation of the same `u16`-length frame that could drift from it.
+type CtlReader = punktfunk_core::quic::io::MsgReader<wtransport::RecvStream>;

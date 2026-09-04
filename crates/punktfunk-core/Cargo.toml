@@ -99,7 +99,9 @@ ureq = { version = "3", optional = true, default-features = false, features = [
 sha2 = { version = "0.11", optional = true }
 hmac = { version = "0.13", optional = true }
 spake2 = { version = "0.4", optional = true }
-tokio = { version = "1", optional = true, features = ["rt-multi-thread", "net", "sync", "macros"] }
+# `io-util` for the `AsyncRead`/`AsyncWrite` extension traits the control framing is generic
+# over (`quic::io`), so the same frames run on a quinn stream or a WebTransport one.
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "net", "sync", "macros", "io-util"] }
 # In-core Opus (multistream) DECODE for the C-ABI `punktfunk_connection_next_audio_pcm` path —
 # used by embedders without a multistream-capable Opus decoder (Apple's AudioToolbox is
 # stereo-only). The Rust clients link `opus` themselves and decode the raw `next_audio` frames,

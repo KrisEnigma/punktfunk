@@ -37,7 +37,7 @@ pub struct ClockSkew {
 #[cfg(feature = "quic")]
 pub async fn clock_sync(
     send: &mut quinn::SendStream,
-    recv: &mut super::io::MsgReader,
+    recv: &mut super::io::MsgReader<quinn::RecvStream>,
 ) -> Option<ClockSkew> {
     use super::io;
     use std::time::Duration;
