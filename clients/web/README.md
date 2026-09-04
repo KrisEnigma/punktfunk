@@ -132,6 +132,21 @@ than inherit it.
 | Sustained | **10,267 datagrams/s**, zero ring drops |
 
 Plan §3 sizes the hot path for 4–5k/s at 50 Mbps, so the ring has about twice the headroom it
-needs and is not the thing to optimise. One caveat worth keeping: drain on `requestAnimationFrame`,
+needs and is not the thing to optimise.
+
+`VideoFrame` → texture through `video-surface.js`, 90 decoded frames per size:
+
+| | ms/frame | of a 60 Hz budget |
+|---|---|---|
+| 720p | 0.237 | 1.4% |
+| 1080p | 0.150 | 0.9% |
+| 4K | 0.375 | 2.2% |
+
+**Benchmark this with decoder output, never with a canvas.** The same code fed `VideoFrame`s built
+from an `OffscreenCanvas` reports 1.5 / 3.2 / 11.8 ms for those sizes — thirty times worse, and
+scaling with pixels, because a canvas-backed frame has to be read back and converted where a
+decoder-backed one is already a surface the GL driver can bind. Measuring the wrong one would have
+condemned WebGL2 at 4K and made Phase 4 look like a performance necessity. It is not: §5.2's answer
+is that **WebGPU's `importExternalTexture()` is an HDR win, not a throughput one.** One caveat worth keeping: drain on `requestAnimationFrame`,
 not `setTimeout`. A background tab throttles timers to 1 Hz, and the same run that drops nothing on
 rAF dropped 688 of 5000 on a 25 ms timer — the ring holds ~50 ms at this rate.
