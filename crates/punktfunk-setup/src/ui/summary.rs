@@ -14,7 +14,7 @@
 //! Pin `lines()`. Evidence: `design/installer-v2.md`.
 
 use crate::choices::{Action, Choices};
-use crate::facts::{Channel, Facts};
+use crate::facts::{Channel, Facts, Family};
 use crate::plan::{self, Plan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,22 +68,28 @@ pub struct Screen {
 
 impl Screen {
     pub fn new(facts: Facts, choices: Choices) -> Screen {
+        // SteamOS builds `main` on the device and its script owns the groups, linger and the
+        // unit start. Those rows would be toggles nothing reads, so they are not offered.
+        let steamos = facts.family == Family::Steamos;
         let mut items = vec![Item::Go];
         items.push(Item::Row(Field::Components));
-        items.push(Item::Row(Field::Channel));
+        if !steamos {
+            items.push(Item::Row(Field::Channel));
+        }
         // A client listens on nothing fixed, so none of the host wiring rows apply to it.
         if choices.components.host {
-            items.extend([
-                Item::Row(Field::Group),
-                Item::Row(Field::Gamestream),
-                Item::Row(Field::Clipboard),
-            ]);
+            if !steamos {
+                items.push(Item::Row(Field::Group));
+            }
+            items.extend([Item::Row(Field::Gamestream), Item::Row(Field::Clipboard)]);
             // Linger only earns a row where it changes something: on a box with a graphical
             // seat the host still waits for a session, so the row would promise an appliance.
-            if !facts.graphical_seat || facts.couch_box {
+            if !steamos && (!facts.graphical_seat || facts.couch_box) {
                 items.push(Item::Row(Field::Linger));
             }
-            items.push(Item::Row(Field::Start));
+            if !steamos {
+                items.push(Item::Row(Field::Start));
+            }
             // Omarchy's own options, asked here instead of again by `punktfunk-omarchy setup`.
             if facts.omarchy {
                 items.extend([

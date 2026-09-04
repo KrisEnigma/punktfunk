@@ -59,6 +59,13 @@ In Desktop Mode open **Konsole** (or ssh in), then:
 
 <Install platform="steamos" />
 
+**One command instead?** The [guided installer](/docs/install#guided-install-preview) (preview) runs
+exactly the two lines above and asks the two questions they have no flag for (Moonlight compat, the
+shared clipboard). It does not ask about groups, linger or starting the services — the script below
+always does those:
+
+<Installer />
+
 It is idempotent — safe to re-run. In one pass it:
 
 1. creates the `pf2` Debian-trixie distrobox and installs the build toolchain,
