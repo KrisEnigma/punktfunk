@@ -11,27 +11,32 @@
 //! Coordinates are published VERBATIM in the OS's desktop space (`IDARG_OUT_QUERY_HWCURSOR::X/Y`
 //! = the shape's top-left, can be negative); the host subtracts its monitor's desktop origin.
 //! Shape pixels are the OS's 32-bpp rows at `Pitch` — BGRA for ALPHA cursors, color+mask for
-//! MASKED_COLOR — copied raw; the host converts (keeping this thread dumb and allocation-free
-//! after startup).
+//! MASKED_COLOR — copied raw; the host converts.
+//!
+//! The same publish also lands in the monitor's [`CursorCell`] as frame-relative RGBA, which
+//! the encode pool blends into its slots when the client draws no pointer.
 
 use core::sync::atomic::{AtomicU32, Ordering, fence};
+use std::sync::Arc;
 
 use pf_driver_proto::cursor::{
     CURSOR_MAGIC, CURSOR_SHAPE_BYTES, CURSOR_SHAPE_MAX, CURSOR_SHAPE_OFFSET, CURSOR_SHM_SIZE,
-    CursorShm,
+    CursorShm, shape_extent, shape_rgba,
 };
 use wdk_iddcx::nt_success;
 use wdk_sys::iddcx;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::System::Memory::{
-    FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, UnmapViewOfFile,
-};
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
+use windows::Win32::System::Memory::{FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile};
+use windows::Win32::System::Threading::WaitForMultipleObjects;
+
+use crate::cursor_cell::{CursorCell, CursorImage};
+use crate::worker::{OwnedHandle, OwnedView, Sendable, Worker};
 
 /// The host's `IOCTL_SET_CURSOR_CHANNEL` delivery: the [`CursorShm`] mapping handle VALUE,
 /// already duplicated into this WUDFHost process. Owning a `CursorChannel` means owning the
-/// handle; `Drop` closes it unless [`into_unowned`](Self::into_unowned) disarmed that (the
-/// not-adopted reject path, where the host reaps remotely) or the worker consumed it.
+/// handle; `Drop` closes it unless [`into_unowned`](Self::into_unowned) disarmed that — the
+/// not-adopted reject path (the host reaps remotely), or [`setup_and_spawn`], which moves the
+/// handle into an [`OwnedHandle`] that closes it instead.
 pub struct CursorChannel {
     handle: u64,
     owned: bool,
@@ -65,28 +70,14 @@ impl Drop for CursorChannel {
     }
 }
 
-/// The live worker: stops + joins on drop (monitor departure / replacement).
-pub struct CursorWorker {
-    stop: isize,
-    /// The OS cursor-data event handle VALUE — kept so a later swap-chain (re)assignment can
-    /// RE-ISSUE [`IddCxMonitorSetupHardwareCursor`] on the freshly committed path (the setup is
-    /// per-mode-commit: the OS silently reverts to software cursor on every mode commit). The
-    /// worker thread still owns closing it on exit; this is a read-only copy for re-setup.
-    data_event: isize,
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-impl CursorWorker {
-    /// The OS cursor-data event, for [`setup_hardware_cursor`] re-issue.
-    pub fn data_event(&self) -> isize {
-        self.data_event
-    }
-}
-
-/// Declare (or RE-declare) the hardware cursor for `monitor` against `data_event`. Called at
-/// initial channel delivery AND on every swap-chain assignment (a mode commit reverts the path
-/// to software cursor). Must run OUTSIDE the monitors lock — the DDI may call back into the
-/// mode callbacks. Returns the DDI status.
+/// Declare (or RE-declare) the hardware cursor for `monitor` against `data_event`, returning
+/// the DDI status. Called at initial channel delivery AND on every swap-chain assignment, since
+/// a mode commit reverts the path to a software cursor.
+///
+/// `data_event` is a BORROWED value: the monitor entry owns the event and closes it only after
+/// joining the worker, so the handle this registers with the OS stays open for as long as the
+/// OS may signal it. Must run OUTSIDE the monitors lock — the DDI may call back into the mode
+/// callbacks, which take it.
 pub fn setup_hardware_cursor(monitor: iddcx::IDDCX_MONITOR, data_event: isize) -> i32 {
     let caps = iddcx::IDDCX_CURSOR_CAPS {
         Size: core::mem::size_of::<iddcx::IDDCX_CURSOR_CAPS>() as u32,
@@ -110,52 +101,41 @@ pub fn setup_hardware_cursor(monitor: iddcx::IDDCX_MONITOR, data_event: isize) -
         hNewCursorDataAvailable: data_event as *mut core::ffi::c_void,
     };
     // SAFETY: `monitor` is a live IddCx monitor; `setup` outlives the call; `data_event` is a
-    // live event handle (the worker owns it for its lifetime, and re-setup only runs while the
-    // worker is present).
+    // live event handle owned by the monitor entry, which outlives every worker it declares.
     unsafe { wdk_iddcx::IddCxMonitorSetupHardwareCursor(monitor, &setup) }
 }
 
-// NOTE: there is NO un-declare path. Re-issuing `IddCxMonitorSetupHardwareCursor` with empty
-// caps (no alpha, XOR NONE, zero max dims) is rejected `STATUS_INVALID_PARAMETER` — observed
-// on-glass (26100, driver 9.9.0722.1407). The composite flip therefore works by FLAG + MODE
-// RE-COMMIT: `monitor::set_cursor_forward(false)` stores the flag, the host forces a same-mode
-// re-commit, and the OS's per-commit software-cursor default sticks because
-// `monitor::resetup_cursor` skips the flagged monitor.
+// There is NO un-declare path: empty caps are rejected `STATUS_INVALID_PARAMETER`. The
+// composite flip is a flag plus a mode re-commit: `monitor::set_cursor_forward(false)` stores
+// the flag, the host forces a same-mode re-commit, and the OS's per-commit software-cursor
+// default sticks because `Monitor::resetup_cursor` skips the flagged monitor.
 
-// SAFETY: `stop` is an event handle value; the worker owns every other resource.
-unsafe impl Send for CursorWorker {}
-
-impl Drop for CursorWorker {
-    fn drop(&mut self) {
-        // SAFETY: `stop` is our owned manual-reset event; signal + join, then close.
-        unsafe {
-            let _ = SetEvent(HANDLE(self.stop as *mut core::ffi::c_void));
-        }
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
-        // SAFETY: the worker has exited; nothing else references the handle.
-        unsafe {
-            let _ = CloseHandle(HANDLE(self.stop as *mut core::ffi::c_void));
-        }
-    }
-}
-
-/// Declare the hardware cursor for `monitor` and start the query→publish worker over the
-/// delivered section. `None` on any failure (mapping/magic/event/DDI) — the caller logs and the
-/// session simply keeps the composited-cursor behavior (the host times out waiting for a first
-/// seqlock publish and falls back the same way).
+/// Map the delivered section and start the query→publish worker for `monitor`.
+///
+/// Ownership is the point of this function. The section handle is adopted out of `ch` into an
+/// [`OwnedView`] that unmaps the view and closes the mapping on EVERY exit — including a failed
+/// spawn, which drops the closure holding it, so nothing is left behind in the host process's
+/// handle table. That view then travels into the thread and is released when the thread returns.
+/// `data_event` is only borrowed: the monitor entry owns it and closes it after the join.
+///
+/// `None` on any failure (mapping, magic, DDI); the caller keeps the composited cursor, which is
+/// also what the host falls back to when no seqlock publish arrives.
 pub fn setup_and_spawn(
     monitor: iddcx::IDDCX_MONITOR,
     ch: CursorChannel,
     declare: bool,
-) -> Option<CursorWorker> {
-    // Map the host-created section. FILE_MAP_READ|WRITE: we write, the host reads.
-    let mapping = HANDLE(ch.handle as *mut core::ffi::c_void);
-    // SAFETY: `mapping` is the duplicated section handle we own; size is the fixed contract size.
+    data_event: isize,
+    cell: Arc<CursorCell>,
+) -> Option<Worker> {
+    // SAFETY: the host duplicated this section handle into our process and `CursorChannel` hands
+    // its ownership over here — `into_unowned` below disarms its own close.
+    let mapping = unsafe { OwnedHandle::from_raw(HANDLE(ch.handle as *mut core::ffi::c_void)) };
+    ch.into_unowned();
+    // SAFETY: `mapping` is the section handle we just adopted; size is the fixed contract size.
+    // FILE_MAP_READ|WRITE because we write the cursor state and the host reads it.
     let view = unsafe {
         MapViewOfFile(
-            mapping,
+            mapping.as_raw(),
             FILE_MAP_READ | FILE_MAP_WRITE,
             0,
             0,
@@ -164,53 +144,30 @@ pub fn setup_and_spawn(
     };
     if view.Value.is_null() {
         dbglog!("[pf-vd] cursor: MapViewOfFile failed — keeping composited cursor");
-        return None;
+        return None; // `mapping` drops here and closes
     }
-    let shm = view.Value.cast::<CursorShm>();
+    // SAFETY: `view` is the single mapping of `mapping` we just made; from here one value owns
+    // both, and every return below unmaps and closes them.
+    let view = unsafe { OwnedView::from_raw(view.Value, mapping) };
+    let shm = view.base().cast::<CursorShm>();
     // SAFETY: the view spans CURSOR_SHM_SIZE >= size_of::<CursorShm>(); reading the host stamp.
     if unsafe { core::ptr::addr_of!((*shm).magic).read_volatile() } != CURSOR_MAGIC {
         dbglog!("[pf-vd] cursor: section magic mismatch — rejecting");
-        // SAFETY: unmapping the view we just mapped.
-        unsafe {
-            let _ = UnmapViewOfFile(view);
-        }
         return None;
     }
 
-    // Auto-reset data event (the OS signals it per cursor update) + manual-reset stop event.
-    // SAFETY: plain event creation, no names, no security descriptor.
-    let (data_evt, stop_evt) = unsafe {
-        match (
-            CreateEventW(None, false, false, None),
-            CreateEventW(None, true, false, None),
-        ) {
-            (Ok(d), Ok(s)) => (d, s),
-            _ => {
-                let _ = UnmapViewOfFile(view);
-                dbglog!("[pf-vd] cursor: event creation failed");
-                return None;
-            }
-        }
-    };
-
     // One caps definition for initial setup AND the per-mode-commit re-setup — see
-    // `setup_hardware_cursor` for the FULL rationale. `declare = false` (a delivery landing
-    // while the session is in the COMPOSITE render mode) skips the declaration: the worker
-    // spawns anyway so a later enable-flip has its event to declare against; its queries just
-    // fail NOT_SUPPORTED until then (logged once, harmless).
+    // `setup_hardware_cursor`. `declare = false` (a delivery landing while the session is in the
+    // COMPOSITE render mode) skips the declaration: the worker spawns anyway so a later
+    // enable-flip has an event to declare against; its queries just fail NOT_SUPPORTED until
+    // then (logged once, harmless).
     if declare {
-        let st = setup_hardware_cursor(monitor, data_evt.0 as isize);
+        let st = setup_hardware_cursor(monitor, data_event);
         if !nt_success(st) {
             dbglog!(
                 "[pf-vd] cursor: IddCxMonitorSetupHardwareCursor failed 0x{:08x}",
                 st as u32
             );
-            // SAFETY: cleaning up the resources created above.
-            unsafe {
-                let _ = CloseHandle(data_evt);
-                let _ = CloseHandle(stop_evt);
-                let _ = UnmapViewOfFile(view);
-            }
             return None;
         }
         dbglog!("[pf-vd] cursor: hardware cursor declared — worker starting");
@@ -218,38 +175,22 @@ pub fn setup_and_spawn(
         dbglog!("[pf-vd] cursor: channel adopted UNdeclared (composite mode) — worker starting");
     }
 
-    // Ownership crossing into the thread as plain values (HANDLE/pointer aren't Send).
+    // The IddCx monitor handle is a raw pointer; the view carries its own `Send` wrapper.
     let monitor_v = monitor as usize;
-    let view_v = view.Value as usize;
-    let data_v = data_evt.0 as isize;
-    let stop_v = stop_evt.0 as isize;
-    let mapping_v = ch.handle;
-    ch.into_unowned(); // the worker owns the mapping handle from here (closed on exit below)
-
-    let join = std::thread::Builder::new()
-        .name("pf-vd-cursor".into())
-        .spawn(move || {
-            run_worker(monitor_v, view_v, data_v, stop_v);
-            // SAFETY: the worker is the sole owner of these at exit; close/unmap exactly once.
-            unsafe {
-                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
-                    Value: view_v as *mut core::ffi::c_void,
-                });
-                let _ = CloseHandle(HANDLE(data_v as *mut core::ffi::c_void));
-                let _ = CloseHandle(HANDLE(mapping_v as *mut core::ffi::c_void));
-            }
-        })
-        .ok()?;
-
-    Some(CursorWorker {
-        stop: stop_v,
-        data_event: data_v,
-        join: Some(join),
+    let view = Sendable(view);
+    Worker::spawn("pf-vd-cursor", move |stop| {
+        let view = view; // the wrapper, not the field: the view unmaps when this thread returns
+        run_worker(monitor_v, view.0.base() as usize, data_event, stop, &cell);
     })
 }
 
-/// The wait→query→publish loop. Exits when the stop event signals.
-fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop_v: isize) {
+/// The wait→query→publish loop, exiting when `stop` signals.
+///
+/// This thread owns NOTHING it has to release. `stop` belongs to the [`Worker`] that spawned it
+/// and `data_v` to the monitor entry, both of which close after the join; the mapping behind
+/// `view_v` is unmapped by the [`OwnedView`] the spawning closure moved in here. Returning is
+/// the whole cleanup.
+fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE, cell: &CursorCell) {
     let monitor = monitor_v as iddcx::IDDCX_MONITOR;
     let shm = view_v as *mut CursorShm;
     let shape_dst = (view_v + CURSOR_SHAPE_OFFSET) as *mut u8;
@@ -257,17 +198,13 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop_v: isize) {
     let mut last_shape_id: u32 = 0;
     let mut query_warned = false;
     let mut published = false;
-    let handles = [
-        HANDLE(stop_v as *mut core::ffi::c_void),
-        HANDLE(data_v as *mut core::ffi::c_void),
-    ];
+    // The pool's copy of the latest publish; its position outlives shape-less ticks.
+    let mut image: Option<CursorImage> = None;
+    let handles = [stop, HANDLE(data_v as *mut core::ffi::c_void)];
     loop {
-        // POLL, not pure event-wait: the OS fires `hNewCursorDataAvailable` only for cursors it
-        // routes through the hardware plane — masked/monochrome cursors (I-beam, hand, move,
-        // resize) don't fire it. Polling does NOT recover them either (they are simply not in
-        // this query's world — see the caps comment above); the ~30 Hz timeout just keeps the
-        // seqlock's position/visibility fresh across missed events, and the query with the
-        // current `LastShapeId` is a cheap no-op when nothing changed.
+        // Poll as well as wait: the OS signals the event only for hardware-plane cursors, so
+        // a ~30 Hz timeout keeps position and visibility fresh across the ones it never
+        // signals for. The query with the current `LastShapeId` is a no-op when nothing moved.
         const POLL_MS: u32 = 33;
         // SAFETY: both handles are live for the worker's lifetime (owner drops after join).
         let w = unsafe { WaitForMultipleObjects(&handles, false, POLL_MS) };
@@ -327,36 +264,45 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop_v: isize) {
         let s = seq.load(Ordering::Relaxed);
         seq.store(s.wrapping_add(1), Ordering::Relaxed); // odd = mid-update
         fence(Ordering::Release);
-        // SAFETY: exclusive writer (single worker per section); plain volatile field writes.
-        unsafe {
-            core::ptr::addr_of_mut!((*shm).visible).write_volatile(if out.IsCursorVisible != 0 {
-                1
-            } else {
-                0
-            });
+        let visible = out.IsCursorVisible != 0;
+        let mut shape = None;
+        // SAFETY: exclusive writer (single worker per section); plain volatile field writes,
+        // then one volatile read of the header for the host-stamped origin and scale.
+        let hdr = unsafe {
+            core::ptr::addr_of_mut!((*shm).visible).write_volatile(u32::from(visible));
             // v3 `X`/`Y` are only meaningful when `PositionValid`; otherwise keep the prior
             // position (a position-invalid tick still carries a shape/visibility update).
             if out.PositionValid != 0 {
                 core::ptr::addr_of_mut!((*shm).x).write_volatile(out.X);
                 core::ptr::addr_of_mut!((*shm).y).write_volatile(out.Y);
             }
-            if out.IsCursorShapeUpdated != 0 && out.IsCursorVisible != 0 {
+            if out.IsCursorShapeUpdated != 0 && visible {
                 let info = &out.CursorShapeInfo;
-                let rows = info.Height.min(CURSOR_SHAPE_MAX);
-                let bytes = (rows as usize * info.Pitch as usize).min(CURSOR_SHAPE_BYTES);
-                core::ptr::copy_nonoverlapping(shape_buf.as_ptr(), shape_dst, bytes);
-                core::ptr::addr_of_mut!((*shm).cursor_type).write_volatile(info.CursorType as u32);
-                core::ptr::addr_of_mut!((*shm).width)
-                    .write_volatile(info.Width.min(CURSOR_SHAPE_MAX));
-                core::ptr::addr_of_mut!((*shm).height).write_volatile(rows);
+                let stamp = CursorShm {
+                    cursor_type: info.CursorType as u32,
+                    width: info.Width,
+                    height: info.Height,
+                    pitch: info.Pitch,
+                    hot_x: info.XHot,
+                    hot_y: info.YHot,
+                    ..bytemuck::Zeroable::zeroed()
+                };
+                let (width, rows, pitch) = shape_extent(&stamp);
+                core::ptr::copy_nonoverlapping(shape_buf.as_ptr(), shape_dst, rows * pitch);
+                core::ptr::addr_of_mut!((*shm).cursor_type).write_volatile(stamp.cursor_type);
+                core::ptr::addr_of_mut!((*shm).width).write_volatile(width as u32);
+                core::ptr::addr_of_mut!((*shm).height).write_volatile(rows as u32);
                 core::ptr::addr_of_mut!((*shm).pitch).write_volatile(info.Pitch);
                 core::ptr::addr_of_mut!((*shm).hot_x).write_volatile(info.XHot);
                 core::ptr::addr_of_mut!((*shm).hot_y).write_volatile(info.YHot);
                 core::ptr::addr_of_mut!((*shm).shape_id).write_volatile(info.ShapeId);
                 last_shape_id = info.ShapeId;
+                shape = Some(shape_rgba(&stamp, &shape_buf));
             }
-        }
+            core::ptr::read_volatile(shm)
+        };
         fence(Ordering::Release);
         seq.store(s.wrapping_add(2), Ordering::Release); // even = consistent
+        cell.publish(&mut image, &hdr, shape, visible);
     }
 }

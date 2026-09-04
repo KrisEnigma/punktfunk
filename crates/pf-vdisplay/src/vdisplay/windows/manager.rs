@@ -480,21 +480,21 @@ pub fn vdm() -> &'static VirtualDisplayManager {
         .expect("VirtualDisplayManager used before a backend initialised it")
 }
 
-/// Whether this host's pf-vdisplay driver can run the v5 hardware-cursor
-/// channel. Opens the control device once if nothing has this service run,
-/// so Welcome never guesses. `false` when the driver is missing or stale.
+/// Whether this host has a pf-vdisplay driver that can run the hardware-cursor channel. Every
+/// driver a v7 host accepts can, so this is the handshake itself: it opens the control device
+/// once if nothing else has, so Welcome never guesses. `false` when the driver is missing or
+/// speaks another protocol.
 ///
 /// The first session's Welcome runs before `vdisplay::open` constructs the
 /// backend, so this must not assume an initialised manager. `init` is
 /// idempotent and constructing the driver facade is free.
 pub fn hw_cursor_capable() -> bool {
     let m = init(Box::new(crate::driver::PfVdisplayDriver));
-    let v = m.driver_proto.load(Ordering::Relaxed);
-    if v != 0 {
-        return v >= 5;
+    if m.driver_proto.load(Ordering::Relaxed) != 0 {
+        return true;
     }
     let _ = m.ensure_device();
-    m.driver_proto.load(Ordering::Relaxed) >= 5
+    m.driver_proto.load(Ordering::Relaxed) != 0
 }
 
 /// Live control device for IDD-push sealed-channel delivery. The caller
@@ -513,21 +513,6 @@ pub(crate) fn invalidate_cached_device(why: &str) {
     if let Some(m) = VDM.get() {
         m.invalidate_device(&anyhow::anyhow!("{why}"));
     }
-}
-
-/// Force a REAL mode-set at the keyed target's current mode under the `state`
-/// lock (sole topology mutator). The OS reverts a path to software-cursor only
-/// on a mode commit; a same-config CCD apply is no commit, so after one the
-/// secure desktop still never presents. `false` before the first backend open.
-pub fn force_recommit(key: pf_win_display::win_display::CcdTargetKey) -> bool {
-    let Some(m) = VDM.get() else {
-        return false;
-    };
-    let _guard = m.state.lock().unwrap();
-    let Some(gdi) = pf_win_display::win_display::resolve_gdi_name(key) else {
-        return false;
-    };
-    pf_win_display::win_display::force_mode_reset(&gdi)
 }
 
 /// Best-effort "is this WUDFHost pid still alive?" for the JOIN path.
@@ -645,7 +630,7 @@ impl VirtualDisplayManager {
         &'static self,
         mode: Mode,
         client_fp: Option<[u8; 32]>,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
         quit: Option<Arc<AtomicBool>>,
     ) -> Result<VirtualOutput> {
@@ -1288,7 +1273,7 @@ impl VirtualDisplayManager {
         dev: HANDLE,
         mut mode: Mode,
         slot: u32,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
         inner: &mut MgrInner,
     ) -> Result<Monitor> {
@@ -1300,9 +1285,9 @@ impl VirtualDisplayManager {
         // The session re-asks for this on every rebuild (see `requested_mode`).
         let requested_mode = mode;
         let render_pin = resolve_render_pin();
-        // Gate on v5 so the capture layer does not create a section nobody
-        // will publish into (older drivers ignore the AddRequest field).
-        let hw_cursor = hw_cursor && self.driver_proto.load(Ordering::Relaxed) >= 5;
+        // Gate on an opened device: the version is 0 until the handshake ran, and the capture
+        // layer must not create a section nobody will publish into.
+        let hw_cursor = hw_cursor && self.driver_proto.load(Ordering::Relaxed) != 0;
         // PRE-MUTATION baseline for the standby-sink selector (immunity plan WP3a): which targets
         // were part of the desktop before THIS acquire touches anything — the ADD's
         // auto-activation, the resolve ladder's force-EXTEND (which can light a sleeping sink!),
@@ -1561,14 +1546,6 @@ impl VirtualDisplayManager {
             // so one bounded UPDATE_MODES attempt per process, then latch
             // futile and fail fast to re-arrival (same-id history then makes
             // this size settable in place).
-            if self.driver_proto.load(Ordering::Relaxed) < 4 {
-                anyhow::bail!(
-                    "{}x{} is not in the advertised mode set (v3 driver: in-place reaches only \
-                     arrival-list modes)",
-                    mode.width,
-                    mode.height
-                );
-            }
             if self.update_modes_futile.load(Ordering::Relaxed) {
                 anyhow::bail!(
                     "{}x{} is not in the advertised mode set (UPDATE_MODES latched futile — the \
@@ -1655,7 +1632,7 @@ impl VirtualDisplayManager {
         slot: u32,
         old: &Monitor,
         mode: Mode,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
     ) -> ReAdd {
         tracing::info!(
             slot,

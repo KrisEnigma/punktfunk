@@ -72,6 +72,12 @@ pub(crate) async fn require_auth(
     if req.uri().path() == "/api/v1/health" {
         return forward(req, next, AuthLane::Public).await;
     }
+    // The browser plane's certificate hash. Open because a browser that has never paired has no
+    // client certificate to present, and the response authorises nothing — see
+    // `mgmt::webtransport` for why PAKE, not this route, is what proves the peer.
+    if req.uri().path() == "/api/v1/webtransport" {
+        return forward(req, next, AuthLane::Public).await;
+    }
     // Tray status: unauthenticated, loopback only. On Windows the token file is
     // SYSTEM/Administrators-DACL'd, so the per-user tray cannot authenticate. Not on the
     // cert allowlist — LAN clients already have `/status`. No PeerAddr ⇒ test ⇒ loopback.

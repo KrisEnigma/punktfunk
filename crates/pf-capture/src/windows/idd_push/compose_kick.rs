@@ -1,8 +1,9 @@
 //! Last-resort DWM compose kick: synthetic pointer input that dirties one virtual
 //! display so DWM presents it.
 //!
-//! Primary first-frame path is the driver's `FrameStash` (`frame_transport.rs`). This
-//! remains for pre-stash drivers and an empty-stash cold start. Synthetic input is
+//! Primary first-frame path is the driver's encode-pool stash (`encode/pool.rs`), which
+//! holds the newest full slot so a session opened over a composed desktop still gets a
+//! frame. This kick remains for the cold start with nothing to stash. Synthetic input is
 //! blocked on the secure desktop, defeated by a fullscreen `ClipCursor`, and
 //! user-visible on a sibling display — which is why it is a fallback.
 //!
@@ -14,9 +15,9 @@
 use super::*;
 
 /// LAST-RESORT fallback: nudge DWM into composing THE TARGET virtual display. DWM presents a
-/// display only when something DIRTIES it, so a freshly-attached ring over an idle desktop can
-/// sit at E_PENDING forever. The PRIMARY first-frame mechanism is the driver's `FrameStash`
-/// republish; this kick remains for pre-stash drivers and the never-composed cold start.
+/// display only when something DIRTIES it, so a session opened over an idle desktop can
+/// sit at E_PENDING forever. The PRIMARY first-frame mechanism is the driver's encode-pool
+/// stash; this kick remains for the cold start that never composed, where nothing was stashed.
 /// Synthetic input is inherently unreliable (secure desktop, ClipCursor, user-visible on a
 /// sibling display), which is why it is the fallback.
 ///

@@ -20,20 +20,24 @@ mod log;
 mod adapter;
 mod callbacks;
 mod control;
+mod cursor_cell;
 mod cursor_worker;
 mod direct_3d_device;
-mod edid;
+mod encode;
+#[cfg(feature = "encode-probe")]
+mod encode_probe;
 mod entry;
-mod frame_transport;
 mod monitor;
+mod registry;
 mod swap_chain_processor;
+mod watchdog;
+mod worker;
 
 use wdk_sys::NTSTATUS;
 
 // NTSTATUS codes the driver returns (wdk-sys doesn't surface all of these as constants).
 pub(crate) const STATUS_SUCCESS: NTSTATUS = 0;
 pub(crate) const STATUS_NOT_IMPLEMENTED: NTSTATUS = 0xC000_0002u32 as NTSTATUS;
-pub(crate) const STATUS_NOT_SUPPORTED: NTSTATUS = 0xC000_00BBu32 as NTSTATUS;
 pub(crate) const STATUS_NOT_FOUND: NTSTATUS = 0xC000_0225u32 as NTSTATUS;
 pub(crate) const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as NTSTATUS;
 pub(crate) const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as NTSTATUS;

@@ -108,6 +108,8 @@ mod tray;
 mod store;
 mod stream_marker;
 mod update;
+// The browser plane (design/web-client-implementation-plan.md Phase 1). Runtime opt-in.
+mod webtransport;
 #[cfg(target_os = "windows")]
 use pf_win_display::monitor_devnode;
 #[cfg(target_os = "windows")]
@@ -628,6 +630,13 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
         .and_then(|s| s.parse().ok());
     let mut open = false;
     let mut gamestream = false;
+    // The browser plane, off unless asked for — same stance as GameStream above.
+    let mut webtransport = false;
+    let mut webtransport_port: u16 = webtransport::DEFAULT_PORT;
+    let mut webtransport_port_explicit = false;
+    // Interface only; the port is its own flag so `--webtransport-bind` reads like an address.
+    let mut webtransport_host = "::".to_string();
+    let mut webtransport_bind_explicit = false;
     let mut no_mdns = false;
     // If unset, bind wide below so paired clients can browse. Admin stays loopback in `require_auth`.
     let mut mgmt_bind_explicit = false;
@@ -673,6 +682,17 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
                 )
             }
             "--gamestream" | "--moonlight" => gamestream = true,
+            "--webtransport" => webtransport = true,
+            "--webtransport-port" => {
+                webtransport_port = next()?
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("bad --webtransport-port (want a port number)"))?;
+                webtransport_port_explicit = true;
+            }
+            "--webtransport-bind" => {
+                webtransport_host = next()?;
+                webtransport_bind_explicit = true;
+            }
             "--open" => open = true,
             // Bridged Docker / CI netns: multicast never arrives.
             "--no-mdns" => no_mdns = true,
@@ -723,9 +743,40 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
         mgmt_port: opts.bind.port(),
         data_port,
         mdns: !no_mdns && discovery::mdns_enabled(),
+        // Resolved just below, once the env fallbacks have been applied.
+        webtransport_bind: None,
     };
+    if !webtransport_port_explicit {
+        if let Some(s) = pf_host_config::config().webtransport_port.as_deref() {
+            webtransport_port = s.parse().map_err(|_| {
+                anyhow::anyhow!("bad PUNKTFUNK_WEBTRANSPORT_PORT '{s}' (want a port)")
+            })?;
+        }
+    }
+    if !webtransport_bind_explicit {
+        if let Some(s) = pf_host_config::config().webtransport_bind.as_deref() {
+            webtransport_host = s.to_string();
+        }
+    }
+    // Bracketed IPv6 or a bare IPv4, joined to the port flag. A bad address is a startup error:
+    // listening on every interface when the operator asked for one is the wrong way to fail.
+    let webtransport_bind: std::net::SocketAddr = format!(
+        "{}:{webtransport_port}",
+        if webtransport_host.contains(':') && !webtransport_host.starts_with('[') {
+            format!("[{webtransport_host}]")
+        } else {
+            webtransport_host.clone()
+        }
+    )
+    .parse()
+    .map_err(|_| anyhow::anyhow!("bad --webtransport-bind '{webtransport_host}' (want an IP)"))?;
     // CLI or `PUNKTFUNK_GAMESTREAM`. Packaged units ship native-only ExecStart; env is the pin.
     let gamestream = gamestream || pf_host_config::config().gamestream;
+    let native = native::NativeServe {
+        webtransport_bind: (webtransport || pf_host_config::config().webtransport)
+            .then_some(webtransport_bind),
+        ..native
+    };
     Ok((opts, native, gamestream))
 }
 

@@ -46,7 +46,7 @@ pub(crate) struct HostInfo {
     /// Human-readable OS name (os-release `PRETTY_NAME`; `"Windows"`/`"macOS"` elsewhere).
     #[schema(example = "Bazzite 42 (Kinoite)")]
     os_name: String,
-    /// Codecs this host can encode (`Codec::host_wire_caps`, not the compile-time list).
+    /// Codecs this host can encode (`host_wire_caps`, not the compile-time list).
     codecs: Vec<ApiCodec>,
     /// GameStream/Moonlight-compat planes are running (`--gamestream`). `false` is the default (native only).
     gamestream: bool,
@@ -141,26 +141,37 @@ pub(crate) struct TopologyTransaction {
     took_ms: u64,
 }
 
-/// Per-session capture health (Windows IDD-push): the live classifier verdict, the ring's
-/// self-report and the last staged-recovery episode.
+/// Per-session capture health (Windows IDD-push): the live classifier verdict, the driver
+/// encoder's self-report and the last staged-recovery episode.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct CaptureHealth {
     /// `healthy` / `idle` / `suspect` / `stalled` / `recovering` / `rebuilding` / `secure_desktop`.
     #[schema(example = "healthy")]
     class: String,
-    /// When `class` is `stalled`: `worker` / `transport` / `conversion` / `presentation`.
+    /// When `class` is `stalled`: `worker` / `encoder` / `presentation` / `driver`.
     #[serde(skip_serializing_if = "Option::is_none")]
     stall_class: Option<String>,
     /// Time since the last real source frame.
     source_gap_ms: u64,
-    /// Activity evidence behind the verdict: `recent_source` / `input` / `canary` / `presents`.
+    /// Activity evidence behind the verdict: `input` / `canary`.
     #[serde(skip_serializing_if = "Option::is_none")]
     evidence: Option<String>,
-    /// The ring's own state word; absent on a driver without the health tail.
+    /// The newest access unit's OS present stamp against the moment the host took it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    ring_state: Option<String>,
-    /// The shared-fence ring protocol is negotiated on the current ring.
-    fence_ring: bool,
+    present_to_arrival_ms: Option<u64>,
+    /// `present_to_arrival_ms` is past the classifier's bound: frames come late rather than not
+    /// at all. Reported only — no recovery rung fires on it.
+    late_frames: bool,
+    /// The driver encoder's own state word: `closed` / `open` / `encoding` / `wedged`.
+    /// Absent until the session's first `SET_ENCODE`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoder_state: Option<String>,
+    /// The backend the driver opened: `nvenc` / `amf` / `qsv` / `pyrowave`. Absent as above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_opened: Option<String>,
+    /// Encode threads the driver abandoned after a wedge; two opens the driver cycle.
+    detached: u32,
+    /// Access units the driver published, and frames it dropped at its encode pool.
     published_total: u64,
     dropped_total: u64,
     /// The recovery stage running now, while an episode is open.
@@ -191,7 +202,7 @@ pub(crate) struct CaptureEpisode {
 /// One recovery rung of an episode.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct CaptureStage {
-    /// `encoder_reset` / `ring_reset` / `swap_chain_reset` / `presentation_reset` / `monitor_cycle` / `driver_cycle` / `capture_fallback`.
+    /// `encoder_reset` / `swap_chain_reset` / `presentation_reset` / `driver_cycle`.
     stage: String,
     /// `applied` / `failed` / `unsupported` / `timed_out`.
     outcome: String,
@@ -205,8 +216,11 @@ fn api_capture_health(h: &pf_capture::CaptureHealth) -> CaptureHealth {
         stall_class: h.stall_class.map(Into::into),
         source_gap_ms: ms(h.source_gap),
         evidence: h.evidence.map(Into::into),
-        ring_state: h.ring_state.map(Into::into),
-        fence_ring: h.fence_ring,
+        present_to_arrival_ms: h.present_to_arrival.map(ms),
+        late_frames: h.late_frames,
+        encoder_state: h.encoder_state.map(Into::into),
+        backend_opened: h.backend_opened.map(Into::into),
+        detached: h.detached,
         published_total: h.published_total,
         dropped_total: h.dropped_total,
         current_stage: h.current_stage.map(Into::into),
@@ -422,9 +436,9 @@ pub(crate) async fn get_host_info(State(st): State<Arc<MgmtState>>) -> Json<Host
         gfe_version: GFE_VERSION.into(),
         os: h.os_chain.clone(),
         os_name: h.os_name.clone(),
-        // Same mask as GameStream/QUIC negotiation (`Codec::host_wire_caps`), not the compile-time list.
+        // Same mask as GameStream/QUIC negotiation (`host_wire_caps`), not the compile-time list.
         codecs: {
-            let caps = Codec::host_wire_caps();
+            let caps = crate::encode::host_wire_caps();
             use punktfunk_core::quic::{CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_PYROWAVE};
             [
                 (CODEC_H264, ApiCodec::H264),

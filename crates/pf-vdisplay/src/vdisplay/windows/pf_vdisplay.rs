@@ -31,7 +31,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
-use pf_driver_proto::control;
+use bytemuck::Zeroable;
+use pf_driver_proto::{control, encode};
 
 use super::manager::{AddedMonitor, MonitorKey, VdisplayDriver};
 use super::{Mode, VirtualDisplay, VirtualOutput};
@@ -296,33 +297,9 @@ unsafe fn set_render_adapter(h: HANDLE, luid: LUID) -> Result<()> {
     .context("pf-vdisplay SET_RENDER_ADAPTER")
 }
 
-/// Deliver a monitor's sealed frame channel. On IOCTL success the driver owns the handles
-/// duplicated into WUDFHost; the caller reaps remote duplicates on failure so none leak. Always
-/// the v2 shape (WP7): a pre-fence driver reads the v1 prefix of the longer buffer unchanged.
-///
-/// # Safety
-/// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
-pub unsafe fn send_frame_channel(
-    dev: HANDLE,
-    req: &control::SetFrameChannelRequestV2,
-) -> Result<()> {
-    let mut none: [u8; 0] = [];
-    // SAFETY: `dev` is the live control handle by this fn's contract. `bytes_of(req)` borrows the
-    // caller's request for this synchronous call; `none` is empty, so there is no output buffer.
-    unsafe {
-        ioctl(
-            dev,
-            control::IOCTL_SET_FRAME_CHANNEL,
-            bytemuck::bytes_of(req),
-            &mut none,
-        )
-    }
-    .map(|_| ())
-    .context("pf-vdisplay SET_FRAME_CHANNEL")
-}
-
-/// Deliver a monitor's hardware-cursor section (`IOCTL_SET_CURSOR_CHANNEL`, proto v5). Same
-/// delivery/ownership contract as [`send_frame_channel`].
+/// Deliver a monitor's hardware-cursor section (`IOCTL_SET_CURSOR_CHANNEL`, proto v5). On IOCTL
+/// success the driver owns the handle duplicated into WUDFHost; the caller reaps the remote
+/// duplicate on failure so none leaks.
 ///
 /// # Safety
 /// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
@@ -367,6 +344,58 @@ pub unsafe fn send_cursor_forward(
     }
     .map(|_| ())
     .context("pf-vdisplay SET_CURSOR_FORWARD")
+}
+
+/// Open a monitor's in-driver encoder (`IOCTL_SET_ENCODE`, proto v7) and adopt its AU section.
+/// Same handle contract as [`send_cursor_channel`]: the section and event VALUES in `req` are
+/// already duplicated into WUDFHost, the driver owns them iff the IOCTL succeeds, and the
+/// caller reaps them on `Err`. A short reply fails closed: every field feeds the session.
+///
+/// # Safety
+/// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
+pub unsafe fn send_set_encode(
+    dev: HANDLE,
+    req: &encode::SetEncodeRequest,
+) -> Result<encode::SetEncodeReply> {
+    let mut reply = encode::SetEncodeReply::zeroed();
+    // SAFETY: `dev` is the live control handle by this fn's contract; `bytes_of(req)` and
+    // `bytes_of_mut(&mut reply)` borrow the caller's request and this local for the call.
+    let n = unsafe {
+        ioctl(
+            dev,
+            encode::IOCTL_SET_ENCODE,
+            bytemuck::bytes_of(req),
+            bytemuck::bytes_of_mut(&mut reply),
+        )
+    }
+    .context("pf-vdisplay SET_ENCODE")?;
+    if (n as usize) < size_of::<encode::SetEncodeReply>() {
+        anyhow::bail!(
+            "pf-vdisplay SET_ENCODE: short reply ({n} of {} bytes) — driver predates proto v7",
+            size_of::<encode::SetEncodeReply>()
+        );
+    }
+    Ok(reply)
+}
+
+/// One-shot control on a monitor's live in-driver encoder (`IOCTL_ENCODE_CTL`, proto v7).
+///
+/// # Safety
+/// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
+pub unsafe fn send_encode_ctl(dev: HANDLE, req: &encode::EncodeCtlRequest) -> Result<()> {
+    let mut none: [u8; 0] = [];
+    // SAFETY: `dev` is the live control handle by this fn's contract; `bytes_of(req)` borrows the
+    // caller's request across this synchronous call; no output buffer.
+    unsafe {
+        ioctl(
+            dev,
+            encode::IOCTL_ENCODE_CTL,
+            bytemuck::bytes_of(req),
+            &mut none,
+        )
+    }
+    .map(|_| ())
+    .with_context(|| format!("pf-vdisplay ENCODE_CTL op {}", req.op))
 }
 
 /// RAII SetupAPI device-info list. Every [`open_device`] exit path must destroy it; a driverless
@@ -529,6 +558,27 @@ fn probe_device() -> Probe {
     probe
 }
 
+/// The installed driver speaks a protocol this host cannot drive. Typed so a session can name
+/// the remedy — install the matching pair — instead of reporting an IOCTL error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriverOutdated {
+    pub driver: u32,
+    pub host: u32,
+}
+
+impl std::fmt::Display for DriverOutdated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pf-vdisplay driver outdated: the driver speaks protocol {}, this host needs {} — \
+             install the matching host + driver (they ship in one installer)",
+            self.driver, self.host
+        )
+    }
+}
+
+impl std::error::Error for DriverOutdated {}
+
 /// pf-vdisplay IOCTL surface behind [`VirtualDisplayManager`](super::manager::VirtualDisplayManager).
 /// Wire contract: `pf_driver_proto::control` (versioned, hard-checked).
 pub(crate) struct PfVdisplayDriver;
@@ -563,53 +613,23 @@ impl VdisplayDriver for PfVdisplayDriver {
         }
         let info: control::InfoReply =
             bytemuck::pod_read_unaligned(&info_buf[..size_of::<control::InfoReply>()]);
-        // Floor/ceiling, not equality: v4+ is additive, so a v3 driver still works and the
-        // in-place path is gated on the reported version. Below the floor or above this host fails.
+        // v7 replaced the video transport outright, so the floor equals this host's version: a
+        // v6 driver has no encoder to open and a future one may have moved the section again.
         if info.protocol_version < pf_driver_proto::MIN_DRIVER_PROTOCOL_VERSION
             || info.protocol_version > pf_driver_proto::PROTOCOL_VERSION
         {
-            anyhow::bail!(
-                "pf-vdisplay protocol mismatch: host drives {}..={}, driver reports {} — install \
-                 matching host + driver",
-                pf_driver_proto::MIN_DRIVER_PROTOCOL_VERSION,
-                pf_driver_proto::PROTOCOL_VERSION,
-                info.protocol_version
-            );
+            return Err(anyhow::Error::new(DriverOutdated {
+                driver: info.protocol_version,
+                host: pf_driver_proto::PROTOCOL_VERSION,
+            }));
         }
         let watchdog_s = info.watchdog_timeout_s.max(1);
         // Only log of the negotiated watchdog; pinger cadence is `watchdog/3`.
         tracing::info!(
-            "pf-vdisplay protocol {} (host drives {}..={}, watchdog timeout {}s)",
+            "pf-vdisplay protocol {} (watchdog timeout {}s)",
             info.protocol_version,
-            pf_driver_proto::MIN_DRIVER_PROTOCOL_VERSION,
-            pf_driver_proto::PROTOCOL_VERSION,
             watchdog_s
         );
-        // Per-version gaps. Bumps since v3 are additive; a blanket `< PROTOCOL_VERSION` named
-        // the wrong missing capability (told a v4 driver it lacked a v4 feature).
-        if info.protocol_version < 4 {
-            tracing::warn!(
-                "pf-vdisplay protocol {}: driver lacks the in-place mid-stream resize \
-                 (IOCTL_UPDATE_MODES, added in v4) — every mid-stream resize costs a monitor \
-                 re-arrival (one hotplug per switch) until the driver is updated",
-                info.protocol_version
-            );
-        }
-        if info.protocol_version < 5 {
-            tracing::warn!(
-                "pf-vdisplay protocol {}: driver lacks the IddCx hardware-cursor channel (added in \
-                 v5) — the pointer stays composited into the captured frame",
-                info.protocol_version
-            );
-        }
-        if info.protocol_version < 6 {
-            tracing::info!(
-                "pf-vdisplay protocol {}: driver lacks the mid-stream cursor-forward flip \
-                 (IOCTL_SET_CURSOR_FORWARD, added in v6) — the cursor model declared at monitor ADD \
-                 stands for the whole session",
-                info.protocol_version
-            );
-        }
         // CLEAR_ALL only on the first open of the process. A reopen can race sessions that still
         // believe they are live; an unconditional CLEAR_ALL would raze them.
         if !reap_orphans {
@@ -636,7 +656,7 @@ impl VdisplayDriver for PfVdisplayDriver {
         mode: Mode,
         render_luid: Option<LUID>,
         preferred_monitor_id: u32,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
     ) -> Result<AddedMonitor> {
         let session_id = next_session_id();
@@ -870,7 +890,7 @@ pub struct PfVdisplayDisplay {
     client_fp: Option<[u8; 32]>,
     /// Client HDR volume (`None` = unknown/SDR → driver EDID defaults). Advertised in the
     /// created monitor's EDID so host apps tone-map to the client's panel.
-    client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+    client_hdr: Option<pf_frame::HdrMeta>,
     /// Declare an IddCx hardware cursor. Honored only when the handshake reported proto ≥ 5.
     hw_cursor: bool,
     /// Deliberate-quit flag (`None` = linger policy). A user "stop" tears the monitor down
@@ -899,7 +919,7 @@ impl VirtualDisplay for PfVdisplayDisplay {
         self.client_fp = fingerprint;
     }
 
-    fn set_client_hdr(&mut self, hdr: Option<punktfunk_core::quic::HdrMeta>) {
+    fn set_client_hdr(&mut self, hdr: Option<pf_frame::HdrMeta>) {
         self.client_hdr = hdr;
     }
 
@@ -979,6 +999,31 @@ pub fn ensure_available() -> Result<()> {
         );
     }
     result.map(|_| ())
+}
+
+/// The `DriverCycle` recovery rung (plan §2.5): reap a dead or blocked WUDFHost and reload the
+/// adapter, so the session's rebuild reopens against a fresh host process. Reuses the
+/// hostless-zombie reload — no second lever. Never joins the WUDFHost and never opens the
+/// control device: [`reload_vdisplay_adapter`] shells out with its own timeouts and
+/// `invalidate_cached_device` drops the handle without waiting on a drain, so the control plane
+/// stays live through the seconds the display is black. The caller rebuilds the pipeline after.
+pub fn force_driver_cycle() -> Result<()> {
+    let _serialize = RECOVERY.lock().unwrap_or_else(|e| e.into_inner());
+    // Release our own control handle first: an open handle vetoes the PnP disable/restart.
+    super::manager::invalidate_cached_device(
+        "driver cycle: releasing the control handle before the adapter reload",
+    );
+    match reload_vdisplay_adapter() {
+        AdapterCycle::Reloaded { .. } => Ok(()),
+        AdapterCycle::NotInstalled => {
+            anyhow::bail!(
+                "driver cycle: no pf-vdisplay adapter devnode — the driver is not installed"
+            )
+        }
+        AdapterCycle::Refused(why) => {
+            anyhow::bail!("driver cycle: the adapter devnode could not be reloaded ({why})")
+        }
+    }
 }
 
 /// Wait for an openable control interface; reload if `reload` and the devnode looks hostless.
@@ -1219,6 +1264,174 @@ mod tests {
         assert_eq!(vout.preferred_mode, Some((1920, 1080, 60)));
         thread::sleep(Duration::from_secs(3));
         drop(vout); // REMOVE + stop the pinger
+    }
+
+    /// Spike S5 (`#[ignore]`): arm the driver's in-process encode probe on a fresh 1080p60
+    /// monitor and read its tally. Needs a driver built with `--features encode-probe`.
+    /// `PF_PROBE_BACKEND` (nvenc|amf|qsv|pyrowave), `PF_PROBE_CODEC` (h264|hevc|av1|pyrowave),
+    /// `PF_PROBE_INPUT` (default|nv12), `PF_PROBE_FRAMES` (300) pick the run.
+    /// `PF_PROBE_HDR=1` takes the 10-bit PQ input and `PF_PROBE_444=1` the full-chroma one. The
+    /// run puts the virtual display into the colour mode its depth needs and prints what stuck —
+    /// a probe fed the wrong surface format fails at `fmt` rather than encoding something else.
+    #[test]
+    #[ignore = "needs an encode-probe pf-vdisplay driver on real hardware; run with --ignored"]
+    fn live_encode_probe() {
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let backend = env("PF_PROBE_BACKEND", "nvenc");
+        let codec = env("PF_PROBE_CODEC", "hevc");
+        let input = env("PF_PROBE_INPUT", "default");
+        let want_hdr = env("PF_PROBE_HDR", "0") == "1";
+        let want_444 = env("PF_PROBE_444", "0") == "1";
+        let frames: u32 = env("PF_PROBE_FRAMES", "300")
+            .parse()
+            .expect("PF_PROBE_FRAMES");
+        let id = |names: [&str; 4], v: &str, what: &str| -> u32 {
+            let i = names.iter().position(|n| *n == v);
+            i.unwrap_or_else(|| panic!("{what}={v:?} is not one of {names:?}")) as u32 + 1
+        };
+        let req = control::EncodeProbeRequest {
+            target_id: 0,
+            backend: id(
+                ["nvenc", "amf", "qsv", "pyrowave"],
+                &backend,
+                "PF_PROBE_BACKEND",
+            ),
+            codec: id(
+                ["h264", "hevc", "av1", "pyrowave"],
+                &codec,
+                "PF_PROBE_CODEC",
+            ),
+            input: match input.as_str() {
+                "default" => 0,
+                "nv12" => 1,
+                other => panic!("PF_PROBE_INPUT={other:?} is not default|nv12"),
+            },
+            frames,
+            bitrate_kbps: 20_000,
+            fps: 60,
+            flags: (if want_hdr { control::PROBE_FLAG_HDR } else { 0 })
+                | (if want_444 { control::PROBE_FLAG_444 } else { 0 }),
+        };
+
+        let _policy = ExclusiveTopology::force();
+        let mut vd = PfVdisplayDisplay::new().expect("open pf-vdisplay");
+        let vout = vd
+            .create(Mode {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            })
+            .expect("create virtual display");
+        let wc = vout.win_capture.as_ref().expect("no capture target");
+        let target_id = wc.target_id;
+        // The probe converts from DWM's surface as it comes, so the run's depth decides the
+        // display's colour mode: FP16 under advanced colour, BGRA without it. The host service is
+        // stopped for this test, so nobody else sets it — set it here and report what stuck.
+        let key = pf_win_display::win_display::CcdTargetKey::new(wc.adapter_luid, target_id);
+        let set_ok = pf_win_display::win_display::set_advanced_color(key, want_hdr);
+        thread::sleep(Duration::from_millis(750));
+        let color_on = pf_win_display::win_display::advanced_color_enabled(key);
+        println!("probe hdr-state: want={want_hdr} set_ok={set_ok} enabled={color_on:?}");
+        // The swap-chain assign and the first composes settle, as the other live cases wait.
+        thread::sleep(Duration::from_secs(3));
+        let req = control::EncodeProbeRequest { target_id, ..req };
+        let dev = open_device().expect("open the pf-vdisplay control device");
+        let h = HANDLE(dev.as_raw_handle());
+        let mut none: [u8; 0] = [];
+        // SAFETY: `h` borrows the live `OwnedHandle` above; `bytes_of(&req)` is a local that
+        // outlives the synchronous call; ARM writes no output.
+        unsafe {
+            ioctl(
+                h,
+                control::IOCTL_ENCODE_PROBE_ARM,
+                bytemuck::bytes_of(&req),
+                &mut none,
+            )
+        }
+        .expect("IOCTL_ENCODE_PROBE_ARM — is the driver built with --features encode-probe?");
+
+        // DWM presents only what something dirties: a 1 px pointer wiggle keeps frames flowing
+        // on the (isolated, so pointer-holding) virtual display.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let jiggle = {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                use windows::Win32::Foundation::POINT;
+                use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+                let mut p = POINT::default();
+                // SAFETY: `p` is a valid out-param.
+                if unsafe { GetCursorPos(&mut p) }.is_err() {
+                    return;
+                }
+                let mut flip = false;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    flip = !flip;
+                    // SAFETY: plain integer coordinates, restored on the next flip.
+                    let _ = unsafe { SetCursorPos(p.x + i32::from(flip), p.y) };
+                    thread::sleep(Duration::from_millis(4));
+                }
+                // SAFETY: restores the position observed above.
+                let _ = unsafe { SetCursorPos(p.x, p.y) };
+            })
+        };
+        let started = Instant::now();
+        let reply = loop {
+            thread::sleep(Duration::from_millis(100));
+            let mut out = [0u8; size_of::<control::EncodeProbeReply>()];
+            // SAFETY: `h` is the live control handle; STATUS takes no input and writes into
+            // `out`, whose length is the output size.
+            let n = unsafe { ioctl(h, control::IOCTL_ENCODE_PROBE_STATUS, &[], &mut out) }
+                .expect("IOCTL_ENCODE_PROBE_STATUS");
+            assert_eq!(n as usize, out.len(), "short STATUS reply");
+            let r: control::EncodeProbeReply = bytemuck::pod_read_unaligned(&out);
+            if r.state >= 3 || started.elapsed() > Duration::from_secs(60) {
+                break r;
+            }
+        };
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = jiggle.join();
+        let name = String::from_utf8_lossy(&reply.name)
+            .trim_end_matches('\0')
+            .to_string();
+        println!(
+            "encode probe: backend={backend} codec={codec} input={input} flags={:#x} state={} frames={} aus={} \
+             bytes={} open_us={} first_au_us={} mean_us={} max_us={} drops={} error={} name={name}",
+            req.flags,
+            reply.state,
+            reply.frames_submitted,
+            reply.aus,
+            reply.bytes,
+            reply.open_us,
+            reply.first_au_us,
+            reply.mean_submit_to_au_us,
+            reply.max_submit_to_au_us,
+            reply.drops,
+            reply.error
+        );
+        // WUDFHost's temp dir — `C:\Windows\Temp` under the SCM, the LocalService profile otherwise.
+        let file = format!("pfvd-probe-{backend}-{codec}.bin");
+        for dir in [
+            r"C:\Windows\Temp",
+            r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Temp",
+        ] {
+            let path = format!(r"{dir}\{file}");
+            match std::fs::metadata(&path) {
+                Ok(m) => println!("encode probe: output {path} ({} bytes)", m.len()),
+                Err(_) => println!("encode probe: no output at {path}"),
+            }
+        }
+        drop(vout); // REMOVE before the asserts so a red run never leaks the monitor
+        assert_eq!(
+            reply.state, 3,
+            "probe did not finish: state={} error={} name={name}",
+            reply.state, reply.error
+        );
+        assert!(
+            reply.aus + reply.drops + 2 >= frames,
+            "aus={} < frames({frames}) - drops({}) - 2",
+            reply.aus,
+            reply.drops
+        );
     }
 
     /// Forces `Topology::Exclusive` **and `KeepAlive::Off`** for the duration of a case and puts

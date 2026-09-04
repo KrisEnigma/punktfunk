@@ -16,7 +16,7 @@
 //! thread waits on per-buffer events and `nvEncLockBitstream`. `submit` blocks on the
 //! oldest completion when `POOL - 1` encodes are in flight. Register/map/unmap stay on
 //! the encode thread. The DLL resolves at runtime, so an AMD/Intel box fails [`try_api`]
-//! and AMF/QSV/`super::sw` carry the session.
+//! and AMF/QSV/software carry the session.
 
 // `unsafe_op_in_unsafe_fn` off: this file is raw NVENC/D3D11 calls. Wrapping each one
 // would add a SAFETY that only restates the prototype. Exit: delete the empty markers.
@@ -41,7 +41,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::mpsc;
 use windows::core::{Interface, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
@@ -217,7 +217,7 @@ fn session_cap() -> u32 {
 }
 
 /// Whether one more plain (non-split) session fits. AMD/Intel never open NVENC so this passes.
-pub(crate) fn can_open_another_session() -> bool {
+pub fn can_open_another_session() -> bool {
     LIVE_SESSION_UNITS.load(std::sync::atomic::Ordering::Relaxed) < session_cap()
 }
 
@@ -459,7 +459,9 @@ pub struct NvencD3d11Encoder {
     /// Latched when `query_caps` finds no 10-bit encode, so re-inits do not re-warn.
     hdr_unsupported: bool,
     /// Source mastering metadata, emitted as in-band SEI on each HDR keyframe. `None` = VUI only.
-    hdr_meta: Option<punktfunk_core::quic::HdrMeta>,
+    hdr_meta: Option<pf_frame::HdrMeta>,
+    /// Render adapter the session encodes on; keys the process-wide ceiling/split caches.
+    adapter_luid: Option<LUID>,
     /// Capturer textures registered with NVENC, cached by pointer (in-place encode). The cloned
     /// `ID3D11Texture2D` keeps each alive until unregister — the capturer may drop its copy first.
     regs: HashMap<isize, (nv::NV_ENC_REGISTERED_PTR, ID3D11Texture2D)>,
@@ -565,11 +567,35 @@ impl ChunkState {
     }
 }
 
+/// The NVENC input format for a captured [`PixelFormat`]. Shared by `open` and the first
+/// `submit` so the format `caps()` answers from is the one the session will init with.
+const fn buffer_format(format: PixelFormat) -> nv::NV_ENC_BUFFER_FORMAT {
+    match format {
+        PixelFormat::P010 => nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV420_10BIT,
+        // Same packed layout for both: `Rgb10a2Sdr` is sRGB, so its session takes BT.709 VUI.
+        PixelFormat::Rgb10a2 | PixelFormat::Rgb10a2Sdr => {
+            nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
+        }
+        PixelFormat::Nv12 => nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
+        _ => nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
+    }
+}
+
+/// FREXT `chromaFormatIDC = 3` needs packed RGB, which NVENC CSCs itself. Subsampled YUV in
+/// means 4:2:0 out however the session was negotiated, so `chroma_444` must follow this.
+const fn full_chroma_input(fmt: nv::NV_ENC_BUFFER_FORMAT) -> bool {
+    matches!(
+        fmt,
+        nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB
+            | nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
+    )
+}
+
 impl NvencD3d11Encoder {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         codec: Codec,
-        _format: PixelFormat,
+        format: PixelFormat,
         width: u32,
         height: u32,
         fps: u32,
@@ -579,10 +605,16 @@ impl NvencD3d11Encoder {
         // Client-decoder slice ceiling (`VIDEO_CAP_MULTI_SLICE` / GameStream slices-per-frame).
         // 1 = single-slice — the safe shape toward decoders that never asked (some SoCs wedge).
         max_slices: u32,
+        // Selected render adapter (`None` = OS default). Only the probe/cache keys read it;
+        // the session device comes from the first submitted frame.
+        adapter_luid: Option<LUID>,
     ) -> Result<Self> {
         // DLL load is the real availability gate: fail open with a reason instead of an opaque
         // first-frame session error. Later NVENC calls sit behind this, so `api()` is sound.
         try_api().map_err(|e| anyhow!("NVENC unavailable: {e}"))?;
+        // 4:4:4 is HEVC-only; the GPU-support gate is in `query_caps`.
+        let want_444 = chroma.is_444() && codec == Codec::H265;
+        let buffer_fmt = buffer_format(format);
         Ok(Self {
             encoder: ptr::null_mut(),
             codec,
@@ -591,16 +623,18 @@ impl NvencD3d11Encoder {
             height,
             fps,
             bitrate_bps,
-            buffer_fmt: nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
+            buffer_fmt,
             bit_depth,
-            // 4:4:4 is HEVC-only; the GPU-support gate is in `query_caps`.
-            chroma_444: chroma.is_444() && codec == Codec::H265,
-            chroma_444_requested: chroma.is_444() && codec == Codec::H265,
+            // Effective from the open, not from the first frame: callers read `caps()` to
+            // answer the client, and a subsampled input never becomes 4:4:4 later.
+            chroma_444: want_444 && full_chroma_input(buffer_fmt),
+            chroma_444_requested: want_444,
             hdr_requested: false,
             hdr_unsupported: false,
             yuv444_supported: false,
             hdr: false,
             hdr_meta: None,
+            adapter_luid,
             regs: HashMap::new(),
             next: 0,
             bitstreams: Vec::new(),
@@ -871,7 +905,8 @@ impl NvencD3d11Encoder {
 
     fn split_key(&self) -> SplitKey {
         // Render-adapter LUID, `0` when unresolved. Advisory: a collision costs one re-search.
-        let gpu = pf_gpu::resolve_render_adapter_luid()
+        let gpu = self
+            .adapter_luid
             .map(|l| ((l.HighPart as u32 as u64) << 32) | l.LowPart as u64)
             .unwrap_or(0);
         SplitKey {
@@ -985,7 +1020,8 @@ impl NvencD3d11Encoder {
     /// Identity in the process-lifetime bitrate-ceiling cache. GPU is the render adapter LUID
     /// (`0` if unresolved). Advisory: a collision costs one failed open + re-search, never a wrong session.
     fn ceiling_key(&self, split_mode: u32) -> CeilingKey {
-        let gpu = pf_gpu::resolve_render_adapter_luid()
+        let gpu = self
+            .adapter_luid
             .map(|l| ((l.HighPart as u32 as u64) << 32) | l.LowPart as u64)
             .unwrap_or(0);
         CeilingKey {
@@ -1394,40 +1430,19 @@ impl Encoder for NvencD3d11Encoder {
             // first subsampled-YUV frame would permanently demote the session.
             self.chroma_444 = self.chroma_444_requested;
             // YUV (NV12/P010): native encode, no RGB→YUV CSC. RGB is the shader path.
-            // 10-bit forces Main10.
-            self.buffer_fmt = match captured.format {
-                PixelFormat::P010 => {
+            // 10-bit forces Main10; NV12 pins 8 — `register_resource` rejects it in a
+            // 10-bit session, unlike ARGB.
+            self.buffer_fmt = buffer_format(captured.format);
+            match captured.format {
+                PixelFormat::P010 | PixelFormat::Rgb10a2 | PixelFormat::Rgb10a2Sdr => {
                     self.bit_depth = 10;
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV420_10BIT
                 }
-                PixelFormat::Rgb10a2 => {
-                    self.bit_depth = 10;
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
-                }
-                PixelFormat::Rgb10a2Sdr => {
-                    // 10-bit SDR: same packed layout as Rgb10a2, but sRGB — `hdr` is false, so
-                    // the session opens Main10 with BT.709 SDR VUI.
-                    self.bit_depth = 10;
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
-                }
-                PixelFormat::Nv12 => {
-                    // NV12 is 8-bit 4:2:0. Unlike ARGB, NV12 cannot feed a 10-bit session:
-                    // `register_resource` rejects it as InvalidParam.
-                    self.bit_depth = 8;
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12
-                }
-                _ => nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
-            };
-            // FREXT/chromaFormatIDC=3 only on RGB input. Clear the effective flag so
-            // `caps().chroma_444` reports what the stream carries; keep `chroma_444_requested`
-            // so a later RGB re-init recovers 4:4:4.
-            if self.chroma_444
-                && !matches!(
-                    self.buffer_fmt,
-                    nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB
-                        | nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR10
-                )
-            {
+                PixelFormat::Nv12 => self.bit_depth = 8,
+                _ => {}
+            }
+            // Clear the effective flag so `caps().chroma_444` reports what the stream carries;
+            // keep `chroma_444_requested` so a later RGB re-init recovers 4:4:4.
+            if self.chroma_444 && !full_chroma_input(self.buffer_fmt) {
                 tracing::warn!(
                     format = ?captured.format,
                     "4:4:4 negotiated but the capturer delivered subsampled YUV — encoding 4:2:0"
@@ -1649,7 +1664,7 @@ impl Encoder for NvencD3d11Encoder {
         }
     }
 
-    fn set_hdr_meta(&mut self, meta: Option<punktfunk_core::quic::HdrMeta>) {
+    fn set_hdr_meta(&mut self, meta: Option<pf_frame::HdrMeta>) {
         self.hdr_meta = meta;
     }
 
@@ -2015,27 +2030,35 @@ impl Drop for NvencD3d11Encoder {
     }
 }
 
-/// Probe HEVC 4:4:4 (`NV_ENC_CAPS_SUPPORT_YUV444_ENCODE`). Cached by [`crate::can_encode_444`]
+/// Probe HEVC 4:4:4 (`NV_ENC_CAPS_SUPPORT_YUV444_ENCODE`). Cached by `pf_encode::can_encode_444`
 /// and read before Welcome so the host advertises the chroma it can really encode.
-pub fn probe_can_encode_444(codec: Codec) -> bool {
+pub fn probe_can_encode_444(codec: Codec, adapter_luid: Option<LUID>) -> bool {
     if codec != Codec::H265 {
         return false;
     }
-    probe_encode_cap(codec, nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_YUV444_ENCODE)
+    probe_encode_cap(
+        codec,
+        nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_YUV444_ENCODE,
+        adapter_luid,
+    )
 }
 
 /// Probe 10-bit encode (`NV_ENC_CAPS_SUPPORT_10BIT_ENCODE` on the codec GUID). Cached by
-/// [`crate::can_encode_10bit`] and read before Welcome so negotiated depth matches NVENC.
-pub fn probe_can_encode_10bit(codec: Codec) -> bool {
+/// `pf_encode::can_encode_10bit` and read before Welcome so negotiated depth matches NVENC.
+pub fn probe_can_encode_10bit(codec: Codec, adapter_luid: Option<LUID>) -> bool {
     if !codec.supports_10bit() {
         return false;
     }
-    probe_encode_cap(codec, nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_10BIT_ENCODE)
+    probe_encode_cap(
+        codec,
+        nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_10BIT_ENCODE,
+        adapter_luid,
+    )
 }
 
 /// One NVENC cap for `codec` on a throwaway session. `false` on any failure — unconfirmed = no.
-fn probe_encode_cap(codec: Codec, cap: nv::NV_ENC_CAPS) -> bool {
-    with_probe_session(|enc| {
+fn probe_encode_cap(codec: Codec, cap: nv::NV_ENC_CAPS, adapter_luid: Option<LUID>) -> bool {
+    with_probe_session(adapter_luid, |enc| {
         let mut param = nv::NV_ENC_CAPS_PARAM {
             version: nv::NV_ENC_CAPS_PARAM_VER,
             capsToQuery: cap,
@@ -2056,15 +2079,15 @@ fn probe_encode_cap(codec: Codec, cap: nv::NV_ENC_CAPS) -> bool {
 
 /// Codecs this GPU's NVENC can encode (`nvEncGetEncodeGUIDs`) on a throwaway session,
 /// probing the selected render adapter. Failure returns "nothing probed", which
-/// [`crate::CodecSupport::wire_mask`] turns into `None` so a broken probe cannot
-/// narrow an NVIDIA host to nothing. Cached per GPU by [`crate::windows_codec_support`].
-pub(crate) fn probe_codec_support() -> crate::CodecSupport {
+/// `pf_encode::codec_support_wire_mask` turns into `None` so a broken probe cannot
+/// narrow an NVIDIA host to nothing. Cached per GPU by `pf_encode::windows_codec_support`.
+pub fn probe_codec_support(adapter_luid: Option<LUID>) -> crate::CodecSupport {
     let unknown = crate::CodecSupport {
         h264: false,
         h265: false,
         av1: false,
     };
-    with_probe_session(|enc| {
+    with_probe_session(adapter_luid, |enc| {
         // SAFETY: all NVENC calls go through the loaded API table against live session `enc`;
         // `count`/`written` are live locals, and `guids` is sized to the count the driver just
         // reported, its pointer valid for that many `GUID`s.
@@ -2101,7 +2124,10 @@ pub(crate) fn probe_codec_support() -> crate::CodecSupport {
 /// Open a throwaway NVENC session on a fresh hardware D3D11 device, hand it to `f`, tear down.
 /// `None` = no loadable NVENC / no device / failed open. Shared by [`probe_encode_cap`] and
 /// [`probe_codec_support`].
-fn with_probe_session<T>(f: impl FnOnce(*mut c_void) -> T) -> Option<T> {
+fn with_probe_session<T>(
+    adapter_luid: Option<LUID>,
+    f: impl FnOnce(*mut c_void) -> T,
+) -> Option<T> {
     // Same exclusion as `init_session`: a throwaway open must not overlap a zombie reap.
     let _gate = DRIVER_SESSION_GATE
         .lock()
@@ -2126,11 +2152,10 @@ fn with_probe_session<T>(f: impl FnOnce(*mut c_void) -> T) -> Option<T> {
     unsafe {
         // Probe the selected render adapter — the GPU the session will encode on. The OS default
         // can be the other GPU on a hybrid box.
-        let adapter: Option<IDXGIAdapter1> =
-            pf_gpu::resolve_render_adapter_luid().and_then(|luid| {
-                let factory: IDXGIFactory4 = CreateDXGIFactory1().ok()?;
-                factory.EnumAdapterByLuid(luid).ok()
-            });
+        let adapter: Option<IDXGIAdapter1> = adapter_luid.and_then(|luid| {
+            let factory: IDXGIFactory4 = CreateDXGIFactory1().ok()?;
+            factory.EnumAdapterByLuid(luid).ok()
+        });
         let mut device: Option<ID3D11Device> = None;
         let created = match &adapter {
             Some(a) => D3D11CreateDevice(
@@ -2294,6 +2319,7 @@ mod tests {
                 8,
                 chroma,
                 1,
+                None,
             )
             .expect("NVENC open");
             let mut out = Vec::new();
@@ -2393,6 +2419,7 @@ mod tests {
                 8,
                 ChromaFormat::Yuv420,
                 1,
+                None,
             )
             .expect("NVENC open");
 
@@ -2525,6 +2552,7 @@ mod tests {
                 8,
                 ChromaFormat::Yuv420,
                 1,
+                None,
             )
             .expect("NVENC open");
 
@@ -2623,7 +2651,7 @@ mod tests {
     #[test]
     #[ignore = "requires an NVIDIA GPU + driver — run manually on the RTX box (.173)"]
     fn nvenc_codec_probe_reports_real_gpu_support() {
-        let caps = probe_codec_support();
+        let caps = probe_codec_support(None);
         eprintln!(
             "NVENC (Windows) probe: h264={} h265={} av1={}",
             caps.h264, caps.h265, caps.av1
@@ -2633,7 +2661,7 @@ mod tests {
             "every NVENC generation encodes H.264 — a false here means the GUID enumeration \
              failed, which would narrow the host's codec advertisement"
         );
-        let again = probe_codec_support();
+        let again = probe_codec_support(None);
         assert_eq!(
             (caps.h264, caps.h265, caps.av1),
             (again.h264, again.h265, again.av1),
