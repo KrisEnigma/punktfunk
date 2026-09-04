@@ -9448,11 +9448,25 @@
             "type": "string",
             "description": "Lowercase hex SHA-256 of the leaf certificate DER — the bytes that go in\n`serverCertificateHashes[0].value`."
           },
+          "cert_hash_sig": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hex ECDSA-P256-SHA256 signature (ASN.1 DER) by the host's long-lived native identity over\n`\"punktfunk-wt-cert-v1:\" + cert_hash_sha256`. Absent when that identity is the legacy RSA\npair. A browser that has paired MUST check this; one that has not cannot, and does not."
+          },
           "expires_at": {
             "type": "integer",
             "format": "int64",
             "description": "Unix seconds. Past this the certificate has rotated and the hash above is stale; fetch\nagain rather than cache. Always under two weeks out — the spec refuses anything longer.",
             "minimum": 0
+          },
+          "host_cert_der": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 DER of the native identity's leaf certificate — the key that verifies\n`cert_hash_sig`. A browser hashes it and compares with the fingerprint it stored at\npairing; trusting it without that check would defeat the whole exercise."
           },
           "port": {
             "type": "integer",

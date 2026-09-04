@@ -52,6 +52,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   published at `GET /api/v1/webtransport`. Narrow it with `PUNKTFUNK_WEBTRANSPORT_BIND` and
   `PUNKTFUNK_WEBTRANSPORT_ORIGINS` — a browser applies no same-origin rule to WebTransport, so
   without the second any page the user has open can reach the port.
+- **`GET /api/v1/webtransport` attests the browser plane's certificate.** `cert_hash_sig` and
+  `host_cert_der` carry the host's long-lived identity signing that plane's throwaway certificate
+  hash, so a browser that paired earlier can chain the two before it dials. Both are absent on a
+  host still serving the legacy RSA identity.
 - **`Platform::Web` in `pf-console-ui`.** The browser takes the desktop's glyphs and ring but the
   no-live-chord settings wording, since a page binds none. An embedder switching on `Platform`
   gains an arm to handle.

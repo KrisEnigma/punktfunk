@@ -12,10 +12,11 @@
 //! key is never written to disk: minted at start-up, held in memory, replaced on rotation.
 //!
 //! [`published`] feeds an UNAUTHENTICATED management route, because a browser that has never
-//! paired holds no client certificate. That route proves nothing on its own — substitute both
-//! hash and certificate and the browser connects to you. PAKE pairing over the control stream is
-//! what proves the peer, and it does not need the transport authenticated. Until that lands
-//! (Phase 3) this plane echoes and carries no session.
+//! paired holds no client certificate. That route proves nothing to a first-time browser —
+//! substitute both hash and certificate and it connects to you. PAKE pairing over the control
+//! stream is what proves the peer, and it does not need the transport authenticated. A browser
+//! that has already paired gets more: [`CertAttestation`] chains this plane's throwaway
+//! certificate back to the host fingerprint it pinned.
 
 mod datagrams;
 mod session;
@@ -50,6 +51,49 @@ pub struct Published {
     pub cert_hash: String,
     /// Unix seconds. A client past this must re-fetch before dialling.
     pub expires_at: u64,
+    /// Proof that this plane belongs to the host a browser paired with. Absent on the legacy
+    /// RSA identity ([`crate::identity`]), which the browser verifier does not implement.
+    pub attestation: Option<CertAttestation>,
+}
+
+/// The long-lived native identity vouching for this plane's throwaway certificate.
+///
+/// A browser pins a durable host fingerprint at pairing, but this plane's certificate is
+/// deliberately ephemeral and cannot be pinned across restarts. So the native key signs the hash
+/// instead, and a paired browser checks the chain — hash the certificate, compare with its pin,
+/// verify the signature — before it dials. Unpaired browsers ignore all of it, as they must:
+/// nothing here authorises anything, and PAKE is still what proves the peer.
+#[derive(Clone, Debug)]
+pub struct CertAttestation {
+    /// Hex ECDSA-P256-SHA256 signature, ASN.1 DER, over `CERT_SIG_CONTEXT` + [`Published::cert_hash`].
+    pub cert_hash_sig: String,
+    /// Base64 of the native identity's leaf certificate DER. A browser hashes this to check it
+    /// against its pin, then verifies with the key inside it.
+    pub host_cert_der: String,
+}
+
+/// Domain separation. The native key also signs X.509, so a signature it makes over a certificate
+/// hash must not be replayable as one over anything else.
+const CERT_SIG_CONTEXT: &str = "punktfunk-wt-cert-v1:";
+
+/// Sign `cert_hash` with the native identity, and hand back the certificate that verifies it.
+///
+/// `None` rather than an error on the legacy RSA identity: a host still serving that pair has no
+/// browser pairings to break, and failing start-up over it would be worse than not attesting.
+fn attest(ident: &crate::identity::NativeIdentity, cert_hash: &str) -> Option<CertAttestation> {
+    use base64::Engine as _;
+    let key = rcgen::KeyPair::from_pem(&ident.key_pem).ok()?;
+    if key.algorithm() != &rcgen::PKCS_ECDSA_P256_SHA256 {
+        tracing::warn!("native identity is not P-256, so the browser plane is not attested");
+        return None;
+    }
+    let msg = format!("{CERT_SIG_CONTEXT}{cert_hash}");
+    let sig = rcgen::SigningKey::sign(&key, msg.as_bytes()).ok()?;
+    let (_, pem) = x509_parser::pem::parse_x509_pem(ident.cert_pem.as_bytes()).ok()?;
+    Some(CertAttestation {
+        cert_hash_sig: sig.iter().map(|b| format!("{b:02x}")).collect(),
+        host_cert_der: base64::engine::general_purpose::STANDARD.encode(&pem.contents),
+    })
 }
 
 static PUBLISHED: RwLock<Option<Published>> = RwLock::new(None);
@@ -70,7 +114,11 @@ fn withdraw() {
 /// Mint a fresh short-lived identity. Returns it with what a browser would need to dial it —
 /// the caller publishes that only once the endpoint is actually bound, so the route never
 /// advertises a plane that is not listening.
-fn mint(port: u16, sans: &[String]) -> Result<(Identity, Published)> {
+fn mint(
+    port: u16,
+    sans: &[String],
+    ident: &crate::identity::NativeIdentity,
+) -> Result<(Identity, Published)> {
     let identity = Identity::self_signed_builder()
         .subject_alt_names(sans)
         .from_now_utc()
@@ -100,12 +148,14 @@ fn mint(port: u16, sans: &[String]) -> Result<(Identity, Published)> {
         validity_days = VALIDITY_DAYS,
         "WebTransport identity minted (in memory, never persisted)"
     );
+    let attestation = attest(ident, &cert_hash);
     Ok((
         identity,
         Published {
             port,
             cert_hash,
             expires_at,
+            attestation,
         },
     ))
 }
@@ -115,10 +165,15 @@ fn mint(port: u16, sans: &[String]) -> Result<(Identity, Published)> {
 /// A rotation rebuilds the endpoint, which drops whatever is connected. Once every twelve days,
 /// and a browser reconnects on its own — cheaper than teaching quinn to swap a certificate under
 /// live sessions, and the reconnect path has to work anyway.
-pub async fn serve(bind: SocketAddr, sans: Vec<String>, origins: Vec<String>) -> Result<()> {
+pub async fn serve(
+    bind: SocketAddr,
+    sans: Vec<String>,
+    origins: Vec<String>,
+    ident: crate::identity::NativeIdentity,
+) -> Result<()> {
     let port = bind.port();
     loop {
-        let (identity, publish) = mint(port, &sans)?;
+        let (identity, publish) = mint(port, &sans, &ident)?;
         let config = ServerConfig::builder()
             .with_bind_address(bind)
             .with_identity(identity)
@@ -279,7 +334,8 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let (_identity, p) = mint(9778, &["localhost".to_string()]).expect("mint");
+        let ident = crate::identity::ephemeral().expect("mint a native identity");
+        let (_identity, p) = mint(9778, &["localhost".to_string()], &ident).expect("mint");
 
         assert_eq!(p.port, 9778);
         assert_eq!(p.cert_hash.len(), 64, "SHA-256 as hex");
@@ -322,5 +378,51 @@ mod tests {
         // Unconfigured means "any", which is what a host with no console setting has to mean.
         assert!(origin_allowed(Some("https://anything"), &[]));
         assert!(origin_allowed(None, &[]));
+    }
+
+    /// The whole point of the attestation: a browser holding only a host fingerprint can decide
+    /// whether this plane's throwaway certificate belongs to that host.
+    #[test]
+    fn attestation_verifies_against_the_pinned_host_certificate() {
+        use base64::Engine as _;
+        let ident = crate::identity::ephemeral().expect("mint a native identity");
+        let cert_hash = "a".repeat(64);
+        let a = attest(&ident, &cert_hash).expect("P-256 identity attests");
+
+        // Step one of the browser's check: the certificate really is the one it pinned.
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(&a.host_cert_der)
+            .expect("host_cert_der is base64");
+        let (_, expected) = x509_parser::pem::parse_x509_pem(ident.cert_pem.as_bytes()).unwrap();
+        assert_eq!(
+            der, expected.contents,
+            "attested DER is the identity's leaf"
+        );
+
+        // Step two: the signature is that certificate's key over this hash, and nothing else.
+        let cert = expected.parse_x509().unwrap();
+        let key = cert.public_key().subject_public_key.data.to_vec();
+        let sig: Vec<u8> = (0..a.cert_hash_sig.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&a.cert_hash_sig[i..i + 2], 16).unwrap())
+            .collect();
+        let verify = |msg: &str| {
+            aws_lc_rs::signature::UnparsedPublicKey::new(
+                &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
+                &key,
+            )
+            .verify(msg.as_bytes(), &sig)
+        };
+        assert!(verify(&format!("{CERT_SIG_CONTEXT}{cert_hash}")).is_ok());
+        // Domain separation and the hash itself both have to matter, or the signature proves
+        // nothing about which certificate it names.
+        assert!(
+            verify(&cert_hash).is_err(),
+            "context is part of the message"
+        );
+        assert!(
+            verify(&format!("{CERT_SIG_CONTEXT}{}", "b".repeat(64))).is_err(),
+            "a different hash must not verify"
+        );
     }
 }

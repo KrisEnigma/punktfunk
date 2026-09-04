@@ -552,8 +552,11 @@ pub fn serve(
                 "127.0.0.1".to_string(),
             ];
             let origins = pf_host_config::config().webtransport_origins.clone();
+            // The long-lived identity signs the plane's throwaway certificate, so a paired
+            // browser can check it against the fingerprint it pinned.
+            let ident = native_ident.clone();
             tokio::spawn(async move {
-                if let Err(e) = crate::webtransport::serve(bind, sans, origins).await {
+                if let Err(e) = crate::webtransport::serve(bind, sans, origins, ident).await {
                     tracing::error!(%bind, error = %e, "WebTransport plane stopped");
                 }
             });
