@@ -69,6 +69,15 @@ fun androidSdkDir(): String {
     return "${System.getProperty("user.home")}/Library/Android/sdk"
 }
 
+/// The NDK's `toolchains/llvm/prebuilt/<host-tag>/lib`, holding `libclang.so`/`.dylib`. The host
+/// tag is `linux-x86_64`, `darwin-x86_64` (Rosetta on Apple silicon) or `windows-x86_64`, so it is
+/// resolved by listing rather than guessed — there is exactly one.
+fun ndkLibclangDir(): String? {
+    val prebuilt = File("${androidSdkDir()}/ndk/$ndkVer/toolchains/llvm/prebuilt")
+    val host = prebuilt.listFiles()?.firstOrNull { it.isDirectory } ?: return null
+    return File(host, "lib").takeIf { it.isDirectory }?.absolutePath
+}
+
 // Every cargo-ndk invocation needs the same discovery environment, and they must not drift apart:
 // a lint that ran against a different toolchain/sysroot than the build is a lint about a different
 // program. Applied by both `registerCargoNdk` (build) and `registerCargoNdkClippy` (lint).
@@ -88,6 +97,11 @@ fun Exec.cargoNdkEnvironment() {
     environment("ANDROID_NDK_ROOT", "$sdk/ndk/$ndkVer")
     environment("ANDROID_NDK", "$sdk/ndk/$ndkVer")
     environment("CMAKE_GENERATOR", "Ninja")
+    // pyrowave-sys runs bindgen over the codec's C API, and bindgen dlopens libclang at build
+    // time. Point it at the NDK's own copy rather than requiring one on the box: the NDK is
+    // already the hard prerequisite here, its clang is the one the sysroot matches, and this
+    // keeps a dev machine and the CI image (which carries no libclang-dev) on the same footing.
+    ndkLibclangDir()?.let { environment("LIBCLANG_PATH", it) }
     // audiopus_sys picks static-vs-dynamic by HOST not target — force the bundled static libopus
     // (pure C) so the android .so links it instead of looking for the host's libopus.so.
     environment("LIBOPUS_STATIC", "1")

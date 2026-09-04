@@ -407,17 +407,17 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'lo
         // actually happened, and `crate::audio` opens the device from those, never from these.
         audio_rate_hz,
         audio_bits,
-        // Codecs this device can decode, ranked on the Kotlin side (`VideoDecoders.decodableCodecBits`:
-        // H.264 + HEVC always, AV1 when a real `video/av01` decoder exists — AMediaCodec is
-        // mime-driven, see `codec_mime`). Mask to the known bits and fall back to the pre-AV1
-        // H.264|HEVC pair on 0 so a bogus value can't advertise nothing and kill the handshake.
-        // The host resolves the emitted codec from these + the soft `preferred_codec` and echoes it
-        // in `connector.codec`, which drives the mime below.
+        // Codecs this device decodes (`VideoDecoders.decodableCodecBits`): H.264 + HEVC always,
+        // AV1 on a real `video/av01` decoder, PyroWave on a GPU that passes the probe — the one
+        // bit here naming no MediaCodec, since it decodes as Vulkan compute in `crate::pyro`.
+        // Masked to the known bits, falling back to H.264|HEVC on 0 so a bogus value cannot
+        // advertise nothing and kill the handshake. The host echoes its pick in `connector.codec`.
         {
             let bits = (video_codecs.clamp(0, u8::MAX as jint) as u8)
                 & (punktfunk_core::quic::CODEC_H264
                     | punktfunk_core::quic::CODEC_HEVC
-                    | punktfunk_core::quic::CODEC_AV1);
+                    | punktfunk_core::quic::CODEC_AV1
+                    | punktfunk_core::quic::CODEC_PYROWAVE);
             if bits == 0 {
                 punktfunk_core::quic::CODEC_H264 | punktfunk_core::quic::CODEC_HEVC
             } else {

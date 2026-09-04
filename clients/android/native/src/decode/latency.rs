@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 
 /// Wall-clock now in nanoseconds (CLOCK_REALTIME basis), to compare against the host-stamped
 /// capture `pts_ns` after the skew offset is applied.
-pub(super) fn now_realtime_ns() -> i128 {
+pub(crate) fn now_realtime_ns() -> i128 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

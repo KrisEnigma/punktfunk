@@ -156,7 +156,7 @@ pub(super) fn boost_hot_threads(tids: &[i32]) {
 /// Best-effort: raise the decode thread toward Android's URGENT_DISPLAY band so background work
 /// can't preempt it under load (which shows up as late/dropped frames). Non-fatal if the platform
 /// refuses (foreground apps may set their own threads; the exact floor is policy-dependent).
-pub(super) fn boost_thread_priority() {
+pub(crate) fn boost_thread_priority() {
     // SAFETY: `gettid`/`setpriority` on the calling thread are always-safe syscalls. PRIO_PROCESS
     // with a TID targets that one task on Linux — the same idiom `Process.setThreadPriority` uses.
     unsafe {

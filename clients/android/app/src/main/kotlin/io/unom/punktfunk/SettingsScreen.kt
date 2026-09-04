@@ -720,6 +720,8 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
         // Only codecs this device can actually decode are offered — a preference the client never
         // advertises would be a dead setting (see [codecOptionsFor]).
         val av1Capable = remember { VideoDecoders.pickDecoder("video/av01") != null }
+        // The GPU probe, not a MediaCodec one — PyroWave decodes as Vulkan compute.
+        val pyrowaveCapable = remember { VideoDecoders.pyrowaveCapable() }
         // Mirror the Automatic AV1 rule in HostConnect (hardware AV1 AND no partial-frame
         // support) so the picker says what "Automatic" actually does on THIS device.
         val autoPrefersAv1 = remember {
@@ -727,7 +729,7 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
         }
         SettingDropdown(
             label = "Video codec",
-            options = codecOptionsFor(s.codec, av1Capable),
+            options = codecOptionsFor(s.codec, av1Capable, pyrowaveCapable),
             selected = s.codec,
             field = "codec",
             caption = if (autoPrefersAv1) {

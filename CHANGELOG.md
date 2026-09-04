@@ -48,6 +48,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   hidden per-game shortcut with the game's name, art and icon. Anyone wrapping
   `bin/punktfunkrun.sh` gains `PF_GAME=steam:<appid>` (passed as `punktfunk launch --game`), and
   the backend gains `library(ref)`, `game_art(appid, icon_hash)` and `save_icon(appid, png)`.
+- **The Android client decodes PyroWave.** A Vulkan 1.3 device with the codec's compute feature
+  set now advertises `CODEC_PYROWAVE` and decodes it as GPU compute into its own swapchain,
+  beside the MediaCodec path rather than through it. Nothing to do: the codec stays opt-in per
+  session, and a device without that feature set never offers the row.
 - **Capture health on the Status page and in `GET /api/v1/status`.** A native Windows session's
   `session.capture` block carries the live capture-health class (`healthy`, `idle`, `suspect`,
   `stalled` with its class, `recovering`, `rebuilding`, `secure_desktop`), the evidence behind
