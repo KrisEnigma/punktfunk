@@ -43,6 +43,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **A settings profile can be bound to one library title.** `KnownHost.game_profiles` maps a
+  title id to a profile id, and resolution now runs one-off ▸ title ▸ host ▸ globals — raise
+  Options on a cover and pick "Settings profile…". Nothing changes until you bind one; a
+  deleted profile drops the title back to the host's default rather than to raw globals.
+- **The controller-UI switch reaches webOS.** "Controller-optimized UI" and "Show it" are
+  offered wherever a client has a second interface to fall back to, which now includes the TV
+  client's cursor UI. The two stored keys lost their `android.` prefix (`gamepad_ui_enabled`,
+  `gamepad_ui_mode`); nothing persisted under the old names, so there is nothing to migrate.
 - **`guide` and `qam` quick-action slots.** The `overlay_actions` blob takes two more built-in
   ids, each a one-shot tap of a system button on the host's pad (`BTN_GUIDE`, `BTN_MISC1`) —
   the same verb the session control socket's `guide`/`qam` already exposed. An older client

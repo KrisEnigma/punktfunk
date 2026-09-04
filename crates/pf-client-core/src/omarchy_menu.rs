@@ -294,6 +294,7 @@ mod tests {
             clipboard_sync: false,
             profile_id: None,
             pinned_profiles: vec![],
+            game_profiles: Default::default(),
             id: None,
         }
     }

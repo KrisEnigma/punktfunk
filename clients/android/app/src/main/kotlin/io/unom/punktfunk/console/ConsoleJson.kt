@@ -96,6 +96,9 @@ internal object ConsoleJson {
                     h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
                         ?.let(::profileChip) ?: JSONObject.NULL,
                 )
+                // Ids, not chips: the bind screen only compares them. Pinned copies below
+                // inherit the map — a card is the same host's shelf.
+                .put("game_profiles", JSONObject(h.gameProfiles))
             out.put(base)
             // A pinned card shares the primary tile's live state; its key rides the profile id
             // behind a NUL (impossible in a fingerprint or `addr:port`) — Rust parity.
@@ -163,6 +166,7 @@ internal object ConsoleJson {
                 else h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
                     ?.let(::profileChip) ?: JSONObject.NULL,
             )
+            .put("game_profiles", JSONObject(h.gameProfiles))
     }
 
     /** `KnownHosts` (Rust) — only what the console needs to build a link: id, address, fp. */
@@ -350,8 +354,8 @@ internal object ConsoleJson {
         j.put("android.gyro_on_phone", s.gyroOnPhone)
         j.put("android.sc2_capture", s.sc2Capture)
         j.put("android.ds_capture", s.dsCapture)
-        j.put("android.gamepad_ui_mode", s.gamepadUiMode)
-        j.put("android.gamepad_ui_enabled", s.gamepadUiEnabled)
+        j.put("gamepad_ui_mode", s.gamepadUiMode)
+        j.put("gamepad_ui_enabled", s.gamepadUiEnabled)
         j.put("android.reduce_ui_resolution", s.reduceUiResolution)
         // A store written by the nesting build carries the stale wrapper; drop it rather than
         // round-trip a copy of these keys that nothing reads for the life of the install.
@@ -410,9 +414,9 @@ internal object ConsoleJson {
             gyroOnPhone = j.optBoolean("android.gyro_on_phone", s.gyroOnPhone),
             sc2Capture = j.optBoolean("android.sc2_capture", s.sc2Capture),
             dsCapture = j.optBoolean("android.ds_capture", s.dsCapture),
-            gamepadUiMode = j.optString("android.gamepad_ui_mode", s.gamepadUiMode)
+            gamepadUiMode = j.optString("gamepad_ui_mode", s.gamepadUiMode)
                 .ifEmpty { s.gamepadUiMode },
-            gamepadUiEnabled = j.optBoolean("android.gamepad_ui_enabled", s.gamepadUiEnabled),
+            gamepadUiEnabled = j.optBoolean("gamepad_ui_enabled", s.gamepadUiEnabled),
             reduceUiResolution = j.optBoolean("android.reduce_ui_resolution", s.reduceUiResolution),
         )
     }

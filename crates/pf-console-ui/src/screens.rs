@@ -266,7 +266,7 @@ impl Screen {
             Screen::ShortcutEditor(s) => s.title(),
             Screen::Pair(s) => format!("Pair with {}", s.host_name()),
             Screen::PinHosts(s) => format!("Pin \u{201c}{}\u{201d}", s.profile_name()),
-            Screen::BindProfile(s) => format!("Default for {}", s.host_name()),
+            Screen::BindProfile(s) => s.heading(),
             Screen::Controllers(_) => "Connected controllers".into(),
             Screen::HostOptions(s) => s.title(),
         }

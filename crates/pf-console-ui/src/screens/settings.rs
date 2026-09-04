@@ -108,12 +108,16 @@ mod android_keys {
     pub const PHONE_GYRO: &str = "android.gyro_on_phone";
     pub const SC2: &str = "android.sc2_capture";
     pub const DS_CAPTURE: &str = "android.ds_capture";
-    pub const GAMEPAD_UI_MODE: &str = "android.gamepad_ui_mode";
-    pub const GAMEPAD_UI: &str = "android.gamepad_ui_enabled";
     pub const REDUCE_UI_RES: &str = "android.reduce_ui_resolution";
 }
 
-/// Stored `android.gamepad_ui_mode` values (`GamepadUi.kt`).
+/// The console-vs-fallback pair, unprefixed: webOS carries the same two keys (its
+/// fallback is the cursor UI, not a touch home), so they name a concept rather than
+/// a platform. Kotlin reads and writes them under these names too.
+const GAMEPAD_UI_KEY: &str = "gamepad_ui_enabled";
+const GAMEPAD_UI_MODE_KEY: &str = "gamepad_ui_mode";
+
+/// Stored [`GAMEPAD_UI_MODE_KEY`] values (`GamepadUi.kt`).
 const GAMEPAD_UI_MODES: [(&str, &str); 2] =
     [("connected", "With a controller"), ("always", "Always")];
 
@@ -872,8 +876,11 @@ fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         // Android's own render-scale knob. webOS gets a 1080p surface from the compositor
         // whatever it asks for, so the quantity does not exist there.
         RowId::ReduceUiResolution => &[Android],
-        // The touch shell exists only where there is a touch shell to fall back to.
-        RowId::LowLatency | RowId::GamepadUi | RowId::GamepadUiMode => &[Android],
+        // A MediaCodec decoder flag; nothing else has the knob.
+        RowId::LowLatency => &[Android],
+        // Offered wherever there is a second UI to fall back to: Android's touch home,
+        // webOS's cursor shell. `row_applies` still needs `fallback_ui` from the host.
+        RowId::GamepadUi | RowId::GamepadUiMode => &[Android, WebOS],
         // A pad list and a licences screen: both real on a TV.
         RowId::Controllers | RowId::Licenses => &[Android, WebOS],
         // DualSense capture — the pad reaches webOS over Bluetooth HID, not hidraw, so the
@@ -905,11 +912,10 @@ fn row_applies(id: RowId, ctx: &Ctx) -> bool {
         // Needs `fallback_ui`; otherwise off strands the user with no UI.
         RowId::GamepadUi => ctx.fallback_ui,
         // Hidden unless fallback_ui and the switch above is on. Sits below that
-        // switch so the cursor is never on a row that vanishes. A TV is always
-        // console (`GamepadUi.kt`: the tv term alone satisfies the OR).
-        RowId::GamepadUiMode => {
-            ctx.fallback_ui && extra_bool(ctx.settings, android_keys::GAMEPAD_UI, true)
-        }
+        // switch so the cursor is never on a row that vanishes. An Android TV
+        // ignores the value (`GamepadUi.kt`: the tv term alone satisfies the OR);
+        // webOS obeys it — a Magic Remote with no pad is why its cursor UI exists.
+        RowId::GamepadUiMode => ctx.fallback_ui && extra_bool(ctx.settings, GAMEPAD_UI_KEY, true),
         // `os_theme::available()`, not platform: a new publisher needs no edit here.
         RowId::FollowOsTheme => crate::os_theme::available(),
         // Hidden while follow_os_theme; sits below the switch that drops it.
@@ -1184,7 +1190,7 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
         RowId::GamepadUi => (
             None,
             "Controller-optimized UI",
-            on_off(extra_bool(s, android_keys::GAMEPAD_UI, true)).into(),
+            on_off(extra_bool(s, GAMEPAD_UI_KEY, true)).into(),
         ),
         RowId::GamepadUiMode => (
             None,
@@ -1192,7 +1198,7 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
             "Show it",
             label_for(
                 &GAMEPAD_UI_MODES,
-                extra_str(s, android_keys::GAMEPAD_UI_MODE, "connected"),
+                extra_str(s, GAMEPAD_UI_MODE_KEY, "connected"),
             )
             .into(),
         ),
@@ -1402,15 +1408,30 @@ fn detail(id: RowId, ctx: &Ctx) -> &'static str {
             "Capture a wired DualSense directly (touchpad, motion, adaptive triggers). \
              Needs the USB grant when the pad is plugged in."
         }
-        RowId::GamepadUi => {
-            "Front the app with this console instead of the touch interface. Off returns \
-             to the touch home immediately — switch it back on there."
-        }
-        RowId::GamepadUiMode => {
-            "When this console fronts the app: whenever a controller is attached, or \
-             always — for a device that lives docked to a TV. The switch above turns it \
-             off altogether."
-        }
+        // The other UI is named, not called "the other UI": the sentence has to tell
+        // the reader where "off" lands, and that is a different place per client.
+        RowId::GamepadUi => match platform {
+            Platform::Desktop | Platform::Android => {
+                "Front the app with this console instead of the touch interface. Off returns \
+                 to the touch home immediately — switch it back on there."
+            }
+            Platform::WebOS => {
+                "Front the app with this console instead of the cursor UI. Off returns to \
+                 the cursor UI immediately — switch it back on there."
+            }
+        },
+        RowId::GamepadUiMode => match platform {
+            Platform::Desktop | Platform::Android => {
+                "When this console fronts the app: whenever a controller is attached, or \
+                 always — for a device that lives docked to a TV. The switch above turns it \
+                 off altogether."
+            }
+            Platform::WebOS => {
+                "When this console fronts the app: whenever a controller is connected, or \
+                 always. Without one the remote gets the cursor UI, which it points at. \
+                 The switch above turns it off altogether."
+            }
+        },
         RowId::Controllers => "Connected controllers, their grants and a rumble/haptics test.",
         RowId::Licenses => "The open-source licences this app ships under.",
         RowId::Profile(_) => {
@@ -1659,12 +1680,12 @@ fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
         RowId::PhoneGyro => toggle_extra(s, android_keys::PHONE_GYRO, false, delta, wrap),
         RowId::Sc2Passthrough => toggle_extra(s, android_keys::SC2, true, delta, wrap),
         RowId::DsCapture => toggle_extra(s, android_keys::DS_CAPTURE, true, delta, wrap),
-        RowId::GamepadUi => toggle_extra(s, android_keys::GAMEPAD_UI, true, delta, wrap),
+        RowId::GamepadUi => toggle_extra(s, GAMEPAD_UI_KEY, true, delta, wrap),
         RowId::GamepadUiMode => {
-            let mut v = extra_str(s, android_keys::GAMEPAD_UI_MODE, "connected").to_string();
+            let mut v = extra_str(s, GAMEPAD_UI_MODE_KEY, "connected").to_string();
             step_str(&GAMEPAD_UI_MODES, &mut v, delta, wrap).map(|()| {
                 s.extra.insert(
-                    android_keys::GAMEPAD_UI_MODE.to_string(),
+                    GAMEPAD_UI_MODE_KEY.to_string(),
                     serde_json::Value::String(v),
                 );
             })
@@ -2340,6 +2361,7 @@ pub(crate) mod tests {
                 accent: None,
             }),
             bound_profile: None,
+            game_profiles: Default::default(),
         };
         let hosts = [pinned.clone(), {
             pinned.key = "aa".into();
@@ -2510,12 +2532,12 @@ pub(crate) mod tests {
             assert!(!extra_bool(ctx.settings, android_keys::LOW_LATENCY, true));
             assert!(adjust(RowId::GamepadUiMode, 1, true, ctx));
             assert_eq!(
-                extra_str(ctx.settings, android_keys::GAMEPAD_UI_MODE, "connected"),
+                extra_str(ctx.settings, GAMEPAD_UI_MODE_KEY, "connected"),
                 "always"
             );
-            assert!(extra_bool(ctx.settings, android_keys::GAMEPAD_UI, true));
+            assert!(extra_bool(ctx.settings, GAMEPAD_UI_KEY, true));
             assert!(adjust(RowId::GamepadUi, 1, true, ctx));
-            assert!(!extra_bool(ctx.settings, android_keys::GAMEPAD_UI, true));
+            assert!(!extra_bool(ctx.settings, GAMEPAD_UI_KEY, true));
             let mut after = ctx.settings.clone();
             after.extra = before.extra.clone();
             assert_eq!(after, before);
@@ -2534,7 +2556,7 @@ pub(crate) mod tests {
             ctx.fallback_ui = true;
             assert!(row_applies(RowId::GamepadUi, ctx));
             assert!(row_applies(RowId::GamepadUiMode, ctx));
-            set_extra_bool(ctx.settings, android_keys::GAMEPAD_UI, false);
+            set_extra_bool(ctx.settings, GAMEPAD_UI_KEY, false);
             assert!(row_applies(RowId::GamepadUi, ctx));
             assert!(
                 !row_applies(RowId::GamepadUiMode, ctx),

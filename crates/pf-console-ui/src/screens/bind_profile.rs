@@ -14,6 +14,12 @@ use crate::widgets::{ListMsg, MenuList, RowSpec};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Rect};
 
+/// The title this screen binds for. Absent = the host's own default.
+pub(crate) struct GameSubject {
+    pub id: String,
+    pub title: String,
+}
+
 pub(crate) struct BindProfileScreen {
     /// Host primary key (fingerprint or `addr:port`), never a pinned-card composite.
     host_key: String,
@@ -21,6 +27,9 @@ pub(crate) struct BindProfileScreen {
     /// Catalog snapshot at construction. The console cannot create profiles, so
     /// this list cannot change while the screen is open.
     profiles: Vec<(String, String)>,
+    /// Set when the menu was raised on a title rather than the host tile. Same catalog
+    /// and same radio behaviour either way — only the binding it writes differs.
+    game: Option<GameSubject>,
     list: MenuList,
 }
 
@@ -34,7 +43,21 @@ impl BindProfileScreen {
             host_key,
             host_name,
             profiles,
+            game: None,
             list: MenuList::new(),
+        }
+    }
+
+    /// The same screen bound to one title instead of the host tile.
+    pub(crate) fn for_game(
+        host_key: String,
+        host_name: String,
+        game: GameSubject,
+        profiles: Vec<(String, String)>,
+    ) -> BindProfileScreen {
+        BindProfileScreen {
+            game: Some(game),
+            ..BindProfileScreen::new(host_key, host_name, profiles)
         }
     }
 
@@ -42,12 +65,22 @@ impl BindProfileScreen {
         &self.host_name
     }
 
+    /// Stack title: the subject the user picked is the one named.
+    pub(crate) fn heading(&self) -> String {
+        match &self.game {
+            Some(g) => format!("Profile for {}", g.title),
+            None => format!("Default for {}", self.host_name()),
+        }
+    }
+
+    /// Read from the model, never remembered: the row's chip and its `game_profiles`
+    /// ARE the state, so the checkmark cannot disagree with what the carousel shows.
     fn bound(&self, ctx: &Ctx) -> Option<String> {
-        ctx.hosts
-            .iter()
-            .find(|r| r.key == self.host_key)
-            .and_then(|r| r.bound_profile.as_ref())
-            .map(|p| p.id.clone())
+        let row = ctx.hosts.iter().find(|r| r.key == self.host_key)?;
+        match &self.game {
+            Some(g) => row.game_profiles.get(&g.id).cloned(),
+            None => row.bound_profile.as_ref().map(|p| p.id.clone()),
+        }
     }
 
     fn choice(&self, i: usize) -> Option<Option<&str>> {
@@ -106,6 +139,7 @@ impl BindProfileScreen {
                 }
                 fx.cmds.push(ConsoleCmd::BindProfile {
                     key: self.host_key.clone(),
+                    game: self.game.as_ref().map(|g| g.id.clone()),
                     profile_id: choice.map(str::to_owned),
                 });
                 Some(MenuPulse::Confirm)
@@ -117,8 +151,13 @@ impl BindProfileScreen {
         if self.profiles.is_empty() {
             return vec![Hint::new(HintKey::Back, "Done")];
         }
+        let verb = if self.game.is_some() {
+            "Use for this title"
+        } else {
+            "Set default"
+        };
         vec![
-            Hint::new(HintKey::Confirm, "Set default"),
+            Hint::new(HintKey::Confirm, verb),
             Hint::new(HintKey::Back, "Done"),
         ]
     }
@@ -158,17 +197,29 @@ impl BindProfileScreen {
         let rows: Vec<RowSpec> = (0..self.len())
             .map(|i| {
                 let (label, id) = if i == 0 {
-                    ("No default".to_string(), None)
+                    // Row 0 is what "no binding" MEANS here: globals for a host, the
+                    // host's own default for a title. Naming the fallback beats "None".
+                    let none = if self.game.is_some() {
+                        "Use the host's default"
+                    } else {
+                        "No default"
+                    };
+                    (none.to_string(), None)
                 } else {
                     let (id, name) = &self.profiles[i - 1];
                     (name.clone(), Some(id.as_str()))
                 };
                 let current = bound.as_deref() == id;
+                let marker = if self.game.is_some() {
+                    "In use"
+                } else {
+                    "Default"
+                };
                 RowSpec {
                     header: None,
                     label,
                     value: Some(if current {
-                        "Default".into()
+                        marker.into()
                     } else {
                         String::new()
                     }),
@@ -181,9 +232,14 @@ impl BindProfileScreen {
             .collect();
         self.list
             .render(canvas, list_rect, &rows, fonts, k, dt, true);
+        let detail = if self.game.is_some() {
+            "What this title streams with, overriding the host's default. A pinned card still keeps its own."
+        } else {
+            "What a plain press on this host's tile connects with. Pinned cards keep their own."
+        };
         fonts.centered(
             canvas,
-            "What a plain press on this host's tile connects with. Pinned cards keep their own.",
+            detail,
             W::Regular,
             13.0 * k,
             fg(0.55),
@@ -223,6 +279,7 @@ mod tests {
                 name: "Work".into(),
                 accent: None,
             }),
+            game_profiles: Default::default(),
         }
     }
 
@@ -261,6 +318,7 @@ mod tests {
             fx.cmds,
             vec![ConsoleCmd::BindProfile {
                 key: "aa".into(),
+                game: None,
                 profile_id: Some("p2".into()),
             }]
         );
@@ -274,6 +332,7 @@ mod tests {
             fx.cmds,
             vec![ConsoleCmd::BindProfile {
                 key: "aa".into(),
+                game: None,
                 profile_id: None,
             }]
         );
@@ -323,5 +382,75 @@ mod tests {
         let pulse = s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
         assert!(fx.cmds.is_empty());
         assert!(matches!(pulse, Some(MenuPulse::Boundary)));
+    }
+
+    /// Raised on a title: the command names the game, the checkmark comes from
+    /// `game_profiles` (not the host's chip), and re-choosing it is still a boundary.
+    #[test]
+    fn a_title_binds_its_own_profile_and_reads_its_own_checkmark() {
+        let mut settings = Settings::default();
+        let pads = Vec::new();
+        let library = crate::library::LibraryShared::default();
+        // Host bound to p1, title already bound to p2 — the two must not be confused.
+        let mut row = host(Some("p1"));
+        row.game_profiles
+            .insert("halo".to_string(), "p2".to_string());
+        let hosts = [row];
+        let mut ctx = Ctx {
+            hosts: &hosts,
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::Desktop,
+            pads: &pads,
+            deck: false,
+            fallback_ui: false,
+            device_name: "t",
+            t: 0.0,
+        };
+        let mut s = BindProfileScreen::for_game(
+            "aa".into(),
+            "Desk".into(),
+            GameSubject {
+                id: "halo".into(),
+                title: "Halo".into(),
+            },
+            vec![("p1".into(), "Work".into()), ("p2".into(), "Game".into())],
+        );
+        assert_eq!(s.heading(), "Profile for Halo");
+
+        // Row 2 is p2, which this title already uses: a boundary, not a second write.
+        let mut fx = Outbox::default();
+        s.menu(MenuEvent::Move(MenuDir::Down), &mut ctx, &mut fx);
+        s.menu(MenuEvent::Move(MenuDir::Down), &mut ctx, &mut fx);
+        let pulse = s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
+        assert!(fx.cmds.is_empty());
+        assert!(matches!(pulse, Some(MenuPulse::Boundary)));
+
+        // Row 1 is p1 — the host's default, but not this title's, so it binds.
+        let mut fx = Outbox::default();
+        s.menu(MenuEvent::Move(MenuDir::Up), &mut ctx, &mut fx);
+        s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
+        assert_eq!(
+            fx.cmds,
+            vec![ConsoleCmd::BindProfile {
+                key: "aa".into(),
+                game: Some("halo".into()),
+                profile_id: Some("p1".into()),
+            }]
+        );
+
+        // Row 0 clears the title's binding; it does not touch the host's.
+        let mut fx = Outbox::default();
+        s.menu(MenuEvent::Move(MenuDir::Up), &mut ctx, &mut fx);
+        s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
+        assert_eq!(
+            fx.cmds,
+            vec![ConsoleCmd::BindProfile {
+                key: "aa".into(),
+                game: Some("halo".into()),
+                profile_id: None,
+            }]
+        );
     }
 }

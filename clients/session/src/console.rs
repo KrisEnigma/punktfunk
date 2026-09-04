@@ -109,6 +109,7 @@ pub fn run(target: Option<&str>) -> u8 {
                 actions: Vec::new(),
                 pin: None,
                 bound_profile: None,
+                game_profiles: Default::default(),
             };
             let label = row.name.clone();
             if k.is_none() {
@@ -261,8 +262,12 @@ pub fn run(target: Option<&str>) -> u8 {
                     // same one `--connect` goes through. A pinned card's connect arrives as a
                     // one-off profile id; the resolver prefers it over the binding, and a
                     // dangling id falls back to the defaults without blocking the connect.
-                    let (settings, profile) =
-                        trust::effective_settings(&addr, port, profile.as_deref());
+                    let (settings, profile) = trust::effective_settings(
+                        &addr,
+                        port,
+                        profile.as_deref(),
+                        launch.as_deref(),
+                    );
                     let mut params = session_params(
                         &settings,
                         profile.map(|p| p.name),
@@ -366,6 +371,7 @@ fn fake_host_row() -> HostRow {
         actions: Vec::new(),
         pin: None,
         bound_profile: None,
+        game_profiles: Default::default(),
     }
 }
 
@@ -760,19 +766,34 @@ impl ServiceState {
                 // `run` refreshes the rows right after this drain, so the carousel and
                 // the pin screen reflect the new card within the same service pass.
             }
-            ConsoleCmd::BindProfile { key, profile_id } => {
-                // The BINDING half of the profile pair — `KnownHost::profile_id`, what a
-                // plain A-press on the primary tile connects with. `SetPin` above is the
-                // presentation half and never touches this field; this never touches the
-                // pins. Same store discipline, same refresh-after-drain.
+            ConsoleCmd::BindProfile {
+                key,
+                game,
+                profile_id,
+            } => {
+                // The BINDING half of the profile pair — `KnownHost::profile_id` for the
+                // host, `game_profiles` for one title. `SetPin` above is the presentation
+                // half and never touches either; this never touches the pins. Same store
+                // discipline, same refresh-after-drain.
                 let mut known = trust::KnownHosts::load();
                 let idx = index_for_key(&known, &key);
                 let Some(h) = idx.and_then(|i| known.hosts.get_mut(i)) else {
                     tracing::warn!(%key, "profile bind for an unknown host — ignoring");
                     return;
                 };
-                if h.profile_id != profile_id {
-                    h.profile_id = profile_id;
+                let changed = match &game {
+                    Some(id) => {
+                        let moved = h.profile_for_game(id) != profile_id.as_deref();
+                        h.bind_game_profile(id, profile_id.as_deref());
+                        moved
+                    }
+                    None => {
+                        let moved = h.profile_id != profile_id;
+                        h.profile_id = profile_id;
+                        moved
+                    }
+                };
+                if changed {
                     if let Err(e) = known.save() {
                         tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
                     }
@@ -930,6 +951,9 @@ impl ServiceState {
                         .as_deref()
                         .and_then(|id| catalog.find_by_id(id))
                         .map(chip),
+                    // Ids straight through, dangling ones included: the bind screen only
+                    // compares, and a deleted profile falls back at resolve, not here.
+                    game_profiles: h.game_profiles.clone(),
                 };
                 // A pinned card shares the primary tile's live state; its key rides the
                 // profile id behind a NUL (impossible in a fingerprint or `addr:port`),
@@ -984,6 +1008,7 @@ impl ServiceState {
                 actions: Vec::new(),
                 pin: None,
                 bound_profile: None,
+                game_profiles: Default::default(),
             })
             .collect();
         extra.sort_by(|a, b| a.name.cmp(&b.name));
