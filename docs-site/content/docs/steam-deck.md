@@ -91,6 +91,19 @@ stream — plus a door into the client's own gamepad UI for everything else.
   applied — "4K on the TV" and "battery saver" presets, one tap each. Pins are made in the
   Punktfunk app (or any other client) and shared across all of them; the panel shows them, it
   doesn't create them.
+- **Stream from Steam's own Play button** — on a game's page press the **▾** beside Play.
+  Steam's "Play from" list shows your Punktfunk hosts that have the game (the host's Steam
+  library plugin is connected) right under Steam Link's own "Stream from" entries, marked with a
+  small Punktfunk lens at the row's end. Pick one and Steam's Play button itself becomes
+  **Stream** for that game, violet when you're on it just as Play is green — the same idea as
+  Remote Play, pointed at your Punktfunk host. It works whether or not the Deck has the game
+  installed, so a page that says **Install** can stream instead of downloading. A sleeping host
+  is woken first when the client knows how (see [Wake-on-LAN](/docs/wake-on-lan)). While it
+  streams, Steam shows the **game** as running — its name, its art, in the overlay and to your
+  friends — and the button reads **Stop**; quitting from the Steam menu returns you to the
+  game's page. Pick "This device" or a Steam PC to hand the button back to Steam. The entries
+  are on by default; the switch is in the panel under **Punktfunk → Punktfunk in Steam's Play
+  menu**.
 - **Open Punktfunk** — opens the client's console home: the host picker, adding a host by address,
   pairing, browsing a host's [game library](/docs/game-library), and the **full settings screen** —
   resolution, bitrate, codec, audio, controllers and the stats overlay.
@@ -186,6 +199,9 @@ The plugin check follows the [channel](/docs/channels) you installed from: a plu
 | **Request access** isn't offered | The host isn't advertising on this network, so there's no identity to pin. Use the PIN path. |
 | A request-access stream sits there | That's it waiting — somebody has to approve the Deck on the host. It gives up after about three minutes. |
 | Stream launches but doesn't focus | Start it from the panel (not by launching the client by hand) so Steam/gamescope focuses it. |
+| No Punktfunk host in a game's **▾** menu | The host must be **paired** (not just trusted) and have been online since the plugin loaded, and the game must be in the host's library as a Steam title. Open the panel once to rescan, then reopen the page. The switch under **Punktfunk** in the panel must be on. If all that holds, Steam's page layout may have changed; the plugin logs what it found in Decky's CEF console (lines starting `punktfunk:`). |
+| **Play** stays green after picking a host | Reopen the page; the choice applies on the next render. Picking a Steam entry hands the button back to Steam. |
+| Hidden entries named after games pile up in "show hidden" | Each game streamed from its page has one. Panel → **About** → **Remove game shortcuts** clears them; they return on the next Stream. |
 | The stream wedges — black, or won't close | Panel → **About** → **Force-stop**, then start it again. |
 | The **Punktfunk** library entry disappeared | Panel → **Recreate library shortcut**; it puts the entry back in place. |
 | You want a clean slate | **Open Punktfunk → Settings** for stream settings, or `punktfunk reset` in Desktop Mode to forget every saved host. Your paired identity is kept either way. |
@@ -200,11 +216,12 @@ Removing the plugin through Decky removes the plugin and nothing else, so do the
 
 1. **Remove the plugin.** Quick Access Menu (`…`) → the **plug** icon (Decky) → the **gear**
    (Settings) → **Plugins** → **Punktfunk** → **Uninstall**.
-2. **Remove the Steam shortcuts it created.** The plugin adds two non-Steam entries, both named
-   **Punktfunk** — the one you see in your library, and a second one it keeps hidden to carry the
-   stream. Decky removes neither. In your library, right-click a **Punktfunk** entry →
-   **Manage → Remove non-Steam game from your library**, and repeat for the hidden one once you've
-   let the library show hidden games.
+2. **Remove the Steam shortcuts it created.** Before uninstalling, tap **About → Remove game
+   shortcuts** in the panel to clear the hidden per-game entries streamed from game pages. The
+   plugin also adds two non-Steam entries named **Punktfunk** — the one you see in your library,
+   and a second one it keeps hidden to carry the stream. Decky removes neither. In your library,
+   right-click a **Punktfunk** entry → **Manage → Remove non-Steam game from your library**, and
+   repeat for the hidden one once you've let the library show hidden games.
 3. **Remove the client**, if you're done streaming on this Deck. In Desktop Mode:
 
    ```sh
