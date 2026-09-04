@@ -205,6 +205,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A Windows launch starts in its executable's own folder.** It inherited the host service's
+  working directory instead, which sits under `C:\Program Files` — Ryujinx refuses to run there,
+  and a title loading assets relative to the working directory read the host's folder; nothing
+  to do.
 - **HDR plus 4:4:4 carries full chroma again on Windows.** The in-driver encoder took P010 for
   every HDR session, so NVENC emitted 4:2:0 while the `SET_ENCODE` reply still promised 4:4:4.
   Nothing to do: such a session now opens on the packed 10-bit RGB input.

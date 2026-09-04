@@ -10,7 +10,7 @@
 //! console session when it starts the ordinary host.
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Security::{
@@ -46,6 +46,31 @@ fn current_process_session_id() -> Result<u32> {
     .context("ProcessIdToSessionId(current host process)")
 }
 
+/// Where to start `cmdline`'s executable: the directory holding it.
+///
+/// A child must never inherit the host's cwd. The service starts the host in its
+/// install directory, so an inherited cwd puts every launch under
+/// `C:\Program Files\punktfunk` — which Ryujinx tests
+/// (`Environment.CurrentDirectory`) and refuses to run under, and which sends a
+/// game's relative asset loads into the host's folder.
+///
+/// The first token is read as `CreateProcess` reads it: quoted, else up to the
+/// first space. `None` for a non-absolute token (`explorer.exe <uri>`,
+/// `cmd.exe /c …`) or a directory that is gone — both keep the inherited cwd
+/// rather than failing the spawn.
+fn exe_dir(cmdline: &str) -> Option<PathBuf> {
+    let rest = cmdline.trim_start();
+    let exe = Path::new(match rest.strip_prefix('"') {
+        Some(quoted) => quoted.split('"').next()?,
+        None => rest.split(' ').next()?,
+    });
+    if !exe.is_absolute() {
+        return None;
+    }
+    let dir = exe.parent()?;
+    dir.is_dir().then(|| dir.to_path_buf())
+}
+
 /// Spawns `cmdline` as the signed-in user of this process's WTS session on
 /// `winsta0\default`. Returns the new process id.
 ///
@@ -54,7 +79,8 @@ fn current_process_session_id() -> Result<u32> {
 /// `PUNKTFUNK_*` / `RUST_LOG` (see [`merged_env_block`]).
 ///
 /// Needs SYSTEM (`WTSQueryUserToken` requires `SE_TCB`). Fails when this
-/// process's session has no signed-in user.
+/// process's session has no signed-in user. `workdir` defaults to the
+/// executable's own directory ([`exe_dir`]) — never this process's.
 pub fn spawn_as_current_session_user(cmdline: &str, workdir: Option<&Path>) -> Result<u32> {
     let session = current_process_session_id()?;
     let mut user_token = HANDLE::default();
@@ -103,6 +129,7 @@ pub fn spawn_as_current_session_user(cmdline: &str, workdir: Option<&Path>) -> R
     };
 
     let mut cmd: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
+    let workdir = workdir.map(Path::to_path_buf).or_else(|| exe_dir(cmdline));
     let workdir_w: Option<Vec<u16>> = workdir.map(|d| {
         d.as_os_str()
             .to_string_lossy()
@@ -209,7 +236,26 @@ pub(crate) unsafe fn merged_env_block(user_block: *const u16) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::query_process_session;
+    use super::{exe_dir, query_process_session};
+
+    #[test]
+    fn launch_directory_comes_from_the_executable_path() {
+        let exe = std::env::temp_dir().join("emu.exe");
+        let dir = exe.parent().expect("temp dir has a parent").to_path_buf();
+
+        // Quoted (every store recipe and plugin template) and bare, both with arguments.
+        let quoted = format!("\"{}\" \"a rom.nsp\"", exe.display());
+        assert_eq!(exe_dir(&quoted), Some(dir.clone()));
+        assert_eq!(exe_dir(&format!("{} rom.nsp", exe.display())), Some(dir));
+
+        // Hand-offs name no path, so the cwd is the OS default and does not matter.
+        assert_eq!(exe_dir("explorer.exe \"steam://rungameid/70\""), None);
+        assert_eq!(exe_dir("cmd.exe /c start game"), None);
+
+        // A directory that is gone must not fail the spawn.
+        let missing = std::env::temp_dir().join("pf-no-such-dir").join("emu.exe");
+        assert_eq!(exe_dir(&format!("\"{}\"", missing.display())), None);
+    }
 
     #[test]
     fn process_session_query_uses_requested_process() {
