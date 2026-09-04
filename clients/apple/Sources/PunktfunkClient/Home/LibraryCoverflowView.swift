@@ -135,7 +135,7 @@ struct LibraryCoverflowView: View {
             icon: game.iconToken,
             // Decode at the size drawn (the container's poster box), never at the CDN's.
             drawnSize: CGSize(width: width, height: height),
-            onLoaded: { artSettled += 1 })
+            onLoaded: { artSettled += 1 }, frameID: game.id)
             .frame(width: width, height: height)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(alignment: .topLeading) {

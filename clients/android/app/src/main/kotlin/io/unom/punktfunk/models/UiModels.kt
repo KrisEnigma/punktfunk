@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.geometry.Rect
 import io.unom.punktfunk.kit.library.GameEntry
 import io.unom.punktfunk.kit.security.KnownHost
 
@@ -104,8 +105,18 @@ data class ActiveSession(
     val launchHold: LaunchHold? = null,
 )
 
-/** A held launch, and where to ask after it — the shelf's host on the management lane. */
-data class LaunchHold(val game: GameEntry, val address: String, val mgmtPort: Int, val fpHex: String)
+/**
+ * A held launch: where to ask after it (the shelf's host, on the management lane) and the tile its
+ * cover flies out of. [sourceRect] is in window coordinates and null when the launch came off
+ * something with no tile — the console shelf, which the Rust shell draws.
+ */
+data class LaunchHold(
+    val game: GameEntry,
+    val address: String,
+    val mgmtPort: Int,
+    val fpHex: String,
+    val sourceRect: Rect? = null,
+)
 
 /**
  * The library shelf a finished game launch should return to: the saved host's id, and the pinned

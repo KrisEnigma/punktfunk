@@ -65,17 +65,34 @@ final class FrameMeter: @unchecked Sendable {
     }
 }
 
+/// A held launch: the title, and the tile its cover flies out of.
+struct LaunchHoldTarget: Equatable {
+    let entry: GameEntry
+    /// The shelf tile's rect in global (window) coordinates, when the launch came off a tile the
+    /// hold can fly from. nil scales the cover up in place instead.
+    let sourceRect: CGRect?
+    /// Which launch this is, counting up for the life of the process — the hold's identity.
+    ///
+    /// Load-bearing, not bookkeeping: a hold that is removed and raised again lands in the same
+    /// place in the view tree, and SwiftUI hands the new one the OLD one's state. Its cover then
+    /// starts already landed, and the flight silently stops happening after the first launch.
+    let seq: Int
+}
+
 /// The entry behind a `connect(launchID:)`, handed over out of band: the shelf's launch callbacks
-/// carry only the id (five call sites, three tile views), and the launch hold needs the title and
-/// art. Keyed by id on the way out, so a stale entry can never dress a different launch.
+/// carry only the id (five call sites, three tile views), and the launch hold needs the title, art
+/// and tile rect. Keyed by id on the way out, so a stale entry can never dress a different launch.
 enum LaunchedEntry {
-    private static var last: GameEntry?
+    private static var last: (entry: GameEntry, rect: CGRect?)?
 
-    static func remember(_ entry: GameEntry?) { last = entry }
+    static func remember(_ entry: GameEntry?, from rect: CGRect?) {
+        last = entry.map { ($0, rect) }
+    }
 
-    static func take(_ id: String) -> GameEntry? {
+    static func take(_ id: String, seq: Int) -> LaunchHoldTarget? {
         defer { last = nil }
-        return last?.id == id ? last : nil
+        guard let last, last.entry.id == id else { return nil }
+        return LaunchHoldTarget(entry: last.entry, sourceRect: last.rect, seq: seq)
     }
 }
 
@@ -99,11 +116,18 @@ final class SessionModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var connection: PunktfunkConnection?
-    /// The launched title whose game is not up yet: the session view veils the stream with its
-    /// poster until the host's `/status` says the game left `launching` (`punktfunk-host::gamelease`),
-    /// or the player asks to see. nil for a desktop connect, a launcher tile, and once revealed.
-    @Published private(set) var launchHold: GameEntry?
+    /// The launched title whose game is not up yet: its cover flies out of the shelf tile at the
+    /// tap and holds the screen — through the dial, and then over the stream — until the host's
+    /// `/status` says the game left `launching` (`punktfunk-host::gamelease`), or the player asks
+    /// to see. nil for a desktop connect, a launcher tile, and once revealed.
+    ///
+    /// Raised at `connect`, not at first frame: the shelf is still on screen at the tap, which is
+    /// the only moment the cover has somewhere to fly FROM, and holding from there means one
+    /// unbroken screen from the tap to the game rather than a stream of the launcher in between.
+    @Published private(set) var launchHold: LaunchHoldTarget?
     private var launchWatch: Task<Void, Never>?
+    /// Counts launches, so each hold is a view of its own — see `LaunchHoldTarget.seq`.
+    private var launchSeq = 0
     /// The host this session is for (a value copy; identity = id).
     @Published private(set) var activeHost: StoredHost?
     /// The library entry this session was launched with (`connect(launchID:)`), or nil if the user
@@ -479,7 +503,9 @@ final class SessionModel: ObservableObject {
         launchedTitleID = launchID
         launchedShelf = shelf
         // The host never tracks a launcher tile, so there is nothing to wait for.
-        launchHold = launchID.flatMap(LaunchedEntry.take).flatMap { $0.isLauncher ? nil : $0 }
+        launchSeq += 1
+        launchHold = launchID.flatMap { LaunchedEntry.take($0, seq: launchSeq) }
+            .flatMap { $0.entry.isLauncher ? nil : $0 }
         errorMessage = nil
         settings = effective
         statsVerbosity = StatsVerbosity(rawValue: effective.statsVerbosity) ?? .normal
@@ -1153,7 +1179,7 @@ final class SessionModel: ObservableObject {
     /// Poll the host once a second for the launched title's state, and reveal when it has
     /// answered — or when it never will. Same lane and identity as the shelf's Resume badge.
     private func watchLaunch() {
-        guard let hold = launchHold, let host = activeHost else { return }
+        guard let hold = launchHold?.entry, let host = activeHost else { return }
         let port = connection.map(\.hostMgmtPort).flatMap { $0 > 0 ? $0 : nil } ?? host.effectiveMgmtPort
         guard let identity = (try? ClientIdentityStore.shared.load())?.identity else {
             revealStream()

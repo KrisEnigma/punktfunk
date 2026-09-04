@@ -494,6 +494,15 @@ impl LibraryScreen {
         self.art.get(id)
     }
 
+    /// Where this title's tile was last drawn — what the launch hold flies its cover
+    /// out of. Empty when the shelf has not drawn it (culled, or never laid out), which
+    /// the hold reads as "no tile" and arrives in place instead.
+    pub(crate) fn tile_rect(&self, id: &str) -> Rect {
+        (0..self.geom.len())
+            .find(|&i| self.game(i).is_some_and(|g| g.id == id))
+            .map_or(Rect::new_empty(), |i| self.geom[i])
+    }
+
     /// Filtered length for tests in another module, which cannot reach [`Self::len`].
     #[cfg(test)]
     pub(crate) fn len_for_test(&self) -> usize {

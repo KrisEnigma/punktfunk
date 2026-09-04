@@ -125,6 +125,8 @@ impl Shell {
         }
         if let Some(l) = &mut self.launching {
             l.appear = approach(l.appear, 1.0, dt, 0.09);
+            l.flight.step_spec(1.0, crate::anim::springs::LAUNCH, dt);
+            l.flight.settle(1.0, 0.001, 0.01);
         }
         if let Some(l) = &self.launching {
             // The shelf that launched it still holds its decoded poster underneath.
@@ -310,21 +312,42 @@ impl Shell {
         poster: Option<&Image>,
     ) {
         let cx = w / 2.0;
+        // Fades in rather than replacing the shelf outright: the cover has to be seen
+        // LEAVING its tile, which means the tile has to still be there when it does.
+        canvas.save_layer_alpha_f(None, l.appear as f32);
         self.draw_takeover_field(canvas, w, h, t);
+        canvas.restore();
 
         // Poster: 2:3, 40 % of the height, never past the shelf's decode size.
         let ph = (h * 0.40).min(300.0 * k);
         let pw = ph * 2.0 / 3.0;
         let py = h * 0.44 - ph / 2.0;
-        let card = Rect::from_xywh((cx - pw / 2.0) as f32, py as f32, pw as f32, ph as f32);
+        let settled = Rect::from_xywh((cx - pw / 2.0) as f32, py as f32, pw as f32, ph as f32);
+        // Where it flies from: its shelf tile, or — with no tile to leave — the settled
+        // rect a little small, so the arrival still reads as one.
+        let start = if l.from.is_empty() {
+            let (dx, dy) = (settled.width() * 0.07, settled.height() * 0.07);
+            settled.with_inset((dx, dy))
+        } else {
+            l.from
+        };
+        let p = l.flight.pos as f32;
+        let lerp = |a: f32, b: f32| a + (b - a) * p;
+        let card = Rect::from_ltrb(
+            lerp(start.left, settled.left),
+            lerp(start.top, settled.top),
+            lerp(start.right, settled.right),
+            lerp(start.bottom, settled.bottom),
+        );
         let corner = (10.0 * k) as f32;
 
-        canvas.save_layer_alpha_f(None, l.appear as f32);
-        // Settles from slightly small, so the arrival reads as the card landing.
-        let s = 0.96 + 0.04 * l.appear;
-        canvas.translate((cx as f32, (py + ph / 2.0) as f32));
-        canvas.scale((s as f32, s as f32));
-        canvas.translate((-cx as f32, -(py + ph / 2.0) as f32));
+        canvas.save();
+        // One full turn on the way over, about the card's own centre.
+        canvas.rotate(
+            360.0 * p,
+            Some(skia_safe::Point::new(card.center_x(), card.center_y())),
+        );
+        let (pw, ph) = (f64::from(card.width()), f64::from(card.height()));
         let mut shadow = fill(crate::theme::shade(0.55));
         shadow.set_mask_filter(skia_safe::MaskFilter::blur(
             skia_safe::BlurStyle::Normal,
@@ -362,7 +385,7 @@ impl Shell {
         }
         canvas.restore();
 
-        let title_y = py + ph + 44.0 * k;
+        let title_y = f64::from(settled.bottom) + 44.0 * k;
         fonts.centered(
             canvas,
             &l.title,
@@ -385,14 +408,28 @@ impl Shell {
                 w * 0.66,
             );
         }
-        crate::theme::spinner(canvas, cx, title_y + 72.0 * k, 12.0 * k, t);
-        self.draw_takeover_hints(
+        crate::theme::spinner(canvas, cx, title_y + 64.0 * k, 11.0 * k, t);
+        fonts.centered(
             canvas,
-            w,
-            h,
-            k,
-            fonts,
-            &[Hint::new(HintKey::Confirm, "Show stream")],
+            if l.connected {
+                "Starting the game\u{2026}"
+            } else {
+                "Connecting\u{2026}"
+            },
+            W::Regular,
+            12.5 * k,
+            fg(0.45 * l.appear as f32),
+            cx,
+            title_y + 92.0 * k,
+            w * 0.66,
         );
+        // Before the dial lands B cancels it, exactly as it does on the connect card;
+        // after, the only thing left to ask for is the picture.
+        let hint = if l.connected {
+            Hint::new(HintKey::Confirm, "Show stream")
+        } else {
+            Hint::new(HintKey::Back, "Cancel")
+        };
+        self.draw_takeover_hints(canvas, w, h, k, fonts, &[hint]);
     }
 }

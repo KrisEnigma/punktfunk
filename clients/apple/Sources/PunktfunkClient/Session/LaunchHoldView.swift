@@ -2,56 +2,129 @@
 //  LaunchHoldView.swift
 //  Punktfunk
 //
-//  The launch hold: the launched title's poster over the live stream until its game is up.
+//  The launch hold: the picked title's cover leaves its shelf tile and holds the screen until
+//  the game is actually up.
 //
 
 import PunktfunkKit
 import SwiftUI
 
-/// Opaque, so the launcher and desktop behind never show — every launch used to open on them.
-/// A tap (the button, on tvOS) shows the stream anyway; `SessionModel.launchHold` decides the rest.
+/// A cover turning about its own vertical axis, in perspective.
+///
+/// `rotation3DEffect` is the obvious way to write this and cannot be used here: it takes part in
+/// layout, and a card carrying one is placed in the corner whatever the offset beside it says.
+/// So the same projection is built by hand and marked as something layout never sees.
+///
+/// The `m13` term is what makes it a turn rather than a squeeze: it feeds x into the homogeneous
+/// divide, so the edge swinging toward the viewer grows and the one going away shrinks, and the
+/// card's top and bottom converge with it. Without it the face only narrows, which reads as flat.
+private struct CoverFlip: GeometryEffect {
+    /// Full turns, so the animation has something continuous to interpolate: an angle that starts
+    /// and ends in the same place would be a value that never changes.
+    var turns: Double
+
+    /// Viewer distance, as a multiple of the card's width. Nearer means a stronger turn; much
+    /// past two or three card widths and the perspective stops being visible at all.
+    var distance: Double = 2.2
+
+    var animatableData: Double {
+        get { turns }
+        set { turns = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        let angle = turns * 2 * .pi
+        let d = max(size.width, 1) * distance
+        var rotation = ProjectionTransform()
+        rotation.m11 = cos(angle)
+        rotation.m13 = sin(angle) / d
+        let toCentre = ProjectionTransform(
+            CGAffineTransform(translationX: -size.width / 2, y: -size.height / 2))
+        let back = ProjectionTransform(
+            CGAffineTransform(translationX: size.width / 2, y: size.height / 2))
+        return toCentre.concatenating(rotation).concatenating(back)
+    }
+}
+
+/// One screen from the tap to the game.
+///
+/// Mounts over the shelf at the dial, flies the cover out of the tile the player just pressed, and
+/// stays opaque across the switch to the stream — so the launcher booting behind it is never seen.
+/// `SessionModel.launchHold` decides when it comes down; a tap (the button, on tvOS) shows the
+/// stream regardless.
+///
+/// Laid out as a title card rather than a centred stack: the cover carries the screen from the
+/// left at most of its height, and everything the host knows about the title reads down the
+/// right-hand side.
 struct LaunchHoldView: View {
     let entry: GameEntry
     let host: StoredHost?
+    /// The dial is still in flight — the status line says so until frames are coming.
+    var connecting = false
+    /// The shelf tile's rect in global coordinates, when there is a tile to fly out of.
+    var sourceRect: CGRect?
+    /// Screenshot harness: canned art in place of the paired host's loader.
+    var artOverride: (any LibraryArtSource)?
     let onShow: () -> Void
-    @State private var loader: LibraryArtLoader?
 
-    /// `Steam · PC` — the store, and the platform when the host filed one.
-    private var detail: String {
-        [entry.storeLabel, entry.platform].compactMap { $0 }.joined(separator: " \u{b7} ")
+    @State private var loader: (any LibraryArtSource)?
+    /// The cover has left its tile (spring), and the backdrop has closed over the shelf (fade).
+    @State private var landed = false
+
+    init(
+        entry: GameEntry, host: StoredHost?, connecting: Bool = false,
+        sourceRect: CGRect? = nil, artOverride: (any LibraryArtSource)? = nil,
+        onShow: @escaping () -> Void
+    ) {
+        self.entry = entry
+        self.host = host
+        self.connecting = connecting
+        self.sourceRect = sourceRect
+        self.artOverride = artOverride
+        self.onShow = onShow
+        // Seeded rather than assigned on appear when the caller already has one. The cover's
+        // subtree changes identity the moment a loader arrives, and a replaced subtree has no
+        // previous geometry to animate from — so a loader landing on the same frame as the
+        // flight is armed silently eats the flight. With the art in hand from the first
+        // render there is no swap to collide with.
+        _loader = State(initialValue: artOverride)
     }
+
+    /// The cover's flight: a spring, so it arrives with a little weight rather than easing to
+    /// a stop, and loose enough that the turn is readable on the way.
+    private let flight = Animation.spring(response: 0.75, dampingFraction: 0.72)
 
     var body: some View {
         GeometryReader { geo in
-            let posterHeight = min(geo.size.height * 0.40, 300)
-            let poster = CGSize(width: posterHeight * 2 / 3, height: posterHeight)
-            ZStack {
-                LinearGradient(
-                    colors: [Color(white: 0.11), Color(white: 0.03)],
-                    startPoint: .top, endPoint: .bottom)
-                VStack(spacing: 12) {
-                    PosterImage(
-                        candidates: entry.art.posterCandidates, title: entry.title,
-                        loader: loader, icon: entry.iconToken, drawnSize: poster)
-                        .frame(width: poster.width, height: poster.height)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .shadow(color: .black.opacity(0.6), radius: 24, y: 12)
-                        .padding(.bottom, 18)
-                    Text(entry.title)
-                        .font(.geist(24, .semibold, relativeTo: .title2))
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                    if !detail.isEmpty {
-                        Text(detail)
-                            .font(.geist(15, .regular, relativeTo: .callout))
-                            .foregroundStyle(.white.opacity(0.6))
-                    }
-                    ProgressView().tint(.white).padding(.top, 10)
-                    Button("Show stream", action: onShow)
-                        .buttonStyle(.bordered)
-                        .padding(.top, 14)
-                }
-                .padding(.horizontal, 32)
+            let layout = Layout(size: geo.size)
+            let from = startRect(layout.cover, geo)
+            // The cover is always LAID OUT where it lands, and travels as a transform: scale,
+            // offset and rotation are geometry effects with animatable data, where an animated
+            // `frame`/`position` is a layout change SwiftUI is free to apply without one — which
+            // is exactly what it did, leaving the flight as a backdrop fade and nothing else.
+            let scale = landed ? 1 : from.width / max(layout.cover.width, 1)
+            let dx = landed ? 0 : from.midX - layout.cover.midX
+            let dy = landed ? 0 : from.midY - layout.cover.midY
+            ZStack(alignment: .topLeading) {
+                backdrop(geo.size)
+                    .opacity(landed ? 1 : 0)
+                    .animation(.easeOut(duration: 0.3), value: landed)
+                cover
+                    .frame(width: layout.cover.width, height: layout.cover.height)
+                    // One full turn on the way over, around the card's own vertical axis.
+                    .modifier(CoverFlip(turns: landed ? 1 : 0).ignoredByLayout())
+                    .scaleEffect(scale)
+                    // Placed by offset from the stack's top-left, not by `position`: a positioned
+                    // view claims the whole proposal, and two of them in one stack fight over it.
+                    .offset(x: layout.cover.minX + dx, y: layout.cover.minY + dy)
+                    .animation(flight, value: landed)
+                details
+                    .frame(width: layout.details.width, alignment: .leading)
+                    .offset(x: layout.details.minX, y: layout.details.minY)
+                    .opacity(landed ? 1 : 0)
+                    // Behind the cover's own flight, so the card arrives and the words settle
+                    // beside it rather than the two racing.
+                    .animation(.easeOut(duration: 0.3).delay(0.18), value: landed)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -62,13 +135,163 @@ struct LaunchHoldView: View {
         .onTapGesture(perform: onShow)
         #endif
         .task {
-            // The shelf's own loader: host-origin art over the paired identity, CDNs plain.
-            guard let host, let identity = (try? ClientIdentityStore.shared.load())?.identity
-            else { return }
-            loader = try? LibraryArtLoader(
-                address: host.address, port: host.effectiveMgmtPort,
-                certPEM: identity.certPEM, keyPEM: identity.keyPEM,
-                hostFingerprint: host.pinnedSHA256)
+            if loader == nil {
+                loader = Self.hostLoader(host)
+            }
+            // Armed a frame later, deliberately. This view is INSERTED — by the session's
+            // overlay, and by the preview harness — and a state change made while that
+            // insertion is still being committed rides the same transaction, which SwiftUI
+            // is free to apply without animating. Opacity survived that; the geometry did
+            // not, so the flight came out as a plain fade. One frame's wait separates them.
+            try? await Task.sleep(nanoseconds: 40_000_000)
+            landed = true
+        }
+    }
+
+    /// The shelf's own loader: host-origin art over the paired identity, CDNs plain. Resolved
+    /// once on appear rather than per render — the session republishes its stats every second,
+    /// and rebuilding this on each of those would re-read the identity every second with it.
+    private static func hostLoader(_ host: StoredHost?) -> (any LibraryArtSource)? {
+        guard let host, let identity = (try? ClientIdentityStore.shared.load())?.identity
+        else { return nil }
+        return try? LibraryArtLoader(
+            address: host.address, port: host.effectiveMgmtPort,
+            certPEM: identity.certPEM, keyPEM: identity.keyPEM,
+            hostFingerprint: host.pinnedSHA256)
+    }
+
+    /// Cover and text as one centred pair: a 2:3 card on the left, and a column beside it wide
+    /// enough for a long title to break twice rather than fifteen times.
+    private struct Layout {
+        let cover: CGRect
+        let details: CGRect
+
+        init(size: CGSize) {
+            let coverH = min(size.height * 0.62, 460)
+            let coverW = coverH * 2 / 3
+            let gap = min(size.width * 0.04, 56)
+            let detailsW = min(max(size.width * 0.34, 260), 460)
+            let originX = (size.width - (coverW + gap + detailsW)) / 2
+            cover = CGRect(
+                x: originX, y: (size.height - coverH) / 2, width: coverW, height: coverH)
+            // Centred on the cover, so the pair reads as one object however tall the text runs.
+            details = CGRect(
+                x: originX + coverW + gap, y: cover.midY - coverH / 2,
+                width: detailsW, height: coverH)
+        }
+    }
+
+    /// Where the flight starts: the tile the player pressed, in this view's own space.
+    ///
+    /// Falls back to the settled rect, slightly small, whenever there is no usable tile — a
+    /// keyboard launch off a scrolled-away row, a deep link, a stale rect from a recycled cell.
+    /// The cover then simply arrives rather than flying from somewhere the player never looked.
+    private func startRect(_ target: CGRect, _ geo: GeometryProxy) -> CGRect {
+        let container = geo.frame(in: .global)
+        guard let source = sourceRect, source.width > 1, source.height > 1 else {
+            return target.insetBy(dx: target.width * 0.14, dy: target.height * 0.14)
+        }
+        let local = source.offsetBy(dx: -container.minX, dy: -container.minY)
+        guard local.intersects(CGRect(origin: .zero, size: geo.size).insetBy(dx: -80, dy: -80))
+        else {
+            return target.insetBy(dx: target.width * 0.14, dy: target.height * 0.14)
+        }
+        return local
+    }
+
+    /// The title's own art, thrown out of focus behind it — the game colours the room it is
+    /// starting in. Decoded small on purpose: it is blurred to nothing but a wash, so a
+    /// full-resolution copy of a cover already on screen would be paid for twice for no pixels.
+    /// Opaque underneath, because hiding the launcher behind it is this screen's whole job.
+    private func backdrop(_ size: CGSize) -> some View {
+        ZStack {
+            Color.black
+            // Held back until there is a loader, for the same reason as the cover: a poster that
+            // mounts without one exhausts its candidates against nothing and never looks again.
+            if loader != nil {
+                PosterImage(
+                    candidates: entry.art.posterCandidates, title: "", loader: loader,
+                    drawnSize: CGSize(width: 120, height: 180))
+                    .frame(width: size.width, height: size.height)
+                    // Overscanned before the blur: a blur samples transparent pixels past the
+                    // edge, which would ring the wash in a dark frame the size of the screen.
+                    .scaleEffect(1.25)
+                    .blur(radius: 120)
+                    .saturation(1.3)
+                    .opacity(0.55)
+            }
+            LinearGradient(
+                colors: [.black.opacity(0.3), .black.opacity(0.55), .black.opacity(0.9)],
+                startPoint: .top, endPoint: .bottom)
+        }
+        .ignoresSafeArea()
+    }
+
+    private var cover: some View {
+        // Held back until there is a loader. `PosterImage` walks its candidates once, from
+        // `.task(id: index)`, so one that mounts without a loader exhausts them against nothing
+        // and settles on the placeholder for good. Re-identifying it instead would restart the
+        // flight, since replacing a view drops the frame it was animating from.
+        Group {
+            if loader != nil {
+                PosterImage(
+                    candidates: entry.art.posterCandidates, title: entry.title,
+                    loader: loader, icon: entry.iconToken)
+            } else {
+                Color.white.opacity(0.06)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.14), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.65), radius: 34, y: 18)
+    }
+
+    /// `PC · 2024 · Steam` — what the host filed the title under, in the order a player scans it.
+    private var facts: String {
+        [entry.platform, entry.releaseYear.map(String.init), entry.storeLabel]
+            .compactMap { $0 }
+            .joined(separator: " \u{b7} ")
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(entry.title)
+                .font(.geist(34, .semibold, relativeTo: .largeTitle))
+                .foregroundStyle(.white)
+                .lineLimit(3)
+                .minimumScaleFactor(0.7)
+                .fixedSize(horizontal: false, vertical: true)
+            if !facts.isEmpty {
+                Text(facts)
+                    .font(.geist(15, .medium, relativeTo: .callout))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .padding(.top, 10)
+            }
+            if let developer = entry.developer, !developer.isEmpty {
+                Text(developer)
+                    .font(.geist(14, .regular, relativeTo: .subheadline))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .padding(.top, 4)
+            }
+            if let genres = entry.genres, !genres.isEmpty {
+                Text(genres.joined(separator: " \u{b7} "))
+                    .font(.geist(14, .regular, relativeTo: .subheadline))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .padding(.top, 4)
+            }
+            HStack(spacing: 9) {
+                ProgressView().controlSize(.small).tint(.white)
+                Text(connecting ? "Connecting…" : "Starting the game…")
+                    .font(.geist(13, .regular, relativeTo: .footnote))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            .padding(.top, 26)
+            Button("Show stream", action: onShow)
+                .buttonStyle(.bordered)
+                .padding(.top, 16)
         }
     }
 }

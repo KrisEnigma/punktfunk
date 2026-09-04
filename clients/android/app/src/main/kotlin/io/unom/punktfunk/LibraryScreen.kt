@@ -55,6 +55,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import android.content.res.Configuration
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -362,7 +364,10 @@ fun LibraryScreen(
                         libraryProfileId = pinnedProfileId,
                         // The host never tracks a launcher tile, so there is nothing to wait for.
                         launchHold = game.takeUnless { it.isLauncher }?.let {
-                            LaunchHold(it, host.address, host.effectiveMgmtPort, host.fpHex)
+                            LaunchHold(
+                                it, host.address, host.effectiveMgmtPort, host.fpHex,
+                                sourceRect = TileFrames.rect(it.id),
+                            )
                         },
                     ),
                 )
@@ -650,6 +655,8 @@ private fun TouchPoster(
                 Modifier
                     .fillMaxWidth()
                     .aspectRatio(2f / 3f)
+                    // What the launch hold flies this title's cover out of.
+                    .onGloballyPositioned { TileFrames.record(game.id, it.boundsInWindow()) }
                     .clip(shape)
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center,

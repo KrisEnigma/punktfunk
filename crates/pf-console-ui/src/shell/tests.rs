@@ -1159,6 +1159,21 @@ fn dump_console_screens() {
     // finish inside it and dump the spinner as the coverflow.
     dump(&mut s2, 80, 8, "07-library", true);
 
+    // The launch hold, mid-flight and settled. Confirm on a settled shelf raises it, so
+    // these two frames are the cover leaving its tile and the screen it lands on — the
+    // one sequence a still cannot show by itself.
+    {
+        let mut s5 = shelf_shell();
+        s5.handle_menu(MenuEvent::Move(MenuDir::Right));
+        dump(&mut s5, 80, 8, "_07d-settle", true);
+        s5.handle_menu(MenuEvent::Confirm);
+        // ~90 ms in: the spring is a third of the way over and a third of the way round.
+        dump(&mut s5, 3, 30, "07d-launch-hold-flight", true);
+        dump(&mut s5, 40, 16, "07e-launch-hold", true);
+        s5.session_streaming();
+        dump(&mut s5, 20, 16, "07f-launch-hold-streaming", true);
+    }
+
     // Sort/view bar focused: the only state that draws the accent wash. Both palette
     // poles — `accent(0.14)` reads differently over dark than pale.
     for (name, palette) in [
@@ -1611,16 +1626,31 @@ mod launch_hold {
             s.take_action(),
             Some(OverlayAction::Launch { .. })
         ));
-        s.session_streaming();
         assert!(
-            s.holds_stream() && !s.in_stream,
-            "the handshake alone reveals nothing"
+            s.holds_stream(),
+            "the hold is up from the press, not the first frame"
+        );
+        assert!(
+            s.connecting.is_none(),
+            "and it replaces the connect card rather than stacking on it"
         );
         assert_eq!(
             s.launching.as_ref().map(|l| l.detail.as_str()),
             Some("Steam · PC")
         );
 
+        // Nothing to ask the host until there is a session behind the launch.
+        s.sync();
+        assert!(
+            bus.drain().is_empty(),
+            "no lease exists before the dial lands"
+        );
+
+        s.session_streaming();
+        assert!(
+            s.holds_stream() && !s.in_stream,
+            "the handshake alone reveals nothing"
+        );
         s.sync();
         assert!(
             bus.drain()
@@ -1633,6 +1663,7 @@ mod launch_hold {
         s.sync();
         assert!(bus.drain().is_empty(), "no answer yet, no second question");
         library.set_running(&running("steam:570", "launching"));
+        at(&mut s, 101.5);
         s.sync();
         assert!(s.holds_stream(), "launching is the wait itself");
         assert!(!bus.drain().is_empty(), "answer landed and a second passed");
@@ -1640,6 +1671,27 @@ mod launch_hold {
         library.set_running(&running("steam:570", "running"));
         s.sync();
         assert!(!s.holds_stream() && s.in_stream);
+    }
+
+    /// B belongs to the dial while it is in flight: the hold stands where the connect
+    /// card used to, so it has to answer for it.
+    #[test]
+    fn back_cancels_the_dial_while_the_hold_is_still_connecting() {
+        let (mut s, _library, _bus) = on_shelf();
+        s.start_connect(intent("steam:570"));
+        assert!(matches!(
+            s.take_action(),
+            Some(OverlayAction::Launch { .. })
+        ));
+        s.handle_menu(MenuEvent::Back);
+        assert!(matches!(
+            s.take_action(),
+            Some(OverlayAction::CancelConnect)
+        ));
+        assert!(
+            !s.holds_stream() && !s.in_stream,
+            "cancelled back onto the shelf, not into a stream"
+        );
     }
 
     #[test]
@@ -1666,6 +1718,10 @@ mod launch_hold {
     fn launcher_tiles_skip_the_hold_and_a_press_ends_it() {
         let (mut s, _library, _bus) = on_shelf();
         s.start_connect(intent("steam:ui"));
+        assert!(
+            s.connecting.is_some(),
+            "a launcher tile keeps the plain connect card"
+        );
         s.session_streaming();
         assert!(
             s.in_stream && !s.holds_stream(),

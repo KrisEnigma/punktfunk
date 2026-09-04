@@ -146,9 +146,6 @@ struct Connecting {
     /// Host is parked pending operator approval. Takeover title is
     /// "Waiting for approval", not "Connecting".
     request_access: bool,
-    /// The title this connect launches, when it launches one — becomes the
-    /// [`Launching`] hold once the handshake lands.
-    launch: Option<LaunchHost>,
 }
 
 /// Where the launch hold asks after its title: the shelf's host, on the
@@ -160,20 +157,34 @@ struct LaunchHost {
     fp_hex: String,
 }
 
-/// The stream is live but its game is not: the takeover stays up, wearing the
-/// title's poster, until the host reports the game running.
+/// One screen from the press to the game: the cover leaves its shelf tile, and
+/// holds — through the dial, then over the stream — until the game is up.
 ///
 /// Every launch begins with the launcher's own window (Steam booting, a
 /// desktop) — the first thing a player used to see of a game. The host tells
 /// `launching` from `running` per lease (`punktfunk-host::gamelease`), and a
 /// paired client may read it, so the hold polls that until it changes.
+///
+/// Raised at the press rather than at the first frame, because the shelf is
+/// only on screen then — it is the one moment the cover has somewhere to fly
+/// FROM — and holding from there means the launcher is never seen at all.
+/// Replaces the [`Connecting`] card for a game launch; the two would otherwise
+/// be two takeovers for one act.
 struct Launching {
     host: LaunchHost,
     title: String,
     /// Store and platform, `Steam · PC`.
     detail: String,
-    /// Poster/title fade-in, 0 → 1.
+    /// Backdrop and copy fade, 0 → 1.
     appear: f64,
+    /// The cover's flight out of its tile, 0 (tile) → 1 (settled).
+    flight: Spring,
+    /// The tile it leaves, in the shell's layout space. Empty = no tile to
+    /// leave (a keyboard launch off a culled row), so it arrives in place.
+    from: Rect,
+    /// The dial landed. Before it, a press cancels the connect and there is no
+    /// session to ask the host about; after it, a press shows the stream.
+    connected: bool,
     since: f64,
     last_poll: f64,
     /// `status_gen` when the hold began; a state read before that describes
@@ -575,7 +586,6 @@ impl Shell {
                     title,
                     appear: 0.0,
                     request_access: false,
-                    launch: None,
                 })
             }
             None => self.connecting = None,
@@ -590,20 +600,24 @@ impl Shell {
     }
 
     pub(crate) fn session_streaming(&mut self) {
-        let hold = self
-            .connecting
-            .take()
-            .and_then(|c| c.launch)
-            .and_then(|l| self.launch_hold(l));
-        self.in_stream = hold.is_none();
-        self.launching = hold;
+        self.connecting = None;
+        let t = self.t();
+        let Some(l) = &mut self.launching else {
+            self.in_stream = true;
+            return;
+        };
+        l.connected = true;
+        // The host has no lease to report until the session that launched the title
+        // exists, so the "never listed it" clock only starts making sense here.
+        l.since = t;
+        self.in_stream = false;
     }
 
     /// The hold for a launched title, or `None` when there is nothing to
     /// wait for: a launcher tile (the host never tracks those), a title the
     /// shelf no longer lists, or a host that does not composite this console
     /// over its stream (Android swaps to its own stream screen at handshake).
-    fn launch_hold(&self, host: LaunchHost) -> Option<Launching> {
+    fn launch_hold(&self, host: LaunchHost, from: Rect) -> Option<Launching> {
         if self.platform != Platform::Desktop {
             return None;
         }
@@ -627,6 +641,9 @@ impl Shell {
             title: g.title.clone(),
             detail,
             appear: 0.0,
+            flight: Spring::rest(0.0),
+            from,
+            connected: false,
             since: t,
             // The first poll goes out on the next frame.
             last_poll: t - LAUNCH_POLL_STALL,
@@ -647,6 +664,12 @@ impl Shell {
         let t = self.t();
         let reads = self.library.status_gen();
         let Some(l) = &self.launching else { return };
+        // Nothing to ask about yet: the lease is the SESSION's, and a title that was
+        // already up would otherwise read as "running" and reveal a stream that does
+        // not exist.
+        if !l.connected {
+            return;
+        }
         let state = (reads > l.base_gen)
             .then(|| self.library.launch_state(&l.host.id))
             .flatten();
@@ -713,7 +736,6 @@ impl Shell {
                 .unwrap_or_else(|| "the host".to_string()),
             appear: 1.0,
             request_access: false,
-            launch: None,
         });
         self.show_toast(msg.to_string());
     }
@@ -879,20 +901,26 @@ impl Shell {
     }
 
     fn start_connect(&mut self, intent: ConnectIntent) {
-        // A game launch comes off a shelf, which knows the host's management port.
+        // A game launch comes off a shelf, which knows both the host's management
+        // port and where it just drew the tile.
         let launch = match (&intent.launch, self.stack.last()) {
-            (Some(id), Some(Screen::Library(lib))) => Some(LaunchHost {
-                id: id.clone(),
-                addr: intent.addr.clone(),
-                mgmt: lib.host_mgmt_port(),
-                fp_hex: intent.fp_hex.clone(),
-            }),
+            (Some(id), Some(Screen::Library(lib))) => Some((
+                LaunchHost {
+                    id: id.clone(),
+                    addr: intent.addr.clone(),
+                    mgmt: lib.host_mgmt_port(),
+                    fp_hex: intent.fp_hex.clone(),
+                },
+                lib.tile_rect(id),
+            )),
             _ => None,
         };
-        self.set_connecting(Some(intent.title.clone()));
-        if let Some(c) = &mut self.connecting {
-            c.request_access = intent.request_access;
-            c.launch = launch;
+        self.launching = launch.and_then(|(host, from)| self.launch_hold(host, from));
+        if self.launching.is_none() {
+            self.set_connecting(Some(intent.title.clone()));
+            if let Some(c) = &mut self.connecting {
+                c.request_access = intent.request_access;
+            }
         }
         self.actions.push_back(OverlayAction::Launch {
             addr: intent.addr,
@@ -907,10 +935,17 @@ impl Shell {
 
     pub(crate) fn handle_menu(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
         self.sync();
-        // Any press on the launch hold shows the stream: the player asked to see.
-        if self.launching.is_some() {
-            if matches!(ev, MenuEvent::Confirm | MenuEvent::Back) {
-                self.reveal_stream();
+        // The launch hold owns the buttons while it is up: before the dial lands B
+        // cancels it, as the connect card's B does; after, any press shows the stream.
+        if let Some(l) = &self.launching {
+            if l.connected {
+                if matches!(ev, MenuEvent::Confirm | MenuEvent::Back) {
+                    self.reveal_stream();
+                    return Some(MenuPulse::Confirm);
+                }
+            } else if ev == MenuEvent::Back {
+                self.launching = None;
+                self.actions.push_back(OverlayAction::CancelConnect);
                 return Some(MenuPulse::Confirm);
             }
             return None;
@@ -996,9 +1031,13 @@ impl Shell {
         // Right button is B, including on modal cards. Exception: B at the
         // root quits, and a right-click is too easy to fire by accident —
         // quit stays the legend's clickable "Quit".
-        if self.launching.is_some() {
-            if p.press() || p.kind == PointerKind::Back {
+        if let Some(l) = &self.launching {
+            let connected = l.connected;
+            if connected && (p.press() || p.kind == PointerKind::Back) {
                 self.reveal_stream();
+            } else if !connected && p.kind == PointerKind::Back {
+                self.launching = None;
+                self.actions.push_back(OverlayAction::CancelConnect);
             }
             return true;
         }
