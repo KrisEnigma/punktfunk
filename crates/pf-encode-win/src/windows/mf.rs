@@ -1157,6 +1157,17 @@ mod tests {
         );
     }
 
+    /// The adapter the device sits on, as `MFT_ENUM_ADAPTER_LUID` wants it.
+    fn adapter_luid_of(device: &ID3D11Device) -> Option<LUID> {
+        use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+        // SAFETY: standard COM navigation on a live device; every interface is an owned
+        // windows-rs wrapper released on drop, and `GetDesc` fills a plain out-struct.
+        unsafe {
+            let dxgi: IDXGIDevice = device.cast().ok()?;
+            Some(dxgi.GetAdapter().ok()?.GetDesc().ok()?.AdapterLuid)
+        }
+    }
+
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("pf_encode_win=debug")
@@ -1183,10 +1194,6 @@ mod tests {
         };
 
         init_tracing();
-        if !probe_can_encode(codec, None) {
-            eprintln!("skipping: no hardware {codec:?} MFT on this box");
-            return None;
-        }
         // SAFETY: self-contained harness owning every COM handle it creates;
         // `D3D11CreateDevice` fills `device` only on success, and the NV12 texture is
         // created on and used from that one device and thread.
@@ -1229,6 +1236,14 @@ mod tests {
                 .expect("input texture");
             (device.clone(), t.expect("texture"))
         };
+        // Bind the MFT to the device's OWN adapter, as a session does. A box with two vendors'
+        // encoders hands `None` whichever the sort ranks first, and an MFT from one adapter
+        // refuses a device from another with a bare E_FAIL at SET_D3D_MANAGER.
+        let luid = adapter_luid_of(&device).expect("device LUID");
+        if !probe_can_encode(codec, Some(luid)) {
+            eprintln!("skipping: no hardware {codec:?} MFT on this box's render adapter");
+            return None;
+        }
         let mut enc = MfEncoder::open(
             codec,
             PixelFormat::Nv12,
@@ -1238,7 +1253,7 @@ mod tests {
             2_000_000,
             8,
             ChromaFormat::Yuv420,
-            None,
+            Some(luid),
         )
         .expect("open");
         let mut aus = Vec::new();
