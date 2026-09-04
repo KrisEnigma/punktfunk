@@ -43,9 +43,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 ### Added
 
 - **A browser client, `clients/web`.** `pf-console-ui` compiled to `wasm32-unknown-emscripten`
-  draws the console on a WebGL2 canvas; there is no transport, decoder or pairing yet. Build it
-  with `clients/web/build.sh` and read that directory's README first — it needs emsdk 4.0.9
-  specifically, and it is the one target that builds Skia from source.
+  draws the console on a WebGL2 canvas, and video streams to it over WebTransport — handshake,
+  FEC, decrypt and reassembly are `punktfunk-core`'s, unchanged. There is no pairing, audio or
+  input yet. Build it with `clients/web/build.sh` and read that directory's README first: it needs
+  emsdk 4.0.9 specifically, and it is the one target that builds Skia from source.
+- **A WebTransport plane on the host, off by default.** `--webtransport` /
+  `PUNKTFUNK_WEBTRANSPORT` serves browsers on UDP 9778 with its own short-lived P-256 certificate,
+  published at `GET /api/v1/webtransport`. Narrow it with `PUNKTFUNK_WEBTRANSPORT_BIND` and
+  `PUNKTFUNK_WEBTRANSPORT_ORIGINS` — a browser applies no same-origin rule to WebTransport, so
+  without the second any page the user has open can reach the port.
 - **`Platform::Web` in `pf-console-ui`.** The browser takes the desktop's glyphs and ring but the
   no-live-chord settings wording, since a page binds none. An embedder switching on `Platform`
   gains an arm to handle.
@@ -160,6 +166,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `if-addrs` off wasm only, keeps its Apple `recv_batch` off it, and `trust`'s identity, pair,
   probe and `preferred_codec` entry points are absent there — a browser has no quinn. No other
   target changes.
+- **`punktfunk_core::quic`'s messages no longer need the `quic` feature.** Only `endpoint`, `io`,
+  `clipstream`, `pake` and `clock_sync` do; the codecs build on every target, so a client that
+  speaks punktfunk/1 over another transport can name `Hello` without pulling quinn. Every existing
+  path is unchanged. SPAKE2 moves behind a new `pake` feature that `quic` turns on.
 - **`punktfunk_core`'s C ABI is absent on wasm.** Nothing in a browser embeds this crate over the
   C ABI, and its `#[no_mangle]` roots made the cdylib cargo builds regardless unlinkable there. An
   embedder is unaffected on every target that has one.
