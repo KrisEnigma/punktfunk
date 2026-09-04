@@ -23,10 +23,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
-- **The Windows driver protocol floor is 7.** The pf-vdisplay driver encodes what DWM composes
-  and the host reads access units, so a host and a driver from different releases no longer
-  share a video transport. Install the matching pair — they ship in one installer, and a
-  mismatch ends the session with a "driver outdated" error naming both versions.
+- **The Windows driver protocol floor is 8.** The pf-vdisplay driver encodes what DWM composes
+  and answers only to the host process that created each monitor, so a host and a driver from
+  different releases share neither a video transport nor an ownership rule. Install the
+  matching pair — they ship in one installer, and a mismatch ends the session with a "driver
+  outdated" error naming both versions.
 - **A Windows driver update restarts the display device.** The encoder lives inside
   `pf_vdisplay.dll` now, so applying one flaps the virtual display where a host-only update did
   not. Schedule it like a driver update: expect a brief black screen on the release that carries
@@ -50,16 +51,29 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   offered wherever a client has a second interface to fall back to, which now includes the TV
   client's cursor UI. The two stored keys lost their `android.` prefix (`gamepad_ui_enabled`,
   `gamepad_ui_mode`); nothing persisted under the old names, so there is nothing to migrate.
+- **`guide` and `qam` quick-action slots.** The `overlay_actions` blob takes two more built-in
+  ids, each a one-shot tap of a system button on the host's pad (`BTN_GUIDE`, `BTN_MISC1`) —
+  the same verb the session control socket's `guide`/`qam` already exposed. An older client
+  reads them as empty slots, so a profile still syncs both ways.
 - **Decky: Punktfunk hosts in Steam's "Play from" menu.** The plugin patches
   `/library/app/:appid`, lists hosts whose library carries `steam:<appid>` in the Play button's
   ▾ menu, re-dresses Steam's Play button as Stream while one is chosen, and streams under a
   hidden per-game shortcut with the game's name, art and icon. Anyone wrapping
   `bin/punktfunkrun.sh` gains `PF_GAME=steam:<appid>` (passed as `punktfunk launch --game`), and
   the backend gains `library(ref)`, `game_art(appid, icon_hash)` and `save_icon(appid, png)`.
+- **The Android client splits at a foldable's hinge.** A book foldable half-opened on a table
+  gives the picture the upright half and the on-screen controller the flat one, so a thumb never
+  sits on the game; a hinge that folds the screen left or right is left alone. Nothing to set:
+  the split is the posture plus the controller being shown, and flattening the device restores
+  the full picture.
 - **The Android client decodes PyroWave.** A Vulkan 1.3 device with the codec's compute feature
   set now advertises `CODEC_PYROWAVE` and decodes it as GPU compute into its own swapchain,
   beside the MediaCodec path rather than through it. Nothing to do: the codec stays opt-in per
   session, and a device without that feature set never offers the row.
+- **A Media Foundation encoder backend on Windows.** Every x64 vendor ships an H.264/HEVC MFT,
+  so the driver now falls back to it when the native SDK open fails instead of ending the
+  session; `PUNKTFUNK_ENCODER=mf` pins it. It encodes 8-bit 4:2:0 only, so an HDR or 4:4:4
+  session keeps whichever native backend it resolved to.
 - **Capture health on the Status page and in `GET /api/v1/status`.** A native Windows session's
   `session.capture` block carries the live capture-health class (`healthy`, `idle`, `suspect`,
   `stalled` with its class, `recovering`, `rebuilding`, `secure_desktop`), the evidence behind
@@ -213,6 +227,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The quick-action dial follows the left stick on Apple and Android.** Both clients read the
+  stick as a four-way step, so reaching a slot walked the whole dial one disc at a time; they now
+  aim at the sector the thumb points at, as the desktop clients already did. Nothing to do — the
+  D-pad still steps.
+- **A Windows launch starts in its executable's own folder.** It inherited the host service's
+  working directory instead, which sits under `C:\Program Files` — Ryujinx refuses to run there,
+  and a title loading assets relative to the working directory read the host's folder; nothing
+  to do.
 - **HDR plus 4:4:4 carries full chroma again on Windows.** The in-driver encoder took P010 for
   every HDR session, so NVENC emitted 4:2:0 while the `SET_ENCODE` reply still promised 4:4:4.
   Nothing to do: such a session now opens on the packed 10-bit RGB input.

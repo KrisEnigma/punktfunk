@@ -117,6 +117,10 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
 
+    // Fold posture for the tabletop split (FoldSplit.kt) — there is no framework API for a hinge,
+    // WindowInfoTracker is the platform's only source for one.
+    implementation("androidx.window:window:1.5.0")
+
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")

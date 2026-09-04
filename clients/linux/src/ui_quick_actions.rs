@@ -135,6 +135,8 @@ fn short_label(cfg: &OverlayConfig, slot: &SlotId) -> String {
         SlotId::Mic => "Mic".into(),
         SlotId::Pad => "Pad".into(),
         SlotId::SendText => "Text".into(),
+        SlotId::Guide => "Guide".into(),
+        SlotId::Qam => "QAM".into(),
         SlotId::Host(_) => "Power".into(),
         SlotId::Shortcut(id) => cfg
             .shortcut(id)
@@ -281,7 +283,7 @@ fn editor_page(shared: &Shared) -> adw::NavigationPage {
     let caption = gtk::Label::builder()
         .label(
             "Click a button to change it, or drag one onto another to swap the two. \
-             A two-finger twist or Select+A opens this ring in a stream.",
+             Ctrl+Alt+Shift+O, a two-finger twist or Select+A opens this dial in a stream.",
         )
         .wrap(true)
         .xalign(0.0)

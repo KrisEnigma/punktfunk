@@ -325,6 +325,12 @@ final class SessionModel: ObservableObject {
         #endif
     }
 
+    /// One synthetic system-button tap on the host's pad (a `GamepadWire` bit) — the ring's
+    /// guide / quick-access slots, which reach the host where the physical button cannot.
+    func tapPadButton(_ bit: UInt32) {
+        gamepadCapture?.tapButton(bit)
+    }
+
     /// The virtual on-screen controller (design/touch-client-overlay.md §4): shown from the
     /// ring's `pad` slot, per session. While up it holds one wire pad, so the host sees one
     /// controller arrive and, on hide, one leave (§9). Never toggled by the ring's own open and

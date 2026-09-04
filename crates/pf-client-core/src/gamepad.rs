@@ -330,13 +330,19 @@ impl GamepadService {
     /// Synthetic host Guide: down now, up [`TAP_PRESS`] later, on the first forwarded
     /// slot (pad 0 if none). No-op with no session.
     pub fn tap_guide(&self) {
-        let _ = self.ctl.send(Ctl::TapButton(wire::BTN_GUIDE));
+        self.tap_button(wire::BTN_GUIDE);
+    }
+
+    /// [`Self::tap_guide`] for any system button — the quick-action ring's route, which
+    /// carries the bit its slot stands for.
+    pub fn tap_button(&self, bit: u32) {
+        let _ = self.ctl.send(Ctl::TapButton(bit));
     }
 
     /// Like [`Self::tap_guide`] for `MISC1` (Deck `…`). Harmless on pads that map or
     /// drop the misc button.
     pub fn tap_qam(&self) {
-        let _ = self.ctl.send(Ctl::TapButton(wire::BTN_MISC1));
+        self.tap_button(wire::BTN_MISC1);
     }
 
     /// Tier-A capability bits declared at slot open (wired DualSense/Edge only; others

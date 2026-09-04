@@ -27,7 +27,9 @@
 # `clippy ... -- -D warnings` into `-D warnings` for cargo itself ("unexpected argument '-D'").
 # A single quoted string reaches us intact and only cargo parses it.
 param([string]$CommandLine)
-$CargoArgs = $CommandLine -split '\s+' | Where-Object { $_ -ne '' }
+# @() is load-bearing: a one-word command line leaves a scalar, and splatting a string
+# passes it one CHARACTER per argument — `build` reaches cargo as `b u i l d`.
+$CargoArgs = @($CommandLine -split '\s+' | Where-Object { $_ -ne '' })
 
 $ErrorActionPreference = 'Continue'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -38,16 +40,25 @@ $rel = $drivers.Substring($repoRoot.Length).TrimStart('\')
 $prevTarget = $env:CARGO_TARGET_DIR
 Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
 
-$used = (Get-PSDrive -PSProvider FileSystem).Name
-$letter = 'X', 'Y', 'W', 'V', 'U', 'T' | Where-Object { $used -notcontains $_ } | Select-Object -First 1
+# Try each letter for real rather than asking Get-PSDrive which is free: subst mappings are
+# per-logon-session, so another job's letter looks free here and then fails to map. Giving up
+# on the first refusal is what silently drops the whole MAX_PATH defence.
 $subst = $null
-if ($letter) {
+foreach ($letter in 'X', 'Y', 'W', 'V', 'U', 'T', 'S', 'R') {
     & subst "${letter}:" $repoRoot 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0 -and (Test-Path "${letter}:\$rel")) { $subst = "${letter}:" }
-    elseif ($LASTEXITCODE -eq 0) { & subst "${letter}:" /D 2>&1 | Out-Null }
+    if ($LASTEXITCODE -ne 0) { continue }
+    if (Test-Path "${letter}:\$rel") { $subst = "${letter}:"; break }
+    & subst "${letter}:" /D 2>&1 | Out-Null
 }
 $runDir = if ($subst) { "$subst\$rel" } else { $drivers }
-if (-not $subst) { Write-Host '    (no free drive letter - running in place; a deep checkout may hit MAX_PATH)' }
+# In place is fine from a short root and fatal from a deep one, and the failure lands minutes
+# later as an MSBuild MSB3191 inside CMake. Say it here, where it is still legible.
+if (-not $subst) {
+    Write-Host "    (no drive letter would map - running in place from a $($repoRoot.Length)-char root)"
+    if ($repoRoot.Length -gt 40) {
+        Write-Host "    WARNING: that root leaves little of the 260-char budget; a CMake dep (pyrowave-sys, libvpl-sys) may fail with MSB3191."
+    }
+}
 
 Write-Host "==> cargo $($CargoArgs -join ' ')  [in $runDir]"
 Push-Location $runDir

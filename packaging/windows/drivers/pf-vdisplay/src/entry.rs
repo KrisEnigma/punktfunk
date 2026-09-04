@@ -56,6 +56,25 @@ extern "C" fn driver_add(_driver: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTSTA
         call_unsafe_wdf_function_binding!(WdfDeviceInitSetPnpPowerEventCallbacks, init, &mut pnp);
     }
 
+    // A control handle's close is the owner-gone signal (`watchdog::evt_file_cleanup`), so a
+    // crashed host's monitors depart at once instead of after the watchdog window. Set before
+    // IddCx's own init: should the class extension take the slot, the silence watchdog still
+    // covers a dead host.
+    let mut files = pod_init!(wdk_sys::WDF_FILEOBJECT_CONFIG);
+    files.Size = core::mem::size_of::<wdk_sys::WDF_FILEOBJECT_CONFIG>() as ULONG;
+    files.EvtFileCleanup = Some(crate::watchdog::evt_file_cleanup);
+    files.AutoForwardCleanupClose = wdk_sys::_WDF_TRI_STATE::WdfUseDefault;
+    files.FileObjectClass = wdk_sys::_WDF_FILEOBJECT_CLASS::WdfFileObjectWdfCannotUseFsContexts;
+    // SAFETY: init is the framework-provided device-init; files is valid for the call.
+    unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceInitSetFileObjectConfig,
+            init,
+            &mut files,
+            WDF_NO_OBJECT_ATTRIBUTES
+        );
+    }
+
     // Build the IddCx client config and wire the SDR callbacks. `.Size` = size_of (1.10 structs, 1.10 fw).
     let mut cfg = pod_init!(iddcx::IDD_CX_CLIENT_CONFIG);
     cfg.Size = core::mem::size_of::<iddcx::IDD_CX_CLIENT_CONFIG>() as u32;

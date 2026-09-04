@@ -22,7 +22,7 @@ use pf_driver_proto::encode::{self as wire, EncodeCtlRequest, SetEncodeReply, Se
 use wdk_sys::NTSTATUS;
 
 use self::section::{AuSection, Ctl, EncodeSession};
-use self::thread::{EncodeThread, ThreadCtx, fail_reply};
+use self::thread::{BACKEND_NAMES, EncodeThread, ThreadCtx, fail_reply};
 use crate::monitor::Monitor;
 use crate::{STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS, registry};
 
@@ -35,18 +35,24 @@ const OPEN_BOUND: Duration = Duration::from_secs(5);
 
 /// Backend names in the order the addresses below pin them, for the load-time log.
 pub fn backends_linked() -> &'static [&'static str] {
-    &["nvenc", "amf", "qsv", "pyrowave", "convert"]
+    &["nvenc", "amf", "qsv", "pyrowave", "mf", "convert"]
 }
 
-/// `IOCTL_SET_ENCODE`: open an encoder for the monitor with `req.target_id` on the AU section
-/// the host delivered, replacing any session it already has.
+/// `IOCTL_SET_ENCODE`: open an encoder for `owner`'s monitor with `req.target_id` on the AU
+/// section the host delivered, replacing any session it already has.
 ///
-/// `Err` is an NTSTATUS for a malformed request or an unknown target, with nothing adopted.
-/// `Ok` completes the IOCTL successfully whatever `status` says; from the map on, the driver
-/// owns the handles (`AuSection`). The open runs on the new encode thread and this call
+/// `Err` is an NTSTATUS for a malformed request or a target `owner` does not hold, with nothing
+/// adopted. `Ok` completes the IOCTL successfully whatever `status` says; from the map on, the
+/// driver owns the handles (`AuSection`). The open runs on the new encode thread and this call
 /// waits [`OPEN_BOUND`] for its reply. A displaced session's thread stops with no lock held.
-pub fn set_encode(req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
-    let listed = req.backends[0] != 0 && req.backends.iter().all(|&b| b <= 4);
+pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
+    // The bound is the name table's length: `open_listed` indexes it by `backend - 1`, and a
+    // backend added there without widening this would be rejected here instead.
+    let listed = req.backends[0] != 0
+        && req
+            .backends
+            .iter()
+            .all(|&b| (b as usize) <= BACKEND_NAMES.len());
     let valid = req.target_id != 0
         && req.section != 0
         && req.event != 0
@@ -57,7 +63,8 @@ pub fn set_encode(req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
     if !valid {
         return Err(STATUS_INVALID_PARAMETER);
     }
-    let Some(monitor) = registry::find(|m| m.target_id() == req.target_id) else {
+    let Some(monitor) = registry::find(|m| m.owner == owner && m.target_id() == req.target_id)
+    else {
         return Err(STATUS_NOT_FOUND);
     };
     let section = match AuSection::map(req.section, req.event, req.section_bytes) {
@@ -108,11 +115,12 @@ pub fn set_encode(req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
     }
 }
 
-/// `IOCTL_ENCODE_CTL`: one op on the live encoder of the monitor with `req.target_id`.
+/// `IOCTL_ENCODE_CTL`: one op on the live encoder of `owner`'s monitor with `req.target_id`.
 /// Everything but `reset` is queued for the encode thread and wakes it; `reset` is
 /// [`reset`], on this thread.
-pub fn encode_ctl(req: &EncodeCtlRequest) -> NTSTATUS {
-    let Some(monitor) = registry::find(|m| m.target_id() == req.target_id) else {
+pub fn encode_ctl(owner: u32, req: &EncodeCtlRequest) -> NTSTATUS {
+    let Some(monitor) = registry::find(|m| m.owner == owner && m.target_id() == req.target_id)
+    else {
         return STATUS_NOT_FOUND;
     };
     let Some(session) = monitor.encode() else {
