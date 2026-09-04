@@ -169,9 +169,9 @@ clients/linux/src/app.rs:1
 clients/linux/src/spawn.rs:1
 clients/session/src/main.rs:4
 crates/pf-console-ui/src/screens/settings.rs:1
+crates/pf-encode-win/src/windows/nvenc.rs:4
 crates/pf-encode/src/enc/linux/nvenc_cuda.rs:2
 crates/pf-encode/src/enc/linux/worker.rs:1
-crates/pf-encode/src/enc/windows/nvenc.rs:4
 crates/pf-inject/src/inject/linux/steam_gadget.rs:5
 crates/pf-vdisplay/src/lib.rs:1
 crates/pf-vdisplay/src/vdisplay/routing.rs:4
@@ -185,6 +185,7 @@ crates/punktfunk-host/src/library/art.rs:2
 crates/punktfunk-host/src/mgmt/tests.rs:3
 crates/punktfunk-host/src/native.rs:4
 crates/punktfunk-host/src/windows/service.rs:1
+packaging/windows/drivers/pf-vdisplay/src/encode/thread.rs:1
 BASELINE
 
 : > "$tmp/gate_c"

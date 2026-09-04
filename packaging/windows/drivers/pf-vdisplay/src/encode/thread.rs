@@ -268,13 +268,16 @@ pub fn codec_from_wire(codec: u32) -> Option<Codec> {
 
 /// Implicit Vulkan layers (overlays, our pf-vkhdr-layer) hang in session 0, and the encoder's
 /// private instance wants none of them. The loader-wide knob needs a 1.3.234+ loader; each
-/// manifest's own `disable_environment` works on any. Once per process.
+/// manifest's own `disable_environment` works on any.
+///
+/// Call from `driver_entry` only. Mutating the environment is unsound once other threads run,
+/// and the encode thread is exactly the wrong place for it; at load there is no other thread.
 pub fn disable_implicit_vulkan_layers() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // SAFETY: WUDFHost is this driver's own process (`ProcessSharingDisabled`); Windows'
-        // SetEnvironmentVariable is thread-safe and nothing here parses the environment
-        // concurrently.
+        // SAFETY: called from `driver_entry`, before this driver has started a thread, so no
+        // reader can race the write. WUDFHost is our own process (`ProcessSharingDisabled`), so
+        // the variables reach nobody else.
         unsafe {
             for (k, v) in [
                 ("VK_LOADER_LAYERS_DISABLE", "~implicit~"),
@@ -311,7 +314,7 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
         )
         .map(|e| Box::new(e) as Box<dyn Encoder>),
         4 => {
-            disable_implicit_vulkan_layers();
+            // Layers were disabled at `driver_entry`; doing it here would race the live threads.
             pf_encode_win::pyrowave::PyroWaveEncoder::open(
                 w,
                 h,
