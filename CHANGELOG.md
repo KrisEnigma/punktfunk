@@ -23,10 +23,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
-- **The Windows driver protocol floor is 7.** The pf-vdisplay driver encodes what DWM composes
-  and the host reads access units, so a host and a driver from different releases no longer
-  share a video transport. Install the matching pair — they ship in one installer, and a
-  mismatch ends the session with a "driver outdated" error naming both versions.
+- **The Windows driver protocol floor is 8.** The pf-vdisplay driver encodes what DWM composes
+  and answers only to the host process that created each monitor, so a host and a driver from
+  different releases share neither a video transport nor an ownership rule. Install the
+  matching pair — they ship in one installer, and a mismatch ends the session with a "driver
+  outdated" error naming both versions.
 - **A Windows driver update restarts the display device.** The encoder lives inside
   `pf_vdisplay.dll` now, so applying one flaps the virtual display where a host-only update did
   not. Schedule it like a driver update: expect a brief black screen on the release that carries

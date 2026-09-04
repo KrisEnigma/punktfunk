@@ -8,6 +8,9 @@
 //! `EVT_IDD_CX_DEVICE_IO_CONTROL` shape returns `()`, leaving the framework no status to act on) is
 //! a type-level fact. Buffer I/O rides the token's methods over `bytemuck` casts of the Pod wire
 //! structs — which leaves the control plane one `unsafe` block, the token construction.
+//!
+//! Every verb is scoped to the calling process (v8): a monitor answers only to the owner whose
+//! ADD created it, and CLEAR_ALL departs the caller's own. Two hosts on one box never meet.
 
 use bytemuck::Pod;
 use pf_driver_proto::control;
@@ -22,12 +25,13 @@ use crate::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND,
 /// # Safety
 /// `request` is the framework-provided `WDFREQUEST` for an `EvtIddCxDeviceIoControl` call.
 pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
-    // Every inbound IOCTL is host liveness (the host PINGs on a timer, plus ADD/REMOVE/GET_INFO/…) —
-    // ping at the top so the watchdog only fires once the host has gone truly silent.
-    crate::watchdog::ping();
     // SAFETY: `request` is the live request for THIS EvtIddCxDeviceIoControl invocation — exactly
     // the contract `Request::new` requires. Everything below is safe: the token owns completion.
     let request = unsafe { Request::new(request) };
+    // The calling process owns what this IOCTL creates and reaches only what it owns. Every
+    // IOCTL is liveness for that owner, so its watchdog fires only once it has gone silent.
+    let owner = request.requestor_pid();
+    crate::watchdog::ping(owner, request.file_object());
     match ioctl_code {
         control::IOCTL_GET_INFO => {
             let reply = control::InfoReply {
@@ -37,18 +41,18 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
             write_output_prefix_complete(request, &reply, size_of::<control::InfoReply>());
         }
         control::IOCTL_PING => request.complete(STATUS_SUCCESS),
-        control::IOCTL_ADD => add(request),
-        control::IOCTL_REMOVE => remove(request),
+        control::IOCTL_ADD => add(owner, request),
+        control::IOCTL_REMOVE => remove(owner, request),
         control::IOCTL_CLEAR_ALL => {
-            crate::monitor::clear_all();
+            crate::monitor::clear_all(owner);
             request.complete(STATUS_SUCCESS);
         }
-        control::IOCTL_SET_RENDER_ADAPTER => set_render_adapter(request),
-        control::IOCTL_UPDATE_MODES => update_modes(request),
-        control::IOCTL_SET_CURSOR_CHANNEL => set_cursor_channel(request),
-        control::IOCTL_SET_CURSOR_FORWARD => set_cursor_forward(request),
-        pf_driver_proto::encode::IOCTL_SET_ENCODE => set_encode(request),
-        pf_driver_proto::encode::IOCTL_ENCODE_CTL => encode_ctl(request),
+        control::IOCTL_SET_RENDER_ADAPTER => set_render_adapter(owner, request),
+        control::IOCTL_UPDATE_MODES => update_modes(owner, request),
+        control::IOCTL_SET_CURSOR_CHANNEL => set_cursor_channel(owner, request),
+        control::IOCTL_SET_CURSOR_FORWARD => set_cursor_forward(owner, request),
+        pf_driver_proto::encode::IOCTL_SET_ENCODE => set_encode(owner, request),
+        pf_driver_proto::encode::IOCTL_ENCODE_CTL => encode_ctl(owner, request),
         #[cfg(feature = "encode-probe")]
         control::IOCTL_ENCODE_PROBE_ARM => encode_probe_arm(request),
         #[cfg(feature = "encode-probe")]
@@ -61,28 +65,29 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
 }
 
 /// `IOCTL_SET_ENCODE` (v7): open an encoder on the delivered AU section. A well-formed request
-/// for a live monitor always completes successfully with the structured reply — the driver
-/// owns the two handles from there — and only a malformed or unmatched one fails the IOCTL
-/// with nothing adopted (`SetEncodeReply` docs).
-fn set_encode(request: Request) {
+/// for a live monitor of `owner`'s always completes successfully with the structured reply —
+/// the driver owns the two handles from there — and only a malformed or unmatched one fails
+/// the IOCTL with nothing adopted (`SetEncodeReply` docs).
+fn set_encode(owner: u32, request: Request) {
     use pf_driver_proto::encode::{SetEncodeReply, SetEncodeRequest};
     let Some(req) = read_input::<SetEncodeRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
-    match crate::encode::set_encode(&req) {
+    match crate::encode::set_encode(owner, &req) {
         Ok(reply) => write_output_prefix_complete(request, &reply, size_of::<SetEncodeReply>()),
         Err(st) => request.complete(st),
     }
 }
 
-/// `IOCTL_ENCODE_CTL` (v7): one control op on a monitor's live encoder; `reset` reopens it.
-fn encode_ctl(request: Request) {
+/// `IOCTL_ENCODE_CTL` (v7): one control op on `owner`'s monitor's live encoder; `reset`
+/// reopens it.
+fn encode_ctl(owner: u32, request: Request) {
     let Some(req) = read_input::<pf_driver_proto::encode::EncodeCtlRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
-    request.complete(crate::encode::encode_ctl(&req));
+    request.complete(crate::encode::encode_ctl(owner, &req));
 }
 
 /// `IOCTL_ENCODE_PROBE_ARM` (spike S5): start an in-process encode run on one monitor's frames.
@@ -95,18 +100,20 @@ fn encode_probe_arm(request: Request) {
     request.complete(crate::encode_probe::arm(&req));
 }
 
-/// `IOCTL_SET_RENDER_ADAPTER`: pin the IddCx render adapter (hybrid-GPU IDD-push).
-fn set_render_adapter(request: Request) {
+/// `IOCTL_SET_RENDER_ADAPTER`: pin the IddCx render adapter (hybrid-GPU IDD-push). Adapter-wide,
+/// so `owner` may not move it from under another owner's live monitors.
+fn set_render_adapter(owner: u32, request: Request) {
     let Some(req) = read_input::<control::SetRenderAdapterRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
-    let st = crate::adapter::set_render_adapter(req.luid_low, req.luid_high);
+    let st = crate::adapter::set_render_adapter(owner, req.luid_low, req.luid_high);
     request.complete(st);
 }
 
-/// `IOCTL_ADD`: create a virtual monitor at the requested mode → reply with the OS target id + LUID.
-fn add(request: Request) {
+/// `IOCTL_ADD`: create `owner`'s virtual monitor at the requested mode → reply with the OS
+/// target id + LUID.
+fn add(owner: u32, request: Request) {
     let Some(req) = read_add_request(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
@@ -116,6 +123,7 @@ fn add(request: Request) {
         return;
     }
     let Some((monitor_id, target_id, luid_low, luid_high)) = crate::monitor::create_monitor(
+        owner,
         req.session_id,
         req.width,
         req.height,
@@ -149,9 +157,9 @@ fn add(request: Request) {
     write_output_prefix_complete(request, &reply, control::ADD_REPLY_LEGACY_SIZE);
 }
 
-/// `IOCTL_SET_CURSOR_CHANNEL` (v5): adopt a monitor's hardware-cursor section, declare the
-/// hardware cursor to the OS, start the query→publish worker.
-fn set_cursor_channel(request: Request) {
+/// `IOCTL_SET_CURSOR_CHANNEL` (v5): adopt `owner`'s monitor's hardware-cursor section, declare
+/// the hardware cursor to the OS, start the query→publish worker.
+fn set_cursor_channel(owner: u32, request: Request) {
     let Some(req) = read_input::<control::SetCursorChannelRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
@@ -160,7 +168,7 @@ fn set_cursor_channel(request: Request) {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
-    match crate::monitor::set_cursor_channel(req.target_id, ch) {
+    match crate::monitor::set_cursor_channel(owner, req.target_id, ch) {
         Ok(()) => request.complete(STATUS_SUCCESS),
         Err(ch) => {
             dbglog!(
@@ -174,14 +182,14 @@ fn set_cursor_channel(request: Request) {
     }
 }
 
-/// `IOCTL_SET_CURSOR_FORWARD` (v6): the mid-stream cursor-render flip — (un)declare a LIVE
-/// monitor's hardware cursor as the client's mouse model demands.
-fn set_cursor_forward(request: Request) {
+/// `IOCTL_SET_CURSOR_FORWARD` (v6): the mid-stream cursor-render flip — (un)declare `owner`'s
+/// LIVE monitor's hardware cursor as the client's mouse model demands.
+fn set_cursor_forward(owner: u32, request: Request) {
     let Some(req) = read_input::<control::SetCursorForwardRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
-    if crate::monitor::set_cursor_forward(req.target_id, req.enable != 0) {
+    if crate::monitor::set_cursor_forward(owner, req.target_id, req.enable != 0) {
         request.complete(STATUS_SUCCESS);
     } else {
         dbglog!(
@@ -195,8 +203,8 @@ fn set_cursor_forward(request: Request) {
 /// `IOCTL_UPDATE_MODES` (v4): refresh a LIVE monitor's target-mode list to a new preferred mode —
 /// the in-place mid-stream resize (`design/first-frame-and-resize-latency.md` P2). The monitor is
 /// NOT departed: its OS identity, swap-chain machinery and encode session all survive; the host
-/// force-sets the freshly-advertised mode afterwards.
-fn update_modes(request: Request) {
+/// force-sets the freshly-advertised mode afterwards. Only `owner`'s monitor answers.
+fn update_modes(owner: u32, request: Request) {
     let Some(req) = read_input::<control::UpdateModesRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
@@ -205,18 +213,23 @@ fn update_modes(request: Request) {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     }
-    let st =
-        crate::monitor::update_monitor_modes(req.session_id, req.width, req.height, req.refresh_hz);
+    let st = crate::monitor::update_monitor_modes(
+        owner,
+        req.session_id,
+        req.width,
+        req.height,
+        req.refresh_hz,
+    );
     request.complete(st);
 }
 
-/// `IOCTL_REMOVE`: depart + drop the monitor for the given session id.
-fn remove(request: Request) {
+/// `IOCTL_REMOVE`: depart + drop `owner`'s monitor for the given session id.
+fn remove(owner: u32, request: Request) {
     let Some(req) = read_input::<control::RemoveRequest>(&request) else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
-    crate::monitor::remove_monitor(req.session_id);
+    crate::monitor::remove_monitor(owner, req.session_id);
     request.complete(STATUS_SUCCESS);
 }
 
