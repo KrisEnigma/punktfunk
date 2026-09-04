@@ -41,6 +41,10 @@ struct LibraryConsoleView: View {
     var onCopyLink: ((GameEntry) -> Void)?
     /// The host's name, for the Options menu's explainer.
     var hostName: String?
+    /// What this host has up right now, if anything — names the menu's Resume row.
+    var nowPlaying: String?
+    /// Stream the host itself, launching nothing (the menu's Connect / Resume row).
+    var onConnect: (() -> Void)?
     /// Whether this screen owns the controller — the shell gates it mid-transition and under the
     /// connect takeover.
     var controllerActive = true
@@ -103,7 +107,9 @@ struct LibraryConsoleView: View {
     /// The field owns the controller only while neither the bar nor a title's Options menu does.
     private var fieldActive: Bool { controllerActive && !barFocused && optionsFor == nil }
     /// Whether a title has an Options menu worth opening (today: only the Copy link row).
-    private var offersOptions: Bool { onCopyLink != nil }
+    /// Either row is enough to be worth a menu — which is what brings X back on tvOS, where
+    /// there is no clipboard and Copy link is the row that isn't there.
+    private var offersOptions: Bool { onCopyLink != nil || onConnect != nil }
     /// Whether Y opens Collections here: an unfiltered root shelf over a library worth browsing.
     private var canOpenCollections: Bool {
         places.canOpenCollections && LibraryCollation.worthBrowsing(games)
@@ -164,6 +170,7 @@ struct LibraryConsoleView: View {
             if let game = optionsFor {
                 LibraryTitleOptionsView(
                     game: game, hostName: hostName, onCopyLink: onCopyLink,
+                    nowPlaying: nowPlaying, onConnect: onConnect,
                     close: { closeOptions() }, controllerActive: controllerActive)
                     .zIndex(2)
                     .transition(

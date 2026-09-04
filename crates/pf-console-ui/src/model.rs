@@ -54,6 +54,15 @@ pub struct HostRow {
     /// Default profile (`KnownHost::profile_id`). Always `None` on a pinned row — that
     /// profile is `pin`.
     pub bound_profile: Option<ProfileChip>,
+    /// What this host has up right now (`GET /api/v1/status`), as a title to show.
+    /// Empty = nothing running, unpaired, unreachable, or a host too old to ask —
+    /// every one of which the tile renders the same way: no line.
+    ///
+    /// Host state, never store state: `serde(default)` so a producer predating the
+    /// field still parses, and it is never persisted, which is what stops a carousel
+    /// coming back claiming a game is up because it was up last night.
+    #[serde(default)]
+    pub running: String,
 }
 
 /// One host-offered action, resolved from `GET /api/v1/actions`
@@ -312,6 +321,7 @@ mod tests {
             actions: Vec::new(),
             pin: None,
             bound_profile: None,
+            running: String::new(),
         };
         shared.set_hosts(vec![row.clone()]);
         let g1 = shared.hosts_gen();

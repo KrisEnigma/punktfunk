@@ -447,8 +447,9 @@ final class SessionModel: ObservableObject {
     func connect(to host: StoredHost, effective: EffectiveSettings,
                  gamepad: PunktfunkConnection.GamepadType = .auto,
                  launchID: String? = nil,
-                 /// The library shelf `launchID` was picked on, so a game exit can return to it.
-                 /// Only meaningful alongside a `launchID`; nil for a plain desktop connect.
+                 /// The library shelf this session started from, so its end can return there —
+                 /// the title's shelf for a launch, and the shelf itself for a Resume, which
+                 /// launches nothing. nil for a connect that did not come off one.
                  shelf: LibraryTarget? = nil,
                  allowTofu: Bool = false,
                  autoTrust: Bool = false,
@@ -1029,6 +1030,14 @@ final class SessionModel: ObservableObject {
         }
         connection = nil
         activeHost = nil
+        // A user-ended stream that STARTED on a shelf goes back to it — the same rule a game
+        // exit follows, because "I'm done with this game" arrives both ways. Gated on having
+        // actually streamed, so a refused or cancelled dial still ends where it was raised
+        // from. `sessionEnded` has already set this for the paths it owns; it disconnects
+        // non-deliberately, so the two can never both fire.
+        if deliberate, phase == .streaming, let shelf = launchedShelf {
+            returnToLibrary = shelf
+        }
         // Read by `sessionEnded` BEFORE it calls us, so clearing here can't rob it of the answer.
         launchedTitleID = nil
         launchedShelf = nil
@@ -1065,14 +1074,12 @@ final class SessionModel: ObservableObject {
         // (per-client access §4) files under `.hostError` there, and "ended with an error"
         // is the wrong sentence for "your access expired".
         let rejection = conn.endRejection
-        // Where a game exit sends us: back into the library this title was launched from, so the
-        // next one is a tap away. Only for a launch that CAME from the library — a game exiting in
-        // a plain desktop session has no library to return to.
+        // Where a game exit sends us: back into the library this session started from, so the
+        // next title is a tap away. A plain desktop connect has no shelf, and so no way back.
         let host = activeHost
-        let cameFromLibrary = launchedTitleID != nil
-        // The shelf it came off — falling back to the host's own if a caller launched a title
-        // without naming one, which is what that launch effectively browsed.
-        let shelf = launchedShelf ?? activeHost.map { LibraryTarget(host: $0) }
+        // The SHELF is what says this came from the library, not the launch id: a Resume off a
+        // shelf launches nothing and still has somewhere to go back to.
+        let shelf = launchedShelf
         let endLine = "session ended by \(name) reason=\(reason) "
             + "rejection=\(rejection.map { String(describing: $0) } ?? "-")"
         sessionLog.info("\(endLine, privacy: .public)")
@@ -1086,7 +1093,7 @@ final class SessionModel: ObservableObject {
         case .gameExited:
             // The player quit their own game. Not a failure, and they are probably after the next
             // title — so no banner, and back to the library it came from.
-            if cameFromLibrary, host != nil, let shelf {
+            if host != nil, let shelf {
                 returnToLibrary = shelf
             }
         case .hostEnded, .local:

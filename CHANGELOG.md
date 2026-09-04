@@ -52,6 +52,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   hidden per-game shortcut with the game's name, art and icon. Anyone wrapping
   `bin/punktfunkrun.sh` gains `PF_GAME=steam:<appid>` (passed as `punktfunk launch --game`), and
   the backend gains `library(ref)`, `game_art(appid, icon_hash)` and `save_icon(appid, png)`.
+- **`HostRow.running` and `library::now_playing`.** Every client that shows host tiles now names
+  the game a paired host has up, read from `GET /api/v1/status` on a 20 s TTL beside the existing
+  host-actions cache. Producers fill the new `HostRow` field (`serde(default)`, never persisted);
+  a console that does not is simply a carousel with no such line.
+- **A shelf can connect without launching.** The library's Options menu (X on the console, the
+  title menu on Apple) gains a first row — "Resume <title>" while the host has a game up, else
+  "Connect to <host>" — that streams the host with no launch id, which is the only way back into
+  a game the host started on its own. On Apple a session begun that way returns to its shelf when
+  it ends, the way a launched title already did.
 - **The Android client splits at a foldable's hinge.** A book foldable half-opened on a table
   gives the picture the upright half and the on-screen controller the flat one, so a thumb never
   sits on the game; a hinge that folds the screen left or right is left alone. Nothing to set:
