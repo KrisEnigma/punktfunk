@@ -18,6 +18,8 @@
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 mod anim;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
+pub mod art_stats;
+#[cfg(any(target_os = "linux", windows, target_os = "android"))]
 mod collate;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod console;
@@ -59,6 +61,8 @@ mod theme;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 mod widgets;
 
+#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+pub use art_stats::{art_stats, ArtStats};
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub use console::{Console, ConsoleEntry, ConsoleHandles, InputSource, Insets, Viewport};
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]

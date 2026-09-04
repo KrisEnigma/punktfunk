@@ -76,12 +76,13 @@ fn art_cache_size(src: (i32, i32), k: f64) -> (i32, i32) {
 /// `Image::from_encoded` defers decode until use; a GPU purge then re-decodes JPEG on
 /// the render thread. Shared with collections so both screens agree on cache size.
 pub(super) fn decode_poster(bytes: &[u8], k: f64) -> Option<Image> {
+    let started = std::time::Instant::now();
     let data = Data::new_copy(bytes);
     // Decoding at the size we keep, rather than in full and then resampling, is most of the
     // cost of filling a shelf: see [`decode_near_cache_size`].
-    let img = match decode_near_cache_size(&data, k) {
-        Some(img) => img,
-        None => Image::from_encoded(data)?,
+    let (img, native_scaled) = match decode_near_cache_size(&data, k) {
+        Some(img) => (img, true),
+        None => (Image::from_encoded(data)?, false),
     };
     let want = art_cache_size((img.width(), img.height()), k);
     let scaled = if want == (img.width(), img.height()) {
@@ -94,6 +95,7 @@ pub(super) fn decode_poster(bytes: &[u8], k: f64) -> Option<Image> {
     // A refused scale keeps the full-size image rather than dropping the cover.
     let out = scaled.unwrap_or_else(|| img.clone());
     let mipped = out.with_default_mipmaps();
+    crate::art_stats::record(started.elapsed(), native_scaled);
     Some(mipped.unwrap_or(out))
 }
 
