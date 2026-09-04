@@ -93,6 +93,6 @@ mod tests {
         assert_eq!(q.len(), INBOX_CAP, "bounded, whatever the sender does");
         // The oldest went, so what is left is the most recent window — the useful end for a
         // live stream, where a stale datagram is worth less than a fresh one.
-        assert_eq!(q.front().map(|d| d[0]), Some(10u8 as u8));
+        assert_eq!(q.front().map(|d| d[0]), Some(10_u8));
     }
 }

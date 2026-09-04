@@ -63,7 +63,7 @@ pub(super) fn synthetic_stream(
                 stages: None,
                 applied_phase_ns: None,
             };
-            let _ = tc.send_datagram(punktfunk_core::quic::encode_host_timing_datagram(&t).into());
+            let _ = tc.send_datagram(punktfunk_core::quic::encode_host_timing_datagram(&t));
         }
         std::thread::sleep(interval);
     }
@@ -820,7 +820,7 @@ fn send_loop(
                                     ),
                                 };
                                 let _ = tc.send_datagram(
-                                    punktfunk_core::quic::encode_host_timing_datagram(&t).into(),
+                                    punktfunk_core::quic::encode_host_timing_datagram(&t),
                                 );
                             }
                         }
@@ -1568,10 +1568,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 tracing::info!(
                     "the launched game exited — ending the session cleanly (APP_EXITED)"
                 );
-                conn.close(
-                    punktfunk_core::quic::APP_EXITED_CLOSE_CODE.into(),
-                    b"game exited",
-                );
+                conn.close(punktfunk_core::quic::APP_EXITED_CLOSE_CODE, b"game exited");
                 quit.store(true, Ordering::SeqCst);
                 stop.store(true, Ordering::SeqCst);
             })
@@ -2425,10 +2422,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         "dedicated game session: the game exited — ending the session cleanly"
                     );
                     quit.store(true, Ordering::SeqCst);
-                    conn.close(
-                        punktfunk_core::quic::APP_EXITED_CLOSE_CODE.into(),
-                        b"game exited",
-                    );
+                    conn.close(punktfunk_core::quic::APP_EXITED_CLOSE_CODE, b"game exited");
                     break;
                 }
                 capture_rebuilds += 1;
@@ -2942,8 +2936,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                                 let _ = conn.send_datagram(
                                     punktfunk_core::quic::encode_hdr_meta_datagram(
                                         &crate::encode::hdr_meta_to_wire(m),
-                                    )
-                                    .into(),
+                                    ),
                                 );
                                 resend_meta = false;
                             }
@@ -3042,12 +3035,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
             if let Some(m) = last_hdr_meta {
                 if au.keyframe || resend_meta {
-                    let _ = conn.send_datagram(
-                        punktfunk_core::quic::encode_hdr_meta_datagram(
-                            &crate::encode::hdr_meta_to_wire(m),
-                        )
-                        .into(),
-                    );
+                    let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(
+                        &crate::encode::hdr_meta_to_wire(m),
+                    ));
                     resend_meta = false;
                 }
             }

@@ -371,7 +371,7 @@ pub(super) async fn negotiate(
                 tracing::warn!("mode-conflict: REJECT — {reason}");
                 // Typed refusal: BUSY + reason bytes. The client reads `ApplicationClosed`,
                 // not a bare drop, so the UI can name the live session.
-                conn.close(REJECT_BUSY_CODE.into(), reason.as_bytes());
+                conn.close(REJECT_BUSY_CODE, reason.as_bytes());
                 anyhow::bail!("{reason}");
             }
         }

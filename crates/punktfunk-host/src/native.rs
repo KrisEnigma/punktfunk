@@ -546,7 +546,7 @@ const REJECT_BUSY_CODE: u32 = punktfunk_core::reject::REJECT_BUSY_CLOSE_CODE;
 /// Close with the typed reject code before the session task returns `Err`. A bare drop
 /// closes with code 0, which the client cannot tell from transport trouble.
 fn close_rejected(conn: &link::SessionLink, reason: punktfunk_core::reject::RejectReason) {
-    conn.close(reason.close_code().into(), reason.to_string().as_bytes());
+    conn.close(reason.close_code(), reason.to_string().as_bytes());
 }
 
 /// One counter and one `warn!` per grant class per session. Totals at end-of-stream;
@@ -1127,7 +1127,7 @@ async fn serve_session(
                 )
             }
         };
-        return pair_ceremony(&conn, send, recv, req, host_fp, np, &pin)
+        return pair_ceremony(&conn, send, recv, req, &client_fp, host_fp, np, &pin)
             .await
             .map(|()| Served::Session);
     }
@@ -1555,16 +1555,7 @@ async fn serve_session(
             .name("punktfunk1-input".into())
             .spawn({
                 let input_route = input_route.clone();
-                move || {
-                    input_thread(
-                        input_rx,
-                        conn.into(),
-                        input_route,
-                        gamepad,
-                        pad_audio_on,
-                        grants,
-                    )
-                }
+                move || input_thread(input_rx, conn, input_route, gamepad, pad_audio_on, grants)
             })
             .context("spawn input thread")?
     };
@@ -1725,7 +1716,7 @@ async fn serve_session(
         std::thread::Builder::new()
             .name("punktfunk1-audio".into())
             .spawn(move || {
-                audio_thread(conn.into(), stop, cap, channels, budget, audio_plane, iso_sink)
+                audio_thread(conn, stop, cap, channels, budget, audio_plane, iso_sink)
             })
             .map_err(|e| tracing::warn!(error = %e, "audio thread spawn failed — session continues without audio"))
             .ok()
@@ -1740,7 +1731,7 @@ async fn serve_session(
         let meta = hello
             .display_hdr
             .unwrap_or_else(|| crate::encode::hdr_meta_to_wire(pf_frame::hdr::generic_hdr10()));
-        let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&meta).into());
+        let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&meta));
         tracing::info!(
             client_volume = hello.display_hdr.is_some(),
             "sent HDR10 static metadata (0xCE baseline)"
@@ -1757,7 +1748,7 @@ async fn serve_session(
         let d = punktfunk_core::quic::encode_rumble_datagram_v3(
             0, 0x4000, 0x8000, 0, 400, 0x2000, 0x6000,
         );
-        let _ = conn.send_datagram(d.to_vec().into());
+        let _ = conn.send_datagram(d.to_vec());
         for h in [
             HidOutput::Led {
                 pad: 0,
@@ -1775,7 +1766,7 @@ async fn serve_session(
                 effect: vec![0x21, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             },
         ] {
-            let _ = conn.send_datagram(h.encode().into());
+            let _ = conn.send_datagram(h.encode());
         }
         tracing::info!("PUNKTFUNK_TEST_FEEDBACK: scripted rumble + hidout burst sent");
     }
@@ -2113,7 +2104,7 @@ async fn serve_session(
     // Every path: stop audio, close, join side threads. Close ends the datagram task → input.
     stop.store(true, Ordering::SeqCst);
     conn.close(
-        if result.is_ok() { 0u32 } else { 1u32 }.into(),
+        if result.is_ok() { 0u32 } else { 1u32 },
         if result.is_ok() { b"done" } else { b"error" },
     );
     // Bounded join: a stuck side thread must not hold the permit/admission entry.
