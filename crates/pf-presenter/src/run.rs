@@ -1712,6 +1712,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     bump_stats_tier(&mut stats_verbosity, &mut stream, &presenter);
                 }
                 RingCommand::Keyboard => ring_keyboard = !ring_keyboard,
+                // The pad worker owns the wire index and the owed release, so this one is
+                // the service's, not `ring_command`'s.
+                RingCommand::TapButton(bit) => gamepad.tap_button(bit),
                 other => {
                     if let Some(st) = stream.as_mut() {
                         ring_command(other, st, &mut window, &mouse, inhibit_shortcuts);
@@ -2925,7 +2928,7 @@ fn ring_command(
                 }
             }
         }
-        RingCommand::CycleStats | RingCommand::Keyboard => {}
+        RingCommand::CycleStats | RingCommand::Keyboard | RingCommand::TapButton(_) => {}
     }
 }
 

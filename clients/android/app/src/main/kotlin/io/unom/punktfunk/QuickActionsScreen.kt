@@ -317,7 +317,7 @@ private val previewActions = RingActions(
         )
     },
     invokeHost = {}, sendShortcut = {},
-    padAvailable = { true }, padShown = { false }, togglePad = {},
+    padAvailable = { true }, padShown = { false }, togglePad = {}, tapPadButton = {},
     currentMode = { intArrayOf(1920, 1080, 60) }, requestMode = { _, _, _ -> },
 )
 
@@ -337,6 +337,8 @@ private fun slotGroups(cfg: OverlayConfig): List<SlotGroup> {
             SlotOption("keyboard", "Keyboard"),
             SlotOption("pad", "Virtual controller", "Shows or hides the on-screen controller"),
             SlotOption("send_text", "Send text"),
+            SlotOption("guide", "Guide button", "The host's Xbox / PS / Steam button"),
+            SlotOption("qam", "Quick access menu", "Only where the host's pad is Steam-shaped"),
         )),
         SlotGroup("View", listOf(SlotOption("stats", "Statistics"))),
         SlotGroup("Audio", listOf(SlotOption("mic", "Microphone"))),

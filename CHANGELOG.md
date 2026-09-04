@@ -49,6 +49,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `isFile`/`isDir` answered `false` for both an absent path and one this account may not read, so
   every scanner reported a permission problem as a missing install. Plugins that scan per-user
   locations should report `denied` with its `grantCommand` rather than skipping the path.
+- **`guide` and `qam` quick-action slots.** The `overlay_actions` blob takes two more built-in
+  ids, each a one-shot tap of a system button on the host's pad (`BTN_GUIDE`, `BTN_MISC1`) —
+  the same verb the session control socket's `guide`/`qam` already exposed. An older client
+  reads them as empty slots, so a profile still syncs both ways.
 - **Decky: Punktfunk hosts in Steam's "Play from" menu.** The plugin patches
   `/library/app/:appid`, lists hosts whose library carries `steam:<appid>` in the Play button's
   ▾ menu, re-dresses Steam's Play button as Stream while one is chosen, and streams under a

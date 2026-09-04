@@ -25,6 +25,12 @@ sealed class SlotId {
     object Mic : SlotId()
     object Pad : SlotId()
     object SendText : SlotId()
+
+    /** The host's guide button (Xbox / PS / Steam), as a synthetic pad tap. */
+    object Guide : SlotId()
+
+    /** The host's quick-access button — `BTN_MISC1`, the Deck's `…`. */
+    object Qam : SlotId()
     data class Host(val actionId: String) : SlotId()
     data class Shortcut(val shortcutId: String) : SlotId()
 
@@ -39,6 +45,8 @@ sealed class SlotId {
             Mic -> "mic"
             Pad -> "pad"
             SendText -> "send_text"
+            Guide -> "guide"
+            Qam -> "qam"
             is Host -> "host:$actionId"
             is Shortcut -> "shortcut:$shortcutId"
         }
@@ -54,6 +62,8 @@ sealed class SlotId {
             "mic" -> Mic
             "pad" -> Pad
             "send_text" -> SendText
+            "guide" -> Guide
+            "qam" -> Qam
             else -> when {
                 s.startsWith("host:") && s.length > 5 -> Host(s.substring(5))
                 s.startsWith("shortcut:") && s.length > 9 -> Shortcut(s.substring(9))

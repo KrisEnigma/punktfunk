@@ -18,6 +18,7 @@ use pf_client_core::host_actions::ActionInfo;
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use pf_client_core::overlay_actions::{chord_chip, key_vk, OverlayConfig, RingPlatform, SlotId};
 use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
+use punktfunk_core::input::gamepad as wire;
 use skia_safe::{Canvas, Color4f, Point, RRect, Rect};
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
@@ -457,6 +458,8 @@ impl Ring {
                 reason: "Not on this client yet — use the keyboard".into(),
                 ..plain("send_text", "Send text", "Text")
             },
+            SlotId::Guide => plain("guide", "Guide button", "Guide"),
+            SlotId::Qam => plain("qam", "Quick access menu", "QAM"),
             SlotId::Host(id) if self.editing.is_some() => Spec {
                 armed: true,
                 ..plain(&format!("host:{id}"), preview_host_label(id), "Power")
@@ -529,6 +532,16 @@ impl Ring {
             SlotId::Stats => self.pending.push_back(RingCommand::CycleStats),
             SlotId::Mic => self.pending.push_back(RingCommand::ToggleMic),
             SlotId::Pad | SlotId::SendText => {}
+            // The host's own overlay is about to take the screen: close first, like End stream.
+            SlotId::Guide | SlotId::Qam => {
+                let bit = if *slot == SlotId::Guide {
+                    wire::BTN_GUIDE
+                } else {
+                    wire::BTN_MISC1
+                };
+                self.close();
+                self.pending.push_back(RingCommand::TapButton(bit));
+            }
             SlotId::Host(id) => {
                 let f = &self.facts;
                 self.cmds.push(ConsoleCmd::HostAction {
@@ -563,6 +576,8 @@ impl Ring {
             SheetRow::Refresh,
             SheetRow::Slot(SlotId::TouchMode),
             SheetRow::Slot(SlotId::Keyboard),
+            SheetRow::Slot(SlotId::Guide),
+            SheetRow::Slot(SlotId::Qam),
             SheetRow::Slot(SlotId::Stats),
             SheetRow::Slot(SlotId::Mic),
         ];
@@ -1441,6 +1456,25 @@ mod tests {
     }
 
     #[test]
+    fn the_system_buttons_tap_the_host_pad_and_close_the_ring() {
+        let mut r = Ring::new();
+        r.set_facts(&facts());
+        r.input(RingInput::Toggle { x: 1.0, y: 1.0 });
+        r.fire(&SlotId::Guide);
+        assert_eq!(
+            r.take_command(),
+            Some(RingCommand::TapButton(wire::BTN_GUIDE))
+        );
+        assert!(!r.open(), "the host's overlay is taking the screen");
+        r.input(RingInput::Toggle { x: 1.0, y: 1.0 });
+        r.fire(&SlotId::Qam);
+        assert_eq!(
+            r.take_command(),
+            Some(RingCommand::TapButton(wire::BTN_MISC1))
+        );
+    }
+
+    #[test]
     fn a_dimmed_slot_says_why_and_sends_nothing() {
         let mut r = Ring::new();
         r.set_facts(&RingFacts {
@@ -1588,6 +1622,8 @@ mod tests {
             "mic",
             "pad",
             "send_text",
+            "guide",
+            "qam",
             "more",
             "host:power.sleep",
             "host:power.reboot",
