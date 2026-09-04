@@ -227,6 +227,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A sleeping host now reads Offline, and auto-wake fires for it.** Every client took a live mDNS
+  advert as proof of life, but a suspending host sends no goodbye and its record lingers for up to
+  75 minutes — so the pip stayed green and Wake-on-LAN, gated on "not advertising", never fired.
+  Presence is now the reachability probe alone on all six surfaces; nothing to do.
 - **The quick-action dial follows the left stick on Apple and Android.** Both clients read the
   stick as a four-way step, so reaching a slot walked the whole dial one disc at a time; they now
   aim at the sector the thumb points at, as the desktop clients already did. Nothing to do — the

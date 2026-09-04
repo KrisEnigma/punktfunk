@@ -238,7 +238,10 @@ object SkiaConsole {
         }
         discovery = d
         d.start()
-        // The reachability sweep: saved hosts not on mDNS, every ~12 s (the desktop's cadence).
+        // The reachability sweep — the whole of presence, every ~12 s (the desktop's cadence).
+        // Every saved host, including the ones on mDNS: an advert is a cache entry with a
+        // 75-minute TTL that a suspending host sends no goodbye for, so trusting it left a
+        // sleeping machine reading Online and, since Wake is gated on `!online`, unwakeable.
         main.post(object : Runnable {
             override fun run() {
                 if (handle == 0L) return
@@ -250,10 +253,15 @@ object SkiaConsole {
                     main.postDelayed(this, 12_000)
                     return
                 }
-                val targets = knownHostStore.all().filter { kh -> discovered.none { kh.matches(it) } }
+                // Probed at the address its live advert claims (a cold boot can land on a new
+                // DHCP lease), keyed by the saved one, which is what every caller looks up.
+                val targets = knownHostStore.all().map { kh ->
+                    val live = discovered.firstOrNull { kh.matches(it) }
+                    Triple("${kh.address}:${kh.port}", live?.host ?: kh.address, live?.port ?: kh.port)
+                }
                 ioPool.execute {
-                    val up = targets.filter { NativeBridge.nativeProbe(it.address, it.port, 3_000) }
-                        .map { "${it.address}:${it.port}" }.toSet()
+                    val up = targets.filter { NativeBridge.nativeProbe(it.second, it.third, 3_000) }
+                        .map { it.first }.toSet()
                     main.post { if (up != reachable) { reachable = up; pushHosts() } }
                 }
                 main.postDelayed(this, 12_000)
@@ -445,11 +453,9 @@ object SkiaConsole {
         val now = android.os.SystemClock.elapsedRealtime()
         for (h in knownHostStore.all()) {
             if (!h.paired || h.fpHex.isEmpty()) continue
-            val online = discovered.any {
-                it.fingerprint.equals(h.fpHex, ignoreCase = true) ||
-                    (it.host == h.address && it.port == h.port)
-            } || "${h.address}:${h.port}" in reachable
-            if (!online) continue
+            // Reachable means it answered the probe — an advert would say yes for a host that
+            // is asleep, and this asks it a question only a live host can answer.
+            if ("${h.address}:${h.port}" !in reachable) continue
             // Stamp BEFORE the request, so a slow host cannot make every push spawn another.
             if (now - (hostActionsAt[h.fpHex] ?: 0L) < HOST_ACTIONS_TTL_MS) continue
             hostActionsAt[h.fpHex] = now

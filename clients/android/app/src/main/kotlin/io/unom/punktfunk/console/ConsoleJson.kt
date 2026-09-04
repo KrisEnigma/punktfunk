@@ -74,7 +74,10 @@ internal object ConsoleJson {
         for (h in saved.sortedBy { it.name.lowercase() }) {
             val key = rowKey(h.fpHex, h.address, h.port)
             val advert = advertFor(h)
-            val online = advert != null || "${h.address}:${h.port}" in reachable
+            // Presence is the probe alone. An advert only says where to look: a suspending host
+            // sends no mDNS goodbye, so its record lingers for up to 75 minutes — long enough to
+            // keep the pip green and, since `can_wake` reads `!online`, the Wake row hidden.
+            val online = "${h.address}:${h.port}" in reachable
             val base = JSONObject()
                 .put("key", key)
                 .put("name", h.name.ifBlank { h.address })

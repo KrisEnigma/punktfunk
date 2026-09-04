@@ -119,7 +119,7 @@ internal fun ConnectGrid(
         // streaming cert, so it needs a paired identity and a host that is answering. It belongs
         // HERE too and not only in the console: a device whose console never comes up is exactly
         // the one whose logs somebody needs, and the touch home was its only shell.
-        if (pin == null && kh.paired && kh.isOnline(discovered, reachable)) {
+        if (pin == null && kh.paired && kh.isOnline(reachable)) {
             add(HostMenuItem("Send logs to host") { onSendLogs(kh) })
         }
         // The host's own actions — sleep, restart, shut it down (`design/host-actions.md` §7),
@@ -279,7 +279,7 @@ internal fun ConnectGrid(
                         name = kh.name,
                         address = "${kh.address}:${kh.port}",
                         status = if (kh.paired) HostStatus.PAIRED else HostStatus.TOFU,
-                        online = kh.isOnline(discovered, reachable),
+                        online = kh.isOnline(reachable),
                         // Live advert preferred (the store lags a discovery tick), else stored.
                         os = discovered.firstOrNull { kh.matches(it) && it.os.isNotEmpty() }?.os
                             ?: kh.os,
@@ -297,7 +297,7 @@ internal fun ConnectGrid(
                         // and waits for the host to come online (matched by fingerprint, so a new DHCP
                         // address on a cold boot still counts as "up") rather than firing a single
                         // silent packet.
-                        onWake = if (pin == null && kh.mac.isNotEmpty() && !kh.isOnline(discovered, reachable)) {
+                        onWake = if (pin == null && kh.mac.isNotEmpty() && !kh.isOnline(reachable)) {
                             ({ onWake(kh) })
                         } else {
                             null
