@@ -56,14 +56,16 @@ const STALE_MS = 60_000;
 // Steam shows the page of the app it launched or just closed. For a stream that is the hidden
 // per-game shortcut, whose page is nothing a user should see; the place to be is the Steam
 // title's own page. Back first — the title's page is normally what lies beneath — and only if
-// that landed elsewhere, navigate to it. Throttled per shortcut so a stuck stack cannot spin.
-const redirectedAt = new Map<number, number>();
+// that landed elsewhere, navigate to it. Steam shows one page at a time, so throttling the most
+// recent shortcut is enough to stop a stuck stack spinning.
+const REDIRECT_THROTTLE_MS = 1500;
+let lastRedirect = { shortcutAppId: 0, at: 0 };
 function redirectShortcutPage(shortcutAppId: number, steamAppId: number): void {
   const now = Date.now();
-  if (now - (redirectedAt.get(shortcutAppId) ?? 0) < 1500) {
+  if (lastRedirect.shortcutAppId === shortcutAppId && now - lastRedirect.at < REDIRECT_THROTTLE_MS) {
     return;
   }
-  redirectedAt.set(shortcutAppId, now);
+  lastRedirect = { shortcutAppId, at: now };
   diag(`game page: shortcut ${shortcutAppId} stands for ${steamAppId} — returning to its page`);
   const target = `/library/app/${steamAppId}`;
   setTimeout(() => {
@@ -178,18 +180,32 @@ function reachPlayBar(ret: ReactElement, game: Game): boolean {
   if (!section) {
     return false;
   }
+  // A new title starts the watch over: the row has to be found on THIS page, and Steam's tree
+  // can move under a client update mid-session.
+  if (currentGame?.appId !== game.appId) {
+    reachedRow = false;
+    clearRowTimer();
+  }
   currentGame = game;
   sections.patch(section);
   if (!reachedRow && !rowTimer) {
     // The row only shows up once the children have rendered; a few seconds without it means
     // Steam's tree has moved, and the trace above says where the walk stopped.
     rowTimer = setTimeout(() => {
+      rowTimer = null;
       if (!reachedRow) {
         diag("game page: the play bar was not reached — Steam's page tree has changed");
       }
     }, 4000);
   }
   return true;
+}
+
+function clearRowTimer(): void {
+  if (rowTimer) {
+    clearTimeout(rowTimer);
+    rowTimer = null;
+  }
 }
 
 /**
@@ -278,6 +294,8 @@ export function installGamePageStream(): () => void {
     routerHook.removePatch(ROUTE, patch);
     sections.reset();
     resetPlayFrom();
+    clearRowTimer();
     reachedRow = false;
+    currentGame = null;
   };
 }

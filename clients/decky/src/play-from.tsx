@@ -83,10 +83,16 @@ let watching = false;
 
 function rerenderPlayButtons(): void {
   for (const inst of instances) {
+    // forceUpdate on an unmounted component is a silent no-op, never a throw, so the updater is
+    // what says whether this one is still on screen. Without it the set grows for the session.
+    if (inst.updater?.isMounted?.(inst) === false) {
+      instances.delete(inst);
+      continue;
+    }
     try {
       inst.forceUpdate();
     } catch {
-      instances.delete(inst); // unmounted
+      instances.delete(inst);
     }
   }
 }
@@ -203,15 +209,18 @@ const playButtonPatcher = createRenderPatcher((out, self) => {
   ensureWatching();
   const game = gameOf(overview);
 
+  const hosts = hostsForApp(game.appId, getHostStore().views);
   const dropdown = collectElements(
     out,
     (x) => !!x?.props && "overview" in x.props && typeof x.props.onClick === "function" && !Array.isArray(x.props.children),
   )[0];
-  if (dropdown) {
+  // Only where we have a host to add. The rebuilt menu leaves out Steam's own "Play on another
+  // device" explainer, so a title no host carries keeps Steam's menu exactly as Steam drew it.
+  if (dropdown && hosts.length > 0) {
     dropdown.props.onClick = (e: any) => openPlayFromMenu(overview, e?.currentTarget ?? undefined);
   }
 
-  const host = selectedHost(game.appId, hostsForApp(game.appId, getHostStore().views));
+  const host = selectedHost(game.appId, hosts);
   if (!host) {
     return out;
   }

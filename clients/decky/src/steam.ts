@@ -366,6 +366,8 @@ function recall(key: string): number | null {
 // shortcuts. Gated in localStorage so we don't rewrite Steam's config dir on every launch; bump
 // CONFIG_VERSION to force a reinstall after the shipped .vdf changes.
 const CONFIG_KEY = "punktfunk:controllerConfig";
+// Per-game layouts hang off the same name, one per game title (see ensureGameControllerConfig).
+const GAME_CONFIG_PREFIX = "punktfunk:controllerConfig:";
 const CONFIG_VERSION = 1;
 async function ensureControllerConfig(): Promise<void> {
   try {
@@ -537,8 +539,16 @@ export function gameShortcutFor(steamAppId: number): number | null {
   return recall(gameKey(steamAppId));
 }
 
+// Read from storage once and kept in step with our own writes — nothing else touches these
+// keys. isOurShortcut runs for every app Steam starts or stops, and a full storage scan there
+// is work for nothing.
+let pairCache: Array<[number, number]> | null = null;
+
 /** Every (steam appid → shortcut appId) pair on record. */
 function gameShortcutPairs(): Array<[number, number]> {
+  if (pairCache) {
+    return pairCache;
+  }
   const pairs: Array<[number, number]> = [];
   try {
     for (let i = 0; i < localStorage.length; i++) {
@@ -552,10 +562,35 @@ function gameShortcutPairs(): Array<[number, number]> {
         pairs.push([steamAppId, shortcut]);
       }
     }
+    pairCache = pairs; // only a scan that finished; a failed one must be retried, not cached
   } catch {
     /* storage unavailable */
   }
   return pairs;
+}
+
+/** Record the shortcut minted for a title; the pair cache is rebuilt on the next read. */
+function rememberGameShortcut(steamAppId: number, appId: number): void {
+  remember(gameKey(steamAppId), appId);
+  pairCache = null;
+}
+
+/** Every key under `prefix`, gone. Collected before removing — removing shifts the indices. */
+function removeByPrefix(prefix: string): void {
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(prefix)) {
+        keys.push(key);
+      }
+    }
+    for (const key of keys) {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    /* storage unavailable */
+  }
 }
 
 /** The Steam title a per-game shortcut stands for, or null for any other appid. */
@@ -674,7 +709,7 @@ async function ensureGameControllerConfig(title: string): Promise<void> {
   if (title.includes('"')) {
     return;
   }
-  const key = `punktfunk:controllerConfig:${title.toLowerCase()}`;
+  const key = `${GAME_CONFIG_PREFIX}${title.toLowerCase()}`;
   try {
     if (localStorage.getItem(key) === `${CONFIG_VERSION}`) {
       return;
@@ -708,7 +743,7 @@ async function doEnsureGameShortcut(
     remembered != null && (await shortcutStillExists(remembered)) ? remembered : null;
   if (appId == null) {
     appId = await SteamClient.Apps.AddShortcut(title, SHELL, startDir, "");
-    remember(gameKey(steamAppId), appId);
+    rememberGameShortcut(steamAppId, appId);
     try {
       localStorage.removeItem(gameArtKey(appId)); // a recycled appId must not skip its art
     } catch {
@@ -751,11 +786,14 @@ export function removeGameShortcuts(): number {
       }
       localStorage.removeItem(gameKey(steamAppId));
       localStorage.removeItem(gameArtKey(shortcut));
+      running.delete(shortcut); // ours only — a generic stream that is up keeps its state
     } catch (e) {
       console.warn("punktfunk: game shortcut not removed", e);
     }
   }
-  running.clear();
+  // The per-game layouts are keyed by game name, so no appid can find them.
+  removeByPrefix(GAME_CONFIG_PREFIX);
+  pairCache = null;
   notifyRunning();
   return removed;
 }
