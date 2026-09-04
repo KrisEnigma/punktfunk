@@ -23,10 +23,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
-- **The Windows driver protocol floor is 7.** The pf-vdisplay driver encodes what DWM composes
-  and the host reads access units, so a host and a driver from different releases no longer
-  share a video transport. Install the matching pair — they ship in one installer, and a
-  mismatch ends the session with a "driver outdated" error naming both versions.
+- **The Windows driver protocol floor is 8.** The pf-vdisplay driver encodes what DWM composes
+  and answers only to the host process that created each monitor, so a host and a driver from
+  different releases share neither a video transport nor an ownership rule. Install the
+  matching pair — they ship in one installer, and a mismatch ends the session with a "driver
+  outdated" error naming both versions.
 - **A Windows driver update restarts the display device.** The encoder lives inside
   `pf_vdisplay.dll` now, so applying one flaps the virtual display where a host-only update did
   not. Schedule it like a driver update: expect a brief black screen on the release that carries
@@ -42,6 +43,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **A settings profile can be bound to one library title.** `KnownHost.game_profiles` maps a
+  title id to a profile id, and resolution now runs one-off ▸ title ▸ host ▸ globals — raise
+  Options on a cover and pick "Settings profile…". Nothing changes until you bind one; a
+  deleted profile drops the title back to the host's default rather than to raw globals.
+- **The controller-UI switch reaches webOS.** "Controller-optimized UI" and "Show it" are
+  offered wherever a client has a second interface to fall back to, which now includes the TV
+  client's cursor UI. The two stored keys lost their `android.` prefix (`gamepad_ui_enabled`,
+  `gamepad_ui_mode`); nothing persisted under the old names, so there is nothing to migrate.
 - **`guide` and `qam` quick-action slots.** The `overlay_actions` blob takes two more built-in
   ids, each a one-shot tap of a system button on the host's pad (`BTN_GUIDE`, `BTN_MISC1`) —
   the same verb the session control socket's `guide`/`qam` already exposed. An older client
@@ -227,6 +236,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A sleeping host now reads Offline, and auto-wake fires for it.** Every client took a live mDNS
+  advert as proof of life, but a suspending host sends no goodbye and its record lingers for up to
+  75 minutes — so the pip stayed green and Wake-on-LAN, gated on "not advertising", never fired.
+  Presence is now the reachability probe alone on all six surfaces; nothing to do.
 - **The quick-action dial follows the left stick on Apple and Android.** Both clients read the
   stick as a four-way step, so reaching a slot walked the whole dial one disc at a time; they now
   aim at the sector the thumb points at, as the desktop clients already did. Nothing to do — the

@@ -216,8 +216,7 @@ struct GamepadHomeView: View {
                 // TTL-gated inside, so an ordinary lap costs nothing — but a game started on the
                 // host while this screen is up shows up on the tile within a lap or two.
                 for host in store.hosts
-                where host.pinnedSHA256 != nil
-                    && (discovery.advertises(host) || store.probedOnline.contains(host.id)) {
+                where host.pinnedSHA256 != nil && store.probedOnline.contains(host.id) {
                     nowPlaying.refresh(host)
                 }
                 try? await Task.sleep(for: .seconds(10))
@@ -592,9 +591,9 @@ struct GamepadHomeView: View {
     private var tiles: [HomeTile] {
         var saved: [HomeTile] = []
         for host in store.hosts {
-            // Online = advertising on mDNS OR proven reachable by the probe (a routed/VPN host
-            // never advertises); the wake item is offered only when neither holds.
-            let online = discovery.advertises(host) || store.probedOnline.contains(host.id)
+            // Online = proven reachable by the probe; a live advert is a cache a sleeping host
+            // keeps warm for up to 75 minutes. The wake item is offered only when this is false.
+            let online = store.probedOnline.contains(host.id)
             let bound = profiles.binding(for: host)
             let connecting = model.phase == .connecting && model.activeHost?.id == host.id
             // The host's own tile, then one per pinned profile — the same order the touch grid
@@ -667,7 +666,7 @@ struct GamepadHomeView: View {
         GamepadHostOptionsView(
             host: host,
             pinnedProfile: target.profile,
-            isOnline: discovery.advertises(host) || store.probedOnline.contains(host.id),
+            isOnline: store.probedOnline.contains(host.id),
             canWake: autoWakeEnabled && PunktfunkConnection.wakeOnLANAvailable
                 && !host.wakeMacs.isEmpty,
             onEdit: {

@@ -68,6 +68,13 @@ data class KnownHost(
      * that no longer exist are dropped when the cards are rendered.
      */
     val pinnedProfileIds: List<String> = emptyList(),
+    /**
+     * Library title id → profile id: what launching that title streams with. Beats [profileId],
+     * which is what a title with no entry here inherits, and is itself beaten by a one-off pick.
+     * Mirrors the Rust `KnownHost.game_profiles`. A dangling id falls through to [profileId], the
+     * way a dangling pin simply disappears — never an error, never a blocked launch.
+     */
+    val gameProfiles: Map<String, String> = emptyMap(),
 ) {
     /**
      * Where this host's management API actually is: the port learned from its advert, else 47990.
@@ -227,6 +234,7 @@ class KnownHostStore(context: Context) {
             clipboardSync = j.optBoolean("clip", false),
             profileId = j.optString("profile", "").ifEmpty { null },
             pinnedProfileIds = stringList(j.optJSONArray("pins")),
+            gameProfiles = stringMap(j.optJSONObject("game_profiles")),
         )
     }.getOrNull()
 
@@ -311,11 +319,19 @@ class KnownHostStore(context: Context) {
             .put("clip", host.clipboardSync)
             .put("profile", host.profileId ?: "")
             .put("pins", JSONArray(host.pinnedProfileIds))
+            .put("game_profiles", JSONObject(host.gameProfiles))
             .toString()
 
         private fun stringList(a: JSONArray?): List<String> {
             if (a == null) return emptyList()
             return (0 until a.length()).mapNotNull { a.optString(it, "").ifEmpty { null } }
+        }
+
+        private fun stringMap(o: JSONObject?): Map<String, String> {
+            if (o == null) return emptyMap()
+            return o.keys().asSequence()
+                .mapNotNull { k -> o.optString(k, "").ifEmpty { null }?.let { k to it } }
+                .toMap()
         }
     }
 }

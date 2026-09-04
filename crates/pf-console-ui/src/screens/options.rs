@@ -36,8 +36,8 @@ enum Action {
     Library,
     CopyLink,
     Edit,
-    /// [`Screen::BindProfile`] for the primary tile. Not on a pin: the pin is
-    /// the profile.
+    /// [`Screen::BindProfile`] for the primary tile, or for a library title. Not on
+    /// a pin: the pin is the profile.
     BindProfile,
     /// Per-host [`KnownHost::clipboard_sync`]. Lives on the host, not Settings:
     /// the other end of the pipe is this machine.
@@ -135,10 +135,18 @@ impl OptionsScreen {
     fn actions(&self, _platform: crate::platform::Platform) -> Vec<Action> {
         let host = match &self.subject {
             Subject::Host(h) => h,
-            // Not Play: the tile's A already launches. Connect is a different press —
-            // it starts nothing — and leads because on a shelf with a game up it is
-            // the row you came for; the cursor starts at 0.
-            Subject::Game { .. } => return vec![Action::Connect, Action::CopyLink, Action::Cancel],
+            // Not Play: the tile's A already launches THIS title. Connect is the other
+            // press — it starts nothing — and leads because on a shelf with a game up it
+            // is the row you came for. Settings profile is the one place a per-title
+            // override can be set, so it ships even with an empty catalog.
+            Subject::Game { .. } => {
+                return vec![
+                    Action::Connect,
+                    Action::CopyLink,
+                    Action::BindProfile,
+                    Action::Cancel,
+                ]
+            }
         };
         if host.pin.is_some() {
             return vec![Action::Unpin, Action::CopyLink, Action::Cancel];
@@ -190,7 +198,10 @@ impl OptionsScreen {
             Action::Library => "Library".into(),
             Action::CopyLink => "Copy link".into(),
             Action::Edit => "Edit\u{2026}".into(),
-            Action::BindProfile => "Default profile\u{2026}".into(),
+            Action::BindProfile => match self.subject {
+                Subject::Game { .. } => "Settings profile\u{2026}".into(),
+                Subject::Host(_) => "Default profile\u{2026}".into(),
+            },
             Action::Clipboard => format!(
                 "Shared clipboard: {}",
                 if self.host().clipboard_sync {
@@ -352,13 +363,29 @@ impl OptionsScreen {
             Action::Edit => fx.replace(Screen::AddHost(super::add_host::AddHostScreen::edit(
                 self.host(),
             ))),
-            Action::BindProfile => fx.replace(Screen::BindProfile(
-                super::bind_profile::BindProfileScreen::new(
-                    key,
-                    self.host().name.clone(),
-                    store.profiles(),
-                ),
-            )),
+            // Same screen either way; the subject decides which binding it writes.
+            Action::BindProfile => {
+                let host_name = self.host().name.clone();
+                let screen = match &self.subject {
+                    Subject::Game { id, title, .. } => {
+                        super::bind_profile::BindProfileScreen::for_game(
+                            key,
+                            host_name,
+                            super::bind_profile::GameSubject {
+                                id: id.clone(),
+                                title: title.clone(),
+                            },
+                            store.profiles(),
+                        )
+                    }
+                    Subject::Host(_) => super::bind_profile::BindProfileScreen::new(
+                        key,
+                        host_name,
+                        store.profiles(),
+                    ),
+                };
+                fx.replace(Screen::BindProfile(screen));
+            }
             Action::Clipboard => {
                 let host = self.host();
                 let on = !host.clipboard_sync;
@@ -539,6 +566,7 @@ mod tests {
             pin: None,
             bound_profile: None,
             running: String::new(),
+            game_profiles: Default::default(),
         }
     }
 
@@ -858,12 +886,20 @@ mod tests {
     /// Still nothing the cover already does — the shelf's A launches this title, and no row
     /// here repeats it. Connect is the other press: it starts nothing.
     #[test]
-    fn a_title_offers_the_link_and_nothing_its_cover_already_does() {
+    fn a_title_offers_the_link_its_profile_and_nothing_its_cover_already_does() {
         let s = OptionsScreen::for_game(&host(), &game());
+        // No Play row: the cover's own A launches. Connect and the profile row are the
+        // verbs a title owns that nothing else on the shelf offers.
         assert_eq!(
             s.actions(crate::platform::Platform::Desktop),
-            vec![Action::Connect, Action::CopyLink, Action::Cancel]
+            vec![
+                Action::Connect,
+                Action::CopyLink,
+                Action::BindProfile,
+                Action::Cancel
+            ]
         );
+        assert_eq!(s.label(Action::BindProfile), "Settings profile\u{2026}");
         // Cursor starts at 0: the row that gets you onto the host is under confirm.
         assert_eq!(s.list.cursor, 0);
         assert_eq!(s.title(), "Hollow Knight");

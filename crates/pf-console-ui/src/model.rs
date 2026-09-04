@@ -4,7 +4,7 @@
 //! network or disk rides a [`ConsoleCmd`] — the overlay never blocks.
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// Resolved catalog entry. The service thread opens the profiles file; the shell never
@@ -63,6 +63,11 @@ pub struct HostRow {
     /// coming back claiming a game is up because it was up last night.
     #[serde(default)]
     pub running: String,
+    /// Library title id → profile id (`KnownHost::game_profiles`), for the bind screen's
+    /// checkmark. Ids, not chips: the shell only compares them, and a title's binding
+    /// outranks `bound_profile` at launch, which the host resolves.
+    #[serde(default)]
+    pub game_profiles: BTreeMap<String, String>,
 }
 
 /// One host-offered action, resolved from `GET /api/v1/actions`
@@ -237,11 +242,14 @@ pub enum ConsoleCmd {
         profile_id: String,
         pin: bool,
     },
-    /// Bind or clear a saved host's default profile (`KnownHost::profile_id`).
-    /// [`Self::SetPin`] is presentation; this is the binding. `None` clears.
-    /// Idempotent.
+    /// Bind or clear a profile. `game` names a library title
+    /// (`KnownHost::game_profiles`); `None` binds the host's own default
+    /// (`KnownHost::profile_id`). [`Self::SetPin`] is presentation; this is the
+    /// binding. `profile_id: None` clears. Idempotent.
     BindProfile {
         key: String,
+        #[serde(default)]
+        game: Option<String>,
         profile_id: Option<String>,
     },
     /// Per-host clipboard share while streaming (`KnownHost::clipboard_sync`).
@@ -322,6 +330,7 @@ mod tests {
             pin: None,
             bound_profile: None,
             running: String::new(),
+            game_profiles: Default::default(),
         };
         shared.set_hosts(vec![row.clone()]);
         let g1 = shared.hosts_gen();

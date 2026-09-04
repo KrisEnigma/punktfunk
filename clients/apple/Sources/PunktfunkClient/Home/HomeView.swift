@@ -308,10 +308,11 @@ struct HomeView: View {
             grouping: HostGrouping(rawValue: groupingRaw) ?? .none)
     }
 
-    /// Online = advertising on mDNS OR answered the reachability probe (a routed/VPN host never
-    /// advertises). One definition, used by the cards and by the Status grouping alike.
+    /// Online = answered the last reachability probe. A live advert is deliberately NOT enough:
+    /// it is a cache entry a sleeping host keeps alive for up to 75 minutes (`HostStore.isReachable`).
+    /// One definition, used by the cards and by the Status grouping alike.
     private func isOnline(_ host: StoredHost) -> Bool {
-        discovery.advertises(host) || store.probedOnline.contains(host.id)
+        store.probedOnline.contains(host.id)
     }
 
     private func groupHeader(_ title: String, accent: String?) -> some View {

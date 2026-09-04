@@ -177,13 +177,15 @@ enum ShotMock {
                 pinnedSHA256: hostFingerprint(6), macAddresses: ["00:1a:2b:3c:4d:5e"],
                 osChain: "windows/11"),
         ]
+        // Which cards read ONLINE. Seeded, because presence is a live probe and a capture has no
+        // network — the same three hosts `discovery()` advertises, so both halves agree.
+        store.debugSetProbedOnline([battlestationID, livingRoomID, officeID])
         return store
     }
 
-    /// Discovery, seeded rather than live. Two saved hosts advertise (so their cards read ONLINE
-    /// through the real `advertises` path, and the reachability probe skips them — no network from
-    /// a capture), "Workshop" stays quiet so the grid shows an asleep machine, and one genuinely
-    /// new host populates the "On this network" section.
+    /// Discovery, seeded rather than live. Three saved hosts advertise (matching the seeded
+    /// reachable set above), "Workshop" stays quiet so the grid shows an asleep machine, and one
+    /// genuinely new host populates the "On this network" section.
     ///
     /// A live browse made the shot non-deterministic AND leaked whatever was on the capturing
     /// machine's LAN into the App Store listing.
