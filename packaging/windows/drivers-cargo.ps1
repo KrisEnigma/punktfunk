@@ -2,6 +2,10 @@
 .SYNOPSIS
   Run one cargo command in the driver workspace through a short filesystem root.
 
+.EXAMPLE
+  ..\drivers-cargo.ps1 'clippy -p pf-vdisplay --all-targets -- -D warnings'
+  The whole command is ONE quoted string; see the param note below for why.
+
 .DESCRIPTION
   The driver's encoder deps (pf-encode-win's `pyrowave` and `qsv` features) build PyroWave and
   oneVPL from source with CMake, and CMake probes the toolchain by building a tiny MSBuild
@@ -17,10 +21,13 @@
   pf-frame) live in crates/ and resolve UPWARD, which a drive mapped at the workspace has no
   parent for. Falls back to running in place when no drive letter is free.
 #>
-# $args, not a param() block: a [Parameter()] attribute makes this an advanced function, and the
-# binder then matches `-p` against its common parameters and fails as ambiguous with
-# -ProgressAction / -PipelineVariable. Cargo flags must reach cargo untouched.
-$CargoArgs = $args
+# ONE STRING, not $args and not a param() with [Parameter()]. Both lose arguments to PowerShell's
+# own binder: an attribute makes this an advanced function, so cargo's `-p` collides with
+# -ProgressAction/-PipelineVariable; and $args silently swallows the first `--`, which turns
+# `clippy ... -- -D warnings` into `-D warnings` for cargo itself ("unexpected argument '-D'").
+# A single quoted string reaches us intact and only cargo parses it.
+param([string]$CommandLine)
+$CargoArgs = $CommandLine -split '\s+' | Where-Object { $_ -ne '' }
 
 $ErrorActionPreference = 'Continue'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path

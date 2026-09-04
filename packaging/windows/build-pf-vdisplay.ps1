@@ -74,7 +74,7 @@ $dll = Join-Path $drvTarget 'x86_64-pc-windows-msvc\release\pf_vdisplay.dll'
 # --- 1. build (release) -----------------------------------------------------------------------
 if (-not $SkipBuild) {
     Write-Host "==> cargo build --release (pf-vdisplay) in $DriversDir (default target -> $drvTarget)"
-    & (Join-Path $PSScriptRoot 'drivers-cargo.ps1') build --release
+    & (Join-Path $PSScriptRoot 'drivers-cargo.ps1') 'build --release'
     $rc = $LASTEXITCODE
     if ($rc -ne 0) { throw "pf-vdisplay cargo build failed ($rc)" }
 }
