@@ -154,6 +154,97 @@ mergeInto(LibraryManager.library, {
     pfNet.ctl.write(HEAPU8.slice(ptr, ptr + len)).catch(function () {});
   },
 
+  // --- the device credential --------------------------------------------------------------
+  //
+  // A browser has no client certificate, so its identity is a WebCrypto P-256 keypair kept in
+  // IndexedDB with `extractable: false` — a script that reads the store gets a handle that can
+  // sign but cannot be copied out, and not even this file can read the private half. Rust holds
+  // the public SPKI and decides what to sign; everything below is key storage and the two
+  // format conversions WebCrypto forces (`r || s` here, DER on the wire — Rust converts).
+  $pfCred: {
+    key: null,
+
+    // The one keypair, generated on first use and reused forever after. A new key is a new
+    // device as far as the host is concerned, so losing it means pairing again.
+    load: function () {
+      if (pfCred.key) return Promise.resolve(pfCred.key);
+      return pfCred.db().then(function (db) {
+        return new Promise(function (resolve, reject) {
+          var tx = db.transaction("keys", "readonly").objectStore("keys").get("device");
+          tx.onsuccess = function () { resolve(tx.result); };
+          tx.onerror = function () { reject(tx.error); };
+        }).then(function (found) {
+          if (found) { pfCred.key = found; return found; }
+          return crypto.subtle
+            .generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])
+            .then(function (pair) {
+              return new Promise(function (resolve, reject) {
+                var tx = db.transaction("keys", "readwrite");
+                tx.objectStore("keys").put(pair, "device");
+                tx.oncomplete = function () { pfCred.key = pair; resolve(pair); };
+                tx.onerror = function () { reject(tx.error); };
+              });
+            });
+        });
+      });
+    },
+
+    db: function () {
+      return new Promise(function (resolve, reject) {
+        var open = indexedDB.open("punktfunk", 1);
+        open.onupgradeneeded = function () { open.result.createObjectStore("keys"); };
+        open.onsuccess = function () { resolve(open.result); };
+        open.onerror = function () { reject(open.error); };
+      });
+    },
+  },
+
+  // Load or mint the device key and hand Rust its SPKI plus this connection's certificate hash.
+  // Both are needed before anything can be signed: the hash is the channel binding.
+  pf_device_init__deps: ["$pfCred", "$UTF8ToString"],
+  pf_device_init: function (hashPtr) {
+    var hex = UTF8ToString(hashPtr);
+    pfCred.load().then(function (pair) {
+      return crypto.subtle.exportKey("spki", pair.publicKey).then(function (spki) {
+        var s = new Uint8Array(spki);
+        var hash = new Uint8Array(32);
+        for (var i = 0; i < 32; i++) hash[i] = parseInt(hex.substr(i * 2, 2), 16);
+        var p = _malloc(s.length + 32);
+        HEAPU8.set(s, p);
+        HEAPU8.set(hash, p + s.length);
+        Module._pf_device_set(p, s.length, p + s.length);
+        _free(p);
+        if (Module.__pfOnDeviceReady) Module.__pfOnDeviceReady();
+      });
+    }).catch(function (e) {
+      console.error("punktfunk: no device key", e);
+    });
+    return 1;
+  },
+
+  // Sign whatever Rust is currently waiting on. WebCrypto returns raw `r || s`; Rust wraps it
+  // as DER, which is the only shape the host's verifier accepts.
+  pf_device_sign__deps: ["$pfCred"],
+  pf_device_sign: function () {
+    var ptr = Module._pf_cred_sign_ptr();
+    var len = Module._pf_cred_sign_len();
+    if (!ptr || !len || !pfCred.key) return 0;
+    var msg = HEAPU8.slice(ptr, ptr + len);
+    crypto.subtle
+      .sign({ name: "ECDSA", hash: "SHA-256" }, pfCred.key.privateKey, msg)
+      .then(function (sig) {
+        var raw = new Uint8Array(sig);
+        var p = _malloc(raw.length);
+        HEAPU8.set(raw, p);
+        Module._pf_cred_signed(p, raw.length);
+        _free(p);
+      })
+      .catch(function (e) {
+        console.error("punktfunk: signing failed", e);
+      });
+    return 1;
+  },
+
   // --- video ----------------------------------------------------------------------------------
   //
   // R3: what crosses is the encoded access unit. The decoded frame goes from `VideoDecoder`

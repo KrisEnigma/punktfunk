@@ -991,6 +991,10 @@
 
 #define PUNKTFUNK_MSG_PAIR_RESULT 19
 
+#define PUNKTFUNK_MSG_AUTH_CHALLENGE 20
+
+#define PUNKTFUNK_MSG_AUTH_RESPONSE 21
+
 // Implied by [`PEN_TOUCHING`]; [`PenTracker`] ORs it so a client that only sets TOUCHING still looks in-range.
 #define PUNKTFUNK_PEN_IN_RANGE 1
 

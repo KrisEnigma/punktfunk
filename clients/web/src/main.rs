@@ -26,6 +26,13 @@ fn main() {
     // `pf_start` once it has sized the canvas.
 }
 
+// Neither is gated: nothing in them is browser-specific, and off wasm is where their tests run.
+// The SPAKE2 half in particular is checked against the host's own role B, which a wasm-only
+// test would never execute.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+mod credential;
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+mod ecdsa;
 #[cfg(target_family = "wasm")]
 mod host;
 #[cfg(target_family = "wasm")]

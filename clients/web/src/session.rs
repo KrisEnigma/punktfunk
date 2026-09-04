@@ -13,9 +13,12 @@
 //! R3 holds throughout. An access unit leaves as a `(ptr, len)` view for `VideoDecoder`; no
 //! decoded pixel ever enters this heap.
 
+use crate::credential::{self, Cred};
 use crate::transport::WebTransportDatagrams;
 use punktfunk_core::config::{CompositorPref, GamepadPref, Mode, Role};
-use punktfunk_core::quic::{Hello, Start, Welcome, MAGIC};
+use punktfunk_core::quic::{
+    AuthChallenge, Hello, PairChallenge, PairResult, Start, Welcome, MAGIC,
+};
 use punktfunk_core::session::Session;
 use std::cell::RefCell;
 
@@ -24,6 +27,9 @@ use std::cell::RefCell;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
     Idle,
+    /// The page has asked for a stream but the host's nonce has not arrived, so we do not yet
+    /// know whether this connection wants a credential. `Hello` waits here.
+    Held,
     /// `Hello` written, waiting for the host's `Welcome`.
     Offered,
     /// Streaming: `Session` is up and `poll_frame` yields access units.
@@ -45,6 +51,9 @@ struct Client {
     height: u32,
     /// Access units delivered, so the page can tell "connected" from "streaming".
     frames: u64,
+    /// Written but not sent: the host asks for a credential before it will read this, and only
+    /// the page can produce one.
+    pending_hello: Option<Hello>,
 }
 
 impl Client {
@@ -57,6 +66,7 @@ impl Client {
             width: 0,
             height: 0,
             frames: 0,
+            pending_hello: None,
         }
     }
 }
@@ -99,9 +109,11 @@ fn take_msg(inbox: &mut Vec<u8>) -> Option<Vec<u8>> {
     Some(body)
 }
 
-/// Open the session: send `Hello` for a stream of `width` × `height` at `fps`.
+/// Open the session: offer a stream of `width` × `height` at `fps`.
 ///
-/// Called once the page's control stream is up. The reply arrives through [`pf_ctl_recv`].
+/// Called once the page's control stream is up. `Hello` does not necessarily go out here — the
+/// host opens with a nonce, and if this browser holds a device key the credential is offered
+/// first. The reply arrives through [`pf_ctl_recv`].
 #[unsafe(no_mangle)]
 pub extern "C" fn pf_session_hello(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> i32 {
     CLIENT.with(|c| {
@@ -132,10 +144,79 @@ pub extern "C" fn pf_session_hello(width: u32, height: u32, fps: u32, bitrate_kb
             audio_rate_hz: 0,
             audio_bits: 0,
         };
-        write_msg(&hello.encode());
-        c.phase = Phase::Offered;
+        c.pending_hello = Some(hello);
+        c.phase = Phase::Held;
+        // The nonce may already have arrived and be waiting on exactly this call.
+        release_hello(&mut c);
         1
     })
+}
+
+/// Send `Hello` if nothing is still owed to the host.
+///
+/// Called from both sides of the race: the page can ask for a stream before the host's nonce
+/// lands, or after. `Cred::NeedsSignature` means the page is still signing, so this waits.
+fn release_hello(c: &mut Client) {
+    if c.phase != Phase::Held || credential::phase() == Cred::NeedsSignature {
+        return;
+    }
+    if let Some(hello) = c.pending_hello.take() {
+        write_msg(&hello.encode());
+        c.phase = Phase::Offered;
+    }
+}
+
+/// The page has signed the host's nonce. Send the credential, then the `Hello` it was holding.
+///
+/// # Safety
+/// `sig` must point to 64 readable bytes: WebCrypto's raw `r || s` for P-256.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pf_cred_signed(sig: *const u8, len: u32) -> i32 {
+    if sig.is_null() || len != 64 {
+        return 0;
+    }
+    // SAFETY: the caller guarantees 64 readable bytes, copied out here and not held.
+    let raw: [u8; 64] = unsafe { std::slice::from_raw_parts(sig, 64) }
+        .try_into()
+        .expect("64 bytes");
+    let Some(response) = credential::auth_response(&raw) else {
+        return 0;
+    };
+    write_msg(&response);
+    CLIENT.with(|c| release_hello(&mut c.borrow_mut()));
+    1
+}
+
+/// Begin pairing with the PIN the host is showing. Ends this connection either way — the host
+/// closes after the ceremony, and the page reconnects to stream.
+///
+/// # Safety
+/// Both pointers must reference their stated number of readable UTF-8 bytes for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pf_pair_begin(
+    pin: *const u8,
+    pin_len: u32,
+    name: *const u8,
+    name_len: u32,
+) -> i32 {
+    if pin.is_null() || name.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller guarantees both ranges; both are copied into owned `String`s here.
+    let (pin, name) = unsafe {
+        (
+            String::from_utf8_lossy(std::slice::from_raw_parts(pin, pin_len as usize)).into_owned(),
+            String::from_utf8_lossy(std::slice::from_raw_parts(name, name_len as usize))
+                .into_owned(),
+        )
+    };
+    let Some(req) = credential::pair_begin(&pin, &name) else {
+        return 0;
+    };
+    // The stream is a pairing one now; nothing will answer a `Hello` on it.
+    CLIENT.with(|c| c.borrow_mut().pending_hello = None);
+    write_msg(&req);
+    1
 }
 
 /// Control-stream bytes from the browser. Copied in, then parsed as messages complete.
@@ -168,6 +249,21 @@ pub unsafe extern "C" fn pf_ctl_recv(ptr: *const u8, len: u32) {
                         c.phase = Phase::Failed;
                     }
                 }
+                continue;
+            }
+            // The credential plane. Each decode checks its own magic and type byte, so trying
+            // them in turn cannot confuse one message for another.
+            if let Ok(ch) = AuthChallenge::decode(&body) {
+                credential::on_challenge(&ch.nonce);
+                // No key, or nothing asked of us: whatever `Hello` is waiting can go.
+                release_hello(&mut c);
+            } else if let Ok(ch) = PairChallenge::decode(&body) {
+                match credential::on_pair_challenge(&ch) {
+                    Some(proof) => write_msg(&proof),
+                    None => println!("punktfunk-web: pairing rejected (wrong PIN, or a MITM)"),
+                }
+            } else if let Ok(r) = PairResult::decode(&body) {
+                credential::on_pair_result(&r);
             }
         }
     });
@@ -248,7 +344,8 @@ pub extern "C" fn pf_session_frames() -> u32 {
     CLIENT.with(|c| u32::try_from(c.borrow().frames).unwrap_or(u32::MAX))
 }
 
-/// `0` idle, `1` offered, `2` live, `3` failed. Small enough to poll from the page.
+/// `0` idle, `1` offered, `2` live, `3` failed, `4` holding for a credential. Small enough to
+/// poll from the page.
 #[unsafe(no_mangle)]
 pub extern "C" fn pf_session_phase() -> u32 {
     CLIENT.with(|c| match c.borrow().phase {
@@ -256,6 +353,7 @@ pub extern "C" fn pf_session_phase() -> u32 {
         Phase::Offered => 1,
         Phase::Live => 2,
         Phase::Failed => 3,
+        Phase::Held => 4,
     })
 }
 

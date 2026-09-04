@@ -81,6 +81,10 @@ whole arrangement and go back to the download.
 | `src/session.rs` | The handshake state machine and the pump that turns datagrams into access units. |
 | `web/video-surface.js` | The video plane (R2), WebGL2. |
 | `web/video-surface-webgpu.js` | The same seam on WebGPU — `importExternalTexture`, and the only HDR route either engine ships. |
+| `src/credential.rs` | The device key's protocol half: SPAKE2 role A, and the per-session signature. |
+| `src/ecdsa.rs` | WebCrypto's raw `r \|\| s` against the DER the host speaks. Portable, tested off wasm. |
+| `web/pf-connect.js` | Fetching the plane, and checking the host's attestation before dialling. |
+| `web/pf-connect.test.js` | That check against bytes a real host produced. `node --test`, no dependencies. |
 | `web/pf-glue.js` | Emscripten `--js-library`. **The only file that names a browser or GL object.** |
 
 `web/pf-glue.js` is load-bearing, not a detail. Rule R2 of the implementation plan says exactly one
@@ -111,6 +115,15 @@ cargo test -p punktfunk-client-web --target wasm32-unknown-emscripten
 what lets the source-scanning lint read the crate's own `src`; without it that one test fails on a
 missing directory.
 
+The credential's own tests run on the desktop, because neither `credential.rs` nor `ecdsa.rs`
+names a browser type and the SPAKE2 half is checked against the host's role B — which is the
+divergence worth catching:
+
+```sh
+cargo test -p punktfunk-client-web
+node --test clients/web/web/pf-connect.test.js
+```
+
 The wasm harness is **single-threaded**, which makes it stricter than the desktop one: libtest
 normally gives every test its own thread, and `theme::reduce_motion` is a thread-local, so tests
 that disagree about motion only stay isolated by accident there. State what a test needs rather
@@ -122,12 +135,12 @@ than inherit it.
   being constructed — and the symptom is `RuntimeError: Out of bounds memory access` from *every*
   export, including ones that do nothing. It reads like a corrupt module, not a stack overflow.
   The build asks for 4 MB, and `Client` boxes its session so the value never crosses the stack.
-- Nothing is paired, so the host serves any browser that reaches it. Pairing is Phase 3, and until
-  then the plane should stay off on any host you do not control.
 - The release module is **8.0 MB of wasm plus 114 KB of JS**, unstripped and un-`wasm-opt`ed. Plan
   §5.5 wants a measured heap ceiling; this is the payload half of it.
-- The ring is wired but nothing decodes yet. `pf_net_blast` / `pf_net_drain` exist to measure the
-  seam (plan §5.4) and to keep it exercised until the session pump lands on it in WP2.2.
+- **The private key is the pairing.** It lives in IndexedDB, non-extractable, so clearing site
+  data unpairs this browser and it must pair again. A private window is a different device every
+  time, by construction.
+- Audio, input and the console's real data are still missing; the browser streams video only.
 
 ## Streaming, end to end
 

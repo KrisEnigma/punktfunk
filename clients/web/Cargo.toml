@@ -22,10 +22,19 @@ pf-client-core = { path = "../../crates/pf-client-core", default-features = fals
 # build resolve two prebuilt keys, and the second one puts a source build of Skia on the critical
 # path. Only `host.rs` names it, to build the context and wrap the canvas.
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
-# `transport::Transport` and the wire's datagram ceiling. No features: the browser plane is
-# WebTransport, so nothing here wants `quic`.
-punktfunk-core = { path = "../../crates/punktfunk-core" }
 anyhow = "1"
+
+# Not in the wasm block, so `credential` and `ecdsa` compile — and their tests RUN — on a
+# developer's desktop and in CI. Neither names a browser type, and the protocol halves are
+# exactly what a wasm-only test would never execute.
+[dependencies]
+# `transport::Transport` and the wire's datagram ceiling. `pake`, not `quic`: the browser plane
+# is WebTransport, so the ceremony is wanted and the quinn runtime under it is not — which is
+# what splitting that feature was for.
+punktfunk-core = { path = "../../crates/punktfunk-core", features = ["pake"] }
+# The device fingerprint: SHA-256 of the WebCrypto key's SPKI, which is what the host stores.
+# Already in the tree via `pake`.
+sha2 = "0.11"
 
 [lints]
 workspace = true

@@ -25,7 +25,7 @@ tls = ["dep:rustls", "dep:sha2", "dep:rustls-pki-types"]
 # never on the per-frame hot path. Off by default so the core stays runtime-free.
 # The SPAKE2 pairing ceremony on its own, so a client that pairs over a transport quinn does
 # not speak (the browser, over WebTransport) can have it without the QUIC runtime.
-pake = ["dep:hmac", "dep:spake2"]
+pake = ["dep:hmac", "dep:spake2", "dep:sha2"]
 quic = ["tls", "pake", "dep:quinn", "dep:tokio", "dep:rcgen", "dep:opus"]
 # Blocking-HTTP clients that must speak the SAME pinned TLS as the QUIC plane: `tls::ureq_agent`
 # hands ureq a caller-built `rustls::ClientConfig` (which is how `PinVerify` gets installed —

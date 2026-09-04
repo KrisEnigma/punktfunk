@@ -21,10 +21,19 @@
   #pf-ui    { z-index: 1; }
   /* The UI is authored SDR and stays that way when the video plane goes HDR (§1 R5). */
   #pf-ui    { dynamic-range-limit: standard; }
-  #pf-fail {
+  #pf-fail, #pf-pair {
     position: fixed; inset: 0; z-index: 2; display: none;
     place-content: center; padding: 2rem; color: #eee; background: #000;
     font: 15px/1.5 system-ui, sans-serif; text-align: center;
+  }
+  #pf-pair input {
+    font: inherit; font-size: 2rem; letter-spacing: 0.4em; text-align: center;
+    width: 6em; padding: 0.4em; margin: 1rem 0.5rem; color: #eee;
+    background: #111; border: 1px solid #444; border-radius: 6px;
+  }
+  #pf-pair button {
+    font: inherit; padding: 0.6em 1.4em; color: #000; background: #eee;
+    border: 0; border-radius: 6px; cursor: pointer;
   }
 </style>
 
@@ -34,9 +43,19 @@
 </div>
 <div id="pf-fail"><p id="pf-fail-text"></p></div>
 
+<div id="pf-pair">
+  <p id="pf-pair-text"></p>
+  <input id="pf-pin" inputmode="numeric" autocomplete="off" maxlength="8" aria-label="Pairing PIN">
+  <button id="pf-pair-go">Pair</button>
+</div>
+
 <!-- `pf-glue.js` is not loaded here: it is emscripten's `--js-library`, linked INTO the module
      at build time so its functions run in the module's own scope (where `GL` lives). -->
 <script src="punktfunk-client-web.js"></script>
+<script type="module">
+  import { fetchPlane, verify, hosts, hostFingerprint } from "./pf-connect.js";
+  window.pfConnect = { fetchPlane, verify, hosts, hostFingerprint };
+</script>
 <script>
   // The page owns the loop and the canvas size; the wasm side owns what is drawn. Keeping
   // pacing here is deliberate — plan §5.3 measures rAF against the native presenter, and a
@@ -69,9 +88,124 @@
     const frame = () => {
       const [w, h] = sizeCanvases();
       mod._pf_frame(w, h);
+      pumpCredential();
+      mod._pf_session_pump();
       requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
+
+    // --- reaching a host ---------------------------------------------------------------------
+    //
+    // The order matters and is the whole trust story: learn the plane, check the attestation
+    // against what we stored at pairing, and only then dial. A browser that has never paired
+    // has nothing to check against and connects trust-on-first-use, which is what pairing over
+    // PAKE then fixes.
+    const say = (id, text) => {
+      for (const el of [pfFail, pfPair]) el.style.display = "none";
+      const el = document.getElementById(id);
+      document.getElementById(id + "-text").textContent = text;
+      el.style.display = "grid";
+    };
+    const pfFail = document.getElementById("pf-fail");
+    const pfPair = document.getElementById("pf-pair");
+
+    // The host serves this page, so its management origin is the page's own. A page opened from
+    // a file or another origin says so rather than guessing.
+    const mgmt = location.origin.startsWith("http") ? location.origin : null;
+    let plane = null;
+
+    // `stringToNewUTF8` mallocs. Every caller here frees, because these run on a reconnect loop
+    // and a page that leaks a string per attempt eventually stops connecting.
+    const withStr = (strings, f) => {
+      const ptrs = strings.map((s) => mod.stringToNewUTF8(s));
+      try {
+        return f(...ptrs.flatMap((p, i) => [p, lengthBytesUTF8(strings[i])]));
+      } finally {
+        for (const p of ptrs) mod._free(p);
+      }
+    };
+    const lengthBytesUTF8 = (s) => new TextEncoder().encode(s).length;
+
+    const connect = async () => {
+      if (!mgmt) return say("pf-fail", "Open this page from the host, not from a file.");
+      try {
+        plane = await pfConnect.fetchPlane(mgmt);
+      } catch (e) {
+        return say("pf-fail", `Could not reach the host: ${e.message}`);
+      }
+      const known = pfConnect.hosts.fingerprint(mgmt);
+      if (known) {
+        try {
+          await pfConnect.verify(plane, known);
+        } catch (e) {
+          // Refuse before dialling. A host that cannot prove it is the one we paired with may
+          // still be reachable — that is exactly the case this exists to catch.
+          return say("pf-fail", `${e.message}. Unpair this host to connect again.`);
+        }
+      }
+      // The key BEFORE the connection, not alongside it: the host's nonce arrives as soon as the
+      // control stream opens, and a key that is still coming out of IndexedDB would miss it.
+      withStr([plane.cert_hash_sha256], (p) => mod._pf_device_init(p));
+    };
+
+    // The device key is loaded and Rust has it. Now dial.
+    mod.__pfOnDeviceReady = () => {
+      const url = `https://${location.hostname}:${plane.port}/stream`;
+      const ok = withStr([url, plane.cert_hash_sha256], (u, _ul, h) =>
+        mod._pf_wt_connect(u, h),
+      );
+      if (!ok) say("pf-fail", "This browser refused the WebTransport session.");
+    };
+
+    // The control stream is up. Ask for a stream; Rust holds the `Hello` back if the host wants
+    // a credential first, and `pf_cred_phase` is how the page learns that it does.
+    mod.__pfOnCtlReady = () => {
+      if (!pfConnect.hosts.fingerprint(mgmt)) {
+        // Never paired with this host. Offer the PIN — the stream will be refused otherwise,
+        // unless the host was started with `serve --open`.
+        say("pf-pair", "Enter the PIN this host is showing.");
+        document.getElementById("pf-pin").focus();
+        return;
+      }
+      const [w, h] = sizeCanvases();
+      mod._pf_session_hello(w, h, 60, 20000);
+    };
+
+    // Poll rather than callback: signing is asynchronous, the phase can change on either side of
+    // it, and one check per frame costs nothing next to the draw.
+    const NEEDS_SIGNATURE = 2;
+    const PAIRED = 4;
+    const FAILED = 5;
+    let settled = false;
+    const pumpCredential = () => {
+      if (mod._pf_cred_phase() === NEEDS_SIGNATURE) mod._pf_device_sign();
+      if (settled || !plane) return;
+      if (mod._pf_cred_phase() === PAIRED) {
+        settled = true;
+        // The fingerprint stored is the long-lived identity's, not this plane's throwaway
+        // certificate — that one is replaced every twelve days.
+        pfConnect.hostFingerprint(plane).then((fp) => {
+          if (fp) pfConnect.hosts.remember(mgmt, fp);
+          say("pf-pair", "Paired. Reconnecting…");
+          // The host closes after the ceremony, as it does for native clients; streaming is a
+          // fresh connection.
+          setTimeout(() => location.reload(), 1200);
+        });
+      } else if (mod._pf_cred_phase() === FAILED) {
+        settled = true;
+        say("pf-fail", "That PIN was refused. Reload and try again.");
+      }
+    };
+
+    document.getElementById("pf-pair-go").addEventListener("click", () => {
+      const pin = document.getElementById("pf-pin").value.trim();
+      if (!pin) return;
+      const name = navigator.userAgent.includes("Safari") ? "Safari" : "Browser";
+      withStr([pin, name], (p, pl, n, nl) => mod._pf_pair_begin(p, pl, n, nl));
+      say("pf-pair", "Pairing…");
+    });
+
+    connect();
 
     // Index into the console's key table (`KEYS` in src/host.rs). Anything absent stays the
     // browser's — reload, devtools and find keep working while the console has focus.
