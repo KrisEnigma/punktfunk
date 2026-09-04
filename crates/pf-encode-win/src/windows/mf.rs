@@ -1178,7 +1178,9 @@ mod tests {
         mut on_frame: impl FnMut(&mut MfEncoder, u32),
     ) -> Option<Vec<AuMeta>> {
         use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-        use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, D3D11_SDK_VERSION};
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
+        };
 
         init_tracing();
         if !probe_can_encode(codec, None) {
@@ -1194,7 +1196,10 @@ mod tests {
                 None,
                 D3D_DRIVER_TYPE_HARDWARE,
                 windows::Win32::Foundation::HMODULE::default(),
-                Default::default(),
+                // The device manager refuses a device without this and the MFT then fails
+                // SET_D3D_MANAGER with a bare E_FAIL — the driver's pooled device carries it
+                // for the same reason.
+                D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 None,
                 D3D11_SDK_VERSION,
                 Some(&mut device),
