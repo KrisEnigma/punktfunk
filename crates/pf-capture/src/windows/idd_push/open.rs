@@ -82,6 +82,7 @@ impl IddPushCapturer {
         keepalive: Box<dyn Send>,
         cursor_sender: Option<crate::CursorChannelSender>,
         cursor_forward: Option<crate::CursorForwardSender>,
+        forwards_to_client: bool,
     ) -> std::result::Result<Self, (anyhow::Error, Box<dyn Send>)> {
         // Idempotent: first capturer starts it so stall logs can correlate DWM holes
         // with OS display events for the session's life.
@@ -95,6 +96,7 @@ impl IddPushCapturer {
             pyrowave,
             cursor_sender,
             cursor_forward,
+            forwards_to_client,
         ) {
             Ok(mut me) => {
                 me._keepalive = keepalive;
@@ -114,6 +116,9 @@ impl IddPushCapturer {
         pyrowave: bool,
         cursor_sender: Option<crate::CursorChannelSender>,
         cursor_forward: Option<crate::CursorForwardSender>,
+        // This session negotiated client-side cursor drawing (`HOST_CAP_CURSOR`). False ⇒ the
+        // pointer can only reach the wire through the driver pool's blend.
+        forwards_to_client: bool,
     ) -> Result<Self> {
         let (pw, ph, _hz) = preferred
             .context("IDD push needs the negotiated mode (WxH) to size the encoder's input")?;
@@ -228,19 +233,20 @@ impl IddPushCapturer {
                 }
             }
         });
-        // Sticky hardware-cursor declare from an earlier session still excludes
-        // the pointer from DWM frames. No live channel this session ⇒ force
-        // composite or there is no pointer at all. Gate on `cursor_shared`, not
-        // `cursor_sender`: delivery is allowed to fail non-fatally.
-        let composite_forced = target.cursor_excluded && cursor_shared.is_none();
+        // Sticky hardware-cursor declare from an earlier session keeps the pointer out of DWM's
+        // frames. Force the pool's blend whenever no CLIENT draws one. Not `cursor_shared` alone:
+        // a channel is delivered TO an excluded target as the blend's shape source, so that test
+        // cancelled the rescue with the very channel opened for it.
+        let composite_forced =
+            target.cursor_excluded && (!forwards_to_client || cursor_shared.is_none());
         if composite_forced {
             tracing::info!(
                 target_id = target.target_id,
-                negotiated_channel = cursor_sender.is_some(),
-                "target carries an irrevocable hardware-cursor declare from an earlier \
-                 desktop-mode session and this session has no LIVE cursor channel — nothing can \
-                 draw the pointer for it. negotiated_channel=true ⇒ one was negotiated but its \
-                 creation/delivery failed"
+                forwards_to_client,
+                have_channel = cursor_shared.is_some(),
+                "target carries an irrevocable hardware-cursor declare and no client draws the \
+                 pointer this session — the driver's pool blends it. have_channel=false ⇒ the \
+                 blend has no shape source either"
             );
         }
         // Same gate as the live channel. IddCx cannot deliver masked/monochrome

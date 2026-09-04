@@ -185,6 +185,24 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoCodecL
     .resolve::<LogErrorAndDefault>()
 }
 
+/// `NativeBridge.nativePyrowaveCapable(): Boolean` — can this device decode PyroWave?
+///
+/// Session-independent, unlike every other video query here: it asks the GPU, not the host, so
+/// Kotlin calls it before connecting to fold `CODEC_PYROWAVE` into the advertised codec bits and
+/// to decide whether the Settings picker offers the row at all. Cached in native after the first
+/// call (a Vulkan instance is created and destroyed to answer it), so this is safe to call from
+/// composition; the first call is the one to keep off the main thread.
+///
+/// Guarded like the teardown shims: this one runs third-party driver code, and a panic crossing
+/// `extern "system"` aborts the app. "No PyroWave" is the right answer for a driver that faults.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativePyrowaveCapable(
+    _env: EnvUnowned,
+    _this: JObject,
+) -> jboolean {
+    jni_guard(false, crate::pyro::available)
+}
+
 /// `NativeBridge.nativeVideoDecoderLabel(handle): String` — the resolved decoder identity for the
 /// HUD, e.g. `c2.qti.avc.decoder · low-latency`, or `""` before the decode thread has resolved one.
 /// One-shot (the decoder is fixed for the session); poll once after the HUD appears. Not

@@ -1,6 +1,6 @@
 # Must be static due to Granite::application_create() feedback.
 
-if (ANDROID)
+if (ANDROID AND NOT ${GRANITE_PLATFORM} MATCHES "null")
     add_granite_internal_static_lib(granite-platform application_android.cpp)
     find_package(game-activity REQUIRED CONFIG)
     find_package(games-controller REQUIRED CONFIG)

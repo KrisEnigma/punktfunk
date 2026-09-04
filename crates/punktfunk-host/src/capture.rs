@@ -198,10 +198,10 @@ pub fn capture_virtual_output(
     // life and closes when the manager retires it and the last session drops. An open control
     // handle vetoes the wake-from-sleep PnP cycle.
 
-    // Presence of this closure opts the session into v5 cursor-channel delivery
-    // (capturer creates CursorShm; driver declares the IddCx hardware cursor). A target an
-    // earlier session's declare already excludes gets one too: the driver's blend is the only
-    // pointer such a session can have.
+    // Presence of this closure opts the session into v5 cursor-channel delivery (capturer
+    // creates CursorShm; driver declares the IddCx hardware cursor). An already-excluded target
+    // gets one too — it is the shape source the pool's blend needs. Whether a CLIENT draws the
+    // pointer is `want.hw_cursor`, passed separately: the channel alone does not say.
     let control_cursor = control.clone();
     let want_channel = want.hw_cursor || target.cursor_excluded;
     let cursor_sender: Option<pf_capture::CursorChannelSender> = want_channel.then(|| {
@@ -254,6 +254,7 @@ pub fn capture_virtual_output(
         keep,
         cursor_sender,
         cursor_forward,
+        want.hw_cursor,
     )
     .map_err(|(e, _keep)| e.context("IDD-push capture open (no fallback)"))
 }

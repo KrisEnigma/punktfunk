@@ -48,6 +48,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   hidden per-game shortcut with the game's name, art and icon. Anyone wrapping
   `bin/punktfunkrun.sh` gains `PF_GAME=steam:<appid>` (passed as `punktfunk launch --game`), and
   the backend gains `library(ref)`, `game_art(appid, icon_hash)` and `save_icon(appid, png)`.
+- **The Android client decodes PyroWave.** A Vulkan 1.3 device with the codec's compute feature
+  set now advertises `CODEC_PYROWAVE` and decodes it as GPU compute into its own swapchain,
+  beside the MediaCodec path rather than through it. Nothing to do: the codec stays opt-in per
+  session, and a device without that feature set never offers the row.
 - **A Media Foundation encoder backend on Windows.** Every x64 vendor ships an H.264/HEVC MFT,
   so the driver now falls back to it when the native SDK open fails instead of ending the
   session; `PUNKTFUNK_ENCODER=mf` pins it. It encodes 8-bit 4:2:0 only, so an HDR or 4:4:4
@@ -133,6 +137,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **`--host` / `--client` choose what to install.** `--client` installs `punktfunk-client` from
   the family repo, or a user-scope flatpak where the family has none, so a distro with no
   punktfunk repo can run the client.
+- **SteamOS installs from the guided installer.** It is a family now rather than a refusal:
+  the install clones the source and runs `scripts/steamdeck/install.sh`, which owns groups,
+  linger and the service start, so the run hands over and stops there.
 - **`--demo <preset>` walks the whole flow against a canned machine.** It changes nothing —
   the plan is handed a runner that cannot spawn and a throwaway filesystem root.
 - **`PUNKTFUNK_INSTALL_OMARCHY_SETUP`** is the env twin for the Omarchy hand-off, which

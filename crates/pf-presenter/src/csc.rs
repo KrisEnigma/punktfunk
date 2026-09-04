@@ -31,7 +31,7 @@ impl CscPass {
             device,
             attachment_format,
             2,
-            include_bytes!("../shaders/nv12_csc.frag.spv"),
+            pf_client_core::video_csc_spv::NV12_CSC_FRAG,
         )
     }
 
@@ -43,7 +43,7 @@ impl CscPass {
             device,
             attachment_format,
             3,
-            include_bytes!("../shaders/planar_csc.frag.spv"),
+            pf_client_core::video_csc_spv::PLANAR_CSC_FRAG,
         )
     }
 
@@ -257,9 +257,10 @@ pub(crate) fn build_fullscreen_pipeline(
     frag_spv: &[u8],
     blend: bool,
 ) -> Result<vk::Pipeline> {
-    // include_bytes! alignment is unspecified; read_spv copies into aligned Vec<u32>.
+    // The blobs are `include_bytes!` in pf-client-core, whose alignment is unspecified;
+    // read_spv copies into an aligned Vec<u32>.
     let vert = ash::util::read_spv(&mut std::io::Cursor::new(
-        &include_bytes!("../shaders/fullscreen.vert.spv")[..],
+        pf_client_core::video_csc_spv::FULLSCREEN_VERT,
     ))?;
     let frag = ash::util::read_spv(&mut std::io::Cursor::new(frag_spv))?;
     // SAFETY: handles owned by this type live for the call; builder structs are locals that outlive it.

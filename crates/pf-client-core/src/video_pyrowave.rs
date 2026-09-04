@@ -22,7 +22,8 @@
 // this file means deleting markers with no caller contract, not wrapping the calls.
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::video::{ColorDesc, VulkanDecodeDevice};
+use crate::video_color::ColorDesc;
+use crate::video_vk::{QueueLock, VulkanDecodeDevice};
 use anyhow::{bail, Context as _, Result};
 use ash::vk;
 use ash::vk::Handle as _;
@@ -194,15 +195,15 @@ impl Hold {
 }
 
 /// Trampolines pyrowave calls around internal queue use. `userdata` is a raw pointer
-/// to the [`crate::video::QueueLock`] the decoder's Arc keeps alive.
+/// to the [`QueueLock`] the decoder's Arc keeps alive.
 unsafe extern "C" fn queue_lock_cb(ud: *mut c_void) {
     // SAFETY: `ud` is the QueueLock the decoder's Arc pins; pyrowave only calls this
     // while the decoder (and thus the Arc) lives.
-    unsafe { (*(ud as *const crate::video::QueueLock)).lock() }
+    unsafe { (*(ud as *const QueueLock)).lock() }
 }
 unsafe extern "C" fn queue_unlock_cb(ud: *mut c_void) {
     // SAFETY: as above.
-    unsafe { (*(ud as *const crate::video::QueueLock)).unlock() }
+    unsafe { (*(ud as *const QueueLock)).unlock() }
 }
 
 /// Fence-waited decode output on the presenter's device, GENERAL layout. Views live
@@ -386,7 +387,7 @@ pub struct PyroWaveDecoder {
     device: ash::Device,
     queue: vk::Queue,
     _hold: Box<Hold>,
-    queue_lock: Arc<crate::video::QueueLock>,
+    queue_lock: Arc<QueueLock>,
     pw_dev: pw::pyrowave_device,
     pw_dec: pw::pyrowave_decoder,
     ring: Vec<PlaneSet>,
