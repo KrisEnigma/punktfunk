@@ -17,6 +17,10 @@
 //! what proves the peer, and it does not need the transport authenticated. Until that lands
 //! (Phase 3) this plane echoes and carries no session.
 
+mod datagrams;
+
+pub(crate) use datagrams::{Inbox, WebTransportPlane};
+
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::sync::RwLock;

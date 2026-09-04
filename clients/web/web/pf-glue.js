@@ -114,5 +114,57 @@ mergeInto(LibraryManager.library, {
     if (pfNet.wt) { try { pfNet.wt.close(); } catch (e) {} }
     pfNet.wt = null;
     pfNet.writer = null;
+    pfNet.ctl = null;
+  },
+
+  // --- the control stream ---------------------------------------------------------------------
+  //
+  // Same length-prefixed punktfunk/1 messages the native client puts on a quinn stream. Rust owns
+  // the codec; this owns the stream. A stream hands over arbitrary chunk boundaries, so whatever
+  // arrives goes straight to Rust, which reassembles.
+  pf_wt_ctl_open__deps: ["$pfNet"],
+  pf_wt_ctl_open: function () {
+    if (!pfNet.wt || pfNet.ctl) return 0;
+    pfNet.wt.createBidirectionalStream().then(function (stream) {
+      pfNet.ctl = stream.writable.getWriter();
+      (function pump(reader) {
+        reader.read().then(function (r) {
+          if (r.done) return;
+          var p = _malloc(r.value.length);
+          HEAPU8.set(r.value, p);
+          _pf_ctl_recv(p, r.value.length);
+          _free(p);
+          pump(reader);
+        }, function () {});
+      })(stream.readable.getReader());
+      // Rust sends Hello once the stream exists, not before: the host has nothing to reply on.
+      if (Module.__pfOnCtlReady) Module.__pfOnCtlReady();
+    }, function (e) {
+      console.error("punktfunk: control stream refused", e);
+    });
+    return 1;
+  },
+
+  pf_wt_ctl_send__deps: ["$pfNet"],
+  pf_wt_ctl_send: function (ptr, len) {
+    if (!pfNet.ctl) return;
+    // A copy, for the same reason the datagram writer takes one: the write is queued and a view
+    // into wasm memory can be detached by a heap growth before it is read.
+    pfNet.ctl.write(HEAPU8.slice(ptr, ptr + len)).catch(function () {});
+  },
+
+  // --- video ----------------------------------------------------------------------------------
+  //
+  // R3: what crosses is the encoded access unit. The decoded frame goes from `VideoDecoder`
+  // straight into the video plane's texture and never enters the wasm heap.
+  pf_video_config: function (codec, width, height) {
+    if (Module.__pfOnVideoConfig) Module.__pfOnVideoConfig(codec, width, height);
+  },
+
+  pf_video_au: function (ptr, len, ptsUs, key) {
+    if (!Module.__pfOnAccessUnit) return;
+    // `slice`, not `subarray`: EncodedVideoChunk keeps the bytes past this call, and the Rust
+    // buffer is freed the moment we return.
+    Module.__pfOnAccessUnit(HEAPU8.slice(ptr, ptr + len), ptsUs, key !== 0);
   },
 });
