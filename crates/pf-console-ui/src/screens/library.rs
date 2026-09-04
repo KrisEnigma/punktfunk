@@ -118,8 +118,11 @@ fn decode_near_cache_size(data: &Data, k: f64) -> Option<Image> {
     // Width alone: `art_cache_size` keeps the source aspect, so both axes carry one scale.
     let desired = want.0 as f32 / src.width as f32;
     let native = codec.get_scaled_dimensions(desired);
-    // A codec that only offers the original size has nothing to give here.
-    if native == src {
+    // A codec that only offers the original size has nothing to give here — and one that
+    // UNDERSHOOTS is refused rather than accepted: `get_scaled_dimensions` approximates, and a
+    // decode below the cache size would quietly make every cover softer than the resample it
+    // replaced. Both cases fall back to the full decode.
+    if native == src || native.width < want.0 || native.height < want.1 {
         return None;
     }
     let info = skia_safe::ImageInfo::new_n32_premul((native.width, native.height), None);
