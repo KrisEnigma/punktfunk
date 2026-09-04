@@ -563,6 +563,12 @@ impl Pads {
                 rumble(wire as u16, low, high, lt, rt);
             }
         };
+        // Every pump() that takes it is Linux or Windows; on any other host the closure is dead
+        // and both `mut` and the binding itself draw a lint. The parameter it shadows is then
+        // unused too, so name it there rather than renaming it for every caller.
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        let _ = &mut hidout;
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let mut hidout = |h: punktfunk_core::quic::HidOutput| {
             if let Some(wire) = wire_of.get(h.pad() as usize).copied().flatten() {
                 hidout(h.with_pad(wire as u16));

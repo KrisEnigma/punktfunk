@@ -379,7 +379,7 @@ fn spawn_watcher(
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         let _ = (child, procs, on_exit);
-        return None;
+        None
     }
     #[cfg(any(target_os = "linux", windows))]
     {
