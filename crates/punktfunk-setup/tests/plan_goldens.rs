@@ -27,6 +27,7 @@ fn fresh(id: &str, family: Family) -> Facts {
         Family::Sysext => "bazzite",
         Family::Pacman if id == "omarchy" => "omarchy",
         Family::Pacman => "arch",
+        Family::Steamos => "steamos-host",
         Family::Flatpak => "install",
     };
     Facts {
@@ -159,6 +160,7 @@ fn fresh_installs() {
     check("fedora-fresh", &fresh("fedora", Family::Dnf), &pins());
     check("bazzite-couch", &fresh("bazzite", Family::Sysext), &pins());
     check("omarchy-fresh", &fresh("omarchy", Family::Pacman), &pins());
+    check("steamos-fresh", &fresh("steamos", Family::Steamos), &pins());
 }
 
 #[test]
@@ -254,6 +256,11 @@ fn uninstalls() {
     check(
         "bazzite-uninstall",
         &installed("bazzite", Family::Sysext, Channel::Stable),
+        &un,
+    );
+    check(
+        "steamos-uninstall",
+        &installed("steamos", Family::Steamos, Channel::Stable),
         &un,
     );
 }
@@ -654,6 +661,62 @@ fn trap_the_omarchy_hand_off_ends_the_run() {
     assert!(handoff.ends_run);
 }
 
+/// The on-device build does groups, linger, tuning and the unit start itself; nothing generic
+/// runs after it. The clipboard line is the one thing that has to land AFTER, because that
+/// script writes host.env only when the file is absent and its defaults carry the Deck's
+/// `RADV_PERFTEST=video_encode`.
+#[test]
+fn trap_the_steamos_build_ends_the_run_and_sets_host_env_after_it() {
+    let plan = plan_for(&fresh("steamos", Family::Steamos), &pins());
+    let steps: Vec<&StepAction> = plan.steps().map(|s| &s.action).collect();
+    let build = steps
+        .iter()
+        .position(|a| matches!(a, StepAction::Run(c) if c.contains("scripts/steamdeck/install.sh")))
+        .expect("the on-device build step");
+    let env = steps
+        .iter()
+        .position(|a| matches!(a, StepAction::SetEnv { key, .. } if key == "PUNKTFUNK_CLIPBOARD"))
+        .expect("the clipboard step");
+    assert!(build < env, "host.env would swallow the encoder default");
+
+    let last = plan
+        .steps()
+        .find(|s| s.ends_run)
+        .expect("a step that ends the run");
+    assert!(
+        matches!(&last.action, StepAction::SetEnv { key, .. } if key == "PUNKTFUNK_CLIPBOARD"),
+        "the run must end on the last step of the hand-off, not before it: {:?}",
+        last.action
+    );
+}
+
+/// A re-run is documented as safe, and `git clone` into an existing tree is a hard failure.
+#[test]
+fn trap_the_steamos_clone_tolerates_a_tree_that_is_already_there() {
+    let cmds = plan_for(&fresh("steamos", Family::Steamos), &pins()).commands();
+    let clone = cmds
+        .iter()
+        .find(|c| c.contains("git clone"))
+        .expect("the clone command");
+    assert!(clone.starts_with("[ -d ~/punktfunk/.git ] ||"), "{clone}");
+}
+
+/// The build script takes `--gamestream`; there is no host.env route to the Moonlight planes
+/// before the units it starts already exist.
+#[test]
+fn trap_steamos_forwards_the_gamestream_choice_to_the_script() {
+    let on = Pins {
+        gamestream: Some(true),
+        ..pins()
+    };
+    let cmds = plan_for(&fresh("steamos", Family::Steamos), &on).commands();
+    assert!(
+        cmds.iter()
+            .any(|c| c.ends_with("scripts/steamdeck/install.sh --gamestream")),
+        "{cmds:?}"
+    );
+}
+
 /// Every optional part of the hand-off is passed explicitly, so the script never has to ask.
 /// A row that stops being forwarded here becomes a question again on the next Omarchy box.
 #[test]
@@ -891,6 +954,7 @@ fn every_platforms_json_install_line_is_carried_verbatim() {
         ("omarchy", fresh("omarchy", Family::Pacman)),
         ("fedora", fresh("fedora", Family::Dnf)),
         ("bazzite", fresh("bazzite", Family::Sysext)),
+        ("steamos", fresh("steamos", Family::Steamos)),
     ];
     for (id, facts) in cases {
         let text = render(&facts, &Choices::derive(&facts, &pins()));

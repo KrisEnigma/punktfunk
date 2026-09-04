@@ -104,7 +104,7 @@ impl OverlayPipe {
             device,
             render_pass,
             pipeline_layout,
-            include_bytes!("../../shaders/overlay.frag.spv"),
+            pf_client_core::video_csc_spv::OVERLAY_FRAG,
             true, // overlay.frag writes premultiplied alpha
         )?;
         Ok(OverlayPipe {

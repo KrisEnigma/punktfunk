@@ -22,7 +22,7 @@ use pf_driver_proto::encode::{self as wire, EncodeCtlRequest, SetEncodeReply, Se
 use wdk_sys::NTSTATUS;
 
 use self::section::{AuSection, Ctl, EncodeSession};
-use self::thread::{EncodeThread, ThreadCtx, fail_reply};
+use self::thread::{BACKEND_NAMES, EncodeThread, ThreadCtx, fail_reply};
 use crate::monitor::Monitor;
 use crate::{STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS, registry};
 
@@ -35,7 +35,7 @@ const OPEN_BOUND: Duration = Duration::from_secs(5);
 
 /// Backend names in the order the addresses below pin them, for the load-time log.
 pub fn backends_linked() -> &'static [&'static str] {
-    &["nvenc", "amf", "qsv", "pyrowave", "convert"]
+    &["nvenc", "amf", "qsv", "pyrowave", "mf", "convert"]
 }
 
 /// `IOCTL_SET_ENCODE`: open an encoder for `owner`'s monitor with `req.target_id` on the AU
@@ -46,7 +46,13 @@ pub fn backends_linked() -> &'static [&'static str] {
 /// driver owns the handles (`AuSection`). The open runs on the new encode thread and this call
 /// waits [`OPEN_BOUND`] for its reply. A displaced session's thread stops with no lock held.
 pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
-    let listed = req.backends[0] != 0 && req.backends.iter().all(|&b| b <= 4);
+    // The bound is the name table's length: `open_listed` indexes it by `backend - 1`, and a
+    // backend added there without widening this would be rejected here instead.
+    let listed = req.backends[0] != 0
+        && req
+            .backends
+            .iter()
+            .all(|&b| (b as usize) <= BACKEND_NAMES.len());
     let valid = req.target_id != 0
         && req.section != 0
         && req.event != 0

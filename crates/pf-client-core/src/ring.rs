@@ -36,6 +36,9 @@ pub enum RingCommand {
     },
     /// A custom chord as key NAMES (`ctrl`, `shift`, `escape`); see `overlay_actions::key_vk`.
     Shortcut(Vec<String>),
+    /// A synthetic tap of one system button on the host's pad — a `gamepad::wire::BTN_*` bit
+    /// (guide or `MISC1`), the same verb the session control socket exposes.
+    TapButton(u32),
 }
 
 /// 100 % scale, client design units (px on Skia, dp/pt on phones). Shared so editors cannot drift.

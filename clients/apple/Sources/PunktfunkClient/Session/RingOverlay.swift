@@ -151,6 +151,8 @@ struct RingActions {
     var padAvailable: () -> Bool
     var padShown: () -> Bool
     var togglePad: () -> Void
+    /// One synthetic system-button tap on the host's pad (a `GamepadWire` bit).
+    var tapPadButton: (UInt32) -> Void
     var currentMode: () -> (w: UInt32, h: UInt32, hz: UInt32)
     var requestMode: (UInt32, UInt32, UInt32) -> Void
 }
@@ -184,6 +186,9 @@ private let noTouchScreenReason = "Apple TV has no touch screen"
 #elseif os(macOS)
 private let noTouchScreenReason = "A Mac has no touch screen"
 #endif
+
+/// Why the two system-button slots are dimmed: they ride the wire pad, like the virtual one.
+private let padOffReason = "Controller input is not forwarded this session"
 
 private func spec(_ slot: SlotId, _ cfg: OverlayConfig, _ a: RingActions) -> SlotSpec {
     switch slot {
@@ -235,6 +240,12 @@ private func spec(_ slot: SlotId, _ cfg: OverlayConfig, _ a: RingActions) -> Slo
     case .sendText:
         return SlotSpec(id: "send_text", label: "Send text", icon: "textformat",
                         enabled: false, reason: "Use the keyboard on this device")
+    case .guide:
+        return SlotSpec(id: "guide", label: "Guide button", icon: "house",
+                        enabled: a.padAvailable(), reason: padOffReason)
+    case .qam:
+        return SlotSpec(id: "qam", label: "Quick access menu", icon: "sidebar.right",
+                        enabled: a.padAvailable(), reason: padOffReason)
     case .host(let id):
         let act = a.hostActions().first { $0.id == id }
         // Three power actions, three glyphs — the same icon on all three made them one button.
@@ -533,6 +544,9 @@ struct RingOverlay: View {
         case .mic: actions.toggleMic()
         case .pad: actions.togglePad()
         case .sendText: break
+        // The host's own overlay is taking the screen: close first, like End stream.
+        case .guide: state.close(); actions.tapPadButton(GamepadWire.guide)
+        case .qam: state.close(); actions.tapPadButton(GamepadWire.misc1)
         case .host(let id):
             if let act = actions.hostActions().first(where: { $0.id == id }) {
                 state.close()
@@ -736,6 +750,15 @@ extension RingOverlay {
         rows.append(SheetRowSpec(label: pad.label, value: pad.enabled ? pad.state : pad.reason, enabled: pad.enabled) {
             if pad.enabled { a.togglePad() }
         })
+        for (slot, bit) in [(SlotId.guide, GamepadWire.guide), (SlotId.qam, GamepadWire.misc1)] {
+            let sys = spec(slot, cfg, a)
+            rows.append(SheetRowSpec(label: sys.label, value: sys.enabled ? "" : sys.reason,
+                                     enabled: sys.enabled) { [state] in
+                guard sys.enabled else { state.refuseTick &+= 1; return }
+                state.close()
+                a.tapPadButton(bit)
+            })
+        }
         rows.append(SheetRowSpec(header: "View", label: "Statistics", value: a.stats().label) { a.cycleStats() })
         let mic = spec(.mic, cfg, a)
         rows.append(SheetRowSpec(header: "Audio", label: mic.label, value: mic.enabled ? mic.state : mic.reason,

@@ -193,7 +193,9 @@ punktfunk-host tray start
 The service reads `%ProgramData%\punktfunk\host.env`. The defaults work out of the box; common knobs:
 
 - `PUNKTFUNK_ENCODER=auto` — `auto` picks NVENC/AMF/QSV by GPU vendor. Force one with `nvenc`, `amf`,
-  `qsv`, or `sw` (software). On a multi-GPU box the [web console's GPU preference](/docs/web-console)
+  `qsv`, `mf` (Media Foundation — any vendor's hardware encoder, 8-bit 4:2:0, and the automatic
+  second rung when the native backend cannot open), or `sw` (software).
+  On a multi-GPU box the [web console's GPU preference](/docs/web-console)
   wins: a forced backend whose vendor doesn't match the selected GPU is ignored (the host logs a
   warning) — remove the stale line rather than fighting it.
 - `PUNKTFUNK_HOST_CMD` — what the service runs. A fresh install from the setup `.exe` writes `serve`:

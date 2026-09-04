@@ -1,6 +1,6 @@
 //! Raw FFI bindings to the vendored PyroWave C API (`pyrowave.h`).
 //!
-//! Empty on targets other than Linux/Windows — see build.rs. The safe wrapper
+//! Empty outside Linux/Windows/64-bit Android — see build.rs. The safe wrapper
 //! lives with its consumer (`punktfunk-host`'s encoder backend, and later the
 //! Rust clients' decoder backend); this crate is bindings only.
 
@@ -15,10 +15,21 @@
 // crate-wide; the hand-written link-sanity test below still carries its proof by convention.
 #![allow(clippy::undocumented_unsafe_blocks)]
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    all(target_os = "android", target_pointer_width = "64")
+))]
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        target_os = "windows",
+        all(target_os = "android", target_pointer_width = "64")
+    )
+))]
 mod tests {
     use super::*;
 

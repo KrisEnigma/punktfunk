@@ -54,6 +54,10 @@ mod feedback;
 mod mic;
 /// Tier-A DualSense pad audio: the 0xD1 plane rendered on the pad's own USB endpoint.
 mod pad_audio;
+// The PyroWave lane: Vulkan compute decode + swapchain present, beside `decode`'s MediaCodec
+// path (design/pyrowave-codec-plan.md). Ungated so the host build compiles the dispatch; the
+// implementation inside is 64-bit-Android-only, like `pyrowave-sys`.
+mod pyro;
 mod session;
 mod stats;
 // Ungated like `discovery`: pure `jni` + `punktfunk_core::wol` (no Android framework), so it links

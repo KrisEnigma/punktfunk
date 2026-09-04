@@ -54,7 +54,12 @@ installer_case omarchy  'ID=omarchy\nID_LIKE=arch\nVERSION_ID=4.0.1\n'    'sudo 
 installer_case omarchy2 'ID=omarchy\nID_LIKE=arch\nVERSION_ID=4.0.1\n'    'punktfunk-omarchy setup'
 installer_case bazzite  'ID=bazzite\nID_LIKE="fedora"\nVERSION_ID=43\n' 'punktfunk-sysext.sh install'
 installer_case nixos    'ID=nixos\n'                                   'docs/nixos'
-installer_case steamos  'ID=steamos\nID_LIKE=arch\n'                    'docs/steamos-host'
+# SteamOS says ID_LIKE=arch, so it has to beat the arch test or a Deck gets pacman commands its
+# read-only /usr cannot run. The install is the on-device build, and a re-run must survive the
+# ~/punktfunk that the first one cloned.
+installer_case steamos  'ID=steamos\nID_LIKE=arch\n'                    'bash ~/punktfunk/scripts/steamdeck/install.sh'
+installer_case steamos2 'ID=steamos\nID_LIKE=arch\n'                    '[ -d ~/punktfunk/.git ] || git clone'
+installer_case holoiso  'ID=holoiso\nID_LIKE="steamos arch"\n'          'scripts/steamdeck/install.sh'
 installer_case gentoo   'ID=gentoo\n'                                  'build-from-source'
 # A distro with no host repo is a dead end for the HOST only: --client takes the flatpak line
 # instead of dying (design/installer-v2.md §5).
@@ -64,6 +69,8 @@ installer_case fedora-rm 'ID=fedora\nVERSION_ID=44\n'                   'yum.rep
 installer_case arch-rm   'ID=arch\n'                                   '/etc/pacman.conf' --uninstall
 installer_case omarchy-rm 'ID=omarchy\nID_LIKE=arch\n'                  'punktfunk-omarchy remove' --uninstall
 installer_case bazzite-rm 'ID=bazzite\nID_LIKE="fedora"\nVERSION_ID=43\n' 'punktfunk-sysext remove' --uninstall
+# Nothing on SteamOS is a package, so --uninstall must say so instead of claiming a removal.
+installer_case steamos-rm 'ID=steamos\nID_LIKE=arch\n'                  'no uninstall script' --uninstall
 
 PUNKTFUNK_SETUP_BIN="$PF" sh scripts/ci/check-install-defaults.sh || fail=1
 

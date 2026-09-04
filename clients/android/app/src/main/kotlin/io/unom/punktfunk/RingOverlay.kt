@@ -29,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Logout
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.SpaceDashboard
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.TouchApp
@@ -74,6 +76,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.RingNav
 import kotlinx.coroutines.delay
@@ -201,6 +204,8 @@ class RingActions(
     val padAvailable: () -> Boolean,
     val padShown: () -> Boolean,
     val togglePad: () -> Unit,
+    /** One synthetic system-button tap on the host's pad (a `Gamepad.BTN_*` bit). */
+    val tapPadButton: (Int) -> Unit,
     /** `[w, h, hz]` as last requested (Android has no live read-back of the negotiated mode). */
     val currentMode: () -> IntArray,
     val requestMode: (Int, Int, Int) -> Unit,
@@ -264,6 +269,14 @@ private fun spec(slot: SlotId, cfg: OverlayConfig, a: RingActions): SlotSpec = w
         "send_text", "Send text", Icons.Filled.TextFields,
         enabled = a.textSupported && a.keyboardGranted(),
         reason = "This host does not take typed text",
+    )
+    SlotId.Guide -> SlotSpec(
+        "guide", "Guide button", Icons.Filled.Home,
+        enabled = a.padAvailable(), reason = "Controller input is not forwarded this session",
+    )
+    SlotId.Qam -> SlotSpec(
+        "qam", "Quick access menu", Icons.Filled.SpaceDashboard,
+        enabled = a.padAvailable(), reason = "Controller input is not forwarded this session",
     )
     is SlotId.Host -> {
         val act = a.hostActions().firstOrNull { it.id == slot.actionId }
@@ -375,6 +388,9 @@ fun RingOverlay(
             SlotId.Mic -> actions.toggleMic()
             SlotId.Pad -> actions.togglePad()
             SlotId.SendText -> textDialog = true
+            // The host's own overlay is taking the screen: close first, like End stream.
+            SlotId.Guide -> { state.close(); actions.tapPadButton(Gamepad.BTN_GUIDE) }
+            SlotId.Qam -> { state.close(); actions.tapPadButton(Gamepad.BTN_MISC1) }
             is SlotId.Host -> {
                 actions.hostActions().firstOrNull { it.id == slot.actionId }?.let { state.close(); actions.invokeHost(it) }
             }
@@ -723,6 +739,12 @@ private fun sheetRows(
     rows += SheetRowSpec(null, st.label, if (st.enabled) "" else st.reason, st.enabled) { if (st.enabled) requestText() }
     val pad = spec(SlotId.Pad, cfg, actions)
     rows += SheetRowSpec(null, pad.label, if (pad.enabled) pad.state else pad.reason, pad.enabled) { if (pad.enabled) actions.togglePad() }
+    for ((slot, bit) in listOf(SlotId.Guide to Gamepad.BTN_GUIDE, SlotId.Qam to Gamepad.BTN_MISC1)) {
+        val sys = spec(slot, cfg, actions)
+        rows += SheetRowSpec(null, sys.label, if (sys.enabled) "" else sys.reason, sys.enabled) {
+            if (sys.enabled) { state.close(); actions.tapPadButton(bit) }
+        }
+    }
     rows += SheetRowSpec("View", "Statistics", actions.stats().label) { actions.cycleStats() }
     val mic = spec(SlotId.Mic, cfg, actions)
     rows += SheetRowSpec("Audio", mic.label, if (mic.enabled) mic.state else mic.reason, mic.enabled) { if (mic.enabled) actions.toggleMic() }

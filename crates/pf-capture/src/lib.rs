@@ -678,6 +678,7 @@ pub fn open_idd_push(
     keepalive: Box<dyn Send>,
     cursor_sender: Option<CursorChannelSender>,
     cursor_forward: Option<CursorForwardSender>,
+    forwards_to_client: bool,
 ) -> std::result::Result<Box<dyn Capturer>, (anyhow::Error, Box<dyn Send>)> {
     idd_push::IddPushCapturer::open(
         target,
@@ -689,6 +690,7 @@ pub fn open_idd_push(
         keepalive,
         cursor_sender,
         cursor_forward,
+        forwards_to_client,
     )
     .map(|c| Box::new(c) as Box<dyn Capturer>)
 }

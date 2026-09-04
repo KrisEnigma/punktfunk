@@ -55,6 +55,8 @@ pub enum EncoderBackend {
     Nvenc,
     Amf,
     Qsv,
+    /// Windows: any vendor's Media Foundation MFT.
+    MediaFoundation,
     Software,
 }
 
@@ -275,6 +277,7 @@ fn resolve_encoder() -> EncoderBackend {
         crate::encode::WindowsBackend::Nvenc => EncoderBackend::Nvenc,
         crate::encode::WindowsBackend::Amf => EncoderBackend::Amf,
         crate::encode::WindowsBackend::Qsv => EncoderBackend::Qsv,
+        crate::encode::WindowsBackend::MediaFoundation => EncoderBackend::MediaFoundation,
         crate::encode::WindowsBackend::Software => EncoderBackend::Software,
     }
 }

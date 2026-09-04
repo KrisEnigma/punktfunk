@@ -66,10 +66,11 @@ your device resamples to its window. Above 1× supersamples at more bandwidth an
 
 **Video codec** — *default: Automatic.* A soft preference: your choice when the host can produce
 it, else the best codec you both speak, in the order HEVC → AV1 → H.264. **PyroWave** is never
-auto-picked — pick it explicitly on Linux, Windows, the console home, or an Apple device whose
-decode probe passes; elsewhere asking for it lands on that same order. See
-[PyroWave](/docs/pyrowave). Android and Apple hide AV1 without a hardware AV1 decoder; Android never
-offers PyroWave.
+auto-picked — pick it explicitly on Linux, Windows, the console home, or an Apple or Android device
+whose decode probe passes; elsewhere asking for it lands on that same order. See
+[PyroWave](/docs/pyrowave). Android and Apple hide AV1 without a hardware AV1 decoder, and hide
+PyroWave without the GPU it needs (on Android, a 64-bit device with Vulkan 1.3 and the codec's
+compute feature set).
 
 **10-bit HDR** — *default: on.* Off means "never send me 10-bit". On, the stream goes 10-bit
 BT.2020 PQ only when the host has HDR content *and* the encoder can do 10-bit. Android disables the
