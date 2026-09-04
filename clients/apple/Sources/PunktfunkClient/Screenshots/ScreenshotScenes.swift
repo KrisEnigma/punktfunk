@@ -288,7 +288,8 @@ private struct ShotHome: View {
             showAddHost: .constant(false), pairingTarget: .constant(nil),
             speedTestTarget: .constant(nil), libraryTarget: .constant(nil),
             connect: { _, _ in }, connectDiscovered: { _ in },
-            onPaired: { _, _ in }, onLaunchTitle: { _, _ in }, wake: { _ in })
+            onPaired: { _, _ in }, onLaunchTitle: { _, _ in }, onConnectShelf: { _ in },
+            wake: { _ in })
         #else
         HomeView(
             store: store, model: model, discovery: discovery,
@@ -296,7 +297,8 @@ private struct ShotHome: View {
             speedTestTarget: .constant(nil), libraryTarget: .constant(nil),
             showSettings: .constant(false),
             connect: { _, _ in }, connectDiscovered: { _ in },
-            onPaired: { _, _ in }, onLaunchTitle: { _, _ in }, wake: { _ in })
+            onPaired: { _, _ in }, onLaunchTitle: { _, _ in }, onConnectShelf: { _ in },
+            wake: { _ in })
         #endif
     }
 }
@@ -337,8 +339,10 @@ private struct ShotLibrary: View {
         LibraryConsoleView(
             games: games, artLoader: ShotPosterArt.source,
             onLaunch: { _ in }, onDismiss: {},
-            // The mock has a clipboard action so the Options menu has its row to show.
+            // The mock has a clipboard action, and a game up, so the Options menu shows both
+            // of the rows a real shelf offers.
             onCopyLink: { _ in }, hostName: "Battlestation",
+            nowPlaying: "Hollow Knight", onConnect: {},
             controllerActive: interactive,
             arrangementOverride: arrangement, barFocusedInitially: barFocused,
             startInCollectionsOverride: collections, optionsInitially: options)
@@ -416,7 +420,7 @@ private struct ShotGamepadHome: View {
             libraryTarget: .constant(nil), pairingTarget: .constant(nil),
             onPaired: { _, _ in }, waker: waker,
             connect: { _, _ in }, connectDiscovered: { _ in }, launchTitle: { _, _ in },
-            wakeOnly: { _ in })
+            connectShelf: { _ in }, wakeOnly: { _ in })
     }
 }
 
@@ -476,7 +480,7 @@ private struct ShotConnect: View {
                 libraryTarget: .constant(nil), pairingTarget: .constant(nil),
             onPaired: { _, _ in }, waker: waker,
                 connect: { _, _ in }, connectDiscovered: { _ in }, launchTitle: { _, _ in },
-            wakeOnly: { _ in })
+            connectShelf: { _ in }, wakeOnly: { _ in })
         } else {
             ShotHome()
         }

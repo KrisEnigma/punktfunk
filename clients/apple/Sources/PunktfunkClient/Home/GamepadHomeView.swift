@@ -60,6 +60,9 @@ private struct HomeTile: Identifiable {
     var osChain: String?
     /// Offline saved host we hold a MAC for (and WoL is available) — activating it wakes first.
     var canWake = false
+    /// What this host has UP right now, if anything (`NowPlayingStore`) — the tile names it, and
+    /// A reads "Resume" instead of "Connect".
+    var nowPlaying: String?
     let activate: () -> Void
 }
 
@@ -94,6 +97,9 @@ struct GamepadHomeView: View {
     /// Launch a library title on a host — the in-place library layer's activate path (iOS; the
     /// cover/sheet presentations wire ContentView's `launchTitle` into LibraryView themselves).
     let launchTitle: (LibraryTarget, String) -> Void
+    /// Stream a shelf's host without launching anything — its menu's Connect / Resume row, and
+    /// the one way back into a game the host started on its own.
+    let connectShelf: (LibraryTarget) -> Void
     /// Wake a host WITHOUT connecting (ContentView's `wakeOnly`) — the host menu's Wake row. The
     /// tile's own A already wakes-and-connects; this is the other half, for bringing a machine up
     /// to look at it rather than to stream from it right now.
@@ -110,6 +116,9 @@ struct GamepadHomeView: View {
     /// What each paired host says this device may do TO it (`design/host-actions.md` §7) —
     /// shared with the touch grid, so the two menus cannot disagree about what a host offers.
     @ObservedObject private var hostPower = HostPowerStore.shared
+    /// What each paired host is playing — the one thing on a card that changes while somebody is
+    /// looking at it, so the tick below keeps it warm alongside reachability.
+    @ObservedObject private var nowPlaying = NowPlayingStore.shared
     /// Same gate the touch grid's "Browse Library…" context-menu item uses (default ON; the
     /// Settings "Game library" toggle opts out).
     @AppStorage(DefaultsKey.libraryEnabled) private var libraryEnabled = true
@@ -204,6 +213,12 @@ struct GamepadHomeView: View {
         .task {
             while !Task.isCancelled {
                 await store.refreshReachability(discovery: discovery)
+                // TTL-gated inside, so an ordinary lap costs nothing — but a game started on the
+                // host while this screen is up shows up on the tile within a lap or two.
+                for host in store.hosts
+                where host.pinnedSHA256 != nil && store.probedOnline.contains(host.id) {
+                    nowPlaying.refresh(host)
+                }
                 try? await Task.sleep(for: .seconds(10))
             }
         }
@@ -351,6 +366,7 @@ struct GamepadHomeView: View {
                 GamepadLibraryScreen(
                     store: store, target: shelf,
                     onLaunch: { launchTitle(shelf, $0) },
+                    onConnect: { connectShelf(shelf) },
                     close: { if !transitioning { libraryTarget = nil } },
                     controllerActive: active)
             }
@@ -539,7 +555,7 @@ struct GamepadHomeView: View {
         // moment ago — the one failure mode a launcher cannot afford.
         var hints = [GamepadHint(
             glyph: buttonGlyph(\.buttonA, fallback: "a.circle"),
-            text: action ?? (selected?.canWake == true ? "Wake & Connect" : "Connect"),
+            text: action ?? connectVerb(for: selected),
             action: { tiles.first { $0.id == selection }?.activate() })]
         if libraryEnabled, selected?.hasLibrary == true {
             hints.append(.init(
@@ -558,6 +574,13 @@ struct GamepadHomeView: View {
             glyph: buttonGlyph(\.buttonX, fallback: "x.circle"), text: "Settings",
             action: { showSettings = true }))
         return hints
+    }
+
+    /// What A does to the selected tile, in the tile's own terms: a host with a game up is one
+    /// you get back INTO — the same press either way, and the card above already names the game.
+    private func connectVerb(for tile: HomeTile?) -> String {
+        if tile?.canWake == true { return "Wake & Connect" }
+        return tile?.nowPlaying == nil ? "Connect" : "Resume"
     }
 
     // MARK: - Data + actions
@@ -595,6 +618,7 @@ struct GamepadHomeView: View {
                     osChain: host.osChain,
                     canWake: autoWakeEnabled && PunktfunkConnection.wakeOnLANAvailable
                         && !online && !host.wakeMacs.isEmpty,
+                    nowPlaying: nowPlaying.title(for: host),
                     activate: {
                         connect(host, profile.map { .profile($0.id) } ?? .inherit)
                     }))
@@ -762,6 +786,16 @@ private struct GamepadHostTile: View {
                 }
             }
             Spacer(minLength: 0)
+            // What the host is playing, above its name — the one thing you would otherwise have
+            // to connect to find out. Green, like the pip and the shelf's Resume badge: on this
+            // screen that colour already means "live over there".
+            if let playing = tile.nowPlaying {
+                Label(playing, systemImage: "play.fill")
+                    .font(.geist(Self.statusFont, .semibold, relativeTo: .caption))
+                    .foregroundStyle(GamepadInk.onlineGreen)
+                    .lineLimit(1)
+                    .padding(.bottom, 3)
+            }
             Text(tile.title)
                 .font(.geist(Self.titleFont, .bold, relativeTo: .title2))
                 .foregroundStyle(ink.fg)

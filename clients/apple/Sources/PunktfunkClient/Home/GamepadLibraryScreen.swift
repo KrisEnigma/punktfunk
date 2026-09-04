@@ -17,6 +17,8 @@ struct GamepadLibraryScreen: View {
     @ObservedObject var store: HostStore
     let target: LibraryTarget
     let onLaunch: (String) -> Void
+    /// Stream this shelf's host without launching anything — the menu's Connect / Resume row.
+    let onConnect: () -> Void
     let close: () -> Void
     var controllerActive = true
 
@@ -37,7 +39,7 @@ struct GamepadLibraryScreen: View {
 
     var body: some View {
         LibraryView(
-            store: store, target: target, onLaunch: onLaunch,
+            store: store, target: target, onLaunch: onLaunch, onConnect: onConnect,
             onClose: close, controllerActive: controllerActive,
             onCollectionChanged: { collection = $0 })
             .safeAreaInset(edge: .top, spacing: 0) {

@@ -29,6 +29,7 @@ import io.unom.punktfunk.kit.discovery.HostDiscovery
 import io.unom.punktfunk.kit.library.LibraryCache
 import io.unom.punktfunk.kit.library.LibraryClient
 import io.unom.punktfunk.kit.library.LibraryResult
+import io.unom.punktfunk.kit.library.RunningGame
 import io.unom.punktfunk.kit.security.ClientIdentity
 import io.unom.punktfunk.kit.security.IdentityStore
 import io.unom.punktfunk.kit.security.KnownHost
@@ -104,6 +105,11 @@ object SkiaConsole {
      *  last asked — the Android half of the desktop's shared actions cache. Main-thread only. */
     private val hostActions = mutableMapOf<String, List<HostActions.Action>>()
     private val hostActionsAt = mutableMapOf<String, Long>()
+
+    /** What each paired host has UP, by fingerprint, and when we last asked — the same shape
+     *  on a much shorter fuse (`pf_client_core::library::RUNNING_TTL`). Main-thread only. */
+    private val nowPlaying = mutableMapOf<String, String>()
+    private val nowPlayingAt = mutableMapOf<String, Long>()
 
     // What the composable hands us while it is on screen.
     private var onConnected: ((ActiveSession) -> Unit)? = null
@@ -443,24 +449,26 @@ object SkiaConsole {
 
     private fun pushHosts() {
         if (handle == 0L) return
-        refreshHostActions()
+        refreshHostState()
         NativeBridge.nativeConsoleSetHosts(
             handle,
             ConsoleJson.hostRows(
                 knownHostStore.all(), discovered, reachable, profileStore.all(), hostActions,
+                nowPlaying,
             ),
         )
     }
 
     /**
-     * Keep each paired, reachable host's advertised actions fresh (`design/host-actions.md` §7),
-     * mirroring the desktop's `pf_client_core::host_actions::refresh`.
+     * Keep each paired, reachable host's advertised actions and running title fresh, mirroring
+     * the desktop's `Service::refresh_host_state`.
      *
-     * On a slow TTL and never when a menu opens: the row list has to be SETTLED before the menu
-     * draws, or rows would appear under a cursor already moving toward something else — and two
-     * of those rows shut a machine down.
+     * Actions run on a slow TTL and never when a menu opens: the row list has to be SETTLED
+     * before the menu draws, or rows would appear under a cursor already moving toward
+     * something else — and two of those rows shut a machine down. What a host has UP changes
+     * between two visits to the carousel, so it gets its own, far shorter one.
      */
-    private fun refreshHostActions() {
+    private fun refreshHostState() {
         val id = identity ?: return
         val now = android.os.SystemClock.elapsedRealtime()
         for (h in knownHostStore.all()) {
@@ -468,10 +476,17 @@ object SkiaConsole {
             // Reachable means it answered the probe — an advert would say yes for a host that
             // is asleep, and this asks it a question only a live host can answer.
             if ("${h.address}:${h.port}" !in reachable) continue
-            // Stamp BEFORE the request, so a slow host cannot make every push spawn another.
-            if (now - (hostActionsAt[h.fpHex] ?: 0L) < HOST_ACTIONS_TTL_MS) continue
-            hostActionsAt[h.fpHex] = now
             val (addr, mgmt, fp) = Triple(h.address, h.effectiveMgmtPort, h.fpHex)
+            // Stamp BEFORE the request, so a slow host cannot make every push spawn another.
+            if (now - (nowPlayingAt[fp] ?: 0L) >= NOW_PLAYING_TTL_MS) {
+                nowPlayingAt[fp] = now
+                ioPool.execute {
+                    val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
+                    main.post { recordNowPlaying(fp, up) }
+                }
+            }
+            if (now - (hostActionsAt[fp] ?: 0L) < HOST_ACTIONS_TTL_MS) continue
+            hostActionsAt[fp] = now
             ioPool.execute {
                 val found = HostActions.list(id, addr, mgmt, fp)
                 main.post {
@@ -480,6 +495,18 @@ object SkiaConsole {
                 }
             }
         }
+    }
+
+    /**
+     * Adopt a `/status` answer as the carousel's "▶ <title>" line: the first entry that is up
+     * and has a title to show, else nothing. Main thread; re-pushes only on a real change, so a
+     * host answering every 20 s does not churn the snapshot generation.
+     */
+    private fun recordNowPlaying(fpHex: String, games: List<RunningGame>) {
+        val title = games.firstOrNull { it.isUp && it.title.isNotEmpty() }?.title.orEmpty()
+        if (nowPlaying[fpHex] == title) return
+        nowPlaying[fpHex] = title
+        pushHosts()
     }
 
     private fun pushKnownHosts() {
@@ -852,8 +879,15 @@ object SkiaConsole {
         if (refreshOnly) {
             if (id == null) return
             ioPool.execute {
-                val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
-                main.post { if (handle != 0L) NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.runningGames(up)) }
+                val games = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
+                main.post {
+                    if (handle == 0L) return@post
+                    NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.runningGames(games))
+                    // The carousel behind the shelf shows the same fact from its own map; this
+                    // answer is fresher than anything its TTL would fetch.
+                    nowPlayingAt[fp] = android.os.SystemClock.elapsedRealtime()
+                    recordNowPlaying(fp, games)
+                }
             }
             return
         }
@@ -943,4 +977,8 @@ object SkiaConsole {
      *  `pf_client_core::host_actions::TTL`. Long on purpose: what it governs changes when an
      *  operator edits access, not minute to minute, and each refresh is a TLS handshake. */
     private const val HOST_ACTIONS_TTL_MS = 300_000L
+
+    /** How long a host's running title stays fresh — `pf_client_core::library::RUNNING_TTL`.
+     *  Short: this is the one host fact that changes while somebody is looking at the tile. */
+    private const val NOW_PLAYING_TTL_MS = 20_000L
 }

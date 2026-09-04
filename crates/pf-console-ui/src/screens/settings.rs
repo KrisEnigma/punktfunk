@@ -2361,6 +2361,7 @@ pub(crate) mod tests {
                 accent: None,
             }),
             bound_profile: None,
+            running: String::new(),
             game_profiles: Default::default(),
         };
         let hosts = [pinned.clone(), {

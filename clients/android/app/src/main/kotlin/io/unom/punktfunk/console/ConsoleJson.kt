@@ -66,6 +66,9 @@ internal object ConsoleJson {
          *  (`design/host-actions.md` §7). Absent = no rows, which is also what an older host
          *  and an ungranted device produce. */
         hostActions: Map<String, List<HostActions.Action>> = emptyMap(),
+        /** What each paired host has up, by fingerprint. Absent = nothing, or nobody has
+         *  asked yet; the tile draws no line either way. */
+        running: Map<String, String> = emptyMap(),
     ): String {
         val out = JSONArray()
         fun advertFor(h: KnownHost): DiscoveredHost? = discovered.firstOrNull { d ->
@@ -100,6 +103,7 @@ internal object ConsoleJson {
                     h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
                         ?.let(::profileChip) ?: JSONObject.NULL,
                 )
+                .put("running", running[h.fpHex].orEmpty())
                 // Ids, not chips: the bind screen only compares them. Pinned copies below
                 // inherit the map — a card is the same host's shelf.
                 .put("game_profiles", JSONObject(h.gameProfiles))
@@ -140,7 +144,9 @@ internal object ConsoleJson {
                     .put("last_used", JSONObject.NULL)
                     .put("os", d.os)
                     .put("pin", JSONObject.NULL)
-                    .put("bound_profile", JSONObject.NULL),
+                    .put("bound_profile", JSONObject.NULL)
+                    // Unsaved: no identity to ask what it is running with.
+                    .put("running", ""),
             )
         }
         return out.toString()

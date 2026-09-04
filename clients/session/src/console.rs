@@ -109,6 +109,7 @@ pub fn run(target: Option<&str>) -> u8 {
                 actions: Vec::new(),
                 pin: None,
                 bound_profile: None,
+                running: String::new(),
                 game_profiles: Default::default(),
             };
             let label = row.name.clone();
@@ -374,6 +375,7 @@ fn fake_host_row() -> HostRow {
         actions: Vec::new(),
         pin: None,
         bound_profile: None,
+        running: String::new(),
         game_profiles: Default::default(),
     }
 }
@@ -470,7 +472,7 @@ impl ServiceState {
             if self.last_probe.elapsed() >= Duration::from_secs(10) {
                 self.last_probe = Instant::now();
                 self.sweep();
-                self.refresh_actions();
+                self.refresh_host_state();
             }
 
             self.console.set_hosts(self.rows());
@@ -506,6 +508,9 @@ impl ServiceState {
                 );
             }
             ConsoleCmd::RefreshRunning { addr, mgmt, fp_hex } => {
+                // The carousel behind the shelf reads a different cache for the same fact;
+                // dropping it here is what stops a tile advertising the game just quit.
+                library::invalidate_running(&fp_hex);
                 // Blocking network on a worker, like every other command here: the service
                 // loop's own host refresh must keep running while a just-ended stream's host
                 // is asked what it still has up.
@@ -850,13 +855,15 @@ impl ServiceState {
             .ok();
     }
 
-    /// Keep every paired, reachable host's advertised actions fresh (the shared TTL'd cache in
-    /// `pf_client_core::host_actions`). Idempotent and cheap — it only reaches the network when
-    /// an entry has actually lapsed.
-    fn refresh_actions(&self) {
+    /// Keep every paired, reachable host's advertised actions and running title fresh (the
+    /// shared TTL'd caches in `pf_client_core`). Idempotent and cheap — each only reaches the
+    /// network when its own entry has lapsed, and the running one lapses far sooner: what a
+    /// host has UP is what changes between two visits to the carousel.
+    fn refresh_host_state(&self) {
         for r in self.rows() {
             if r.paired && r.online && r.pin.is_none() {
                 pf_client_core::host_actions::refresh(&r.addr, r.mgmt_port, &r.fp_hex);
+                library::refresh_running(&r.addr, r.mgmt_port, &r.fp_hex);
             }
         }
     }
@@ -947,6 +954,10 @@ impl ServiceState {
                         .as_deref()
                         .and_then(|id| catalog.find_by_id(id))
                         .map(chip),
+                    // What this host last said it has up, from the same TTL'd cache the
+                    // actions come from. Empty until the first refresh answers — and for
+                    // an unpaired host, which has nothing to authenticate the ask with.
+                    running: library::now_playing(&h.fp_hex),
                     // Ids straight through, dangling ones included: the bind screen only
                     // compares, and a deleted profile falls back at resolve, not here.
                     game_profiles: h.game_profiles.clone(),
@@ -1000,10 +1011,12 @@ impl ServiceState {
                 clipboard_sync: false,
                 last_used: None,
                 os: d.os.clone(),
-                // Discovered but unsaved: not paired, so there is nothing it would let us do.
+                // Discovered but unsaved: not paired, so there is nothing it would let us
+                // do, and no identity to ask what it is running.
                 actions: Vec::new(),
                 pin: None,
                 bound_profile: None,
+                running: String::new(),
                 game_profiles: Default::default(),
             })
             .collect();

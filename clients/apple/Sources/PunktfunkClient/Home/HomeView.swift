@@ -37,6 +37,8 @@ struct HomeView: View {
     /// Picked a title in the (experimental) library — start a session that launches it, with the
     /// shelf's profile (a pinned card's own; the host's binding on its primary card).
     let onLaunchTitle: (LibraryTarget, String) -> Void
+    /// Stream a shelf's host without launching anything (its menu's Connect / Resume row).
+    let onConnectShelf: (LibraryTarget) -> Void
     /// Explicit Wake-on-LAN of an offline host — fires the packet and waits for it to come online
     /// (the "Waking…" overlay), without connecting. Routed through ContentView's HostWaker.
     let wake: (StoredHost) -> Void
@@ -49,6 +51,8 @@ struct HomeView: View {
     @State private var sendLogsResult: (ok: Bool, message: String)?
     /// What each paired host says this device may do to it (`design/host-actions.md` §7).
     @StateObject private var hostPower = HostPowerStore.shared
+    /// What each paired host is playing right now — refreshed on the same beat below.
+    @StateObject private var nowPlaying = NowPlayingStore.shared
     /// A destructive host action awaiting its confirmation.
     @State private var confirmHostAction: PendingHostAction?
     @State private var hostActionResult: (ok: Bool, message: String)?
@@ -150,6 +154,9 @@ struct HomeView: View {
                     // on an ordinary lap.
                     for host in store.hosts where host.pinnedSHA256 != nil && isOnline(host) {
                         hostPower.refresh(host)
+                        // What it is PLAYING changes while somebody is looking at the card, so
+                        // this one has a 20 s TTL against the actions' 300 s.
+                        nowPlaying.refresh(host)
                     }
                     try? await Task.sleep(for: .seconds(10))
                 }
@@ -170,7 +177,9 @@ struct HomeView: View {
                 SpeedTestSheet(host: host)
             }
             .navigationDestination(item: $libraryTarget) { shelf in
-                LibraryView(store: store, target: shelf, onLaunch: { onLaunchTitle(shelf, $0) })
+                LibraryView(
+                    store: store, target: shelf, onLaunch: { onLaunchTitle(shelf, $0) },
+                    onConnect: { onConnectShelf(shelf) })
             }
             #endif
             #if !os(tvOS)
@@ -357,7 +366,8 @@ struct HomeView: View {
             hostActions: pinned == nil ? hostPower.actions(for: host) : [],
             onHostAction: { action in hostAction(action, on: host) },
             profileMenu: profileMenu(for: host),
-            pinnedProfile: pinned)
+            pinnedProfile: pinned,
+            nowPlaying: nowPlaying.title(for: host))
     }
 
     /// A host action picked from a card's menu: explain an unavailable one, confirm a

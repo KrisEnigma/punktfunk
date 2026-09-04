@@ -1,10 +1,12 @@
 // A library title's own actions — reached with X on the shelf or the grid: the desktop console's
 // per-title Options menu (`screens/options.rs`, `Subject::Game`), and the console answer to the
-// touch grid's context menu on a poster. It holds Copy link and Cancel — deliberately not
-// [Play, …]: the menu does not repeat the field's own A press, and Copy link leads so the cursor,
-// which starts on row 0, is already on the row nearly everyone came for. Rendered as a layer over
-// the field inside the library screen (it takes the controller while it is up), in the host
-// options menu's idiom: a title band, glass rows, an explainer band, `A Select · B Back`.
+// touch grid's context menu on a poster. Connect, Copy link, Cancel — deliberately not [Play, …]:
+// the menu does not repeat the field's own A press, which launches the FOCUSED title. Connect is
+// the other press: it starts nothing, so it is the only way back into a game the host launched on
+// its own (an untracked launch has no catalog entry to press A on), and it leads because on a
+// shelf with a game up it is the row people came for. Rendered as a layer over the field inside
+// the library screen (it takes the controller while it is up), in the host options menu's idiom:
+// a title band, glass rows, an explainer band, `A Select · B Back`.
 
 import PunktfunkKit
 import SwiftUI
@@ -21,8 +23,13 @@ struct LibraryTitleOptionsView: View {
     /// The host's name, for the explainer ("Actions for this title on {host}").
     var hostName: String?
     /// Copy the title's `punktfunk://` link; nil where there is no clipboard (the row is then
-    /// omitted, and the menu is Cancel alone — the caller hides X in that case anyway).
+    /// omitted — on tvOS the Connect row is what keeps this menu worth opening).
     var onCopyLink: ((GameEntry) -> Void)?
+    /// What the host has up right now, if anything — the Connect row names it and reads "Resume".
+    var nowPlaying: String?
+    /// Stream the host itself, launching nothing. nil on a surface that cannot connect (the
+    /// screenshot scenes), which drops the row.
+    var onConnect: (() -> Void)?
     let close: () -> Void
     var controllerActive = true
 
@@ -36,6 +43,7 @@ struct LibraryTitleOptionsView: View {
     @State private var focusID: String?
 
     private enum Action: String {
+        case connect
         case copyLink
         case cancel
     }
@@ -49,6 +57,12 @@ struct LibraryTitleOptionsView: View {
 
     private var rows: [Row] {
         var rows: [Row] = []
+        if onConnect != nil {
+            rows.append(Row(
+                action: .connect,
+                label: nowPlaying.map { "Resume \($0)" } ?? "Connect to \(hostName ?? "host")",
+                icon: nowPlaying == nil ? "display" : "play.fill"))
+        }
         if onCopyLink != nil {
             rows.append(Row(action: .copyLink, label: copied ? "Copied" : "Copy link", icon: "link"))
         }
@@ -122,6 +136,10 @@ struct LibraryTitleOptionsView: View {
 
     private var detail: String {
         switch rows.first(where: { $0.id == focusID })?.action {
+        case .connect:
+            return nowPlaying == nil
+                ? "Stream this host without launching anything."
+                : "Get back into what this host already has running."
         case .copyLink:
             return "Copy a punktfunk:// link that opens straight into this title."
         case .cancel, .none:
@@ -144,6 +162,11 @@ struct LibraryTitleOptionsView: View {
 
     private func run(_ action: Action) {
         switch action {
+        case .connect:
+            // Close first: the caller dismisses the shelf as it dials, and a menu left up would
+            // be the thing the connect takeover has to animate over.
+            close()
+            onConnect?()
         case .copyLink:
             onCopyLink?(game)
             // No toast machinery on this surface — the row says so itself.

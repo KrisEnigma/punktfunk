@@ -474,6 +474,12 @@ impl LibraryScreen {
             // Shelf scroll is horizontal; grid is vertical. Seat, do not glide from the other.
             self.snap_scroll = true;
         }
+        // The row was cloned when the shelf opened; what the host has UP moves under it.
+        // Only that field: the rest is frozen on purpose (a pin the carousel dropped must
+        // not retarget this shelf).
+        if let Some(row) = ctx.hosts.iter().find(|h| h.key == self.host.key) {
+            self.host.running.clone_from(&row.running);
+        }
     }
 
     /// Columns that fit `rect` at `k`. Per-frame: a stale count puts cursor and layout on different grids.
@@ -1627,6 +1633,7 @@ mod tests {
             actions: Vec::new(),
             pin: None,
             bound_profile: None,
+            running: String::new(),
             game_profiles: Default::default(),
         }
     }

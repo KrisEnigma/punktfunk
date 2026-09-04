@@ -279,6 +279,7 @@ mod tests {
                 name: "Work".into(),
                 accent: None,
             }),
+            running: String::new(),
             game_profiles: Default::default(),
         }
     }

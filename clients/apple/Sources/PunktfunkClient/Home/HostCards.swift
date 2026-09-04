@@ -152,6 +152,10 @@ struct HostCardView: View {
     /// Set on a PINNED card: the profile this card connects with. nil = the host's primary card,
     /// which follows the binding.
     var pinnedProfile: StreamProfile? = nil
+    /// What this host has up right now (`NowPlayingStore`), if anything. It rides the status
+    /// line rather than a line of its own: a card that grows when a game starts would make the
+    /// grid's rows jump, which is the reason the profile chip shares the title line too.
+    var nowPlaying: String? = nil
 
     /// The profile this card announces: a pinned card's own, else the host's binding.
     private var shownProfile: StreamProfile? {
@@ -358,6 +362,13 @@ struct HostCardView: View {
             Text(isOnline ? "ONLINE" : "OFFLINE")
             if host.pinnedSHA256 != nil {
                 Text("· PAIRED")
+            }
+            if let nowPlaying {
+                // Green and mixed-case against the row's uppercase technical fields: this is the
+                // one thing on the card that is about the person's evening rather than the box.
+                Text("· \u{25B6} \(nowPlaying)")
+                    .foregroundStyle(Color.green)
+                    .lineLimit(1)
             }
         }
         .font(.geist(m.status, .medium, relativeTo: .caption2))
