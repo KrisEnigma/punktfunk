@@ -797,8 +797,10 @@ impl ServiceState {
         }
     }
 
-    /// One parallel reachability pass over every non-advertising row (advertising ones
-    /// are online by definition). Runs on its own thread; at most one in flight.
+    /// One parallel reachability pass over every row. Advertising ones are NOT online by
+    /// definition — an advert is a cache entry with a 75-minute TTL that a suspending host sends
+    /// no goodbye for, so skipping them left a sleeping machine reading Online (and, since the
+    /// wake item is gated on `!online`, unwakeable). Runs on its own thread; at most one in flight.
     fn sweep(&self) {
         if self.probe_inflight.swap(true, Ordering::SeqCst) {
             return;
@@ -806,7 +808,6 @@ impl ServiceState {
         let targets: Vec<(String, (String, u16))> = self
             .rows()
             .into_iter()
-            .filter(|r| !self.advertised(r))
             .map(|r| (r.key.clone(), (r.addr.clone(), r.port)))
             .collect();
         let probed = self.probed.clone();
@@ -836,13 +837,6 @@ impl ServiceState {
         }
     }
 
-    fn advertised(&self, row: &HostRow) -> bool {
-        self.discovered.values().any(|d| {
-            (!row.fp_hex.is_empty() && d.fp_hex == row.fp_hex)
-                || (d.addr == row.addr && d.port == row.port)
-        })
-    }
-
     /// The console home's rows: saved hosts (most recent first) — each followed by its
     /// pinned profile cards (design §5.2a) — then discovered-but-unsaved ones, then a
     /// still-uncovered `--browse` seed.
@@ -870,13 +864,11 @@ impl ServiceState {
                     (!h.fp_hex.is_empty() && d.fp_hex == h.fp_hex)
                         || (d.addr == h.addr && d.port == h.port)
                 });
-                let online = advert.is_some() || probed.get(&key).copied().unwrap_or(false);
-                // Write down everything the advert teaches while the host is visible: the mgmt
-                // port (so this console keeps working against a moved one once it is not), the
-                // OS chain, and the wake MAC — which matters most here, because this console and
-                // the Decky panel are the only surfaces a Deck in Gaming Mode ever runs, and a
-                // record that never learned a MAC can never be woken. No-op (and no disk write)
-                // when unchanged, so this is safe on every refresh tick.
+                let online = probed.get(&key).copied().unwrap_or(false);
+                // Everything the advert teaches, while it is visible: mgmt port, OS chain, wake
+                // MAC — a Deck in Gaming Mode runs only this console and the Decky panel, and a
+                // record with no MAC can never be woken — and the address, so a host back on a
+                // new lease is dialed and probed where it lives. No disk write when unchanged.
                 if let Some(a) = advert {
                     pf_client_core::trust::learn_from_advert(
                         &h.fp_hex,
@@ -886,6 +878,7 @@ impl ServiceState {
                         &a.os,
                         a.mgmt_port,
                     );
+                    pf_client_core::trust::rekey_addr(&h.fp_hex, &a.addr, a.port);
                 }
                 let row = HostRow {
                     key: key.clone(),

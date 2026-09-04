@@ -34,18 +34,11 @@ extension StoredHost {
     }
 }
 
-/// The two joins of live mDNS discovery against the saved-host store, shared by the touch grid
+/// The join of live mDNS discovery against the saved-host store, shared by the touch grid
 /// (HomeView) and the gamepad launcher (GamepadHomeView) so both screens classify hosts the same
-/// way. LAN-scoped like the underlying match: a host that isn't advertising here is "not seen",
-/// not proven off.
+/// way. Presence is NOT part of it: whether a host is up is `HostStore.isReachable`, because an
+/// advert outlives the machine it describes by up to 75 minutes.
 extension HostDiscovery {
-    /// A saved host is "online" iff a live advert currently matches it (see `StoredHost.matches`).
-    /// Recomputed on every discovery change (the @Published set), so it tracks hosts
-    /// appearing/leaving the network live.
-    func advertises(_ host: StoredHost) -> Bool {
-        hosts.contains { host.matches($0) }
-    }
-
     /// Discovered hosts not already saved — the saved list shows the rest, so this only surfaces
     /// genuinely-new hosts on the network. Same match as `advertises`, so a saved host whose IP
     /// changed (still fingerprint-matched) doesn't also appear as a stranger.
@@ -121,22 +114,51 @@ final class HostStore: ObservableObject {
         hosts[i].lastConnected = Date() // didSet → persist() writes the shared suite + reloads widget
     }
 
-    /// One reachability sweep, driving `probedOnline`: probe every saved host NOT currently
-    /// advertising on `discovery` (mDNS already answers for those) off the main actor via a bounded,
-    /// trust-agnostic QUIC handshake, then publish the reachable set. This is the mDNS-independent
-    /// half of presence — a host reached over a routed network (Tailscale/VPN) never advertises but
-    /// answers here. Call in a loop from a home view's `.task` (cancelled on disappear).
+    /// Is `host` reachable RIGHT NOW — the one definition of online, used by the pip, the
+    /// auto-wake gate and the wake-wait alike.
+    ///
+    /// A live advert is NOT that answer. An mDNS browse result is a cache entry with a 75-minute
+    /// PTR TTL, and a host that suspends sends no goodbye, so a sleeping machine keeps advertising
+    /// to every client for up to an hour — which is exactly how a Wake-on-LAN gate written as "not
+    /// advertising" came to never fire for the host it was meant to wake. So the advert only says
+    /// WHERE to look (and re-keys the saved address when the host moved DHCP lease); a bounded,
+    /// trust-agnostic QUIC handshake says whether anything is there.
+    func isReachable(_ host: StoredHost, discovery: HostDiscovery) async -> Bool {
+        if let live = discovery.hosts.first(where: { host.matches($0) }) {
+            updateAddress(host.id, address: live.host, port: live.port)
+        }
+        let target = hosts.first { $0.id == host.id } ?? host
+        let (address, port) = (target.address, target.port)
+        return await Task.detached(priority: .utility) {
+            PunktfunkConnection.probe(host: address, port: port)
+        }.value
+    }
+
+    /// One reachability sweep, driving `probedOnline`: probe every saved host and publish the
+    /// reachable set. Call in a loop from a home view's `.task` (cancelled on disappear).
     func refreshReachability(discovery: HostDiscovery) async {
-        let targets = hosts.filter { !discovery.advertises($0) }
+        #if DEBUG
+        guard !probePinned else { return } // a seeded reachable set outranks the live LAN
+        #endif
         var online: Set<StoredHost.ID> = []
-        for host in targets {
-            let reachable = await Task.detached(priority: .utility) {
-                PunktfunkConnection.probe(host: host.address, port: host.port)
-            }.value
-            if reachable { online.insert(host.id) }
+        for host in hosts {
+            if await isReachable(host, discovery: discovery) { online.insert(host.id) }
         }
         probedOnline = online
     }
+
+    #if DEBUG
+    /// A seeded reachable set is in force — the sweep must not replace it with live probes.
+    private var probePinned = false
+
+    /// Screenshot/preview seam, the store's counterpart to `HostDiscovery.debugSet`: pin which
+    /// saved hosts read Online and keep the sweep off. A capture has no network, so every real
+    /// probe fails and every mock host would read Offline.
+    func debugSetProbedOnline(_ ids: Set<StoredHost.ID>) {
+        probePinned = true
+        probedOnline = ids
+    }
+    #endif
 
     func pin(_ hostID: UUID, fingerprint: Data) {
         guard let i = hosts.firstIndex(where: { $0.id == hostID }) else { return }
@@ -151,6 +173,16 @@ final class HostStore: ObservableObject {
               let i = hosts.firstIndex(where: { $0.id == hostID }),
               hosts[i].macAddresses != macs else { return }
         hosts[i].macAddresses = macs
+    }
+
+    /// Follow this host to the address its live advert claims — a saved host is matched by
+    /// fingerprint, so it survives a DHCP move, but every dial and probe still used the address
+    /// it was saved at. Same no-op-when-unchanged contract as `updateMacs`.
+    func updateAddress(_ hostID: UUID, address: String, port: UInt16) {
+        guard let i = hosts.firstIndex(where: { $0.id == hostID }),
+              hosts[i].address != address || hosts[i].port != port else { return }
+        hosts[i].address = address
+        hosts[i].port = port
     }
 
     /// Learn/refresh this host's OS-identity chain from its live advert — same contract as
