@@ -200,8 +200,10 @@ impl EncodeConfig {
 }
 
 /// `ICodecAPI::SetValue`, advisory. An MFT that declines a property still encodes — every
-/// vendor's optional set differs — so a failure is logged, never fatal. `value` must carry
-/// the VARIANT type the property documents: an encoder refuses a mistyped one outright.
+/// vendor's optional set differs — so a failure is logged, never fatal. `value` must carry the
+/// VARIANT type the property documents, and an integer literal is `i32` (`VT_I4`) where nearly
+/// every codec property wants `VT_UI4` — write `1u32`. NVIDIA's MFT refuses a mistyped
+/// B-picture count outright and ignores a mistyped force-keyframe silently.
 fn set_advisory<T>(api: &ICodecAPI, key: &GUID, name: &str, value: T) -> bool
 where
     T: Into<VARIANT> + Copy + std::fmt::Debug,
@@ -256,7 +258,7 @@ fn apply_static_properties(api: &ICodecAPI, cfg: &EncodeConfig, force_idr_ok: bo
         api,
         &CODECAPI_AVEncMPVDefaultBPictureCount,
         "BPictureCount",
-        0,
+        0u32,
     );
     set_advisory(
         api,
@@ -883,7 +885,12 @@ impl Encoder for MfEncoder {
             sample.SetSampleDuration(HNS_PER_SEC / i64::from(fps))?;
             if forced {
                 if let Some(api) = inner.codec_api.as_ref() {
-                    set_advisory(api, &CODECAPI_AVEncVideoForceKeyFrame, "ForceKeyFrame", 1);
+                    set_advisory(
+                        api,
+                        &CODECAPI_AVEncVideoForceKeyFrame,
+                        "ForceKeyFrame",
+                        1u32,
+                    );
                 }
             }
             inner.mft.ProcessInput(0, &sample, 0)
