@@ -1017,8 +1017,12 @@ mod session_main {
                 }
             },
             None => {
-                let (settings, profile) =
-                    trust::effective_settings(&addr, port, profile_arg().as_deref());
+                let (settings, profile) = trust::effective_settings(
+                    &addr,
+                    port,
+                    profile_arg().as_deref(),
+                    arg_value("--launch").as_deref(),
+                );
                 (settings, profile.map(|p| p.name), None)
             }
         };

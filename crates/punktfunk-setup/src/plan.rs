@@ -286,11 +286,13 @@ fn install_phase(
             steps.extend(platform::backend(Family::Flatpak).install(facts, choices));
         }
     }
-    plan.push(
-        Phase::Install,
-        format!("Installing: {what} ({} channel)", choices.channel.as_str()),
-        steps,
-    );
+    // SteamOS compiles `main` on the device, so naming a package channel here would be a lie.
+    let how = if facts.family == Family::Steamos {
+        "built on this device".to_string()
+    } else {
+        format!("{} channel", choices.channel.as_str())
+    };
+    plan.push(Phase::Install, format!("Installing: {what} ({how})"), steps);
 }
 
 /// Everything from here to the start phase is generic Linux wiring — a group, a wide-open

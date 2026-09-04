@@ -83,9 +83,9 @@ const TILE_GAP: f64 = 12.0;
 pub(crate) struct HostsProps {
     pub(crate) svc: Svc,
     pub(crate) hosts: Vec<DiscoveredHost>,
-    /// Saved hosts proven reachable by the periodic QUIC probe (keyed by `fp_hex`), OR'd with
-    /// live-advert presence to drive the Online pip — so a host reached only over a routed
-    /// network (Tailscale/VPN), which never advertises on mDNS, still reads Online.
+    /// Saved hosts proven reachable by the periodic QUIC probe (keyed by `fp_hex`) — the whole
+    /// of the Online pip. A routed host (Tailscale/VPN) that never advertises reads Online here,
+    /// and a sleeping one whose advert has not aged out yet reads Offline.
     pub(crate) probed: HashMap<String, bool>,
     pub(crate) status: String,
     /// Connected-controller count (root state, mirrored from the gamepad service) — a
@@ -689,8 +689,8 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
         );
     }
 
-    // Saved (trusted/paired) hosts — reachable even when mDNS isn't. A saved host that's also
-    // being advertised right now shows as Online (and is deduped out of the discovery section).
+    // Saved (trusted/paired) hosts — reachable even when mDNS isn't. A saved host that answers
+    // the probe shows as Online (and any advert for it is deduped out of the discovery section).
     if !known.hosts.is_empty() {
         body.push(section("SAVED HOSTS"));
         let mut tiles: Vec<Element> = Vec::new();
@@ -713,18 +713,16 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 profile: None,
                 launch: None,
             };
-            // Online = advertising on mDNS OR proven reachable by the last probe sweep (the latter
-            // covers a routed/Tailscale host that never advertises — the display companion to
-            // dial-first).
-            let online = hosts
-                .iter()
-                .any(|h| h.fp_hex == k.fp_hex || (h.addr == k.addr && h.port == k.port))
-                || props.probed.get(&k.fp_hex).copied().unwrap_or(false);
-            // Learn what this host's live advert teaches while it's online: its wake MAC(s) (so we
-            // can wake it once it sleeps), its OS chain (so the tile's mark survives it going
-            // offline), and its management port — the last load-bearing rather than cosmetic, as
-            // a host moved off 47990 loses its library entirely once mDNS is gone unless we write
-            // the port down. No-op, and no disk write, when unchanged.
+            // Online = the last probe sweep reached it, and nothing else. An advert is NOT
+            // presence: it is a cache entry with a 75-minute TTL that a suspending host sends no
+            // goodbye for, so counting it kept a sleeping machine's pip green — and every wake
+            // gate below reads `!online`, which is how Wake-on-LAN stayed silent for exactly the
+            // host it was meant to wake.
+            let online = props.probed.get(&k.fp_hex).copied().unwrap_or(false);
+            // Everything the advert teaches: wake MAC(s), OS chain (so the mark survives going
+            // offline), management port — a host moved off 47990 loses its library once mDNS is
+            // gone unless we write it down — and the address, so a host back on a new lease is
+            // dialed and probed where it lives. No disk write when unchanged.
             if let Some(a) = hosts
                 .iter()
                 .find(|h| h.fp_hex == k.fp_hex || (h.addr == k.addr && h.port == k.port))
@@ -737,6 +735,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                     &a.os,
                     a.mgmt_port,
                 );
+                crate::trust::rekey_addr(&k.fp_hex, &a.addr, a.port);
             }
             let can_wake = !online && !k.mac.is_empty();
             // What this host last said it lets this device do to it. Kept warm here — on the
@@ -1053,10 +1052,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 ),
                 Some(menu),
                 Some(Box::new(move || {
-                    // Saved host with a known MAC that isn't advertising: fire a wake packet and
-                    // DIAL IMMEDIATELY — mDNS absence ≠ unreachable (a routed/Tailscale host never
-                    // advertises here); only a failed dial falls into the "Waking…" wait. An
-                    // online host dials straight away.
+                    // Saved host with a known MAC the probe did not reach: fire a wake packet
+                    // and DIAL IMMEDIATELY — looking unreachable ≠ unreachable (a routed/Tailscale
+                    // host answers a dial it never advertised for); only a failed dial falls into
+                    // the "Waking…" wait. A reachable host dials straight away.
                     if can_wake {
                         initiate_waking(&ctx2, target.clone(), &ss, &st);
                     } else {

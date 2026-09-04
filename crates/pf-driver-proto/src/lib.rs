@@ -38,21 +38,29 @@ pub const fn interface_guid_fields() -> (u32, u16, u16, [u8; 8]) {
 /// Bumped on any incompatible change to either plane. Exchanged via [`control::IOCTL_GET_INFO`];
 /// host and driver assert a match at startup.
 ///
-/// v7 is NOT additive: the pixel ring is gone. The driver encodes what DWM composes and
+/// v8 scopes the driver to the process that asks: a monitor, its encoder and its cursor channel
+/// answer only to the owner whose `IOCTL_ADD` created them (a foreign `target_id` or
+/// `session_id` is `STATUS_NOT_FOUND`), `IOCTL_CLEAR_ALL` departs the caller's own, and an
+/// owner's monitors depart when its last control handle closes or it goes silent for the
+/// watchdog window. Nothing on the wire changed; the floor rises because a host sharing the
+/// driver with a second host relies on it. `IOCTL_SET_RENDER_ADAPTER` stays adapter-wide by
+/// IddCx design, so a pin that would move another live owner's GPU is refused.
+///
+/// v7 was NOT additive: the pixel ring is gone. The driver encodes what DWM composes and
 /// publishes access units into the host's section ([`encode::IOCTL_SET_ENCODE`],
-/// [`encode::IOCTL_ENCODE_CTL`]), and `IOCTL_SET_FRAME_CHANNEL` no longer exists — so the floor
-/// rises with it and a v6 driver fails the session with a structured error. Host and driver ship
-/// in one installer. Evidence: `design/windows-video-plane-overhaul.md` §2.3.
+/// [`encode::IOCTL_ENCODE_CTL`]); `IOCTL_SET_FRAME_CHANNEL` no longer exists. Host and driver
+/// ship in one installer. Evidence: `design/windows-video-plane-overhaul.md` §2.3.
 ///
 /// [`control::AddRequest`] luminance tail and [`control::AddReply::cursor_excluded`] are
 /// prefix-compatible (no bump): a short read/write sees zeros = unknown. A hardware-cursor
 /// declare is irrevocable on the adapter — DWM excludes the pointer from every later monitor
 /// until the adapter resets — so the driver blends the pointer when the client draws none.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
-/// Oldest driver this host still drives. Equal to [`PROTOCOL_VERSION`]: v7 replaced the video
-/// transport outright, so there is no older driver a v7 host can talk to.
-pub const MIN_DRIVER_PROTOCOL_VERSION: u32 = 7;
+/// Oldest driver this host still drives. Equal to [`PROTOCOL_VERSION`]: a v7 driver lets a
+/// second host on the box reach this host's monitors, and v7 itself replaced the video
+/// transport outright.
+pub const MIN_DRIVER_PROTOCOL_VERSION: u32 = 8;
 
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN = 0x22, func, METHOD_BUFFERED = 0, FILE_ANY_ACCESS = 0)`.
 pub const fn ctl_code(func: u32) -> u32 {
@@ -216,7 +224,7 @@ pub mod control {
     pub struct EncodeProbeRequest {
         /// OS target of the monitor to tap; `0` = whichever drain worker offers first.
         pub target_id: u32,
-        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave.
+        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave, 5 Media Foundation.
         pub backend: u32,
         /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave (backend 4 only, and only with backend 4).
         pub codec: u32,
@@ -936,11 +944,14 @@ pub mod encode {
     impl EncodeInput {
         /// The input for `backend` (the [`SetEncodeRequest::backends`] numbering) under the
         /// request's HDR and 4:4:4 flags. Only NVENC ingests packed RGB, so only it can pair
-        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0.
+        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0. Media Foundation
+        /// takes NV12 whatever was asked for — no vendor's MFT accepts P010, so an HDR
+        /// request that reaches it encodes 8-bit rather than failing the open.
         #[must_use]
         pub const fn choose(backend: u32, hdr: bool, chroma444: bool) -> Self {
             match (backend, hdr, chroma444) {
                 (4, _, _) => Self::Planar { hdr, chroma444 },
+                (5, _, _) => Self::Nv12,
                 (1, true, true) => Self::Rgb10,
                 (_, true, _) => Self::P010,
                 (1, false, _) => Self::Bgra,
@@ -2691,8 +2702,9 @@ mod tests {
             req
         );
         assert_eq!(bytes[8..12], 2560u32.to_le_bytes());
-        // v7 replaced the video transport, so the floor is the version itself.
-        assert_eq!(PROTOCOL_VERSION, 7);
+        // v8 scoped the driver to its owners and v7 replaced the video transport; each makes
+        // the floor the version itself.
+        assert_eq!(PROTOCOL_VERSION, 8);
         assert_eq!(MIN_DRIVER_PROTOCOL_VERSION, PROTOCOL_VERSION);
     }
 

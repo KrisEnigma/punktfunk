@@ -527,8 +527,19 @@ extension SettingsView {
     /// The in-stream quick-action ring's editor, opened as a sheet. Every platform with a ring
     /// the user can change: iOS from Touch & pointer, macOS from Keyboard & mouse (the Mac opens
     /// the ring with ⌃⌥⇧O or the Stream menu, so that is where a reader looks for it).
+    /// How to reach the dial on THIS platform. The editor must name its opener: six buttons
+    /// nobody can summon are six buttons nobody sees.
+    private var dialOpener: String {
+        #if os(macOS)
+        "⌃⌥⇧O, the Stream menu or Select + A on a controller opens it mid-stream. "
+        #else
+        "A two-finger twist, or Select + A on a controller, opens it mid-stream. "
+        #endif
+    }
+
     @ViewBuilder var quickActionsRow: some View {
-        described("Which actions the in-stream dial offers and the shortcuts it can send; "
+        described(dialOpener
+                  + "Which actions the in-stream dial offers and the shortcuts it can send; "
                   + "a profile that changes it owns the whole dial.", field: "overlay_actions") {
             // A SHEET, not a push: the detail column is not a NavigationStack, and a
             // NavigationLink pushed from it popped the collapsed iPhone stack to the category

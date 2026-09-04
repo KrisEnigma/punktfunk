@@ -96,8 +96,11 @@ usbfs-iso = { git = "https://github.com/unom-io/usbfs-iso", rev = "f3de1fd62cec2
 # Linux/Windows session binary shows, drawn here through Skia's GL backend on an EGL surface
 # (`src/console/`). `default-features = false` turns its Vulkan overlay off — this host owns the
 # surface. `pf-client-core` for the portable types the shell speaks (settings, menu events,
-# overlay actions); `default-features = false` like every other consumer (its default is the
-# PyroWave decoder, C++ nobody here wants).
+# overlay actions); `default-features = false` like every other consumer — then `pyrowave` back
+# on by name, which is the ONE piece of the desktop half this client takes: the shared Vulkan
+# wavelet decoder behind `src/pyro/` (design/pyrowave-codec-plan.md). It brings the vendored
+# C++/Vulkan codec into the `.so` on the 64-bit ABIs (arm64-v8a, x86_64) and nothing at all on
+# armeabi-v7a, where pyrowave-sys stubs itself out — see its build.rs.
 #
 # All three shipping ABIs. rust-skia publishes prebuilt Skia archives for aarch64/x86_64/
 # i686-linux-android but NOT armv7-linux-androideabi (the 32-bit TV boxes) — that one comes from
@@ -108,7 +111,15 @@ usbfs-iso = { git = "https://github.com/unom-io/usbfs-iso", rev = "f3de1fd62cec2
 # multi-minute source build, and every ABI's log must show `DOWNLOAD AND INSTALL SUCCEEDED`.
 # (Continues the `cfg(target_os = "android")` table above — TOML allows a table header once.)
 pf-console-ui = { path = "../../../crates/pf-console-ui", default-features = false }
-pf-client-core = { path = "../../../crates/pf-client-core", default-features = false }
+pf-client-core = { path = "../../../crates/pf-client-core", default-features = false, features = [
+    "pyrowave",
+] }
+# The PyroWave lane's own Vulkan: device bring-up, swapchain on the `SurfaceView`, and the
+# planar CSC pipeline (`src/pyro/`). `loaded` dlopens libvulkan.so at RUNTIME rather than
+# linking it, which is what keeps the `.so` loading on a device with no Vulkan at all — there
+# the probe simply answers no and the client never advertises the codec. Same pinned version as
+# pf-client-core/pf-presenter so one ash generation owns the handles.
+ash = { version = "0.38", features = ["loaded"] }
 # `gl` + `textlayout` = the prebuilt key `gl-jpegd-jpege-pdf-textlayout` (verify
 # `DOWNLOAD AND INSTALL SUCCEEDED` in the build log on every bump — see pf-console-ui/Cargo.toml).
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }

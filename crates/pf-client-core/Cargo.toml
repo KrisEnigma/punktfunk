@@ -109,13 +109,6 @@ opus = { version = "0.3", optional = true }
 
 mdns-sd = { version = "0.21", optional = true }
 
-# PyroWave decode (the opt-in wired-LAN wavelet codec, design/pyrowave-codec-plan.md
-# §4.5) — pure Vulkan compute on the presenter's shared device, so it builds wherever the
-# spawned Vulkan session presenter runs: Linux AND Windows (pyrowave-sys covers both; it
-# is an empty stub elsewhere). `ash` only wraps the presenter's existing raw handles
-# (same pinned version as pf-presenter).
-pyrowave-sys = { path = "../pyrowave-sys", optional = true }
-ash = { version = "0.38", optional = true }
 # Game-library fetch from the host's management API over mTLS + fingerprint pinning.
 # `ureq` is small + sync (the host uses it too) and its rustls unifies with the
 # workspace's (quinn's) 0.23; the pinning verifier mirrors core's private `PinVerify`.
@@ -239,6 +232,18 @@ sha2 = "0.11"
 # deliberately doesn't need.
 log = "0.4"
 tracing-subscriber = { version = "0.3" }
+
+# PyroWave decode (the opt-in wired-LAN wavelet codec, design/pyrowave-codec-plan.md
+# §4.5) — pure Vulkan compute on the device the frame is presented from, so it builds
+# wherever a Vulkan present path exists: the spawned session presenter on Linux and
+# Windows, and the JNI client's own swapchain on Android (pyrowave-sys covers all three;
+# it is an empty stub elsewhere). Its own target table rather than the desktop one above,
+# because Android takes this crate `--no-default-features` — no decode ladder, no session
+# pump, just the wavelet lane. `ash` only wraps the owner's existing raw handles (same
+# pinned version as pf-presenter).
+[target.'cfg(any(target_os = "linux", windows, target_os = "android"))'.dependencies]
+pyrowave-sys = { path = "../pyrowave-sys", optional = true }
+ash = { version = "0.38", optional = true }
 
 [features]
 # `desktop` separates the full Linux/Windows stack — session pump, the native decode ladder,

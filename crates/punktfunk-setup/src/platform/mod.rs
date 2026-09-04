@@ -12,8 +12,8 @@ pub mod windows;
 use std::sync::OnceLock;
 
 use crate::choices::Choices;
-use crate::facts::{Channel, Facts, Family, FLATPAK_APP};
-use crate::plan::{switch_pkgs, Step, StepAction};
+use crate::facts::{Channel, Facts, Family, DOCS, FLATPAK_APP};
+use crate::plan::{switch_pkgs, Level, Step, StepAction};
 use crate::seam::{BasePaths, CommandRunner};
 
 /// The single source for every install line (`design/installer-v2.md` D6).
@@ -70,6 +70,7 @@ pub fn backend(family: Family) -> &'static dyn PkgBackend {
         Family::Dnf => &Dnf,
         Family::Pacman => &Pacman,
         Family::Sysext => &Sysext,
+        Family::Steamos => &Steamos,
         Family::Flatpak => &Flatpak,
     }
 }
@@ -432,6 +433,79 @@ impl PkgBackend for Sysext {
     }
 }
 
+/// SteamOS ships no package: `/usr` is read-only, so the host is compiled on the device inside
+/// a Debian distrobox ABI-matched to the running OS, which is what keeps it working across OS
+/// updates. `scripts/steamdeck/install.sh` is that build, and it also does the groups, linger,
+/// tuning and unit start every other family gets from the phases below — so this is a hand-off
+/// like Omarchy's, and it ends the run.
+struct Steamos;
+
+impl PkgBackend for Steamos {
+    fn base_pkgs(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
+    fn write_repo(&self, _facts: &Facts, _choices: &Choices) -> Vec<Step> {
+        vec![]
+    }
+
+    fn install(&self, _facts: &Facts, choices: &Choices) -> Vec<Step> {
+        let lines = install_lines("steamos");
+        let (build, clone) = lines
+            .split_last()
+            .expect("steamos entry has an install line");
+        // `git clone` into an existing ~/punktfunk fails, and a re-run is documented as safe.
+        // Whatever tree is there is the one to build; `update.sh --pull` is what moves it.
+        let mut steps: Vec<Step> = clone
+            .iter()
+            .map(|line| Step::run(format!("[ -d ~/punktfunk/.git ] || {line}")))
+            .collect();
+        steps.push(Step::run(if choices.gamestream {
+            format!("{build} --gamestream")
+        } else {
+            build.clone()
+        }));
+        // host.env AFTER the build, never before: that script writes its defaults only when the
+        // file is absent, and one of them (RADV_PERFTEST=video_encode) is what turns Vulkan
+        // encode on for Van Gogh. Creating host.env first would silently cost the Deck it.
+        if choices.clipboard {
+            steps.push(Step::set_env("PUNKTFUNK_CLIPBOARD", "on"));
+        }
+        if let Some(last) = steps.last_mut() {
+            last.ends_run = true;
+        }
+        steps
+    }
+
+    /// One tree, built from `main`. Unreachable in practice: a switch needs a current channel,
+    /// and this family never reports one.
+    fn switch(&self, facts: &Facts, choices: &Choices) -> Vec<Step> {
+        self.install(facts, choices)
+    }
+
+    /// Nothing here is a package — the build is spread across the user session and a handful of
+    /// root-owned files. The units come off, including the rebuild check no other family has,
+    /// and the rest is a documented sequence.
+    fn uninstall(&self, _facts: &Facts) -> Vec<Step> {
+        vec![
+            Step::run(UNIT_TEARDOWN),
+            Step::run("systemctl --user disable --now punktfunk-rebuild-check 2>/dev/null || true"),
+            Step::note(
+                Level::Warn,
+                format!("the on-device build has no uninstall script — the build container, the files under your home and the root-owned tuning come off by hand: {DOCS}/uninstall#steamos--steam-deck-host-on-device-build"),
+            ),
+        ]
+    }
+
+    fn current_channel(&self, _paths: &BasePaths, _run: &dyn CommandRunner) -> Option<Channel> {
+        None
+    }
+
+    fn installed_pf(&self, _run: &dyn CommandRunner) -> Vec<String> {
+        vec![]
+    }
+}
+
 /// User-scope client for families with no native package. An unsupported distro is not
 /// a dead end for the client.
 struct Flatpak;
@@ -481,7 +555,7 @@ mod tests {
     // Fail the build here, not at install time on a box.
     #[test]
     fn every_host_platform_parses_and_carries_install_lines() {
-        for id in ["debian", "arch", "omarchy", "fedora", "bazzite"] {
+        for id in ["debian", "arch", "omarchy", "fedora", "bazzite", "steamos"] {
             assert!(!install_lines(id).is_empty(), "{id} has no install lines");
         }
     }
@@ -532,6 +606,15 @@ mod tests {
             install_lines("bazzite").len(),
             2,
             "fetch the script, run it"
+        );
+
+        let lines = install_lines("steamos");
+        assert_eq!(lines.len(), 2, "clone the source, run the on-device build");
+        assert!(lines[0].starts_with("git clone"), "{:?}", lines[0]);
+        assert!(
+            lines[1].ends_with("scripts/steamdeck/install.sh"),
+            "the gamestream flag is appended to this line: {:?}",
+            lines[1]
         );
     }
 }

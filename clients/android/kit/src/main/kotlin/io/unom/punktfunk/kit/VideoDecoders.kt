@@ -48,10 +48,29 @@ object VideoDecoders {
      * The `quic::CODEC_*` bitfield of codecs this device can decode, advertised in the Hello so the
      * host never emits a codec the decode loop can't open: H.264 (1) and HEVC (2) always (universal
      * on Android hardware), plus AV1 (4) only when [pickDecoder] finds a real (hardware, non-blocked)
-     * `video/av01` decoder. Enumerates `MediaCodecList` — call at connect time, not per frame.
+     * `video/av01` decoder, plus PyroWave (8) when the GPU answers
+     * [NativeBridge.nativePyrowaveCapable].
+     *
+     * PyroWave is the one bit here that names no `MediaCodec`: it is Vulkan compute, so the probe
+     * asks the driver rather than `MediaCodecList`. Enumerates `MediaCodecList` (and, once per
+     * process, a Vulkan instance) — call at connect time, not per frame.
      */
     fun decodableCodecBits(): Int =
-        1 or 2 or (if (pickDecoder("video/av01") != null) 4 else 0)
+        1 or 2 or
+            (if (pickDecoder("video/av01") != null) 4 else 0) or
+            (if (pyrowaveCapable()) 8 else 0)
+
+    /**
+     * Whether this device's GPU decodes PyroWave ([NativeBridge.nativePyrowaveCapable]) — the
+     * codec picker's gate as well as the advertised bit, so both answer from one place.
+     *
+     * Falls back to `false` when the native library is not loaded at all. That is not defensive
+     * padding: the JVM screenshot tests render the REAL settings screen under Robolectric with no
+     * `.so` behind it, and `System.loadLibrary` throws an `Error` (not an `Exception`) there.
+     * "This device has no PyroWave" is the truthful answer for a process that has no core.
+     */
+    fun pyrowaveCapable(): Boolean =
+        runCatching { NativeBridge.nativePyrowaveCapable() }.getOrDefault(false)
 
     /**
      * Whether EVERY decoder this device would use tolerates multi-slice access units — the

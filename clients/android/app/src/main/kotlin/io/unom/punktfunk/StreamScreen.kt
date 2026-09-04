@@ -33,8 +33,12 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,6 +58,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -964,350 +969,393 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         val h = size?.getOrNull(1) ?: 0
         if (w > 0 && h > 0) w.toFloat() / h.toFloat() else 0f
     }
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black).onSizeChanged { containerSize = it }) {
-        // The picture is aspect-fitted; the gesture layer below spans the WHOLE container and maps
-        // every absolute contact — direct-pointer touch, passthrough, the pen lane — into this same
-        // fit through `videoFitRect`, so a swipe that starts on a letterbox bar still registers and
-        // a contact on a bar lands on the nearest picture edge.
-        val videoFit = if (videoAspect > 0f) {
-            Modifier.align(Alignment.Center).aspectRatio(videoAspect)
-        } else {
-            Modifier.fillMaxSize()
-        }
-        AndroidView(
-            modifier = videoFit,
-            factory = { ctx ->
-                SurfaceView(ctx).apply {
-                    videoView = this
-                    holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) {
-                            // Low-latency mode: rank MediaCodecList decoders for the negotiated
-                            // MIME (framework-only API) and hand the chosen one to Rust, which
-                            // creates it by name and applies the per-SoC vendor low-latency keys.
-                            // Off ⇒ no ranking: the platform resolves its default decoder for the
-                            // MIME, exactly as before the overhaul.
-                            val mime = NativeBridge.nativeVideoMime(handle)
-                            val choice = if (lowLatencyMode) VideoDecoders.pickDecoder(mime) else null
-                            NativeBridge.nativeStartVideo(
-                                handle,
-                                holder.surface,
-                                choice?.name ?: "",
-                                lowLatencyMode,
-                                choice?.lowLatencyFeature ?: false,
-                                isTv,
-                                initialSettings.presentPriorityWire(),
-                                initialSettings.smoothBuffer,
-                                // The panel's own refresh — from the mode TABLE (streamPanelFps),
-                                // because display.refreshRate reports a per-uid override, not the
-                                // panel. Fallback: the (possibly lying) live rate.
-                                activity?.streamPanelFps(streamHz)?.takeIf { it > 0 }
-                                    ?: (runCatching { context.display }.getOrNull()?.refreshRate ?: 0f)
-                                        .roundToInt(),
-                                // The SurfaceView's on-screen pixel size — the coordinate space the
-                                // ASurfaceControl layer composites in (the aspect-fitted video rect,
-                                // not the window's rotated buffer geometry). 0 if not laid out yet;
-                                // native falls back to the window buffer size.
-                                this@apply.width,
-                                this@apply.height,
-                            )
-                            NativeBridge.nativeStartAudio(handle, lowLatencyMode, isTv)
-                            // The MIC grant is read live (a surface recreate re-runs this, and
-                            // the mask may have changed since the last one): without it no
-                            // capture opens — the host never attached this session to its mic
-                            // service, so the platform's recording indicator would announce a
-                            // mic nobody can hear.
-                            if (micWanted && accessGrants and SessionAccess.MIC != 0) {
-                                val sessionId =
-                                    NativeBridge.nativeStartMic(handle, initialSettings.echoCancel)
-                                if (initialSettings.echoCancel) {
-                                    attachMicEffects(sessionId, micEffects)
-                                }
-                                // Did a capture actually open? That — not the setting — is what
-                                // puts the mute control on screen. A restart after a surface
-                                // recreate comes back already muted if the user muted: the flag
-                                // lives on the session handle, so nothing has to be re-applied.
-                                micRunning = NativeBridge.nativeMicActive(handle)
-                            }
-                        }
-
-                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                            // The view's CURRENT pixel size, for the ASurfaceControl layer's
-                            // destination rect. It is reported here and not only at
-                            // surfaceCreated because the view grows a frame or two after the
-                            // stream screen appears — hiding the system bars and switching on
-                            // cutout drawing both resize it, and neither recreates the surface.
-                            // A layer left on the start-up rect paints the picture small, in the
-                            // top-left corner. The view's own size, not the buffer geometry in
-                            // `width`/`height`: the layer composites in the view's space.
-                            NativeBridge.nativeVideoSurfaceSize(
-                                handle, this@apply.width, this@apply.height,
-                            )
-                            // Re-assert the frame-rate vote: a buffer-geometry change can reset
-                            // the surface's frame-rate setting on some OEM builds, silently
-                            // dropping the 120 Hz pin mid-stream. Mirrors the native hint's
-                            // policy (FIXED_SOURCE; ALWAYS only on the TV low-latency path —
-                            // phones stay seamless so a re-hint can never force a mode flicker).
-                            if (streamHz > 0) runCatching {
-                                holder.surface.setFrameRate(
-                                    streamHz.toFloat(),
-                                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
-                                    if (isTv && lowLatencyMode) {
-                                        Surface.CHANGE_FRAME_RATE_ALWAYS
-                                    } else {
-                                        Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS
-                                    },
+    // Tabletop foldable (design §4.4): with the pad up on a half-opened device the picture keeps
+    // the upright half and the controls take the flat one, instead of thumbs sitting on the game.
+    // The stream half is a container like any other — the video fit, the gesture layer, the ring
+    // and the hints all measure against it, so none of them knows a fold happened.
+    val density = LocalDensity.current
+    var rootSize by remember { mutableStateOf(IntSize.Zero) }
+    var padSize by remember { mutableStateOf(IntSize.Zero) }
+    val hinge = rememberFoldHinge()
+    val split = if (padShown) hinge?.let { foldSplit(it, rootSize) } else null
+    Column(modifier = Modifier.fillMaxSize().background(Color.Black).onSizeChanged { rootSize = it }) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (split != null) {
+                        Modifier.height(with(density) { split.videoPx.toDp() })
+                    } else {
+                        Modifier.weight(1f)
+                    },
+                )
+                .onSizeChanged { containerSize = it },
+        ) {
+            // The picture is aspect-fitted; the gesture layer below spans the WHOLE container and maps
+            // every absolute contact — direct-pointer touch, passthrough, the pen lane — into this same
+            // fit through `videoFitRect`, so a swipe that starts on a letterbox bar still registers and
+            // a contact on a bar lands on the nearest picture edge.
+            val videoFit = if (videoAspect > 0f) {
+                Modifier.align(Alignment.Center).aspectRatio(videoAspect)
+            } else {
+                Modifier.fillMaxSize()
+            }
+            AndroidView(
+                modifier = videoFit,
+                factory = { ctx ->
+                    SurfaceView(ctx).apply {
+                        videoView = this
+                        holder.addCallback(object : SurfaceHolder.Callback {
+                            override fun surfaceCreated(holder: SurfaceHolder) {
+                                // Low-latency mode: rank MediaCodecList decoders for the negotiated
+                                // MIME (framework-only API) and hand the chosen one to Rust, which
+                                // creates it by name and applies the per-SoC vendor low-latency keys.
+                                // Off ⇒ no ranking: the platform resolves its default decoder for the
+                                // MIME, exactly as before the overhaul.
+                                val mime = NativeBridge.nativeVideoMime(handle)
+                                val choice = if (lowLatencyMode) VideoDecoders.pickDecoder(mime) else null
+                                NativeBridge.nativeStartVideo(
+                                    handle,
+                                    holder.surface,
+                                    choice?.name ?: "",
+                                    lowLatencyMode,
+                                    choice?.lowLatencyFeature ?: false,
+                                    isTv,
+                                    initialSettings.presentPriorityWire(),
+                                    initialSettings.smoothBuffer,
+                                    // The panel's own refresh — from the mode TABLE (streamPanelFps),
+                                    // because display.refreshRate reports a per-uid override, not the
+                                    // panel. Fallback: the (possibly lying) live rate.
+                                    activity?.streamPanelFps(streamHz)?.takeIf { it > 0 }
+                                        ?: (runCatching { context.display }.getOrNull()?.refreshRate ?: 0f)
+                                            .roundToInt(),
+                                    // The SurfaceView's on-screen pixel size — the coordinate space the
+                                    // ASurfaceControl layer composites in (the aspect-fitted video rect,
+                                    // not the window's rotated buffer geometry). 0 if not laid out yet;
+                                    // native falls back to the window buffer size.
+                                    this@apply.width,
+                                    this@apply.height,
                                 )
+                                NativeBridge.nativeStartAudio(handle, lowLatencyMode, isTv)
+                                // The MIC grant is read live (a surface recreate re-runs this, and
+                                // the mask may have changed since the last one): without it no
+                                // capture opens — the host never attached this session to its mic
+                                // service, so the platform's recording indicator would announce a
+                                // mic nobody can hear.
+                                if (micWanted && accessGrants and SessionAccess.MIC != 0) {
+                                    val sessionId =
+                                        NativeBridge.nativeStartMic(handle, initialSettings.echoCancel)
+                                    if (initialSettings.echoCancel) {
+                                        attachMicEffects(sessionId, micEffects)
+                                    }
+                                    // Did a capture actually open? That — not the setting — is what
+                                    // puts the mute control on screen. A restart after a surface
+                                    // recreate comes back already muted if the user muted: the flag
+                                    // lives on the session handle, so nothing has to be re-applied.
+                                    micRunning = NativeBridge.nativeMicActive(handle)
+                                }
                             }
-                        }
 
-                        override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            // Surface gone (backgrounding, or on the way out). Stop the threads that
-                            // render to it — but only while the session is still open. Once
-                            // DisposableEffect has closed it, the handle is freed; dereferencing it
-                            // here is the use-after-free that crashed on back-navigation.
-                            if (!closed.get()) {
-                                releaseMicEffects(micEffects)
-                                NativeBridge.nativeStopMic(handle)
-                                // No capture, no control — but the MUTE state is deliberately left
-                                // standing (native keeps it on the handle), so the restart in
-                                // surfaceCreated brings the user's choice back with it.
-                                micRunning = false
-                                NativeBridge.nativeStopAudio(handle)
-                                NativeBridge.nativeStopVideo(handle)
+                            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                // The view's CURRENT pixel size, for the ASurfaceControl layer's
+                                // destination rect. It is reported here and not only at
+                                // surfaceCreated because the view grows a frame or two after the
+                                // stream screen appears — hiding the system bars and switching on
+                                // cutout drawing both resize it, and neither recreates the surface.
+                                // A layer left on the start-up rect paints the picture small, in the
+                                // top-left corner. The view's own size, not the buffer geometry in
+                                // `width`/`height`: the layer composites in the view's space.
+                                NativeBridge.nativeVideoSurfaceSize(
+                                    handle, this@apply.width, this@apply.height,
+                                )
+                                // Re-assert the frame-rate vote: a buffer-geometry change can reset
+                                // the surface's frame-rate setting on some OEM builds, silently
+                                // dropping the 120 Hz pin mid-stream. Mirrors the native hint's
+                                // policy (FIXED_SOURCE; ALWAYS only on the TV low-latency path —
+                                // phones stay seamless so a re-hint can never force a mode flicker).
+                                if (streamHz > 0) runCatching {
+                                    holder.surface.setFrameRate(
+                                        streamHz.toFloat(),
+                                        Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                                        if (isTv && lowLatencyMode) {
+                                            Surface.CHANGE_FRAME_RATE_ALWAYS
+                                        } else {
+                                            Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS
+                                        },
+                                    )
+                                }
                             }
-                        }
-                    })
-                }
-            },
-        )
-        // Live stats HUD (FPS / throughput / capture→client latency), drawn over the video but
-        // BEFORE the transparent gesture layer below, so it shows through and never eats touches.
-        if (statsOn) {
-            stats?.let {
-                val placement = Modifier.align(Alignment.TopStart).padding(12.dp)
-                OsdScaled {
-                    StatsOverlay(
-                        it, statsVerbosity, decoderLabel, codecLabel, session.profileName,
-                        panelHz, placement,
-                    )
+
+                            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                // Surface gone (backgrounding, or on the way out). Stop the threads that
+                                // render to it — but only while the session is still open. Once
+                                // DisposableEffect has closed it, the handle is freed; dereferencing it
+                                // here is the use-after-free that crashed on back-navigation.
+                                if (!closed.get()) {
+                                    releaseMicEffects(micEffects)
+                                    NativeBridge.nativeStopMic(handle)
+                                    // No capture, no control — but the MUTE state is deliberately left
+                                    // standing (native keeps it on the handle), so the restart in
+                                    // surfaceCreated brings the user's choice back with it.
+                                    micRunning = false
+                                    NativeBridge.nativeStopAudio(handle)
+                                    NativeBridge.nativeStopVideo(handle)
+                                }
+                            }
+                        })
+                    }
+                },
+            )
+            // Live stats HUD (FPS / throughput / capture→client latency), drawn over the video but
+            // BEFORE the transparent gesture layer below, so it shows through and never eats touches.
+            if (statsOn) {
+                stats?.let {
+                    val placement = Modifier.align(Alignment.TopStart).padding(12.dp)
+                    OsdScaled {
+                        StatsOverlay(
+                            it, statsVerbosity, decoderLabel, codecLabel, session.profileName,
+                            panelHz, placement,
+                        )
+                    }
                 }
             }
-        }
-        // The Access chip — what this session is allowed to do, said in the preset vocabulary
-        // ("Controller only · 1 h 58 m left"), shown while the stats HUD is on. It rides the
-        // stats tier rather than standing for the whole stream: a pill that never goes away is
-        // chrome you read as distraction. Full control with no expiry — every session against an
-        // old host, and most against a new one — shows NOTHING: the chip exists for the sessions
-        // where input silently not landing needs an explanation, not as new chrome on everyone's
-        // stream. TopEnd, in the shared pill family (TopStart is the HUD's, TopCentre the
-        // transient cues', BottomCentre the banner's).
-        val accessChip = when {
-            !statsOn -> null
-            accessGrants and SessionAccess.ALL == SessionAccess.ALL && accessRemaining == 0 -> null
-            accessRemaining > 0 ->
-                "${SessionAccess.label(accessGrants)} · " +
-                    "${SessionAccess.remainingLabel(accessRemaining)} left"
-            else -> SessionAccess.label(accessGrants)
-        }
-        if (accessChip != null) {
-            AccessChip(accessChip, Modifier.align(Alignment.TopEnd).padding(12.dp))
-        }
-        // "Hold to quit" hint while the gamepad exit chord is armed — the exit debounces on a ~1 s
-        // hold, so without this cue a couch user reads the (deliberately no-longer-instant) chord as
-        // broken. Purely visual; it sits above the video and below the gesture layer.
-        if (exitArming) {
-            ExitChordHint(Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
-        }
-        // Remote-pointer mode hint — the remote's keys are remapped while it's on, so say so.
-        if (remotePointerOn) {
-            RemotePointerHint(Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
-        }
-        // The start banner (desktop parity), naming ONLY the shortcuts this session actually has:
-        // pad chords when a controller is here, the Back gesture and the three-finger tap when it
-        // is not. Recomputed rather than captured, because both inputs change under it — a pad can
-        // wake mid-banner, and `micRunning` only settles once the capture has actually opened.
-        // Above the video and below the gesture layer: it teaches touches, it must never eat one.
-        //
-        // Bottom-centre is the desktop's placement and the only edge left — TopStart is the HUD,
-        // TopEnd the Access chip, TopCentre the three transient cues — but MotionUnreachableHint
-        // already owns it, and both of these can be up at t≈0. The banner YIELDS rather than
-        // stacking or sliding off-centre: the notice reports something broken about THIS session
-        // and names the setting that fixes it, while the banner repeats shortcuts that will be
-        // there next stream too. Two pills sharing an edge for six seconds would cost the reader
-        // both.
-        if (bannerUp && !motionHint && !touchHint) {
-            StreamStartBanner(
-                text = buildList {
-                    if (padPresent) {
-                        add("Hold Select + Start + L1 + R1 to leave")
-                        // Only while a capture is actually running: the chord itself no-ops
-                        // without one, and offering a mute for a mic nobody has is the lie the
-                        // whole control exists to avoid.
-                        if (micRunning) add("Select + Y mic")
-                        add("Select + X stats")
-                    } else {
-                        // No pad: Back is the deliberate exit (gesture, key, or a TV remote's
-                        // button — all land on the same BackHandler).
-                        add("Back leaves the stream")
-                        // The tap lives in the pointer touch models only — passthrough gives every
-                        // finger to the host verbatim — and needs a screen to put three fingers on,
-                        // plus the POINTER grant (without it the gesture layer is not installed).
-                        if (hasTouch && touchMode != TouchMode.TOUCH &&
+            // The Access chip — what this session is allowed to do, said in the preset vocabulary
+            // ("Controller only · 1 h 58 m left"), shown while the stats HUD is on. It rides the
+            // stats tier rather than standing for the whole stream: a pill that never goes away is
+            // chrome you read as distraction. Full control with no expiry — every session against an
+            // old host, and most against a new one — shows NOTHING: the chip exists for the sessions
+            // where input silently not landing needs an explanation, not as new chrome on everyone's
+            // stream. TopEnd, in the shared pill family (TopStart is the HUD's, TopCentre the
+            // transient cues', BottomCentre the banner's).
+            val accessChip = when {
+                !statsOn -> null
+                accessGrants and SessionAccess.ALL == SessionAccess.ALL && accessRemaining == 0 -> null
+                accessRemaining > 0 ->
+                    "${SessionAccess.label(accessGrants)} · " +
+                        "${SessionAccess.remainingLabel(accessRemaining)} left"
+                else -> SessionAccess.label(accessGrants)
+            }
+            if (accessChip != null) {
+                AccessChip(accessChip, Modifier.align(Alignment.TopEnd).padding(12.dp))
+            }
+            // "Hold to quit" hint while the gamepad exit chord is armed — the exit debounces on a ~1 s
+            // hold, so without this cue a couch user reads the (deliberately no-longer-instant) chord as
+            // broken. Purely visual; it sits above the video and below the gesture layer.
+            if (exitArming) {
+                ExitChordHint(Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
+            }
+            // Remote-pointer mode hint — the remote's keys are remapped while it's on, so say so.
+            if (remotePointerOn) {
+                RemotePointerHint(Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
+            }
+            // The start banner (desktop parity), naming ONLY the shortcuts this session actually has:
+            // pad chords when a controller is here, the Back gesture and the three-finger tap when it
+            // is not. Recomputed rather than captured, because both inputs change under it — a pad can
+            // wake mid-banner, and `micRunning` only settles once the capture has actually opened.
+            // Above the video and below the gesture layer: it teaches touches, it must never eat one.
+            //
+            // Bottom-centre is the desktop's placement and the only edge left — TopStart is the HUD,
+            // TopEnd the Access chip, TopCentre the three transient cues — but MotionUnreachableHint
+            // already owns it, and both of these can be up at t≈0. The banner YIELDS rather than
+            // stacking or sliding off-centre: the notice reports something broken about THIS session
+            // and names the setting that fixes it, while the banner repeats shortcuts that will be
+            // there next stream too. Two pills sharing an edge for six seconds would cost the reader
+            // both.
+            if (bannerUp && !motionHint && !touchHint) {
+                StreamStartBanner(
+                    text = buildList {
+                        // The twist and the three-finger tap live in the pointer touch models only —
+                        // passthrough gives every finger to the host verbatim — and need a screen to
+                        // put fingers on, plus the POINTER grant (without it there is no gesture layer).
+                        val gestures = hasTouch && touchMode != TouchMode.TOUCH &&
                             accessGrants and SessionAccess.POINTER != 0
-                        ) {
-                            add("three-finger tap for stats")
+                        if (padPresent) {
+                            // The dial leads: it is the one chord that reaches every other action.
+                            add("Select + A quick actions")
+                            add("Hold Select + Start + L1 + R1 to leave")
+                            // Only while a capture is actually running: the chord itself no-ops
+                            // without one, and offering a mute for a mic nobody has is the lie the
+                            // whole control exists to avoid.
+                            if (micRunning) add("Select + Y mic")
+                            add("Select + X stats")
+                        } else {
+                            // No pad: Back opens the dial (gesture, key, or a TV remote's button — all
+                            // land on the same BackHandler). Leaving is a slot inside it, not this.
+                            add(
+                                if (gestures) "Back or a two-finger twist opens quick actions"
+                                else "Back opens quick actions"
+                            )
+                            if (gestures) add("three-finger tap for stats")
+                        }
+                    }.joinToString(" · "),
+                    alpha = bannerAlpha,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),
+                )
+            }
+            // Invisible 1-px focus anchor for the host-typing soft keyboard (three-finger swipe up
+            // in the mouse modes) AND the pointer-capture grab target — it never draws or takes
+            // touches, it just owns IME focus and receives captured-pointer events.
+            AndroidView(
+                modifier = Modifier.size(1.dp),
+                factory = { ctx ->
+                    KeyCaptureView(ctx).also { v ->
+                        keyCapture = v
+                        // Real IME text path when the host types committed text (see KeyCaptureView).
+                        v.textHandle =
+                            if (NativeBridge.nativeTextInputSupported(handle)) handle else 0L
+                        v.setOnCapturedPointerListener { _, ev ->
+                            (ctx as? MainActivity)?.mouseForwarder?.onCapturedPointer(ev) ?: false
                         }
                     }
-                }.joinToString(" · "),
-                alpha = bannerAlpha,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),
+                },
             )
-        }
-        // Invisible 1-px focus anchor for the host-typing soft keyboard (three-finger swipe up
-        // in the mouse modes) AND the pointer-capture grab target — it never draws or takes
-        // touches, it just owns IME focus and receives captured-pointer events.
-        AndroidView(
-            modifier = Modifier.size(1.dp),
-            factory = { ctx ->
-                KeyCaptureView(ctx).also { v ->
-                    keyCapture = v
-                    // Real IME text path when the host types committed text (see KeyCaptureView).
-                    v.textHandle =
-                        if (NativeBridge.nativeTextInputSupported(handle)) handle else 0L
-                    v.setOnCapturedPointerListener { _, ev ->
-                        (ctx as? MainActivity)?.mouseForwarder?.onCapturedPointer(ev) ?: false
+            // Touch input per the Settings model: trackpad/direct-pointer mouse (the shared gesture
+            // vocabulary) or real multi-touch passthrough — see TouchInput.kt. Passthrough gets no
+            // keyboard gesture: its fingers belong to the host verbatim (a swipe there may BE a
+            // host-OS gesture), so intercepting three fingers would corrupt real multi-touch.
+            // Stylus lane (design/pen-tablet-input.md §7): against a HOST_CAP_PEN host a stylus
+            // splits out of BOTH touch models onto the pen plane; its heartbeat coroutine keeps a
+            // stationary held stroke alive (and its cancellation lifts everything on teardown).
+            // The POINTER grant gates the whole touch/stylus capture layer — "don't capture what
+            // can't land": ungranted, no gesture handler is installed at all (and no pen lane opens),
+            // rather than fingers being read into events the host will drop. Keyed on the grant so an
+            // AccessUpdate flipping it mid-session swaps the layer live.
+            val pointerOk = accessGrants and SessionAccess.POINTER != 0
+            val stylus = remember(handle, pointerOk) {
+                if (pointerOk && NativeBridge.nativeHostSupportsPen(handle)) StylusStream(handle) else null
+            }
+            if (stylus != null) {
+                LaunchedEffect(stylus) { stylus.heartbeatLoop() }
+            }
+            Box(
+                Modifier.fillMaxSize().pointerInput(handle, touchMode, pointerOk) {
+                    when {
+                        !pointerOk -> {} // no capture — the Access chip is what says why
+                        touchMode == TouchMode.TOUCH -> streamTouchPassthrough(handle, stylus, videoAspect)
+                        else -> streamTouchInput(
+                            handle,
+                            stylus,
+                            videoAspect,
+                            trackpad = touchMode == TouchMode.TRACKPAD,
+                            invertScroll = initialSettings.invertScroll,
+                            onCycleStats = { statsVerbosity = statsVerbosity.next() },
+                            // The summon rides the pointer gesture but TYPES — so it also needs the
+                            // KEYBOARD grant (dismissing is always allowed).
+                            onKeyboard = { show ->
+                                if (!show || accessGrants and SessionAccess.KEYBOARD != 0) {
+                                    keyCapture?.setImeVisible(show)
+                                }
+                            },
+                            // The two-finger twist turns the quick-action ring, frame by frame.
+                            onDial = { ev ->
+                                when (ev) {
+                                    is DialEvent.Turn ->
+                                        if (ring.turn(ev.progress, ev.clockwise, ev.x, ev.y)) haptics.tick()
+                                    DialEvent.Commit -> { ring.commit(); haptics.confirm() }
+                                    DialEvent.Cancel -> ring.cancel()
+                                }
+                            },
+                        )
                     }
-                }
-            },
-        )
-        // Touch input per the Settings model: trackpad/direct-pointer mouse (the shared gesture
-        // vocabulary) or real multi-touch passthrough — see TouchInput.kt. Passthrough gets no
-        // keyboard gesture: its fingers belong to the host verbatim (a swipe there may BE a
-        // host-OS gesture), so intercepting three fingers would corrupt real multi-touch.
-        // Stylus lane (design/pen-tablet-input.md §7): against a HOST_CAP_PEN host a stylus
-        // splits out of BOTH touch models onto the pen plane; its heartbeat coroutine keeps a
-        // stationary held stroke alive (and its cancellation lifts everything on teardown).
-        // The POINTER grant gates the whole touch/stylus capture layer — "don't capture what
-        // can't land": ungranted, no gesture handler is installed at all (and no pen lane opens),
-        // rather than fingers being read into events the host will drop. Keyed on the grant so an
-        // AccessUpdate flipping it mid-session swaps the layer live.
-        val pointerOk = accessGrants and SessionAccess.POINTER != 0
-        val stylus = remember(handle, pointerOk) {
-            if (pointerOk && NativeBridge.nativeHostSupportsPen(handle)) StylusStream(handle) else null
-        }
-        if (stylus != null) {
-            LaunchedEffect(stylus) { stylus.heartbeatLoop() }
-        }
-        Box(
-            Modifier.fillMaxSize().pointerInput(handle, touchMode, pointerOk) {
-                when {
-                    !pointerOk -> {} // no capture — the Access chip is what says why
-                    touchMode == TouchMode.TOUCH -> streamTouchPassthrough(handle, stylus, videoAspect)
-                    else -> streamTouchInput(
-                        handle,
-                        stylus,
-                        videoAspect,
-                        trackpad = touchMode == TouchMode.TRACKPAD,
-                        invertScroll = initialSettings.invertScroll,
-                        onCycleStats = { statsVerbosity = statsVerbosity.next() },
-                        // The summon rides the pointer gesture but TYPES — so it also needs the
-                        // KEYBOARD grant (dismissing is always allowed).
-                        onKeyboard = { show ->
-                            if (!show || accessGrants and SessionAccess.KEYBOARD != 0) {
-                                keyCapture?.setImeVisible(show)
-                            }
+                },
+            )
+            // No standing mic element here: the in-stream mute control is deliberately absent until the
+            // on-screen overlay UI lands and can carry it as one of its controls. Mute itself is intact
+            // — the Select + Y chord toggles it, and the hint below is what confirms the toggle.
+            // Chord confirmation (gamepad/TV) — mute has no standing indicator, so this is the whole
+            // of its feedback: a toggle that showed nothing at all would be indistinguishable from one
+            // that never registered.
+            // The virtual controller: above the gesture layer, so its controls take their fingers
+            // first and every other finger falls through; below the ring, whose scrim owns every
+            // finger while it is up. Composed only while shown (tenet 1) — and on a tabletop fold
+            // it leaves this half entirely for the flat one below.
+            if (split == null) PadHalf(virtualPad, overlayCfg.pad, containerSize, haptics)
+            // The ring, above the gesture layer so its buttons take the finger first. Composed only
+            // while open: a closed overlay costs nothing (tenet 1).
+            OsdScaled {
+                RingOverlay(
+                    state = ring,
+                    cfg = overlayCfg,
+                    actions = RingActions(
+                        endStream = { NativeBridge.nativeDisconnectQuit(handle); onSessionEnded(SessionEndReason.LOCAL) },
+                        disconnectLinger = { onSessionEnded(SessionEndReason.LOCAL) },
+                        touchMode = { touchMode },
+                        cycleTouchMode = {
+                            // Passthrough is skipped toward a host that drops contacts (§5.4).
+                            val order = if (hostAcceptsTouch) TouchMode.entries else listOf(TouchMode.TRACKPAD, TouchMode.POINTER)
+                            touchMode = order[(order.indexOf(touchMode) + 1) % order.size]
                         },
-                        // The two-finger twist turns the quick-action ring, frame by frame.
-                        onDial = { ev ->
-                            when (ev) {
-                                is DialEvent.Turn ->
-                                    if (ring.turn(ev.progress, ev.clockwise, ev.x, ev.y)) haptics.tick()
-                                DialEvent.Commit -> { ring.commit(); haptics.confirm() }
-                                DialEvent.Cancel -> ring.cancel()
-                            }
-                        },
-                    )
-                }
-            },
-        )
-        // No standing mic element here: the in-stream mute control is deliberately absent until the
-        // on-screen overlay UI lands and can carry it as one of its controls. Mute itself is intact
-        // — the Select + Y chord toggles it, and the hint below is what confirms the toggle.
-        // Chord confirmation (gamepad/TV) — mute has no standing indicator, so this is the whole
-        // of its feedback: a toggle that showed nothing at all would be indistinguishable from one
-        // that never registered.
-        // The virtual controller: above the gesture layer, so its controls take their fingers
-        // first and every other finger falls through; below the ring, whose scrim owns every
-        // finger while it is up. Composed only while shown (tenet 1).
-        virtualPad?.let { ext ->
-            val sink = remember(ext) { PadSink(ext::button, ext::axis) }
-            VirtualPadLayer(overlayCfg.pad, containerSize, sink, haptics)
-        }
-        // The ring, above the gesture layer so its buttons take the finger first. Composed only
-        // while open: a closed overlay costs nothing (tenet 1).
-        OsdScaled {
-            RingOverlay(
-                state = ring,
-                cfg = overlayCfg,
-                actions = RingActions(
-                    endStream = { NativeBridge.nativeDisconnectQuit(handle); onSessionEnded(SessionEndReason.LOCAL) },
-                    disconnectLinger = { onSessionEnded(SessionEndReason.LOCAL) },
-                    touchMode = { touchMode },
-                    cycleTouchMode = {
-                        // Passthrough is skipped toward a host that drops contacts (§5.4).
-                        val order = if (hostAcceptsTouch) TouchMode.entries else listOf(TouchMode.TRACKPAD, TouchMode.POINTER)
-                        touchMode = order[(order.indexOf(touchMode) + 1) % order.size]
-                    },
-                    keyboardGranted = { accessGrants and SessionAccess.KEYBOARD != 0 },
-                    keyboard = { keyCapture?.setImeVisible(true) },
-                    textSupported = NativeBridge.nativeTextInputSupported(handle),
-                    sendText = { NativeBridge.nativeSendText(handle, it) },
-                    stats = { statsVerbosity },
-                    cycleStats = { statsVerbosity = statsVerbosity.next() },
-                    micAvailable = { micRunning },
-                    micMuted = { micMuted },
-                    toggleMic = { setMicMuted(!micMuted) },
-                    hostActions = { hostActions },
-                    invokeHost = { act ->
-                        hostRecord?.let { kh ->
-                            scope.launch(Dispatchers.IO) {
-                                (IdentityStore(context).load() as? IdentityLoad.Ok)?.identity?.let { id ->
-                                    HostActions.invoke(id, kh.address, kh.effectiveMgmtPort, kh.fpHex, kh.name, act.id, act.label)
+                        keyboardGranted = { accessGrants and SessionAccess.KEYBOARD != 0 },
+                        keyboard = { keyCapture?.setImeVisible(true) },
+                        textSupported = NativeBridge.nativeTextInputSupported(handle),
+                        sendText = { NativeBridge.nativeSendText(handle, it) },
+                        stats = { statsVerbosity },
+                        cycleStats = { statsVerbosity = statsVerbosity.next() },
+                        micAvailable = { micRunning },
+                        micMuted = { micMuted },
+                        toggleMic = { setMicMuted(!micMuted) },
+                        hostActions = { hostActions },
+                        invokeHost = { act ->
+                            hostRecord?.let { kh ->
+                                scope.launch(Dispatchers.IO) {
+                                    (IdentityStore(context).load() as? IdentityLoad.Ok)?.identity?.let { id ->
+                                        HostActions.invoke(id, kh.address, kh.effectiveMgmtPort, kh.fpHex, kh.name, act.id, act.label)
+                                    }
                                 }
                             }
-                        }
-                    },
-                    sendShortcut = { sendChord(handle, it) },
-                    padAvailable = { activity?.gamepadRouter?.sendsEnabled() == true },
-                    padShown = { padShown },
-                    togglePad = { padShown = !padShown },
-                    currentMode = { requestedMode },
-                    requestMode = { w, h, hz ->
-                        if (NativeBridge.nativeRequestMode(handle, w, h, hz)) {
-                            requestedMode = intArrayOf(w, h, hz)
-                            scope.launch {
-                                delay(500)
-                                NativeBridge.nativeVideoSize(handle)?.takeIf { it.size >= 3 }?.let { requestedMode = it }
+                        },
+                        sendShortcut = { sendChord(handle, it) },
+                        padAvailable = { activity?.gamepadRouter?.sendsEnabled() == true },
+                        padShown = { padShown },
+                        togglePad = { padShown = !padShown },
+                        tapPadButton = { bit -> activity?.gamepadRouter?.tapButton(bit) },
+                        currentMode = { requestedMode },
+                        requestMode = { w, h, hz ->
+                            if (NativeBridge.nativeRequestMode(handle, w, h, hz)) {
+                                requestedMode = intArrayOf(w, h, hz)
+                                scope.launch {
+                                    delay(500)
+                                    NativeBridge.nativeVideoSize(handle)?.takeIf { it.size >= 3 }?.let { requestedMode = it }
+                                }
                             }
-                        }
-                    },
-                ),
-                containerSize = containerSize,
-                haptics = haptics,
-            )
+                        },
+                    ),
+                    containerSize = containerSize,
+                    haptics = haptics,
+                )
+            }
+            micHint?.let { MicChordHint(it, Modifier.align(Alignment.TopCenter).padding(top = 16.dp)) }
+            // Bottom, not top: this can coincide with a mic-chord confirmation or the exit cue, and a
+            // notice landing on top of one of those would cost the user both.
+            if (motionHint) {
+                MotionUnreachableHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
+            } else if (touchHint) {
+                TouchFallbackHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
+            }
         }
-        micHint?.let { MicChordHint(it, Modifier.align(Alignment.TopCenter).padding(top = 16.dp)) }
-        // Bottom, not top: this can coincide with a mic-chord confirmation or the exit cue, and a
-        // notice landing on top of one of those would cost the user both.
-        if (motionHint) {
-            MotionUnreachableHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
-        } else if (touchHint) {
-            TouchFallbackHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
+        if (split != null) {
+            // The hinge itself: nothing on a creased panel, a real strip on a two-panel device.
+            Spacer(Modifier.height(with(density) { split.hingePx.toDp() }))
+            Box(modifier = Modifier.fillMaxWidth().weight(1f).onSizeChanged { padSize = it }) {
+                PadHalf(virtualPad, overlayCfg.pad, padSize, haptics)
+            }
         }
         // Last, so it covers everything: the launched title's poster until its game is up.
         var launchHold by remember(session) { mutableStateOf(session.launchHold) }
         launchHold?.let { LaunchHoldOverlay(it) { launchHold = null } }
     }
+}
+
+/**
+ * The virtual controller in whichever half is holding it: overlaid on the picture, or alone on the
+ * flat half of a tabletop fold. The wire pad itself lives above (`DisposableEffect(padShown)`), so
+ * moving the layer between the two never makes the host see a controller reconnect.
+ */
+@Composable
+private fun PadHalf(pad: GamepadRouter.ExternalPad?, cfg: PadConfig, size: IntSize, haptics: ConsoleHaptics) {
+    if (pad == null) return
+    val sink = remember(pad) { PadSink(pad::button, pad::axis) }
+    VirtualPadLayer(cfg, size, sink, haptics)
 }
 
 /**

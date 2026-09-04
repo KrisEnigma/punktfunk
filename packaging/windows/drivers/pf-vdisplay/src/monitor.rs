@@ -1,6 +1,7 @@
 //! Virtual monitors: the [`Monitor`] type and the control-plane verbs on it — create + arrive
-//! (`IOCTL_ADD`), the in-place mode update, remove, clear, the watchdog reap, the cursor-channel
-//! delivery and the encode session — plus the mode-struct stamping the DDIs fill from.
+//! (`IOCTL_ADD`), the in-place mode update, remove, clear, the owner reap, the cursor-channel
+//! delivery and the encode session — plus the mode-struct stamping the DDIs fill from. Every
+//! verb takes the calling process as `owner` and reaches only the monitors that process added.
 //!
 //! Ownership: [`crate::registry`] holds the only strong `Arc<Monitor>`; the drain worker holds a
 //! `Weak`. Every field a worker, a DDI callback or an IOCTL can race on sits behind its own
@@ -88,9 +89,11 @@ impl CursorState {
 /// `gone` is set first thing in [`teardown`](Self::teardown): an install landing after it gets
 /// its value handed back instead of parking a worker on a monitor nobody will join.
 pub struct Monitor {
+    /// The process whose ADD created this monitor; every later verb must come from it.
+    pub owner: u32,
     /// EDID serial / connector index — the key the mode DDIs match on.
     pub id: u32,
-    /// The host's monotonic key (ADD/REMOVE).
+    /// The owner's key (ADD/REMOVE); two owners may use the same value.
     pub session_id: u64,
     /// The host asked for an IddCx hardware cursor at ADD.
     pub hw_cursor: bool,
@@ -113,6 +116,8 @@ pub struct Monitor {
     /// Bumped (Release) by every session install or removal, and by every pool change. The
     /// drain loop compares it with its last-seen value and re-reads the slots only then.
     pub encode_gen: AtomicU32,
+    /// Publish-token generations handed out so far ([`Self::next_encode_generation`]).
+    encode_generation: AtomicU32,
     /// The render LUID of the last swap-chain assignment, packed; `0` = none yet. The pool
     /// and the encoder open on this device, the one the drain worker acquires from.
     render_luid: std::sync::atomic::AtomicI64,
@@ -126,8 +131,15 @@ fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
 
 impl Monitor {
     /// A registered-but-not-created entry; [`create_monitor`] fills the handle and arrival in.
-    pub(crate) fn pending(id: u32, session_id: u64, hw_cursor: bool, modes: Vec<Mode>) -> Self {
+    pub(crate) fn pending(
+        owner: u32,
+        id: u32,
+        session_id: u64,
+        hw_cursor: bool,
+        modes: Vec<Mode>,
+    ) -> Self {
         Self {
+            owner,
             id,
             session_id,
             hw_cursor,
@@ -146,6 +158,7 @@ impl Monitor {
             encode: Mutex::new(None),
             pool: Mutex::new(None),
             encode_gen: AtomicU32::new(0),
+            encode_generation: AtomicU32::new(0),
             render_luid: std::sync::atomic::AtomicI64::new(0),
             gone: AtomicBool::new(false),
         }
@@ -171,10 +184,11 @@ impl Monitor {
         lock(&self.cursor).cell.clone()
     }
 
-    /// The next publish-token generation: one per `SET_ENCODE`, never 0.
+    /// The next publish-token generation: one per `SET_ENCODE` on this monitor, never 0. The
+    /// host checks it against the section a session mapped, so it only needs to be unique
+    /// within one monitor's life.
     pub fn next_encode_generation(&self) -> u32 {
-        static GENERATION: AtomicU32 = AtomicU32::new(0);
-        GENERATION.fetch_add(1, Ordering::Relaxed) + 1
+        self.encode_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Install an encode session and wake the drain worker so an idle display picks it up
@@ -343,11 +357,11 @@ fn depart(removed: Vec<Arc<Monitor>>) {
     }
 }
 
-/// Depart every monitor that has existed at least `grace` — the host-gone watchdog reap
+/// Depart every monitor of `owner` that has existed at least `grace` — the owner-gone reap
 /// ([`crate::watchdog`]). The grace skips a just-created monitor (the host adds it, then starts
-/// pinging) so a momentarily stale ping timer cannot reap a brand-new one. Returns the count.
-pub fn reap_orphaned(grace: Duration) -> usize {
-    let removed = registry::remove(|m| m.created_at.elapsed() >= grace);
+/// pinging) so a momentarily stale ping sample cannot reap a brand-new one. Returns the count.
+pub fn reap_owner(owner: u32, grace: Duration) -> usize {
+    let removed = registry::remove(|m| m.owner == owner && m.created_at.elapsed() >= grace);
     let n = removed.len();
     depart(removed);
     n
@@ -437,20 +451,24 @@ pub fn target_mode2(width: u32, height: u32, refresh_rate: u32) -> iddcx::IDDCX_
 }
 
 /// Adopt a hardware-cursor channel delivery (`IOCTL_SET_CURSOR_CHANNEL`, proto v5): create the
-/// cursor-data event, declare the hardware cursor to the OS, start the worker. `Err(ch)` when no
-/// arrived monitor has `target_id`, or the event could not be made. A re-delivery replaces
-/// both — the host only re-sends after recreating the section. A monitor added without
-/// `hw_cursor` gets one only because the adapter already excludes the pointer: its client
-/// draws nothing, so the channel exists for the pool's blend alone.
+/// cursor-data event, declare the hardware cursor to the OS, start the worker. `Err(ch)` when
+/// `owner` has no arrived monitor with `target_id`, or the event could not be made. A
+/// re-delivery replaces both — the host only re-sends after recreating the section. A monitor
+/// added without `hw_cursor` gets one only because the adapter already excludes the pointer:
+/// its client draws nothing, so the channel exists for the pool's blend alone.
 ///
 /// A replaced worker is joined before the event it waited on closes, and both the setup DDI and
 /// every join run with no lock held: the DDI can re-enter the mode callbacks, and a join under
 /// a lock would head-block the control plane.
-pub fn set_cursor_channel(target_id: u32, ch: CursorChannel) -> Result<(), CursorChannel> {
+pub fn set_cursor_channel(
+    owner: u32,
+    target_id: u32,
+    ch: CursorChannel,
+) -> Result<(), CursorChannel> {
     if target_id == 0 {
         return Err(ch);
     }
-    let Some(m) = registry::find(|m| m.target_id() == target_id) else {
+    let Some(m) = registry::find(|m| m.owner == owner && m.target_id() == target_id) else {
         return Err(ch);
     };
     let Some(object) = m.object() else {
@@ -507,16 +525,21 @@ pub fn set_cursor_channel(target_id: u32, ch: CursorChannel) -> Result<(), Curso
 /// the hardware cursor again (DWM excludes the pointer; per-mode-commit re-declares resume);
 /// disable stores the flag, which stops the per-commit re-declare on an adapter that never
 /// declared and turns the pool's blend on where one did — there is no un-declare DDI.
-/// `false` when no monitor has `target_id`.
+/// `false` when `owner` has no monitor with `target_id`, or another owner has one.
 ///
 /// The flip is state, not an edge on one monitor generation: the desired value persists per
 /// target in the registry (a fresh entry inherits it at arrival) and is stamped on every live
 /// entry matching the target, since duplicate generations coexist during re-arrival churn. The
 /// DDI runs after every guard has dropped (it can re-enter the mode callbacks), against the
 /// event value copied out of the entry, which closes it only after joining its worker.
-pub fn set_cursor_forward(target_id: u32, enable: bool) -> bool {
+pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
+    // The desired state is keyed by OS target, so a target another owner holds is not this
+    // owner's to flip.
+    if registry::find(|m| m.owner != owner && m.target_id() == target_id).is_some() {
+        return false;
+    }
     registry::set_cursor_forward_desired(target_id, enable);
-    let matching = registry::find_all(|m| m.target_id() == target_id);
+    let matching = registry::find_all(|m| m.owner == owner && m.target_id() == target_id);
     if matching.is_empty() {
         return false; // no monitor with this target at all
     }
@@ -568,11 +591,12 @@ pub fn set_cursor_forward(target_id: u32, enable: bool) -> bool {
     true
 }
 
-/// `IOCTL_ADD`: create + arrive a virtual monitor at `width`x`height`@`refresh` for `session_id`,
-/// named by `preferred_id` (the host's per-client stable id; `0` = lowest free) and advertising
-/// the client display's luminance volume in its EDID (`client_lum`; all-zero = the built-in
+/// `IOCTL_ADD`: create + arrive `owner`'s virtual monitor at the requested mode, named by
+/// `req.preferred_monitor_id` (the host's per-client stable id; `0` = lowest free) and
+/// advertising the client display's luminance volume in its EDID (all-zero = the built-in
 /// defaults). Returns `(monitor_id, target_id, adapter_luid_low, adapter_luid_high)` for the
 /// [`AddReply`](pf_driver_proto::control::AddReply), or `None` (no adapter yet / IddCx error).
+/// The caller validates the mode.
 ///
 /// The entry is registered pending before `IddCxMonitorCreate`, so the mode DDIs the create
 /// re-enters find it by id; the handle and then the arrival are filled in write-once. A create
@@ -581,22 +605,27 @@ pub fn set_cursor_forward(target_id: u32, enable: bool) -> bool {
 /// adapter's monitor budget. The entry is removed before that delete so a concurrent clear or
 /// reap cannot depart the handle being deleted.
 pub fn create_monitor(
-    session_id: u64,
-    width: u32,
-    height: u32,
-    refresh: u32,
-    preferred_id: u32,
-    client_lum: pf_driver_proto::edid::ClientLuminance,
-    hw_cursor: bool,
+    owner: u32,
+    req: &pf_driver_proto::control::AddRequest,
 ) -> Option<(u32, u32, u32, i32)> {
+    let (session_id, width, height, refresh) =
+        (req.session_id, req.width, req.height, req.refresh_hz);
+    let preferred_id = req.preferred_monitor_id;
+    let hw_cursor = req.hw_cursor != 0;
+    let client_lum = pf_driver_proto::edid::ClientLuminance {
+        max_nits: req.max_luminance_nits,
+        max_frame_avg_nits: req.max_frame_avg_nits,
+        min_millinits: req.min_luminance_millinits,
+    };
     let adapter = crate::adapter::adapter()?;
-    // One identity per session: a re-ADD of a still-live `session_id` departs the stale
-    // monitor first, so no duplicate EDID/target lingers.
-    if registry::find(|m| m.session_id == session_id).is_some() {
+    // One identity per owner and session: a re-ADD of a still-live `session_id` departs the
+    // stale monitor first, so no duplicate EDID/target lingers. Another owner's same key is
+    // a different monitor.
+    if registry::find(|m| m.owner == owner && m.session_id == session_id).is_some() {
         dbglog!(
-            "[pf-vd] create_monitor: session {session_id} already live — departing the stale monitor"
+            "[pf-vd] create_monitor: owner {owner} session {session_id} already live — departing the stale monitor"
         );
-        remove_monitor(session_id);
+        remove_monitor(owner, session_id);
     }
     let mut modes = vec![Mode {
         width,
@@ -604,7 +633,7 @@ pub fn create_monitor(
         refresh_rates: vec![refresh],
     }];
     modes.extend(vdisplay::default_modes());
-    let monitor = registry::insert(session_id, hw_cursor, preferred_id, modes);
+    let monitor = registry::insert(owner, session_id, hw_cursor, preferred_id, modes);
     let id = monitor.id;
 
     // EDID (serial = id) describes the monitor; the OS calls back into parse_monitor_description.
@@ -689,9 +718,15 @@ pub fn create_monitor(
 ///
 /// The stored list changes first, so an OS re-query through the mode DDIs sees the new one, and
 /// is reverted if the DDI fails so the two stay coherent. The DDI runs with no lock held: it can
-/// re-enter the mode-query callbacks.
-pub fn update_monitor_modes(session_id: u64, width: u32, height: u32, refresh: u32) -> NTSTATUS {
-    let Some(m) = registry::find(|m| m.session_id == session_id) else {
+/// re-enter the mode-query callbacks. `STATUS_NOT_FOUND` unless `owner` holds `session_id`.
+pub fn update_monitor_modes(
+    owner: u32,
+    session_id: u64,
+    width: u32,
+    height: u32,
+    refresh: u32,
+) -> NTSTATUS {
+    let Some(m) = registry::find(|m| m.owner == owner && m.session_id == session_id) else {
         return crate::STATUS_NOT_FOUND;
     };
     let Some(object) = m.object() else {
@@ -734,19 +769,21 @@ pub fn update_monitor_modes(session_id: u64, width: u32, height: u32, refresh: u
     crate::STATUS_SUCCESS
 }
 
-/// `IOCTL_REMOVE`: unlink, tear down and depart the monitor for `session_id`, recording its
-/// mode list for the next same-id create. Returns true if one was removed.
-pub fn remove_monitor(session_id: u64) -> bool {
-    let Some(m) = registry::remove_session(session_id) else {
+/// `IOCTL_REMOVE`: unlink, tear down and depart `owner`'s monitor for `session_id`, recording
+/// its mode list for the next same-id create. Returns true if one was removed.
+pub fn remove_monitor(owner: u32, session_id: u64) -> bool {
+    let Some(m) = registry::remove_session(owner, session_id) else {
         return false;
     };
     depart(vec![m]);
     true
 }
 
-/// `IOCTL_CLEAR_ALL`: tear down and depart every monitor (host-startup orphan reap).
-pub fn clear_all() {
-    depart(registry::remove(|_| true));
+/// `IOCTL_CLEAR_ALL`: tear down and depart every monitor `owner` holds. A crashed
+/// predecessor's monitors are not the caller's to clear: [`crate::watchdog`] departs those when
+/// the dead process's handles close, so a restarted host finds its connectors free already.
+pub fn clear_all(owner: u32) {
+    depart(registry::remove(|m| m.owner == owner));
 }
 
 /// `EvtCleanupCallback` (device removal, [`crate::callbacks::device_cleanup`]): empty the

@@ -3576,6 +3576,7 @@ version = "0.34.0"
 dependencies = [
  "android_logger",
  "anyhow",
+ "ash",
  "jni",
  "libc",
  "log",

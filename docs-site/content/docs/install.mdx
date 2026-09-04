@@ -62,8 +62,11 @@ distro with no punktfunk repo can still run the client. `--channel stable|canary
 `--help` lists them all. `--demo <preset>` walks the whole flow against a canned machine and
 changes nothing, which is the honest way to see what it would do before letting it near a box.
 
-It covers Ubuntu/Debian, Fedora, Arch-family and Bazzite/Fedora Atomic; NixOS, SteamOS and Windows
-it points at their pages. **Preview:** the per-system pages above remain the documented path, and
+It covers Ubuntu/Debian, Fedora, Arch-family, Bazzite/Fedora Atomic and SteamOS; NixOS and Windows
+it points at their pages. On SteamOS there is no package to install — it clones the source and runs
+the on-device build, which takes about 25 minutes on a first run and does the groups, linger and
+service start itself, so the installer hands over and stops there. **Preview:** the per-system
+pages above remain the documented path, and
 the installer runs exactly the install commands they show — it generates them from the same source
 this site quotes, so the two cannot drift. Re-running is safe.
 

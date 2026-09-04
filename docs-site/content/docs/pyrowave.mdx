@@ -92,6 +92,12 @@ dropped packets.
      **Settings → Codec → PyroWave (wired LAN)**. The option appears only on devices whose
      GPU passes the decode probe (Apple Silicon and A13-class or newer). The decoder follows
      the stream: 4:2:0 or 4:4:4, SDR or HDR, per what the session negotiated.
+   - Android (phone, tablet, TV box — wired Ethernet strongly recommended): set
+     **Settings → Video codec → PyroWave (wired LAN)**. The row appears only on a 64-bit device
+     whose GPU passes the decode probe: Vulkan 1.3 with the codec's compute feature set, which
+     recent Adreno and Mali parts have and older ones do not. This one codec decodes on the GPU
+     and presents through its own swapchain rather than through the hardware video decoder, so
+     the low-latency and presentation settings that tune MediaCodec do not apply to it.
 3. Leave the bitrate on Automatic: a PyroWave session pins itself to the ~1.6 bpp rate for
    your mode (≈200 Mbps at 1080p60; ~2.6 bpp for 4:4:4, +15 % for HDR). An explicit bitrate is honored if you set one, but the
    adaptive-bitrate controller stays off either way — this codec has no useful low-rate
@@ -125,7 +131,9 @@ on) and read the accompanying line — it names the cause and the fix.
 ## Current limits
 
 - Linux and Windows hosts; Linux clients (the GTK desktop app and the session client, including
-  a docked Deck), the Windows client on x64, and Apple clients (native Metal decode on Mac, and on
-  A13-or-newer iPhone, iPad and Apple TV hardware) today. Android has no PyroWave decoder.
+  a docked Deck), the Windows client on x64, Apple clients (native Metal decode on Mac, and on
+  A13-or-newer iPhone, iPad and Apple TV hardware), and 64-bit Android devices with a Vulkan 1.3
+  GPU. The 32-bit Android build carries no decoder, and Wi-Fi cannot carry these rates on any
+  client — this is a wired-LAN codec everywhere.
 - **PyroWave HDR needs a Windows host today** — a Linux-hosted PyroWave session is SDR, however the
   rest of the box is set up (see [4:4:4 and HDR](#444-and-hdr) above). 4:4:4 works on both.

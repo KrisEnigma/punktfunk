@@ -167,7 +167,10 @@ export function mergeHosts(saved: SavedHost[], discovered: DiscoveredHost[]): Ho
       advertisedFp: advert?.fp ?? "",
       moved: !!advert && (advert.addr !== s.addr || advert.port !== s.port),
       paired: s.paired,
-      online: !!advert || s.online === true,
+      // The probe decides, not the advert: a suspending host sends no mDNS goodbye, so its
+      // record lingers for up to 75 minutes — green pip, hidden Wake row, asleep machine.
+      // The advert only stands in when the probe was skipped (`null`).
+      online: s.online ?? !!advert,
       wakeable: (s.mac ?? []).length > 0,
       saved: true,
       pairPolicy: advert?.pair ?? "",

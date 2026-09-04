@@ -78,7 +78,8 @@ impl ConnectPlan {
         launch: Option<&str>,
         one_off_profile: Option<&str>,
     ) -> ConnectPlan {
-        let (settings, profile) = effective_settings(&host.addr, host.port, one_off_profile);
+        let (settings, profile) =
+            effective_settings(&host.addr, host.port, one_off_profile, launch);
         ConnectPlan {
             host: HostTarget::from(host),
             launch: launch.map(str::to_string),
@@ -123,8 +124,9 @@ impl ConnectPlan {
     }
 
     /// Same plan from stores the caller already holds — no disk, no clock, no
-    /// environment. One-off pick, else host binding, else nothing; `Some("")` forces
-    /// the defaults; a dangling reference is no profile, not an error.
+    /// environment. Precedence is `trust::resolve_profile`'s, called rather than
+    /// restated: this path and [`effective_settings`] must not be able to disagree
+    /// about which profile a launch gets.
     pub fn resolve(
         host: &KnownHost,
         launch: Option<&str>,
@@ -132,15 +134,12 @@ impl ConnectPlan {
         catalog: &ProfilesFile,
         base: &Settings,
     ) -> ConnectPlan {
-        let profile = match one_off_profile {
-            Some("") => None,
-            Some(reference) => catalog.resolve(reference).0.cloned(),
-            None => host
-                .profile_id
-                .as_deref()
-                .and_then(|id| catalog.find_by_id(id))
-                .cloned(),
-        };
+        let profile = crate::trust::resolve_profile(
+            catalog,
+            host.profile_id.as_deref(),
+            launch.and_then(|game| host.profile_for_game(game)),
+            one_off_profile,
+        );
         let settings = match &profile {
             Some(p) => p.overrides.apply(base),
             None => base.clone(),

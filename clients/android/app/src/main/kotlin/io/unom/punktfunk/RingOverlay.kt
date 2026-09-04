@@ -29,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Logout
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.SpaceDashboard
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.TouchApp
@@ -74,6 +76,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.RingNav
 import kotlinx.coroutines.delay
@@ -201,6 +204,8 @@ class RingActions(
     val padAvailable: () -> Boolean,
     val padShown: () -> Boolean,
     val togglePad: () -> Unit,
+    /** One synthetic system-button tap on the host's pad (a `Gamepad.BTN_*` bit). */
+    val tapPadButton: (Int) -> Unit,
     /** `[w, h, hz]` as last requested (Android has no live read-back of the negotiated mode). */
     val currentMode: () -> IntArray,
     val requestMode: (Int, Int, Int) -> Unit,
@@ -265,6 +270,14 @@ private fun spec(slot: SlotId, cfg: OverlayConfig, a: RingActions): SlotSpec = w
         enabled = a.textSupported && a.keyboardGranted(),
         reason = "This host does not take typed text",
     )
+    SlotId.Guide -> SlotSpec(
+        "guide", "Guide button", Icons.Filled.Home,
+        enabled = a.padAvailable(), reason = "Controller input is not forwarded this session",
+    )
+    SlotId.Qam -> SlotSpec(
+        "qam", "Quick access menu", Icons.Filled.SpaceDashboard,
+        enabled = a.padAvailable(), reason = "Controller input is not forwarded this session",
+    )
     is SlotId.Host -> {
         val act = a.hostActions().firstOrNull { it.id == slot.actionId }
         // Three power actions, three glyphs — the same icon on all three made them one button.
@@ -289,6 +302,16 @@ private fun spec(slot: SlotId, cfg: OverlayConfig, a: RingActions): SlotSpec = w
             reason = if (a.keyboardGranted()) "A key in this chord is unknown" else "Keyboard input is not granted for this session",
         )
     }
+}
+
+/** The stick's sector read as a list direction for the sheet: 12 o'clock is up, 6 o'clock down,
+ *  the right half of the ring right and the left half left. Neutral moves no cursor. */
+private fun sheetDir(slot: Int?): RingNav? = when (slot) {
+    null -> null
+    0 -> RingNav.Up
+    3 -> RingNav.Down
+    1, 2 -> RingNav.Right
+    else -> RingNav.Left
 }
 
 /**
@@ -375,6 +398,9 @@ fun RingOverlay(
             SlotId.Mic -> actions.toggleMic()
             SlotId.Pad -> actions.togglePad()
             SlotId.SendText -> textDialog = true
+            // The host's own overlay is taking the screen: close first, like End stream.
+            SlotId.Guide -> { state.close(); actions.tapPadButton(Gamepad.BTN_GUIDE) }
+            SlotId.Qam -> { state.close(); actions.tapPadButton(Gamepad.BTN_MISC1) }
             is SlotId.Host -> {
                 actions.hostActions().firstOrNull { it.id == slot.actionId }?.let { state.close(); actions.invokeHost(it) }
             }
@@ -385,36 +411,43 @@ fun RingOverlay(
         if (s.toggle) state.hint = spec(slot, cfg, actions).let { "${it.label}: ${it.state}" }
     }
 
-    // The pad (design §2.6): Right steps the highlight clockwise, Left anticlockwise, Up jumps
-    // to 12 o'clock, Down to 6, Y returns it to the centre; A fires the highlight (the centre
-    // opens the sheet), B closes. In the sheet, Up/Down walk the rows, Left/Right adjust one.
+    // The pad (design §2.6): the left stick AIMS — its sector is the highlight, so the ring
+    // follows the thumb — while the D-pad steps, Right clockwise, Left anticlockwise, Up to 12
+    // o'clock, Down to 6; Y returns the highlight to the centre, A fires it (the centre opens
+    // the sheet), B closes. In the sheet, Up/Down walk the rows and Left/Right adjust one.
     LaunchedEffect(state.navSeq) {
         val n = state.pendingNav ?: return@LaunchedEffect
         state.pendingNav = null
         state.touch()
         if (state.sheet) {
-            when (n) {
-                RingNav.UP -> { state.sheetCursor = (state.sheetCursor - 1).coerceAtLeast(0); haptics.tick() }
-                RingNav.DOWN -> { state.sheetCursor = (state.sheetCursor + 1).coerceAtMost(rows.lastIndex.coerceAtLeast(0)); haptics.tick() }
-                RingNav.LEFT -> rows.getOrNull(state.sheetCursor)?.onAdjust?.let { it(-1); haptics.tick() } ?: haptics.boundary()
-                RingNav.RIGHT -> rows.getOrNull(state.sheetCursor)?.onAdjust?.let { it(1); haptics.tick() } ?: haptics.boundary()
-                RingNav.CONFIRM -> rows.getOrNull(state.sheetCursor)?.let { if (it.enabled) haptics.tick() else haptics.boundary(); it.onTap() }
-                RingNav.BACK -> { state.sheet = false; haptics.tick() }
-                RingNav.CENTRE -> {}
+            // A sheet is a list, not a dial: the six sectors fold onto its four directions.
+            val ev = if (n is RingNav.Sector) sheetDir(n.slot) ?: return@LaunchedEffect else n
+            when (ev) {
+                RingNav.Up -> { state.sheetCursor = (state.sheetCursor - 1).coerceAtLeast(0); haptics.tick() }
+                RingNav.Down -> { state.sheetCursor = (state.sheetCursor + 1).coerceAtMost(rows.lastIndex.coerceAtLeast(0)); haptics.tick() }
+                RingNav.Left -> rows.getOrNull(state.sheetCursor)?.onAdjust?.let { it(-1); haptics.tick() } ?: haptics.boundary()
+                RingNav.Right -> rows.getOrNull(state.sheetCursor)?.onAdjust?.let { it(1); haptics.tick() } ?: haptics.boundary()
+                RingNav.Confirm -> rows.getOrNull(state.sheetCursor)?.let { if (it.enabled) haptics.tick() else haptics.boundary(); it.onTap() }
+                RingNav.Back -> { state.sheet = false; haptics.tick() }
+                RingNav.Centre, is RingNav.Sector -> {}
             }
             return@LaunchedEffect
         }
         val h = state.highlight ?: 6
         when (n) {
-            RingNav.RIGHT -> { state.highlight = if (h >= 6) 0 else (h + 1) % 6; haptics.tick() }
-            RingNav.LEFT -> { state.highlight = if (h >= 6) 5 else (h + 5) % 6; haptics.tick() }
-            RingNav.UP -> { state.highlight = 0; haptics.tick() }
-            RingNav.DOWN -> { state.highlight = 3; haptics.tick() }
-            RingNav.CENTRE -> { state.highlight = 6; haptics.tick() }
-            RingNav.CONFIRM -> if (h >= 6) { haptics.tick(); state.sheetCursor = 0; state.sheet = true } else {
+            // The weapon-wheel idiom: the thumb's sector is the slot, neutral is the centre.
+            is RingNav.Sector -> (n.slot ?: 6).let {
+                if (state.highlight != it) { state.highlight = it; haptics.tick() }
+            }
+            RingNav.Right -> { state.highlight = if (h >= 6) 0 else (h + 1) % 6; haptics.tick() }
+            RingNav.Left -> { state.highlight = if (h >= 6) 5 else (h + 5) % 6; haptics.tick() }
+            RingNav.Up -> { state.highlight = 0; haptics.tick() }
+            RingNav.Down -> { state.highlight = 3; haptics.tick() }
+            RingNav.Centre -> { state.highlight = 6; haptics.tick() }
+            RingNav.Confirm -> if (h >= 6) { haptics.tick(); state.sheetCursor = 0; state.sheet = true } else {
                 cfg.ring[h]?.let { fire(spec(it, cfg, actions), it) } ?: haptics.boundary()
             }
-            RingNav.BACK -> state.close()
+            RingNav.Back -> state.close()
         }
     }
 
@@ -723,6 +756,12 @@ private fun sheetRows(
     rows += SheetRowSpec(null, st.label, if (st.enabled) "" else st.reason, st.enabled) { if (st.enabled) requestText() }
     val pad = spec(SlotId.Pad, cfg, actions)
     rows += SheetRowSpec(null, pad.label, if (pad.enabled) pad.state else pad.reason, pad.enabled) { if (pad.enabled) actions.togglePad() }
+    for ((slot, bit) in listOf(SlotId.Guide to Gamepad.BTN_GUIDE, SlotId.Qam to Gamepad.BTN_MISC1)) {
+        val sys = spec(slot, cfg, actions)
+        rows += SheetRowSpec(null, sys.label, if (sys.enabled) "" else sys.reason, sys.enabled) {
+            if (sys.enabled) { state.close(); actions.tapPadButton(bit) }
+        }
+    }
     rows += SheetRowSpec("View", "Statistics", actions.stats().label) { actions.cycleStats() }
     val mic = spec(SlotId.Mic, cfg, actions)
     rows += SheetRowSpec("Audio", mic.label, if (mic.enabled) mic.state else mic.reason, mic.enabled) { if (mic.enabled) actions.toggleMic() }

@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::facts::{Channel, Facts};
+use crate::facts::{Channel, Facts, Family};
 
 /// The management API's home when Sunshine already holds 47990.
 pub const DEFAULT_MGMT_PORT: u16 = 47991;
@@ -87,28 +87,40 @@ impl Choices {
     pub fn derive(facts: &Facts, pins: &Pins) -> Choices {
         let (channel, switch_from) = resolve_channel(facts, pins.channel);
 
+        // The SteamOS build script joins both groups, enables linger and starts the units
+        // itself, and there is no flag to tell it otherwise. Pin those rows to what will
+        // happen rather than let a toggle promise something nothing reads.
+        let steamos = facts.family == Family::Steamos;
+
         let couch_why = match facts.os.id.as_str() {
             "bazzite" => "Bazzite",
             "nobara" => "Nobara",
             _ => "Game Mode / HTPC box",
         };
-        let linger_why = if facts.couch_box {
+        let linger_why = if steamos {
+            Some("the SteamOS installer always enables it".to_string())
+        } else if facts.couch_box {
             Some(format!("{couch_why} hosts are usually headless"))
         } else if !facts.graphical_seat {
             Some("no graphical session".to_string())
         } else {
             None
         };
-        let group_why = facts
-            .couch_box
-            .then(|| format!("{couch_why} — virtual Steam Deck pad"));
+        let group_why = if steamos {
+            Some("the SteamOS installer always joins it".to_string())
+        } else {
+            facts
+                .couch_box
+                .then(|| format!("{couch_why} — virtual Steam Deck pad"))
+        };
 
         let omarchy_setup = pins.omarchy_setup.unwrap_or(true);
-        let punktfunk_group = pins.punktfunk_group.unwrap_or(true);
+        let punktfunk_group = steamos || pins.punktfunk_group.unwrap_or(true);
         let gamestream = pins.gamestream.unwrap_or(facts.sunshine_active);
-        let linger = pins
-            .linger
-            .unwrap_or(facts.couch_box || !facts.graphical_seat);
+        let linger = steamos
+            || pins
+                .linger
+                .unwrap_or(facts.couch_box || !facts.graphical_seat);
 
         Choices {
             action: pins.action,
@@ -123,7 +135,7 @@ impl Choices {
             gamestream,
             clipboard: pins.clipboard.unwrap_or(true),
             linger,
-            start: !pins.no_start,
+            start: steamos || !pins.no_start,
             move_mgmt_port: facts.sunshine_active,
             mgmt_port: pins.mgmt_port.unwrap_or(DEFAULT_MGMT_PORT),
             omarchy_setup,

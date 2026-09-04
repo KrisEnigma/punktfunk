@@ -4,7 +4,7 @@
 //! `seam::BasePaths` and `seam::CommandRunner`; nothing here takes a unix-only type,
 //! so `--demo` and the tests stay honest on a Mac. See `design/installer-v2.md`.
 //!
-//! Detection punts (NixOS, SteamOS, an unknown distro) are `Punt`. Version floors are
+//! Detection punts (NixOS, an unknown distro) are `Punt`. Version floors are
 //! `Floor` data, because `--uninstall` must keep working on a box below them.
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,9 @@ pub enum Family {
     Dnf,
     Pacman,
     Sysext,
+    /// No package at all: SteamOS has a read-only `/usr`, so the host is compiled on the
+    /// device and the install is a hand-off to that build.
+    Steamos,
     /// No host repo here. The client still installs, user-scope, from the flatpak line —
     /// which is why an unknown distro is a family rather than a dead end.
     Flatpak,
@@ -44,6 +47,7 @@ impl Family {
             Family::Dnf => "dnf",
             Family::Pacman => "pacman",
             Family::Sysext => "sysext",
+            Family::Steamos => "on-device build",
             Family::Flatpak => "flatpak",
         }
     }
@@ -107,7 +111,6 @@ pub enum Punt {
     NotLinux,
     NoOsRelease,
     NixOs,
-    SteamOs,
     Unsupported(String),
 }
 
@@ -123,9 +126,6 @@ impl Punt {
             Punt::NixOs => {
                 format!("NixOS: add the flake input and enable the module instead — {DOCS}/nixos")
             }
-            Punt::SteamOs => format!(
-                "SteamOS host: the on-device installer builds against the running OS — {DOCS}/steamos-host"
-            ),
             Punt::Unsupported(pretty) => {
                 format!("no package repo for '{pretty}' yet — {DOCS}/build-from-source")
             }
@@ -327,7 +327,7 @@ impl Family {
         match self {
             Family::Apt => "sudo apt install libnss3-tools",
             Family::Dnf | Family::Sysext => "sudo dnf install nss-tools",
-            Family::Pacman => "sudo pacman -S nss",
+            Family::Pacman | Family::Steamos => "sudo pacman -S nss",
             Family::Flatpak => "install nss tools",
         }
     }
@@ -339,8 +339,11 @@ fn detect_family(os: &OsRelease, run: &dyn CommandRunner) -> Result<Detected, Pu
     if os.id == "nixos" {
         return Err(Punt::NixOs);
     }
-    if os.id == "steamos" {
-        return Err(Punt::SteamOs);
+    // SteamOS before the arch test it would otherwise match: `/usr` is read-only, so the host
+    // is built on the device rather than installed. Derivatives that keep `ID_LIKE=steamos`
+    // (HoloISO, ChimeraOS) take the same path.
+    if os.id == "steamos" || os.like("steamos") {
+        return Ok((Family::Steamos, "steamos-host", None));
     }
     if run.which("rpm-ostree") || run.which("bootc") || os.id == "bazzite" {
         return Ok((Family::Sysext, "bazzite", None));
@@ -552,13 +555,24 @@ mod tests {
     }
 
     #[test]
-    fn nixos_and_steamos_punt_before_anything_else() {
+    fn nixos_punts_before_anything_else() {
         let r = FakeRunner::new();
         assert_eq!(detect_family(&os("nixos", "", ""), &r), Err(Punt::NixOs));
-        assert_eq!(
-            detect_family(&os("steamos", "arch", ""), &r),
-            Err(Punt::SteamOs)
-        );
+    }
+
+    // SteamOS says `ID_LIKE=arch`, so it has to be tested before the arch family or a Deck
+    // gets pacman commands its read-only /usr cannot run. A derivative that keeps
+    // `ID_LIKE=steamos` lands on the same on-device build.
+    #[test]
+    fn steamos_and_its_derivatives_beat_the_arch_test() {
+        let r = FakeRunner::new();
+        let (family, page, punt) = detect_family(&os("steamos", "arch", ""), &r).unwrap();
+        assert_eq!(family, Family::Steamos);
+        assert_eq!(page, "steamos-host");
+        assert!(punt.is_none());
+
+        let (family, _, _) = detect_family(&os("holoiso", "steamos arch", ""), &r).unwrap();
+        assert_eq!(family, Family::Steamos);
     }
 
     // Game Mode / HTPC images only. rpm-ostree, bootc, and ujust are not tells: Silverblue

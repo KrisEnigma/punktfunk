@@ -56,11 +56,6 @@ fn registry() -> MutexGuard<'static, Registry> {
     lock(&REGISTRY)
 }
 
-/// True if any virtual monitor exists — the watchdog only reaps when there is something to reap.
-pub fn has_monitors() -> bool {
-    !registry().monitors.is_empty()
-}
-
 /// The first live monitor matching `pred`.
 pub fn find(pred: impl Fn(&Monitor) -> bool) -> Option<Arc<Monitor>> {
     registry().monitors.iter().find(|m| pred(m)).cloned()
@@ -85,14 +80,14 @@ pub fn remove(pred: impl Fn(&Monitor) -> bool) -> Vec<Arc<Monitor>> {
     gone
 }
 
-/// Unlink the monitor for `session_id`, recording its advertised list as the id's mode history
-/// under the same guard, so a same-id create racing this removal cannot miss it.
-pub fn remove_session(session_id: u64) -> Option<Arc<Monitor>> {
+/// Unlink `owner`'s monitor for `session_id`, recording its advertised list as the id's mode
+/// history under the same guard, so a same-id create racing this removal cannot miss it.
+pub fn remove_session(owner: u32, session_id: u64) -> Option<Arc<Monitor>> {
     let mut reg = registry();
     let pos = reg
         .monitors
         .iter()
-        .position(|m| m.session_id == session_id)?;
+        .position(|m| m.owner == owner && m.session_id == session_id)?;
     let monitor = reg.monitors.remove(pos);
     let modes = monitor.modes();
     if let Some(slot) = reg.mode_history.iter_mut().find(|(i, _)| *i == monitor.id) {
@@ -103,12 +98,13 @@ pub fn remove_session(session_id: u64) -> Option<Arc<Monitor>> {
     Some(monitor)
 }
 
-/// Register a pending monitor for `session_id`: allocate its id — the host's `preferred_id`
-/// when valid and not live, else the lowest free, since a bounded reused id keeps IddCx reusing
-/// the same OS target slot instead of leaving a ghost node — union in the id's mode history,
-/// and link it. Allocation and insert share one guard so two concurrent ADDs cannot pick the
-/// same id.
+/// Register `owner`'s pending monitor for `session_id`: allocate its id — the host's
+/// `preferred_id` when valid and not live on the device, else the lowest free, since a bounded
+/// reused id keeps IddCx reusing the same OS target slot instead of leaving a ghost node — union
+/// in the id's mode history, and link it. Allocation and insert share one guard so two
+/// concurrent ADDs cannot pick the same id.
 pub fn insert(
+    owner: u32,
     session_id: u64,
     hw_cursor: bool,
     preferred_id: u32,
@@ -120,7 +116,7 @@ pub fn insert(
     if let Some((_, prev)) = reg.mode_history.iter().find(|(i, _)| *i == id) {
         vdisplay::union_modes(&mut modes, prev);
     }
-    let monitor = Arc::new(Monitor::pending(id, session_id, hw_cursor, modes));
+    let monitor = Arc::new(Monitor::pending(owner, id, session_id, hw_cursor, modes));
     reg.monitors.push(monitor.clone());
     monitor
 }
