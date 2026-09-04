@@ -133,7 +133,10 @@ jobs:
         # In-tree target dir on purpose: wdk-build's find_top_level_cargo_manifest() walks UP from OUT_DIR
         # to the first ancestor with a Cargo.lock, so a relocated CARGO_TARGET_DIR (C:\t\…) hides the
         # workspace lock and it panics. pf-vdisplay's encoder deps build PyroWave and oneVPL from
-        # source here, so watch MAX_PATH if this job ever moves deeper.
+        # source, and MAX_PATH did bite: the runner's checkout root is ~78 chars, and MSBuild's .tlog
+        # paths under the CMake tree overflow 260. The compiling steps therefore go through
+        # drivers-cargo.ps1, which substs a drive onto the repo root. fmt needs no compile, so it does
+        # not.
         working-directory: packaging/windows/drivers
     env:
       # wdk-build otherwise picks 10.0.28000.0 (no km/crt) and bindgen fails — pin the WDK SDK version.
@@ -154,13 +157,13 @@ jobs:
         # (the real IddCx driver) + pf-umdf-util (the safe UMDF primitive layer) + the two gamepad
         # drivers. pf-vdisplay linking proves the IddCx call sites resolve against IddCxStub end-to-end
         # (M1 step 2 gate); the gamepad drivers prove pf-umdf-util's WDF dispatch links.
-        run: cargo build -v
+        run: ../drivers-cargo.ps1 build -v
       - name: cargo clippy the shipped drivers (-D warnings — enforces the unsafe-audit gates)
         # The gamepad drivers' business logic is 100% safe (it moved onto pf-umdf-util, the audited
         # unsafe layer); pf-vdisplay + wdk-iddcx are inherently FFI-bound but every `unsafe {}` carries a
         # `// SAFETY:` proof. Both invariants are lint-gated (`unsafe_op_in_unsafe_fn` +
         # `undocumented_unsafe_blocks`); this step keeps them from regressing.
-        run: cargo clippy -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --all-targets -- -D warnings
+        run: ../drivers-cargo.ps1 clippy -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --all-targets -- -D warnings
       - name: cargo fmt --check the driver workspace
         run: cargo fmt -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --check
       - name: Inspect /INTEGRITYCHECK (before) — expect FORCE_INTEGRITY set by wdk-build
@@ -182,4 +185,4 @@ jobs:
         # of them still compiles under the WDK toolchain and the static CRT.
         # LAST on purpose: same profile and target dir, so it overwrites pf_vdisplay.dll and would
         # otherwise hand the PE-inspection steps above the probe DLL instead of the shipped one.
-        run: cargo build -p pf-vdisplay --features encode-probe -v
+        run: ../drivers-cargo.ps1 build -p pf-vdisplay --features encode-probe -v
