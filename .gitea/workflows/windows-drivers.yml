@@ -27,11 +27,15 @@ on:
     paths:
       - '.gitea/workflows/windows-drivers.yml'
       - 'crates/pf-driver-proto/**'
+      # The driver hosts the encoder backends, so a change to them is a driver change.
+      - 'crates/pf-encode-win/**'
       - 'packaging/windows/drivers/**'
   pull_request:
     paths:
       - '.gitea/workflows/windows-drivers.yml'
       - 'crates/pf-driver-proto/**'
+      # The driver hosts the encoder backends, so a change to them is a driver change.
+      - 'crates/pf-encode-win/**'
       - 'packaging/windows/drivers/**'
 
 # Driver builds need the WDK on the runner - the driver-build job below self-provisions it via
