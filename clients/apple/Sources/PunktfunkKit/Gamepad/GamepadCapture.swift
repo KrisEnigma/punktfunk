@@ -289,6 +289,22 @@ public final class GamepadCapture {
         observers.removeAll()
     }
 
+    /// A one-shot synthetic tap of a system button on the host's pad (pf-client-core's
+    /// `GamepadService.tapButton`): down now, up `tapPress` later, on the first forwarded slot's
+    /// wire index — pad 0 when none is open, which is best-effort (the host pad may not exist).
+    /// The quick-action ring's route to the host's guide on a device whose OS keeps the physical
+    /// Home press for itself. Deliberately outside `slot.buttons` and the system-buttons policy:
+    /// this is the ring's own press, not the player's.
+    public func tapButton(_ bit: UInt32) {
+        guard let wire else { return }
+        let pad = slots.first?.pad ?? 0
+        wire.send(.gamepadButton(bit, down: true, pad: pad))
+        let timer = Timer(timeInterval: Self.tapPress, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.wire?.send(.gamepadButton(bit, down: false, pad: pad)) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
     /// Bring `slots` in line with the forwarded set: close any slot no longer wanted (flushing its
     /// held wire state and sending GamepadRemove first) and open any newly-forwarded controller into
     /// its assigned wire index. A controller that stays forwarded keeps its slot untouched, so a

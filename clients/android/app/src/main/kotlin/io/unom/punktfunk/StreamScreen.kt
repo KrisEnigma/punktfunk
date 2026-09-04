@@ -1281,6 +1281,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                     padAvailable = { activity?.gamepadRouter?.sendsEnabled() == true },
                     padShown = { padShown },
                     togglePad = { padShown = !padShown },
+                    tapPadButton = { bit -> activity?.gamepadRouter?.tapButton(bit) },
                     currentMode = { requestedMode },
                     requestMode = { w, h, hz ->
                         if (NativeBridge.nativeRequestMode(handle, w, h, hz)) {
