@@ -29,7 +29,7 @@ use crate::direct_3d_device::Direct3DDevice;
 use crate::monitor::Monitor;
 use crate::worker::{Mmcss, Worker};
 
-const BACKEND_NAMES: [&str; 4] = ["nvenc", "amf", "qsv", "pyrowave"];
+const BACKEND_NAMES: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
 
 /// A failed `SET_ENCODE` as the wire reply: `status` from the driver's domain, the stage tag
 /// in `name`.
@@ -243,7 +243,7 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
 /// Everything one backend `open` takes, in the backends' own vocabulary.
 #[derive(Clone, Copy, Debug)]
 pub struct OpenSpec {
-    /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave.
+    /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave, 5 Media Foundation.
     pub backend: u32,
     pub codec: Codec,
     pub kind: InputKind,
@@ -327,6 +327,10 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
             )
             .map(|e| Box::new(e) as Box<dyn Encoder>)
         }
+        5 => pf_encode_win::mf::MfEncoder::open(
+            spec.codec, format, w, h, fps, bps, depth, chroma, luid,
+        )
+        .map(|e| Box::new(e) as Box<dyn Encoder>),
         _ => return Err((-1, "backend")),
     };
     opened.map_err(|e| {

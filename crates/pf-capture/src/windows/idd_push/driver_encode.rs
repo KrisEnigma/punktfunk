@@ -69,6 +69,7 @@ fn backend_name(b: u32) -> &'static str {
         2 => "amf",
         3 => "qsv",
         4 => "pyrowave",
+        5 => "mf",
         _ => "?",
     }
 }

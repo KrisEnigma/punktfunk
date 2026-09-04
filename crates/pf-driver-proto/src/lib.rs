@@ -936,11 +936,14 @@ pub mod encode {
     impl EncodeInput {
         /// The input for `backend` (the [`SetEncodeRequest::backends`] numbering) under the
         /// request's HDR and 4:4:4 flags. Only NVENC ingests packed RGB, so only it can pair
-        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0.
+        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0. Media Foundation
+        /// takes NV12 whatever was asked for — no vendor's MFT accepts P010, so an HDR
+        /// request that reaches it encodes 8-bit rather than failing the open.
         #[must_use]
         pub const fn choose(backend: u32, hdr: bool, chroma444: bool) -> Self {
             match (backend, hdr, chroma444) {
                 (4, _, _) => Self::Planar { hdr, chroma444 },
+                (5, _, _) => Self::Nv12,
                 (1, true, true) => Self::Rgb10,
                 (_, true, _) => Self::P010,
                 (1, false, _) => Self::Bgra,
