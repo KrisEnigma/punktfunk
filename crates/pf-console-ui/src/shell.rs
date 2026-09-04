@@ -173,8 +173,11 @@ struct LaunchHost {
 struct Launching {
     host: LaunchHost,
     title: String,
-    /// Store and platform, `Steam · PC`.
-    detail: String,
+    /// `PC · 2024 · Steam` — where the host filed it, in the order a player scans it.
+    facts: String,
+    /// Studio, and the genres joined; either may be empty, and an older host sends neither.
+    developer: String,
+    genres: String,
     /// Backdrop and copy fade, 0 → 1.
     appear: f64,
     /// The cover's flight out of its tile, 0 (tile) → 1 (settled).
@@ -626,9 +629,11 @@ impl Shell {
         if g.launcher {
             return None;
         }
-        let detail = [
-            Some(crate::library::store_label(&g.store)),
+        let year = g.year.map(|y| y.to_string());
+        let facts = [
             g.platform.as_deref(),
+            year.as_deref(),
+            Some(crate::library::store_label(&g.store)),
         ]
         .into_iter()
         .flatten()
@@ -639,7 +644,9 @@ impl Shell {
         Some(Launching {
             host,
             title: g.title.clone(),
-            detail,
+            facts,
+            developer: g.developer.clone().unwrap_or_default(),
+            genres: g.genres.join(" \u{b7} "),
             appear: 0.0,
             flight: Spring::rest(0.0),
             from,

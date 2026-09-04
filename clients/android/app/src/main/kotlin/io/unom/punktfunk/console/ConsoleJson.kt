@@ -232,6 +232,9 @@ internal object ConsoleJson {
                     .put("launcher", g.isLauncher)
                     .put("icon", g.icon?.takeIf(::validIconToken) ?: "")
                     .put("platform", g.platform ?: JSONObject.NULL)
+                    .put("developer", g.developer ?: JSONObject.NULL)
+                    .put("year", g.releaseYear ?: JSONObject.NULL)
+                    .put("genres", JSONArray(g.genres))
                     .put("running", false),
             )
         }

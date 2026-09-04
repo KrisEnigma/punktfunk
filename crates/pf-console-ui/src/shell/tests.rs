@@ -248,6 +248,9 @@ fn a_pinned_cards_library_launches_with_its_profile() {
         launcher: false,
         icon: String::new(),
         platform: None,
+        developer: None,
+        year: None,
+        genres: Vec::new(),
         running: false,
     }]);
     s.handle_menu(MenuEvent::Confirm);
@@ -280,6 +283,9 @@ fn a_primary_tiles_library_leaves_the_profile_to_the_binding() {
         launcher: false,
         icon: String::new(),
         platform: None,
+        developer: None,
+        year: None,
+        genres: Vec::new(),
         running: false,
     }]);
     s.handle_menu(MenuEvent::Confirm);
@@ -743,6 +749,9 @@ fn mixed_library(library: &LibraryShared) {
             launcher,
             icon: String::new(),
             platform: platform.map(str::to_string),
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         }
     };
@@ -883,6 +892,9 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         },
         crate::library::LibraryGame {
@@ -892,6 +904,9 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         },
     ]);
@@ -1132,6 +1147,9 @@ fn dump_console_screens() {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         })
         .collect(),
@@ -1298,6 +1316,9 @@ fn platform_games() -> Vec<crate::library::LibraryGame> {
         launcher: false,
         icon: String::new(),
         platform: Some((*platform).to_string()),
+        developer: None,
+        year: None,
+        genres: Vec::new(),
         running: false,
     })
     .collect()
@@ -1564,6 +1585,9 @@ mod launch_hold {
             launcher,
             icon: String::new(),
             platform: Some("PC".into()),
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         }
     }
@@ -1635,8 +1659,9 @@ mod launch_hold {
             "and it replaces the connect card rather than stacking on it"
         );
         assert_eq!(
-            s.launching.as_ref().map(|l| l.detail.as_str()),
-            Some("Steam · PC")
+            s.launching.as_ref().map(|l| l.facts.as_str()),
+            Some("PC · Steam"),
+            "platform, year, store — this mock has no year"
         );
 
         // Nothing to ask the host until there is a session behind the launch.

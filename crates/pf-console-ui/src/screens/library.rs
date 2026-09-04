@@ -1595,6 +1595,9 @@ mod tests {
                     launcher: false,
                     icon: String::new(),
                     platform: None,
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
                     running: false,
                 })
                 .collect(),
@@ -1889,6 +1892,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: None,
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             })
             .collect();
@@ -2069,6 +2075,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: platform.map(str::to_string),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             })
             .collect()

@@ -13,8 +13,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,6 +44,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -156,13 +159,21 @@ fun LaunchHoldOverlay(hold: LaunchHold, onShow: () -> Unit) {
     ) {
         val w = with(density) { maxWidth.toPx() }
         val h = with(density) { maxHeight.toPx() }
-        // Where the cover settles: a 2:3 card on the upper-middle third.
-        val ch = minOf(h * 0.40f, with(density) { 300.dp.toPx() })
-        val cw = ch * 2f / 3f
-        val settled = Rect(
-            left = (w - cw) / 2f, top = h * 0.42f - ch / 2f,
-            right = (w + cw) / 2f, bottom = h * 0.42f + ch / 2f,
-        )
+        // Cover and column as one centred pair. The cover wants most of the height, but on a
+        // portrait phone that would be wider than the screen — so the column and the margins
+        // are taken out of the width first and the card gets what is left.
+        val gap = minOf(w * 0.04f, with(density) { 40.dp.toPx() })
+        val detailsW = maxOf(w * 0.38f, with(density) { 150.dp.toPx() })
+        val maxCoverW = w - gap - detailsW - with(density) { 32.dp.toPx() }
+        var coverH = minOf(h * 0.62f, with(density) { 460.dp.toPx() })
+        var coverW = coverH * 2f / 3f
+        if (coverW > maxCoverW) {
+            coverW = maxCoverW.coerceAtLeast(1f)
+            coverH = coverW * 1.5f
+        }
+        val x0 = (w - (coverW + gap + detailsW)) / 2f
+        val top = (h - coverH) / 2f
+        val settled = Rect(left = x0, top = top, right = x0 + coverW, bottom = top + coverH)
         // Where it flies from: the tile the player tapped, in this overlay's own space. With no
         // usable tile the cover just arrives, a little small, rather than flying in from nowhere.
         val source = hold.sourceRect
@@ -226,36 +237,79 @@ fun LaunchHoldOverlay(hold: LaunchHold, onShow: () -> Unit) {
         ) {
             loader?.let { HoldPosterArt(hold.game, it) }
         }
-        Column(
+        // Centred against the cover rather than hung from its top: most titles carry one fact
+        // line and no studio, and a block pinned to the top of a card this tall reads as having
+        // fallen off it.
+        Box(
             Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = with(density) { settled.bottom.toDp() } + 28.dp)
+                .offset {
+                    IntOffset((settled.right + gap).toInt(), settled.top.toInt())
+                }
+                .width(with(density) { detailsW.toDp() })
+                .height(with(density) { coverH.toDp() })
                 .graphicsLayer { alpha = veil },
-            horizontalAlignment = Alignment.CenterHorizontally,
+            contentAlignment = Alignment.CenterStart,
         ) {
+        Column {
             Text(
                 hold.game.title,
                 color = Color.White,
-                fontSize = 24.sp,
+                fontSize = 26.sp,
                 fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 32.dp),
+                lineHeight = 30.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                listOfNotNull(hold.game.storeLabel, hold.game.platform).joinToString(" · "),
-                color = Color.White.copy(alpha = 0.6f),
-                fontSize = 15.sp,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-            Spacer(Modifier.height(18.dp))
-            CircularProgressIndicator(
-                modifier = Modifier.size(22.dp),
-                color = Color.White,
-                strokeWidth = 2.5.dp,
-            )
-            TextButton(onClick = onShow, modifier = Modifier.padding(top = 10.dp)) {
+            val facts = listOfNotNull(
+                hold.game.platform,
+                hold.game.releaseYear?.toString(),
+                hold.game.storeLabel,
+            ).joinToString(" · ")
+            if (facts.isNotEmpty()) {
+                Text(
+                    facts,
+                    color = Color.White.copy(alpha = 0.62f),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(top = 10.dp),
+                )
+            }
+            hold.game.developer?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    it,
+                    color = Color.White.copy(alpha = 0.45f),
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            if (hold.game.genres.isNotEmpty()) {
+                Text(
+                    hold.game.genres.joinToString(" · "),
+                    color = Color.White.copy(alpha = 0.45f),
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 22.dp),
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    color = Color.White,
+                    strokeWidth = 2.dp,
+                )
+                Text(
+                    "Connecting\u2026",
+                    color = Color.White.copy(alpha = 0.5f),
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(start = 9.dp),
+                )
+            }
+            TextButton(onClick = onShow, modifier = Modifier.padding(top = 8.dp)) {
                 Text("Show stream", color = Color.White)
             }
+        }
         }
     }
 }

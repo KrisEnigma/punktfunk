@@ -1207,6 +1207,9 @@ fn to_model(games: &[library::GameEntry]) -> Vec<LibraryGame> {
             launcher: g.is_launcher(),
             icon: g.icon_token().unwrap_or_default().to_string(),
             platform: g.platform.clone(),
+            developer: g.developer.clone(),
+            year: g.release_year,
+            genres: g.genres.clone(),
             running: false,
         })
         .collect()

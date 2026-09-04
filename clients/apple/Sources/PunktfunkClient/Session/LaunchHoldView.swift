@@ -9,43 +9,6 @@
 import PunktfunkKit
 import SwiftUI
 
-/// A cover turning about its own vertical axis, in perspective.
-///
-/// `rotation3DEffect` is the obvious way to write this and cannot be used here: it takes part in
-/// layout, and a card carrying one is placed in the corner whatever the offset beside it says.
-/// So the same projection is built by hand and marked as something layout never sees.
-///
-/// The `m13` term is what makes it a turn rather than a squeeze: it feeds x into the homogeneous
-/// divide, so the edge swinging toward the viewer grows and the one going away shrinks, and the
-/// card's top and bottom converge with it. Without it the face only narrows, which reads as flat.
-private struct CoverFlip: GeometryEffect {
-    /// Full turns, so the animation has something continuous to interpolate: an angle that starts
-    /// and ends in the same place would be a value that never changes.
-    var turns: Double
-
-    /// Viewer distance, as a multiple of the card's width. Nearer means a stronger turn; much
-    /// past two or three card widths and the perspective stops being visible at all.
-    var distance: Double = 2.2
-
-    var animatableData: Double {
-        get { turns }
-        set { turns = newValue }
-    }
-
-    func effectValue(size: CGSize) -> ProjectionTransform {
-        let angle = turns * 2 * .pi
-        let d = max(size.width, 1) * distance
-        var rotation = ProjectionTransform()
-        rotation.m11 = cos(angle)
-        rotation.m13 = sin(angle) / d
-        let toCentre = ProjectionTransform(
-            CGAffineTransform(translationX: -size.width / 2, y: -size.height / 2))
-        let back = ProjectionTransform(
-            CGAffineTransform(translationX: size.width / 2, y: size.height / 2))
-        return toCentre.concatenating(rotation).concatenating(back)
-    }
-}
-
 /// One screen from the tap to the game.
 ///
 /// Mounts over the shelf at the dial, flies the cover out of the tile the player just pressed, and
@@ -98,33 +61,40 @@ struct LaunchHoldView: View {
         GeometryReader { geo in
             let layout = Layout(size: geo.size)
             let from = startRect(layout.cover, geo)
-            // The cover is always LAID OUT where it lands, and travels as a transform: scale,
-            // offset and rotation are geometry effects with animatable data, where an animated
-            // `frame`/`position` is a layout change SwiftUI is free to apply without one — which
-            // is exactly what it did, leaving the flight as a backdrop fade and nothing else.
-            let scale = landed ? 1 : from.width / max(layout.cover.width, 1)
-            let dx = landed ? 0 : from.midX - layout.cover.midX
-            let dy = landed ? 0 : from.midY - layout.cover.midY
-            ZStack(alignment: .topLeading) {
+            // The pair is laid out, not positioned. Every attempt to place the card by offset
+            // or `position` was undone by the turn: a geometry effect re-anchors what it
+            // transforms to its parent's origin, so anything carrying one lands in the corner.
+            // A real stack cannot be argued with, and the flight rides on top of it as a delta
+            // that is zero once the card is home.
+            ZStack {
                 backdrop(geo.size)
                     .opacity(landed ? 1 : 0)
                     .animation(.easeOut(duration: 0.3), value: landed)
-                cover
-                    .frame(width: layout.cover.width, height: layout.cover.height)
-                    // One full turn on the way over, around the card's own vertical axis.
-                    .modifier(CoverFlip(turns: landed ? 1 : 0).ignoredByLayout())
-                    .scaleEffect(scale)
-                    // Placed by offset from the stack's top-left, not by `position`: a positioned
-                    // view claims the whole proposal, and two of them in one stack fight over it.
-                    .offset(x: layout.cover.minX + dx, y: layout.cover.minY + dy)
-                    .animation(flight, value: landed)
-                details
-                    .frame(width: layout.details.width, alignment: .leading)
-                    .offset(x: layout.details.minX, y: layout.details.minY)
-                    .opacity(landed ? 1 : 0)
-                    // Behind the cover's own flight, so the card arrives and the words settle
-                    // beside it rather than the two racing.
-                    .animation(.easeOut(duration: 0.3).delay(0.18), value: landed)
+                HStack(alignment: .center, spacing: layout.gap) {
+                    cover
+                        .frame(width: layout.cover.width, height: layout.cover.height)
+                        // Flattened first: the poster inside is a flexible view, and a
+                        // projection applied over one resolves its anchor against the whole
+                        // window instead of the card, which is what kept parking it in the
+                        // corner. A compositing group gives the turn a definite thing to turn.
+                        .compositingGroup()
+                        // One full turn on the way over, around the card's own vertical axis.
+                        .rotation3DEffect(
+                            .degrees(landed ? 360 : 0), axis: (x: 0, y: 1, z: 0),
+                            perspective: 0.45)
+                        .scaleEffect(landed ? 1 : from.width / max(layout.cover.width, 1))
+                        .offset(
+                            x: landed ? 0 : from.midX - layout.cover.midX,
+                            y: landed ? 0 : from.midY - layout.cover.midY)
+                        .animation(flight, value: landed)
+                    details
+                        .frame(width: layout.details.width, alignment: .leading)
+                        .opacity(landed ? 1 : 0)
+                        // Behind the cover's own flight, so the card arrives and the words
+                        // settle beside it rather than the two racing.
+                        .animation(.easeOut(duration: 0.3).delay(0.18), value: landed)
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -165,12 +135,22 @@ struct LaunchHoldView: View {
     private struct Layout {
         let cover: CGRect
         let details: CGRect
+        /// The stack's own spacing, so the measured rects and the drawn pair cannot drift.
+        let gap: CGFloat
 
         init(size: CGSize) {
-            let coverH = min(size.height * 0.62, 460)
-            let coverW = coverH * 2 / 3
-            let gap = min(size.width * 0.04, 56)
-            let detailsW = min(max(size.width * 0.34, 260), 460)
+            gap = min(size.width * 0.04, 56)
+            let detailsW = min(max(size.width * 0.34, 220), 460)
+            // The cover wants most of the height, which on a phone held upright is wider than
+            // the screen. The column and the margins come out of the width first; the card
+            // takes what is left.
+            let widest = size.width - gap - detailsW - 32
+            var coverH = min(size.height * 0.62, 460)
+            var coverW = coverH * 2 / 3
+            if coverW > widest {
+                coverW = max(widest, 1)
+                coverH = coverW * 1.5
+            }
             let originX = (size.width - (coverW + gap + detailsW)) / 2
             cover = CGRect(
                 x: originX, y: (size.height - coverH) / 2, width: coverW, height: coverH)

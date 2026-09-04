@@ -263,6 +263,9 @@ mod tests {
             launcher,
             icon: String::new(),
             platform: platform.map(str::to_string),
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         }
     }
@@ -407,6 +410,9 @@ mod tests {
                 launcher: e["role"].as_str() == Some("launcher"),
                 icon: e["icon"].as_str().unwrap_or("").to_string(),
                 platform: e["platform"].as_str().map(str::to_string),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             })
             .collect();

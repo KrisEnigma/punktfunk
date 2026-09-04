@@ -2,8 +2,9 @@
 
 use crate::anim::{approach, springs};
 use crate::glyphs::{hint_bar, Hint, HintKey};
+use crate::library::{card_matrix, PERSPECTIVE};
 use crate::theme::{fg, fill, Fonts, PanelStroke, W};
-use skia_safe::{gradient, Canvas, Color4f, Image, PathBuilder, Point, RRect, Rect, TileMode};
+use skia_safe::{gradient, Canvas, Color4f, Image, PathBuilder, Point, RRect, Rect, TileMode, M44};
 
 use super::{Launching, Shell, ToastMark, BOTTOM_BAND};
 
@@ -311,51 +312,55 @@ impl Shell {
         l: &Launching,
         poster: Option<&Image>,
     ) {
-        let cx = w / 2.0;
         // Fades in rather than replacing the shelf outright: the cover has to be seen
         // LEAVING its tile, which means the tile has to still be there when it does.
         canvas.save_layer_alpha_f(None, l.appear as f32);
         self.draw_takeover_field(canvas, w, h, t);
         canvas.restore();
 
-        // Poster: 2:3, 40 % of the height, never past the shelf's decode size.
-        let ph = (h * 0.40).min(300.0 * k);
-        let pw = ph * 2.0 / 3.0;
-        let py = h * 0.44 - ph / 2.0;
-        let settled = Rect::from_xywh((cx - pw / 2.0) as f32, py as f32, pw as f32, ph as f32);
-        // Where it flies from: its shelf tile, or — with no tile to leave — the settled
-        // rect a little small, so the arrival still reads as one.
+        // Cover and column as one centred pair: a 2:3 card carrying the left, and a text
+        // column beside it wide enough for a long title to break twice, not fifteen times.
+        let ch = (h * 0.62).min(460.0 * k);
+        let cw = ch * 2.0 / 3.0;
+        let gap = (w * 0.04).min(56.0 * k);
+        let dw = (w * 0.34).clamp(260.0 * k, 460.0 * k);
+        let x0 = (w - (cw + gap + dw)) / 2.0;
+        let top = (h - ch) / 2.0;
+        let settled = Rect::from_xywh(x0 as f32, top as f32, cw as f32, ch as f32);
+        // Where it flies from: its shelf tile, or — with no tile to leave — the settled rect
+        // a little small, so the arrival still reads as one.
         let start = if l.from.is_empty() {
-            let (dx, dy) = (settled.width() * 0.07, settled.height() * 0.07);
-            settled.with_inset((dx, dy))
+            settled.with_inset((settled.width() * 0.07, settled.height() * 0.07))
         } else {
             l.from
         };
-        let p = l.flight.pos as f32;
-        let lerp = |a: f32, b: f32| a + (b - a) * p;
-        let card = Rect::from_ltrb(
-            lerp(start.left, settled.left),
-            lerp(start.top, settled.top),
-            lerp(start.right, settled.right),
-            lerp(start.bottom, settled.bottom),
-        );
-        let corner = (10.0 * k) as f32;
+        let p = l.flight.pos;
+        let lerp = |a: f64, b: f64| a + (b - a) * p;
 
         canvas.save();
-        // One full turn on the way over, about the card's own centre.
-        canvas.rotate(
+        // One full turn on the way over, about the card's own vertical axis and through the
+        // same projection the coverflow tilts its side cards with — so the near edge grows
+        // and the far one recedes instead of the face merely narrowing.
+        let m = card_matrix(
+            lerp(f64::from(start.center_x()), f64::from(settled.center_x())),
+            lerp(f64::from(start.center_y()), f64::from(settled.center_y())),
             360.0 * p,
-            Some(skia_safe::Point::new(card.center_x(), card.center_y())),
+            lerp(f64::from(start.width()) / cw.max(1.0), 1.0),
+            cw,
+            ch,
+            PERSPECTIVE * k,
         );
-        let (pw, ph) = (f64::from(card.width()), f64::from(card.height()));
-        let mut shadow = fill(crate::theme::shade(0.55));
+        canvas.concat_44(&M44::row_major(&m));
+        let card = Rect::from_wh(cw as f32, ch as f32);
+        let corner = (14.0 * k) as f32;
+        let mut shadow = fill(crate::theme::shade(0.6));
         shadow.set_mask_filter(skia_safe::MaskFilter::blur(
             skia_safe::BlurStyle::Normal,
-            (16.0 * k) as f32,
+            (18.0 * k) as f32,
             None,
         ));
         canvas.draw_rrect(
-            RRect::new_rect_xy(card.with_offset((0.0, (10.0 * k) as f32)), corner, corner),
+            RRect::new_rect_xy(card.with_offset((0.0, (12.0 * k) as f32)), corner, corner),
             &shadow,
         );
         match poster {
@@ -364,13 +369,13 @@ impl Shell {
                 canvas.clip_rrect(RRect::new_rect_xy(card, corner, corner), None, true);
                 // Cover-fit: crop the source to the card's aspect, centred.
                 let (iw, ih) = (f64::from(img.width()), f64::from(img.height()));
-                let scale = (pw / iw).max(ph / ih);
-                let (cw, ch) = (pw / scale, ph / scale);
+                let scale = (cw / iw).max(ch / ih);
+                let (sw, sh) = (cw / scale, ch / scale);
                 let src = Rect::from_xywh(
-                    ((iw - cw) / 2.0) as f32,
-                    ((ih - ch) / 2.0) as f32,
-                    cw as f32,
-                    ch as f32,
+                    ((iw - sw) / 2.0) as f32,
+                    ((ih - sh) / 2.0) as f32,
+                    sw as f32,
+                    sh as f32,
                 );
                 canvas.draw_image_rect_with_sampling_options(
                     img,
@@ -383,33 +388,39 @@ impl Shell {
             }
             None => crate::screens::library::draw_poster_placeholder(canvas, fonts, None, card, k),
         }
+        canvas.draw_rrect(
+            RRect::new_rect_xy(card, corner, corner),
+            &crate::theme::stroke(fg(0.14), 1.0),
+        );
         canvas.restore();
 
-        let title_y = f64::from(settled.bottom) + 44.0 * k;
-        fonts.centered(
-            canvas,
-            &l.title,
-            W::SemiBold,
-            23.0 * k,
-            fg(l.appear as f32),
-            cx,
-            title_y,
-            w * 0.82,
-        );
-        if !l.detail.is_empty() {
-            fonts.centered(
-                canvas,
-                &l.detail,
-                W::Regular,
-                14.0 * k,
-                fg(0.55 * l.appear as f32),
-                cx,
-                title_y + 30.0 * k,
-                w * 0.66,
-            );
+        // The column: left-aligned beside the cover, centred on its height. Most titles carry
+        // one fact line, and a block hung from the top of a card this tall reads as fallen off
+        // it. The height is estimated from the rows present; measuring the paragraphs to place
+        // them would be a second layout pass for accuracy nobody can see.
+        let rows = [&l.facts, &l.developer, &l.genres]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .count() as f64;
+        let block = (44.0 + rows * 21.0 + 52.0) * k;
+        let a = l.appear as f32;
+        let dx = x0 + cw + gap;
+        let ty = top + (ch - block).max(0.0) / 2.0;
+        fonts.leading(canvas, &l.title, W::SemiBold, 34.0 * k, fg(a), dx, ty, dw);
+        let mut y = ty + 52.0 * k;
+        for (text, size, alpha) in [
+            (&l.facts, 15.0, 0.62),
+            (&l.developer, 14.0, 0.45),
+            (&l.genres, 14.0, 0.45),
+        ] {
+            if text.is_empty() {
+                continue;
+            }
+            fonts.leading(canvas, text, W::Regular, size * k, fg(alpha * a), dx, y, dw);
+            y += (size + 7.0) * k;
         }
-        crate::theme::spinner(canvas, cx, title_y + 64.0 * k, 11.0 * k, t);
-        fonts.centered(
+        crate::theme::spinner(canvas, dx + 8.0 * k, y + 30.0 * k, 8.0 * k, t);
+        fonts.leading(
             canvas,
             if l.connected {
                 "Starting the game\u{2026}"
@@ -418,10 +429,10 @@ impl Shell {
             },
             W::Regular,
             12.5 * k,
-            fg(0.45 * l.appear as f32),
-            cx,
-            title_y + 92.0 * k,
-            w * 0.66,
+            fg(0.5 * a),
+            dx + 24.0 * k,
+            y + 22.0 * k,
+            dw,
         );
         // Before the dial lands B cancels it, exactly as it does on the connect card;
         // after, the only thing left to ask for is the picture.

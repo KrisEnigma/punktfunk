@@ -699,6 +699,15 @@ pub struct LibraryGame {
     pub icon: String,
     /// Host free-form display string (`"PC"`, `"PS2"`, …). `None` until [`crate::collate`] assigns a bucket.
     pub platform: Option<String>,
+    /// What the launch hold says about a title beyond its name. The shelf draws none of it —
+    /// a tile is a poster — so all three default, and a host or a bridge that says nothing
+    /// leaves the hold with the title and the store, which is what it showed before.
+    #[serde(default)]
+    pub developer: Option<String>,
+    #[serde(default)]
+    pub year: Option<u16>,
+    #[serde(default)]
+    pub genres: Vec<String>,
     /// Already up on the host — pick resumes. From `/api/v1/status` via [`LibraryShared::set_running`].
     ///
     /// Host state, not catalog state: not on `GameEntry`, not persisted. A disk shelf cannot
@@ -1348,6 +1357,9 @@ mod tests {
             launcher,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1375,6 +1387,9 @@ mod tests {
             launcher,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1435,6 +1450,9 @@ mod tests {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         }]);
         assert_eq!(shared.status_gen(), 0);
@@ -1470,6 +1488,9 @@ mod tests {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1508,6 +1529,9 @@ mod tests {
                     launcher: false,
                     icon: String::new(),
                     platform: None,
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
                     running: false,
                 })
                 .collect(),
