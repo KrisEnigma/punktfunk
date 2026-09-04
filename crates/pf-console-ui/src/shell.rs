@@ -146,7 +146,53 @@ struct Connecting {
     /// Host is parked pending operator approval. Takeover title is
     /// "Waiting for approval", not "Connecting".
     request_access: bool,
+    /// The title this connect launches, when it launches one — becomes the
+    /// [`Launching`] hold once the handshake lands.
+    launch: Option<LaunchHost>,
 }
+
+/// Where the launch hold asks after its title: the shelf's host, on the
+/// management lane the shelf already reads `/status` from.
+struct LaunchHost {
+    id: String,
+    addr: String,
+    mgmt: u16,
+    fp_hex: String,
+}
+
+/// The stream is live but its game is not: the takeover stays up, wearing the
+/// title's poster, until the host reports the game running.
+///
+/// Every launch begins with the launcher's own window (Steam booting, a
+/// desktop) — the first thing a player used to see of a game. The host tells
+/// `launching` from `running` per lease (`punktfunk-host::gamelease`), and a
+/// paired client may read it, so the hold polls that until it changes.
+struct Launching {
+    host: LaunchHost,
+    title: String,
+    /// Store and platform, `Steam · PC`.
+    detail: String,
+    /// Poster/title fade-in, 0 → 1.
+    appear: f64,
+    since: f64,
+    last_poll: f64,
+    /// `status_gen` when the hold began; a state read before that describes
+    /// an earlier launch of the same title and must not end this one.
+    base_gen: u64,
+    /// `status_gen` when the last poll went out — the next waits for it to move.
+    poll_gen: u64,
+}
+
+/// Poll interval for the launch hold, and the retry when an answer never lands.
+const LAUNCH_POLL: f64 = 1.0;
+const LAUNCH_POLL_STALL: f64 = 5.0;
+/// The host lists nothing for the title: the launch did not resolve
+/// (no recipe, launcher missing). The host logs it and streams on; so do we.
+const LAUNCH_NO_LEASE: f64 = 15.0;
+/// A game the host still calls `launching` this long is one the player wants
+/// to see for themselves — a cold Steam boot with shader work runs to minutes,
+/// and the host waits five for it.
+const LAUNCH_HOLD_MAX: f64 = 120.0;
 
 /// Host-supplied construction options.
 pub struct ConsoleOptions {
@@ -205,6 +251,7 @@ pub(crate) struct Shell {
     fallback_ui: bool,
     pub(crate) in_stream: bool,
     connecting: Option<Connecting>,
+    launching: Option<Launching>,
     /// Host title of the last connect. [`Self::session_reconnecting`] has no
     /// `Launch` of its own, so nothing else can name the host.
     last_connect_title: Option<String>,
@@ -306,6 +353,7 @@ impl Shell {
             fallback_ui: opts.fallback_ui,
             in_stream: false,
             connecting: None,
+            launching: None,
             last_connect_title: None,
             wake: None,
             wake_optimistic: false,
@@ -505,7 +553,14 @@ impl Shell {
     pub(crate) fn editing(&self) -> bool {
         !self.in_stream
             && self.connecting.is_none()
+            && !self.holds_stream()
             && self.stack.last().is_some_and(Screen::editing)
+    }
+
+    /// The console is covering a live stream — a launch hold — and wants the
+    /// pad as menu events, masked off the wire.
+    pub(crate) fn holds_stream(&self) -> bool {
+        self.launching.is_some()
     }
 
     pub(crate) fn take_action(&mut self) -> Option<OverlayAction> {
@@ -520,6 +575,7 @@ impl Shell {
                     title,
                     appear: 0.0,
                     request_access: false,
+                    launch: None,
                 })
             }
             None => self.connecting = None,
@@ -528,17 +584,101 @@ impl Shell {
 
     pub(crate) fn session_failed(&mut self, msg: &str) {
         self.connecting = None;
+        self.launching = None;
         self.in_stream = false;
         self.show_toast_kind(format!("Couldn't connect — {msg}"), ToastKind::Error);
     }
 
     pub(crate) fn session_streaming(&mut self) {
-        self.connecting = None;
+        let hold = self
+            .connecting
+            .take()
+            .and_then(|c| c.launch)
+            .and_then(|l| self.launch_hold(l));
+        self.in_stream = hold.is_none();
+        self.launching = hold;
+    }
+
+    /// The hold for a launched title, or `None` when there is nothing to
+    /// wait for: a launcher tile (the host never tracks those), a title the
+    /// shelf no longer lists, or a host that does not composite this console
+    /// over its stream (Android swaps to its own stream screen at handshake).
+    fn launch_hold(&self, host: LaunchHost) -> Option<Launching> {
+        if self.platform != Platform::Desktop {
+            return None;
+        }
+        let snap = self.library.snapshot();
+        let g = snap.games.iter().find(|g| g.id == host.id)?;
+        if g.launcher {
+            return None;
+        }
+        let detail = [
+            Some(crate::library::store_label(&g.store)),
+            g.platform.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+        let t = self.t();
+        let reads = self.library.status_gen();
+        Some(Launching {
+            host,
+            title: g.title.clone(),
+            detail,
+            appear: 0.0,
+            since: t,
+            // The first poll goes out on the next frame.
+            last_poll: t - LAUNCH_POLL_STALL,
+            base_gen: reads,
+            poll_gen: reads,
+        })
+    }
+
+    /// Drop the hold and let the stream through.
+    fn reveal_stream(&mut self) {
+        self.launching = None;
         self.in_stream = true;
+    }
+
+    /// One frame of the launch hold: reveal when the host has answered, or
+    /// when it never will; else keep the poll going.
+    fn tick_launch(&mut self) {
+        let t = self.t();
+        let reads = self.library.status_gen();
+        let Some(l) = &self.launching else { return };
+        let state = (reads > l.base_gen)
+            .then(|| self.library.launch_state(&l.host.id))
+            .flatten();
+        let elapsed = t - l.since;
+        let done = match state.as_deref() {
+            Some("launching") => elapsed >= LAUNCH_HOLD_MAX,
+            // running, exited, untracked, grace: the host has said all it will.
+            Some(_) => true,
+            None => elapsed >= LAUNCH_NO_LEASE,
+        };
+        if done {
+            self.reveal_stream();
+            return;
+        }
+        let waited = t - l.last_poll;
+        if (reads != l.poll_gen && waited >= LAUNCH_POLL) || waited >= LAUNCH_POLL_STALL {
+            let poll = ConsoleCmd::RefreshRunning {
+                addr: l.host.addr.clone(),
+                mgmt: l.host.mgmt,
+                fp_hex: l.host.fp_hex.clone(),
+            };
+            if let Some(l) = &mut self.launching {
+                l.last_poll = t;
+                l.poll_gen = reads;
+            }
+            self.bus.send(poll);
+        }
     }
 
     pub(crate) fn session_ended(&mut self, reason: Option<&str>) {
         self.connecting = None;
+        self.launching = None;
         self.in_stream = false;
         // Stack survives a stream, so nothing else refreshes the running set:
         // without this the Resume badge still names the title they just quit.
@@ -563,6 +703,7 @@ impl Shell {
     /// `appear = 1.0`: the retry follows a live stream; fading in is a flash.
     pub(crate) fn session_reconnecting(&mut self, msg: &str) {
         self.in_stream = false;
+        self.launching = None;
         self.connecting = Some(Connecting {
             // `None` only if the shell never raised the connect (`--connect`
             // has no console). Prefer a codec-change name over empty string.
@@ -572,6 +713,7 @@ impl Shell {
                 .unwrap_or_else(|| "the host".to_string()),
             appear: 1.0,
             request_access: false,
+            launch: None,
         });
         self.show_toast(msg.to_string());
     }
@@ -708,6 +850,7 @@ impl Shell {
         }
 
         self.collections_handover();
+        self.tick_launch();
     }
 
     /// Swap a library shelf for the collections screen once it holds more
@@ -736,9 +879,20 @@ impl Shell {
     }
 
     fn start_connect(&mut self, intent: ConnectIntent) {
+        // A game launch comes off a shelf, which knows the host's management port.
+        let launch = match (&intent.launch, self.stack.last()) {
+            (Some(id), Some(Screen::Library(lib))) => Some(LaunchHost {
+                id: id.clone(),
+                addr: intent.addr.clone(),
+                mgmt: lib.host_mgmt_port(),
+                fp_hex: intent.fp_hex.clone(),
+            }),
+            _ => None,
+        };
         self.set_connecting(Some(intent.title.clone()));
         if let Some(c) = &mut self.connecting {
             c.request_access = intent.request_access;
+            c.launch = launch;
         }
         self.actions.push_back(OverlayAction::Launch {
             addr: intent.addr,
@@ -753,6 +907,14 @@ impl Shell {
 
     pub(crate) fn handle_menu(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
         self.sync();
+        // Any press on the launch hold shows the stream: the player asked to see.
+        if self.launching.is_some() {
+            if matches!(ev, MenuEvent::Confirm | MenuEvent::Back) {
+                self.reveal_stream();
+                return Some(MenuPulse::Confirm);
+            }
+            return None;
+        }
         if self.connecting.is_some() {
             if ev == MenuEvent::Back {
                 // Drop the takeover here, not on the next `session_phase`.
@@ -834,6 +996,12 @@ impl Shell {
         // Right button is B, including on modal cards. Exception: B at the
         // root quits, and a right-click is too easy to fire by accident —
         // quit stays the legend's clickable "Quit".
+        if self.launching.is_some() {
+            if p.press() || p.kind == PointerKind::Back {
+                self.reveal_stream();
+            }
+            return true;
+        }
         if p.kind == PointerKind::Back {
             if self.stack.len() > 1 || self.connecting.is_some() || self.wake.is_some() {
                 self.handle_menu(MenuEvent::Back);

@@ -1059,6 +1059,15 @@ struct ContentView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.22), value: model.resizing)
+                // The launch hold: the title's poster over the stream until its game is up. Opaque
+                // and mounted only while it holds, for the same direct-to-display reason as above.
+                .overlay {
+                    if pendingFingerprint == nil, let entry = model.launchHold {
+                        LaunchHoldView(entry: entry, host: model.activeHost) { model.revealStream() }
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.35), value: model.launchHold)
             if let fp = pendingFingerprint {
                 TrustCardView(
                     fingerprint: fp,

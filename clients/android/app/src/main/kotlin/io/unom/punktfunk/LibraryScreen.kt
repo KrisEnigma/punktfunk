@@ -89,6 +89,7 @@ import io.unom.punktfunk.kit.security.IdentityStore
 import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.obtainIdentity
 import io.unom.punktfunk.models.ActiveSession
+import io.unom.punktfunk.models.LaunchHold
 import kotlin.math.PI
 import kotlin.math.absoluteValue
 import kotlin.math.cos
@@ -359,6 +360,10 @@ fun LibraryScreen(
                         // not the host's default one.
                         launchedFromLibrary = true,
                         libraryProfileId = pinnedProfileId,
+                        // The host never tracks a launcher tile, so there is nothing to wait for.
+                        launchHold = game.takeUnless { it.isLauncher }?.let {
+                            LaunchHold(it, host.address, host.effectiveMgmtPort, host.fpHex)
+                        },
                     ),
                 )
             } else {

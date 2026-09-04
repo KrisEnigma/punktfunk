@@ -65,6 +65,26 @@ final class FrameMeter: @unchecked Sendable {
     }
 }
 
+/// The entry behind a `connect(launchID:)`, handed over out of band: the shelf's launch callbacks
+/// carry only the id (five call sites, three tile views), and the launch hold needs the title and
+/// art. Keyed by id on the way out, so a stale entry can never dress a different launch.
+enum LaunchedEntry {
+    private static var last: GameEntry?
+
+    static func remember(_ entry: GameEntry?) { last = entry }
+
+    static func take(_ id: String) -> GameEntry? {
+        defer { last = nil }
+        return last?.id == id ? last : nil
+    }
+}
+
+/// How long the launch hold waits on a title the host still calls `launching` (a cold Steam boot
+/// with shader work runs to minutes), and on one the host never lists at all (the launch did not
+/// resolve; the host logs it and streams on).
+private let launchHoldMax: TimeInterval = 120
+private let launchNoLease: TimeInterval = 15
+
 @MainActor
 final class SessionModel: ObservableObject {
     enum Phase: Equatable {
@@ -79,6 +99,11 @@ final class SessionModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var connection: PunktfunkConnection?
+    /// The launched title whose game is not up yet: the session view veils the stream with its
+    /// poster until the host's `/status` says the game left `launching` (`punktfunk-host::gamelease`),
+    /// or the player asks to see. nil for a desktop connect, a launcher tile, and once revealed.
+    @Published private(set) var launchHold: GameEntry?
+    private var launchWatch: Task<Void, Never>?
     /// The host this session is for (a value copy; identity = id).
     @Published private(set) var activeHost: StoredHost?
     /// The library entry this session was launched with (`connect(launchID:)`), or nil if the user
@@ -453,6 +478,8 @@ final class SessionModel: ObservableObject {
         activeHost = host
         launchedTitleID = launchID
         launchedShelf = shelf
+        // The host never tracks a launcher tile, so there is nothing to wait for.
+        launchHold = launchID.flatMap(LaunchedEntry.take).flatMap { $0.isLauncher ? nil : $0 }
         errorMessage = nil
         settings = effective
         statsVerbosity = StatsVerbosity(rawValue: effective.statsVerbosity) ?? .normal
@@ -1026,6 +1053,7 @@ final class SessionModel: ObservableObject {
         // Read by `sessionEnded` BEFORE it calls us, so clearing here can't rob it of the answer.
         launchedTitleID = nil
         launchedShelf = nil
+        revealStream()
         phase = .idle
         fps = 0
         mbps = 0
@@ -1115,11 +1143,54 @@ final class SessionModel: ObservableObject {
         resizing = resizeIndicator.active
     }
 
+    /// Drop the launch hold and let the stream through.
+    func revealStream() {
+        launchWatch?.cancel()
+        launchWatch = nil
+        launchHold = nil
+    }
+
+    /// Poll the host once a second for the launched title's state, and reveal when it has
+    /// answered — or when it never will. Same lane and identity as the shelf's Resume badge.
+    private func watchLaunch() {
+        guard let hold = launchHold, let host = activeHost else { return }
+        let port = connection.map(\.hostMgmtPort).flatMap { $0 > 0 ? $0 : nil } ?? host.effectiveMgmtPort
+        guard let identity = (try? ClientIdentityStore.shared.load())?.identity else {
+            revealStream()
+            return
+        }
+        let began = Date()
+        launchWatch?.cancel()
+        launchWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                let games = await LibraryClient.running(
+                    address: host.address, port: port,
+                    certPEM: identity.certPEM, keyPEM: identity.keyPEM,
+                    hostFingerprint: host.pinnedSHA256)
+                let state = games.first { $0.appID == hold.id }?.state
+                let elapsed = Date().timeIntervalSince(began)
+                let done: Bool
+                switch state {
+                case "launching": done = elapsed >= launchHoldMax
+                // running, exited, untracked, grace: the host has said all it will.
+                case .some: done = true
+                case nil: done = elapsed >= launchNoLease
+                }
+                if done {
+                    self?.revealStream()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: NSEC_PER_SEC)
+            }
+        }
+    }
+
     private func beginStreaming() {
         guard let conn = connection else { return }
         // Input capture itself is owned by StreamView (engaged by the captureEnabled
         // flip this phase change causes, released/re-engaged by the user from there).
         phase = .streaming
+        watchLaunch()
         displaySleepGuard.acquire()
         // Audio starts with streaming, not during the trust prompt — no host sound (or
         // mic uplink!) before the user trusted the host. Devices and the mic switch come from the

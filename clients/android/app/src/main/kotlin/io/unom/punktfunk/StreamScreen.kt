@@ -1304,6 +1304,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         } else if (touchHint) {
             TouchFallbackHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
         }
+        // Last, so it covers everything: the launched title's poster until its game is up.
+        var launchHold by remember(session) { mutableStateOf(session.launchHold) }
+        launchHold?.let { LaunchHoldOverlay(it) { launchHold = null } }
     }
 }
 

@@ -123,6 +123,12 @@ pub trait Overlay {
         false
     }
 
+    /// The console is drawn over a live stream (a launch hold) and takes the pad
+    /// as menu events, exactly as the ring does.
+    fn holds_stream(&self) -> bool {
+        false
+    }
+
     /// Drain one ring command. Each iteration while streaming.
     fn take_ring_command(&mut self) -> Option<RingCommand> {
         None

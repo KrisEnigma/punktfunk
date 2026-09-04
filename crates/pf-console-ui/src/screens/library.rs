@@ -134,7 +134,7 @@ fn placeholder_face(launcher: bool) -> Color4f {
 }
 
 /// Coverless cell. Launcher: brand face + mark. Game: quieter face + monogram. `None`: stale index.
-fn draw_poster_placeholder(
+pub(crate) fn draw_poster_placeholder(
     canvas: &Canvas,
     fonts: &Fonts,
     game: Option<&LibraryGame>,
@@ -486,6 +486,12 @@ impl LibraryScreen {
 
     pub(crate) fn host_fp_hex(&self) -> &str {
         &self.host.fp_hex
+    }
+
+    /// A decoded poster, for the launch hold drawn over this shelf. The focused tile
+    /// keeps drawing underneath, so its poster is never the one evicted.
+    pub(crate) fn poster(&self, id: &str) -> Option<&Image> {
+        self.art.get(id)
     }
 
     /// Filtered length for tests in another module, which cannot reach [`Self::len`].

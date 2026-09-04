@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.ui.graphics.vector.ImageVector
+import io.unom.punktfunk.kit.library.GameEntry
 import io.unom.punktfunk.kit.security.KnownHost
 
 /** Bottom-bar destinations (the immersive stream view is shown full-screen, outside the bar). */
@@ -96,7 +97,15 @@ data class ActiveSession(
      * change what the next title streams with.
      */
     val libraryProfileId: String? = null,
+    /**
+     * The launched title whose game is not up yet: the stream screen veils the picture with its
+     * poster until the host reports the game running. Null for a desktop connect or a launcher tile.
+     */
+    val launchHold: LaunchHold? = null,
 )
+
+/** A held launch, and where to ask after it — the shelf's host on the management lane. */
+data class LaunchHold(val game: GameEntry, val address: String, val mgmtPort: Int, val fpHex: String)
 
 /**
  * The library shelf a finished game launch should return to: the saved host's id, and the pinned

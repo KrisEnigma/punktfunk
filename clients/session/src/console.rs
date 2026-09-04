@@ -506,7 +506,7 @@ impl ServiceState {
                 std::thread::Builder::new()
                     .name("punktfunk-running".into())
                     .spawn(move || {
-                        shared.set_running(&running_ids(&addr, mgmt, &identity, pin));
+                        shared.set_running(&library::fetch_running(&addr, mgmt, &identity, pin));
                     })
                     .ok();
             }
@@ -1176,7 +1176,7 @@ fn spawn_fetch(
             // What the host has up right now, so a title the player can return to says so.
             // Deliberately after the catalog — a slow `/status` must not hold the titles back —
             // and never fatal: an older host answers nothing and every badge simply stays off.
-            shared.set_running(&running_ids(&addr, mgmt, &identity, pin));
+            shared.set_running(&library::fetch_running(&addr, mgmt, &identity, pin));
             if !jobs.is_empty() {
                 let rx = library::spawn_art_fetch(base, identity, pin, jobs);
                 while let Ok((id, bytes)) = rx.recv_blocking() {
@@ -1209,25 +1209,6 @@ fn to_model(games: &[library::GameEntry]) -> Vec<LibraryGame> {
             platform: g.platform.clone(),
             running: false,
         })
-        .collect()
-}
-
-/// Which library ids the host has up right now — the Resume set.
-///
-/// Best-effort by contract (see [`library::fetch_running`]): an older host, an unreachable one or
-/// a shape we don't recognise yields an empty set, which correctly clears every badge rather than
-/// failing anything. Entries with no `app_id` — an operator-typed GameStream command — are dropped:
-/// there is no catalog entry to badge.
-fn running_ids(
-    addr: &str,
-    mgmt: u16,
-    identity: &(String, String),
-    pin: Option<[u8; 32]>,
-) -> std::collections::HashSet<String> {
-    library::fetch_running(addr, mgmt, identity, pin)
-        .into_iter()
-        .filter(|g| g.is_up())
-        .filter_map(|g| g.app_id)
         .collect()
 }
 

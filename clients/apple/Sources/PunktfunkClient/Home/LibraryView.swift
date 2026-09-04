@@ -675,6 +675,7 @@ struct LibraryView: View {
         guard let onLaunch else { return nil }
         return { id in
             LibraryScrollMemory.remember(id, forHost: host.id.uuidString)
+            LaunchedEntry.remember(games.first { $0.id == id })
             onLaunch(id)
         }
     }

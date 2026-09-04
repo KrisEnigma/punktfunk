@@ -42,6 +42,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **A launch hold on every client.** A title launched from a library keeps its poster, name and
+  store on screen after the handshake until the host's `games[].state` on `GET /api/v1/status`
+  leaves `launching` — 15 s if the host never lists the title, 120 s if it stays `launching`,
+  and any press shows the stream early. Nothing to configure: the state has been on `/status`
+  since the session⇄game lifetime work, and launcher tiles never hold.
 - **Decky: Punktfunk hosts in Steam's "Play from" menu.** The plugin patches
   `/library/app/:appid`, lists hosts whose library carries `steam:<appid>` in the Play button's
   ▾ menu, re-dresses Steam's Play button as Stream while one is chosen, and streams under a

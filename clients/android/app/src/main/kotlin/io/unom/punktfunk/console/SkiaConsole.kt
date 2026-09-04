@@ -26,6 +26,7 @@ import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.discovery.HostDiscovery
+import io.unom.punktfunk.kit.library.DEFAULT_MGMT_PORT
 import io.unom.punktfunk.kit.library.LibraryCache
 import io.unom.punktfunk.kit.library.LibraryClient
 import io.unom.punktfunk.kit.library.LibraryResult
@@ -35,6 +36,7 @@ import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.KnownHostStore
 import io.unom.punktfunk.kit.security.obtainIdentity
 import io.unom.punktfunk.models.ActiveSession
+import io.unom.punktfunk.models.LaunchHold
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -551,6 +553,11 @@ object SkiaConsole {
             val h = kotlinx.coroutines.runBlocking {
                 connectToHost(app, effective, id, addr, port, fp, launchId, timeout)
             }
+            // The launched entry, for the stream screen's hold — the shelf cached it on fetch.
+            val launched = launchId?.let { lid ->
+                LibraryCache.standard(app.cacheDir).load(kh?.id ?: fp)?.games
+                    ?.firstOrNull { it.id == lid }?.takeUnless { it.isLauncher }
+            }
             main.post {
                 if (d.cancelled.get()) {
                     if (h != 0L) ioPool.execute { NativeBridge.nativeClose(h) }
@@ -586,6 +593,11 @@ object SkiaConsole {
                             hostId = record?.id,
                             launchedFromLibrary = launchId != null,
                             libraryProfileId = profileId,
+                            launchHold = launched?.let {
+                                val mgmt = NativeBridge.nativeHostMgmtPort(h).takeIf { p -> p > 0 }
+                                    ?: record?.effectiveMgmtPort ?: DEFAULT_MGMT_PORT
+                                LaunchHold(it, addr, mgmt, fp)
+                            },
                         ),
                     )
                 } else {
@@ -800,8 +812,7 @@ object SkiaConsole {
             if (id == null) return
             ioPool.execute {
                 val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
-                    .filter { it.isUp }.mapNotNull { it.appId }
-                main.post { if (handle != 0L) NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.stringArray(up)) }
+                main.post { if (handle != 0L) NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.runningGames(up)) }
             }
             return
         }
@@ -837,12 +848,11 @@ object SkiaConsole {
                     val games = r.games
                     cache.store(cacheKey, games)
                     val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
-                        .filter { it.isUp }.mapNotNull { it.appId }
                     main.post {
                         if (gen != fetchGen.get()) return@post
                         NativeBridge.nativeConsoleLibraryGames(handle, ConsoleJson.libraryGames(games), false)
                         NativeBridge.nativeConsoleLibraryStale(handle, 0)
-                        NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.stringArray(up))
+                        NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.runningGames(up))
                     }
                     for (g in games) {
                         val candidates = g.art.posterCandidates

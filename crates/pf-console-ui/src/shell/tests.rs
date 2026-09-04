@@ -1533,3 +1533,152 @@ fn paints_are_built_by_the_theme_constructors() {
         offenders.join("\n  ")
     );
 }
+
+// --- Launch hold -------------------------------------------------------------------
+
+mod launch_hold {
+    use super::*;
+    use crate::library::LibraryGame;
+    use pf_client_core::library::RunningGame;
+
+    fn game(id: &str, title: &str, launcher: bool) -> LibraryGame {
+        LibraryGame {
+            id: id.into(),
+            title: title.into(),
+            store: "steam".into(),
+            launcher,
+            icon: String::new(),
+            platform: Some("PC".into()),
+            running: false,
+        }
+    }
+
+    fn running(id: &str, state: &str) -> Vec<RunningGame> {
+        vec![RunningGame {
+            app_id: Some(id.into()),
+            title: String::new(),
+            state: state.into(),
+        }]
+    }
+
+    fn intent(id: &str) -> ConnectIntent {
+        ConnectIntent {
+            addr: "10.0.0.1".into(),
+            port: 47989,
+            fp_hex: "aa11".into(),
+            launch: Some(id.into()),
+            title: "Deck".into(),
+            request_access: false,
+            profile: None,
+        }
+    }
+
+    /// A shell standing on a shelf, with the bus kept so the poll can be witnessed.
+    fn on_shelf() -> (Shell, LibraryShared, ConsoleBus) {
+        fake_home();
+        let console = ConsoleShared::default();
+        console.set_hosts(hosts());
+        let library = LibraryShared::default();
+        let bus = ConsoleBus::default();
+        let mut s = Shell::new(
+            console,
+            library.clone(),
+            bus.clone(),
+            ConsoleOptions::desktop("deck".into(), false),
+            vec![
+                Screen::Home(HomeScreen::new()),
+                Screen::Library(LibraryScreen::new(&hosts()[0], 0)),
+            ],
+        )
+        .unwrap();
+        s.fake_clock = Some((100.0, 0.0));
+        library.set_games(vec![
+            game("steam:570", "Dota 2", false),
+            game("steam:ui", "Big Picture", true),
+        ]);
+        (s, library, bus)
+    }
+
+    fn at(s: &mut Shell, t: f64) {
+        s.fake_clock = Some((t, 0.0));
+    }
+
+    #[test]
+    fn a_launched_title_holds_the_stream_until_the_host_says_running() {
+        let (mut s, library, bus) = on_shelf();
+        s.start_connect(intent("steam:570"));
+        assert!(matches!(
+            s.take_action(),
+            Some(OverlayAction::Launch { .. })
+        ));
+        s.session_streaming();
+        assert!(
+            s.holds_stream() && !s.in_stream,
+            "the handshake alone reveals nothing"
+        );
+        assert_eq!(
+            s.launching.as_ref().map(|l| l.detail.as_str()),
+            Some("Steam · PC")
+        );
+
+        s.sync();
+        assert!(
+            bus.drain()
+                .iter()
+                .any(|c| matches!(c, ConsoleCmd::RefreshRunning { mgmt: 47990, .. })),
+            "the hold asks the shelf's host"
+        );
+        // The next poll waits for that answer, then a second.
+        at(&mut s, 101.5);
+        s.sync();
+        assert!(bus.drain().is_empty(), "no answer yet, no second question");
+        library.set_running(&running("steam:570", "launching"));
+        s.sync();
+        assert!(s.holds_stream(), "launching is the wait itself");
+        assert!(!bus.drain().is_empty(), "answer landed and a second passed");
+
+        library.set_running(&running("steam:570", "running"));
+        s.sync();
+        assert!(!s.holds_stream() && s.in_stream);
+    }
+
+    #[test]
+    fn the_hold_ignores_state_read_before_the_launch_and_gives_up_without_a_lease() {
+        let (mut s, library, _bus) = on_shelf();
+        // The shelf's own refresh, from before this launch: the previous copy exited.
+        library.set_running(&running("steam:570", "exited"));
+        s.start_connect(intent("steam:570"));
+        s.session_streaming();
+        s.sync();
+        assert!(
+            s.holds_stream(),
+            "a read from before the launch is not this launch"
+        );
+        at(&mut s, 100.0 + LAUNCH_NO_LEASE);
+        s.sync();
+        assert!(
+            s.in_stream,
+            "the host never listed it — nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn launcher_tiles_skip_the_hold_and_a_press_ends_it() {
+        let (mut s, _library, _bus) = on_shelf();
+        s.start_connect(intent("steam:ui"));
+        s.session_streaming();
+        assert!(
+            s.in_stream && !s.holds_stream(),
+            "the host never tracks a launcher"
+        );
+
+        s.session_ended(None);
+        s.start_connect(intent("steam:570"));
+        s.session_streaming();
+        assert!(s.holds_stream());
+        assert!(s.handle_menu(MenuEvent::Move(MenuDir::Left)).is_none());
+        assert!(s.holds_stream(), "a nudge is not a request to see");
+        s.handle_menu(MenuEvent::Confirm);
+        assert!(s.in_stream && !s.holds_stream());
+    }
+}

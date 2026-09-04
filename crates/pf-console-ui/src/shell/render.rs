@@ -168,7 +168,9 @@ impl Shell {
             t,
             glyphs: self.glyphs,
             // A modal owns B/A while up — do not also show the screen's legend.
-            show_hints: self.connecting.is_none() && self.wake.is_none(),
+            show_hints: self.connecting.is_none()
+                && self.launching.is_none()
+                && self.wake.is_none(),
         };
         // Only a settled top screen publishes hint hit-boxes. Mid-transition every
         // layer is slid inside a `save_layer`, so reported rects are not the pixels.
