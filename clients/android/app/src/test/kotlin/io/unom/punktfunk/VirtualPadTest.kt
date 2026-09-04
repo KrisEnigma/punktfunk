@@ -7,7 +7,8 @@ import org.junit.Test
 
 /** The virtual controller's pure parts: preset geometry, the D-pad's angle, the stick's travel, the trigger's pull. */
 class VirtualPadTest {
-    private val sizes = listOf(933f to 420f, 420f to 933f, 1024f to 768f)
+    // The last is a tabletop fold's flat half: full width, half the height of an unfolded panel.
+    private val sizes = listOf(933f to 420f, 420f to 933f, 1024f to 768f, 830f to 345f)
 
     @Test
     fun every_preset_fits_its_layer_with_no_two_controls_overlapping() {

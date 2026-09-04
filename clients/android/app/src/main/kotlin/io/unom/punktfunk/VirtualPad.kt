@@ -168,8 +168,8 @@ private fun disc(id: String, label: String, glyph: String, bit: Int, cx: Float, 
  * are fixed per preset (§4.3): sticks in the bottom corners, the D-pad beside the left stick, the
  * face buttons in the bottom-right corner with the right stick beside them, the shoulders in the
  * top corners, Select, Guide and Start along the bottom edge. A narrow layer lifts the D-pad and
- * the right stick above their neighbours and puts the middle three along the top edge instead.
- * An unknown preset is `full`.
+ * the right stick above their neighbours; the middle three keep the bottom edge only while the
+ * clusters leave it free, and take the top edge when they do not. An unknown preset is `full`.
  */
 internal fun padControls(layout: String, w: Float, h: Float): List<PadControl> {
     val narrow = w < NARROW
@@ -213,10 +213,17 @@ internal fun padControls(layout: String, w: Float, h: Float): List<PadControl> {
         }
         out += PadControl.Stick("rs", "Right stick", right, Gamepad.AXIS_RS_X, Gamepad.AXIS_RS_Y)
     }
-    val midY = if (narrow) MARGIN + SMALL_R else bottom - SMALL_R
-    out += disc("select", "Select", "⧉", Gamepad.BTN_BACK, w / 2 - 64, midY, SMALL_R)
-    out += disc("guide", "Guide", "◎", Gamepad.BTN_GUIDE, w / 2, midY, SMALL_R)
-    out += disc("start", "Start", "☰", Gamepad.BTN_START, w / 2 + 64, midY, SMALL_R)
+    // Measured against the clusters, not guessed from the width: between [NARROW] and about
+    // 900 dp the right stick still spreads into the bottom corner, near enough to sit on Start.
+    val middle = { y: Float ->
+        listOf(
+            disc("select", "Select", "⧉", Gamepad.BTN_BACK, w / 2 - 64, y, SMALL_R),
+            disc("guide", "Guide", "◎", Gamepad.BTN_GUIDE, w / 2, y, SMALL_R),
+            disc("start", "Start", "☰", Gamepad.BTN_START, w / 2 + 64, y, SMALL_R),
+        )
+    }
+    val low = middle(bottom - SMALL_R)
+    out += if (low.none { m -> out.any { it.rect.overlaps(m.rect) } }) low else middle(MARGIN + SMALL_R)
     return out
 }
 
