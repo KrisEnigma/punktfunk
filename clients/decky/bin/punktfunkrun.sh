@@ -14,6 +14,8 @@
 # every host:
 #   PF_REF     host reference — a saved host's stable id, or addr[:port]  (required to stream)
 #   PF_PROFILE settings-profile id for a pinned card                      (optional)
+#   PF_GAME    store-qualified library id (steam:570) the host launches into the stream —
+#              set by a stream started from a Steam game's page          (optional)
 #   PF_REQUEST_ACCESS  non-empty = ask the host's operator to admit this device instead of
 #                      pairing with a PIN. The connect PARKS until somebody approves it.
 #   PF_BROWSE  non-empty = open the client's console home instead of streaming
@@ -82,6 +84,11 @@ fi
 set -- --fullscreen
 if [ -n "${PF_PROFILE:-}" ]; then
     set -- --profile "$PF_PROFILE" "$@"
+fi
+# A title to launch into the stream: the CLI hands the id to the host, which resolves it
+# against its own library — the Deck never learns what the launch recipe is.
+if [ -n "${PF_GAME:-}" ]; then
+    set -- --game "$PF_GAME" "$@"
 fi
 
 # REQUEST ACCESS RUNS SUPERVISED — no `--exec`. Under --exec the CLI BECOMES the session, so no

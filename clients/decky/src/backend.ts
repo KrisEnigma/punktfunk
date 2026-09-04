@@ -89,6 +89,21 @@ export interface PairResult extends CliResult {
   fp?: string;
 }
 
+/**
+ * One title of a host's library (`punktfunk library <ref> --json`). `id` is store-qualified —
+ * `steam:570`, `custom:…` — and is the handle a launch names; the Steam ones are what the game
+ * page matches against Steam's own appids.
+ */
+export interface LibraryGame {
+  id: string;
+  store: string;
+  title: string;
+}
+
+export interface LibraryResult extends CliResult {
+  games?: LibraryGame[];
+}
+
 export interface RunnerInfo {
   runner: string; // absolute path to bin/punktfunkrun.sh
   app_id: string; // flatpak app id
@@ -158,11 +173,45 @@ export const trustHost = callable<
   [addr: string, port: number, fp: string, name: string],
   CliResult
 >("trust_host");
+/**
+ * The host's game library. Paired hosts only: the library routes take the paired identity
+ * over mTLS, so a host that merely has a pinned fingerprint answers `needs-pairing`.
+ */
+export const library = callable<[ref: string], LibraryResult>("library");
 
 // ---- Steam / plugin business (only a Decky plugin can do these) ------------------------
 
 export const runnerInfo = callable<[], RunnerInfo>("runner_info");
 export const shortcutArt = callable<[], ShortcutArt>("shortcut_art");
+
+/**
+ * A Steam game's own artwork, for the hidden shortcut that streams it: base64 images keyed like
+ * `ShortcutArt`, each with a `<key>_type` of `jpg` | `png`, and the icon as bytes. Any piece
+ * Steam's cache and the store CDN both lack is absent.
+ */
+export interface GameArt {
+  ok: boolean;
+  error?: string;
+  grid?: string;
+  grid_type?: string;
+  gridwide?: string;
+  gridwide_type?: string;
+  hero?: string;
+  hero_type?: string;
+  logo?: string;
+  logo_type?: string;
+  /** The icon's bytes (`jpg` from Steam's cache or CDN, `png` for the Punktfunk fallback). */
+  icon?: string;
+  icon_type?: string;
+  /** A ready file for SetShortcutIcon — only set for the PNG fallback. */
+  icon_path?: string;
+}
+export const gameArt = callable<[appid: number, iconHash: string], GameArt>("game_art");
+/** Write a converted PNG icon for a shortcut; returns the path SetShortcutIcon wants. */
+export const saveIcon = callable<
+  [appid: number, pngBase64: string],
+  { ok: boolean; path?: string; error?: string }
+>("save_icon");
 // Install the Steam Input layout (native touchscreen `ts_n` + gamepad passthrough) and point our
 // shortcut(s) at it, so the Deck touchscreen reaches the client as native touch with no manual
 // controller setup. Best-effort + idempotent; keyed by the shared shortcut NAME (both shortcuts
