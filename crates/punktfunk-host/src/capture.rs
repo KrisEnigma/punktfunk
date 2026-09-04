@@ -260,7 +260,7 @@ pub fn capture_virtual_output(
 }
 
 /// Open the in-driver encoder for an IDD-push session: the plan as the driver numbers it, the
-/// resolved Windows backend as a one-entry preference list, the two IOCTL senders over the
+/// resolved Windows backend ahead of any fallback rung, the two IOCTL senders over the
 /// manager's control handle, and the `pf_gpu` session record. The heap is sized from the
 /// opening rate; ABR climbs past twice it eat the burst margin.
 #[cfg(target_os = "windows")]
@@ -309,17 +309,23 @@ pub fn open_driver_encoder(
                 )
             }
         });
-    let (backend, label) = match plan.codec {
-        Codec::PyroWave => (4, "driver-pyrowave"),
+    let backend = match plan.codec {
+        Codec::PyroWave => 4,
         _ => match crate::encode::windows_resolved_backend() {
-            WindowsBackend::Nvenc => (1, "driver-nvenc"),
-            WindowsBackend::Amf => (2, "driver-amf"),
-            WindowsBackend::Qsv => (3, "driver-qsv"),
+            WindowsBackend::Nvenc => 1,
+            WindowsBackend::Amf => 2,
+            WindowsBackend::Qsv => 3,
+            WindowsBackend::MediaFoundation => 5,
             WindowsBackend::Software => anyhow::bail!(
                 "driver encode: the resolved backend is software, which the driver cannot run"
             ),
         },
     };
+    // Media Foundation is the second rung for an H.26x session a missing `amfrt64.dll` or a
+    // declined native open would otherwise end, but only inside its 8-bit 4:2:0 ceiling: the
+    // plan is already negotiated here, so a wider one would open and then refuse every frame.
+    let mf_fits = !plan.hdr && !plan.chroma.is_444() && bit_depth <= 8;
+    let fallback = u32::from(!matches!(backend, 4 | 5) && mf_fits) * 5;
     let params = pf_capture::DriverEncodeParams {
         codec: match plan.codec {
             Codec::H264 => 1,
@@ -336,10 +342,20 @@ pub fn open_driver_encoder(
         hdr: plan.hdr,
         hdr_meta: capturer.hdr_meta(),
         wire_chunk_bytes: plan.wire_chunk.unwrap_or(0) as u32,
-        backends: [backend, 0, 0, 0],
+        backends: [backend, fallback, 0, 0],
         wire_seq_base,
     };
     let enc = pf_capture::open_driver_encoder(endpoint, &params, set_encode, encode_ctl)?;
+    // The driver walks the preference list, so the record names what actually opened —
+    // reading back the request's first choice would hide every fallback.
+    let label = match enc.telemetry().map(|t| t.backend) {
+        Some("nvenc") => "driver-nvenc",
+        Some("amf") => "driver-amf",
+        Some("qsv") => "driver-qsv",
+        Some("pyrowave") => "driver-pyrowave",
+        Some("mf") => "driver-mf",
+        _ => "driver",
+    };
     Ok(crate::encode::track_session(enc, label))
 }
 

@@ -1185,7 +1185,8 @@ pub fn can_encode_444(codec: Codec) -> bool {
                         false
                     }
                 }
-                WindowsBackend::Software => false,
+                // No MFT encodes 4:4:4 on any vendor.
+                WindowsBackend::MediaFoundation | WindowsBackend::Software => false,
             }
         }
     };
@@ -1292,7 +1293,8 @@ pub fn can_encode_10bit(codec: Codec) -> bool {
                         false
                     }
                 }
-                WindowsBackend::Software => false,
+                // 8-bit 4:2:0 only — the MF backend rejects P010 at open.
+                WindowsBackend::MediaFoundation | WindowsBackend::Software => false,
             }
         }
     };
@@ -1316,6 +1318,9 @@ pub enum WindowsBackend {
     Nvenc,
     Amf,
     Qsv,
+    /// Media Foundation: any vendor's hardware MFT. Second rung under the native SDKs on
+    /// x64, and the only hardware encoder on an Adreno adapter.
+    MediaFoundation,
     Software,
 }
 
@@ -1334,7 +1339,9 @@ pub fn windows_backend_vendor_id(backend: WindowsBackend) -> Option<u32> {
         WindowsBackend::Nvenc => Some(pf_gpu::VENDOR_NVIDIA),
         WindowsBackend::Amf => Some(pf_gpu::VENDOR_AMD),
         WindowsBackend::Qsv => Some(pf_gpu::VENDOR_INTEL),
-        WindowsBackend::Software => None,
+        // Vendor-agnostic: every x64 vendor and Adreno ship an MFT, so an `mf` pin is
+        // never contradicted by the selected adapter.
+        WindowsBackend::MediaFoundation | WindowsBackend::Software => None,
     }
 }
 
@@ -1366,9 +1373,29 @@ fn windows_pinned_backend() -> Option<WindowsBackend> {
         "nvenc" | "hw" | "nvidia" | "cuda" => Some(WindowsBackend::Nvenc),
         "amf" | "amd" => Some(WindowsBackend::Amf),
         "qsv" | "intel" => Some(WindowsBackend::Qsv),
+        "mf" | "mediafoundation" => Some(WindowsBackend::MediaFoundation),
         "sw" | "software" | "openh264" => Some(WindowsBackend::Software),
         _ => None,
     }
+}
+
+/// Has the selected adapter a hardware MFT? Cached per selected GPU, like
+/// [`can_encode_444`]: [`windows_resolved_backend`] is uncached and runs on every
+/// `/serverinfo` poll, where an `MFTEnum2` walk plus an adapter resolve would block the
+/// async executor and log on each one.
+#[cfg(target_os = "windows")]
+fn mf_has_hardware_encoder() -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let key = pf_gpu::selection_key();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return *v;
+    }
+    let has = mf::probe_has_hardware_encoder(pf_gpu::resolve_render_adapter_luid());
+    cache.lock().unwrap().insert(key, has);
+    has
 }
 
 /// Active Windows backend. `auto` → selected adapter's vendor; a contradicting
@@ -1386,6 +1413,10 @@ pub fn windows_resolved_backend() -> WindowsBackend {
         Some(GpuVendor::Nvidia) => WindowsBackend::Nvenc,
         Some(GpuVendor::Amd) => WindowsBackend::Amf,
         Some(GpuVendor::Intel) => WindowsBackend::Qsv,
+        // No vendor with a native SDK. An adapter that still has a hardware MFT (Adreno)
+        // is a GPU backend, and must resolve to one: `Software` here would also flip the
+        // capturer to CPU staging, so the D3D11 input MF needs would never materialise.
+        None if mf_has_hardware_encoder() => WindowsBackend::MediaFoundation,
         None => WindowsBackend::Software,
     })
 }
@@ -1430,6 +1461,8 @@ pub fn windows_backend_is_probed() -> bool {
         WindowsBackend::Amf => true,
         WindowsBackend::Qsv => cfg!(feature = "qsv") || cfg!(feature = "amf-qsv"),
         WindowsBackend::Nvenc => cfg!(feature = "nvenc"),
+        // MFT enumeration is the probe, and it needs no feature.
+        WindowsBackend::MediaFoundation => true,
         WindowsBackend::Software => false,
     }
 }
@@ -1489,6 +1522,9 @@ pub fn windows_codec_support() -> CodecSupport {
                 {
                     false
                 }
+            }
+            WindowsBackend::MediaFoundation => {
+                mf::probe_can_encode(codec, pf_gpu::resolve_render_adapter_luid())
             }
             // NVENC answers from one GUID-list session below. Software is never
             // probed. Defensive `false` → static-superset fallback.
@@ -1638,6 +1674,28 @@ mod tests {
             resolve_windows_backend(None, None, derived(Software)),
             Software
         );
+        // MF has no vendor, so no adapter can contradict the pin — that is the whole
+        // point of the rung: it opens on NVIDIA, AMD, Intel, and Adreno alike.
+        for vendor in [
+            pf_gpu::VENDOR_NVIDIA,
+            pf_gpu::VENDOR_AMD,
+            pf_gpu::VENDOR_INTEL,
+            pf_gpu::VENDOR_QUALCOMM,
+        ] {
+            assert_eq!(
+                resolve_windows_backend(Some(MediaFoundation), Some(vendor), unreachable),
+                MediaFoundation
+            );
+        }
+        assert_eq!(
+            resolve_windows_backend(
+                None,
+                Some(pf_gpu::VENDOR_QUALCOMM),
+                derived(MediaFoundation)
+            ),
+            MediaFoundation
+        );
+        assert_eq!(windows_backend_vendor_id(MediaFoundation), None);
     }
 
     #[test]

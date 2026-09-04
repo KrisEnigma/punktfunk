@@ -52,6 +52,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   set now advertises `CODEC_PYROWAVE` and decodes it as GPU compute into its own swapchain,
   beside the MediaCodec path rather than through it. Nothing to do: the codec stays opt-in per
   session, and a device without that feature set never offers the row.
+- **A Media Foundation encoder backend on Windows.** Every x64 vendor ships an H.264/HEVC MFT,
+  so the driver now falls back to it when the native SDK open fails instead of ending the
+  session; `PUNKTFUNK_ENCODER=mf` pins it. It encodes 8-bit 4:2:0 only, so an HDR or 4:4:4
+  session keeps whichever native backend it resolved to.
 - **Capture health on the Status page and in `GET /api/v1/status`.** A native Windows session's
   `session.capture` block carries the live capture-health class (`healthy`, `idle`, `suspect`,
   `stalled` with its class, `recovering`, `rebuilding`, `secure_desktop`), the evidence behind

@@ -65,6 +65,10 @@ on:
       # The encode subsystem (split out in W6) + the vendored VPL dispatcher the `qsv` feature
       # builds — without these, encoder changes only reached this workflow via Cargo.lock luck.
       - 'crates/pf-encode/**'
+      # The Windows backends themselves (NVENC/AMF/QSV/PyroWave/MF + the `Encoder` trait),
+      # split out of pf-encode so the driver can host them. Missing here, a new or changed
+      # backend reached main with no Windows build — the same Cargo.lock-luck gap as below.
+      - 'crates/pf-encode-win/**'
       - 'crates/libvpl-sys/**'
       # …and the rest of the W6 subsystem crates this build compiles. pf-encode was listed while
       # the crates it speaks (pf-frame's CapturedFrame/PixelFormat/dxgi vocabulary, pf-gpu's
