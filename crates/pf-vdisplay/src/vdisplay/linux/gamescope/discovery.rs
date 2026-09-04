@@ -54,7 +54,11 @@ pub(crate) fn steam_appid_from_launch(cmd: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// [`SteamGameWatch::Exited`] only after the reaper was seen running; a cold Steam boot is [`Cancelled`].
+/// [`SteamGameWatch::Exited`] only after the game was seen on screen; a cold Steam boot is
+/// [`Cancelled`]. Both edges come from gamescope's own root atoms, never from process shape:
+/// Steam wraps its pre-launch work (shader precompile, the install-script evaluator) in the same
+/// `reaper SteamLaunch AppId=` the game gets, so a `/proc` match adopts a tree that was never the
+/// game and reads its exit as the game exiting.
 pub(crate) fn wait_for_steam_game_exit(
     appid: u32,
     cancel: &std::sync::atomic::AtomicBool,
@@ -68,18 +72,23 @@ pub(crate) fn wait_for_steam_game_exit(
     const EXIT_CONFIRM: Duration = Duration::from_secs(3);
 
     let start_deadline = Instant::now() + START_GRACE;
-    while !steam_game_running(appid) {
+    // Coming up is `GAMESCOPE_FOCUSED_APP`: the game is actually presenting, and unlike the
+    // baselayer list it carries no stale ids from earlier sessions.
+    while steam_focused_app() != Some(appid) {
         if cancel.load(Ordering::Relaxed) || Instant::now() >= start_deadline {
             return SteamGameWatch::Cancelled;
         }
         std::thread::sleep(POLL);
     }
+    tracing::info!(appid, "gamescope: the launched game is on screen");
     let mut gone_since: Option<Instant> = None;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return SteamGameWatch::Cancelled;
         }
-        if steam_game_running(appid) {
+        // Going away is baselayer membership, not focus: opening the Steam overlay moves focus
+        // to the client UI while the game is still running, and that must not read as an exit.
+        if steam_baselayer_has(appid) {
             gone_since = None;
         } else if gone_since.get_or_insert_with(Instant::now).elapsed() >= EXIT_CONFIRM {
             return SteamGameWatch::Exited;
@@ -88,44 +97,57 @@ pub(crate) fn wait_for_steam_game_exit(
     }
 }
 
-/// Exact `AppId=<appid>` so 57 never hits 570; shader precompile is not reaper-wrapped.
-fn steam_game_running(appid: u32) -> bool {
-    let uid = crate::proc::current_uid();
-    let appid_tok = format!("AppId={appid}");
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
-    };
-    for e in entries.flatten() {
-        let name = e.file_name();
-        let Some(pid_str) = name.to_str() else {
-            continue;
-        };
-        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        let Ok(md) = std::fs::metadata(e.path()) else {
-            continue;
-        };
-        use std::os::unix::fs::MetadataExt;
-        if md.uid() != uid {
-            continue;
-        }
-        let Ok(cmdline) = std::fs::read(e.path().join("cmdline")) else {
-            continue;
-        };
-        let (mut launch, mut appid_match) = (false, false);
-        for arg in cmdline.split(|&b| b == 0) {
-            if arg == b"SteamLaunch" {
-                launch = true;
-            } else if arg == appid_tok.as_bytes() {
-                appid_match = true;
-            }
-        }
-        if launch && appid_match {
-            return true;
-        }
+/// Connect to the session's gamescope Xwayland. `None` when it exposes none (no `--steam`, or
+/// the session is gone), which every caller reads as "nothing to say about the game".
+fn steam_root_atoms() -> Option<(x11rb::rust_connection::RustConnection, u32)> {
+    use x11rb::connection::Connection;
+    use x11rb::rust_connection::{DefaultStream, RustConnection};
+    // Never `setenv` XAUTHORITY to reach it: glibc rewrites process-global `environ` and
+    // `getenv` takes no lock. Gamescope's Xwayland is same-uid and takes an empty token, the
+    // same connect `pf-capture`'s cursor source falls back to.
+    let (display, _xauth) = xwayland_cursor_targets().into_iter().next()?;
+    let parsed =
+        x11rb::reexports::x11rb_protocol::parse_display::parse_display(Some(&display)).ok()?;
+    let screen = usize::from(parsed.screen);
+    let stream = parsed
+        .connect_instruction()
+        .into_iter()
+        .find_map(|addr| DefaultStream::connect(&addr).ok())
+        .map(|(s, _peer)| s)?;
+    let conn =
+        RustConnection::connect_to_stream_with_auth_info(stream, screen, Vec::new(), Vec::new())
+            .ok()?;
+    let root = conn.setup().roots.get(screen)?.root;
+    Some((conn, root))
+}
+
+/// One `CARDINAL` list from gamescope's root window.
+fn root_cardinals(name: &[u8]) -> Option<Vec<u32>> {
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+    let (conn, root) = steam_root_atoms()?;
+    let atom = conn.intern_atom(true, name).ok()?.reply().ok()?.atom;
+    if atom == 0 {
+        return None; // never interned: this gamescope is not in --steam mode
     }
-    false
+    let prop = conn
+        .get_property(false, root, atom, AtomEnum::CARDINAL, 0, 16)
+        .ok()?
+        .reply()
+        .ok()?;
+    prop.value32().map(|v| v.collect())
+}
+
+/// The appid gamescope is presenting, or `None` when it says nothing.
+fn steam_focused_app() -> Option<u32> {
+    root_cardinals(b"GAMESCOPE_FOCUSED_APP")?.first().copied()
+}
+
+/// Is `appid` in `GAMESCOPECTRL_BASELAYER_APPID`? Steam adds it as the launch starts and removes
+/// it when the game process goes (measured on .21: added at +9 s, removed within 1 s of exit).
+/// The list can carry a stale id from an earlier session, so this only decides *going away* for
+/// an appid already seen focused.
+fn steam_baselayer_has(appid: u32) -> bool {
+    root_cardinals(b"GAMESCOPECTRL_BASELAYER_APPID").is_some_and(|v| v.contains(&appid))
 }
 
 /// Managed/SteamOS is single-session and logs to journald, so this is unscoped.

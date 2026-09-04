@@ -1553,6 +1553,59 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         }
     }
 
+    // A dedicated Steam session ends on gamescope's own root atoms, never on process shape:
+    // Steam wraps its pre-launch work (shader precompile, the install-script evaluator) in the
+    // same `SteamLaunch AppId=` reaper the game gets, so a scan adopts a tree that was never the
+    // game and reads its exit as the game exiting, seconds before the game starts.
+    #[cfg(target_os = "linux")]
+    let steam_exit_appid: Option<u32> = launch
+        .as_deref()
+        .filter(|_| crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref()))
+        .and_then(crate::vdisplay::steam_appid_from_launch);
+    #[cfg(not(target_os = "linux"))]
+    let steam_exit_appid: Option<u32> = None;
+
+    let end_on_game_exit = {
+        let conn = conn.clone();
+        let stop = stop.clone();
+        let quit = quit.clone();
+        move || {
+            if !crate::session_settings::get().session_on_game_exit {
+                tracing::info!(
+                    "the launched game exited, but ending the session on game exit is off — \
+                     leaving the stream up"
+                );
+                return;
+            }
+            tracing::info!("the launched game exited — ending the session cleanly (APP_EXITED)");
+            conn.close(
+                punktfunk_core::quic::APP_EXITED_CLOSE_CODE.into(),
+                b"game exited",
+            );
+            quit.store(true, Ordering::SeqCst);
+            stop.store(true, Ordering::SeqCst);
+        }
+    };
+
+    // The atom watcher owns the end for a dedicated Steam session; `gamelease` keeps running, so
+    // the console still shows what is playing, but it no longer closes the connection.
+    #[cfg(target_os = "linux")]
+    let steam_exit_watch = steam_exit_appid.map(|appid| {
+        let stop = stop.clone();
+        let end = end_on_game_exit.clone();
+        std::thread::Builder::new()
+            .name("pf1-steamexit".into())
+            .spawn(move || {
+                if crate::vdisplay::watch_steam_game_exit(appid, &stop) {
+                    end();
+                }
+            })
+    });
+    #[cfg(target_os = "linux")]
+    if let Some(Err(e)) = steam_exit_watch.as_ref().map(|r| r.as_ref()) {
+        tracing::warn!(error = %e, "could not start the dedicated Steam exit watcher");
+    }
+
     let game_lease = launch_target.as_ref().map(|target| {
         #[cfg(target_os = "linux")]
         let nested = crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref());
@@ -1563,28 +1616,15 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         #[cfg(not(target_os = "linux"))]
         let child = None;
 
-        let on_exit: crate::gamelease::OnExit = {
-            let conn = conn.clone();
-            let stop = stop.clone();
-            let quit = quit.clone();
-            Box::new(move || {
-                if !crate::session_settings::get().session_on_game_exit {
-                    tracing::info!(
-                        "the launched game exited, but ending the session on game exit is off — \
-                         leaving the stream up"
-                    );
-                    return;
-                }
+        let on_exit: crate::gamelease::OnExit = if steam_exit_appid.is_some() {
+            Box::new(|| {
                 tracing::info!(
-                    "the launched game exited — ending the session cleanly (APP_EXITED)"
+                    "game lease: the launched game exited (status only — this dedicated Steam \
+                     session ends on gamescope's atoms)"
                 );
-                conn.close(
-                    punktfunk_core::quic::APP_EXITED_CLOSE_CODE.into(),
-                    b"game exited",
-                );
-                quit.store(true, Ordering::SeqCst);
-                stop.store(true, Ordering::SeqCst);
             })
+        } else {
+            Box::new(end_on_game_exit)
         };
         crate::gamelease::open(
             crate::gamelease::LeaseRequest {
@@ -1732,16 +1772,10 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     // send rate ⇒ the capture source isn't producing frames (e.g. an IDD virtual display DWM isn't
     // compositing), NOT an encoder problem. Logged every 2 s when `PUNKTFUNK_PERF`.
     let (mut diag_new, mut diag_repeat, mut diag_regen) = (0u64, 0u64, 0u64);
-    // Seat-pointer park schedule (see `park_pointer`): per (re)built display, and re-armed by
-    // the capture-model flip. More than one attempt for a RELATIVE-ONLY session, because the
-    // first park can land on a still-cold EIS connection (devices not yet resumed → the injector
-    // DROPS it) — observed on-glass; the retry a second later goes through. A client that steers
-    // the pointer itself gets the bring-up park only: its own absolute moves are the retry, and
-    // a synthetic one on top of them is just a yank to centre. While the session is in the
-    // capture model with no live cursor overlay, keep trying up to the cap: no overlay there
-    // means the pointer still isn't on the streamed output, and a relative-only client can
-    // never fix that itself — but only where an absent overlay is evidence of anything at all
-    // (`no_overlay_means_off_output`, settled per display by `settle_portal_cursor`).
+    // Seat-pointer park schedule (see `park_pointer`): per (re)built display, re-armed by the
+    // capture-model flip. A relative-only session retries: the first park can hit a cold EIS
+    // whose devices have not resumed, and the client cannot move the pointer onto the streamed
+    // output itself. One park for a client that steers absolutely — more is a yank to centre.
     #[cfg(target_os = "linux")]
     let mut parked_display = None;
     #[cfg(target_os = "linux")]
