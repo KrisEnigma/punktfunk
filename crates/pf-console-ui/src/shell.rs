@@ -616,14 +616,14 @@ impl Shell {
         self.in_stream = false;
     }
 
-    /// The hold for a launched title, or `None` when there is nothing to
-    /// wait for: a launcher tile (the host never tracks those), a title the
-    /// shelf no longer lists, or a host that does not composite this console
-    /// over its stream (Android swaps to its own stream screen at handshake).
+    /// The hold for a launched title, or `None` when there is nothing to wait for: a launcher
+    /// tile (the host never tracks those), or a title the shelf no longer lists.
+    ///
+    /// Every platform, not just the desktop. The console is the launch screen wherever it is
+    /// the launcher — a host that has a stream view of its own waits for
+    /// [`OverlayAction::ShowStream`] before switching to it, rather than drawing a second
+    /// launch screen of its own on top of this one.
     fn launch_hold(&self, host: LaunchHost, from: Rect) -> Option<Launching> {
-        if self.platform != Platform::Desktop {
-            return None;
-        }
         let snap = self.library.snapshot();
         let g = snap.games.iter().find(|g| g.id == host.id)?;
         if g.launcher {
@@ -663,6 +663,10 @@ impl Shell {
     fn reveal_stream(&mut self) {
         self.launching = None;
         self.in_stream = true;
+        // Hosts that swap to a stream view of their own have been holding the session since
+        // the dial landed; this is what releases it. A host that composites this console over
+        // its stream ignores it.
+        self.actions.push_back(OverlayAction::ShowStream);
     }
 
     /// One frame of the launch hold: reveal when the host has answered, or

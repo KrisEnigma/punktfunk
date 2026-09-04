@@ -23,6 +23,14 @@ pub enum OverlayAction {
     },
     /// Browse continues. A dial that already won is quit-closed.
     CancelConnect,
+    /// The launch hold is done — the game is up, or the player asked to see.
+    ///
+    /// For a host that draws this console OVER its stream (the Vulkan session) the reveal is
+    /// internal and this says nothing new. It exists for a host that must SWAP to a stream
+    /// view of its own: Android leaves the console for its stream screen, and doing that at
+    /// the handshake is what put a second launch screen in front of the first. The session is
+    /// held from the dial landing until this arrives.
+    ShowStream,
     Quit,
     /// SDL owns the clipboard and lives on the run-loop thread, so this
     /// cannot ride the console command bus.

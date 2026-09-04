@@ -305,6 +305,9 @@ pub fn run(target: Option<&str>) -> u8 {
                 // to the enum keeps failing loudly here instead of falling into a
                 // wildcard that silently drops it.
                 OverlayAction::CopyText(_) => ActionOutcome::Handled,
+                // This console is drawn OVER the session's stream, so the hold coming down is
+                // the shell's own business and the picture is already behind it.
+                OverlayAction::ShowStream => ActionOutcome::Handled,
                 OverlayAction::Quit => ActionOutcome::Quit,
             }
         });
