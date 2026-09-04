@@ -26,7 +26,6 @@ import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.discovery.HostDiscovery
-import io.unom.punktfunk.kit.library.DEFAULT_MGMT_PORT
 import io.unom.punktfunk.kit.library.LibraryCache
 import io.unom.punktfunk.kit.library.LibraryClient
 import io.unom.punktfunk.kit.library.LibraryResult
@@ -36,7 +35,6 @@ import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.KnownHostStore
 import io.unom.punktfunk.kit.security.obtainIdentity
 import io.unom.punktfunk.models.ActiveSession
-import io.unom.punktfunk.models.LaunchHold
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -579,11 +577,6 @@ object SkiaConsole {
             val timeout = if (requestAccess) REQUEST_ACCESS_TIMEOUT_MS else CONNECT_TIMEOUT_MS
             val h = kotlinx.coroutines.runBlocking {
                 connectToHost(app, effective, id, addr, port, fp, launchId, timeout)
-            }
-            // The launched entry, for the stream screen's hold — the shelf cached it on fetch.
-            val launched = launchId?.let { lid ->
-                LibraryCache.standard(app.cacheDir).load(kh?.id ?: fp)?.games
-                    ?.firstOrNull { it.id == lid }?.takeUnless { it.isLauncher }
             }
             main.post {
                 if (d.cancelled.get()) {
