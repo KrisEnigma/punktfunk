@@ -31,6 +31,8 @@ use std::sync::Arc;
 pub(crate) use pf_frame::thread_qos::boost_thread_priority;
 
 mod compositor;
+// The session's control connection, whichever transport carries it (quinn or WebTransport).
+mod link;
 use compositor::resolve_compositor;
 
 /// GameStream presents the same virtual pad and must pick `windows_xbox_hid` from this definition.
