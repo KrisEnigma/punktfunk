@@ -1268,7 +1268,7 @@ mod tests {
 
     /// Spike S5 (`#[ignore]`): arm the driver's in-process encode probe on a fresh 1080p60
     /// monitor and read its tally. Needs a driver built with `--features encode-probe`.
-    /// `PF_PROBE_BACKEND` (nvenc|amf|qsv|pyrowave), `PF_PROBE_CODEC` (h264|hevc|av1|pyrowave),
+    /// `PF_PROBE_BACKEND` (nvenc|amf|qsv|pyrowave|mf), `PF_PROBE_CODEC` (h264|hevc|av1|pyrowave),
     /// `PF_PROBE_INPUT` (default|nv12), `PF_PROBE_FRAMES` (300) pick the run.
     /// `PF_PROBE_HDR=1` takes the 10-bit PQ input and `PF_PROBE_444=1` the full-chroma one. The
     /// run puts the virtual display into the colour mode its depth needs and prints what stuck —
@@ -1285,19 +1285,19 @@ mod tests {
         let frames: u32 = env("PF_PROBE_FRAMES", "300")
             .parse()
             .expect("PF_PROBE_FRAMES");
-        let id = |names: [&str; 4], v: &str, what: &str| -> u32 {
+        let id = |names: &[&str], v: &str, what: &str| -> u32 {
             let i = names.iter().position(|n| *n == v);
             i.unwrap_or_else(|| panic!("{what}={v:?} is not one of {names:?}")) as u32 + 1
         };
         let req = control::EncodeProbeRequest {
             target_id: 0,
             backend: id(
-                ["nvenc", "amf", "qsv", "pyrowave"],
+                &["nvenc", "amf", "qsv", "pyrowave", "mf"],
                 &backend,
                 "PF_PROBE_BACKEND",
             ),
             codec: id(
-                ["h264", "hevc", "av1", "pyrowave"],
+                &["h264", "hevc", "av1", "pyrowave"],
                 &codec,
                 "PF_PROBE_CODEC",
             ),

@@ -216,7 +216,7 @@ pub mod control {
     pub struct EncodeProbeRequest {
         /// OS target of the monitor to tap; `0` = whichever drain worker offers first.
         pub target_id: u32,
-        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave.
+        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave, 5 Media Foundation.
         pub backend: u32,
         /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave (backend 4 only, and only with backend 4).
         pub codec: u32,
