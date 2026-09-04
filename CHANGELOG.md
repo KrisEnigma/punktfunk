@@ -129,6 +129,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **`--host` / `--client` choose what to install.** `--client` installs `punktfunk-client` from
   the family repo, or a user-scope flatpak where the family has none, so a distro with no
   punktfunk repo can run the client.
+- **SteamOS installs from the guided installer.** It is a family now rather than a refusal:
+  the install clones the source and runs `scripts/steamdeck/install.sh`, which owns groups,
+  linger and the service start, so the run hands over and stops there.
 - **`--demo <preset>` walks the whole flow against a canned machine.** It changes nothing —
   the plan is handed a runner that cannot spawn and a throwaway filesystem root.
 - **`PUNKTFUNK_INSTALL_OMARCHY_SETUP`** is the env twin for the Omarchy hand-off, which
