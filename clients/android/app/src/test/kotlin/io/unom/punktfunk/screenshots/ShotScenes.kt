@@ -531,9 +531,9 @@ internal fun StreamBannerScene(pad: Boolean) {
     ) {
         StreamStartBanner(
             text = if (pad) {
-                "Hold Select + Start + L1 + R1 to leave · Select + Y mic · Select + X stats"
+                "Select + A quick actions · Hold Select + Start + L1 + R1 to leave · Select + X stats"
             } else {
-                "Back leaves the stream · three-finger tap for stats"
+                "Back or a two-finger twist opens quick actions · three-finger tap for stats"
             },
             alpha = 1f,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),

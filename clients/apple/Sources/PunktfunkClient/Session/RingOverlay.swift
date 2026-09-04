@@ -470,14 +470,18 @@ struct RingOverlay: View {
         #endif
     }
 
-    /// The pad (design §2.6): Right steps the highlight clockwise, Left anticlockwise, Up jumps
-    /// to 12 o'clock, Down to 6, Y returns it to the centre; A fires the highlight (the centre
-    /// opens the sheet), B closes. In the sheet, Up/Down walk the rows, Left/Right adjust one.
+    /// The pad (design §2.6): the left stick AIMS — its sector is the highlight, so the ring
+    /// follows the thumb — while the D-pad steps, Right clockwise, Left anticlockwise, Up to 12
+    /// o'clock, Down to 6; Y returns the highlight to the centre, A fires it (the centre opens
+    /// the sheet), B closes. In the sheet, Up/Down walk the rows and Left/Right adjust one.
     private func handleNav(_ n: RingNav) {
         state.touch()
         if state.sheet {
             let rows = sheetRows()
             switch n {
+            // A sheet is a list, not a dial: the six sectors fold onto its four directions.
+            case .sector(let k):
+                if let k { handleNav(k == 0 ? .up : k == 3 ? .down : k < 3 ? .right : .left) }
             case .up: state.sheetCursor = max(state.sheetCursor - 1, 0); state.pressTick &+= 1
             case .down: state.sheetCursor = min(state.sheetCursor + 1, max(rows.count - 1, 0)); state.pressTick &+= 1
             case .left, .right:
@@ -499,6 +503,12 @@ struct RingOverlay: View {
         }
         let h = state.highlight ?? 6
         switch n {
+        // The weapon-wheel idiom: the thumb's sector is the slot, neutral is the centre.
+        case .sector(let k):
+            let next = k ?? 6
+            guard state.highlight != next else { return }
+            state.highlight = next
+            state.pressTick &+= 1
         case .right: state.highlight = h >= 6 ? 0 : (h + 1) % 6; state.pressTick &+= 1
         case .left: state.highlight = h >= 6 ? 5 : (h + 5) % 6; state.pressTick &+= 1
         case .up: state.highlight = 0; state.pressTick &+= 1
