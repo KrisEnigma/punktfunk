@@ -52,6 +52,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   hidden per-game shortcut with the game's name, art and icon. Anyone wrapping
   `bin/punktfunkrun.sh` gains `PF_GAME=steam:<appid>` (passed as `punktfunk launch --game`), and
   the backend gains `library(ref)`, `game_art(appid, icon_hash)` and `save_icon(appid, png)`.
+- **The Android client splits at a foldable's hinge.** A book foldable half-opened on a table
+  gives the picture the upright half and the on-screen controller the flat one, so a thumb never
+  sits on the game; a hinge that folds the screen left or right is left alone. Nothing to set:
+  the split is the posture plus the controller being shown, and flattening the device restores
+  the full picture.
 - **The Android client decodes PyroWave.** A Vulkan 1.3 device with the codec's compute feature
   set now advertises `CODEC_PYROWAVE` and decodes it as GPU compute into its own swapchain,
   beside the MediaCodec path rather than through it. Nothing to do: the codec stays opt-in per
