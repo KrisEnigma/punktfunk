@@ -257,9 +257,6 @@ mod pool {
         /// disabled. At most one entry per group holds it; teardown hands it to
         /// a sibling, and it runs only when the last member drops.
         pub(super) topology_restore: Option<Restore>,
-        /// Launch command at create. Reuse requires an exact match so game A
-        /// never serves game B. `None` = desktop / no nested command.
-        pub(super) launch: Option<String>,
         /// Isolation identity at create (`design/gamescope-multiuser.md`). Reuse
         /// requires an exact match (EIS path + Pulse sinks baked into env).
         /// `None` = not isolated.
@@ -280,6 +277,28 @@ mod pool {
     }
 
     pub(super) type Restore = Box<dyn FnOnce() + Send>;
+
+    /// Kept generations of `backend` sharing `isolation`: what a sole-instance acquire must
+    /// retire before it creates, so the backend never runs two. Active entries are never
+    /// selected — a live session keeps its own compositor and this acquire creates beside it.
+    pub(super) fn kept_to_retire(
+        entries: &[Entry],
+        backend: &str,
+        isolation: &Option<String>,
+    ) -> Vec<u64> {
+        entries
+            .iter()
+            .filter(|e| {
+                e.backend == backend
+                    && e.isolation == *isolation
+                    && matches!(
+                        e.life,
+                        lifecycle::State::Lingering { .. } | lifecycle::State::Pinned
+                    )
+            })
+            .map(|e| e.generation)
+            .collect()
+    }
 
     /// Display group: one per desktop compositor backend. Each gamescope spawn
     /// is its own group — never auto-rowed or restore-grouped with another.
@@ -516,7 +535,6 @@ mod pool {
                 backend,
                 identity_slot: None,
                 topology_restore: restore,
-                launch: None,
                 isolation: None,
                 epoch: 0,
                 generation,
@@ -624,6 +642,47 @@ mod pool {
             assert!(
                 pool[0].topology_restore.is_none(),
                 "restore must not cross into another backend's group"
+            );
+        }
+
+        /// S1: a kept spawn is retired so the acquire that follows never runs a second one.
+        /// Two live gamescopes lose the `gamescope-N` lock, and Steam then hands the URL to the
+        /// older instance and exits, killing the new spawn's primary child.
+        #[test]
+        fn a_sole_instance_acquire_retires_every_kept_sibling() {
+            let mut pinned = test_entry("gamescope", 1, None);
+            pinned.life = lifecycle::State::Pinned;
+            let mut lingering = test_entry("gamescope", 2, None);
+            lingering.life = lifecycle::State::Lingering {
+                until: Instant::now() + std::time::Duration::from_secs(60),
+            };
+            let pool = vec![pinned, lingering, test_entry("kwin", 3, None)];
+            assert_eq!(kept_to_retire(&pool, "gamescope", &None), vec![1, 2]);
+        }
+
+        /// An Active gamescope belongs to a live session — never retired under it.
+        #[test]
+        fn a_sole_instance_acquire_never_retires_a_live_session() {
+            let mut active = test_entry("gamescope", 1, None);
+            active.life.acquire();
+            let pool = vec![active];
+            assert!(kept_to_retire(&pool, "gamescope", &None).is_empty());
+        }
+
+        /// Isolated multi-user spawns are deliberately concurrent: the singleton is per
+        /// isolation identity, not per host.
+        #[test]
+        fn a_sole_instance_acquire_leaves_another_isolation_alone() {
+            let mut theirs = test_entry("gamescope", 1, None);
+            theirs.life = lifecycle::State::Pinned;
+            theirs.isolation = Some("seat-b".into());
+            let mut mine = test_entry("gamescope", 2, None);
+            mine.life = lifecycle::State::Pinned;
+            mine.isolation = Some("seat-a".into());
+            let pool = vec![theirs, mine];
+            assert_eq!(
+                kept_to_retire(&pool, "gamescope", &Some("seat-a".into())),
+                vec![2]
             );
         }
 
@@ -828,7 +887,8 @@ mod linux {
 
     use super::pool::{
         assemble_displays, assign_group_ids, effective_linger, epoch_matches, group_key,
-        hand_off_restore, in_group, position_for_new, take_expired, Entry, Restore, Row,
+        hand_off_restore, in_group, kept_to_retire, position_for_new, take_expired, Entry, Restore,
+        Row,
     };
     use super::DisplayInfo;
     use crate::lifecycle::{self, Release};
@@ -966,8 +1026,9 @@ mod linux {
     ) -> Result<VirtualOutput> {
         ensure_timer();
         let backend = vd.name();
-        // Reuse keys: launch/isolation must match (game A never serves B); epoch is current.
-        let launch = vd.launch_command();
+        // Reuse keys: isolation must match; epoch is current. The launch command is deliberately
+        // NOT one — a kept spawn serves any title and the session launches into it. Keying on it
+        // spawned a second compositor per game, which broke the socket lock and Steam.
         let isolation = vd.isolation_key();
         let cur_epoch = crate::session_epoch();
         let r = reg();
@@ -998,7 +1059,6 @@ mod linux {
                             lifecycle::State::Lingering { .. } | lifecycle::State::Pinned
                         ) && e.backend == backend
                             && e.mode == mode
-                            && e.launch == launch
                             && e.isolation == isolation
                             && e.hw_cursor == vd.hw_cursor()
                             && e.hdr == vd.hdr()
@@ -1066,6 +1126,13 @@ mod linux {
             }
         }
 
+        // Nothing reusable, so this acquire creates. A sole-instance backend must not end up
+        // with two: retire the kept one first. `Entry`'s Drop kills and waits, so the socket name
+        // is free by the time `create` runs. Active entries are refused by `force_release`.
+        if vd.sole_instance() {
+            retire_incompatible(backend, &isolation);
+        }
+
         // Stamp generation before group questions: a gamescope spawn's group
         // IS its generation. A burned stamp on failed create is fine (opaque,
         // monotonic, never an index).
@@ -1121,7 +1188,6 @@ mod linux {
             backend,
             identity_slot,
             topology_restore,
-            launch: launch.clone(),
             isolation: isolation.clone(),
             epoch: cur_epoch,
             generation,
@@ -1306,6 +1372,23 @@ mod linux {
     /// [`force_release`] (kept only; Active refused; already-gone no-op); distinct log.
     pub(super) fn retire(generation: u64) {
         release_kept(Some(generation), "retired (superseded by a mode switch)");
+    }
+
+    /// Tear down every kept display of `backend` sharing `isolation`, so a sole-instance
+    /// backend never runs two. Active entries are left alone (`force_release` refuses them):
+    /// a live session keeps its own compositor, and this acquire creates alongside it.
+    pub(super) fn retire_incompatible(backend: &'static str, isolation: &Option<String>) {
+        let Some(r) = REG.get() else { return };
+        let doomed = {
+            let es = r.entries.lock().unwrap();
+            kept_to_retire(&es, backend, isolation)
+        };
+        for g in doomed {
+            release_kept(
+                Some(g),
+                "retired (a sole-instance backend must not run two)",
+            );
+        }
     }
 
     /// Tear down kept (lingering/pinned) entries — all, or one by generation —

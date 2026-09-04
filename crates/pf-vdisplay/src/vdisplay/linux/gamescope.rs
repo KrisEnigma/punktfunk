@@ -56,6 +56,9 @@ pub struct GamescopeDisplay {
     isolation: Option<crate::SessionIsolation>,
     /// Exclusive darken-hold release, picked up by [`VirtualDisplay::take_topology_restore`].
     pending_restore: Option<Box<dyn FnOnce() + Send>>,
+    /// This acquire spawned gamescope, so `cmd` is already its primary child. A keep-alive reuse
+    /// leaves it `false` and the session must launch into the live compositor instead.
+    spawned_nested_launch: bool,
 }
 
 /// Mode + HDR the managed session was launched at. HDR is in the reuse key: gamescope cannot
@@ -431,9 +434,14 @@ impl VirtualDisplay for GamescopeDisplay {
         matches!(self.route, None | Some(crate::GamescopeRoute::Spawn))
     }
 
-    fn launch_command(&self) -> Option<String> {
-        // Reuse key: a kept spawn running game A must never serve a session launching game B.
-        self.cmd.clone()
+    fn nested_launch_started(&self) -> bool {
+        self.spawned_nested_launch
+    }
+
+    fn sole_instance(&self) -> bool {
+        // Bare spawn only; managed/attach do not own the socket name. Same route test as
+        // `poolable_now` — a second spawn is what breaks the `gamescope-N` lock and Steam.
+        self.poolable_now()
     }
 
     fn kept_display_alive(&mut self, node_id: u32) -> bool {
@@ -551,6 +559,7 @@ impl VirtualDisplay for GamescopeDisplay {
             crate::panel_dpms::acquire_stream_darken();
             self.pending_restore = Some(Box::new(crate::panel_dpms::release_stream_darken));
         }
+        self.spawned_nested_launch = true;
         Ok(VirtualOutput::owned(
             node_id,
             Some((mode.width, mode.height, mode.refresh_hz)),

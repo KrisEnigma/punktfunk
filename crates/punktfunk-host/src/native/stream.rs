@@ -1520,7 +1520,13 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             );
             None
         }
-        Some(cmd) if crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref()) => {
+        // Nested only when this acquire actually spawned gamescope — then `cmd` is already its
+        // primary child. A keep-alive reuse spawned nothing, so it falls through and launches
+        // into the live session below; without that, a second launch showed an idle session.
+        Some(cmd)
+            if crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref())
+                && vd.nested_launch_started() =>
+        {
             tracing::info!(command = %cmd, "launch nested into the per-session gamescope");
             spawned_now = true;
             None

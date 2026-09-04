@@ -240,11 +240,18 @@ pub trait VirtualDisplay: Send {
     fn poolable_now(&self) -> bool {
         true
     }
-    /// Launch command on this instance ([`set_launch_command`](Self::set_launch_command)). Registry
-    /// reuse key `(backend, mode, launch)`: a kept game A must not serve a session that asked for
-    /// B. Default `None`; only gamescope reports it.
-    fn launch_command(&self) -> Option<String> {
-        None
+    /// Did this acquire start the nested launch command itself, as the compositor's primary
+    /// child? `false` after a keep-alive reuse — nothing was spawned, so the session must launch
+    /// into the live compositor or the game never starts. Only gamescope's bare spawn nests.
+    fn nested_launch_started(&self) -> bool {
+        false
+    }
+    /// At most one live display of this backend may share an isolation identity. Registry retires
+    /// an incompatible kept one rather than letting a second exist. Gamescope spawn: `true` — a
+    /// second compositor loses the `gamescope-N` lock, and Steam's single instance then hands the
+    /// URL to the older one and exits, killing the new spawn's primary child. Default `false`.
+    fn sole_instance(&self) -> bool {
+        false
     }
     /// Is this kept `node_id` still live? Registry checks before reuse; `false` tears it down and
     /// creates fresh. Default `true` — [`mark_failed`](crate::registry::mark_failed) is the backstop
