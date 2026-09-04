@@ -14,6 +14,7 @@ import {
   Spinner,
   showModal,
   staticClasses,
+  ToggleField,
 } from "@decky/ui";
 import { definePlugin, toaster } from "@decky/api";
 import { FC, useEffect, useState } from "react";
@@ -37,13 +38,26 @@ import {
   hasUpdate,
   HostView,
   needsPair,
+  refreshHosts,
   startStream,
   trustState,
   useHosts,
   useUpdate,
 } from "./hooks";
+import {
+  gamePageStreamEnabled,
+  installGamePageStream,
+  setGamePageStreamEnabled,
+} from "./library-page";
 import { OsMark } from "./os-icon";
-import { ensureGamepadUiShortcut, launchGamepadUi, recreateShortcuts, stopStream } from "./steam";
+import {
+  ensureGamepadUiShortcut,
+  launchGamepadUi,
+  recreateShortcuts,
+  removeGameShortcuts,
+  stopStream,
+  watchRunningStreams,
+} from "./steam";
 import { TrustSheet } from "./trust";
 
 // Recovery action for "the Punktfunk library entry vanished" — recreates the visible shortcut
@@ -63,6 +77,19 @@ async function recreatePunktfunkShortcut(): Promise<void> {
               removedDuplicates === 1 ? "entry" : "entries"
             }`
           : "Shortcut restored to your library",
+  });
+}
+
+/** Delete the hidden per-game entries that game-page streams minted. Each comes back, with its
+ *  art, on the next Stream tap for that game — so this is tidying, never a loss. */
+function removeGamePageShortcuts(): void {
+  const removed = removeGameShortcuts();
+  toaster.toast({
+    title: "Punktfunk",
+    body:
+      removed === 0
+        ? "No game shortcuts to remove"
+        : `Removed ${removed} game ${removed === 1 ? "shortcut" : "shortcuts"}`,
   });
 }
 
@@ -166,6 +193,7 @@ const QamPanel: FC = () => {
       live = false;
     };
   }, []);
+  const [gamePageStream, setGamePageStream] = useState(gamePageStreamEnabled);
 
   return (
     <>
@@ -274,6 +302,17 @@ const QamPanel: FC = () => {
             Open Punktfunk
           </ButtonItem>
         </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Punktfunk in Steam's Play menu"
+            description="The ▾ beside a game's Play button lists your hosts that have it, next to Steam Link's; pick one and Play becomes Stream."
+            checked={gamePageStream}
+            onChange={(on) => {
+              setGamePageStreamEnabled(on);
+              setGamePageStream(on);
+            }}
+          />
+        </PanelSectionRow>
       </PanelSection>
 
       {streaming && (
@@ -335,6 +374,15 @@ const QamPanel: FC = () => {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
+            description="Streams started from a game's page run under a hidden entry named after that game. This removes them; each returns on its next Stream."
+            onClick={() => removeGamePageShortcuts()}
+          >
+            Remove game shortcuts
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
             description="Ends a stream that stopped responding."
             onClick={() => void forceStop()}
           >
@@ -352,7 +400,19 @@ export default definePlugin(() => {
   // home) exists and is repointed to the current plugin dir — also installs the native-touch
   // controller config. Fire-and-forget: cosmetic library upkeep must never block plugin load.
   void ensureGamepadUiShortcut();
+  // Warm the host list and each paired host's library now, so the first game page opened
+  // already knows which titles a host can stream — the QAM panel may never have been opened.
+  void refreshHosts();
+  // The Stream button on Steam's game pages (see library-page.tsx). Removed on dismount, or
+  // Steam keeps calling into a plugin that is gone.
+  const removeGamePageStream = installGamePageStream();
+  // Steam's app lifetime feed tells the game page when its stream is up (Stream ↔ Stop).
+  const unwatchRunning = watchRunningStreams();
   return {
+    onDismount() {
+      removeGamePageStream();
+      unwatchRunning();
+    },
     // `name` must stay in sync with plugin.json (the loader keys plugins by it) — and it is
     // USER-VISIBLE: Decky labels the entry in its plugin list with it, so it carries the brand
     // case. Decky finds an installed plugin by matching plugin.json "name" (never the folder

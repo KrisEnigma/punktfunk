@@ -12,7 +12,8 @@ import {
   updateClient,
   UpdateInfo,
 } from "./backend";
-import { LaunchOpts, launchStream } from "./steam";
+import { refreshLibraries } from "./catalog";
+import { LaunchOpts, launchGameStream, launchStream } from "./steam";
 
 export const DOCS_URL = "https://docs.punktfunk.unom.io/docs/steam-deck";
 
@@ -79,6 +80,12 @@ export interface HostView {
   moved: boolean;
   paired: boolean;
   online: boolean;
+  /**
+   * The record carries a MAC, so a launch can wake it: the CLI runs its wake-and-wait loop
+   * before dialling when the client's auto-wake setting is on. What lets an offline host still
+   * be listed for a title.
+   */
+  wakeable: boolean;
   saved: boolean;
   /** The advert's policy ("required"|"optional"); "" when the host isn't advertising. */
   pairPolicy: string;
@@ -161,6 +168,7 @@ export function mergeHosts(saved: SavedHost[], discovered: DiscoveredHost[]): Ho
       moved: !!advert && (advert.addr !== s.addr || advert.port !== s.port),
       paired: s.paired,
       online: !!advert || s.online === true,
+      wakeable: (s.mac ?? []).length > 0,
       saved: true,
       pairPolicy: advert?.pair ?? "",
       os: advert?.os || s.os || "",
@@ -184,6 +192,7 @@ export function mergeHosts(saved: SavedHost[], discovered: DiscoveredHost[]): Ho
       moved: false, // no record, so nothing to be stale
       paired: a.paired,
       online: true,
+      wakeable: false, // no record, so no MAC
       saved: false,
       pairPolicy: a.pair,
       os: a.os,
@@ -207,51 +216,113 @@ function sortRows(a: HostView, b: HostView): number {
 }
 
 // ----------------------------------------------------------------------------------------
-// Hosts — ONE call site for both lists. They were separate hooks when the plugin had two
-// views mounting them independently; the panel is the only view now, and merging them means
-// the "scanning" state covers the whole row set rather than half of it flickering in first.
+// Hosts — ONE store for both consumers. The QAM panel renders the rows; Steam's game page is
+// not a child of the panel and needs the same rows (plus each host's library) before the panel
+// has ever been opened, so the scan lives at module level and both subscribe.
 // ----------------------------------------------------------------------------------------
-export function useHosts() {
-  const [views, setViews] = useState<HostView[]>([]);
-  const [scanning, setScanning] = useState(false);
-  // Why the list is empty, when it is empty for a reason other than an empty LAN. Rendering
-  // any of these as "No hosts yet" would blame the user's network for the plugin's problem:
-  //   "client-outdated"    — the installed client predates `punktfunk discover`
-  //   "client-unavailable" — there is no client installed at all
-  //   "list-failed"        — the refresh itself blew up (backend down, call threw)
-  const [problem, setProblem] = useState<string | null>(null);
+export interface HostStore {
+  views: HostView[];
+  scanning: boolean;
+  /**
+   * Why the list is empty, when it is empty for a reason other than an empty LAN. Rendering
+   * any of these as "No hosts yet" would blame the user's network for the plugin's problem:
+   *   "client-outdated"    — the installed client predates `punktfunk discover`
+   *   "client-unavailable" — there is no client installed at all
+   *   "list-failed"        — the refresh itself blew up (backend down, call threw)
+   */
+  problem: string | null;
+  /** When the last scan landed (ms since epoch); 0 = never. */
+  scannedAt: number;
+}
 
-  const refresh = useCallback(async () => {
-    setScanning(true);
-    try {
-      // Both in flight at once: the browse is time-bounded and the probe is network-bound, so
-      // running them in sequence would cost the sum of two waits for no benefit.
-      const [d, s] = await Promise.all([discover(), listHosts()]);
-      // Both calls run the same binary, so they fail the same way; take whichever answered.
-      setProblem(
-        d.error === "client-unavailable" || s.error === "client-unavailable"
-          ? "client-unavailable"
-          : d.error === "client-outdated" || s.error === "client-outdated"
-            ? "client-outdated"
-            : null,
-      );
-      setViews(mergeHosts(s.hosts ?? [], d.hosts ?? []));
-    } catch (e) {
-      // Inline, not a toast: the panel remounts (and refreshes) on every QAM open, so while
-      // the backend is unhappy a toast here nagged on each open. The panel row also sits next
-      // to the Refresh button that retries it, which is where the eyes already are.
-      console.warn("punktfunk: host list refresh failed", e);
-      setProblem("list-failed");
-    } finally {
-      setScanning(false);
-    }
-  }, []);
+let hostStore: HostStore = { views: [], scanning: false, problem: null, scannedAt: 0 };
+const hostListeners = new Set<() => void>();
 
+function setHostStore(patch: Partial<HostStore>): void {
+  hostStore = { ...hostStore, ...patch };
+  for (const listener of hostListeners) {
+    listener();
+  }
+}
+
+export function getHostStore(): HostStore {
+  return hostStore;
+}
+
+export function subscribeHosts(listener: () => void): () => void {
+  hostListeners.add(listener);
+  return () => {
+    hostListeners.delete(listener);
+  };
+}
+
+async function doRefreshHosts(): Promise<void> {
+  setHostStore({ scanning: true });
+  try {
+    // Both in flight at once: the browse is time-bounded and the probe is network-bound, so
+    // running them in sequence would cost the sum of two waits for no benefit.
+    const [d, s] = await Promise.all([discover(), listHosts()]);
+    // Both calls run the same binary, so they fail the same way; take whichever answered.
+    const problem =
+      d.error === "client-unavailable" || s.error === "client-unavailable"
+        ? "client-unavailable"
+        : d.error === "client-outdated" || s.error === "client-outdated"
+          ? "client-outdated"
+          : null;
+    const views = mergeHosts(s.hosts ?? [], d.hosts ?? []);
+    setHostStore({ views, problem, scannedAt: Date.now() });
+    // The libraries ride the same refresh but never gate the rows: the panel draws the moment
+    // the scan lands, and the game page fills in as each host answers.
+    void refreshLibraries(views);
+  } catch (e) {
+    // Inline, not a toast: the panel remounts (and refreshes) on every QAM open, so while
+    // the backend is unhappy a toast here nagged on each open. The panel row also sits next
+    // to the Refresh button that retries it, which is where the eyes already are.
+    console.warn("punktfunk: host list refresh failed", e);
+    setHostStore({ problem: "list-failed" });
+  } finally {
+    setHostStore({ scanning: false });
+  }
+}
+
+// Single-flight: a QAM open racing a game-page mount shares one scan instead of running the
+// same two subprocesses twice.
+let scanInFlight: Promise<void> | null = null;
+
+/** Rescan now: mDNS browse + saved-host probe, then every paired host's library. */
+export function refreshHosts(): Promise<void> {
+  scanInFlight ??= doRefreshHosts().finally(() => {
+    scanInFlight = null;
+  });
+  return scanInFlight;
+}
+
+/** Rescan only when the last scan is older than `maxAgeMs`; a fresh one stands as is. */
+export function refreshHostsIfStale(maxAgeMs: number): Promise<void> {
+  if (Date.now() - hostStore.scannedAt < maxAgeMs) {
+    return Promise.resolve();
+  }
+  return refreshHosts();
+}
+
+/** The store as React state — re-renders on every scan. */
+export function useHostStore(): HostStore {
+  const [state, setState] = useState(hostStore);
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    const unsubscribe = subscribeHosts(() => setState(hostStore));
+    setState(hostStore); // a scan that landed between render and subscribe
+    return unsubscribe;
+  }, []);
+  return state;
+}
 
-  return { views, scanning, problem, refresh };
+/** The QAM panel's view: the rows, plus a scan on every mount (the panel remounts per open). */
+export function useHosts() {
+  const { views, scanning, problem } = useHostStore();
+  useEffect(() => {
+    void refreshHosts();
+  }, []);
+  return { views, scanning, problem, refresh: refreshHosts };
 }
 
 // ----------------------------------------------------------------------------------------
@@ -466,5 +537,24 @@ export async function startStream(
     Navigation.CloseSideMenus();
   } catch (e) {
     toaster.toast({ title: "Punktfunk", body: `Launch failed${label ? ` (${label})` : ""}: ${e}` });
+  }
+}
+
+/**
+ * Stream a Steam title from its own page. Same rules as `startStream`, under the per-game
+ * shortcut that wears the game's name and art (see steam.ts). `title` and `iconHash` are
+ * Steam's own overview fields for the game.
+ */
+export async function startGameStream(
+  v: HostView,
+  steamAppId: number,
+  title: string,
+  iconHash: string,
+): Promise<void> {
+  try {
+    await launchGameStream(v.ref, steamAppId, title, iconHash);
+    Navigation.CloseSideMenus();
+  } catch (e) {
+    toaster.toast({ title: "Punktfunk", body: `Launch failed (${title}): ${e}` });
   }
 }

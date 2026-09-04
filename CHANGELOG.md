@@ -42,6 +42,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **Decky: Punktfunk hosts in Steam's "Play from" menu.** The plugin patches
+  `/library/app/:appid`, lists hosts whose library carries `steam:<appid>` in the Play button's
+  ▾ menu, re-dresses Steam's Play button as Stream while one is chosen, and streams under a
+  hidden per-game shortcut with the game's name, art and icon. Anyone wrapping
+  `bin/punktfunkrun.sh` gains `PF_GAME=steam:<appid>` (passed as `punktfunk launch --game`), and
+  the backend gains `library(ref)`, `game_art(appid, icon_hash)` and `save_icon(appid, png)`.
 - **A Media Foundation encoder backend on Windows.** Every x64 vendor ships an H.264/HEVC MFT,
   so the driver now falls back to it when the native SDK open fails instead of ending the
   session; `PUNKTFUNK_ENCODER=mf` pins it. It encodes 8-bit 4:2:0 only, so an HDR or 4:4:4
