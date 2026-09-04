@@ -56,6 +56,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `host_cert_der` carry the host's long-lived identity signing that plane's throwaway certificate
   hash, so a browser that paired earlier can chain the two before it dials. Both are absent on a
   host still serving the legacy RSA identity.
+- **Browsers pair with a device key, and prove it once per session.** `PairRequest` gains an
+  optional trailing `device_key` (P-256 SPKI) whose SHA-256 becomes the SPAKE2 identity and the
+  stored fingerprint; two new control messages, `AuthChallenge` (0x14) and `AuthResponse` (0x15),
+  carry a host nonce and the client's signature over it bound to the transport certificate. A
+  client with a certificate sends neither and its bytes on the wire are unchanged.
+- **The browser plane honours `require_pairing`.** A browser sends that signature before its
+  `Hello`, and a host that requires pairing refuses one that does not. Run `serve --open` to keep
+  an unpaired browser streaming, as it already does for native clients.
 - **`Platform::Web` in `pf-console-ui`.** The browser takes the desktop's glyphs and ring but the
   no-live-chord settings wording, since a page binds none. An embedder switching on `Platform`
   gains an arm to handle.

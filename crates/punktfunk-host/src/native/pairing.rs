@@ -32,7 +32,7 @@ const PAIRING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 // Eight orthogonal inputs, not a struct waiting to happen: the two identities are the whole
 // point of the signature, and grouping them would hide the decision the caller has to make.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn pair_ceremony<W, R>(
+pub(crate) async fn pair_ceremony<W, R>(
     conn: &super::link::SessionLink,
     mut send: W,
     mut recv: R,

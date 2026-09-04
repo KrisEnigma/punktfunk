@@ -4,10 +4,15 @@
 //! The host shows a short PIN out-of-band; the user types it on the client.
 //! Trust is [`super::pake`] (SPAKE2), not a hash of the PIN: an active MITM learns
 //! only whether one guess was right — no transcript for offline search.
-//! Both certificate fingerprints are SPAKE2 identities, so the confirmation
-//! MACs agree only when both sides saw the same two certs. After mutual
-//! confirmation the host persists the client's fingerprint and the client
-//! pins the host's.
+//! Both fingerprints are SPAKE2 identities, so the confirmation MACs agree only
+//! when both sides saw the same two. After mutual confirmation the host persists
+//! the client's fingerprint and the client pins the host's.
+//!
+//! A client with a certificate uses its fingerprint and stops there — the transport re-proves
+//! it on every later connection. A browser has no client certificate, so it sends
+//! [`PairRequest::device_key`] instead and its fingerprint is the SHA-256 of that. Nothing on
+//! the transport re-proves it afterwards, which is what [`AuthChallenge`] is for: once per
+//! session, the client signs a host nonce bound to the channel.
 
 use super::*;
 use crate::error::{PunktfunkError, Result};
@@ -16,6 +21,26 @@ pub const MSG_PAIR_REQUEST: u8 = 0x10;
 pub const MSG_PAIR_CHALLENGE: u8 = 0x11;
 pub const MSG_PAIR_PROOF: u8 = 0x12;
 pub const MSG_PAIR_RESULT: u8 = 0x13;
+pub const MSG_AUTH_CHALLENGE: u8 = 0x14;
+pub const MSG_AUTH_RESPONSE: u8 = 0x15;
+
+/// Domain separation for [`AuthResponse::signature`]. A device key may sign other things; a
+/// signature over a session nonce must not be replayable as one over any of them.
+pub const AUTH_SIG_CONTEXT: &[u8] = b"punktfunk-device-auth-v1:";
+
+/// The exact bytes an [`AuthResponse`] signs. Both sides call this, so neither can hold a
+/// different opinion of what was signed.
+///
+/// `binding` names the channel — for the browser plane, the raw SHA-256 of the transport
+/// certificate both ends already agree on. Without it a signature captured on one connection
+/// replays on another; with it, it is worthless anywhere else.
+pub fn auth_signed_message(binding: &[u8; 32], nonce: &[u8; 32]) -> Vec<u8> {
+    let mut m = Vec::with_capacity(AUTH_SIG_CONTEXT.len() + 64);
+    m.extend_from_slice(AUTH_SIG_CONTEXT);
+    m.extend_from_slice(binding);
+    m.extend_from_slice(nonce);
+    m
+}
 
 /// `client → host`: begin pairing. `name` is the host-stored label (≤64 bytes UTF-8);
 /// `spake_a` is the client's SPAKE2 message (see [`super::pake::start`]).
@@ -23,6 +48,35 @@ pub const MSG_PAIR_RESULT: u8 = 0x13;
 pub struct PairRequest {
     pub name: String,
     pub spake_a: Vec<u8>,
+    /// SPKI DER of the client's device key, or empty when the client has a certificate instead.
+    /// The host's identity for the ceremony is then the SHA-256 of these bytes, which is also
+    /// what it stores — so this must be the key the client can later sign with, not a copy.
+    ///
+    /// Trailing and optional: a host that predates it rejects a message carrying one, and only
+    /// carriers without mTLS send it. Those carriers are newer than the field.
+    pub device_key: Vec<u8>,
+}
+
+/// `host → client`: prove you still hold the device key you paired with.
+///
+/// Only sent on a carrier with no client certificate. The nonce is fresh per connection, so a
+/// captured response does not open a second one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthChallenge {
+    pub nonce: [u8; 32],
+}
+
+/// `client → host`: the device key and its signature over [`auth_signed_message`].
+///
+/// The host recomputes SHA-256 of `device_key` and looks that up in its pairing store, so a
+/// valid signature by an unpaired key proves possession of nothing that matters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthResponse {
+    /// SPKI DER, the same bytes sent in [`PairRequest::device_key`].
+    pub device_key: Vec<u8>,
+    /// ECDSA P-256 / SHA-256, ASN.1 DER — what WebCrypto's `ECDSA` produces once converted
+    /// from its raw `r || s`.
+    pub signature: Vec<u8>,
 }
 
 /// `host → client`: host SPAKE2 message + key-confirmation MAC. The client
@@ -75,6 +129,10 @@ impl PairRequest {
         b.push(n as u8);
         b.extend_from_slice(name);
         put_bytes(&mut b, &self.spake_a);
+        // Omitted entirely when absent, so a certificate client's bytes are what they always were.
+        if !self.device_key.is_empty() {
+            put_bytes(&mut b, &self.device_key);
+        }
         b
     }
 
@@ -88,12 +146,64 @@ impl PairRequest {
         }
         let name = String::from_utf8_lossy(&b[6..6 + n]).into_owned();
         let (spake_a, end) = get_bytes(b, 6 + n)?;
+        let (device_key, end) = if end == b.len() {
+            (&b[..0], end)
+        } else {
+            get_bytes(b, end)?
+        };
         if end != b.len() {
             return Err(PunktfunkError::InvalidArg("trailing bytes"));
         }
         Ok(PairRequest {
             name,
             spake_a: spake_a.to_vec(),
+            device_key: device_key.to_vec(),
+        })
+    }
+}
+
+impl AuthChallenge {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(37);
+        b.extend_from_slice(CTL_MAGIC);
+        b.push(MSG_AUTH_CHALLENGE);
+        b.extend_from_slice(&self.nonce);
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Result<AuthChallenge> {
+        if b.len() != 37 || &b[0..4] != CTL_MAGIC || b[4] != MSG_AUTH_CHALLENGE {
+            return Err(PunktfunkError::InvalidArg("bad AuthChallenge"));
+        }
+        let mut nonce = [0u8; 32];
+        nonce.copy_from_slice(&b[5..37]);
+        Ok(AuthChallenge { nonce })
+    }
+}
+
+impl AuthResponse {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(9 + self.device_key.len() + self.signature.len());
+        b.extend_from_slice(CTL_MAGIC);
+        b.push(MSG_AUTH_RESPONSE);
+        put_bytes(&mut b, &self.device_key);
+        put_bytes(&mut b, &self.signature);
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Result<AuthResponse> {
+        if b.len() < 5 || &b[0..4] != CTL_MAGIC || b[4] != MSG_AUTH_RESPONSE {
+            return Err(PunktfunkError::InvalidArg("bad AuthResponse"));
+        }
+        let (device_key, end) = get_bytes(b, 5)?;
+        let device_key = device_key.to_vec();
+        let (signature, end) = get_bytes(b, end)?;
+        if end != b.len() {
+            return Err(PunktfunkError::InvalidArg("trailing bytes"));
+        }
+        Ok(AuthResponse {
+            device_key,
+            signature: signature.to_vec(),
         })
     }
 }
@@ -170,8 +280,14 @@ mod tests {
         let pr = PairRequest {
             name: "Enrico's Mac".into(),
             spake_a: vec![1, 2, 3, 4, 5],
+            device_key: Vec::new(),
         };
         assert_eq!(PairRequest::decode(&pr.encode()).unwrap(), pr);
+        let keyed = PairRequest {
+            device_key: vec![0x30, 0x59, 0x30, 0x13],
+            ..pr.clone()
+        };
+        assert_eq!(PairRequest::decode(&keyed.encode()).unwrap(), keyed);
         let pc = PairChallenge {
             spake_b: vec![9; 33],
             confirm: [7u8; 32],
@@ -197,6 +313,7 @@ mod tests {
         let pr = PairRequest {
             name: format!("{}\u{00fc}", "x".repeat(HELLO_NAME_MAX - 1)),
             spake_a: vec![1, 2, 3],
+            device_key: Vec::new(),
         };
         let dec = PairRequest::decode(&pr.encode()).unwrap();
         assert!(dec.name.len() <= HELLO_NAME_MAX && dec.name.starts_with('x'));
@@ -204,5 +321,56 @@ mod tests {
             !dec.name.contains('\u{FFFD}'),
             "name must never be split mid-char on the wire"
         );
+    }
+
+    /// A certificate client must put the same bytes on the wire it always did, or every host
+    /// older than the field rejects it.
+    #[test]
+    fn a_device_key_free_request_is_byte_identical_to_the_old_shape() {
+        let pr = PairRequest {
+            name: "old client".into(),
+            spake_a: vec![7; 33],
+            device_key: Vec::new(),
+        };
+        let bytes = pr.encode();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(CTL_MAGIC);
+        expected.push(MSG_PAIR_REQUEST);
+        expected.push(10);
+        expected.extend_from_slice(b"old client");
+        expected.extend_from_slice(&33u16.to_le_bytes());
+        expected.extend_from_slice(&[7; 33]);
+        assert_eq!(bytes, expected, "the field is absent, not empty-encoded");
+    }
+
+    #[test]
+    fn auth_messages_roundtrip() {
+        let c = AuthChallenge { nonce: [0x5a; 32] };
+        assert_eq!(AuthChallenge::decode(&c.encode()).unwrap(), c);
+        let r = AuthResponse {
+            device_key: vec![0x30, 0x59],
+            signature: vec![0x30, 0x45, 0x02],
+        };
+        assert_eq!(AuthResponse::decode(&r.encode()).unwrap(), r);
+        for m in [c.encode(), r.encode()] {
+            let mut bad = m.clone();
+            bad.push(0);
+            assert!(
+                AuthChallenge::decode(&bad).is_err() && AuthResponse::decode(&bad).is_err(),
+                "a trailing byte is a different message, not a longer one"
+            );
+        }
+    }
+
+    /// The signature has to name the connection it was made on, or one captured response opens
+    /// every later session.
+    #[test]
+    fn the_signed_message_binds_the_channel_and_the_nonce() {
+        let m = auth_signed_message(&[1u8; 32], &[2u8; 32]);
+        assert!(m.starts_with(AUTH_SIG_CONTEXT), "domain separated");
+        assert_ne!(m, auth_signed_message(&[9u8; 32], &[2u8; 32]));
+        assert_ne!(m, auth_signed_message(&[1u8; 32], &[9u8; 32]));
+        // Same length either way, so the two halves cannot be slid past each other.
+        assert_eq!(m.len(), AUTH_SIG_CONTEXT.len() + 64);
     }
 }

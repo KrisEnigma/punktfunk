@@ -96,6 +96,37 @@ fn attest(ident: &crate::identity::NativeIdentity, cert_hash: &str) -> Option<Ce
     })
 }
 
+/// Everything the plane needs to serve a browser.
+///
+/// A struct rather than six positional arguments through three call layers: half of them are
+/// `Vec<String>` or `bool`, and a transposed pair would compile.
+#[derive(Clone)]
+pub struct Plane {
+    pub bind: SocketAddr,
+    /// Subject alternative names for the minted certificate — the addresses a browser may dial.
+    pub sans: Vec<String>,
+    /// Empty means any. See [`origin_allowed`].
+    pub origins: Vec<String>,
+    /// The long-lived host identity, which signs each minted certificate's hash.
+    pub identity: crate::identity::NativeIdentity,
+    pub pairing: std::sync::Arc<crate::native_pairing::NativePairing>,
+    /// The native plane's flag, honoured identically here: off, a browser streams without
+    /// proving anything, which is what `serve --open` asks for.
+    pub require_pairing: bool,
+}
+
+/// A plane bound to one certificate. Sessions need the hash of the certificate *this* endpoint
+/// presents, and a rotation replaces the endpoint — so it is captured here rather than read back
+/// from [`published`], which would race the swap.
+struct Serving {
+    plane: Plane,
+    /// Raw SHA-256 of the leaf DER. The SPAKE2 host identity and the channel binding both.
+    cert_hash: [u8; 32],
+    /// Last pairing attempt on this plane, for the same rate limit the native one applies.
+    /// SPAKE2 caps a ceremony at one online guess; this caps the ceremonies.
+    last_pairing: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
 static PUBLISHED: RwLock<Option<Published>> = RwLock::new(None);
 
 /// The live certificate's details, or `None` when the plane is not running.
@@ -165,17 +196,16 @@ fn mint(
 /// A rotation rebuilds the endpoint, which drops whatever is connected. Once every twelve days,
 /// and a browser reconnects on its own — cheaper than teaching quinn to swap a certificate under
 /// live sessions, and the reconnect path has to work anyway.
-pub async fn serve(
-    bind: SocketAddr,
-    sans: Vec<String>,
-    origins: Vec<String>,
-    ident: crate::identity::NativeIdentity,
-) -> Result<()> {
-    let port = bind.port();
+pub async fn serve(plane: Plane) -> Result<()> {
+    let port = plane.bind.port();
     loop {
-        let (identity, publish) = mint(port, &sans, &ident)?;
+        let (identity, publish) = mint(port, &plane.sans, &plane.identity)?;
+        // Sessions bind to this exact certificate, so a rotation cannot leave one authenticating
+        // against a hash the peer never saw.
+        let cert_hash = unhex32(&publish.cert_hash)
+            .context("the minted certificate hash is not 32 hex bytes")?;
         let config = ServerConfig::builder()
-            .with_bind_address(bind)
+            .with_bind_address(plane.bind)
             .with_identity(identity)
             // A browser tab that is throttled in the background must not look like a dead peer.
             .keep_alive_interval(Some(Duration::from_secs(3)))
@@ -192,10 +222,16 @@ pub async fn serve(
         if let Ok(mut g) = PUBLISHED.write() {
             *g = Some(publish);
         }
+        let bind = plane.bind;
         tracing::info!(%bind, "WebTransport plane listening");
+        let serving = std::sync::Arc::new(Serving {
+            plane: plane.clone(),
+            cert_hash,
+            last_pairing: std::sync::Mutex::new(None),
+        });
         // Accept until the certificate is due for replacement, then fall out and re-mint.
         tokio::select! {
-            _ = accept_loop(endpoint, origins.clone()) => {}
+            _ = accept_loop(endpoint, serving) => {}
             () = tokio::time::sleep(ROTATE_AFTER) => {
                 tracing::info!("WebTransport certificate due for rotation");
             }
@@ -205,17 +241,30 @@ pub async fn serve(
 
 async fn accept_loop(
     endpoint: Endpoint<wtransport::endpoint::endpoint_side::Server>,
-    origins: Vec<String>,
+    serving: std::sync::Arc<Serving>,
 ) {
     loop {
         let incoming = endpoint.accept().await;
-        let origins = origins.clone();
+        let serving = serving.clone();
         tokio::spawn(async move {
-            if let Err(e) = session(incoming, &origins).await {
+            if let Err(e) = session(incoming, &serving).await {
                 tracing::debug!(error = %e, "WebTransport session ended");
             }
         });
     }
+}
+
+/// Hex back to the 32 bytes SPAKE2 and the channel binding want. The published form is hex
+/// because that is what `serverCertificateHashes` documentation and our API speak.
+fn unhex32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Is this page allowed to open a session?
@@ -228,11 +277,12 @@ fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
     allowed.is_empty() || origin.is_some_and(|o| allowed.iter().any(|a| a == o))
 }
 
-/// One browser session. Phase 1 echoes: the plan's exit criterion is a page that connects and
-/// sends datagrams both ways, and everything real waits for the `Transport` impl in Phase 2.
+/// One browser session: check the origin, then hand the connection to [`session::run`] while
+/// this task feeds inbound datagrams to the pump. `/echo` keeps Phase 1's loopback for the
+/// measurement pages.
 async fn session(
     incoming: wtransport::endpoint::IncomingSession,
-    origins: &[String],
+    serving: &std::sync::Arc<Serving>,
 ) -> Result<()> {
     let request = incoming.await.context("await session request")?;
     // The peer picks `:path` and nothing upstream value-checks it, so control characters would
@@ -250,7 +300,7 @@ async fn session(
             .take(128)
             .collect::<String>()
     });
-    if !origin_allowed(origin.as_deref(), origins) {
+    if !origin_allowed(origin.as_deref(), &serving.plane.origins) {
         request.forbidden().await;
         tracing::warn!(
             origin = origin.as_deref().unwrap_or("<none>"),
@@ -274,7 +324,11 @@ async fn session(
     // The session's inbound queue: filled here, because only this task can await the connection,
     // and drained by the pump's `Transport` on its own thread.
     let inbox = std::sync::Arc::new(Inbox::default());
-    let mut pump = tokio::spawn(session::run(connection.clone(), inbox.clone()));
+    let mut pump = tokio::spawn(session::run(
+        connection.clone(),
+        inbox.clone(),
+        serving.clone(),
+    ));
     loop {
         tokio::select! {
             datagram = connection.receive_datagram() => {

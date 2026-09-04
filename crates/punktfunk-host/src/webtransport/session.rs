@@ -9,24 +9,62 @@
 //! The frame source is synthetic and the encoder is openh264. That is not a placeholder for
 //! testing's sake: it is what lets a headless box with no GPU serve a browser, which is what the
 //! browser tier is being proven against.
+//!
+//! **Identity, with no client certificate.** The stream opens with an [`AuthChallenge`], because
+//! a browser must be told the nonce before it can say anything. A first-time browser ignores it
+//! and sends a `PairRequest` carrying its WebCrypto device key; a paired one answers with a
+//! signature over that key, and the host looks the key's fingerprint up in the same store native
+//! clients live in. What mTLS does per packet, this does once — see
+//! `design/web-client-implementation-plan.md` Phase 3 for the honest comparison.
 
-use super::{Inbox, WebTransportPlane};
+use super::{Inbox, Serving, WebTransportPlane};
 use anyhow::{Context, Result};
 use punktfunk_core::config::{CompositorPref, FecConfig, FecScheme, GamepadPref, Role};
+use punktfunk_core::quic::io::{read_msg, write_msg};
 use punktfunk_core::quic::ColorInfo;
-use punktfunk_core::quic::{Hello, Start, Welcome};
+use punktfunk_core::quic::{
+    auth_signed_message, AuthChallenge, AuthResponse, Hello, PairRequest, Start, Welcome,
+};
 use punktfunk_core::session::Session;
 use rand::RngCore;
 use std::sync::Arc;
 use wtransport::Connection;
 
 /// Read the handshake, then stream until the browser goes away.
-pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>) -> Result<()> {
-    let (mut tx, rx) = conn.accept_bi().await.context("accept control stream")?;
-    let mut rx: CtlReader = punktfunk_core::quic::io::MsgReader::new(rx);
+pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>, serving: Arc<Serving>) -> Result<()> {
+    let (mut tx, mut rx) = conn.accept_bi().await.context("accept control stream")?;
 
-    // The browser opens the control stream and sends `Hello` on it.
-    let hello_bytes = rx.read_msg().await.context("read Hello")?;
+    // The nonce goes out before anything is read: a paired browser cannot speak without it, and
+    // one that is pairing ignores it. Fresh per connection, so a captured answer opens nothing.
+    let mut nonce = [0u8; 32];
+    rand::rng().fill_bytes(&mut nonce);
+    write_msg(&mut tx, &AuthChallenge { nonce }.encode())
+        .await
+        .context("write AuthChallenge")?;
+
+    let first = read_msg(&mut rx).await.context("read the first message")?;
+
+    // A `PairRequest` ends the session either way — pairing is its own connection, as on the
+    // native plane, so a browser reconnects to stream.
+    if let Ok(req) = PairRequest::decode(&first) {
+        return pair(&conn, tx, rx, req, &serving).await;
+    }
+    let hello_bytes = match AuthResponse::decode(&first) {
+        Ok(auth) => {
+            let name = admit(&auth, &nonce, &serving)?;
+            tracing::info!(device = %name, "browser authenticated");
+            read_msg(&mut rx).await.context("read Hello")?
+        }
+        // No credential offered. Allowed only where the operator has said pairing is not
+        // required, which is the same latitude `serve --open` gives native clients.
+        Err(_) => {
+            anyhow::ensure!(
+                !serving.plane.require_pairing,
+                "this host requires pairing — the browser sent no device signature"
+            );
+            first
+        }
+    };
     let hello = Hello::decode(&hello_bytes).map_err(|e| anyhow::anyhow!("bad Hello: {e:?}"))?;
     tracing::info!(
         width = hello.mode.width,
@@ -37,13 +75,13 @@ pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>) -> Result<()> {
     );
 
     let welcome = offer(&conn, &hello);
-    punktfunk_core::quic::io::write_msg(&mut tx, &welcome.encode())
+    write_msg(&mut tx, &welcome.encode())
         .await
         .context("write Welcome")?;
 
     // `Start` carries a UDP port on the native plane; a browser has no second plane, so the
     // message is only a "begin" marker here.
-    let start_bytes = rx.read_msg().await.context("read Start")?;
+    let start_bytes = read_msg(&mut rx).await.context("read Start")?;
     Start::decode(&start_bytes).map_err(|e| anyhow::anyhow!("bad Start: {e:?}"))?;
 
     let cfg = welcome.session_config(Role::Host);
@@ -63,6 +101,105 @@ pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>) -> Result<()> {
         Ok(r) => r,
         Err(e) => Err(anyhow::anyhow!("stream thread: {e}")),
     }
+}
+
+/// Is this device one the host paired with, and does it still hold the key?
+///
+/// Both halves matter and neither is enough. A signature by an unpaired key proves possession of
+/// something the host never trusted; a fingerprint in the store with no signature is a public
+/// value anyone can replay. Returns the stored device name, for the log.
+fn admit(auth: &AuthResponse, nonce: &[u8; 32], serving: &Serving) -> Result<String> {
+    let fp = sha256(&auth.device_key);
+    let hex: String = fp.iter().map(|b| format!("{b:02x}")).collect();
+    let paired = serving
+        .plane
+        .pairing
+        .list()
+        .into_iter()
+        .find(|c| c.fingerprint == hex)
+        .context("this device is not paired with the host")?;
+    let msg = auth_signed_message(&serving.cert_hash, nonce);
+    aws_lc_rs::signature::UnparsedPublicKey::new(
+        &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
+        spki_p256_point(&auth.device_key).context("device key is not a P-256 SPKI")?,
+    )
+    .verify(&msg, &auth.signature)
+    .map_err(|_| anyhow::anyhow!("the device signature does not verify"))?;
+    Ok(paired.name)
+}
+
+/// The 65-byte uncompressed point inside a P-256 SPKI.
+///
+/// Every P-256 SPKI starts with the same 26-byte header — the SEQUENCE, the two OIDs and the BIT
+/// STRING tag are all fixed by the key type — so matching it whole both locates the point and
+/// rejects any other key type, which is what we want: the verifier is P-256 only.
+fn spki_p256_point(spki: &[u8]) -> Option<&[u8]> {
+    const P256_SPKI_HEADER: [u8; 26] = [
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    let (head, point) = spki.split_at_checked(P256_SPKI_HEADER.len())?;
+    (head == P256_SPKI_HEADER && point.len() == 65 && point[0] == 0x04).then_some(point)
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes).into()
+}
+
+/// Pair a browser, then end the connection.
+///
+/// The identities are what makes this the native ceremony rather than a second one: the client's
+/// is the SHA-256 of the device key it just sent, the host's is the hash of the certificate this
+/// endpoint presented — which the browser had to pin to connect at all, so a man in the middle
+/// cannot hold it without the host's private key.
+async fn pair(
+    conn: &Connection,
+    tx: wtransport::SendStream,
+    rx: wtransport::RecvStream,
+    req: PairRequest,
+    serving: &Serving,
+) -> Result<()> {
+    anyhow::ensure!(
+        spki_p256_point(&req.device_key).is_some(),
+        "a browser must pair with a P-256 device key"
+    );
+    // Charged before arming is consulted, on every outcome: otherwise this plane answers "is
+    // pairing armed?" for free, to anyone. Knocks can hold it against the real device, which is
+    // the trade the native plane already makes.
+    {
+        let mut last = serving.last_pairing.lock().unwrap();
+        if last.is_some_and(|t| t.elapsed() < crate::native::PAIRING_COOLDOWN) {
+            anyhow::bail!("pairing rate-limited — retry shortly");
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let client_fp = sha256(&req.device_key);
+    let pin = match serving.plane.pairing.pin_for_attempt(
+        &client_fp
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+    ) {
+        crate::native_pairing::PinAttempt::Pin(pin) => pin,
+        crate::native_pairing::PinAttempt::Disarmed => {
+            anyhow::bail!("pairing is not armed — arm it in the console, then retry")
+        }
+        crate::native_pairing::PinAttempt::BoundToOther => {
+            anyhow::bail!("pairing is armed for a different device")
+        }
+    };
+    crate::native::pair_ceremony(
+        &crate::native::link::SessionLink::Web(conn.clone()),
+        tx,
+        rx,
+        req,
+        &client_fp,
+        &serving.cert_hash,
+        &serving.plane.pairing,
+        &pin,
+    )
+    .await
 }
 
 /// What this host will serve a browser. Deliberately narrow: no host capability bits, because
@@ -178,9 +315,104 @@ fn stream(
     )
 }
 
-/// The control plane's own framing, on a WebTransport stream.
-///
-/// `punktfunk_core::quic::io` is generic over `AsyncRead`/`AsyncWrite`, and `wtransport`'s
-/// streams implement both — so this is the same reader the native plane uses, not a second
-/// implementation of the same `u16`-length frame that could drift from it.
-type CtlReader = punktfunk_core::quic::io::MsgReader<wtransport::RecvStream>;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use punktfunk_core::quic::auth_signed_message;
+    use rcgen::{
+        KeyPair, PublicKeyData as _, SigningKey as _, PKCS_ECDSA_P256_SHA256,
+        PKCS_ECDSA_P384_SHA384,
+    };
+
+    fn store(tag: &str) -> Arc<crate::native_pairing::NativePairing> {
+        let path =
+            std::env::temp_dir().join(format!("pf-wt-auth-{tag}-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Arc::new(crate::native_pairing::NativePairing::load_with(Some(path), None, false).unwrap())
+    }
+
+    fn serving(pairing: Arc<crate::native_pairing::NativePairing>) -> Serving {
+        Serving {
+            plane: crate::webtransport::Plane {
+                bind: "127.0.0.1:9778".parse().unwrap(),
+                sans: Vec::new(),
+                origins: Vec::new(),
+                identity: crate::identity::ephemeral().unwrap(),
+                pairing,
+                require_pairing: true,
+            },
+            cert_hash: [0x11; 32],
+            last_pairing: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn respond(key: &KeyPair, binding: &[u8; 32], nonce: &[u8; 32]) -> AuthResponse {
+        let device_key = key.subject_public_key_info();
+        let signature = key.sign(&auth_signed_message(binding, nonce)).unwrap();
+        AuthResponse {
+            device_key,
+            signature,
+        }
+    }
+
+    /// A P-256 SPKI is a fixed shape, so locating the point is exact rather than a guess — and
+    /// anything that is not one has to be refused, not misread.
+    #[test]
+    fn only_a_p256_spki_yields_a_key() {
+        let p256 = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let spki = p256.subject_public_key_info();
+        let point = spki_p256_point(&spki).expect("a P-256 SPKI has a point");
+        assert_eq!(point.len(), 65);
+        assert_eq!(point[0], 0x04, "uncompressed");
+
+        let p384 = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        assert!(spki_p256_point(&p384.subject_public_key_info()).is_none());
+        assert!(spki_p256_point(&[]).is_none());
+        assert!(
+            spki_p256_point(&spki[..spki.len() - 1]).is_none(),
+            "truncated"
+        );
+        let mut trailing = spki.clone();
+        trailing.push(0);
+        assert!(spki_p256_point(&trailing).is_none(), "over-long");
+    }
+
+    /// The session credential: paired *and* holding the key, on *this* connection.
+    #[test]
+    fn admission_needs_a_pairing_a_signature_and_this_channel() {
+        let np = store("admit");
+        let s = serving(np.clone());
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let nonce = [0x77u8; 32];
+        let auth = respond(&key, &s.cert_hash, &nonce);
+
+        // Unpaired: a perfect signature buys nothing.
+        assert!(admit(&auth, &nonce, &s).is_err(), "not paired yet");
+
+        let fp: String = sha256(&auth.device_key)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        np.add("Enrico's browser", &fp).unwrap();
+        assert_eq!(admit(&auth, &nonce, &s).unwrap(), "Enrico's browser");
+
+        // Paired, but the signature must still be over this nonce on this channel.
+        assert!(admit(&auth, &[0x78; 32], &s).is_err(), "replayed nonce");
+        let mut elsewhere = serving(np.clone());
+        elsewhere.cert_hash = [0x22; 32];
+        assert!(
+            admit(&auth, &nonce, &elsewhere).is_err(),
+            "a response captured on one connection must not open another"
+        );
+
+        // A different key that claims the paired fingerprint cannot: the fingerprint IS the key.
+        let other = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        assert!(admit(&respond(&other, &s.cert_hash, &nonce), &nonce, &s).is_err());
+
+        // And the paired key with a mangled signature does not slip through.
+        let mut bent = auth.clone();
+        let last = bent.signature.len() - 1;
+        bent.signature[last] ^= 0xff;
+        assert!(admit(&bent, &nonce, &s).is_err());
+    }
+}

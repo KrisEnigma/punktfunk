@@ -32,7 +32,7 @@ pub(crate) use pf_frame::thread_qos::boost_thread_priority;
 
 mod compositor;
 // The session's control connection, whichever transport carries it (quinn or WebTransport).
-mod link;
+pub(crate) mod link;
 use compositor::resolve_compositor;
 
 /// GameStream presents the same virtual pad and must pick `windows_xbox_hid` from this definition.
@@ -40,7 +40,7 @@ pub(crate) mod gamepad;
 use gamepad::{resolve_gamepad, resolve_pad_kind, route_decision};
 
 mod pairing;
-use pairing::pair_ceremony;
+pub(crate) use pairing::pair_ceremony;
 
 mod audio;
 use audio::audio_thread;
@@ -159,7 +159,7 @@ use crate::send_pacing::{percentile, PaceStat};
 use crate::stats_recorder::StatsRecorder;
 
 /// Bounds online PIN guessing: SPAKE2 already gives one guess per ceremony; this caps the rate.
-const PAIRING_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const PAIRING_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// `u32 LE index` then `data[i] = idx + i` (wrapping) — the client byte-checks this.
 pub fn test_frame(idx: u32, len: usize) -> Vec<u8> {

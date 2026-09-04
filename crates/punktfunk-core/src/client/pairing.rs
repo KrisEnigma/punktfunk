@@ -46,7 +46,14 @@ impl NativeClient {
                     .map_err(|e| PunktfunkError::Io(std::io::Error::other(e.to_string())))?;
                 // SPAKE2 as A; bind our fingerprint and the TOFU-observed host cert.
                 let (pake, spake_a) = pake::start(true, &pin, &client_fp, &host_fp);
-                io::write_msg(&mut send, &PairRequest { name, spake_a }.encode()).await?;
+                // No `device_key`: this client's identity is its certificate, which the
+                // transport re-proves on every connection.
+                let req = PairRequest {
+                    name,
+                    spake_a,
+                    device_key: Vec::new(),
+                };
+                io::write_msg(&mut send, &req.encode()).await?;
                 let challenge = PairChallenge::decode(&io::read_msg(&mut recv).await?)?;
                 let confirms = pake.finish(&challenge.spake_b)?;
                 // Host confirm = same key (PIN + certs). Pin only after this.

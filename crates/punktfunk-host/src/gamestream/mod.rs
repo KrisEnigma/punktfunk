@@ -553,10 +553,18 @@ pub fn serve(
             ];
             let origins = pf_host_config::config().webtransport_origins.clone();
             // The long-lived identity signs the plane's throwaway certificate, so a paired
-            // browser can check it against the fingerprint it pinned.
-            let ident = native_ident.clone();
+            // browser can check it against the fingerprint it pinned. Same pairing store and
+            // same flag as the native plane: a device is paired with the host, not with a plane.
+            let plane = crate::webtransport::Plane {
+                bind,
+                sans,
+                origins,
+                identity: native_ident.clone(),
+                pairing: np.clone(),
+                require_pairing: native.require_pairing,
+            };
             tokio::spawn(async move {
-                if let Err(e) = crate::webtransport::serve(bind, sans, origins, ident).await {
+                if let Err(e) = crate::webtransport::serve(plane).await {
                     tracing::error!(%bind, error = %e, "WebTransport plane stopped");
                 }
             });
