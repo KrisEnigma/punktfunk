@@ -2,7 +2,7 @@
 //! estimator ([`clock_offset_ns`]), and the mid-stream re-sync state machine
 //! ([`ClockResync`]).
 
-use super::{io, ClockEcho, ClockProbe};
+use super::{ClockEcho, ClockProbe};
 
 /// NTP offset (host minus client, ns) and RTT from `(t1, t2, t3, t4)` samples.
 /// Picks the **minimum-RTT** sample: least queuing, and it drops the first
@@ -31,10 +31,15 @@ pub struct ClockSkew {
 /// Client-side skew handshake: `ROUNDS` [`ClockProbe`]/[`ClockEcho`] round-trips.
 /// `None` if the host never answers (pre-skew host) — caller assumes a shared
 /// clock. Each read is bounded so a silent host cannot wedge session start.
+///
+/// Takes a quinn stream, so it needs the feature; the [`ClockProbe`]/[`ClockEcho`] codecs above
+/// do not, and a browser drives the same rounds over its own stream.
+#[cfg(feature = "quic")]
 pub async fn clock_sync(
     send: &mut quinn::SendStream,
-    recv: &mut io::MsgReader,
+    recv: &mut super::io::MsgReader,
 ) -> Option<ClockSkew> {
+    use super::io;
     use std::time::Duration;
     const ROUNDS: usize = 8;
     let read_timeout = Duration::from_secs(2);

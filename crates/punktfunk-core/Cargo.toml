@@ -23,7 +23,10 @@ default = []
 tls = ["dep:rustls", "dep:sha2", "dep:rustls-pki-types"]
 # Control-plane QUIC (pairing, config, reverse audio). tokio is permitted ONLY here,
 # never on the per-frame hot path. Off by default so the core stays runtime-free.
-quic = ["tls", "dep:quinn", "dep:tokio", "dep:rcgen", "dep:hmac", "dep:spake2", "dep:opus"]
+# The SPAKE2 pairing ceremony on its own, so a client that pairs over a transport quinn does
+# not speak (the browser, over WebTransport) can have it without the QUIC runtime.
+pake = ["dep:hmac", "dep:spake2"]
+quic = ["tls", "pake", "dep:quinn", "dep:tokio", "dep:rcgen", "dep:opus"]
 # Blocking-HTTP clients that must speak the SAME pinned TLS as the QUIC plane: `tls::ureq_agent`
 # hands ureq a caller-built `rustls::ClientConfig` (which is how `PinVerify` gets installed —
 # ureq's own `TlsConfig` has no hook for a custom verifier). Separate from `tls` because the
