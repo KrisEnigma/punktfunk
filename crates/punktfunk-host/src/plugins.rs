@@ -47,6 +47,7 @@ pub fn main(args: &[String]) -> Result<()> {
             disable()
         }
         Some("status") => status(),
+        Some("grant") => grant(args.get(1).map(String::as_str)),
         Some("-h") | Some("--help") | Some("help") | None => {
             print_usage();
             Ok(())
@@ -66,6 +67,7 @@ USAGE:
     punktfunk-host plugins enable            enable + start the plugin runner (opt-in)
     punktfunk-host plugins disable           stop + disable the plugin runner
     punktfunk-host plugins status            is the runner enabled/running?
+    punktfunk-host plugins grant <dir>       let the runner read one of YOUR directories
 
 NAMES:
     A bare first-party name resolves into the @punktfunk scope: `playnite` installs
@@ -232,6 +234,50 @@ fn resolve_runner_in(
 }
 
 // ---- service ops ------------------------------------------------------------------------------
+
+/// Grant the runner READ on one directory the operator owns.
+///
+/// The Windows runner is `NT AUTHORITY\LocalService`, which holds no ACE anywhere inside a user
+/// profile — so a launcher installed there is invisible to every scanner plugin, and reads exactly
+/// like one that is not installed. This is that grant, without the operator hand-writing a SID.
+///
+/// It stays one directory: every service account holds "bypass traverse checking", so the locked
+/// parents above the target are never access-checked and the rest of the profile stays shut.
+#[cfg(target_os = "windows")]
+fn grant(dir: Option<&str>) -> Result<()> {
+    let Some(dir) = dir.map(str::trim).filter(|d| !d.is_empty()) else {
+        bail!("usage: punktfunk-host plugins grant <dir>");
+    };
+    // A typo must not report success — the ACE would land on a name nothing ever reads.
+    if !std::path::Path::new(dir).is_dir() {
+        bail!("'{dir}' is not a directory (grant the folder holding the launcher, not the .exe)");
+    }
+    let ok = Command::new(icacls_path())
+        .arg(dir)
+        .args(["/grant", &format!("{LOCAL_SERVICE_SID}:(OI)(CI)(RX)")])
+        .status()
+        .context("failed to run icacls")?
+        .success();
+    if !ok {
+        bail!(
+            "icacls could not change '{dir}'. Changing a folder's permissions is done by its OWNER \
+             or an administrator - run this as the user who owns the folder, or from an elevated \
+             prompt."
+        );
+    }
+    println!(
+        "Granted the plugin runner read on {dir}. Re-run the plugin's detection to pick it up."
+    );
+    Ok(())
+}
+
+/// Nothing to grant off Windows: the runner is a systemd USER unit, so it already runs as the
+/// operator and reads exactly what they can.
+#[cfg(not(target_os = "windows"))]
+fn grant(_dir: Option<&str>) -> Result<()> {
+    println!("Nothing to grant: the plugin runner is a systemd USER unit, so it runs as you.");
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 fn enable() -> Result<()> {
