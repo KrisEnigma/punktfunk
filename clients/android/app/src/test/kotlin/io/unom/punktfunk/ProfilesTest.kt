@@ -203,6 +203,27 @@ class ProfilesTest {
         assertNull(store.resolveFor(null, oneOff = null))
     }
 
+    /** A title's own binding sits between the one-off and the host's default. */
+    @Test
+    fun aTitleBindingOutranksTheHostAndYieldsToAOneOff() {
+        val store = ProfileStore(RuntimeEnvironment.getApplication())
+        val work = newProfile("Work")
+        val game = newProfile("Game")
+        listOf(work, game).forEach(store::save)
+        val h = host().copy(profileId = work.id, gameProfiles = mapOf("halo" to game.id))
+
+        assertEquals(game.id, store.resolveFor(h, oneOff = null, launch = "halo")!!.id)
+        // A title with no entry inherits the host's default; the desktop does too.
+        assertEquals(work.id, store.resolveFor(h, oneOff = null, launch = "doom")!!.id)
+        assertEquals(work.id, store.resolveFor(h, oneOff = null)!!.id)
+        // A one-off still wins, and "" still forces the globals.
+        assertEquals(work.id, store.resolveFor(h, oneOff = work.id, launch = "halo")!!.id)
+        assertNull(store.resolveFor(h, oneOff = "", launch = "halo"))
+        // Deleted title profile: the host's default stands, not the globals.
+        store.delete(game.id)
+        assertEquals(work.id, store.resolveFor(h, oneOff = null, launch = "halo")!!.id)
+    }
+
     @Test
     fun aDeletedProfileLeavesNoErrorBehind() {
         val store = ProfileStore(RuntimeEnvironment.getApplication())

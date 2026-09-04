@@ -96,6 +96,9 @@ internal object ConsoleJson {
                     h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
                         ?.let(::profileChip) ?: JSONObject.NULL,
                 )
+                // Ids, not chips: the bind screen only compares them. Pinned copies below
+                // inherit the map — a card is the same host's shelf.
+                .put("game_profiles", JSONObject(h.gameProfiles))
             out.put(base)
             // A pinned card shares the primary tile's live state; its key rides the profile id
             // behind a NUL (impossible in a fingerprint or `addr:port`) — Rust parity.
@@ -163,6 +166,7 @@ internal object ConsoleJson {
                 else h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
                     ?.let(::profileChip) ?: JSONObject.NULL,
             )
+            .put("game_profiles", JSONObject(h.gameProfiles))
     }
 
     /** `KnownHosts` (Rust) — only what the console needs to build a link: id, address, fp. */

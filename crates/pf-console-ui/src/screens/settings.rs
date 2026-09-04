@@ -2340,6 +2340,7 @@ pub(crate) mod tests {
                 accent: None,
             }),
             bound_profile: None,
+            game_profiles: Default::default(),
         };
         let hosts = [pinned.clone(), {
             pinned.key = "aa".into();

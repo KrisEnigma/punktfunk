@@ -94,6 +94,7 @@ fn hosts() -> Vec<HostRow> {
         actions: Vec::new(),
         pin: None,
         bound_profile: None,
+        game_profiles: Default::default(),
     };
     vec![
         HostRow {

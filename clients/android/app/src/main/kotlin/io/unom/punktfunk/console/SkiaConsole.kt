@@ -540,7 +540,7 @@ object SkiaConsole {
             return
         }
         val kh = knownHostStore.get(addr, port)
-        val profile: StreamProfile? = profileStore.resolveFor(kh, profileId)
+        val profile: StreamProfile? = profileStore.resolveFor(kh, profileId, launchId)
         val effective = settings.effectiveFor(profile)
         val d = Dial()
         dial = d
@@ -662,12 +662,25 @@ object SkiaConsole {
         pushHosts(); pushKnownHosts()
     }
 
-    /** `ConsoleCmd::BindProfile` — the host's default binding (`KnownHost.profileId`); null clears. */
+    /**
+     * `ConsoleCmd::BindProfile` — the host's default binding (`KnownHost.profileId`), or with
+     * `game`, one title's ([KnownHost.gameProfiles]). A null `profile_id` clears either.
+     */
     private fun bindProfile(c: JSONObject) {
         val kh = hostForKey(c.optString("key")) ?: return
         val pid = c.optString("profile_id")
             .takeIf { c.has("profile_id") && !c.isNull("profile_id") && it.isNotEmpty() }
-        knownHostStore.save(kh.copy(profileId = pid))
+        val game = c.optString("game")
+            .takeIf { c.has("game") && !c.isNull("game") && it.isNotEmpty() }
+        val next = when (game) {
+            // Cleared bindings leave no key behind, so an unbound host stores an empty map.
+            null -> kh.copy(profileId = pid)
+            else -> kh.copy(
+                gameProfiles = kh.gameProfiles.toMutableMap()
+                    .apply { if (pid == null) remove(game) else put(game, pid) },
+            )
+        }
+        knownHostStore.save(next)
         pushHosts(); pushKnownHosts()
     }
 
