@@ -1334,6 +1334,12 @@ pub fn shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWindow
                 <property name="accelerator">&lt;Control&gt;&lt;Alt&gt;&lt;Shift&gt;v</property>
               </object>
             </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title">Open the quick actions dial (a pad opens it with Select + A, and aims it with the left stick)</property>
+                <property name="accelerator">&lt;Control&gt;&lt;Alt&gt;&lt;Shift&gt;o</property>
+              </object>
+            </child>
           </object>
         </child>
       </object>

@@ -1138,7 +1138,14 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         if (bannerUp && !motionHint && !touchHint) {
             StreamStartBanner(
                 text = buildList {
+                    // The twist and the three-finger tap live in the pointer touch models only —
+                    // passthrough gives every finger to the host verbatim — and need a screen to
+                    // put fingers on, plus the POINTER grant (without it there is no gesture layer).
+                    val gestures = hasTouch && touchMode != TouchMode.TOUCH &&
+                        accessGrants and SessionAccess.POINTER != 0
                     if (padPresent) {
+                        // The dial leads: it is the one chord that reaches every other action.
+                        add("Select + A quick actions")
                         add("Hold Select + Start + L1 + R1 to leave")
                         // Only while a capture is actually running: the chord itself no-ops
                         // without one, and offering a mute for a mic nobody has is the lie the
@@ -1146,17 +1153,13 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                         if (micRunning) add("Select + Y mic")
                         add("Select + X stats")
                     } else {
-                        // No pad: Back is the deliberate exit (gesture, key, or a TV remote's
-                        // button — all land on the same BackHandler).
-                        add("Back leaves the stream")
-                        // The tap lives in the pointer touch models only — passthrough gives every
-                        // finger to the host verbatim — and needs a screen to put three fingers on,
-                        // plus the POINTER grant (without it the gesture layer is not installed).
-                        if (hasTouch && touchMode != TouchMode.TOUCH &&
-                            accessGrants and SessionAccess.POINTER != 0
-                        ) {
-                            add("three-finger tap for stats")
-                        }
+                        // No pad: Back opens the dial (gesture, key, or a TV remote's button — all
+                        // land on the same BackHandler). Leaving is a slot inside it, not this.
+                        add(
+                            if (gestures) "Back or a two-finger twist opens quick actions"
+                            else "Back opens quick actions"
+                        )
+                        if (gestures) add("three-finger tap for stats")
                     }
                 }.joinToString(" · "),
                 alpha = bannerAlpha,
