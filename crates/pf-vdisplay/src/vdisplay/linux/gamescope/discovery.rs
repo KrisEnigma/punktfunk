@@ -72,15 +72,19 @@ pub(crate) fn wait_for_steam_game_exit(
     const EXIT_CONFIRM: Duration = Duration::from_secs(3);
 
     let start_deadline = Instant::now() + START_GRACE;
-    // Coming up is `GAMESCOPE_FOCUSED_APP`: the game is actually presenting, and unlike the
-    // baselayer list it carries no stale ids from earlier sessions.
-    while steam_focused_app() != Some(appid) {
+    // Coming up is `GAMESCOPE_FOCUSED_APP`, and it also picks the display: a dead session's
+    // clients keep their DISPLAY in the environment, so several answer at once and only the
+    // session actually running this appid ever focuses it.
+    let dpy = loop {
+        if let Some(d) = display_presenting(appid) {
+            break d;
+        }
         if cancel.load(Ordering::Relaxed) || Instant::now() >= start_deadline {
             return SteamGameWatch::Cancelled;
         }
         std::thread::sleep(POLL);
-    }
-    tracing::info!(appid, "gamescope: the launched game is on screen");
+    };
+    tracing::info!(appid, dpy = %dpy, "gamescope: the launched game is on screen");
     let mut gone_since: Option<Instant> = None;
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -88,7 +92,8 @@ pub(crate) fn wait_for_steam_game_exit(
         }
         // Going away is baselayer membership, not focus: opening the Steam overlay moves focus
         // to the client UI while the game is still running, and that must not read as an exit.
-        if steam_baselayer_has(appid) {
+        // A vanished display (gamescope gone) also ends it — nothing left to present into.
+        if baselayer_has(&dpy, appid) {
             gone_since = None;
         } else if gone_since.get_or_insert_with(Instant::now).elapsed() >= EXIT_CONFIRM {
             return SteamGameWatch::Exited;
@@ -97,17 +102,22 @@ pub(crate) fn wait_for_steam_game_exit(
     }
 }
 
-/// Connect to the session's gamescope Xwayland. `None` when it exposes none (no `--steam`, or
-/// the session is gone), which every caller reads as "nothing to say about the game".
-fn steam_root_atoms() -> Option<(x11rb::rust_connection::RustConnection, u32)> {
+/// The gamescope Xwayland presenting `appid`, when one is.
+fn display_presenting(appid: u32) -> Option<String> {
+    xwayland_cursor_targets()
+        .into_iter()
+        .map(|(d, _xauth)| d)
+        .find(|d| focused_app(d) == Some(appid))
+}
+
+/// Connect to gamescope's Xwayland root. Never `setenv` XAUTHORITY to reach it: glibc rewrites
+/// process-global `environ` and `getenv` takes no lock. Gamescope starts Xwayland with no
+/// `-auth`, so an empty token connects — the same fallback `pf-capture`'s cursor source uses.
+fn root_atoms(display: &str) -> Option<(x11rb::rust_connection::RustConnection, u32)> {
     use x11rb::connection::Connection;
     use x11rb::rust_connection::{DefaultStream, RustConnection};
-    // Never `setenv` XAUTHORITY to reach it: glibc rewrites process-global `environ` and
-    // `getenv` takes no lock. Gamescope's Xwayland is same-uid and takes an empty token, the
-    // same connect `pf-capture`'s cursor source falls back to.
-    let (display, _xauth) = xwayland_cursor_targets().into_iter().next()?;
     let parsed =
-        x11rb::reexports::x11rb_protocol::parse_display::parse_display(Some(&display)).ok()?;
+        x11rb::reexports::x11rb_protocol::parse_display::parse_display(Some(display)).ok()?;
     let screen = usize::from(parsed.screen);
     let stream = parsed
         .connect_instruction()
@@ -121,10 +131,10 @@ fn steam_root_atoms() -> Option<(x11rb::rust_connection::RustConnection, u32)> {
     Some((conn, root))
 }
 
-/// One `CARDINAL` list from gamescope's root window.
-fn root_cardinals(name: &[u8]) -> Option<Vec<u32>> {
+/// One `CARDINAL` list from `display`'s root window. `None` once the display is gone.
+fn root_cardinals(display: &str, name: &[u8]) -> Option<Vec<u32>> {
     use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
-    let (conn, root) = steam_root_atoms()?;
+    let (conn, root) = root_atoms(display)?;
     let atom = conn.intern_atom(true, name).ok()?.reply().ok()?.atom;
     if atom == 0 {
         return None; // never interned: this gamescope is not in --steam mode
@@ -137,17 +147,18 @@ fn root_cardinals(name: &[u8]) -> Option<Vec<u32>> {
     prop.value32().map(|v| v.collect())
 }
 
-/// The appid gamescope is presenting, or `None` when it says nothing.
-fn steam_focused_app() -> Option<u32> {
-    root_cardinals(b"GAMESCOPE_FOCUSED_APP")?.first().copied()
+/// The appid `display` is presenting, or `None` when it says nothing.
+fn focused_app(display: &str) -> Option<u32> {
+    root_cardinals(display, b"GAMESCOPE_FOCUSED_APP")?
+        .first()
+        .copied()
 }
 
 /// Is `appid` in `GAMESCOPECTRL_BASELAYER_APPID`? Steam adds it as the launch starts and removes
-/// it when the game process goes (measured on .21: added at +9 s, removed within 1 s of exit).
-/// The list can carry a stale id from an earlier session, so this only decides *going away* for
-/// an appid already seen focused.
-fn steam_baselayer_has(appid: u32) -> bool {
-    root_cardinals(b"GAMESCOPECTRL_BASELAYER_APPID").is_some_and(|v| v.contains(&appid))
+/// it within a second of the game process going (measured on .21). The list also carries ids no
+/// game is running, so this only decides *going away* for an appid already seen focused.
+fn baselayer_has(display: &str, appid: u32) -> bool {
+    root_cardinals(display, b"GAMESCOPECTRL_BASELAYER_APPID").is_some_and(|v| v.contains(&appid))
 }
 
 /// Managed/SteamOS is single-session and logs to journald, so this is unscoped.
@@ -562,6 +573,29 @@ fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod live_probe {
+    /// Reads the atoms off a real `--steam` gamescope. Ignored: needs one running.
+    /// `cargo test -p pf-vdisplay --bins -- --ignored steam_atoms --nocapture`
+    #[test]
+    #[ignore]
+    fn steam_atoms_are_readable() {
+        let targets = super::xwayland_cursor_targets();
+        assert!(!targets.is_empty(), "no gamescope Xwayland found");
+        for (dpy, _) in &targets {
+            println!(
+                "{dpy}: focused={:?} baselayer={:?}",
+                super::focused_app(dpy),
+                super::root_cardinals(dpy, b"GAMESCOPECTRL_BASELAYER_APPID"),
+            );
+        }
+        assert!(
+            targets.iter().any(|(d, _)| super::focused_app(d).is_some()),
+            "no display answered GAMESCOPE_FOCUSED_APP — the empty-token connect failed"
+        );
+    }
 }
 
 #[cfg(test)]
