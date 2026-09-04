@@ -27,12 +27,36 @@ on:
     paths:
       - '.gitea/workflows/windows-drivers.yml'
       - 'crates/pf-driver-proto/**'
+      # The driver hosts the encoder backends, so a change to them is a driver change.
+      - 'crates/pf-encode-win/**'
+      # …and the crates those backends compile against: pf-frame owns the frame vocabulary
+      # their signatures take, pf-zerocopy sits under it, and the two -sys crates are the
+      # QSV and PyroWave features. Unlisted, a change to any of them reached main with no
+      # driver build behind it — the Cargo.lock-luck gap the host lane already closed.
+      - 'crates/pf-frame/**'
+      - 'crates/pf-zerocopy/**'
+      - 'crates/libvpl-sys/**'
+      - 'crates/pyrowave-sys/**'
       - 'packaging/windows/drivers/**'
+      # Every build job below runs this, and it sits beside the driver tree rather than in it.
+      - 'packaging/windows/drivers-cargo.ps1'
   pull_request:
     paths:
       - '.gitea/workflows/windows-drivers.yml'
       - 'crates/pf-driver-proto/**'
+      # The driver hosts the encoder backends, so a change to them is a driver change.
+      - 'crates/pf-encode-win/**'
+      # …and the crates those backends compile against: pf-frame owns the frame vocabulary
+      # their signatures take, pf-zerocopy sits under it, and the two -sys crates are the
+      # QSV and PyroWave features. Unlisted, a change to any of them reached main with no
+      # driver build behind it — the Cargo.lock-luck gap the host lane already closed.
+      - 'crates/pf-frame/**'
+      - 'crates/pf-zerocopy/**'
+      - 'crates/libvpl-sys/**'
+      - 'crates/pyrowave-sys/**'
       - 'packaging/windows/drivers/**'
+      # Every build job below runs this, and it sits beside the driver tree rather than in it.
+      - 'packaging/windows/drivers-cargo.ps1'
 
 # Driver builds need the WDK on the runner - the driver-build job below self-provisions it via
 # scripts/ci/ensure-windows-toolchain.ps1, a fast no-op once already present.

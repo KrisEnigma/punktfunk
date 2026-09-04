@@ -4539,7 +4539,7 @@
         "properties": {
           "backend": {
             "type": "string",
-            "description": "`nvenc` | `amf` | `qsv` | `vaapi` | `software`."
+            "description": "`nvenc` | `amf` | `qsv` | `mf` | `vaapi` | `software`."
           },
           "id": {
             "type": "string",

@@ -205,6 +205,8 @@ fn short_label(cfg: &OverlayConfig, slot: &SlotId) -> String {
         SlotId::Mic => "Mic".into(),
         SlotId::Pad => "Pad".into(),
         SlotId::SendText => "Text".into(),
+        SlotId::Guide => "Guide".into(),
+        SlotId::Qam => "QAM".into(),
         SlotId::Host(_) => "Power".into(),
         SlotId::Shortcut(id) => cfg
             .shortcut(id)
@@ -306,8 +308,8 @@ pub(super) fn quick_actions_section(props: &Props, cx: &mut RenderCx) -> Element
     let cfg = current(props);
     let mut parts: Vec<Element> = vec![
         text_block(
-            "Click a button to change it, or drag one onto another to swap the two. A two-finger \
-             twist or Select+A opens this ring in a stream.",
+            "Click a button to change it, or drag one onto another to swap the two. \
+             Ctrl+Alt+Shift+O, a two-finger twist or Select+A opens this dial in a stream.",
         )
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText)

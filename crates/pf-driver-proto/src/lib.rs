@@ -216,7 +216,7 @@ pub mod control {
     pub struct EncodeProbeRequest {
         /// OS target of the monitor to tap; `0` = whichever drain worker offers first.
         pub target_id: u32,
-        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave.
+        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave, 5 Media Foundation.
         pub backend: u32,
         /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave (backend 4 only, and only with backend 4).
         pub codec: u32,
@@ -936,11 +936,14 @@ pub mod encode {
     impl EncodeInput {
         /// The input for `backend` (the [`SetEncodeRequest::backends`] numbering) under the
         /// request's HDR and 4:4:4 flags. Only NVENC ingests packed RGB, so only it can pair
-        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0.
+        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0. Media Foundation
+        /// takes NV12 whatever was asked for — no vendor's MFT accepts P010, so an HDR
+        /// request that reaches it encodes 8-bit rather than failing the open.
         #[must_use]
         pub const fn choose(backend: u32, hdr: bool, chroma444: bool) -> Self {
             match (backend, hdr, chroma444) {
                 (4, _, _) => Self::Planar { hdr, chroma444 },
+                (5, _, _) => Self::Nv12,
                 (1, true, true) => Self::Rgb10,
                 (_, true, _) => Self::P010,
                 (1, false, _) => Self::Bgra,

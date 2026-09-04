@@ -36,7 +36,7 @@ pub(crate) struct ApiActiveGpu {
     name: String,
     /// `nvidia` | `amd` | `intel` | `other`.
     vendor: String,
-    /// `nvenc` | `amf` | `qsv` | `vaapi` | `software`.
+    /// `nvenc` | `amf` | `qsv` | `mf` | `vaapi` | `software`.
     backend: String,
     sessions: u32,
 }

@@ -1,6 +1,8 @@
 package io.unom.punktfunk.kit
 
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.hypot
 import android.content.Context
 import android.hardware.input.InputManager
 import android.os.Handler
@@ -36,8 +38,21 @@ import java.util.concurrent.ConcurrentHashMap
  * threads, [padPresent]/[padHasOwnMotion] from the phone-gyro thread and [deviceMotion] from the
  * pad-sensor thread, so the slot table is a [ConcurrentHashMap].
  */
-/** What a pad does to the quick-action ring while it owns the pad (design §2.6). */
-enum class RingNav { UP, DOWN, LEFT, RIGHT, CONFIRM, BACK, CENTRE }
+/** What a pad does to the quick-action ring while it owns the pad (design §2.6): the D-pad steps
+ *  the highlight, the left stick aims it, A fires, B backs out, Y returns it to the centre. */
+sealed interface RingNav {
+    data object Up : RingNav
+    data object Down : RingNav
+    data object Left : RingNav
+    data object Right : RingNav
+    data object Confirm : RingNav
+    data object Back : RingNav
+    data object Centre : RingNav
+
+    /** The left stick's 60° sector: slot [slot] clockwise from 12 o'clock, null back at neutral.
+     *  A dial follows the thumb — stepping one disc per push is the thing it must not do. */
+    data class Sector(val slot: Int?) : RingNav
+}
 
 class GamepadRouter(
     context: Context,
@@ -213,8 +228,8 @@ class GamepadRouter(
     var onRingNav: ((RingNav) -> Unit)? = null
 
     @Volatile private var ringOpen = false
-    /** The left stick's current direction while the ring is up, for edge-triggered nav. */
-    private var stickDir: RingNav? = null
+    /** The ring sector the left stick last resolved to — see [ringSector]. */
+    private var stickSector: Int? = null
 
     /**
      * The ring is up: everything held is released on the host NOW (a held sprint must not
@@ -224,18 +239,35 @@ class GamepadRouter(
     fun setRingOpen(open: Boolean) {
         if (ringOpen == open) return
         ringOpen = open
-        stickDir = null
+        stickSector = null
         if (open) slots.values.forEach { releaseHeld(it) }
     }
 
+    /**
+     * A one-shot synthetic tap of a system button on the host's pad (pf-client-core's
+     * `GamepadService.tapButton`): down now, up [TAP_PRESS_MS] later, on the first forwarded
+     * slot's wire index — pad 0 when none is open, which is best-effort (the host pad may not
+     * exist). Deliberately past [slotButton]: this is the ring's own press, not the player's,
+     * so neither [ringOpen] nor the system-button policy may swallow it.
+     */
+    fun tapButton(bit: Int) {
+        if (!forwarding) return
+        val pad = slots.values.minOfOrNull { it.index } ?: 0
+        NativeBridge.nativeSendGamepadButton(handle, bit, true, pad)
+        mainHandler.postDelayed(
+            { NativeBridge.nativeSendGamepadButton(handle, bit, false, pad) },
+            TAP_PRESS_MS,
+        )
+    }
+
     private fun ringNavFor(bit: Int): RingNav? = when (bit) {
-        Gamepad.BTN_DPAD_UP -> RingNav.UP
-        Gamepad.BTN_DPAD_DOWN -> RingNav.DOWN
-        Gamepad.BTN_DPAD_LEFT -> RingNav.LEFT
-        Gamepad.BTN_DPAD_RIGHT -> RingNav.RIGHT
-        Gamepad.BTN_A -> RingNav.CONFIRM
-        Gamepad.BTN_B -> RingNav.BACK
-        Gamepad.BTN_Y -> RingNav.CENTRE
+        Gamepad.BTN_DPAD_UP -> RingNav.Up
+        Gamepad.BTN_DPAD_DOWN -> RingNav.Down
+        Gamepad.BTN_DPAD_LEFT -> RingNav.Left
+        Gamepad.BTN_DPAD_RIGHT -> RingNav.Right
+        Gamepad.BTN_A -> RingNav.Confirm
+        Gamepad.BTN_B -> RingNav.Back
+        Gamepad.BTN_Y -> RingNav.Centre
         else -> null
     }
 
@@ -500,20 +532,17 @@ class GamepadRouter(
         if (!isForwardable(dev)) return false
         val slot = slotFor(dev) ?: return false
         if (ringOpen) {
-            // The left stick steps the ring like the D-pad, edge-triggered on leaving neutral.
-            val x = event.getAxisValue(MotionEvent.AXIS_X)
-            val y = event.getAxisValue(MotionEvent.AXIS_Y)
-            val dir = when {
-                y < -0.6f -> RingNav.UP
-                y > 0.6f -> RingNav.DOWN
-                x < -0.6f -> RingNav.LEFT
-                x > 0.6f -> RingNav.RIGHT
-                abs(x) < 0.4f && abs(y) < 0.4f -> null
-                else -> stickDir
-            }
-            if (dir != stickDir) {
-                stickDir = dir
-                dir?.let { onRingNav?.invoke(it) }
+            // The left stick AIMS: its sector is the slot, so the ring follows the thumb the way
+            // a weapon wheel does. Sent on every sector change, neutral included — the D-pad is
+            // what steps disc by disc.
+            val sector = ringSector(
+                event.getAxisValue(MotionEvent.AXIS_X),
+                event.getAxisValue(MotionEvent.AXIS_Y),
+                stickSector,
+            )
+            if (sector != stickSector) {
+                stickSector = sector
+                onRingNav?.invoke(RingNav.Sector(sector))
             }
             return true
         }
@@ -834,6 +863,32 @@ class GamepadRouter(
     internal companion object {
         /** Mirror of `punktfunk-core::input::MAX_PADS` — wire pad indices 0..15. */
         const val MAX_PADS = 16
+
+        /** A sector, once engaged, keeps the stick until the angle is this far past its 30° edge —
+         *  a thumb resting between two slots would otherwise flicker between them. */
+        const val SECTOR_OVERLAP_DEG = 5.0
+
+        /**
+         * The ring slot the left stick points at, given the sector already engaged: past the dead
+         * zone by MAGNITUDE (a diagonal counts) the angle falls into one of six 60° sectors centred
+         * on the slots, slot `k` at `-90° + 60°·k`, 12 o'clock first, clockwise. The Kotlin half of
+         * `pf_client_core::menu_nav::ring_sector` — same 0.5 engage / 0.3 release thresholds, so
+         * the dial feels identical on a phone and on a Steam Deck. [MotionEvent.AXIS_Y] is +down,
+         * which is already the screen's own sense.
+         */
+        fun ringSector(x: Float, y: Float, current: Int?): Int? {
+            if (hypot(x, y) <= (if (current == null) 0.5f else 0.3f)) return null
+            // Degrees clockwise from 12 o'clock, so slot k's centre is at 60·k. atan2 spans
+            // (-180°, 180°], so the +90 turn can only reach -90 — one wrap covers it.
+            var deg = Math.toDegrees(atan2(y.toDouble(), x.toDouble())) + 90.0
+            if (deg < 0) deg += 360.0
+            if (current != null) {
+                // Signed distance from the engaged slot's centre, folded into ±180°.
+                val off = (deg - 60.0 * current + 540.0) % 360.0 - 180.0
+                if (abs(off) <= 30.0 + SECTOR_OVERLAP_DEG) return current
+            }
+            return ((deg + 30.0) / 60.0).toInt() % 6
+        }
 
         /** Emergency stream-exit chord: Select + Start + L1 + R1 held together (matches the legacy single-pad chord). */
         const val EXIT_CHORD = Gamepad.BTN_BACK or Gamepad.BTN_START or Gamepad.BTN_LB or Gamepad.BTN_RB

@@ -140,6 +140,11 @@ What the raw button does, per client:
   yourself, in the system's per-controller Home-button setting.
 - **Apple TV** — tvOS never delivers the Home press to apps; hold-Select is the only route.
 
+The [quick-action dial](#the-quick-action-dial) carries both buttons too — **Guide button** and
+**Quick access menu** — for a controller whose own guide the device keeps, or none at all. Each
+sends one tap on the host's pad; **Quick access menu** only reaches a host whose virtual controller
+is Steam-shaped.
+
 Both halves are [settings](/docs/client-settings#input), per profile like everything else:
 **Steam / guide button** (Automatic / Send to host / This device) and **Hold Select for guide**
 (Automatic / On / Off). Automatic picks the behavior above for each platform — the gesture stays off
@@ -224,10 +229,16 @@ Quick Actions item); with a controller, **Select+A** (Select first) on every cli
 never sees the two presses. What the six buttons hold is the **Quick actions** setting, and the
 editor is the dial itself — on every client but Apple TV, which takes whatever the profile carries.
 
+While the dial is up the controller belongs to it and the host sees nothing. The **left stick
+aims**: the dial highlights whatever slot your thumb points at, and letting go returns to the
+centre — the D-pad is what steps disc by disc. **A** fires the highlight, the centre one opens the
+sheet, **Y** returns to the centre and **B** closes.
+
 A Mac hands your pointer back for as long as the dial is up, so you can click a button, and takes
 capture again when it closes. Buttons a platform cannot serve are dimmed and say why: **Touch
 mode**, **Virtual controller** and **Keyboard** on a Mac, which has no touch screen and no software
-keyboard.
+keyboard. **Guide button** and **Quick access menu** are dimmed wherever controller input is not
+forwarded — they ride the same wire pad.
 
 ### Virtual controller
 

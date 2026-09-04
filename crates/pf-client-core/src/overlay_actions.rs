@@ -28,6 +28,10 @@ pub enum SlotId {
     Mic,
     Pad,
     SendText,
+    /// The host's guide button (Xbox / PS / Steam), as a synthetic pad tap.
+    Guide,
+    /// The host's quick-access button — `BTN_MISC1`, the Deck's `…`.
+    Qam,
     Host(String),
     Shortcut(String),
 }
@@ -44,6 +48,8 @@ impl SlotId {
             SlotId::Mic => "mic".into(),
             SlotId::Pad => "pad".into(),
             SlotId::SendText => "send_text".into(),
+            SlotId::Guide => "guide".into(),
+            SlotId::Qam => "qam".into(),
             SlotId::Host(id) => format!("host:{id}"),
             SlotId::Shortcut(id) => format!("shortcut:{id}"),
         }
@@ -60,6 +66,8 @@ impl SlotId {
             "mic" => SlotId::Mic,
             "pad" => SlotId::Pad,
             "send_text" => SlotId::SendText,
+            "guide" => SlotId::Guide,
+            "qam" => SlotId::Qam,
             _ => {
                 if let Some(id) = s.strip_prefix("host:").filter(|id| !id.is_empty()) {
                     SlotId::Host(id.into())
@@ -411,6 +419,12 @@ pub fn catalogue(cfg: &OverlayConfig, platform: RingPlatform) -> Vec<CatalogueGr
                         ""
                     },
                 ),
+                e("guide", "Guide button", ""),
+                e(
+                    "qam",
+                    "Quick access menu",
+                    "Only where the host's pad is Steam-shaped",
+                ),
             ],
         },
         CatalogueGroup {
@@ -469,6 +483,8 @@ pub fn slot_icon(id: &str, state: &str) -> Option<&'static str> {
         "mic" => "mic",
         "pad" => "gamepad-2",
         "send_text" => "send",
+        "guide" => "house",
+        "qam" => "panel-right",
         "more" => "ellipsis",
         "host:power.sleep" => "moon",
         "host:power.reboot" => "rotate-cw",
@@ -678,6 +694,8 @@ mod tests {
             "mic",
             "pad",
             "send_text",
+            "guide",
+            "qam",
             "host:power.reboot",
             "shortcut:s2",
         ] {
