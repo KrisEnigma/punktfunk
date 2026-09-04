@@ -53,8 +53,18 @@ pub fn published() -> Option<Published> {
     PUBLISHED.read().ok().and_then(|g| g.clone())
 }
 
-/// Mint a fresh short-lived identity and publish its hash. Returns the identity for the endpoint.
-fn mint(port: u16, sans: &[String]) -> Result<Identity> {
+/// Stop advertising. The route answers 404 again, which is what a caller should see when the
+/// plane is not listening.
+fn withdraw() {
+    if let Ok(mut g) = PUBLISHED.write() {
+        *g = None;
+    }
+}
+
+/// Mint a fresh short-lived identity. Returns it with what a browser would need to dial it —
+/// the caller publishes that only once the endpoint is actually bound, so the route never
+/// advertises a plane that is not listening.
+fn mint(port: u16, sans: &[String]) -> Result<(Identity, Published)> {
     let identity = Identity::self_signed_builder()
         .subject_alt_names(sans)
         .from_now_utc()
@@ -78,20 +88,20 @@ fn mint(port: u16, sans: &[String]) -> Result<Identity> {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if let Ok(mut g) = PUBLISHED.write() {
-        *g = Some(Published {
-            port,
-            cert_hash: cert_hash.clone(),
-            expires_at,
-        });
-    }
     tracing::info!(
         port,
         cert_hash = %cert_hash,
         validity_days = VALIDITY_DAYS,
         "WebTransport identity minted (in memory, never persisted)"
     );
-    Ok(identity)
+    Ok((
+        identity,
+        Published {
+            port,
+            cert_hash,
+            expires_at,
+        },
+    ))
 }
 
 /// Run the plane until the process ends, re-minting the identity as it ages out.
@@ -101,14 +111,25 @@ fn mint(port: u16, sans: &[String]) -> Result<Identity> {
 /// live sessions, and the reconnect path has to work anyway.
 pub async fn serve(port: u16, sans: Vec<String>) -> Result<()> {
     loop {
-        let identity = mint(port, &sans)?;
+        let (identity, publish) = mint(port, &sans)?;
         let config = ServerConfig::builder()
             .with_bind_default(port)
             .with_identity(identity)
             // A browser tab that is throttled in the background must not look like a dead peer.
             .keep_alive_interval(Some(Duration::from_secs(3)))
             .build();
-        let endpoint = Endpoint::server(config).context("bind the WebTransport endpoint")?;
+        // Bind first, publish second. The other order leaves the route advertising a hash for a
+        // plane that never came up, which reads as the API lying.
+        let endpoint = match Endpoint::server(config).context("bind the WebTransport endpoint") {
+            Ok(endpoint) => endpoint,
+            Err(e) => {
+                withdraw();
+                return Err(e);
+            }
+        };
+        if let Ok(mut g) = PUBLISHED.write() {
+            *g = Some(publish);
+        }
         tracing::info!(port, "WebTransport plane listening");
         // Accept until the certificate is due for replacement, then fall out and re-mint.
         tokio::select! {
@@ -135,7 +156,14 @@ async fn accept_loop(endpoint: Endpoint<wtransport::endpoint::endpoint_side::Ser
 /// sends datagrams both ways, and everything real waits for the `Transport` impl in Phase 2.
 async fn session(incoming: wtransport::endpoint::IncomingSession) -> Result<()> {
     let request = incoming.await.context("await session request")?;
-    let path = request.path().to_string();
+    // The peer picks `:path` and nothing upstream value-checks it, so control characters would
+    // reach the log ring verbatim and let an unauthenticated peer forge log lines.
+    let path: String = request
+        .path()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(128)
+        .collect();
     let connection = request.accept().await.context("accept session")?;
     tracing::info!(path = %path, "WebTransport session accepted");
     // One control stream and datagrams, mirroring the native plane's split. The control stream
@@ -175,8 +203,7 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        mint(9778, &["localhost".to_string()]).expect("mint");
-        let p = published().expect("minting publishes");
+        let (_identity, p) = mint(9778, &["localhost".to_string()]).expect("mint");
 
         assert_eq!(p.port, 9778);
         assert_eq!(p.cert_hash.len(), 64, "SHA-256 as hex");
