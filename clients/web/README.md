@@ -79,7 +79,8 @@ whole arrangement and go back to the download.
 | `web/index.html` | The two canvases, the `requestAnimationFrame` loop, key mapping. |
 | `src/transport.rs` | The datagram ring and `punktfunk_core`'s `Transport` over it. |
 | `src/session.rs` | The handshake state machine and the pump that turns datagrams into access units. |
-| `web/video-surface.js` | The video plane (R2). WebGL2 today, WebGPU in Phase 4. |
+| `web/video-surface.js` | The video plane (R2), WebGL2. |
+| `web/video-surface-webgpu.js` | The same seam on WebGPU — `importExternalTexture`, and the only HDR route either engine ships. |
 | `web/pf-glue.js` | Emscripten `--js-library`. **The only file that names a browser or GL object.** |
 
 `web/pf-glue.js` is load-bearing, not a detail. Rule R2 of the implementation plan says exactly one
@@ -163,6 +164,19 @@ A 720p60 stream from that host, fifteen seconds:
 | Access units delivered / decoded | **131 / 131** — nothing lost, nothing partial |
 | Ring drops | **0** |
 | Upload per decoded frame | **0.47 ms** |
+
+The two video planes, same decoder feeding both, CPU submission cost only (neither calls
+`finish()`, so this is what the frame loop pays, not what the GPU takes):
+
+| | WebGL2 | WebGPU |
+|---|---|---|
+| 1080p | 0.188 ms | ~0.000 ms |
+| 4K | 0.637 ms | 0.100 ms |
+
+WebGPU is cheaper because `importExternalTexture()` binds the frame instead of copying it, but
+neither is near a frame budget — **pick WebGPU for HDR, not for speed**. `toneMapping:
+{ mode: "extended" }` is accepted by Safari 27, and it is the only shipped HDR route in either
+engine: Chromium's WebGL2 path is still behind a flag and WebKit has none.
 
 `VideoFrame` → texture through `video-surface.js`, 90 decoded frames per size:
 
