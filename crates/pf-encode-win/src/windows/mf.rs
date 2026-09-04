@@ -22,7 +22,7 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 use std::time::{Duration, Instant};
 use windows::core::{Interface, GUID};
-use windows::Win32::Foundation::LUID;
+use windows::Win32::Foundation::{LUID, S_OK};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Resource, ID3D11Texture2D,
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
@@ -36,22 +36,23 @@ use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncH264CABACEnable, CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize,
     CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, CODECAPI_AVScenarioInfo,
     ICodecAPI, IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIDeviceManager,
-    IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform, METransformHaveOutput,
-    METransformNeedInput, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
-    MFCreateMediaType, MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint, MFStartup,
-    MFTEnum2, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_H264, MFVideoFormat_HEVC,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_ENCODER,
-    MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE, MF_MT_AVG_BITRATE,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
-    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFShutdown, IMFTransform,
+    METransformHaveOutput, METransformNeedInput, MFCreateAttributes, MFCreateDXGIDeviceManager,
+    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample, MFMediaType_Video,
+    MFSampleExtension_CleanPoint, MFStartup, MFTEnum2, MFT_FRIENDLY_NAME_Attribute,
+    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT,
+    MF_E_NO_EVENTS_AVAILABLE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
+    MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
-use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_UI4};
+use windows::Win32::System::Variant::VARIANT;
 
 /// Input texture ring depth. The MFT holds a ref on the sample (and so the slot) until it
 /// has consumed it; `submit` back-pressures at [`IN_FLIGHT_MAX`], well under this, so a
@@ -80,21 +81,6 @@ fn subtype(codec: Codec) -> Result<GUID> {
              (Qualcomm) is reported broken; use a native SDK backend for AV1"
         ),
         Codec::PyroWave => bail!("PyroWave never opens the Media Foundation backend"),
-    }
-}
-
-/// `VT_UI4` VARIANT — the only shape [`ICodecAPI::SetValue`] is given here.
-fn var_u32(value: u32) -> VARIANT {
-    VARIANT {
-        Anonymous: VARIANT_0 {
-            Anonymous: ManuallyDrop::new(VARIANT_0_0 {
-                vt: VT_UI4,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: VARIANT_0_0_0 { ulVal: value },
-            }),
-        },
     }
 }
 
@@ -214,16 +200,29 @@ impl EncodeConfig {
 }
 
 /// `ICodecAPI::SetValue`, advisory. An MFT that declines a property still encodes — every
-/// vendor's optional set differs — so a failure is logged, never fatal.
-fn set_advisory(api: &ICodecAPI, key: &GUID, name: &str, value: u32) -> bool {
-    let v = var_u32(value);
-    // SAFETY: `api` is live, `key` is a static GUID, and `v` is a by-value VT_UI4 VARIANT
+/// vendor's optional set differs — so a failure is logged, never fatal. `value` must carry
+/// the VARIANT type the property documents: an encoder refuses a mistyped one outright.
+fn set_advisory<T>(api: &ICodecAPI, key: &GUID, name: &str, value: T) -> bool
+where
+    T: Into<VARIANT> + Copy + std::fmt::Debug,
+{
+    let v = value.into();
+    // SAFETY: `api` is live, `key` is a static GUID, and `v` is a by-value scalar VARIANT
     // that outlives the synchronous call (no allocation to release).
     let r = unsafe { api.SetValue(key, &v) };
     if let Err(e) = &r {
-        tracing::debug!(property = name, value, error = %e, "MF encoder declined a codec-API property");
+        tracing::debug!(property = name, value = ?value, error = %e, "MF encoder declined a codec-API property");
     }
     r.is_ok()
+}
+
+/// `ICodecAPI::IsSupported`, strictly. `S_FALSE` names a property the MFT knows and will not
+/// honour, and windows-rs folds that into `Ok`; Microsoft's contract is to test for `S_OK`.
+fn is_supported(api: &ICodecAPI, key: &GUID) -> bool {
+    // SAFETY: `api` is live and `key` is a static GUID. The raw vtable call is the only way
+    // to see `S_FALSE` — the wrapper's `Result` has already discarded it.
+    let hr = unsafe { (Interface::vtable(api).IsSupported)(Interface::as_raw(api), key) };
+    hr == S_OK
 }
 
 /// Both rate-control knobs in one place: the open path and `reconfigure_bitrate` must not
@@ -248,7 +247,9 @@ fn apply_static_properties(api: &ICodecAPI, cfg: &EncodeConfig, force_idr_ok: bo
         "RateControlMode",
         eAVEncCommonRateControlMode_CBR.0 as u32,
     );
-    set_advisory(api, &CODECAPI_AVLowLatencyMode, "LowLatencyMode", 1);
+    // VARIANT_BOOL on encoders — only the H.264 *decoder* takes VT_UI4 for low latency.
+    // An MFT that checks the type declines a mistyped one and stays deeply pipelined.
+    set_advisory(api, &CODECAPI_AVLowLatencyMode, "LowLatencyMode", true);
     // B-frames break FIFO pairing and add a frame of latency. Chromium forces 0 on
     // Qualcomm, where the MFT default was 1 and buggy.
     set_advisory(
@@ -264,7 +265,7 @@ fn apply_static_properties(api: &ICodecAPI, cfg: &EncodeConfig, force_idr_ok: bo
         eAVScenarioInfo_DisplayRemoting.0 as u32,
     );
     if cfg.codec == Codec::H264 {
-        set_advisory(api, &CODECAPI_AVEncH264CABACEnable, "CABAC", 1);
+        set_advisory(api, &CODECAPI_AVEncH264CABACEnable, "CABAC", true);
     }
     // Infinite GOP is the tree's contract: IDR on demand only. An MFT that cannot force an
     // IDR gets a periodic one instead, or a lost frame freezes the client forever.
@@ -329,22 +330,6 @@ fn input_type(cfg: &EncodeConfig) -> Result<IMFMediaType> {
     }
 }
 
-/// Annex-B NAL type of the first NAL in `au`. `None` when the AU is not Annex-B.
-fn first_nal_type(codec: Codec, au: &[u8]) -> Option<u8> {
-    let start = if au.starts_with(&[0, 0, 0, 1]) {
-        4
-    } else if au.starts_with(&[0, 0, 1]) {
-        3
-    } else {
-        return None;
-    };
-    let b = *au.get(start)?;
-    Some(match codec {
-        Codec::H264 => b & 0x1f,
-        _ => (b >> 1) & 0x3f,
-    })
-}
-
 /// H.264 SPS/PPS or HEVC VPS/SPS/PPS.
 fn is_parameter_set(codec: Codec, nal: u8) -> bool {
     match codec {
@@ -353,15 +338,13 @@ fn is_parameter_set(codec: Codec, nal: u8) -> bool {
     }
 }
 
-/// The leading VPS/SPS/PPS run of an AU, or `None` when it starts with a slice. Qualcomm's
-/// MFT publishes the sequence header late and HEVC in-band only, so an IDR without one is
-/// undecodable unless we prepend the cached run ourselves.
+/// The AU's VPS/SPS/PPS run, or `None` when it carries none. An access-unit delimiter or
+/// SEI ahead of the run is skipped rather than treated as its absence — that is the shape
+/// Qualcomm's MFT emits, and it publishes the sequence header late and HEVC in-band only,
+/// so an IDR without one is undecodable unless we prepend the cached run ourselves.
 fn parameter_set_prefix(codec: Codec, au: &[u8]) -> Option<&[u8]> {
-    if !is_parameter_set(codec, first_nal_type(codec, au)?) {
-        return None;
-    }
-    let mut cut = au.len();
-    let mut i = 3;
+    let mut run: Option<usize> = None;
+    let mut i = 2;
     while i + 1 < au.len() {
         if au[i - 2..i + 1] != [0, 0, 1] {
             i += 1;
@@ -374,32 +357,32 @@ fn parameter_set_prefix(codec: Codec, au: &[u8]) -> Option<&[u8]> {
         } else {
             i - 2
         };
-        if !is_parameter_set(
-            codec,
-            match codec {
-                Codec::H264 => au[header] & 0x1f,
-                _ => (au[header] >> 1) & 0x3f,
-            },
-        ) {
-            cut = code_start;
-            break;
+        let nal = match codec {
+            Codec::H264 => au[header] & 0x1f,
+            _ => (au[header] >> 1) & 0x3f,
+        };
+        match (is_parameter_set(codec, nal), run) {
+            (true, None) => run = Some(code_start),
+            (false, Some(start)) => return Some(&au[start..code_start]),
+            _ => {}
         }
         i = header + 1;
     }
-    Some(&au[..cut])
+    run.map(|start| &au[start..])
 }
 
 /// One submitted frame, awaiting its AU. The MFT emits in submit order (B-frames are off),
 /// so this pairs by position — MF puts no wire index on the output sample.
 struct PendingMeta {
     pts_ns: u64,
-    forced: bool,
 }
 
 /// Live MFT session. Field order is drop order: the transform releases before the device
 /// manager and the ring textures it was reading.
 struct Inner {
     mft: IMFTransform,
+    /// The activation object that created `mft`: it owns the shutdown, so it outlives it.
+    activate: IMFActivate,
     events: IMFMediaEventGenerator,
     /// `None` when the MFT exposes no `ICodecAPI` — then bitrate and GOP are whatever the
     /// output media type carried, and `reconfigure_bitrate` declines.
@@ -422,6 +405,23 @@ struct Inner {
     first_au_logged: bool,
 }
 
+impl Drop for Inner {
+    /// An async MFT must be shut down before its last release, and an activation object
+    /// shuts down what it created. Releasing without either leaks the vendor MFT's worker
+    /// threads and GPU allocations for the life of the driver process.
+    fn drop(&mut self) {
+        // SAFETY: teardown runs on the encode thread that drove the MFT. Each call is
+        // synchronous and takes no arguments, and this is the documented last use of both.
+        unsafe {
+            let _ = self.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            if let Ok(shutdown) = self.mft.cast::<IMFShutdown>() {
+                let _ = shutdown.Shutdown();
+            }
+            let _ = self.activate.ShutdownObject();
+        }
+    }
+}
+
 impl Inner {
     fn note_first_au(&mut self, au: &EncodedFrame) {
         if !self.first_au_logged {
@@ -440,10 +440,9 @@ impl Inner {
 fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
     // SAFETY: the MFT is live on this thread and owes exactly one output per HaveOutput
     // event. `MFT_OUTPUT_DATA_BUFFER`'s `ManuallyDrop` members are reclaimed with
-    // `ManuallyDrop::take` on every path, so the sample and event collection the MFT
-    // allocated are released exactly once. The `Lock`ed pointer is read only for the
-    // length the same call reported, and is unlocked before the buffer drops.
-    let (data, keyframe) = unsafe {
+    // `ManuallyDrop::take` on every path, so the sample and the event collection the MFT
+    // allocated are released exactly once.
+    let sample = unsafe {
         let mut out = [MFT_OUTPUT_DATA_BUFFER {
             dwStreamID: 0,
             pSample: ManuallyDrop::new(None),
@@ -455,7 +454,15 @@ fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
         let sample: Option<IMFSample> = ManuallyDrop::take(&mut out[0].pSample);
         let _events = ManuallyDrop::take(&mut out[0].pEvents);
         call.context("IMFTransform::ProcessOutput")?;
-        let sample = sample.ok_or_else(|| anyhow!("MFT signalled HaveOutput with no sample"))?;
+        sample.ok_or_else(|| anyhow!("MFT signalled HaveOutput with no sample"))?
+    };
+    // The MFT has handed this frame over, so its entry is spent whatever the payload turns
+    // out to be. Popping only on the success path would pair every later AU with the wrong
+    // frame's timestamp for the rest of the session.
+    let meta = inner.pending.pop_front();
+    // SAFETY: `sample` is owned here. The `Lock`ed pointer is read only for the length the
+    // same call reported, and the buffer is unlocked before it drops.
+    let (data, keyframe) = unsafe {
         let buffer = sample
             .ConvertToContiguousBuffer()
             .context("IMFSample::ConvertToContiguousBuffer")?;
@@ -476,8 +483,6 @@ fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
     if data.is_empty() {
         bail!("Media Foundation returned an empty access unit");
     }
-    let meta = inner.pending.pop_front();
-    let keyframe = keyframe || meta.as_ref().is_some_and(|m| m.forced);
     let data = if keyframe {
         repeat_parameter_sets(inner, codec, data)
     } else {
@@ -716,7 +721,7 @@ impl MfEncoder {
             let codec_api: Option<ICodecAPI> = mft.cast().ok();
             let force_idr_ok = codec_api
                 .as_ref()
-                .is_some_and(|api| api.IsSupported(&CODECAPI_AVEncVideoForceKeyFrame).is_ok());
+                .is_some_and(|api| is_supported(api, &CODECAPI_AVEncVideoForceKeyFrame));
             if let Some(api) = codec_api.as_ref() {
                 apply_static_properties(api, &cfg, force_idr_ok);
             }
@@ -724,6 +729,17 @@ impl MfEncoder {
                 .context("IMFTransform::SetOutputType")?;
             mft.SetInputType(0, &input_type(&cfg)?, 0)
                 .context("IMFTransform::SetInputType")?;
+            // `process_output` always asks the MFT for its own sample. One that wants the
+            // caller to allocate would fail every ProcessOutput instead, so refuse here and
+            // let the driver's preference list move on to the next backend.
+            let out_info = mft
+                .GetOutputStreamInfo(0)
+                .context("IMFTransform::GetOutputStreamInfo")?;
+            let provides = (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0
+                | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0) as u32;
+            if out_info.dwFlags & provides == 0 {
+                bail!("{name} wants the caller to allocate output samples — unsupported here");
+            }
             if let Some(api) = codec_api.as_ref() {
                 // Rate is dynamic: re-apply after the types so the MFT's own derivation
                 // from MF_MT_AVG_BITRATE cannot win.
@@ -781,6 +797,7 @@ impl MfEncoder {
         );
         self.inner = Some(Inner {
             mft,
+            activate,
             events,
             codec_api,
             _manager: manager,
@@ -879,10 +896,15 @@ impl Encoder for MfEncoder {
         inner.frames_submitted += 1;
         inner.pending.push_back(PendingMeta {
             pts_ns: captured.pts_ns,
-            forced,
         });
-        // Collect whatever the MFT already finished; `poll` then has no wait to do.
-        pump(inner, codec)
+        // Collect whatever the MFT already finished; `poll` then has no wait to do. The MFT
+        // owns the frame from here, so a failure must not report the submit as failed: the
+        // driver would drop its in-flight entry and mis-stamp every later AU. `poll` raises
+        // the same error on its next call.
+        if let Err(e) = pump(inner, codec) {
+            tracing::debug!(error = %e, "MF event pump failed after the frame was accepted");
+        }
+        Ok(())
     }
 
     fn request_keyframe(&mut self) {
@@ -1026,6 +1048,15 @@ impl Encoder for MfEncoder {
         }
         // Owed AUs arrive as HaveOutput events; surface them through `poll`.
         let _ = wait_until(inner, codec, "drain", |i| i.pending.is_empty());
+        // End-of-stream zeroed the MFT's input credit and it issues no more until a fresh
+        // start-of-stream, so without this a later submit stalls out its whole budget.
+        // SAFETY: the MFT is live on this thread; a synchronous no-argument message.
+        unsafe {
+            let _ = inner
+                .mft
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+        }
+        inner.need_input = 0;
         Ok(())
     }
 }
@@ -1079,10 +1110,6 @@ mod tests {
 
     #[test]
     fn nal_classification_matches_the_two_codecs() {
-        // 4-byte start code, H.264 SPS (type 7) then HEVC VPS (type 32).
-        assert_eq!(first_nal_type(Codec::H264, &[0, 0, 0, 1, 0x67]), Some(7));
-        assert_eq!(first_nal_type(Codec::H265, &[0, 0, 1, 0x40]), Some(32));
-        assert_eq!(first_nal_type(Codec::H264, &[0x67, 0, 0, 1]), None);
         assert!(is_parameter_set(Codec::H264, 8));
         assert!(!is_parameter_set(Codec::H264, 5));
         assert!(is_parameter_set(Codec::H265, 34));
@@ -1106,6 +1133,27 @@ mod tests {
         assert_eq!(
             parameter_set_prefix(Codec::H264, &au[..12]).expect("all parameter sets"),
             &au[..12]
+        );
+    }
+
+    /// An MFT that opens the AU with a delimiter still gets its header cached. That is
+    /// the Qualcomm shape, and requiring the run to come first defeated it entirely.
+    #[test]
+    fn parameter_set_prefix_skips_a_leading_delimiter() {
+        // AUD (0x09) + SPS (0x67) + PPS (0x68) + IDR slice (0x65).
+        let au = [
+            0, 0, 0, 1, 0x09, 0x10, //
+            0, 0, 0, 1, 0x67, 0xAA, //
+            0, 0, 0, 1, 0x68, 0xBB, //
+            0, 0, 0, 1, 0x65, 0xCC,
+        ];
+        let prefix =
+            parameter_set_prefix(Codec::H264, &au).expect("delimiter-led AU still has a prefix");
+        assert_eq!(prefix, &au[6..18]);
+        // SEI-led, parameter sets running to the end of the AU.
+        assert_eq!(
+            parameter_set_prefix(Codec::H264, &au[..18]).expect("delimiter then parameter sets"),
+            &au[6..18]
         );
     }
 
