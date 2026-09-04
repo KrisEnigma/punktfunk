@@ -205,6 +205,8 @@ fn short_label(cfg: &OverlayConfig, slot: &SlotId) -> String {
         SlotId::Mic => "Mic".into(),
         SlotId::Pad => "Pad".into(),
         SlotId::SendText => "Text".into(),
+        SlotId::Guide => "Guide".into(),
+        SlotId::Qam => "QAM".into(),
         SlotId::Host(_) => "Power".into(),
         SlotId::Shortcut(id) => cfg
             .shortcut(id)

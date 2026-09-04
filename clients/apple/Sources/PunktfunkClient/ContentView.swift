@@ -1401,6 +1401,7 @@ struct ContentView: View {
             padAvailable: { [model] in model.virtualPadAvailable },
             padShown: { [model] in model.virtualPadShown },
             togglePad: { [model] in model.toggleVirtualPad() },
+            tapPadButton: { [model] bit in model.tapPadButton(bit) },
             currentMode: {
                 let m = conn.currentMode()
                 return (m.width, m.height, m.refreshHz)

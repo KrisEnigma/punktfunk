@@ -228,6 +228,23 @@ class GamepadRouter(
         if (open) slots.values.forEach { releaseHeld(it) }
     }
 
+    /**
+     * A one-shot synthetic tap of a system button on the host's pad (pf-client-core's
+     * `GamepadService.tapButton`): down now, up [TAP_PRESS_MS] later, on the first forwarded
+     * slot's wire index — pad 0 when none is open, which is best-effort (the host pad may not
+     * exist). Deliberately past [slotButton]: this is the ring's own press, not the player's,
+     * so neither [ringOpen] nor the system-button policy may swallow it.
+     */
+    fun tapButton(bit: Int) {
+        if (!forwarding) return
+        val pad = slots.values.minOfOrNull { it.index } ?: 0
+        NativeBridge.nativeSendGamepadButton(handle, bit, true, pad)
+        mainHandler.postDelayed(
+            { NativeBridge.nativeSendGamepadButton(handle, bit, false, pad) },
+            TAP_PRESS_MS,
+        )
+    }
+
     private fun ringNavFor(bit: Int): RingNav? = when (bit) {
         Gamepad.BTN_DPAD_UP -> RingNav.UP
         Gamepad.BTN_DPAD_DOWN -> RingNav.DOWN

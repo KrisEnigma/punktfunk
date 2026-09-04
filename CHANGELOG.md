@@ -42,6 +42,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`guide` and `qam` quick-action slots.** The `overlay_actions` blob takes two more built-in
+  ids, each a one-shot tap of a system button on the host's pad (`BTN_GUIDE`, `BTN_MISC1`) —
+  the same verb the session control socket's `guide`/`qam` already exposed. An older client
+  reads them as empty slots, so a profile still syncs both ways.
 - **Capture health on the Status page and in `GET /api/v1/status`.** A native Windows session's
   `session.capture` block carries the live capture-health class (`healthy`, `idle`, `suspect`,
   `stalled` with its class, `recovering`, `rebuilding`, `secure_desktop`), the evidence behind
