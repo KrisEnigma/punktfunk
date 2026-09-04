@@ -555,6 +555,19 @@ impl RemotePyroWave {
 }
 
 impl Encoder for RemotePyroWave {
+    /// Submit-driven: the worker encodes what `submit` hands it, so the loop submits this tick's
+    /// frame rather than draining AUs the backend already holds. Written out because a silently
+    /// inherited default here would disable the feature for every worker-backed session.
+    fn ready_aus(&mut self, _deadline: std::time::Instant) -> Option<usize> {
+        None
+    }
+
+    /// Submit-driven, so the loop's own access-unit watch catches this backend's stalls; there is
+    /// no driver-side clock to report. Written out for the same reason as `ready_aus`.
+    fn telemetry(&self) -> Option<pf_frame::health::EncoderTelemetry> {
+        None
+    }
+
     fn submit(&mut self, frame: &CapturedFrame) -> Result<()> {
         // CPU-backed frames reach this encoder (4:4:4 with zero-copy off; the raw-dmabuf degrade
         // latch). 1080p BGRA is ~8 MB (~480 MB/s at 60 fps) and must not cross the socket; the
@@ -1354,7 +1367,7 @@ mod tests {
                 .collect()
         }
         let trait_fns = fn_names(item_block(
-            include_str!("../codec.rs"),
+            include_str!("../../../../pf-encode-win/src/codec.rs"),
             "pub trait Encoder: Send {",
         ));
         let impl_fns = fn_names(item_block(
