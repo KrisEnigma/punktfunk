@@ -591,12 +591,12 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
     true
 }
 
-/// `IOCTL_ADD`: create + arrive `owner`'s virtual monitor at `width`x`height`@`refresh` for
-/// `session_id`, named by `preferred_id` (the host's per-client stable id; `0` = lowest free)
-/// and advertising the client display's luminance volume in its EDID (`client_lum`; all-zero =
-/// the built-in defaults). Returns `(monitor_id, target_id, adapter_luid_low, adapter_luid_high)`
-/// for the [`AddReply`](pf_driver_proto::control::AddReply), or `None` (no adapter yet / IddCx
-/// error).
+/// `IOCTL_ADD`: create + arrive `owner`'s virtual monitor at the requested mode, named by
+/// `req.preferred_monitor_id` (the host's per-client stable id; `0` = lowest free) and
+/// advertising the client display's luminance volume in its EDID (all-zero = the built-in
+/// defaults). Returns `(monitor_id, target_id, adapter_luid_low, adapter_luid_high)` for the
+/// [`AddReply`](pf_driver_proto::control::AddReply), or `None` (no adapter yet / IddCx error).
+/// The caller validates the mode.
 ///
 /// The entry is registered pending before `IddCxMonitorCreate`, so the mode DDIs the create
 /// re-enters find it by id; the handle and then the arrival are filled in write-once. A create
@@ -606,14 +606,17 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
 /// reap cannot depart the handle being deleted.
 pub fn create_monitor(
     owner: u32,
-    session_id: u64,
-    width: u32,
-    height: u32,
-    refresh: u32,
-    preferred_id: u32,
-    client_lum: pf_driver_proto::edid::ClientLuminance,
-    hw_cursor: bool,
+    req: &pf_driver_proto::control::AddRequest,
 ) -> Option<(u32, u32, u32, i32)> {
+    let (session_id, width, height, refresh) =
+        (req.session_id, req.width, req.height, req.refresh_hz);
+    let preferred_id = req.preferred_monitor_id;
+    let hw_cursor = req.hw_cursor != 0;
+    let client_lum = pf_driver_proto::edid::ClientLuminance {
+        max_nits: req.max_luminance_nits,
+        max_frame_avg_nits: req.max_frame_avg_nits,
+        min_millinits: req.min_luminance_millinits,
+    };
     let adapter = crate::adapter::adapter()?;
     // One identity per owner and session: a re-ADD of a still-live `session_id` departs the
     // stale monitor first, so no duplicate EDID/target lingers. Another owner's same key is

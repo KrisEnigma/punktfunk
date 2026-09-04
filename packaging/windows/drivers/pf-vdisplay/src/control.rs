@@ -122,20 +122,9 @@ fn add(owner: u32, request: Request) {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     }
-    let Some((monitor_id, target_id, luid_low, luid_high)) = crate::monitor::create_monitor(
-        owner,
-        req.session_id,
-        req.width,
-        req.height,
-        req.refresh_hz,
-        req.preferred_monitor_id,
-        pf_driver_proto::edid::ClientLuminance {
-            max_nits: req.max_luminance_nits,
-            max_frame_avg_nits: req.max_frame_avg_nits,
-            min_millinits: req.min_luminance_millinits,
-        },
-        req.hw_cursor != 0,
-    ) else {
+    let Some((monitor_id, target_id, luid_low, luid_high)) =
+        crate::monitor::create_monitor(owner, &req)
+    else {
         request.complete(STATUS_NOT_FOUND);
         return;
     };

@@ -137,14 +137,16 @@ pub fn set_render_adapter(owner: u32, luid_low: u32, luid_high: i32) -> NTSTATUS
     };
     let packed = (i64::from(luid_high) << 32) | i64::from(luid_low);
     let pin = *crate::registry::lock(&RENDER_PIN);
-    if let Some((held, by)) = pin {
-        if held != packed && by != owner && crate::registry::find(|m| m.owner == by).is_some() {
-            dbglog!(
-                "[pf-vd] set_render_adapter: owner {owner} asked for {luid_high:08x}:{luid_low:08x} \
-                 while owner {by} holds monitors on the pinned GPU — refused"
-            );
-            return crate::STATUS_ACCESS_DENIED;
-        }
+    if let Some((held, by)) = pin
+        && held != packed
+        && by != owner
+        && crate::registry::find(|m| m.owner == by).is_some()
+    {
+        dbglog!(
+            "[pf-vd] set_render_adapter: owner {owner} asked for {luid_high:08x}:{luid_low:08x} \
+             while owner {by} holds monitors on the pinned GPU — refused"
+        );
+        return crate::STATUS_ACCESS_DENIED;
     }
     *crate::registry::lock(&RENDER_PIN) = Some((packed, owner));
     let mut in_args = pod_init!(iddcx::IDARG_IN_ADAPTERSETRENDERADAPTER);
