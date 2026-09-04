@@ -1267,9 +1267,13 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 });
             }
         }
-        // While the ring is up the pad belongs to the ring: masked off the wire, polled
-        // into menu events. The three gates that keep pad input off client UI flip together.
-        let ring_open = stream.is_some() && overlay.as_ref().is_some_and(|o| o.ring_open());
+        // While the ring is up, or the console holds a launch over the live stream, the
+        // pad belongs to the overlay: masked off the wire, polled into menu events. The
+        // three gates that keep pad input off client UI flip together.
+        let ring_open = stream.is_some()
+            && overlay
+                .as_ref()
+                .is_some_and(|o| o.ring_open() || o.holds_stream());
         if ring_open != ring_was_open {
             ring_was_open = ring_open;
             gamepad.set_masked(ring_open);

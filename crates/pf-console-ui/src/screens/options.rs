@@ -562,6 +562,9 @@ mod tests {
             launcher: false,
             icon: "steam".into(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         }
     }

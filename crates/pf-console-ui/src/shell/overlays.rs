@@ -2,10 +2,11 @@
 
 use crate::anim::{approach, springs};
 use crate::glyphs::{hint_bar, Hint, HintKey};
+use crate::library::{card_matrix, PERSPECTIVE};
 use crate::theme::{fg, fill, Fonts, PanelStroke, W};
-use skia_safe::{gradient, Canvas, Color4f, PathBuilder, Point, Rect, TileMode};
+use skia_safe::{gradient, Canvas, Color4f, Image, PathBuilder, Point, RRect, Rect, TileMode, M44};
 
-use super::{Shell, ToastMark, BOTTOM_BAND};
+use super::{Launching, Shell, ToastMark, BOTTOM_BAND};
 
 /// Kind mark in a 13 dp box.
 fn draw_toast_mark(canvas: &Canvas, mark: ToastMark, cx: f64, cy: f64, k: f64, ink: Color4f) {
@@ -123,6 +124,19 @@ impl Shell {
                 canvas, w, h, k, appear, t, fonts, spinner, &title, &body, &hints,
             );
         }
+        if let Some(l) = &mut self.launching {
+            l.appear = approach(l.appear, 1.0, dt, 0.09);
+            l.flight.step_spec(1.0, crate::anim::springs::LAUNCH, dt);
+            l.flight.settle(1.0, 0.001, 0.01);
+        }
+        if let Some(l) = &self.launching {
+            // The shelf that launched it still holds its decoded poster underneath.
+            let poster = match self.stack.last() {
+                Some(crate::screens::Screen::Library(lib)) => lib.poster(&l.host.id),
+                _ => None,
+            };
+            self.draw_launch_hold(canvas, w, h, k, t, fonts, l, poster);
+        }
 
         if self.toast.as_ref().is_some_and(|toast| t - toast.at > 4.0) {
             self.toast = None;
@@ -205,23 +219,7 @@ impl Shell {
     ) {
         let cx = w / 2.0;
         canvas.save_layer_alpha_f(None, appear as f32);
-        // Opaque aurora — the home field, so this reads as the console taking over.
-        self.draw_aurora(canvas, w, h, t, 0.0);
-        // Shade pool under the centre so title/body separate from a bright aurora.
-        let mut vignette = crate::theme::shaded();
-        let shades = [crate::theme::shade(0.5), crate::theme::shade(0.0)];
-        vignette.set_shader(gradient::shaders::radial_gradient(
-            (
-                Point::new(cx as f32, (h / 2.0) as f32),
-                (w.max(h) * 0.42) as f32,
-            ),
-            &gradient::Gradient::new(
-                gradient::Colors::new_evenly_spaced(&shades, TileMode::Clamp, None),
-                gradient::Interpolation::default(),
-            ),
-            None,
-        ));
-        canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &vignette);
+        self.draw_takeover_field(canvas, w, h, t);
 
         let title_y = h / 2.0 + if spinner { 14.0 * k } else { 0.0 };
         if spinner {
@@ -249,18 +247,200 @@ impl Shell {
                 w * 0.66,
             );
         }
-        if !hints.is_empty() {
-            let probe = hint_bar(canvas, fonts, hints, self.glyphs, -10_000.0, -10_000.0, k);
-            hint_bar(
-                canvas,
-                fonts,
-                hints,
-                self.glyphs,
-                cx - probe.size.0 / 2.0,
-                h - 34.0 * k,
-                k,
-            );
-        }
+        self.draw_takeover_hints(canvas, w, h, k, fonts, hints);
         canvas.restore();
+    }
+
+    /// The takeover's ground: an opaque aurora — the home field, so this reads as the
+    /// console taking over — with a shade pool under the centre so text separates from a
+    /// bright field.
+    fn draw_takeover_field(&self, canvas: &Canvas, w: f64, h: f64, t: f64) {
+        self.draw_aurora(canvas, w, h, t, 0.0);
+        let mut vignette = crate::theme::shaded();
+        let shades = [crate::theme::shade(0.5), crate::theme::shade(0.0)];
+        vignette.set_shader(gradient::shaders::radial_gradient(
+            (
+                Point::new((w / 2.0) as f32, (h / 2.0) as f32),
+                (w.max(h) * 0.42) as f32,
+            ),
+            &gradient::Gradient::new(
+                gradient::Colors::new_evenly_spaced(&shades, TileMode::Clamp, None),
+                gradient::Interpolation::default(),
+            ),
+            None,
+        ));
+        canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &vignette);
+    }
+
+    /// The takeover's legend, centered where every console screen's sits.
+    fn draw_takeover_hints(
+        &self,
+        canvas: &Canvas,
+        w: f64,
+        h: f64,
+        k: f64,
+        fonts: &Fonts,
+        hints: &[Hint],
+    ) {
+        if hints.is_empty() {
+            return;
+        }
+        let probe = hint_bar(canvas, fonts, hints, self.glyphs, -10_000.0, -10_000.0, k);
+        hint_bar(
+            canvas,
+            fonts,
+            hints,
+            self.glyphs,
+            w / 2.0 - probe.size.0 / 2.0,
+            h - 34.0 * k,
+            k,
+        );
+    }
+
+    /// The launch hold: the title's poster on the takeover field, its name and store
+    /// beneath, a spinner for the wait. `appear` lifts the poster group in; the field
+    /// itself is already on screen from the connect, so it never blinks.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_launch_hold(
+        &self,
+        canvas: &Canvas,
+        w: f64,
+        h: f64,
+        k: f64,
+        t: f64,
+        fonts: &Fonts,
+        l: &Launching,
+        poster: Option<&Image>,
+    ) {
+        // Fades in rather than replacing the shelf outright: the cover has to be seen
+        // LEAVING its tile, which means the tile has to still be there when it does.
+        canvas.save_layer_alpha_f(None, l.appear as f32);
+        self.draw_takeover_field(canvas, w, h, t);
+        canvas.restore();
+
+        // Cover and column as one centred pair: a 2:3 card carrying the left, and a text
+        // column beside it wide enough for a long title to break twice, not fifteen times.
+        let ch = (h * 0.62).min(460.0 * k);
+        let cw = ch * 2.0 / 3.0;
+        let gap = (w * 0.04).min(56.0 * k);
+        let dw = (w * 0.34).clamp(260.0 * k, 460.0 * k);
+        let x0 = (w - (cw + gap + dw)) / 2.0;
+        let top = (h - ch) / 2.0;
+        let settled = Rect::from_xywh(x0 as f32, top as f32, cw as f32, ch as f32);
+        // Where it flies from: its shelf tile, or — with no tile to leave — the settled rect
+        // a little small, so the arrival still reads as one.
+        let start = if l.from.is_empty() {
+            settled.with_inset((settled.width() * 0.07, settled.height() * 0.07))
+        } else {
+            l.from
+        };
+        let p = l.flight.pos;
+        let lerp = |a: f64, b: f64| a + (b - a) * p;
+
+        canvas.save();
+        // One full turn on the way over, about the card's own vertical axis and through the
+        // same projection the coverflow tilts its side cards with — so the near edge grows
+        // and the far one recedes instead of the face merely narrowing.
+        let m = card_matrix(
+            lerp(f64::from(start.center_x()), f64::from(settled.center_x())),
+            lerp(f64::from(start.center_y()), f64::from(settled.center_y())),
+            360.0 * p,
+            lerp(f64::from(start.width()) / cw.max(1.0), 1.0),
+            cw,
+            ch,
+            PERSPECTIVE * k,
+        );
+        canvas.concat_44(&M44::row_major(&m));
+        let card = Rect::from_wh(cw as f32, ch as f32);
+        let corner = (14.0 * k) as f32;
+        let mut shadow = fill(crate::theme::shade(0.6));
+        shadow.set_mask_filter(skia_safe::MaskFilter::blur(
+            skia_safe::BlurStyle::Normal,
+            (18.0 * k) as f32,
+            None,
+        ));
+        canvas.draw_rrect(
+            RRect::new_rect_xy(card.with_offset((0.0, (12.0 * k) as f32)), corner, corner),
+            &shadow,
+        );
+        match poster {
+            Some(img) => {
+                canvas.save();
+                canvas.clip_rrect(RRect::new_rect_xy(card, corner, corner), None, true);
+                // Cover-fit: crop the source to the card's aspect, centred.
+                let (iw, ih) = (f64::from(img.width()), f64::from(img.height()));
+                let scale = (cw / iw).max(ch / ih);
+                let (sw, sh) = (cw / scale, ch / scale);
+                let src = Rect::from_xywh(
+                    ((iw - sw) / 2.0) as f32,
+                    ((ih - sh) / 2.0) as f32,
+                    sw as f32,
+                    sh as f32,
+                );
+                canvas.draw_image_rect_with_sampling_options(
+                    img,
+                    Some((&src, skia_safe::canvas::SrcRectConstraint::Fast)),
+                    card,
+                    crate::theme::art_sampling(),
+                    &fill(fg(1.0)),
+                );
+                canvas.restore();
+            }
+            None => crate::screens::library::draw_poster_placeholder(canvas, fonts, None, card, k),
+        }
+        canvas.draw_rrect(
+            RRect::new_rect_xy(card, corner, corner),
+            &crate::theme::stroke(fg(0.14), 1.0),
+        );
+        canvas.restore();
+
+        // The column: left-aligned beside the cover, centred on its height. Most titles carry
+        // one fact line, and a block hung from the top of a card this tall reads as fallen off
+        // it. The height is estimated from the rows present; measuring the paragraphs to place
+        // them would be a second layout pass for accuracy nobody can see.
+        let rows = [&l.facts, &l.developer, &l.genres]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .count() as f64;
+        let block = (44.0 + rows * 21.0 + 52.0) * k;
+        let a = l.appear as f32;
+        let dx = x0 + cw + gap;
+        let ty = top + (ch - block).max(0.0) / 2.0;
+        fonts.leading(canvas, &l.title, W::SemiBold, 34.0 * k, fg(a), dx, ty, dw);
+        let mut y = ty + 52.0 * k;
+        for (text, size, alpha) in [
+            (&l.facts, 15.0, 0.62),
+            (&l.developer, 14.0, 0.45),
+            (&l.genres, 14.0, 0.45),
+        ] {
+            if text.is_empty() {
+                continue;
+            }
+            fonts.leading(canvas, text, W::Regular, size * k, fg(alpha * a), dx, y, dw);
+            y += (size + 7.0) * k;
+        }
+        crate::theme::spinner(canvas, dx + 8.0 * k, y + 30.0 * k, 8.0 * k, t);
+        fonts.leading(
+            canvas,
+            if l.connected {
+                "Starting the game\u{2026}"
+            } else {
+                "Connecting\u{2026}"
+            },
+            W::Regular,
+            12.5 * k,
+            fg(0.5 * a),
+            dx + 24.0 * k,
+            y + 22.0 * k,
+            dw,
+        );
+        // Before the dial lands B cancels it, exactly as it does on the connect card;
+        // after, the only thing left to ask for is the picture.
+        let hint = if l.connected {
+            Hint::new(HintKey::Confirm, "Show stream")
+        } else {
+            Hint::new(HintKey::Back, "Cancel")
+        };
+        self.draw_takeover_hints(canvas, w, h, k, fonts, &[hint]);
     }
 }

@@ -180,7 +180,7 @@ fn placeholder_face(launcher: bool) -> Color4f {
 }
 
 /// Coverless cell. Launcher: brand face + mark. Game: quieter face + monogram. `None`: stale index.
-fn draw_poster_placeholder(
+pub(crate) fn draw_poster_placeholder(
     canvas: &Canvas,
     fonts: &Fonts,
     game: Option<&LibraryGame>,
@@ -532,6 +532,21 @@ impl LibraryScreen {
 
     pub(crate) fn host_fp_hex(&self) -> &str {
         &self.host.fp_hex
+    }
+
+    /// A decoded poster, for the launch hold drawn over this shelf. The focused tile
+    /// keeps drawing underneath, so its poster is never the one evicted.
+    pub(crate) fn poster(&self, id: &str) -> Option<&Image> {
+        self.art.get(id)
+    }
+
+    /// Where this title's tile was last drawn — what the launch hold flies its cover
+    /// out of. Empty when the shelf has not drawn it (culled, or never laid out), which
+    /// the hold reads as "no tile" and arrives in place instead.
+    pub(crate) fn tile_rect(&self, id: &str) -> Rect {
+        (0..self.geom.len())
+            .find(|&i| self.game(i).is_some_and(|g| g.id == id))
+            .map_or(Rect::new_empty(), |i| self.geom[i])
     }
 
     /// Filtered length for tests in another module, which cannot reach [`Self::len`].
@@ -1633,6 +1648,9 @@ mod tests {
                     launcher: false,
                     icon: String::new(),
                     platform: None,
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
                     running: false,
                 })
                 .collect(),
@@ -1927,6 +1945,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: None,
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             })
             .collect();
@@ -2107,6 +2128,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: platform.map(str::to_string),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             })
             .collect()

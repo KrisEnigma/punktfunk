@@ -60,6 +60,14 @@ data class GameEntry(
      * sets none). What the console's Collections group by; carried through verbatim.
      */
     val platform: String? = null,
+    /**
+     * The rest of the host's `GameMeta` that a screen has room for. The host has sent these since
+     * the library API existed and nothing decoded them until the launch hold wanted more than a
+     * title; every one is absent on an older host, which simply shows less.
+     */
+    val developer: String? = null,
+    val releaseYear: Int? = null,
+    val genres: List<String> = emptyList(),
 ) {
     val isCustom: Boolean get() = store == "custom"
 
@@ -266,6 +274,11 @@ object LibraryClient {
                     role = str(o, "role"),
                     icon = str(o, "icon"),
                     platform = str(o, "platform"),
+                    developer = str(o, "developer"),
+                    releaseYear = o.optInt("release_year").takeIf { it > 0 },
+                    genres = o.optJSONArray("genres")?.let { g ->
+                        (0 until g.length()).mapNotNull { g.optString(it).ifBlank { null } }
+                    } ?: emptyList(),
                 ),
             )
         }

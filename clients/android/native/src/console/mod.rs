@@ -723,8 +723,8 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibr
     .resolve::<LogErrorAndDefault>()
 }
 
-/// `NativeBridge.nativeConsoleLibraryRunning(handle, json)` — the ids the host has up
-/// (`["steam:570", …]`).
+/// `NativeBridge.nativeConsoleLibraryRunning(handle, json)` — the host's `/status` `games[]`
+/// (`[{"app_id": "steam:570", "state": "running"}, …]`).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibraryRunning(
     mut env: EnvUnowned,
@@ -733,9 +733,11 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibr
     json: JString,
 ) {
     env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(ids)) = (host(handle), json_arg::<Vec<String>>(env, &json)) {
-            let up: std::collections::HashSet<String> = ids.into_iter().collect();
-            h.handles.library.set_running(&up);
+        if let (Some(h), Some(games)) = (
+            host(handle),
+            json_arg::<Vec<pf_client_core::library::RunningGame>>(env, &json),
+        ) {
+            h.handles.library.set_running(&games);
         }
         Ok(())
     })

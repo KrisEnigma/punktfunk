@@ -69,10 +69,18 @@ pub struct GameEntry {
     pub title: String,
     #[serde(default)]
     pub art: Artwork,
-    /// Free-form display string from the host's flattened `GameMeta`. Other
-    /// metadata stays undecoded until a UI needs it.
+    /// Free-form display string from the host's flattened `GameMeta`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// The rest of that `GameMeta` the launch hold has room to show. The host has sent these
+    /// since the library API existed and nothing read them until a screen wanted more than a
+    /// title. Every one is optional on the wire, so an older host simply says nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_year: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
     /// `"game"` (default; older hosts omit) or `"launcher"`. A plain string: the
     /// host owns the vocabulary; an unknown value must not fail the catalog decode.
     #[serde(default, skip_serializing_if = "Option::is_none")]

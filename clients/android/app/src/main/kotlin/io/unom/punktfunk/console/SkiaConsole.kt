@@ -107,6 +107,18 @@ object SkiaConsole {
 
     // What the composable hands us while it is on screen.
     private var onConnected: ((ActiveSession) -> Unit)? = null
+
+    /**
+     * The connected session the console's launch hold is still standing in front of.
+     *
+     * Handed to the app on `ShowStream`, dropped on a cancel. Null whenever the console is not
+     * holding one — a desktop-session connect, or a launch the shell decided not to hold (a
+     * launcher tile, which the host never tracks).
+     */
+    private var pendingSession: ActiveSession? = null
+
+    /** Whether the launch just dialled is one the shell will hold: a game, not a launcher. */
+    private var holdsLaunch = false
     private var onSettingsChange: ((Settings) -> Unit)? = null
     private var onQuit: (() -> Unit)? = null
     private var onPlatformScreen: ((String) -> Unit)? = null
@@ -513,7 +525,16 @@ object SkiaConsole {
                 "CancelConnect" -> {
                     dial?.cancelled?.set(true)
                     dial = null
+                    // A cancel after the dial landed still has a session to let go of.
+                    pendingSession?.let { s -> ioPool.execute { NativeBridge.nativeClose(s.handle) } }
+                    pendingSession = null
                     discovery?.restart()
+                }
+                // The console's launch hold is done — the game is up, or the player asked to
+                // see. Only now does the stream view replace it.
+                "ShowStream" -> pendingSession?.let { s ->
+                    pendingSession = null
+                    onConnected?.invoke(s)
                 }
             }
             is JSONObject -> {
@@ -546,6 +567,12 @@ object SkiaConsole {
             return
         }
         val kh = knownHostStore.get(addr, port)
+        // The shell raises its hold for a GAME launch off a shelf; a desktop connect and a
+        // launcher tile go straight through, so the session is handed over at once. Mirrors
+        // `Shell::launch_hold`, and reads the same cached catalog the shelf was drawn from.
+        holdsLaunch = launchId != null &&
+            LibraryCache.standard(app.cacheDir).load(kh?.id ?: fp)?.games
+                ?.firstOrNull { it.id == launchId }?.isLauncher == false
         val profile: StreamProfile? = profileStore.resolveFor(kh, profileId, launchId)
         val effective = settings.effectiveFor(profile)
         val d = Dial()
@@ -582,18 +609,25 @@ object SkiaConsole {
                             knownHostStore.learnMgmtPort(record.address, record.port, it)
                         }
                     }
-                    NativeBridge.nativeConsoleSessionPhase(handle, 1, "")
-                    onConnected?.invoke(
-                        ActiveSession(
-                            h,
-                            effective,
-                            clipboardSync = record?.clipboardSync ?: false,
-                            profileName = profile?.name,
-                            hostId = record?.id,
-                            launchedFromLibrary = launchId != null,
-                            libraryProfileId = profileId,
-                        ),
+                    val session = ActiveSession(
+                        h,
+                        effective,
+                        clipboardSync = record?.clipboardSync ?: false,
+                        profileName = profile?.name,
+                        hostId = record?.id,
+                        launchedFromLibrary = launchId != null,
+                        libraryProfileId = profileId,
                     )
+                    // The console learns the dial landed and keeps the screen: its launch hold
+                    // is still waiting on the game. Handing the session over here instead would
+                    // swap the console for the stream view mid-wait, which is the seam this
+                    // whole screen exists to remove. `ShowStream` releases it.
+                    NativeBridge.nativeConsoleSessionPhase(handle, 1, "")
+                    if (holdsLaunch) {
+                        pendingSession = session
+                    } else {
+                        onConnected?.invoke(session)
+                    }
                 } else {
                     val token = NativeBridge.nativeTakeLastError()
                     NativeBridge.nativeConsoleSessionPhase(
@@ -819,8 +853,7 @@ object SkiaConsole {
             if (id == null) return
             ioPool.execute {
                 val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
-                    .filter { it.isUp }.mapNotNull { it.appId }
-                main.post { if (handle != 0L) NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.stringArray(up)) }
+                main.post { if (handle != 0L) NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.runningGames(up)) }
             }
             return
         }
@@ -856,12 +889,11 @@ object SkiaConsole {
                     val games = r.games
                     cache.store(cacheKey, games)
                     val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
-                        .filter { it.isUp }.mapNotNull { it.appId }
                     main.post {
                         if (gen != fetchGen.get()) return@post
                         NativeBridge.nativeConsoleLibraryGames(handle, ConsoleJson.libraryGames(games), false)
                         NativeBridge.nativeConsoleLibraryStale(handle, 0)
-                        NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.stringArray(up))
+                        NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.runningGames(up))
                     }
                     for (g in games) {
                         val candidates = g.art.posterCandidates

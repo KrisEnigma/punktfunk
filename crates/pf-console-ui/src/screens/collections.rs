@@ -753,6 +753,9 @@ mod tests {
                     launcher: false,
                     icon: String::new(),
                     platform: Some(if i < 4 { "PS2".into() } else { "PS3".into() }),
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
                     running: false,
                 })
                 .collect(),
@@ -943,6 +946,9 @@ mod tests {
                 launcher: true,
                 icon: "steam".into(),
                 platform: Some("Launchers".into()),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             },
             LibraryGame {
@@ -952,6 +958,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: Some("PS3".into()),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             },
         ]);

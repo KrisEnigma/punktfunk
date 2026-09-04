@@ -127,6 +127,39 @@ private func decodePoster(_ data: Data, maxPixels: Int?) -> PlatformImage? {
     #endif
 }
 
+/// Where each library poster last drew, in global (window) coordinates, by entry id.
+///
+/// The launch hold's cover flies out of the tile the player picked, and by the time it mounts that
+/// tile is on its way out — the shelf dismisses on launch. So the rect is recorded as the shelf
+/// lays out and read once, at the tap. Deliberately plain storage rather than observable state:
+/// every poster writes here on every layout pass, and a published change would re-render the
+/// shelf from its own scrolling.
+///
+/// A recycled `LazyVGrid` tile stops updating when it scrolls off, so an entry can hold a stale
+/// rect. That is harmless — the hold checks the rect is still on screen and otherwise just scales
+/// its cover up in place.
+@MainActor
+enum TileFrames {
+    private static var frames: [String: CGRect] = [:]
+
+    static func record(_ id: String, _ rect: CGRect) { frames[id] = rect }
+
+    static func rect(_ id: String) -> CGRect? {
+        frames[id].flatMap { $0.width > 1 && $0.height > 1 ? $0 : nil }
+    }
+}
+
+/// One poster's rect on its way up to `TileFrames`. A preference rather than a direct read of
+/// the proxy, because this has to survive the tile MOVING (a scroll, a window resize, the
+/// shelf's own entrance) and not just resizing.
+private struct TileFramePreference: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
+    }
+}
+
 /// Sequentially tries cover-art URLs over `loader` (so a paired client can reach the host's own
 /// art proxy, not just public CDNs — see `LibraryArtLoader`), advancing past any that fail to
 /// load, then a placeholder. The loaded image is hard-clipped to fill the card's actual frame
@@ -149,6 +182,9 @@ struct PosterImage: View {
     /// placeholder is what it will be. The gamepad coverflow waits on a few of these before
     /// playing its entrance, so the cards swing in carrying artwork rather than grey rectangles.
     var onLoaded: (() -> Void)?
+    /// Publish this poster's on-screen rect to `TileFrames` under this id (the entry's). What the
+    /// launch hold flies its cover out of; nil for a poster nothing launches from.
+    var frameID: String?
     @State private var index = 0
     @State private var image: PlatformImage?
     @Environment(\.displayScale) private var displayScale
@@ -183,6 +219,18 @@ struct PosterImage: View {
         // fetches land one by one, so without this a freshly opened library is a run of cards
         // visibly snapping from grey to artwork after the strip has already settled.
         .animation(.easeOut(duration: 0.3), value: image != nil)
+        .background {
+            if frameID != nil {
+                GeometryReader { geo in
+                    Color.clear.preference(
+                        key: TileFramePreference.self, value: geo.frame(in: .global))
+                }
+            }
+        }
+        .onPreferenceChange(TileFramePreference.self) { rect in
+            guard let frameID, let rect else { return }
+            TileFrames.record(frameID, rect)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
         .task(id: index) { await loadCurrent() }

@@ -74,6 +74,13 @@ pub(crate) mod springs {
         response: 0.38,
         damping: 0.72,
     };
+    /// The launch hold's cover leaving its shelf tile. Long and loose next to the
+    /// rest: it crosses the whole screen and turns once on the way, and a tighter
+    /// spring finishes both before the eye has followed either.
+    pub(crate) const LAUNCH: SpringSpec = SpringSpec {
+        response: 0.75,
+        damping: 0.72,
+    };
 }
 
 /// `k`/`c` live in [`crate::library`] and [`TRAY_K`]/[`TRAY_C`].

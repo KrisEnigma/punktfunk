@@ -300,6 +300,22 @@ struct ContentView: View {
                 home
             }
         }
+        // The launch hold rides OVER this switch, because it starts before it: the cover leaves
+        // its shelf tile at the tap, while `home` is still up, and the swap to `sessionView`
+        // happens behind it. Mounting is instant (the view fades its own backdrop in over the
+        // shelf — that fade IS the transition); only the reveal fades out.
+        .overlay {
+            if let hold = model.launchHold {
+                LaunchHoldView(
+                    entry: hold.entry, host: model.activeHost,
+                    connecting: model.connection == nil, sourceRect: hold.sourceRect,
+                    onShow: { model.revealStream() })
+                    // Its own view per launch — a reused one keeps the last flight's state.
+                    .id(hold.seq)
+                    .transition(.asymmetric(insertion: .identity, removal: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: model.launchHold)
         .onAppear {
             seedDefaultModeIfNeeded()
             autoConnectIfAsked()
@@ -922,7 +938,8 @@ struct ContentView: View {
             #if os(tvOS)
             // The focus engine only enters the takeover once nothing under it can hold focus;
             // then Menu reaches the overlay's `.onExitCommand` instead of the launcher — or the app.
-            .disabled(connectingOverlayName != nil || waker.waking != nil)
+            .disabled(
+                connectingOverlayName != nil || waker.waking != nil || model.launchHold != nil)
             #endif
             .overlay {
                 ConnectOverlay(
@@ -940,7 +957,10 @@ struct ContentView: View {
     /// during the delegated-approval wait (that has its own "Waiting for approval" prompt, so the
     /// takeover must not stack over it) and, of course, when idle or streaming.
     private var connectingOverlayName: String? {
-        guard awaitingApproval == nil, model.phase == .connecting, let host = model.activeHost
+        // A launch dial has the launch hold instead — that says which GAME is coming, and stacking
+        // "Connecting to <host>" on top of it would be two takeovers for one act.
+        guard awaitingApproval == nil, model.launchHold == nil,
+              model.phase == .connecting, let host = model.activeHost
         else { return nil }
         return host.displayName
     }

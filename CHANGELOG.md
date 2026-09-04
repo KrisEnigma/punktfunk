@@ -43,6 +43,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **A launch hold on every client.** A title picked from a library sends its cover out of the
+  shelf tile, turning once as it crosses to the middle of the screen, and holds there — through
+  the dial and then over the stream — until the host's `games[].state` on `GET /api/v1/status`
+  leaves `launching`. It gives up after 15 s if the host never lists the title and 120 s if it
+  stays `launching`, any press shows the stream early, and launcher tiles never hold.
 - **A settings profile can be bound to one library title.** `KnownHost.game_profiles` maps a
   title id to a profile id, and resolution now runs one-off ▸ title ▸ host ▸ globals — raise
   Options on a cover and pick "Settings profile…". Nothing changes until you bind one; a
