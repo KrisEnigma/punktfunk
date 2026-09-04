@@ -143,7 +143,7 @@ impl NativeAudioEnc {
 /// the promised wire and the sent wire cannot disagree.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(super) fn audio_thread(
-    conn: quinn::Connection,
+    conn: super::link::SessionLink,
     stop: Arc<AtomicBool>,
     audio_cap: AudioCapSlot,
     channels: u8,
@@ -575,8 +575,8 @@ pub(super) fn audio_thread(
             };
             let Some(d) = datagram else { continue };
             // Four `SendDatagramError` outcomes; only `ConnectionLost` ends the session.
-            match conn.send_datagram(d.into()) {
-                Ok(()) => {
+            match conn.send_datagram(d) {
+                super::link::DatagramSend::Sent => {
                     seq = seq.wrapping_add(1);
                     // Score against the slot and the previous departure. `now` is from the
                     // top of this iteration — one clock read cheaper, ~200/s.
@@ -590,12 +590,11 @@ pub(super) fn audio_thread(
                     // anchor to continue from — both preconditions for synthesizing anything.
                     sent_any = true;
                 }
-                Err(quinn::SendDatagramError::ConnectionLost(_)) => break 'session,
                 // One oversized frame, not the plane. Advance `seq` so the client sees a
                 // gap and conceals it. Warn on powers of two. Persistent means
                 // `audio_frame_us` was sized against a datagram budget this path lacks
                 // (see MTU note in `handshake::negotiate`).
-                Err(quinn::SendDatagramError::TooLarge) => {
+                super::link::DatagramSend::TooLarge => {
                     oversized_drops += 1;
                     if oversized_drops.is_power_of_two() {
                         tracing::warn!(
@@ -615,10 +614,9 @@ pub(super) fn audio_thread(
                 // Datagrams disabled for the rest of the connection. End the audio plane
                 // (capturer parked below; video continues) rather than pacing a wire that
                 // cannot take it. Logged once: this arm breaks.
-                Err(e) => {
+                super::link::DatagramSend::Unavailable => {
                     tracing::warn!(
-                        error = %e,
-                        "the QUIC datagram path is unavailable — ending the audio plane for this \
+                        "the datagram path is unavailable — ending the audio plane for this \
                          session (video continues)"
                     );
                     break 'session;
@@ -661,7 +659,7 @@ pub(super) fn audio_thread(
 /// the session without it, same as a capturer that fails to open.
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(super) fn audio_thread(
-    _conn: quinn::Connection,
+    _conn: super::link::SessionLink,
     _stop: Arc<AtomicBool>,
     _audio_cap: AudioCapSlot,
     _channels: u8,

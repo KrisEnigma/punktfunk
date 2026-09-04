@@ -34,14 +34,41 @@ impl SessionLink {
         }
     }
 
-    /// Unreliable datagram: audio, cursor, rumble, HID out. Lossy by contract — a refusal is a
-    /// drop to count, never an error to unwind. `false` when the stack would not take it.
-    pub(crate) fn send_datagram(&self, payload: Vec<u8>) -> bool {
+    /// Unreliable datagram: audio, cursor, rumble, HID out.
+    ///
+    /// The three outcomes callers actually act on, because they act differently: a frame too big
+    /// for this path is dropped and the plane continues, while datagrams being unavailable at all
+    /// ends the plane rather than pacing a wire that cannot take it.
+    pub(crate) fn send_datagram(&self, payload: Vec<u8>) -> DatagramSend {
         match self {
-            SessionLink::Quic(c) => c.send_datagram(payload.into()).is_ok(),
+            SessionLink::Quic(c) => match c.send_datagram(payload.into()) {
+                Ok(()) => DatagramSend::Sent,
+                Err(quinn::SendDatagramError::TooLarge) => DatagramSend::TooLarge,
+                Err(_) => DatagramSend::Unavailable,
+            },
             // Not the quinn connection: a WebTransport datagram carries a session-id prefix, so
             // it has to go through the layer that writes one.
-            SessionLink::Web(c) => c.send_datagram(payload).is_ok(),
+            SessionLink::Web(c) => match c.send_datagram(&payload) {
+                Ok(()) => DatagramSend::Sent,
+                Err(wtransport::error::SendDatagramError::TooLarge) => DatagramSend::TooLarge,
+                Err(_) => DatagramSend::Unavailable,
+            },
+        }
+    }
+
+    /// The next datagram from the peer — mic, rich input, pen. `Err` once the peer is gone.
+    pub(crate) async fn read_datagram(&self) -> Result<Vec<u8>, LinkClosed> {
+        match self {
+            SessionLink::Quic(c) => c
+                .read_datagram()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(LinkClosed::from),
+            SessionLink::Web(c) => c
+                .receive_datagram()
+                .await
+                .map(|d| d.payload().to_vec())
+                .map_err(|e| LinkClosed::Other(format!("{e:?}"))),
         }
     }
 
@@ -69,8 +96,8 @@ impl SessionLink {
     }
 
     /// `Some` once the connection has ended, without awaiting.
-    pub(crate) fn close_reason(&self) -> Option<String> {
-        self.quic().close_reason().map(|e| e.to_string())
+    pub(crate) fn close_reason(&self) -> Option<LinkClosed> {
+        self.quic().close_reason().map(LinkClosed::from)
     }
 
     pub(crate) fn close(&self, code: u32, reason: &[u8]) {
@@ -78,8 +105,30 @@ impl SessionLink {
     }
 
     /// Resolves when the peer is gone.
-    pub(crate) async fn closed(&self) -> String {
-        self.quic().closed().await.to_string()
+    pub(crate) async fn closed(&self) -> LinkClosed {
+        LinkClosed::from(self.quic().closed().await)
+    }
+
+    /// The quinn connection, for the parts that are still quinn-shaped: the handshake and
+    /// control streams, and the peer certificate a browser does not have.
+    ///
+    /// `None` for a browser. **This is the seam that is still to be cut** — the control plane's
+    /// framing (`punktfunk_core::quic::io`) reads a `quinn::RecvStream` concretely, so
+    /// generalising it over `AsyncRead` is what would let a browser share the long-lived control
+    /// loop instead of running its own handshake. Datagrams needed none of that, which is why
+    /// they went first.
+    pub(crate) fn as_quic(&self) -> Option<&quinn::Connection> {
+        match self {
+            SessionLink::Quic(c) => Some(c),
+            SessionLink::Web(_) => None,
+        }
+    }
+
+    /// The peer's client-certificate fingerprint. Always `None` for a browser: WebTransport has
+    /// no mTLS, so a browser identifies itself at the application layer instead
+    /// (`design/web-client-implementation-plan.md`, Phase 3).
+    pub(crate) fn peer_fingerprint(&self) -> Option<[u8; 32]> {
+        punktfunk_core::quic::endpoint::peer_fingerprint(self.as_quic()?)
     }
 
     /// Whether a browser is on the other end. For the few decisions that really are about the
@@ -87,6 +136,79 @@ impl SessionLink {
     /// streams are not on offer.
     pub(crate) fn is_web(&self) -> bool {
         matches!(self, SessionLink::Web(_))
+    }
+}
+
+/// What became of one datagram.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DatagramSend {
+    Sent,
+    /// Over this path's datagram ceiling. The frame is lost; the plane carries on, and a caller
+    /// that sees these should be resizing what it sends rather than retrying.
+    TooLarge,
+    /// The peer will take no more datagrams for the rest of the connection.
+    Unavailable,
+}
+
+impl DatagramSend {
+    pub(crate) fn is_sent(self) -> bool {
+        self == DatagramSend::Sent
+    }
+}
+
+/// Why a connection ended, in the terms callers actually branch on: our own close codes ride an
+/// application close, and a timeout is the one transport failure worth telling apart from the
+/// rest. Everything else is noise for a log line.
+#[derive(Clone, Debug)]
+pub(crate) enum LinkClosed {
+    /// The peer closed with an application code — where `QUIT_CODE` and the reject codes live.
+    App {
+        code: u64,
+        reason: String,
+    },
+    /// The path went quiet. Distinguished because a client that timed out did not choose to leave.
+    TimedOut,
+    Other(String),
+}
+
+impl LinkClosed {
+    /// The application close code, if that is how it ended.
+    pub(crate) fn app_code(&self) -> Option<u64> {
+        match self {
+            LinkClosed::App { code, .. } => Some(*code),
+            _ => None,
+        }
+    }
+
+    /// Did the peer close with this application code?
+    pub(crate) fn closed_with(&self, code: u32) -> bool {
+        self.app_code() == Some(u64::from(code))
+    }
+}
+
+impl From<quinn::ConnectionError> for LinkClosed {
+    fn from(e: quinn::ConnectionError) -> LinkClosed {
+        match e {
+            quinn::ConnectionError::ApplicationClosed(ref ac) => LinkClosed::App {
+                code: ac.error_code.into_inner(),
+                reason: String::from_utf8_lossy(&ac.reason).into_owned(),
+            },
+            quinn::ConnectionError::TimedOut => LinkClosed::TimedOut,
+            other => LinkClosed::Other(other.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for LinkClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkClosed::App { code, reason } if reason.is_empty() => {
+                write!(f, "closed by peer (code {code})")
+            }
+            LinkClosed::App { code, reason } => write!(f, "closed by peer (code {code}): {reason}"),
+            LinkClosed::TimedOut => f.write_str("timed out"),
+            LinkClosed::Other(s) => f.write_str(s),
+        }
     }
 }
 

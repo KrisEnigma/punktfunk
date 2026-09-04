@@ -40,7 +40,7 @@ pub(super) fn synthetic_stream(
     probe_rx: &std::sync::mpsc::Receiver<ProbeRequest>,
     probe_result_tx: &tokio::sync::mpsc::UnboundedSender<ProbeResult>,
     fec_target: &AtomicU8,
-    timing_conn: Option<&quinn::Connection>,
+    timing_conn: Option<&super::link::SessionLink>,
     probe_seq: bool,
 ) -> Result<()> {
     let interval = std::time::Duration::from_millis(1000 / 60);
@@ -697,7 +697,7 @@ fn send_loop(
     // Applied between AUs only — a streamed AU's tiling is derived from the size it began with.
     shard_rx: std::sync::mpsc::Receiver<usize>,
     stats: SendStats,
-    timing_conn: Option<quinn::Connection>,
+    timing_conn: Option<super::link::SessionLink>,
     phase: Arc<PhaseCtl>,
     probe_seq: bool,
 ) {
@@ -1101,8 +1101,8 @@ pub(super) struct SessionContext {
     pub(super) retarget_tx: tokio::sync::mpsc::UnboundedSender<u32>,
     pub(super) gap_tx: tokio::sync::mpsc::UnboundedSender<u32>,
     pub(super) fec_target: Arc<AtomicU8>,
-    pub(super) conn: quinn::Connection,
-    pub(super) timing_conn: Option<quinn::Connection>,
+    pub(super) conn: super::link::SessionLink,
+    pub(super) timing_conn: Option<super::link::SessionLink>,
     pub(super) phase: Arc<PhaseCtl>,
     pub(super) cursor_forward: bool,
     /// `true` = client draws; `false` = host composites. Always `true` (inert) for non-cap sessions.
@@ -1322,9 +1322,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     // Re-dial re-sends `Hello::launch` verbatim. Adopt against the original stamp or procscan refuses it.
     let launch_claim = launch_target.as_ref().map(|t| {
         crate::launchreg::claim(
-            endpoint::peer_fingerprint(&conn)
-                .map(hex::encode)
-                .as_deref(),
+            conn.peer_fingerprint().map(hex::encode).as_deref(),
             t.game.id.as_deref(),
             fresh_stamp,
         )
@@ -1405,7 +1403,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         None => {
             // Open first: Windows `open` inits the manager; `vdm()` before that panics.
             let mut vd = crate::vdisplay::open(compositor)?;
-            vd.set_client_identity(endpoint::peer_fingerprint(&conn));
+            vd.set_client_identity(conn.peer_fingerprint());
             vd.set_client_hdr(client_hdr);
             // HDR verdict, not the depth — a 10-bit SDR session leaves the output SDR.
             vd.set_hdr(hdr);
@@ -1422,7 +1420,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             let _idd_setup_guard = (plan.capture == crate::session_plan::CaptureBackend::IddPush)
                 .then(|| {
                     let slot = crate::vdisplay::manager::slot_id_for(
-                        endpoint::peer_fingerprint(&conn),
+                        conn.peer_fingerprint(),
                         (mode.width, mode.height),
                     );
                     crate::vdisplay::manager::vdm().begin_idd_setup(slot, stop.clone())
@@ -1483,9 +1481,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     if !adopt_launch {
         if let Some(t) = launch_target.as_ref() {
             crate::gamelease::end_others_for_new_launch(
-                endpoint::peer_fingerprint(&conn)
-                    .map(hex::encode)
-                    .as_deref(),
+                conn.peer_fingerprint().map(hex::encode).as_deref(),
                 t.game.id.as_deref(),
             );
         }
@@ -1602,7 +1598,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         crate::gamelease::SessionGuard::new(
             lease,
             quit.clone(),
-            endpoint::peer_fingerprint(&conn).map(hex::encode),
+            conn.peer_fingerprint().map(hex::encode),
             launch_claim,
         )
     });

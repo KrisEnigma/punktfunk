@@ -259,7 +259,7 @@ pub(super) fn cursor_forward(
 /// renegotiation. `first` is the already-read first control message.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) async fn negotiate(
-    conn: &quinn::Connection,
+    conn: &super::link::SessionLink,
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
     first: &[u8],
@@ -326,7 +326,7 @@ pub(super) async fn negotiate(
     // registers in the live set only once its data plane is up, so a later client can steal it.
     {
         use crate::vdisplay::admission::{admit, preempt_same_identity, Admission};
-        let peer_fp = endpoint::peer_fingerprint(conn);
+        let peer_fp = conn.peer_fingerprint();
 
         // Own prior session (QUIC idle has not fired). Stop it and wait the release grace so
         // this reconnect reuses the kept display. Runs before we register, so we never stop ourselves.
@@ -583,7 +583,7 @@ pub(super) async fn negotiate(
     let prep: Option<super::stream::PrepHandle> = match (source, compositor) {
         (Punktfunk1Source::Virtual, Some(comp)) => {
             let (ctx_tx, ctx_rx) = std::sync::mpsc::sync_channel::<SessionContext>(1);
-            let client_identity = endpoint::peer_fingerprint(conn);
+            let client_identity = conn.peer_fingerprint();
             let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
             // Read back off Welcome so the prepared display and session wiring cannot disagree.
             let cursor_fw = welcome.host_caps & punktfunk_core::quic::HOST_CAP_CURSOR != 0;
@@ -839,7 +839,7 @@ async fn negotiate_video_format(
 /// Audio plane for Welcome: Opus, or lossless PCM when client, operator, and the
 /// capture-rate probe all allow it. Async for that blocking probe.
 async fn negotiate_audio_plane(
-    conn: &quinn::Connection,
+    conn: &super::link::SessionLink,
     hello: &Hello,
     audio_channels: u8,
     bitrate_kbps: u32,

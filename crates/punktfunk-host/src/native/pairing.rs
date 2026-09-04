@@ -19,7 +19,7 @@ const PAIRING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Host SPAKE2 (role B). Consumes the armed PIN after the challenge write so a
 /// vanished client still burns the one online guess. Both stream writes time out.
 pub(super) async fn pair_ceremony(
-    conn: &quinn::Connection,
+    conn: &super::link::SessionLink,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     req: PairRequest,
@@ -28,7 +28,8 @@ pub(super) async fn pair_ceremony(
     pin: &str,
 ) -> Result<()> {
     use punktfunk_core::quic::pake;
-    let client_fp = endpoint::peer_fingerprint(conn)
+    let client_fp = conn
+        .peer_fingerprint()
         .ok_or_else(|| anyhow!("pairing requires the client to present a certificate"))?;
     let client_fp_hex = fingerprint_hex(&client_fp);
     // Unpaired wire name: scrub once here and log only that value.

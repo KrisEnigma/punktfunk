@@ -430,7 +430,7 @@ pub(crate) async fn serve(
         let conn_err = conn.clone();
         sessions.spawn(async move {
             match serve_session(
-                conn,
+                conn.into(),
                 &opts,
                 &audio_cap,
                 inj_tx,
@@ -545,7 +545,7 @@ const REJECT_BUSY_CODE: u32 = punktfunk_core::reject::REJECT_BUSY_CLOSE_CODE;
 
 /// Close with the typed reject code before the session task returns `Err`. A bare drop
 /// closes with code 0, which the client cannot tell from transport trouble.
-fn close_rejected(conn: &quinn::Connection, reason: punktfunk_core::reject::RejectReason) {
+fn close_rejected(conn: &link::SessionLink, reason: punktfunk_core::reject::RejectReason) {
     conn.close(reason.close_code().into(), reason.to_string().as_bytes());
 }
 
@@ -647,7 +647,7 @@ fn access_sleep(deadline: Option<i64>, warned: &[bool; 2], now: i64) -> std::tim
 /// and on every grant edit; folds the live mask within one event; typed-close at deadline,
 /// "expire now", or unpair. Closes only this connection — the owner's stream is untouched.
 async fn access_lifecycle(
-    conn: quinn::Connection,
+    conn: link::SessionLink,
     mut watch_rx: tokio::sync::watch::Receiver<crate::native_pairing::AccessState>,
     grants: Arc<AtomicU32>,
     clip_enabled: Arc<AtomicBool>,
@@ -1046,7 +1046,7 @@ enum Served {
 // Distinct host-lifetime handles from `serve`; a context struct would hide the lifetimes.
 #[allow(clippy::too_many_arguments)]
 async fn serve_session(
-    conn: quinn::Connection,
+    conn: link::SessionLink,
     opts: &Punktfunk1Options,
     audio_cap: &AudioCapSlot,
     inj_tx: std::sync::mpsc::Sender<InputEvent>,
@@ -1061,7 +1061,12 @@ async fn serve_session(
 ) -> Result<Served> {
     let peer = conn.remote_address();
 
-    let (mut send, mut recv) = match tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.accept_bi())
+    // Still quinn: the control plane's framing reads a `quinn::RecvStream` concretely, so a
+    // browser runs its own handshake in `crate::webtransport::session` until that is generalised.
+    let Some(quic) = conn.as_quic().cloned() else {
+        anyhow::bail!("this session path serves the native plane only");
+    };
+    let (mut send, mut recv) = match tokio::time::timeout(HANDSHAKE_TIMEOUT, quic.accept_bi())
         .await
         .map_err(|_| anyhow!("control stream timeout"))?
     {
@@ -1078,7 +1083,7 @@ async fn serve_session(
         .map_err(|_| anyhow!("first message timeout"))??;
     if let Ok(req) = PairRequest::decode(&first) {
         // Fingerprint-bound PIN window: only this device may consume (or burn) it.
-        let Some(client_fp) = endpoint::peer_fingerprint(&conn) else {
+        let Some(client_fp) = conn.peer_fingerprint() else {
             close_rejected(
                 &conn,
                 punktfunk_core::reject::RejectReason::IdentityRequired,
@@ -1143,7 +1148,7 @@ async fn serve_session(
                 punktfunk_core::WIRE_VERSION
             );
         }
-        let fp = endpoint::peer_fingerprint(&conn);
+        let fp = conn.peer_fingerprint();
         // `effective`, not `is_paired`: an expired record is listed but not authorized, so it
         // knocks like an unpaired device and re-approval is the re-grant.
         let authorized = fp
@@ -1219,7 +1224,7 @@ async fn serve_session(
 
     // Grants once at admission: effective mask + deadline + watch. Anonymous (`--open`) and
     // an identity with no record keep full control — nothing on the trust record to enforce.
-    let session_fp_hex = endpoint::peer_fingerprint(&conn).map(|fp| fingerprint_hex(&fp));
+    let session_fp_hex = conn.peer_fingerprint().map(|fp| fingerprint_hex(&fp));
     let admit_unix = wall_unix_now();
     let (initial_grants, deadline_unix, access_watch) = match session_fp_hex.as_deref() {
         Some(fp_hex) => match np.effective(fp_hex, admit_unix) {
@@ -1271,9 +1276,7 @@ async fn serve_session(
         let conn = conn.clone();
         tokio::spawn(async move {
             let reason = conn.closed().await;
-            if matches!(&reason, quinn::ConnectionError::ApplicationClosed(ac)
-                if ac.error_code == quinn::VarInt::from_u32(QUIT_CODE))
-            {
+            if reason.closed_with(QUIT_CODE) {
                 quit.store(true, Ordering::SeqCst);
             }
             stop.store(true, Ordering::SeqCst);
@@ -1399,8 +1402,13 @@ async fn serve_session(
     // Without CLIPBOARD the coordinator never starts (a watcher that doesn't exist can't leak).
     // Inert handle (`available: false`) keeps control-task arms uniform: NOT_PERMITTED, and
     // the decline loop still answers stray fetches.
-    let clip = if initial_grants & GRANT_CLIPBOARD != 0 {
-        pf_clipboard::start(conn.clone(), clip_enabled.clone(), compositor.is_some()).await
+    // The clipboard's fetch transfers are quinn streams, so it is on offer only where there are
+    // some — a browser takes the declining arm below until the control plane is carrier-agnostic.
+    let clip_quic = (initial_grants & GRANT_CLIPBOARD != 0)
+        .then(|| conn.as_quic().cloned())
+        .flatten();
+    let clip = if let Some(quic) = clip_quic {
+        pf_clipboard::start(quic, clip_enabled.clone(), compositor.is_some()).await
     } else {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_offer_tx, offer_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1479,7 +1487,9 @@ async fn serve_session(
     }
     // No backend: decline fetches instead of hanging (coordinator owns `accept_bi` when live).
     if !clip_available && pf_clipboard::enabled() {
-        pf_clipboard::spawn_decline_loop(conn.clone());
+        if let Some(quic) = conn.as_quic() {
+            pf_clipboard::spawn_decline_loop(quic.clone());
+        }
     }
 
     // Isolated gamescope: per-session input/audio/mic. Identity is the cert-fingerprint prefix
@@ -1545,7 +1555,16 @@ async fn serve_session(
             .name("punktfunk1-input".into())
             .spawn({
                 let input_route = input_route.clone();
-                move || input_thread(input_rx, conn, input_route, gamepad, pad_audio_on, grants)
+                move || {
+                    input_thread(
+                        input_rx,
+                        conn.into(),
+                        input_route,
+                        gamepad,
+                        pad_audio_on,
+                        grants,
+                    )
+                }
             })
             .context("spawn input thread")?
     };
@@ -1637,7 +1656,7 @@ async fn serve_session(
     // Handshake complete: CONNECTED. A client rejected earlier never emits either.
     let event_client = crate::events::ClientRef {
         name: hello.name.clone().unwrap_or_default(),
-        fingerprint: endpoint::peer_fingerprint(&conn).map(|fp| fingerprint_hex(&fp)),
+        fingerprint: conn.peer_fingerprint().map(|fp| fingerprint_hex(&fp)),
         plane: crate::events::Plane::Native,
     };
     crate::events::emit(crate::events::EventKind::ClientConnected {
@@ -1647,14 +1666,12 @@ async fn serve_session(
         let conn = conn.clone();
         tokio::spawn(async move {
             let reason = conn.closed().await;
-            let why = match &reason {
-                quinn::ConnectionError::ApplicationClosed(ac)
-                    if ac.error_code == quinn::VarInt::from_u32(QUIT_CODE) =>
-                {
-                    crate::events::DisconnectReason::Quit
-                }
-                quinn::ConnectionError::TimedOut => crate::events::DisconnectReason::Timeout,
-                _ => crate::events::DisconnectReason::Error,
+            let why = if reason.closed_with(QUIT_CODE) {
+                crate::events::DisconnectReason::Quit
+            } else if matches!(reason, link::LinkClosed::TimedOut) {
+                crate::events::DisconnectReason::Timeout
+            } else {
+                crate::events::DisconnectReason::Error
             };
             crate::events::emit(crate::events::EventKind::ClientDisconnected {
                 client: event_client,
@@ -1665,7 +1682,7 @@ async fn serve_session(
 
     // Mode-conflict admission: later clients see this identity + mode + stop (and may `steal`).
     let _live_guard = {
-        let id = endpoint::peer_fingerprint(&conn);
+        let id = conn.peer_fingerprint();
         let label = id
             .map(|fp| {
                 fp.iter()
@@ -1707,7 +1724,9 @@ async fn serve_session(
         let iso_sink = None;
         std::thread::Builder::new()
             .name("punktfunk1-audio".into())
-            .spawn(move || audio_thread(conn, stop, cap, channels, budget, audio_plane, iso_sink))
+            .spawn(move || {
+                audio_thread(conn.into(), stop, cap, channels, budget, audio_plane, iso_sink)
+            })
             .map_err(|e| tracing::warn!(error = %e, "audio thread spawn failed — session continues without audio"))
             .ok()
     } else {
@@ -1815,7 +1834,7 @@ async fn serve_session(
     // Reconnect inside the game's window: cancel pending termination. Data plane re-adopts via
     // `launchreg` (carries the original launch instant). Matched on (this client, this title).
     if let Some(target) = launch_target.as_ref() {
-        let fp = punktfunk_core::quic::endpoint::peer_fingerprint(&conn).map(hex::encode);
+        let fp = conn.peer_fingerprint().map(hex::encode);
         // `readopt` already logged leftover processes.
         let _reprieved = crate::gamelease::readopt(fp.as_deref(), target.game.id.as_deref());
     }
@@ -1870,11 +1889,13 @@ async fn serve_session(
     let multi_slice = hello.video_caps & punktfunk_core::quic::VIDEO_CAP_MULTI_SLICE != 0;
     let stats_dp = stats;
     // Stats label: cert-fingerprint prefix, else peer IP (anonymous TOFU/--open).
-    let client_label = endpoint::peer_fingerprint(&conn)
+    let client_label = conn
+        .peer_fingerprint()
         .map(|fp| fingerprint_hex(&fp)[..12].to_string())
         .unwrap_or_else(|| conn.remote_address().ip().to_string());
     // Tray toast: trust-store name (rename at approval wins), else sanitized Hello. `None` if nameless.
-    let client_name = endpoint::peer_fingerprint(&conn)
+    let client_name = conn
+        .peer_fingerprint()
         .map(|fp| fingerprint_hex(&fp))
         .and_then(|fp_hex| {
             np.list()

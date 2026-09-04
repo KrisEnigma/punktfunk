@@ -1472,6 +1472,11 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
     const EXPECTED: &[(&str, &str, bool, bool)] = &[
         // Host/status: plugin-readable; the small read-only set is the cert lane's.
         ("GET", "/api/v1/health", true, false), // always open, handled before either gate
+        // The browser plane's certificate hash. Neither gate admits it and neither needs to:
+        // `require_auth` exempts the path outright, because a browser that has never paired holds
+        // no credential and the response authorises nothing — a certificate hash is what any peer
+        // learns by connecting. See `mgmt::webtransport`.
+        ("GET", "/api/v1/webtransport", false, false),
         ("GET", "/api/v1/host", true, true),
         ("GET", "/api/v1/status", true, true),
         ("GET", "/api/v1/local/summary", true, false), // loopback-only, handled before the gates
