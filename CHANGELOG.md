@@ -254,6 +254,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **HDR plus 4:4:4 carries full chroma again on Windows.** The in-driver encoder took P010 for
   every HDR session, so NVENC emitted 4:2:0 while the `SET_ENCODE` reply still promised 4:4:4.
   Nothing to do: such a session now opens on the packed 10-bit RGB input.
+- **iPad and Apple TV audio no longer sits 40–90 ms behind the picture with the mic off.** On
+  some devices, in some states, iOS handed the app an 85 ms audio buffer because the mic-off
+  session never asked for one; the client then had to hold that much audio before every
+  speaker callback, so lip sync was off by that amount on any network, and the HUD showed the
+  audio buffer bouncing between 15 and 115 ms with a/v at +40 or more. The client now asks
+  for 10 ms whether or not the mic is on, logs what it asked for and what it got at connect,
+  and warns when iOS gives it far more. Nothing to do.
 - **A re-run upgrades a box that already has every package.** The install phase skipped the
   packages entirely when the host, console and plugin runner were all present, so a box carrying
   a broken build could only be cleared by uninstalling first — nothing to do.
