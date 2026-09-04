@@ -675,6 +675,7 @@ struct LibraryView: View {
         guard let onLaunch else { return nil }
         return { id in
             LibraryScrollMemory.remember(id, forHost: host.id.uuidString)
+            LaunchedEntry.remember(games.first { $0.id == id }, from: TileFrames.rect(id))
             onLaunch(id)
         }
     }
@@ -779,7 +780,7 @@ private struct GameCard: View {
         VStack(alignment: .leading, spacing: 6) {
             PosterImage(
                 candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
-                icon: game.iconToken)
+                icon: game.iconToken, frameID: game.id)
                 .aspectRatio(2.0 / 3.0, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))

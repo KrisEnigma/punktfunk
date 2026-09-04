@@ -259,11 +259,13 @@ fun ConnectScreen(
         }
         if (learned) savedHosts = knownHostStore.all()
     }
-    // Saved hosts proven reachable by a QUIC probe this cycle, keyed "address:port" — the
-    // routed-network (Tailscale/VPN) counterpart to mDNS presence, since such hosts never
-    // advertise. OR'd into `isOnline` below so their pips light up. Probe only saved hosts NOT
-    // already seen on mDNS, off the main thread, every ~12 s; gated on LNP (blocked UDP would
-    // just time out). `rememberUpdatedState` keeps the 1 Hz mDNS updates from restarting the loop.
+    // Saved hosts proven reachable by a QUIC probe this cycle, keyed "address:port" — and the ONLY
+    // thing [isOnline] reads. An mDNS advert is not proof of life: it is a cache entry with a
+    // 75-minute TTL that a host suspending sends no goodbye for, so a sleeping machine kept every
+    // pip green and every "not advertising" wake gate shut. Every saved host is probed, at the
+    // address its live advert claims when there is one (a cold boot can land on a new DHCP lease),
+    // off the main thread, every ~12 s; gated on LNP (blocked UDP would just time out).
+    // `rememberUpdatedState` keeps the 1 Hz mDNS updates from restarting the loop.
     var reachable by remember { mutableStateOf<Set<String>>(emptySet()) }
     val discoveredNow by rememberUpdatedState(discovered)
     LaunchedEffect(savedHosts, lnpGranted) {
@@ -272,11 +274,16 @@ fun ConnectScreen(
             return@LaunchedEffect
         }
         while (true) {
-            val targets = savedHosts.filter { kh -> discoveredNow.none { kh.matches(it) } }
+            // Keyed by the SAVED address whichever one answered, so the key stays the one every
+            // caller looks up.
+            val targets = savedHosts.map { kh ->
+                val live = discoveredNow.firstOrNull { kh.matches(it) }
+                Triple("${kh.address}:${kh.port}", live?.host ?: kh.address, live?.port ?: kh.port)
+            }
             reachable = withContext(Dispatchers.IO) {
                 targets
-                    .filter { NativeBridge.nativeProbe(it.address, it.port, 3_000) }
-                    .map { "${it.address}:${it.port}" }
+                    .filter { (_, addr, port) -> NativeBridge.nativeProbe(addr, port, 3_000) }
+                    .map { (key, _, _) -> key }
                     .toSet()
             }
             delay(12_000)
@@ -317,7 +324,7 @@ fun ConnectScreen(
             val now = android.os.SystemClock.elapsedRealtime()
             for (kh in savedHosts) {
                 if (!kh.paired || kh.fpHex.isEmpty()) continue
-                if (!kh.isOnline(discoveredNow, reachableNow)) continue
+                if (!kh.isOnline(reachableNow)) continue
                 if (now - (hostActionsAt[kh.fpHex] ?: 0L) < HOST_ACTIONS_TTL_MS) continue
                 // Stamp BEFORE the request, so a slow host cannot make every lap ask again.
                 hostActionsAt = hostActionsAt + (kh.fpHex to now)
@@ -448,13 +455,13 @@ fun ConnectScreen(
     }
 
     // Wake-aware connect. If auto-wake is on (Settings.autoWakeEnabled) and the target is a saved
-    // host with a learned MAC that ISN'T currently advertising, fire a wake packet and DIAL
-    // IMMEDIATELY — mDNS absence does NOT mean unreachable (a host reached over a routed network —
-    // Tailscale/VPN/another subnet — is mDNS-blind forever, and gating the dial on presence bricked
-    // exactly those reconnects). A genuinely-asleep box is already booting while the dial times out;
-    // only a FAILED dial falls into the wake-and-WAIT-for-mDNS flow (WakeController's "Waking…"
-    // overlay), which redials once the host reappears. Otherwise (auto-wake off, no MAC, or already
-    // seen live) dial straight through.
+    // host with a learned MAC that the probe did NOT reach, fire a wake packet and DIAL IMMEDIATELY
+    // — looking unreachable does not mean unreachable (a host over a routed network —
+    // Tailscale/VPN/another subnet — answers a dial it never advertised for, and gating the dial on
+    // presence bricked exactly those reconnects). A genuinely-asleep box is already booting while
+    // the dial times out; only a FAILED dial falls into the wake-and-wait flow (WakeController's
+    // "Waking…" overlay), which redials once the host answers. Otherwise (auto-wake off, no MAC, or
+    // already reachable) dial straight through.
     fun doConnect(
         targetHost: String,
         targetPort: Int,
@@ -478,7 +485,8 @@ fun ConnectScreen(
         fun liveAdvert(): DiscoveredHost? =
             if (kh != null) discovered.firstOrNull { kh.matches(it) }
             else discovered.firstOrNull { it.host == targetHost && it.port == targetPort }
-        if (settings.autoWakeEnabled && macs.isNotEmpty() && liveAdvert() == null) {
+        val down = kh == null || !kh.isOnline(reachable)
+        if (settings.autoWakeEnabled && macs.isNotEmpty() && down) {
             // Fire-and-forget first packet (harmless if it's awake), then dial-first.
             scope.launch(Dispatchers.IO) { NativeBridge.nativeWakeOnLan(macs.joinToString(","), targetHost) }
             doConnectDirect(targetHost, targetPort, name, pinHex, profile, launch, onFailure = {
@@ -487,7 +495,16 @@ fun ConnectScreen(
                     connectsAfter = true,
                     macs = macs,
                     lastIp = targetHost,
-                    isOnline = { liveAdvert() != null },
+                    // A live advert would answer in milliseconds and lie (see [isOnline]); this
+                    // asks the host itself, at the address it advertises if it moved lease.
+                    isOnline = {
+                        val live = liveAdvert()
+                        withContext(Dispatchers.IO) {
+                            NativeBridge.nativeProbe(
+                                live?.host ?: targetHost, live?.port ?: targetPort, 3_000,
+                            )
+                        }
+                    },
                     onOnline = {
                         val live = liveAdvert()
                         // Woke back on a new address? Re-key the saved record so it (and future
@@ -831,10 +848,14 @@ fun ConnectScreen(
             connectsAfter = false,
             macs = kh.mac,
             lastIp = kh.address,
-            // "Back up" is mDNS presence ONLY — narrower than the [isOnline] that decides whether to
-            // OFFER Wake, which also counts a QUIC probe answer. Matched through `matches`, so a
-            // cold boot onto a new DHCP address still ends the wait.
-            isOnline = { discovered.any { kh.matches(it) } },
+            // "Back up" is the host answering a probe, at the address its advert claims if a cold
+            // boot moved it — never the advert alone, which a sleeping host keeps publishing.
+            isOnline = {
+                val live = discovered.firstOrNull { kh.matches(it) }
+                withContext(Dispatchers.IO) {
+                    NativeBridge.nativeProbe(live?.host ?: kh.address, live?.port ?: kh.port, 3_000)
+                }
+            },
             onOnline = {},
         )
     }
@@ -922,7 +943,7 @@ fun ConnectScreen(
     ConnectPrompts(
         identity = identity,
         profiles = profiles,
-        isOnline = { it.isOnline(discovered, reachable) },
+        isOnline = { it.isOnline(reachable) },
         pendingTrust = pendingTrust,
         onPendingTrustChange = { pendingTrust = it },
         onTrustNew = { pt ->
@@ -1040,12 +1061,14 @@ internal fun KnownHost.matches(dh: DiscoveredHost): Boolean {
 }
 
 /**
- * True when a saved host is reachable RIGHT NOW: advertising on mDNS OR answering the QUIC probe
- * (a host reached over a routed network — Tailscale/VPN — never advertises but is reachable). The
- * display-side companion to dial-first: presence no longer means "on this LAN".
+ * True when a saved host is reachable RIGHT NOW: it answered the last QUIC probe. Deliberately NOT
+ * "advertising on mDNS" — an advert is a cache entry a sleeping host keeps alive for up to 75
+ * minutes, so reading it as presence left the pip green and Wake-on-LAN silent for exactly the
+ * machine that needed waking. It also never covered a routed host (Tailscale/VPN), which answers a
+ * dial it never advertised for.
  *
  * `internal`, not private: the touch grid draws the same pip in its own file now, and the console's
  * tile builder is handed this as a lambda so it never has to know what "reachable" is made of.
  */
-internal fun KnownHost.isOnline(discovered: List<DiscoveredHost>, reachable: Set<String>): Boolean =
-    discovered.any { matches(it) } || reachable.contains("$address:$port")
+internal fun KnownHost.isOnline(reachable: Set<String>): Boolean =
+    reachable.contains("$address:$port")

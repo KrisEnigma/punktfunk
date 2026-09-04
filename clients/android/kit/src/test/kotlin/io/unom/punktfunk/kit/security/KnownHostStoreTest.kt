@@ -55,6 +55,19 @@ class KnownHostStoreTest {
         val legacy = JSONObject().put("addr", "10.0.0.5").put("port", 9777).toString()
         assertEquals("", JSONObject(legacy).optString("os", ""))
     }
+
+    @Test
+    fun perTitleProfileBindingsSurviveTheRoundTripAndDefaultEmpty() {
+        val plain = KnownHost("10.0.0.5", 9777, "HTPC", "a".repeat(64), true)
+        assertTrue(plain.gameProfiles.isEmpty())
+        val bound = plain.copy(gameProfiles = mapOf("halo" to "p2"))
+        val j = JSONObject(KnownHostStore.encode(bound))
+        assertEquals("p2", j.getJSONObject("game_profiles").getString("halo"))
+        // A record written before the field existed has no key and reads back empty —
+        // the same additive rule as `os` above, so no migration is owed.
+        val legacy = JSONObject(KnownHostStore.encode(plain))
+        assertEquals(0, legacy.getJSONObject("game_profiles").length())
+    }
 }
 
 /**

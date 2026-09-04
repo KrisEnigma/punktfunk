@@ -300,6 +300,22 @@ struct ContentView: View {
                 home
             }
         }
+        // The launch hold rides OVER this switch, because it starts before it: the cover leaves
+        // its shelf tile at the tap, while `home` is still up, and the swap to `sessionView`
+        // happens behind it. Mounting is instant (the view fades its own backdrop in over the
+        // shelf — that fade IS the transition); only the reveal fades out.
+        .overlay {
+            if let hold = model.launchHold {
+                LaunchHoldView(
+                    entry: hold.entry, host: model.activeHost,
+                    connecting: model.connection == nil, sourceRect: hold.sourceRect,
+                    onShow: { model.revealStream() })
+                    // Its own view per launch — a reused one keeps the last flight's state.
+                    .id(hold.seq)
+                    .transition(.asymmetric(insertion: .identity, removal: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: model.launchHold)
         .onAppear {
             seedDefaultModeIfNeeded()
             autoConnectIfAsked()
@@ -922,7 +938,8 @@ struct ContentView: View {
             #if os(tvOS)
             // The focus engine only enters the takeover once nothing under it can hold focus;
             // then Menu reaches the overlay's `.onExitCommand` instead of the launcher — or the app.
-            .disabled(connectingOverlayName != nil || waker.waking != nil)
+            .disabled(
+                connectingOverlayName != nil || waker.waking != nil || model.launchHold != nil)
             #endif
             .overlay {
                 ConnectOverlay(
@@ -940,7 +957,10 @@ struct ContentView: View {
     /// during the delegated-approval wait (that has its own "Waiting for approval" prompt, so the
     /// takeover must not stack over it) and, of course, when idle or streaming.
     private var connectingOverlayName: String? {
-        guard awaitingApproval == nil, model.phase == .connecting, let host = model.activeHost
+        // A launch dial has the launch hold instead — that says which GAME is coming, and stacking
+        // "Connecting to <host>" on top of it would be two takeovers for one act.
+        guard awaitingApproval == nil, model.launchHold == nil,
+              model.phase == .connecting, let host = model.activeHost
         else { return nil }
         return host.displayName
     }
@@ -1473,29 +1493,32 @@ struct ContentView: View {
         profile: ProfileSelection = .inherit,
         allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil
     ) {
+        // Dial the record as it stands NOW: a host that came back on a new DHCP lease was re-keyed
+        // by the reachability check while we waited, and the value captured here is then stale.
         let go = {
             startSessionDirect(
-                host, launchID: launchID, profile: profile, allowTofu: allowTofu,
+                store.hosts.first { $0.id == host.id } ?? host,
+                launchID: launchID, profile: profile, allowTofu: allowTofu,
                 requestAccess: requestAccess, approvalReq: approvalReq)
         }
-        // Not advertising and we can wake it? DIAL FIRST anyway — no mDNS advert does NOT mean
-        // unreachable: a host reached over a routed network (Tailscale/VPN/another subnet) is
-        // mDNS-blind forever, and gating the dial on presence bricked exactly those reconnects
-        // (the host log shows no connection attempt at all; the tile pip and this gate share the
-        // LAN-only `advertises` predicate). `prepareWake` inside the dial already fires the magic
-        // packet up front, so a genuinely-asleep host is waking while the connect times out; only
-        // when that dial FAILS do we fall into the visible "Waking…" wait — a cold box takes far
-        // longer to boot than a connect will sit — and redial once it's back on mDNS.
+        // Down (by the probe, not by mDNS — a sleeping host advertises for another 75 minutes) and
+        // we can wake it? DIAL FIRST anyway, since unreachable-looking is not unreachable: a host
+        // over a routed network (Tailscale/VPN/another subnet) answers a dial it never advertised
+        // for. `prepareWake` inside the dial already fires the magic packet up front, so a
+        // genuinely-asleep host is waking while the connect times out; only when that dial FAILS do
+        // we fall into the visible "Waking…" wait — a cold box takes far longer to boot than a
+        // connect will sit — and redial once it answers.
         if autoWakeEnabled, PunktfunkConnection.wakeOnLANAvailable,
-           !host.wakeMacs.isEmpty, !discovery.advertises(host) {
-            discovery.start() // so the wake-wait can observe it reappear
+           !host.wakeMacs.isEmpty, !store.probedOnline.contains(host.id) {
+            discovery.start() // so the wake-wait can pick up a host that moved address
             startSessionDirect(
                 host, launchID: launchID, profile: profile, allowTofu: allowTofu,
                 requestAccess: requestAccess, approvalReq: approvalReq,
                 onUnreachable: {
                     waker.start(
                         host: host, connectsAfter: true, macs: host.wakeMacs, lastIP: host.address,
-                        isOnline: { discovery.advertises(host) }, onOnline: go)
+                        isOnline: { await store.isReachable(host, discovery: discovery) },
+                        onOnline: go)
                 })
         } else {
             go()
@@ -1538,22 +1561,22 @@ struct ContentView: View {
     }
 
     /// Learn-while-awake, wake-while-asleep — run just before every connect:
-    ///  • host currently advertising (awake) → refresh its stored Wake-on-LAN MAC(s) from the live
-    ///    advert, so a later wake has an up-to-date target;
-    ///  • host NOT advertising (likely asleep/off) and we have MAC(s) → fire a magic packet first.
-    ///    The connect that follows already retries/times out long enough for a woken host to come
-    ///    up; if it's genuinely off/unreachable the connect fails as before. Best-effort and
-    ///    non-blocking (the send runs off the main thread).
+    ///  • an advert matches this host → refresh the MAC(s), OS chain and mgmt port it publishes, so
+    ///    a later wake has an up-to-date target and the library keeps working once this device can
+    ///    no longer see the advert (VPN, routed subnet, multicast-dead Wi-Fi);
+    ///  • the probe did NOT reach it and we have MAC(s) → fire a magic packet first. The two are
+    ///    independent: a sleeping host keeps advertising for up to 75 minutes, so a live advert is
+    ///    no reason to withhold the packet — reading it as one is why auto-wake stayed silent for
+    ///    the host it was meant to wake. Best-effort and non-blocking (the send is off-main).
     private func prepareWake(for host: StoredHost) {
         if let live = discovery.hosts.first(where: { host.matches($0) }) {
             store.updateMacs(host.id, macs: live.macAddresses) // learn — on every platform
             store.updateOsChain(host.id, chain: live.osChain) // ditto for the card's OS mark
-            // ...and the mgmt port, so the library keeps working against a host that moved it once
-            // this device can no longer see the advert (VPN, routed subnet, multicast-dead Wi-Fi).
             store.updateMgmtPort(host.id, port: live.mgmtPort)
-        } else if autoWakeEnabled, PunktfunkConnection.wakeOnLANAvailable, !host.wakeMacs.isEmpty {
-            // Auto-wake only: fire the up-front packet so a genuinely-asleep host is booting while the
-            // dial times out. With auto-wake off, connects go straight through (no packet).
+        }
+        // Auto-wake only. With it off, connects go straight through (no packet).
+        if autoWakeEnabled, PunktfunkConnection.wakeOnLANAvailable, !host.wakeMacs.isEmpty,
+           !store.probedOnline.contains(host.id) {
             let macs = host.wakeMacs
             let ip = host.address
             DispatchQueue.global(qos: .userInitiated).async {
@@ -1585,7 +1608,7 @@ struct ContentView: View {
         discovery.start()
         waker.start(
             host: host, connectsAfter: false, macs: host.wakeMacs, lastIP: host.address,
-            isOnline: { discovery.advertises(host) }, onOnline: {})
+            isOnline: { await store.isReachable(host, discovery: discovery) }, onOnline: {})
     }
 
     /// Picked a title in the (experimental) library: dismiss the browser and start a session that

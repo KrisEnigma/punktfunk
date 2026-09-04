@@ -368,10 +368,14 @@ class ProfileStore(context: Context) {
      * which is why it must survive as a value all the way down here. A binding whose profile was
      * deleted resolves as none: never an error, never a blocked connect.
      */
-    fun resolveFor(host: KnownHost?, oneOff: String?): StreamProfile? = when {
-        oneOff != null -> resolve(oneOff).first
-        else -> host?.profileId?.let(::byId)
-    }
+    fun resolveFor(host: KnownHost?, oneOff: String?, launch: String? = null): StreamProfile? =
+        when {
+            oneOff != null -> resolve(oneOff).first
+            // A title's own binding is the more specific answer to the same question; a
+            // deleted one falls through to the host's default, not past it to the globals.
+            else -> launch?.let { host?.gameProfiles?.get(it) }?.let(::byId)
+                ?: host?.profileId?.let(::byId)
+        }
 
     /** [host]'s pinned profiles, in card order, with duplicates and deleted profiles dropped. */
     fun pinsFor(host: KnownHost): List<StreamProfile> =

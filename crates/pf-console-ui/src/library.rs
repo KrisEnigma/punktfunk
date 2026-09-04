@@ -699,6 +699,15 @@ pub struct LibraryGame {
     pub icon: String,
     /// Host free-form display string (`"PC"`, `"PS2"`, …). `None` until [`crate::collate`] assigns a bucket.
     pub platform: Option<String>,
+    /// What the launch hold says about a title beyond its name. The shelf draws none of it —
+    /// a tile is a poster — so all three default, and a host or a bridge that says nothing
+    /// leaves the hold with the title and the store, which is what it showed before.
+    #[serde(default)]
+    pub developer: Option<String>,
+    #[serde(default)]
+    pub year: Option<u16>,
+    #[serde(default)]
+    pub genres: Vec<String>,
     /// Already up on the host — pick resumes. From `/api/v1/status` via [`LibraryShared::set_running`].
     ///
     /// Host state, not catalog state: not on `GameEntry`, not persisted. A disk shelf cannot
@@ -745,6 +754,12 @@ struct Shared {
     /// catching `Loading`. A warm cache publishes `Ready` inside one 60 Hz frame, so a
     /// phase edge can be missed; a counter cannot.
     fetch_epoch: u64,
+    /// Each launched title's host-side state string (`launching`, `running`, …), by library
+    /// id — the launch hold's answer. Replaced whole on every `/status` read.
+    states: std::collections::HashMap<String, String>,
+    /// Bumped on every `/status` read, changed or not: the launch hold paces its next poll
+    /// on an answer landing, not on the answer being different.
+    status_gen: u64,
 }
 
 pub(crate) struct LibrarySnapshot {
@@ -767,6 +782,8 @@ impl Default for LibraryShared {
             art_in: VecDeque::new(),
             generation: 0,
             fetch_epoch: 0,
+            states: std::collections::HashMap::new(),
+            status_gen: 0,
         })))
     }
 }
@@ -833,15 +850,23 @@ impl LibraryShared {
         s.generation += 1;
     }
 
-    /// Titles currently up, by library id; re-order. `/status` is read after the catalog.
-    /// Empty set clears every badge (older or unreachable host).
+    /// The host's `/status` `games[]`, read after the catalog: which titles are up (the
+    /// Resume badge, re-ordered) and each one's state (the launch hold). An empty list
+    /// clears every badge (older or unreachable host).
     ///
-    /// No-op — no generation bump — when nothing changed. This is polled.
-    pub fn set_running(&self, up: &std::collections::HashSet<String>) {
+    /// The badge side is a no-op — no generation bump — when nothing changed. This is polled.
+    pub fn set_running(&self, games: &[pf_client_core::library::RunningGame]) {
         let mut s = self.0.lock().unwrap();
+        s.status_gen += 1;
+        s.states = games
+            .iter()
+            .filter_map(|g| Some((g.app_id.clone()?, g.state.clone())))
+            .collect();
         let mut changed = false;
         for g in &mut s.games {
-            let now = up.contains(&g.id);
+            let now = games
+                .iter()
+                .any(|r| r.is_up() && r.app_id.as_deref() == Some(g.id.as_str()));
             if g.running != now {
                 g.running = now;
                 changed = true;
@@ -854,6 +879,17 @@ impl LibraryShared {
         order(&mut games);
         s.games = games;
         s.generation += 1;
+    }
+
+    /// The host's state string for one launched title, from the last `/status` read; `None`
+    /// when the host lists nothing for it (no lease yet, or the launch never resolved).
+    pub(crate) fn launch_state(&self, id: &str) -> Option<String> {
+        self.0.lock().unwrap().states.get(id).cloned()
+    }
+
+    /// How many `/status` reads have landed — see `status_gen`.
+    pub(crate) fn status_gen(&self) -> u64 {
+        self.0.lock().unwrap().status_gen
     }
 
     pub fn push_art(&self, id: String, bytes: Vec<u8>) {
@@ -1321,6 +1357,9 @@ mod tests {
             launcher,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1348,6 +1387,9 @@ mod tests {
             launcher,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1358,10 +1400,7 @@ mod tests {
             g("Heroic", true),
             g("Tunic", false),
         ]);
-        let up: std::collections::HashSet<String> = ["steam:Portal 2", "steam:Heroic"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let up = running(&["steam:Portal 2", "steam:Heroic"], "running");
         shared.set_running(&up);
         let snap = shared.snapshot();
         let titles: Vec<&str> = snap.games.iter().map(|g| g.title.as_str()).collect();
@@ -1382,10 +1421,61 @@ mod tests {
         shared.set_running(&up);
         assert_eq!(shared.snapshot().generation, gen_before);
 
-        shared.set_running(&std::collections::HashSet::new());
+        shared.set_running(&[]);
         let after = shared.snapshot();
         assert!(after.games.iter().all(|g| !g.running));
         assert!(after.generation > gen_before, "a real change does re-sync");
+    }
+
+    fn running(ids: &[&str], state: &str) -> Vec<pf_client_core::library::RunningGame> {
+        ids.iter()
+            .map(|id| pf_client_core::library::RunningGame {
+                app_id: Some((*id).to_string()),
+                title: String::new(),
+                state: state.to_string(),
+            })
+            .collect()
+    }
+
+    /// The launch hold reads each title's state, and paces on reads landing — so a read
+    /// that changes no badge still counts, and `launching` is up for the badge but not
+    /// running for the hold.
+    #[test]
+    fn status_reads_keep_state_and_count_even_when_nothing_changed() {
+        let shared = LibraryShared::default();
+        shared.set_games(vec![LibraryGame {
+            id: "steam:Celeste".into(),
+            title: "Celeste".into(),
+            store: "steam".into(),
+            launcher: false,
+            icon: String::new(),
+            platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
+            running: false,
+        }]);
+        assert_eq!(shared.status_gen(), 0);
+        shared.set_running(&running(&["steam:Celeste"], "launching"));
+        assert_eq!(shared.status_gen(), 1);
+        assert_eq!(
+            shared.launch_state("steam:Celeste").as_deref(),
+            Some("launching")
+        );
+        assert!(
+            shared.snapshot().games[0].running,
+            "launching is up on the shelf"
+        );
+        let badges = shared.snapshot().generation;
+        shared.set_running(&running(&["steam:Celeste"], "running"));
+        assert_eq!(shared.status_gen(), 2);
+        assert_eq!(shared.snapshot().generation, badges, "no badge moved");
+        assert_eq!(
+            shared.launch_state("steam:Celeste").as_deref(),
+            Some("running")
+        );
+        shared.set_running(&[]);
+        assert_eq!(shared.launch_state("steam:Celeste"), None);
     }
 
     /// Cached catalog is `Ready` + stale, never an error. Live `set_games` clears the flag.
@@ -1398,6 +1488,9 @@ mod tests {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1436,6 +1529,9 @@ mod tests {
                     launcher: false,
                     icon: String::new(),
                     platform: None,
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
                     running: false,
                 })
                 .collect(),

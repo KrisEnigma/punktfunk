@@ -94,6 +94,11 @@ env:
   # sccache and incremental compilation are mutually exclusive; CI wants the shared
   # cache, dev boxes keep incremental.
   CARGO_INCREMENTAL: "0"
+  # rustc overflowed its own stack compiling pf-console-ui for x86_64-linux-android at
+  # opt-level 3 (exit 254, "we would appreciate a report") — inside this container, and
+  # nowhere else: the same crate, profile and target build on a dev machine. 16 MiB is
+  # what the crash note itself asks for.
+  RUST_MIN_STACK: "16777216"
   # The Skia console (pf-console-ui over skia-bindings, design/android-skia-console-port.md):
   # prebuilt Skia archives for all three Android ABIs come from our own release
   # (git.unom.io/unom/skia-binaries) — kit/build.gradle.kts fetches them itself, verifies each

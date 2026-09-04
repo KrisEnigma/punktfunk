@@ -44,8 +44,16 @@ const ART_BUDGET: usize = 160;
 /// Twice the grid cell: mip levels both arrangements sample. Smaller magnifies the shelf.
 const ART_CACHE_W: f64 = GRID_W * 2.0;
 const ART_CACHE_H: f64 = GRID_H * 2.0;
-/// A 600×900 JPEG is ~10 ms; two/frame is 120/s and at most one dropped frame.
-pub(super) const ART_DECODES_PER_FRAME: usize = 2;
+/// How much of a frame poster decoding may spend before it yields to the next one.
+///
+/// A COUNT cannot be right for two machines an order of magnitude apart: two per frame is
+/// nothing on a desktop and a dropped frame on a 2020 TV, where one 600×900 JPEG costs more
+/// than the whole 16 ms budget. A time budget self-tunes — fast hardware fills the shelf in
+/// the same few frames it always did, slow hardware decodes one and gets on with drawing.
+///
+/// Always at least one per frame regardless: a budget already spent must still make progress,
+/// or a slow panel would never finish loading at all.
+pub(super) const ART_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
 /// Fit `src` into [`ART_CACHE_W`]×[`ART_CACHE_H`] at `k`. Source aspect; never enlarge.
 ///
@@ -68,7 +76,14 @@ fn art_cache_size(src: (i32, i32), k: f64) -> (i32, i32) {
 /// `Image::from_encoded` defers decode until use; a GPU purge then re-decodes JPEG on
 /// the render thread. Shared with collections so both screens agree on cache size.
 pub(super) fn decode_poster(bytes: &[u8], k: f64) -> Option<Image> {
-    let img = Image::from_encoded(Data::new_copy(bytes))?;
+    let started = std::time::Instant::now();
+    let data = Data::new_copy(bytes);
+    // Decoding at the size we keep, rather than in full and then resampling, is most of the
+    // cost of filling a shelf: see [`decode_near_cache_size`].
+    let (img, native_scaled) = match decode_near_cache_size(&data, k) {
+        Some(img) => (img, true),
+        None => (Image::from_encoded(data)?, false),
+    };
     let want = art_cache_size((img.width(), img.height()), k);
     let scaled = if want == (img.width(), img.height()) {
         None
@@ -80,7 +95,38 @@ pub(super) fn decode_poster(bytes: &[u8], k: f64) -> Option<Image> {
     // A refused scale keeps the full-size image rather than dropping the cover.
     let out = scaled.unwrap_or_else(|| img.clone());
     let mipped = out.with_default_mipmaps();
+    crate::art_stats::record(started.elapsed(), native_scaled);
     Some(mipped.unwrap_or(out))
+}
+
+/// Decode straight to (or just above) the size the cache keeps, using the codec's own scaling.
+///
+/// A JPEG scales in the DCT — 1/2, 3/8, 1/4 and so on come out of the decoder for a fraction
+/// of the work a full decode costs, and a 600×900 cover into a 300×450 cache is exactly the
+/// 1/2 case. The full-size decode this replaces threw most of those pixels away in the resample
+/// on the very next line.
+///
+/// `None` when the codec cannot help — an unsupported format, or art already small enough to
+/// keep whole — and the caller falls back to decoding it in full.
+fn decode_near_cache_size(data: &Data, k: f64) -> Option<Image> {
+    let mut codec = skia_safe::codec::Codec::from_data(data.clone())?;
+    let src = codec.dimensions();
+    let want = art_cache_size((src.width, src.height), k);
+    if want == (src.width, src.height) {
+        return None;
+    }
+    // Width alone: `art_cache_size` keeps the source aspect, so both axes carry one scale.
+    let desired = want.0 as f32 / src.width as f32;
+    let native = codec.get_scaled_dimensions(desired);
+    // A codec that only offers the original size has nothing to give here — and one that
+    // UNDERSHOOTS is refused rather than accepted: `get_scaled_dimensions` approximates, and a
+    // decode below the cache size would quietly make every cover softer than the resample it
+    // replaced. Both cases fall back to the full decode.
+    if native == src || native.width < want.0 || native.height < want.1 {
+        return None;
+    }
+    let info = skia_safe::ImageInfo::new_n32_premul((native.width, native.height), None);
+    codec.get_image(info, None).ok()
 }
 
 /// Coldest stamps first, past [`ART_BUDGET`]. Split out so the policy tests without Skia.
@@ -134,7 +180,7 @@ fn placeholder_face(launcher: bool) -> Color4f {
 }
 
 /// Coverless cell. Launcher: brand face + mark. Game: quieter face + monogram. `None`: stale index.
-fn draw_poster_placeholder(
+pub(crate) fn draw_poster_placeholder(
     canvas: &Canvas,
     fonts: &Fonts,
     game: Option<&LibraryGame>,
@@ -488,6 +534,21 @@ impl LibraryScreen {
         &self.host.fp_hex
     }
 
+    /// A decoded poster, for the launch hold drawn over this shelf. The focused tile
+    /// keeps drawing underneath, so its poster is never the one evicted.
+    pub(crate) fn poster(&self, id: &str) -> Option<&Image> {
+        self.art.get(id)
+    }
+
+    /// Where this title's tile was last drawn — what the launch hold flies its cover
+    /// out of. Empty when the shelf has not drawn it (culled, or never laid out), which
+    /// the hold reads as "no tile" and arrives in place instead.
+    pub(crate) fn tile_rect(&self, id: &str) -> Rect {
+        (0..self.geom.len())
+            .find(|&i| self.game(i).is_some_and(|g| g.id == id))
+            .map_or(Rect::new_empty(), |i| self.geom[i])
+    }
+
     /// Filtered length for tests in another module, which cannot reach [`Self::len`].
     #[cfg(test)]
     pub(crate) fn len_for_test(&self) -> usize {
@@ -627,12 +688,18 @@ impl LibraryScreen {
             }
         }
         let k = self.art_k;
-        for (id, bytes) in shared.drain_art(ART_DECODES_PER_FRAME) {
+        // One at a time against the clock rather than a fixed count — see [`ART_FRAME_BUDGET`].
+        // The deadline is checked AFTER a decode so every frame lands at least one.
+        let started = std::time::Instant::now();
+        while let Some((id, bytes)) = shared.drain_art(1).pop() {
             match decode_poster(&bytes, k) {
                 Some(img) => {
                     self.art.insert(id, img);
                 }
                 None => tracing::debug!(%id, "undecodable poster"),
+            }
+            if started.elapsed() >= ART_FRAME_BUDGET {
+                break;
             }
         }
     }
@@ -1560,6 +1627,7 @@ mod tests {
             actions: Vec::new(),
             pin: None,
             bound_profile: None,
+            game_profiles: Default::default(),
         }
     }
 
@@ -1580,6 +1648,9 @@ mod tests {
                     launcher: false,
                     icon: String::new(),
                     platform: None,
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
                     running: false,
                 })
                 .collect(),
@@ -1874,6 +1945,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: None,
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             })
             .collect();
@@ -2054,6 +2128,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: platform.map(str::to_string),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             })
             .collect()

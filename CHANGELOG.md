@@ -23,10 +23,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
-- **The Windows driver protocol floor is 7.** The pf-vdisplay driver encodes what DWM composes
-  and the host reads access units, so a host and a driver from different releases no longer
-  share a video transport. Install the matching pair — they ship in one installer, and a
-  mismatch ends the session with a "driver outdated" error naming both versions.
+- **The Windows driver protocol floor is 8.** The pf-vdisplay driver encodes what DWM composes
+  and answers only to the host process that created each monitor, so a host and a driver from
+  different releases share neither a video transport nor an ownership rule. Install the
+  matching pair — they ship in one installer, and a mismatch ends the session with a "driver
+  outdated" error naming both versions.
 - **A Windows driver update restarts the display device.** The encoder lives inside
   `pf_vdisplay.dll` now, so applying one flaps the virtual display where a host-only update did
   not. Schedule it like a driver update: expect a brief black screen on the release that carries
@@ -49,6 +50,19 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `isFile`/`isDir` answered `false` for both an absent path and one this account may not read, so
   every scanner reported a permission problem as a missing install. Plugins that scan per-user
   locations should report `denied` with its `grantCommand` rather than skipping the path.
+- **A launch hold on every client.** A title picked from a library sends its cover out of the
+  shelf tile, turning once as it crosses to the middle of the screen, and holds there — through
+  the dial and then over the stream — until the host's `games[].state` on `GET /api/v1/status`
+  leaves `launching`. It gives up after 15 s if the host never lists the title and 120 s if it
+  stays `launching`, any press shows the stream early, and launcher tiles never hold.
+- **A settings profile can be bound to one library title.** `KnownHost.game_profiles` maps a
+  title id to a profile id, and resolution now runs one-off ▸ title ▸ host ▸ globals — raise
+  Options on a cover and pick "Settings profile…". Nothing changes until you bind one; a
+  deleted profile drops the title back to the host's default rather than to raw globals.
+- **The controller-UI switch reaches webOS.** "Controller-optimized UI" and "Show it" are
+  offered wherever a client has a second interface to fall back to, which now includes the TV
+  client's cursor UI. The two stored keys lost their `android.` prefix (`gamepad_ui_enabled`,
+  `gamepad_ui_mode`); nothing persisted under the old names, so there is nothing to migrate.
 - **`guide` and `qam` quick-action slots.** The `overlay_actions` blob takes two more built-in
   ids, each a one-shot tap of a system button on the host's pad (`BTN_GUIDE`, `BTN_MISC1`) —
   the same verb the session control socket's `guide`/`qam` already exposed. An older client
@@ -59,6 +73,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   hidden per-game shortcut with the game's name, art and icon. Anyone wrapping
   `bin/punktfunkrun.sh` gains `PF_GAME=steam:<appid>` (passed as `punktfunk launch --game`), and
   the backend gains `library(ref)`, `game_art(appid, icon_hash)` and `save_icon(appid, png)`.
+- **The Android client splits at a foldable's hinge.** A book foldable half-opened on a table
+  gives the picture the upright half and the on-screen controller the flat one, so a thumb never
+  sits on the game; a hinge that folds the screen left or right is left alone. Nothing to set:
+  the split is the posture plus the controller being shown, and flattening the device restores
+  the full picture.
 - **The Android client decodes PyroWave.** A Vulkan 1.3 device with the codec's compute feature
   set now advertises `CODEC_PYROWAVE` and decodes it as GPU compute into its own swapchain,
   beside the MediaCodec path rather than through it. Nothing to do: the codec stays opt-in per
@@ -220,6 +239,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A sleeping host now reads Offline, and auto-wake fires for it.** Every client took a live mDNS
+  advert as proof of life, but a suspending host sends no goodbye and its record lingers for up to
+  75 minutes — so the pip stayed green and Wake-on-LAN, gated on "not advertising", never fired.
+  Presence is now the reachability probe alone on all six surfaces; nothing to do.
+- **The quick-action dial follows the left stick on Apple and Android.** Both clients read the
+  stick as a four-way step, so reaching a slot walked the whole dial one disc at a time; they now
+  aim at the sector the thumb points at, as the desktop clients already did. Nothing to do — the
+  D-pad still steps.
 - **A Windows launch starts in its executable's own folder.** It inherited the host service's
   working directory instead, which sits under `C:\Program Files` — Ryujinx refuses to run there,
   and a title loading assets relative to the working directory read the host's folder; nothing

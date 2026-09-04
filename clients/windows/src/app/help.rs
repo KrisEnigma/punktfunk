@@ -26,6 +26,11 @@ const STREAM_SHORTCUTS: &[(&str, &str)] = &[
         "Ctrl+Alt+Shift+V",
         "Mute or unmute your microphone (only while the stream sends one)",
     ),
+    ("Ctrl+Alt+Shift+O", "Open the quick actions dial"),
+    (
+        "Back+A",
+        "Controller: open the quick actions dial \u{2014} the left stick aims it",
+    ),
     (
         "LB+RB+Start+Back",
         "Controller: release input / leave fullscreen \u{2014} hold to disconnect",

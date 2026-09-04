@@ -172,12 +172,17 @@ impl CollectionsScreen {
         if want.is_empty() {
             return;
         }
-        for (id, bytes) in library.take_art_for(&want, super::library::ART_DECODES_PER_FRAME) {
+        // Against the clock, like the shelf's own drain — one at a time, at least one a frame.
+        let started = std::time::Instant::now();
+        while let Some((id, bytes)) = library.take_art_for(&want, 1).pop() {
             match super::library::decode_poster(&bytes, self.art_k) {
                 Some(img) => {
                     self.art.insert(id, img);
                 }
                 None => tracing::debug!(%id, "undecodable poster"),
+            }
+            if started.elapsed() >= super::library::ART_FRAME_BUDGET {
+                break;
             }
         }
     }
@@ -731,6 +736,7 @@ mod tests {
             actions: Vec::new(),
             pin: None,
             bound_profile: None,
+            game_profiles: Default::default(),
         }
     }
 
@@ -747,6 +753,9 @@ mod tests {
                     launcher: false,
                     icon: String::new(),
                     platform: Some(if i < 4 { "PS2".into() } else { "PS3".into() }),
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
                     running: false,
                 })
                 .collect(),
@@ -937,6 +946,9 @@ mod tests {
                 launcher: true,
                 icon: "steam".into(),
                 platform: Some("Launchers".into()),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             },
             LibraryGame {
@@ -946,6 +958,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: Some("PS3".into()),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             },
         ]);

@@ -21,8 +21,8 @@ class ConsoleSettingsExtraTest {
     @Test
     fun androidKeysAreWrittenFlat() {
         val j = ConsoleJson.settings(Settings(gamepadUiEnabled = false, lowLatencyMode = false), null)
-        assertTrue("the console reads this key at the top level", j.has("android.gamepad_ui_enabled"))
-        assertFalse(j.getBoolean("android.gamepad_ui_enabled"))
+        assertTrue("the console reads this key at the top level", j.has("gamepad_ui_enabled"))
+        assertFalse(j.getBoolean("gamepad_ui_enabled"))
         assertFalse(j.getBoolean("android.low_latency"))
         assertFalse("a nested wrapper is what serde swallows whole", j.has("extra"))
     }
@@ -32,7 +32,7 @@ class ConsoleSettingsExtraTest {
     fun aStaleNestedWrapperIsDropped() {
         val base = JSONObject().put(
             "extra",
-            JSONObject().put("android.gamepad_ui_enabled", true),
+            JSONObject().put("gamepad_ui_enabled", true),
         )
         assertFalse(ConsoleJson.settings(Settings(gamepadUiEnabled = false), base).has("extra"))
     }
@@ -40,8 +40,8 @@ class ConsoleSettingsExtraTest {
     @Test
     fun theConsolesOwnSaveIsReadBack() {
         val saved = JSONObject()
-            .put("android.gamepad_ui_enabled", false)
-            .put("android.gamepad_ui_mode", GAMEPAD_UI_ALWAYS)
+            .put("gamepad_ui_enabled", false)
+            .put("gamepad_ui_mode", GAMEPAD_UI_ALWAYS)
             .put("android.ds_capture", false)
         val next = ConsoleJson.applySettings(Settings(), saved)
         assertFalse("turning the console off must reach the store", next.gamepadUiEnabled)

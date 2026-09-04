@@ -110,8 +110,8 @@ pub(crate) fn session_page(ctx: &Arc<super::AppCtx>, hud: &HudSample) -> Element
 
     body.push(
         text_block(
-            "Ctrl+Alt+Shift+Q releases input \u{00B7} Ctrl+Alt+Shift+D disconnects \u{00B7} \
-             Ctrl+Alt+Shift+S stats \u{00B7} F11 fullscreen",
+            "Ctrl+Alt+Shift+O quick actions \u{00B7} Ctrl+Alt+Shift+Q releases input \u{00B7} \
+             Ctrl+Alt+Shift+D disconnects \u{00B7} Ctrl+Alt+Shift+S stats \u{00B7} F11 fullscreen",
         )
         .font_size(11.0)
         .wrap()

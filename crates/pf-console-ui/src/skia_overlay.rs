@@ -350,6 +350,10 @@ impl Overlay for SkiaOverlay {
         self.ring.open()
     }
 
+    fn holds_stream(&self) -> bool {
+        self.shell.as_ref().is_some_and(Shell::holds_stream)
+    }
+
     fn take_ring_command(&mut self) -> Option<RingCommand> {
         self.ring.take_command()
     }
@@ -577,10 +581,15 @@ impl SkiaOverlay {
             self.banner_text = None;
             return 0.0;
         }
+        // The dial's opener leads: it is the one shortcut that reaches every other action, so a
+        // reader who remembers only this line still has stats, mic and disconnect.
         self.banner_text = Some(if ctx.pad.is_some() {
-            "Hold L1 + R1 + Start + Select to leave · Ctrl+Alt+Shift+S stats".to_string()
+            "Select + A quick actions · Hold L1 + R1 + Start + Select to leave · \
+             Ctrl+Alt+Shift+S stats"
+                .to_string()
         } else {
-            "Ctrl+Alt+Shift+Q releases input · Ctrl+Alt+Shift+D disconnects · Ctrl+Alt+Shift+S stats"
+            "Ctrl+Alt+Shift+O quick actions · Ctrl+Alt+Shift+Q releases input · \
+             Ctrl+Alt+Shift+D disconnects · Ctrl+Alt+Shift+S stats"
                 .to_string()
         });
         ((BANNER_S - age) / BANNER_FADE_S).min(1.0)

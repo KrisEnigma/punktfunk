@@ -5,7 +5,7 @@
 //! after completion from safe code.
 
 use wdk_sys::{
-    NTSTATUS, WDF_NO_OBJECT_ATTRIBUTES, WDFDEVICE, WDFMEMORY, WDFQUEUE, WDFREQUEST,
+    NTSTATUS, WDF_NO_OBJECT_ATTRIBUTES, WDFDEVICE, WDFFILEOBJECT, WDFMEMORY, WDFQUEUE, WDFREQUEST,
     call_unsafe_wdf_function_binding,
 };
 
@@ -36,6 +36,19 @@ impl Request {
     /// called from (WDF owns handle validity; a forged/dangling handle is framework UB).
     pub unsafe fn new(raw: WDFREQUEST) -> Request {
         Request(raw)
+    }
+
+    /// The process that sent this request. What a control IOCTL creates belongs to it, and a
+    /// later IOCTL from another process must not reach it.
+    pub fn requestor_pid(&self) -> u32 {
+        // SAFETY: `self.0` is the live callback request per `Request::new`'s contract.
+        unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetRequestorProcessId, self.0) }
+    }
+
+    /// The file object — the caller's device handle — this request arrived on.
+    pub fn file_object(&self) -> WDFFILEOBJECT {
+        // SAFETY: `self.0` is the live callback request per `Request::new`'s contract.
+        unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetFileObject, self.0) }
     }
 
     /// Complete the request with `status` (consumes the token — the framework owns it afterwards).

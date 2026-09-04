@@ -11,6 +11,7 @@ import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.library.DEFAULT_MGMT_PORT
 import io.unom.punktfunk.kit.library.GameEntry
+import io.unom.punktfunk.kit.library.RunningGame
 import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.padInfoOf
 import org.json.JSONArray
@@ -74,7 +75,10 @@ internal object ConsoleJson {
         for (h in saved.sortedBy { it.name.lowercase() }) {
             val key = rowKey(h.fpHex, h.address, h.port)
             val advert = advertFor(h)
-            val online = advert != null || "${h.address}:${h.port}" in reachable
+            // Presence is the probe alone. An advert only says where to look: a suspending host
+            // sends no mDNS goodbye, so its record lingers for up to 75 minutes — long enough to
+            // keep the pip green and, since `can_wake` reads `!online`, the Wake row hidden.
+            val online = "${h.address}:${h.port}" in reachable
             val base = JSONObject()
                 .put("key", key)
                 .put("name", h.name.ifBlank { h.address })
@@ -96,6 +100,9 @@ internal object ConsoleJson {
                     h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
                         ?.let(::profileChip) ?: JSONObject.NULL,
                 )
+                // Ids, not chips: the bind screen only compares them. Pinned copies below
+                // inherit the map — a card is the same host's shelf.
+                .put("game_profiles", JSONObject(h.gameProfiles))
             out.put(base)
             // A pinned card shares the primary tile's live state; its key rides the profile id
             // behind a NUL (impossible in a fingerprint or `addr:port`) — Rust parity.
@@ -163,6 +170,7 @@ internal object ConsoleJson {
                 else h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
                     ?.let(::profileChip) ?: JSONObject.NULL,
             )
+            .put("game_profiles", JSONObject(h.gameProfiles))
     }
 
     /** `KnownHosts` (Rust) — only what the console needs to build a link: id, address, fp. */
@@ -231,6 +239,9 @@ internal object ConsoleJson {
                     .put("launcher", g.isLauncher)
                     .put("icon", g.icon?.takeIf(::validIconToken) ?: "")
                     .put("platform", g.platform ?: JSONObject.NULL)
+                    .put("developer", g.developer ?: JSONObject.NULL)
+                    .put("year", g.releaseYear ?: JSONObject.NULL)
+                    .put("genres", JSONArray(g.genres))
                     .put("running", false),
             )
         }
@@ -250,6 +261,16 @@ internal object ConsoleJson {
         .toString()
 
     fun stringArray(items: Collection<String>): String = JSONArray(items).toString()
+
+    /** `/status` games as the console's `RunningGame` mirror; an entry without an id has no tile. */
+    fun runningGames(games: List<RunningGame>): String {
+        val out = JSONArray()
+        for (g in games) {
+            val id = g.appId ?: continue
+            out.put(JSONObject().put("app_id", id).put("state", g.state))
+        }
+        return out.toString()
+    }
 
     // ---- pads -------------------------------------------------------------------------------
 
@@ -350,8 +371,8 @@ internal object ConsoleJson {
         j.put("android.gyro_on_phone", s.gyroOnPhone)
         j.put("android.sc2_capture", s.sc2Capture)
         j.put("android.ds_capture", s.dsCapture)
-        j.put("android.gamepad_ui_mode", s.gamepadUiMode)
-        j.put("android.gamepad_ui_enabled", s.gamepadUiEnabled)
+        j.put("gamepad_ui_mode", s.gamepadUiMode)
+        j.put("gamepad_ui_enabled", s.gamepadUiEnabled)
         j.put("android.reduce_ui_resolution", s.reduceUiResolution)
         // A store written by the nesting build carries the stale wrapper; drop it rather than
         // round-trip a copy of these keys that nothing reads for the life of the install.
@@ -410,9 +431,9 @@ internal object ConsoleJson {
             gyroOnPhone = j.optBoolean("android.gyro_on_phone", s.gyroOnPhone),
             sc2Capture = j.optBoolean("android.sc2_capture", s.sc2Capture),
             dsCapture = j.optBoolean("android.ds_capture", s.dsCapture),
-            gamepadUiMode = j.optString("android.gamepad_ui_mode", s.gamepadUiMode)
+            gamepadUiMode = j.optString("gamepad_ui_mode", s.gamepadUiMode)
                 .ifEmpty { s.gamepadUiMode },
-            gamepadUiEnabled = j.optBoolean("android.gamepad_ui_enabled", s.gamepadUiEnabled),
+            gamepadUiEnabled = j.optBoolean("gamepad_ui_enabled", s.gamepadUiEnabled),
             reduceUiResolution = j.optBoolean("android.reduce_ui_resolution", s.reduceUiResolution),
         )
     }
