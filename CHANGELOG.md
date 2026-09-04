@@ -43,6 +43,18 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`punktfunk-host plugins grant <dir>`.** The Windows runner is `LocalService` and cannot read
+  your user profile, so a launcher installed there reads as "not installed"; grant the runner
+  read on that one directory instead of hand-writing an icacls SID.
+- **`Access`, `fileAccess`, `dirAccess` and `grantCommand` in `@punktfunk/plugin-kit/library`.**
+  `isFile`/`isDir` answered `false` for both an absent path and one this account may not read, so
+  every scanner reported a permission problem as a missing install. Plugins that scan per-user
+  locations should report `denied` with its `grantCommand` rather than skipping the path.
+- **A launch hold on every client.** A title picked from a library sends its cover out of the
+  shelf tile, turning once as it crosses to the middle of the screen, and holds there — through
+  the dial and then over the stream — until the host's `games[].state` on `GET /api/v1/status`
+  leaves `launching`. It gives up after 15 s if the host never lists the title and 120 s if it
+  stays `launching`, any press shows the stream early, and launcher tiles never hold.
 - **A settings profile can be bound to one library title.** `KnownHost.game_profiles` maps a
   title id to a profile id, and resolution now runs one-off ▸ title ▸ host ▸ globals — raise
   Options on a cover and pick "Settings profile…". Nothing changes until you bind one; a

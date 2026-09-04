@@ -14,9 +14,12 @@ import * as path from "node:path";
 import {
 	confinedJoin,
 	crc32,
+	dirAccess,
+	fileAccess,
 	fileUrl,
 	findGridArtFile,
 	findLocalArtFile,
+	grantCommand,
 	gridFilenames,
 	isSteamTool,
 	openReadOnly,
@@ -514,5 +517,53 @@ describe("parseRegSubKeys", () => {
 		expect(
 			parseRegSubKeys("ERROR: The system was unable to find...", KEY),
 		).toEqual([]);
+	});
+});
+
+describe("access classification", () => {
+	// The distinction the Windows runner depends on: a launcher inside a user profile stats
+	// exactly like an absent one unless EACCES is told apart from ENOENT. Reproduced with a
+	// directory stripped of traverse permission, which is the same errno everywhere.
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pf-access-"));
+
+	test("present, absent and unreadable are three different answers", () => {
+		const open = path.join(root, "open");
+		fs.mkdirSync(open);
+		fs.writeFileSync(path.join(open, "emu.exe"), "x");
+
+		expect(fileAccess(path.join(open, "emu.exe"))).toBe("ok");
+		expect(dirAccess(open)).toBe("ok");
+		expect(fileAccess(path.join(open, "nope.exe"))).toBe("missing");
+		expect(dirAccess(path.join(root, "nope"))).toBe("missing");
+
+		// An empty file is not a usable manifest, and that is "missing", never "denied".
+		fs.writeFileSync(path.join(open, "empty.exe"), "");
+		expect(fileAccess(path.join(open, "empty.exe"))).toBe("missing");
+
+		// Root ignores the mode bits, so it cannot observe a denial.
+		if (process.platform === "win32" || process.getuid?.() === 0) return;
+		const shut = path.join(root, "shut");
+		fs.mkdirSync(shut);
+		fs.writeFileSync(path.join(shut, "emu.exe"), "x");
+		fs.chmodSync(shut, 0o000);
+		try {
+			expect(fileAccess(path.join(shut, "emu.exe"))).toBe("denied");
+		} finally {
+			fs.chmodSync(shut, 0o700);
+		}
+	});
+
+	test("the grant names a directory, and only on Windows", () => {
+		const grant = grantCommand(
+			"C:\\Users\\e\\AppData\\Roaming\\Ryujinx\\Ryujinx.exe",
+		);
+		if (process.platform === "win32") {
+			expect(grant).toBe(
+				'icacls "C:\\Users\\e\\AppData\\Roaming\\Ryujinx" /grant "*S-1-5-19:(OI)(CI)(RX)"',
+			);
+		} else {
+			// The Linux runner is a `systemctl --user` unit — already the operator, nothing to grant.
+			expect(grant).toBeNull();
+		}
 	});
 });

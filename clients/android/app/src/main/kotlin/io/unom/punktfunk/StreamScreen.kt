@@ -1340,6 +1340,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                 PadHalf(virtualPad, overlayCfg.pad, padSize, haptics)
             }
         }
+        // Last, so it covers everything: the launched title's poster until its game is up.
+        var launchHold by remember(session) { mutableStateOf(session.launchHold) }
+        launchHold?.let { LaunchHoldOverlay(it) { launchHold = null } }
     }
 }
 

@@ -55,6 +55,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import android.content.res.Configuration
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -89,6 +91,7 @@ import io.unom.punktfunk.kit.security.IdentityStore
 import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.obtainIdentity
 import io.unom.punktfunk.models.ActiveSession
+import io.unom.punktfunk.models.LaunchHold
 import kotlin.math.PI
 import kotlin.math.absoluteValue
 import kotlin.math.cos
@@ -359,6 +362,13 @@ fun LibraryScreen(
                         // not the host's default one.
                         launchedFromLibrary = true,
                         libraryProfileId = pinnedProfileId,
+                        // The host never tracks a launcher tile, so there is nothing to wait for.
+                        launchHold = game.takeUnless { it.isLauncher }?.let {
+                            LaunchHold(
+                                it, host.address, host.effectiveMgmtPort, host.fpHex,
+                                sourceRect = TileFrames.rect(it.id),
+                            )
+                        },
                     ),
                 )
             } else {
@@ -645,6 +655,8 @@ private fun TouchPoster(
                 Modifier
                     .fillMaxWidth()
                     .aspectRatio(2f / 3f)
+                    // What the launch hold flies this title's cover out of.
+                    .onGloballyPositioned { TileFrames.record(game.id, it.boundsInWindow()) }
                     .clip(shape)
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center,

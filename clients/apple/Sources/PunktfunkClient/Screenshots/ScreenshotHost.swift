@@ -88,8 +88,12 @@ struct ScreenshotHostView: View {
             .background(IOSOrientationConfigurator(orientation: scene.orientation))
             #endif
             .task {
-                // Let layout + materials settle, then signal the driver.
-                try? await Task.sleep(nanoseconds: 900_000_000)
+                // Let layout + materials settle, then signal the driver. PUNKTFUNK_SHOT_DELAY
+                // (milliseconds) moves that moment: a scene that ANIMATES — the launch hold's
+                // cover leaving its tile — is only capturable by choosing when to look at it.
+                let ms = ProcessInfo.processInfo.environment["PUNKTFUNK_SHOT_DELAY"]
+                    .flatMap(UInt64.init) ?? 900
+                try? await Task.sleep(nanoseconds: ms * 1_000_000)
                 announceReady()
             }
     }

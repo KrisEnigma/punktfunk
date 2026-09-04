@@ -824,7 +824,7 @@ object NativeBridge {
     /** One title's poster, encoded (JPEG/PNG bytes). */
     external fun nativeConsoleLibraryArt(handle: Long, id: String, bytes: ByteArray)
 
-    /** The ids the host has up: `["steam:570", …]`. */
+    /** The host's `/status` games: `[{"app_id": "steam:570", "state": "running"}, …]`. */
     external fun nativeConsoleLibraryRunning(handle: Long, json: String)
 
     /** 0 fresh, 1 waking, 2 offline — the cached shelf's staleness note. */

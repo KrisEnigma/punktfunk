@@ -350,6 +350,10 @@ impl Overlay for SkiaOverlay {
         self.ring.open()
     }
 
+    fn holds_stream(&self) -> bool {
+        self.shell.as_ref().is_some_and(Shell::holds_stream)
+    }
+
     fn take_ring_command(&mut self) -> Option<RingCommand> {
         self.ring.take_command()
     }

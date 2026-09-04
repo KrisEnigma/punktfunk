@@ -11,6 +11,7 @@ import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.library.DEFAULT_MGMT_PORT
 import io.unom.punktfunk.kit.library.GameEntry
+import io.unom.punktfunk.kit.library.RunningGame
 import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.padInfoOf
 import org.json.JSONArray
@@ -244,6 +245,9 @@ internal object ConsoleJson {
                     .put("launcher", g.isLauncher)
                     .put("icon", g.icon?.takeIf(::validIconToken) ?: "")
                     .put("platform", g.platform ?: JSONObject.NULL)
+                    .put("developer", g.developer ?: JSONObject.NULL)
+                    .put("year", g.releaseYear ?: JSONObject.NULL)
+                    .put("genres", JSONArray(g.genres))
                     .put("running", false),
             )
         }
@@ -263,6 +267,16 @@ internal object ConsoleJson {
         .toString()
 
     fun stringArray(items: Collection<String>): String = JSONArray(items).toString()
+
+    /** `/status` games as the console's `RunningGame` mirror; an entry without an id has no tile. */
+    fun runningGames(games: List<RunningGame>): String {
+        val out = JSONArray()
+        for (g in games) {
+            val id = g.appId ?: continue
+            out.put(JSONObject().put("app_id", id).put("state", g.state))
+        }
+        return out.toString()
+    }
 
     // ---- pads -------------------------------------------------------------------------------
 
