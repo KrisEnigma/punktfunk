@@ -927,6 +927,16 @@ impl LibraryScreen {
                 }
                 true
             }
+            // Hover focuses, so the press that follows opens the card rather than reaching
+            // it. A touchscreen sends Press with no Move first, so its two-press path stands.
+            PointerKind::Move => match self.card_under(p) {
+                Some(i) if i != self.cursor as usize => {
+                    self.cursor = i as i32;
+                    self.seat_grid_col();
+                    true
+                }
+                _ => false,
+            },
             PointerKind::Press => {
                 // Pills sit over the field. `TabStrip` keeps last-drawn geometry; faded pills must not hit.
                 let (sort_hit, view_hit) = if self.bar_shown() && self.bar.focus {
@@ -951,16 +961,7 @@ impl LibraryScreen {
                     store_view(view, ctx);
                     return true;
                 }
-                // Nearest to the cursor is on top. First-by-index hits a buried card.
-                let hit = self
-                    .geom
-                    .iter()
-                    .enumerate()
-                    // Geom is a frame old; a refresh can shorten the shelf before this press.
-                    .filter(|(i, r)| *i < self.len() && p.hits(**r))
-                    .min_by_key(|(i, _)| (*i as i32 - self.cursor).abs())
-                    .map(|(i, _)| i);
-                match hit {
+                match self.card_under(p) {
                     Some(i) if i == self.cursor as usize => {
                         self.menu(MenuEvent::Confirm, ctx, fx);
                         true
@@ -975,6 +976,18 @@ impl LibraryScreen {
             }
             _ => false,
         }
+    }
+
+    /// The card under `p`, nearest the cursor first — cards overlap on the shelf, and
+    /// first-by-index would pick a buried one. Geometry is a frame old, so a refresh that
+    /// shortened the shelf cannot produce an index past its end.
+    fn card_under(&self, p: Pointer) -> Option<usize> {
+        self.geom
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| *i < self.len() && p.hits(**r))
+            .min_by_key(|(i, _)| (*i as i32 - self.cursor).abs())
+            .map(|(i, _)| i)
     }
 
     fn step(&mut self, delta: i32, clamp: bool) -> Option<MenuPulse> {
