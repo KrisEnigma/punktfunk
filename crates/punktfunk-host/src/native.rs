@@ -1826,8 +1826,9 @@ pub(crate) async fn run_admitted(
         )
     };
 
-    // Virtual source only. Best-effort: a spawn error must not early-return (threads already up).
-    let audio_handle = if opts.source == Punktfunk1Source::Virtual {
+    // Not for the byte-pattern source, which has a test client that wants nothing else on the
+    // wire. Best-effort: a spawn error must not early-return (threads already up).
+    let audio_handle = if opts.source != Punktfunk1Source::Synthetic {
         let conn = conn.clone();
         let stop = stop.clone();
         let cap = audio_cap.clone();
