@@ -522,6 +522,9 @@ pub struct NvencD3d11Encoder {
     session_async: bool,
     /// Last invalidated ref range. Dedupes the client's resends of the same loss event.
     last_rfi_range: Option<(i64, i64)>,
+    /// `distrust_references` latched: a resident reference may predict from a hole the
+    /// client decoded against, so RFI declines until an IDR flushes the DPB.
+    distrusted: bool,
     /// D3D11 device this session opened against. Capturer recreates it on a desktop switch; a new
     /// device pointer tears down and re-inits.
     init_device: *mut c_void,
@@ -664,6 +667,7 @@ impl NvencD3d11Encoder {
             chunk: None,
             session_async: false,
             last_rfi_range: None,
+            distrusted: false,
             init_device: ptr::null_mut(),
             init_device_com: None,
             session_units: 0,
@@ -744,9 +748,11 @@ impl NvencD3d11Encoder {
         self.encoder = ptr::null_mut();
         self.inited = false;
         self.next = 0;
-        // Fresh session, empty DPB, first frame is an IDR. Prior RFI range and pending-anchor tag are stale.
+        // Fresh session, empty DPB, first frame is an IDR. Prior RFI range, pending-anchor tag
+        // and distrust are stale.
         self.last_rfi_range = None;
         self.pending_anchor = false;
+        self.distrusted = false;
     }
 
     /// One `NV_ENC_CAPS` value; 0 on error (unqueryable = unsupported).
@@ -1525,6 +1531,8 @@ impl Encoder for NvencD3d11Encoder {
             let pts = self.frame_idx as u64;
             self.frame_idx += 1;
             let flags = if std::mem::take(&mut self.force_kf) {
+                // The IDR flushes the DPB: every later reference is clean again.
+                self.distrusted = false;
                 nv::NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR as u32
                     | nv::NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS as u32
             } else {
@@ -1668,10 +1676,14 @@ impl Encoder for NvencD3d11Encoder {
         self.hdr_meta = meta;
     }
 
+    fn distrust_references(&mut self) {
+        self.distrusted = true;
+    }
+
     fn invalidate_ref_frames(&mut self, first: i64, last: i64) -> bool {
-        // No live session or the GPU can't invalidate → caller forces a full IDR.
-        // Range policy is `nvenc_core::plan_range_recovery` for both direct-NVENC backends.
-        if self.encoder.is_null() || !self.rfi_supported {
+        // No live session, no GPU support, or distrusted references → caller forces a
+        // full IDR. Range policy is `nvenc_core::plan_range_recovery` for both backends.
+        if self.encoder.is_null() || !self.rfi_supported || self.distrusted {
             return false;
         }
         match plan_range_recovery(first, last, self.frame_idx, self.last_rfi_range) {

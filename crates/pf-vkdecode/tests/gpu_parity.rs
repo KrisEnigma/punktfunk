@@ -1146,6 +1146,118 @@ fn low_delay_host_av1_every_frame_hashes_bit_identical_to_libavcodec() {
     );
 }
 
+/// A host that reopens its encoder at a new size mid-session sends a new
+/// sequence header and key frame into the same decoder: `ensure_state` must
+/// retire the session and pools and rebuild at the new extent. The other legs
+/// start at their final size. Here the 320×240 vector runs first, then the 4K
+/// two-tile host stream with no flush between, and both must still hash
+/// bit-identical to libavcodec.
+#[test]
+#[ignore = "needs a Vulkan Video AV1 decode device (fleet boxes; see module docs)"]
+fn av1_size_change_mid_session_rebuilds_and_stays_bit_identical() {
+    let _gpu = common::gpu_lock();
+    arm_test_readback(&_gpu);
+
+    let small = common::split_av1_aus(common::TEST_25FPS_AV1);
+    let large = common::split_av1_aus(LOWDELAY_AV1);
+    assert_eq!(small.len(), FRAME_COUNT);
+    assert_eq!(large.len(), LOWDELAY_AV1_UNIT_COUNT);
+
+    let setup = common::bring_up(&common::Request {
+        codec: common::AV1,
+        graphics: common::Graphics::Required,
+        report_families: true,
+    });
+    let handles = setup.handles();
+
+    let (small_hashes, large_hashes) = {
+        // SAFETY: as in `av1_parity_run_against`.
+        let mut decoder = unsafe { VkAv1Decoder::new(&handles, Box::new(NoopQueueLock)) }
+            .expect("wrap the device");
+        decoder
+            .probe_stream_support(1, 8, false)
+            .expect("AV1 Main 4:2:0 8-bit, no film grain");
+        // SAFETY: as in `av1_parity_run_against`; one readback per geometry.
+        let readback_small = unsafe {
+            Readback::new(
+                &setup.instance,
+                setup.pd,
+                &setup.device,
+                setup.graphics_qf,
+                DISPLAY_AV1,
+                EXPECTED_FORMAT,
+            )
+        };
+        // SAFETY: as above.
+        let readback_large = unsafe {
+            Readback::new(
+                &setup.instance,
+                setup.pd,
+                &setup.device,
+                setup.graphics_qf,
+                DISPLAY_LOWDELAY_AV1,
+                EXPECTED_FORMAT,
+            )
+        };
+        let mut small_hashes: Vec<String> = Vec::new();
+        for (au_index, au) in small.iter().enumerate() {
+            let mut next = decoder
+                .decode(au)
+                .unwrap_or_else(|e| panic!("small AU {au_index}: decode failed: {e}"));
+            while let Some(frame) = next {
+                let planes =
+                    consume_frame(&mut decoder, &readback_small, &frame, small_hashes.len());
+                small_hashes.push(sha256_hex(&planes));
+                next = decoder.take_ready();
+            }
+        }
+        // No flush: the next unit is the new sequence header + key frame.
+        let mut large_hashes: Vec<String> = Vec::new();
+        for (au_index, au) in large.iter().enumerate() {
+            let mut next = decoder.decode(au).unwrap_or_else(|e| {
+                panic!(
+                    "4K AU {au_index} after the size change: decode failed: {e}\n  state: {}",
+                    decoder.debug_snapshot()
+                )
+            });
+            while let Some(frame) = next {
+                let planes =
+                    consume_frame(&mut decoder, &readback_large, &frame, large_hashes.len());
+                large_hashes.push(sha256_hex(&planes));
+                next = decoder.take_ready();
+            }
+        }
+        decoder.flush();
+        while let Some(frame) = decoder.take_ready() {
+            let planes = consume_frame(&mut decoder, &readback_large, &frame, large_hashes.len());
+            large_hashes.push(sha256_hex(&planes));
+        }
+        eprintln!("final state: {}", decoder.debug_snapshot());
+        // SAFETY: every readback was fence-waited inside `read_nv12`.
+        unsafe {
+            readback_small.destroy();
+            readback_large.destroy();
+        }
+        (small_hashes, large_hashes)
+    };
+    // SAFETY: decoder Drop drained the queue; readback handles are gone.
+    unsafe { setup.destroy() };
+
+    assert_bit_identical(
+        &small_hashes,
+        &golden_hashes(GOLDENS_AV1),
+        "AV1 (320x240, before the size change)",
+    );
+    assert_bit_identical(
+        &large_hashes,
+        &golden_hashes(GOLDENS_LOWDELAY_AV1),
+        "AV1 (4K two-tile, after the size change)",
+    );
+    eprintln!(
+        "AV1: 240p then 4K two-tile through one decoder, every frame bit-identical to libavcodec"
+    );
+}
+
 /// Frame 0 pixels vs libavcodec, byte for byte. The hash leg names no cause;
 /// these signatures do:
 ///

@@ -697,6 +697,27 @@ struct PlaneSettings {
     echo_cancel: bool,
 }
 
+/// Send the remembered lost range once the shared 100 ms ask throttle is open.
+/// A span wider than `RFI_MAX_RANGE` is beyond any encoder's history: keyframe.
+fn flush_pending_rfi(
+    pending: &mut Option<(u32, u32)>,
+    last_req: &mut Option<Instant>,
+    now: Instant,
+    connector: &NativeClient,
+) {
+    let throttled = last_req.is_some_and(|t| now.duration_since(t) < Duration::from_millis(100));
+    let Some((first, last)) = pending.filter(|_| !throttled) else {
+        return;
+    };
+    *pending = None;
+    *last_req = Some(now);
+    if last.wrapping_sub(first).wrapping_add(1) > punktfunk_core::packet::RFI_MAX_RANGE {
+        let _ = connector.request_keyframe();
+    } else {
+        let _ = connector.request_rfi(first, last);
+    }
+}
+
 fn spawn_plane_threads(
     connector: &Arc<NativeClient>,
     stop: &Arc<AtomicBool>,
@@ -979,6 +1000,13 @@ fn pump(
     // Mic uplink cursor. A healthy 10 ms-frame mic reads ~100 sent/s.
     let mut window_mic = connector.mic_stats();
     let mut last_kf_req: Option<Instant> = None;
+    // Lost range the ask throttle swallowed, `(first, last)`, widened by later gaps
+    // and sent by `flush_pending_rfi` once the throttle opens. Without it a second
+    // gap inside the window (a lost recovery anchor) asks nothing until the 500 ms
+    // backstop, and then for an IDR.
+    let mut pending_rfi: Option<(u32, u32)> = None;
+    // PyroWave AUs decode independently, so a late one is still worth showing.
+    let all_intra = connector.codec == punktfunk_core::quic::CODEC_PYROWAVE;
     // Freeze-until-reanchor. Armed on any loss signal, withholds concealed frames
     // until a clean re-anchor. Owns the no-output streak and overdue-freeze
     // backstop. Seeded with the current drop count so the first `poll` is not a loss.
@@ -1088,25 +1116,25 @@ fn pump(
                             // that climb from re-freezing a stream the RFI anchor healed.
                             gate.arm_expecting_drops(now, u64::from(gap));
                             next_expected_index = Some(frame.frame_index.wrapping_add(1));
-                            // The gap is the precise lost range, so this can drive RFI.
-                            // Prefer RFI (one clean P-frame) over a keyframe; throttle
-                            // with the other recovery paths (one ask per 100 ms). A gap
-                            // wider than `RFI_MAX_RANGE` is beyond any encoder history.
-                            if last_kf_req
-                                .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(100))
-                            {
-                                last_kf_req = Some(now);
-                                if gap > punktfunk_core::packet::RFI_MAX_RANGE {
-                                    let _ = connector.request_keyframe();
-                                } else {
-                                    let _ = connector
-                                        .request_rfi(exp, frame.frame_index.wrapping_sub(1));
-                                }
-                            }
+                            // The oldest unsent loss stays `first`: the host invalidates
+                            // everything since it anyway, so one ask covers a burst.
+                            let first = pending_rfi.map_or(exp, |(first, _)| first);
+                            pending_rfi = Some((first, frame.frame_index.wrapping_sub(1)));
+                            flush_pending_rfi(&mut pending_rfi, &mut last_kf_req, now, &connector);
                             tracing::trace!(
                                 gap,
                                 "frame gap — RFI recovery, holding last frame until re-anchor"
                             );
+                        } else if !all_intra {
+                            // A whole AU behind one already decoded: decoding it now
+                            // rewinds the DPB (H.264 reads it as a frame_num wrap, HEVC's
+                            // RPS unmarks the newer picture) and phantoms an RFI. Skip.
+                            tracing::trace!(
+                                index = frame.frame_index,
+                                expected = exp,
+                                "skipping a straggler AU that arrived behind a decoded one"
+                            );
+                            continue;
                         }
                     }
                     None => next_expected_index = Some(frame.frame_index.wrapping_add(1)),
@@ -1420,12 +1448,15 @@ fn pump(
             && last_kf_req.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(100))
         {
             last_kf_req = Some(now);
+            // The IDR repairs everything a pending RFI would have named.
+            pending_rfi = None;
             let _ = connector.request_keyframe();
             tracing::debug!(
                 dropped,
                 "requested keyframe (loss recovery / overdue re-anchor)"
             );
         }
+        flush_pending_rfi(&mut pending_rfi, &mut last_kf_req, now, &connector);
 
         if window_start.elapsed() >= Duration::from_secs(1) {
             // ~1 Hz phase-lock report, riding the stats window. Quiet until the

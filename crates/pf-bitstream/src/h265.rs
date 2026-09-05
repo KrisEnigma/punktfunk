@@ -609,13 +609,14 @@ impl H265Planner {
 
         // Ask over the slice lists, not the RPS/DPB snapshot: 8.3.2 retains
         // pictures this AU does not use (`used_by_curr_pic` clear). An IRAP's
-        // lists are empty, so this is vacuously true (`CleanLedger`).
+        // lists are empty, so this is vacuously true (`CleanLedger`); a
+        // concealed picture's own warnings keep it unclean.
         let references_clean = self.clean.references_clean(
             slices
                 .iter()
                 .flat_map(|s: &SlicePlan| s.ref_list0.iter().chain(&s.ref_list1))
                 .map(|r| r.id),
-        );
+        ) && !warnings.iter().any(PlanWarning::is_integrity);
         let picture = Self::picture_plan(&cur, recovery_point, references_clean);
         let rps = cur.rps_plan.clone();
         let dpb_refs = cur.dpb_refs.clone();

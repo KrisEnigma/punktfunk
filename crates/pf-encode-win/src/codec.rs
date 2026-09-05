@@ -206,12 +206,12 @@ pub struct EncoderCaps {
     /// Session glue logs a mismatch; the in-band SPS is authoritative.
     pub chroma_444: bool,
     /// Periodic intra-refresh wave: a moving intra band recodes the picture
-    /// over ~0.5 s, no periodic IDR. FEC-unrecoverable loss self-heals, so the
-    /// session rate-limits client keyframe requests. The wave has no
-    /// decoder-visible clean-point (FFmpeg never sets `AV_FRAME_FLAG_KEY` at a
-    /// recovery point; AMF emits no recovery-point SEI), so this cap alone
-    /// cannot lift the freeze — that needs
-    /// [`intra_refresh_recovery`](Self::intra_refresh_recovery).
+    /// over ~0.5 s, no periodic IDR. The wave has no decoder-visible
+    /// clean-point (FFmpeg never sets `AV_FRAME_FLAG_KEY` at a recovery point;
+    /// AMF emits no recovery-point SEI), so this cap alone cannot lift the
+    /// freeze and the session keeps the short IDR cooldown. Only
+    /// [`intra_refresh_recovery`](Self::intra_refresh_recovery) rate-limits
+    /// client keyframe requests.
     pub intra_refresh: bool,
     /// Constrained GDR heals a lost picture within one wave. The host then tags
     /// wave-boundary AUs with

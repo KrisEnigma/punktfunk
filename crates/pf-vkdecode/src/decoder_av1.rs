@@ -392,12 +392,15 @@ fn av1_picture_info<'a>(
     info
 }
 
-/// Planner-reported missing DPB reference. Does not match
-/// [`PlanWarning::TruncatedAu`]: that is concealment the planner already
-/// applied; refusing it would turn every clipped AU into a keyframe request.
+/// Planner-reported missing or stale DPB reference: the picture the frame
+/// predicts from is not there, so decoding it would only paint garbage. Does
+/// not match [`PlanWarning::TruncatedAu`]: that is concealment the planner
+/// already applied; refusing it would turn every clipped AU into a keyframe
+/// request.
 pub(crate) fn lost_reference(warnings: &[PlanWarning]) -> Option<(u8, u8)> {
     warnings.iter().find_map(|w| match w {
-        PlanWarning::MissingReference { slot, ref_index } => Some((*slot, *ref_index)),
+        PlanWarning::MissingReference { slot, ref_index }
+        | PlanWarning::StaleReference { slot, ref_index } => Some((*slot, *ref_index)),
         _ => None,
     })
 }
