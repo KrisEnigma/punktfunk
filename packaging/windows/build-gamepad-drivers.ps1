@@ -149,10 +149,12 @@ foreach ($d in $drivers) {
     $sInf = Join-Path $Out $d.inf
     Copy-Item (Join-Path $rel $d.dll) $sDll -Force
     Copy-Item (Join-Path $DriversDir $d.inx) $sInf -Force   # stampinf rewrites this copy in place
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $clear -Path $sDll | Out-Null
+    # In-process, so the script's own throw propagates (a child powershell's exit is swallowed).
+    & $clear -Path $sDll | Out-Null
     & $signtool sign /fd SHA256 @signArgs $sDll | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "signtool sign ($($d.dll)) failed ($LASTEXITCODE)" }
     & $stampinf -f $sInf -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "stampinf ($($d.inf)) failed ($LASTEXITCODE)" }
 }
 
 # --- 5. Inf2Cat both catalogs (one pass over -Out), then sign each -----------------------------

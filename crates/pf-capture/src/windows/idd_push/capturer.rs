@@ -109,7 +109,12 @@ impl IddPushCapturer {
         let opened = self.encoder.is_some();
         let driver_seq = self.encoder.map_or(0, |t| t.source_seq);
         let geometry = (self.width, self.height, self.out_format());
-        if opened && driver_seq == self.driver_source_seq && self.delivered == Some(geometry) {
+        // A re-opened encoder's fresh section reads 0 until the pool takes a frame: no news,
+        // not a delivery — a delivered 0 would re-arm the first-frame kick mid-session.
+        if opened
+            && (driver_seq == 0 || driver_seq == self.driver_source_seq)
+            && self.delivered == Some(geometry)
+        {
             return Ok(None);
         }
         self.driver_source_seq = driver_seq;
@@ -137,8 +142,12 @@ impl IddPushCapturer {
                 })
                 .unzip();
             let evidence = StallEvidence {
-                max_heartbeat_age_ms: (self.encoder.is_some())
-                    .then_some(self.max_hb_age_us / 1_000),
+                // `None` until the drain worker's first heartbeat: an age of 0 would acquit
+                // a worker that never ran.
+                max_heartbeat_age_ms: self
+                    .encoder
+                    .and_then(|t| t.drain_heartbeat)
+                    .map(|_| self.max_hb_age_us / 1_000),
                 // Same window as the report's OS-event correlation (gap + cause lead-in).
                 probes: now
                     .checked_sub(stall.gap + Duration::from_millis(300))
@@ -320,6 +329,7 @@ impl Capturer for IddPushCapturer {
         // monitor composes SDR whatever the session negotiated. Re-assert before the encoder
         // re-opens, or it opens for FP16 against a BGRA surface the pool can only refuse.
         self.display_hdr = self.pin_negotiated_depth();
+        self.refresh_cursor_origin();
         self.redeliver_cursor_channel();
         true
     }
@@ -347,17 +357,24 @@ impl Capturer for IddPushCapturer {
     ) {
         use pf_frame::recovery::{Stage, StageOutcome};
         let step = self.finish_stage(stage, outcome);
-        // A driver cycle reaped the WUDFHost this capturer's encoder points at: end it here so
-        // the host rebuilds the whole pipeline (SET_ENCODE included) against the fresh host.
-        if matches!(stage, Stage::DriverCycle) && matches!(outcome, StageOutcome::Applied) {
-            self.pending_fault = Some(anyhow::anyhow!(
-                "IDD-push: the pf-vdisplay driver was cycled (adapter reload) — ending the \
-                 capturer so the session rebuilds its virtual output on the fresh WUDFHost"
-            ));
-            return;
-        }
         if let Err(e) = self.drive(step) {
             self.pending_fault = Some(e);
+            return;
+        }
+        // A driver cycle, applied or not, ends this capturer: the WUDFHost its encoder points at
+        // is gone either way, and the driver-death watch fires the cycle outside any episode, so
+        // nothing else bounds a reload that keeps failing.
+        if matches!(stage, Stage::DriverCycle) {
+            let applied = matches!(outcome, StageOutcome::Applied);
+            self.pending_fault = Some(anyhow::anyhow!(
+                "IDD-push: the pf-vdisplay driver cycle {} — ending the capturer so the session \
+                 rebuilds its virtual output",
+                if applied {
+                    "reloaded the adapter"
+                } else {
+                    "FAILED (adapter not reloaded)"
+                }
+            ));
         }
     }
 

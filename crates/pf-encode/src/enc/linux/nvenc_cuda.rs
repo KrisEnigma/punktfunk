@@ -1921,9 +1921,11 @@ impl Encoder for NvencCudaEncoder {
                 }
             }
             let tp = std::time::Instant::now();
-            (api().encode_picture)(self.encoder, &mut pic)
-                .nv_ok()
-                .map_err(|e| nvenc_status::call_err("encode_picture", e))?;
+            if let Err(e) = (api().encode_picture)(self.encoder, &mut pic).nv_ok() {
+                // Nothing owns the mapping yet; left mapped, the slot's next map fails too.
+                let _ = (api().unmap_input_resource)(self.encoder, mp.mappedResource);
+                return Err(nvenc_status::call_err("encode_picture", e));
+            }
             t_pic = tp.elapsed();
             self.pending.push_back((
                 self.bitstreams[slot],

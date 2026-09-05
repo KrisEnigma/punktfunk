@@ -13,6 +13,8 @@
   ok would stop the service, every tray, and the console/plugin tasks
 ==> Files → C:\Program Files\punktfunk
   ok would unpack the payload into C:\Program Files\punktfunk
+==> Register the uninstaller
+  ok would register 'Punktfunk Host' in Add/Remove Programs (HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7C9E6A52-1F4B-4E8D-A3C7-2B5D8F1E0A93}_is1)
 ==> Registry
   + reg delete HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run /v PunktfunkTray /f
   + reg add HKLM\SOFTWARE\Classes\AppUserModelId\unom.punktfunk.tray /v DisplayName /t REG_SZ /d Punktfunk /f
@@ -33,8 +35,6 @@
   + schtasks /Create /TN PunktfunkScripting /XML <generated> /F
 ==> Restoring what the stop disabled
   ok would re-enable only the tasks that were enabled before the stop
-==> Register the uninstaller
-  ok would register 'Punktfunk Host' in Add/Remove Programs (HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{7C9E6A52-1F4B-4E8D-A3C7-2B5D8F1E0A93}_is1)
 
   Done. Next:
   1. Open the web console:  https://<this-PC>:47992  (the certificate is the host's own — continue past the warning)

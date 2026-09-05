@@ -283,9 +283,7 @@ impl HostConfig {
             webtransport_port: val("PUNKTFUNK_WEBTRANSPORT_PORT")
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
-            encoder_pref: std::env::var("PUNKTFUNK_ENCODER")
-                .unwrap_or_default()
-                .to_ascii_lowercase(),
+            encoder_pref: encoder_pref(),
             render_adapter: val("PUNKTFUNK_RENDER_ADAPTER"),
             idd_depth: val("PUNKTFUNK_IDD_DEPTH")
                 .and_then(|s| s.parse::<usize>().ok())
@@ -385,6 +383,22 @@ impl HostConfig {
 }
 
 /// Process-wide host configuration, parsed once on first access.
+/// `PUNKTFUNK_ENCODER`, lower-cased. On Windows a software pin becomes `auto`: the driver
+/// encodes, so a session opened on it would pass the handshake and die at the encoder open.
+fn encoder_pref() -> String {
+    let pref = std::env::var("PUNKTFUNK_ENCODER")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if cfg!(windows) && matches!(pref.as_str(), "sw" | "software" | "openh264") {
+        eprintln!(
+            "punktfunk: PUNKTFUNK_ENCODER={pref:?} — Windows has no software encoder since the \
+             driver took over encoding; using auto"
+        );
+        return "auto".into();
+    }
+    pref
+}
+
 pub fn config() -> &'static HostConfig {
     static CFG: OnceLock<HostConfig> = OnceLock::new();
     CFG.get_or_init(HostConfig::from_env)

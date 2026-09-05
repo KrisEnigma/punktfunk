@@ -11,7 +11,7 @@
 //! Every COM object the backends see is a [`bridge`]d `QueryInterface` of the driver's own
 //! 0.58 object, so the two crates never wrap each other's pointer.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pf_driver_proto::encode::EncodeInput;
 use pf_encode_win::convert::{
@@ -29,9 +29,15 @@ use windows62::core::{Interface as _, PCWSTR};
 
 use crate::cursor_cell::CursorImage;
 use crate::direct_3d_device::Direct3DDevice;
+use crate::registry::lock;
 
 /// A driver-domain failure: a small code for the reply and a stage tag; the log has the rest.
 pub type Fail = (i32, &'static str);
+
+/// Every monitor on an adapter shares the pooled device's immediate context, and
+/// `SetMultithreadProtected` serialises single calls, not the draw sequences a pass issues.
+/// Held for each pass, always after the pool's state lock.
+static CTX: Mutex<()> = Mutex::new(());
 
 type Tex = d3d::ID3D11Texture2D;
 type Rtv = d3d::ID3D11RenderTargetView;
@@ -129,14 +135,20 @@ pub fn make_tex62(
 fn rtv(dev: &d3d::ID3D11Device, t: &Tex) -> Result<Rtv, Fail> {
     let mut v = None;
     // SAFETY: `t` is a live render-target texture on `dev`; `v` a valid out-param.
-    unsafe { dev.CreateRenderTargetView(t, None, Some(&mut v)) }.map_err(|_| (-2, "rtv"))?;
+    unsafe { dev.CreateRenderTargetView(t, None, Some(&mut v)) }.map_err(|e| {
+        dbglog!("[pf-vd] encode: CreateRenderTargetView failed: {e:?}");
+        (-2, "rtv")
+    })?;
     v.ok_or((-2, "rtv"))
 }
 
 fn srv(dev: &d3d::ID3D11Device, t: &Tex) -> Result<Srv, Fail> {
     let mut v = None;
     // SAFETY: `t` is a live shader-resource texture on `dev`; `v` a valid out-param.
-    unsafe { dev.CreateShaderResourceView(t, None, Some(&mut v)) }.map_err(|_| (-2, "srv"))?;
+    unsafe { dev.CreateShaderResourceView(t, None, Some(&mut v)) }.map_err(|e| {
+        dbglog!("[pf-vd] encode: CreateShaderResourceView failed: {e:?}");
+        (-2, "srv")
+    })?;
     v.ok_or((-2, "srv"))
 }
 
@@ -374,6 +386,7 @@ impl Targets {
             )?);
         }
         let plate = self.plate.as_ref().ok_or((-2, "plate"))?;
+        let _ctx = lock(&CTX);
         // SAFETY: `src` and `plate` are same-size, same-format textures on the same device whose
         // immediate context is multithread-protected (`Direct3DDevice`).
         unsafe { self.ctx.CopyResource(plate, src) };
@@ -394,6 +407,7 @@ impl Targets {
     /// after the cursor blend. `src` needs no bind flags beyond what the shader kinds read
     /// through an SRV created per call.
     pub fn pass(&mut self, src: &Tex, i: usize, defer: bool) -> Result<(), Fail> {
+        let _ctx = lock(&CTX);
         self.deferred[i] = false;
         if let Planes::Bgra(slots) = &self.planes {
             // SAFETY: `src` and the slot are live same-size textures on the same device, whose
@@ -535,6 +549,7 @@ impl Targets {
         pts_ns: u64,
         cursor: Option<(CursorImage, f32)>,
     ) -> Result<CapturedFrame, Fail> {
+        let _ctx = lock(&CTX);
         if let Some((image, scale)) = cursor {
             self.blend(i, &image, scale);
         }

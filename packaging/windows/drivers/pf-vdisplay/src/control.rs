@@ -170,6 +170,11 @@ fn add(owner: u32, request: Request) {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     }
+    // A refused adapter init is never retried by PnP; the host's ADD retries are the only
+    // second chance, so use them.
+    if crate::adapter::adapter().is_none() {
+        crate::adapter::retry_init();
+    }
     let Some((monitor_id, target_id, luid_low, luid_high)) =
         crate::monitor::create_monitor(owner, &req)
     else {

@@ -103,6 +103,22 @@ impl CursorShared {
         HANDLE(self.section.handle.as_raw_handle())
     }
 
+    /// Re-stamp the monitor's desktop origin: a resize or an HDR re-arrival moves it, and both
+    /// the driver's blend and the fallback read here place the pointer relative to it.
+    pub(super) fn set_origin(&mut self, origin: (i32, i32)) {
+        if origin == self.origin {
+            return;
+        }
+        self.origin = origin;
+        let shm = self.section.ptr::<CursorShm>();
+        // SAFETY: the view spans `CURSOR_SHM_SIZE` for `self`'s lifetime; both fields are
+        // 4-aligned i32s in the fixed layout, written whole.
+        unsafe {
+            std::ptr::addr_of_mut!((*shm).origin_x).write_volatile(origin.0);
+            std::ptr::addr_of_mut!((*shm).origin_y).write_volatile(origin.1);
+        }
+    }
+
     /// Tell the driver where this HDR desktop puts SDR white (1.0 = 80 nits) for its blend
     /// onto an FP16 frame; `0` = SDR. One aligned word, read by the driver per publish.
     pub(super) fn set_sdr_white_scale(&self, scale: f32) {

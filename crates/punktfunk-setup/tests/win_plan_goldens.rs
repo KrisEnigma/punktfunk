@@ -318,7 +318,7 @@ fn restore_carries_the_pre_install_task_states() {
     let fresh_plan = host_plan(&fresh(), &WinChoices::derive(&fresh()));
     assert!(!fresh_plan.steps().any(|s| matches!(
         s,
-        WinAction::StopHostRuntime | WinAction::RestoreTasks { .. }
+        WinAction::StopHostRuntime { .. } | WinAction::RestoreTasks { .. }
     )));
 }
 

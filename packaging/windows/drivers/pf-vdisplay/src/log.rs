@@ -108,6 +108,57 @@ macro_rules! dbglog {
     ($($a:tt)*) => { if $crate::log::file_log_enabled() { $crate::log::log(&::std::format!($($a)*)) } };
 }
 
+/// Route the encoder backends' `tracing` events into [`log`], behind the same gate: with no
+/// subscriber in WUDFHost every NVENC status string and AMF rejection is dropped, and a failed
+/// open reaches the host as a bare stage tag. Call from `DriverEntry`, once.
+pub(crate) fn install_tracing_bridge() {
+    if !file_log_enabled() {
+        return;
+    }
+    let _ = tracing::subscriber::set_global_default(Bridge);
+}
+
+struct Bridge;
+
+impl tracing::Subscriber for Bridge {
+    fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
+        *m.level() <= tracing::Level::DEBUG
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = String::new();
+        event.record(&mut Line(&mut line));
+        let m = event.metadata();
+        dbglog!("[pf-vd] {} {}:{line}", m.level(), m.target());
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// `message` first as written, every other field as `name=value`.
+struct Line<'a>(&'a mut String);
+
+impl tracing::field::Visit for Line<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn core::fmt::Debug) {
+        use core::fmt::Write;
+        let _ = if field.name() == "message" {
+            write!(self.0, " {value:?}")
+        } else {
+            write!(self.0, " {}={value:?}", field.name())
+        };
+    }
+}
+
 /// Zero-initialise a C POD struct (windows-rs / WDK / IddCx). These are `#[repr(C)]` framework structs
 /// whose all-zero bit pattern is a valid zero-initialised value; the caller stamps the required
 /// `.Size`/etc fields immediately after. Centralises the `unsafe { core::mem::zeroed() }` the IddCx/WDF

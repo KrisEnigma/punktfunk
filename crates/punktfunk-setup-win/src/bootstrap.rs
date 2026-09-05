@@ -49,6 +49,18 @@ pub fn relaunch_if_packed() -> Option<ExitCode> {
 fn extract_and_run(exe: &Path, data: &[u8], payload: &[u8]) -> Result<ExitCode, String> {
     let root = fresh_root()?;
     payload::extract(payload, &root)?;
+    // Windows inherits the DACL, never the owner: the unpacked `staging\*` dirs are owned by
+    // whoever ran setup, and the host's driver leg rejects a source not owned by SYSTEM /
+    // Administrators. Best-effort — the per-user client root cannot and need not be re-owned.
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("icacls")
+            .arg(&root)
+            .args(["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
     // The stub is the bytes before the overlay — the same wizard, minus payload and
     // signature. Written beside the runtime under the launch name, so `unins000.exe` keeps
     // its D6 meaning in the child.

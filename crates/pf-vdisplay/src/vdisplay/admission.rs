@@ -113,15 +113,15 @@ pub fn effective_conflict() -> ModeConflict {
 /// here, never admitted then degrading a live sibling
 /// (`design/windows-parallel-virtual-displays.md`).
 pub fn admit(req_identity: Option<[u8; 32]>) -> Admission {
-    // Scope the table lock to `decide` only. Budget checks call
-    // `manager::snapshot` (holds `state` across DDC, SetupAPI, 3 s
-    // activation ladders) and an NVENC probe; holding the process-wide
-    // table across those stalls every connect, disconnect, and mgmt read.
+    // The table lock covers `decide` only: the budget check below takes `manager::snapshot`,
+    // which stalls on DDC/SetupAPI, and every connect and mgmt read waits on this table.
+    // Only OTHER clients count: a same-client reconnect whose zombie has not dropped yet is
+    // about to reuse its own slot, not take a second one.
     let (decision, any_live) = {
         let live = table().lock().unwrap();
         (
             decide(effective_conflict(), req_identity, &live),
-            !live.is_empty(),
+            live.iter().any(|s| !same_client(s.identity, req_identity)),
         )
     };
     let _ = any_live; // used only by the cfg-gated budget blocks below
@@ -152,12 +152,8 @@ pub fn admit(req_identity: Option<[u8; 32]>) -> Admission {
                 "host display budget exhausted: {slots} display(s) live/kept, max_displays = {max}"
             ));
         }
-        if !pf_encode::can_open_another_session() {
-            return Admission::Reject(
-                "host encoder budget exhausted: no NVENC session headroom for another display"
-                    .to_string(),
-            );
-        }
+        // No encoder-headroom gate: the encoders live in the driver's WUDFHost now, and the
+        // host-side session counter it used to read never moves.
     }
     decision
 }

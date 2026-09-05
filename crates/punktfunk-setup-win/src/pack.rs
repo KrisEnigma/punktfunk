@@ -154,6 +154,42 @@ pub fn stage_runtime(target: &Path, into: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
+/// [`copy_tree`] onto a live install: a file Windows refuses to overwrite because a process
+/// still maps it (error 5 or 32) lands beside it as `<name>.pf-new`, queued to replace it at
+/// the next boot, and goes on `deferred` instead of aborting the tree mid-way.
+pub fn deploy_tree(from: &Path, to: &Path, deferred: &mut Vec<PathBuf>) -> Result<usize, String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut count = 0;
+    for entry in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let dest = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            count += deploy_tree(&entry.path(), &dest, deferred)?;
+            continue;
+        }
+        match std::fs::copy(entry.path(), &dest) {
+            Ok(_) => count += 1,
+            Err(e) if matches!(e.raw_os_error(), Some(5 | 32)) => {
+                let staged = dest.with_extension(match dest.extension() {
+                    Some(ext) => format!("{}.pf-new", ext.to_string_lossy()),
+                    None => "pf-new".into(),
+                });
+                std::fs::copy(entry.path(), &staged)
+                    .map_err(|e| format!("{}: {e}", staged.display()))?;
+                if !punktfunk_setup::platform::windows::sys::replace_on_reboot(&staged, &dest) {
+                    return Err(format!(
+                        "{}: {e} (and no reboot-time replace)",
+                        dest.display()
+                    ));
+                }
+                deferred.push(dest);
+            }
+            Err(e) => return Err(format!("{}: {e}", dest.display())),
+        }
+    }
+    Ok(count)
+}
+
 pub fn copy_tree(from: &Path, to: &Path) -> Result<usize, String> {
     std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
     let mut count = 0;

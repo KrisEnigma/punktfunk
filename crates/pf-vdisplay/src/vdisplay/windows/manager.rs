@@ -488,6 +488,15 @@ pub fn vdm() -> &'static VirtualDisplayManager {
 /// The first session's Welcome runs before `vdisplay::open` constructs the
 /// backend, so this must not assume an initialised manager. `init` is
 /// idempotent and constructing the driver facade is free.
+/// The protocol the driver answered at the last handshake, for the status surface; `None`
+/// before any session opened the control device. No probe of its own: a v7 driver under a v8
+/// host should show here, not only in the session that fails.
+pub fn driver_protocol() -> Option<u32> {
+    let m = init(Box::new(crate::driver::PfVdisplayDriver));
+    let v = m.driver_proto.load(Ordering::Relaxed);
+    (v != 0).then_some(v)
+}
+
 pub fn hw_cursor_capable() -> bool {
     let m = init(Box::new(crate::driver::PfVdisplayDriver));
     if m.driver_proto.load(Ordering::Relaxed) != 0 {
@@ -619,8 +628,9 @@ impl VirtualDisplayManager {
 
     /// Open and initialise the backend (validates the driver is present).
     pub(crate) fn open_backend(&self) -> Result<()> {
-        // Hold `state` across the open so two racing backends cannot double-open.
-        let _guard = self.state.lock().unwrap();
+        // The `device` mutex serialises the open itself; `state` was never what protected
+        // it, and holding it here stalls every acquire and management read behind the
+        // PowerShell the open may spawn.
         self.ensure_device().map(|_| ())
     }
 
@@ -659,8 +669,10 @@ impl VirtualDisplayManager {
         self.ensure_linger_timer();
         let slot =
             resolve_slot_id(client_fp, (mode.width, mode.height)).map_err(anyhow::Error::new)?;
-        let mut inner = self.state.lock().unwrap();
+        // Before `state`: the open can spawn PowerShell for an adapter reload, and every
+        // release and management read waits on this lock meanwhile.
         let dev = self.ensure_device()?;
+        let mut inner = self.state.lock().unwrap();
 
         // IDD-push: a new connection while THIS slot is Lingering/Pinned is a
         // reconnect. A reused IddCx swap-chain is dead — preempt and create
@@ -936,6 +948,10 @@ impl VirtualDisplayManager {
             .name("vdisplay-pinger".into())
             .spawn(move || {
                 let mut warned = false;
+                // Gone-class failures in a row: one is a transient the next ping clears, two
+                // is a device that is really gone. Retiring on one silences the keepalive,
+                // and the driver's silence watchdog then departs live monitors.
+                let mut gone_streak = 0u32;
                 while !stop_t.load(Ordering::Relaxed) {
                     if let Some(h) = vdm().device_handle() {
                         // SAFETY: `ping` requires `dev` to be a valid control handle. The `h` Arc
@@ -944,12 +960,18 @@ impl VirtualDisplayManager {
                         // drops only the manager's reference; see `DeviceSlot`). The pinger thread
                         // only spins while the `&'static` manager singleton lives.
                         match unsafe { vdm().driver.ping(dev_raw(&h)) } {
-                            Ok(()) => warned = false,
+                            Ok(()) => {
+                                warned = false;
+                                gone_streak = 0;
+                            }
                             Err(e) if is_device_gone(&e) => {
-                                // Device is gone. Retire so the next session
-                                // reopens; the monitors are already dead
-                                // driver-side.
-                                vdm().invalidate_device(&e);
+                                gone_streak += 1;
+                                if gone_streak >= 2 {
+                                    // Device is gone. Retire so the next session
+                                    // reopens; the monitors are already dead
+                                    // driver-side.
+                                    vdm().invalidate_device(&e);
+                                }
                             }
                             Err(e) => {
                                 if !warned {
@@ -1066,6 +1088,15 @@ impl VirtualDisplayManager {
                             failures = snap.failures,
                             "exclusive re-assert watchdog: display snapshot is last-known-good — \
                              topology state unknown this cycle, mutating nothing"
+                        );
+                        continue;
+                    }
+                    // Under a live exclusive isolate our own targets are active, so a snapshot
+                    // without them is an untrustworthy read, not an empty desk.
+                    if !keep.iter().any(|k| snap.target(*k).is_some()) {
+                        tracing::debug!(
+                            "exclusive re-assert watchdog: the snapshot carries none of our \
+                             targets — unknown this cycle, mutating nothing"
                         );
                         continue;
                     }

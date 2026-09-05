@@ -431,13 +431,18 @@ pub fn wait_target_departed(key: CcdTargetKey, ceiling: std::time::Duration) -> 
     let deadline = std::time::Instant::now() + ceiling;
     let mut absent_streak = 0u32;
     loop {
-        if resolve_gdi_name(key).is_none() {
-            absent_streak += 1;
-            if absent_streak >= 2 {
-                return true;
+        // A failed query is unknown, not absent: it neither advances nor resets the streak.
+        match query_display_config(QDC_ONLY_ACTIVE_PATHS) {
+            Ok((paths, _)) if paths.iter().any(|p| path_target_key(p) == key) => {
+                absent_streak = 0;
             }
-        } else {
-            absent_streak = 0;
+            Ok(_) => {
+                absent_streak += 1;
+                if absent_streak >= 2 {
+                    return true;
+                }
+            }
+            Err(_) => {}
         }
         if std::time::Instant::now() >= deadline {
             return false;
@@ -1242,7 +1247,15 @@ pub fn isolate_displays_ccd_checked(
     // Re-query and re-apply until only the keep set is active. One apply can
     // leave a panel lit; the lock screen must not land there.
     for attempt in 1..=4u32 {
-        let (mut paths, mut modes) = query_active_config()?;
+        // An earlier attempt may already have switched panels off, so `saved` must survive a
+        // failed re-query: the churn it caused is why this loop retries at all.
+        let Some((mut paths, mut modes)) = query_active_config() else {
+            tracing::warn!(
+                "display isolate (CCD): re-query FAILED before attempt {attempt}/4 — retrying"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            continue;
+        };
         let mut others = 0u32;
         for p in paths.iter_mut() {
             if keep.contains(&path_target_key(p)) {
@@ -1717,10 +1730,16 @@ static DARK_SINKS_FUTILE: std::sync::Mutex<Vec<(CcdTargetKey, String)>> =
 /// Restore the topology saved by [`isolate_displays_ccd`] (teardown, before
 /// the virtual is removed).
 pub fn restore_displays_ccd(saved: &SavedConfig) {
-    restore_displays_ccd_inner(saved);
-    // Clear the marker only AFTER restore (and the dark-desk backstop). A host
-    // that dies mid-restore must leave the marker so the next start re-lights.
-    isolate_journal::clear();
+    // The marker goes only once the desk is known lit (or nothing external is connected). A
+    // host that dies mid-restore, or a restore that lit nothing, leaves it for the next start.
+    if restore_displays_ccd_inner(saved) {
+        isolate_journal::clear();
+    } else {
+        tracing::warn!(
+            "display isolate (CCD): the restore left every external display dark — keeping the \
+             crash-recovery marker so the next host start forces EXTEND"
+        );
+    }
 }
 
 /// Every display target that still EXISTS right now — complete [`CcdTargetKey`]s from a full
@@ -1800,10 +1819,12 @@ fn prune_saved_config_for_targets(
     (kept, new_modes, dropped)
 }
 
-fn restore_displays_ccd_inner(saved: &SavedConfig) {
+/// `true` when no connected external display is left dark — the restore lit one, the backstop
+/// did, or there is none to light.
+fn restore_displays_ccd_inner(saved: &SavedConfig) -> bool {
     let (saved_paths, saved_modes) = saved;
     if saved_paths.is_empty() {
-        return;
+        return true;
     }
     // Prune absent targets first: one stale path (or orphaned mode) makes
     // SetDisplayConfig reject the whole array with 0x57 — nothing restores.
@@ -1875,7 +1896,7 @@ fn restore_displays_ccd_inner(saved: &SavedConfig) {
                  an earlier force-EXTEND — an unlightable sink (off/standby TV), not a failed \
                  restore; leaving the topology be"
             );
-            return;
+            return false;
         }
         tracing::warn!(
             "display isolate (CCD): no external physical display active after the restore (rc={apply_rc:#x}, connected={connected}) — forcing the EXTEND preset so the desk is not left dark"
@@ -1887,7 +1908,9 @@ fn restore_displays_ccd_inner(saved: &SavedConfig) {
             .iter()
             .any(|t| t.external_physical && t.active);
         *DARK_SINKS_FUTILE.lock().unwrap() = if lit_after { Vec::new() } else { dark };
+        return lit_after;
     }
+    true
 }
 
 /// Live CCD queries. `#[ignore]` so an un-instrumented run is `ignored`, not a

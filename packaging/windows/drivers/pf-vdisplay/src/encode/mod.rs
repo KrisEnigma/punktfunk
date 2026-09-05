@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::time::Duration;
 
-use pf_driver_proto::encode::au::AuHeader;
+use pf_driver_proto::encode::au::{self, AuHeader};
 use pf_driver_proto::encode::{self as wire, EncodeCtlRequest, SetEncodeReply, SetEncodeRequest};
 use wdk_sys::NTSTATUS;
 
@@ -46,8 +46,10 @@ pub fn backends_linked() -> &'static [&'static str] {
 ///
 /// `Err` is an NTSTATUS for a malformed request or a target `owner` does not hold, with nothing
 /// adopted. `Ok` completes the IOCTL successfully whatever `status` says; from the map on, the
-/// driver owns the handles (`AuSection`). The open runs on the new encode thread and this call
-/// waits [`OPEN_BOUND`] for its reply. A displaced session's thread stops with no lock held.
+/// driver owns the handles (`AuSection`). The session already on the monitor stops first, with
+/// no lock held: two encode threads on one pool would split its slots, and the old one's exit
+/// clears the pool's `live` under its successor. The open runs on the new encode thread and
+/// this call waits [`OPEN_BOUND`] for its reply.
 pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
     // The bound is the name table's length: `open_listed` indexes it by `backend - 1`, and a
     // backend added there without widening this would be rejected here instead.
@@ -74,6 +76,13 @@ pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, 
         Ok(s) => s,
         Err(_) => return Err(STATUS_INVALID_PARAMETER),
     };
+    if let Some(old) = monitor.take_encode() {
+        old.stop();
+        // A thread that would not stop was detached still holding its slots.
+        if let Some(pool) = monitor.pool() {
+            pool.reclaim();
+        }
+    }
     let Some(luid) = monitor.render_luid() else {
         return Ok(fail_reply(wire::SET_ENCODE_NO_DEVICE, (-5, "noswap")));
     };
@@ -137,6 +146,19 @@ pub fn encode_ctl(owner: u32, req: &EncodeCtlRequest) -> NTSTATUS {
         wire::ENCODE_CTL_SET_HDR_META => Ctl::SetHdrMeta(req.payload),
         wire::ENCODE_CTL_FLUSH => Ctl::Flush,
         wire::ENCODE_CTL_RESET => return reset(&monitor, &session, req.arg0),
+        wire::ENCODE_CTL_CLOSE => {
+            // The host's proxy is gone; a stale proxy names an older generation and stops
+            // nothing. The pool stays for the retained slot.
+            if session.generation == req.arg0
+                && let Some(live) = monitor.take_encode()
+            {
+                live.stop();
+                if let Some(pool) = monitor.pool() {
+                    pool.reclaim();
+                }
+            }
+            return STATUS_SUCCESS;
+        }
         _ => return STATUS_INVALID_PARAMETER,
     };
     session.push_ctl(op);
@@ -158,6 +180,17 @@ fn reset(monitor: &Arc<Monitor>, session: &Arc<EncodeSession>, wire_seq_base: u3
     }
     if let Some(pool) = monitor.pool() {
         pool.reclaim();
+    }
+    // The old thread's published slots: the new heap ring knows nothing of their bytes and
+    // would place its IDR over them while the host still reads them, and both would carry the
+    // new base. Freed here, where nothing writes; a slot the host holds READING stays its own.
+    for i in 0..au::AU_SLOTS as usize {
+        let _ = session.section.slot_state(i).compare_exchange(
+            au::PUBLISHED,
+            au::FREE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     session
         .wire_seq_base

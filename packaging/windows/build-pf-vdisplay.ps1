@@ -160,18 +160,21 @@ if ($seatsText -match '(?m)^%DeviceName%=pf_vdisplay_Install, Root\\pf_vdisplay'
 }
 Set-Content -Path $sInfSeats -Value $seatsText -NoNewline
 
-# Clear FORCE_INTEGRITY BEFORE signing (it edits the PE, invalidating any signature).
-& powershell -NoProfile -ExecutionPolicy Bypass -File $clear -Path $sDll | Out-Null
+# Clear FORCE_INTEGRITY BEFORE signing (it edits the PE, invalidating any signature). In-process,
+# so the script's own throw propagates: a child powershell's exit code is swallowed here.
+& $clear -Path $sDll | Out-Null
 
 if (-not $DriverVer) { $now = Get-Date; $DriverVer = '9.9.{0}.{1}' -f $now.ToString('MMdd'), $now.ToString('HHmm') }
 
 & $signtool sign /fd SHA256 @signArgs $sDll | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "signtool sign (dll) failed ($LASTEXITCODE)" }
 & $stampinf -f $sInf -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "stampinf (inf) failed ($LASTEXITCODE)" }
 # Same DriverVer on both: the date is what wins `RdpIdd_IndirectDisplay` against the inbox driver,
 # whose rank is identical to ours and whose date is frozen at 06/21/2006. A seats package stamped
 # older than inbox loses the id silently (`windows-seat-display-tier.md` sec 5d).
 & $stampinf -f $sInfSeats -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "stampinf (seats inf) failed ($LASTEXITCODE)" }
 & $inf2cat /driver:$Out /os:$catOs /uselocaltime | Out-Null
 if (-not (Test-Path $sCat)) { throw "Inf2Cat did not produce $sCat" }
 if (-not (Test-Path $sCatSeats)) { throw "Inf2Cat did not produce $sCatSeats" }

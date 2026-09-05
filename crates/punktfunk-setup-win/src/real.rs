@@ -25,12 +25,14 @@ pub struct DirPayload {
 }
 
 impl PayloadSource for DirPayload {
-    fn deploy(&self, dest: &Path) -> Result<(), String> {
+    fn deploy(&self, dest: &Path) -> Result<Vec<PathBuf>, String> {
         let app = self.root.join("app");
         if !app.is_dir() {
             return Err("this payload carries no app tree — an uninstaller cannot install".into());
         }
-        crate::pack::copy_tree(&app, dest).map(|_| ())
+        let mut deferred = Vec::new();
+        crate::pack::deploy_tree(&app, dest, &mut deferred)?;
+        Ok(deferred)
     }
 }
 
