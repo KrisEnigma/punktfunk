@@ -14,9 +14,9 @@ fn main() -> Result<(), wdk_build::ConfigError> {
 /// since "1.10" < "1.2" lexically). `<arch>` follows the cargo target: `x64` or `ARM64`.
 fn link_iddcx_stub() {
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH");
-    let arch = wdk_build::CpuArchitecture::try_from_cargo_str(&target_arch)
-        .unwrap_or_else(|| panic!("no WDK lib dir for target arch {target_arch}"))
-        .as_windows_str();
+    let cpu = wdk_build::CpuArchitecture::try_from_cargo_str(&target_arch)
+        .unwrap_or_else(|| panic!("no WDK lib dir for target arch {target_arch}"));
+    let arch = cpu.as_windows_str();
     const ROOTS: [&str; 2] = [
         r"C:\Program Files (x86)\Windows Kits\10\Lib",
         r"C:\Program Files\Windows Kits\10\Lib",
