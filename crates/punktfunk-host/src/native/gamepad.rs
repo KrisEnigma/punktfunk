@@ -47,8 +47,9 @@ pub(super) fn resolve_pad_kind(kind: GamepadPref) -> GamepadPref {
 /// `linux`/`windows` are the host OS. DualSense, DualShock 4, DualSense Edge, Xbox One, and
 /// Steam Deck have both a Linux and a Windows backend; other wishes fold to Xbox 360 (never
 /// an error — a session without rich pads still streams). Xbox Elite has no Linux identity
-/// (`PadIdentity` stops at One S). Steam Controller / Switch Pro / SC2 Puck are Linux-only.
-/// Steam Controller 2 is Linux UHID and Windows DEVTYPE_TRITON.
+/// (`PadIdentity` stops at One S). Steam Controller and Switch Pro are Linux-only.
+/// Steam Controller 2 is Linux UHID and Windows DEVTYPE_TRITON; the SC2 Puck has a native
+/// Linux identity and folds onto the wired one on Windows.
 ///
 /// Compile-time OS flags only. `PUNKTFUNK_XBOX_BACKEND=xusb` un-varies Windows identity at
 /// runtime; that fold is [`degrade_xbox_identity`], not this function.
@@ -74,13 +75,12 @@ fn pick_gamepad(pref: GamepadPref, env: Option<&str>, linux: bool, windows: bool
         // Linux: UHID passthrough under 28DE:1302; no kernel driver, Steam Input consumes hidraw.
         GamepadPref::SteamController2 if linux => GamepadPref::SteamController2,
         GamepadPref::SteamController2 if windows => GamepadPref::SteamController2,
-        // 28DE:1304 has seven USB interfaces; no Windows synthesis, so `_` → Xbox360.
+        // 28DE:1304's seven interfaces have a native Linux synthesis only.
         GamepadPref::SteamController2Puck if linux => GamepadPref::SteamController2Puck,
-        // The Puck's 7-interface 28DE:1304 topology has no Windows synthesis, and needs none:
-        // the dongle PIDs are client-side transports only — Steam treats the wired PID as the
-        // canonical controller (triton_proto.rs) — so a Puck-captured pad folds onto the same
-        // wired 28DE:1302 virtual pad a cabled one mints. The descriptor declares the wireless
-        // ids (0x79), so the client's forwarded connect edge stays legal on the wired identity.
+        // Windows needs none: the dongle PIDs are client-side transports, and Steam treats the
+        // wired PID as the canonical controller (triton_proto.rs), so a Puck pad folds onto the
+        // same 28DE:1302 pad a cabled one mints. That descriptor declares 0x79, so the client's
+        // forwarded connect edge stays legal on it.
         GamepadPref::SteamController2Puck if windows => GamepadPref::SteamController2,
         _ => GamepadPref::Xbox360,
     }
