@@ -13,8 +13,9 @@ is compiled, so nothing misses the crate.
 
 Removes any top-level `name = { ... git = "...github.com/microsoft/windows-rs..." ... }`
 entry, single- or multi-line (pf-client-core's spans a features array; the entry ends at
-the first line that closes back to depth 0). Registry deps in the same table (wasapi,
-sdl3) are kept — they vendor normally.
+the first line that closes back to depth 0), and every `"dep:name"` a `[features]` list
+makes of it — cargo refuses a feature that names a dependency the manifest no longer
+declares. Registry deps in the same table (wasapi, sdl3) are kept — they vendor normally.
 
 Dependency-free (no tomlkit) so it also runs inside the flatpak build sandbox and on the
 Steam Deck's stock python.
@@ -22,6 +23,7 @@ Steam Deck's stock python.
 Usage: prune-windows-toml.py <Cargo.toml> [<Cargo.toml> ...]
 """
 
+import re
 import sys
 
 WINDOWS_RS = "github.com/microsoft/windows-rs"
@@ -31,6 +33,7 @@ def prune(text: str) -> tuple[str, int]:
     lines = text.splitlines(keepends=True)
     kept: list[str] = []
     removed = 0
+    names: list[str] = []
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -49,11 +52,16 @@ def prune(text: str) -> tuple[str, int]:
                 j += 1
             if any(WINDOWS_RS in e for e in entry):
                 removed += 1
+                names.append(stripped.split("=", 1)[0].strip())
                 i = j
                 continue
         kept.append(line)
         i += 1
-    return "".join(kept), removed
+    out = "".join(kept)
+    for name in names:
+        # A trailing comma before `]` is valid TOML, so the element goes and the comma stays.
+        out = re.sub(r'\s*"dep:' + re.escape(name) + r'"\s*,?', "", out)
+    return out, removed
 
 
 def main() -> None:
@@ -68,4 +76,22 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--self-test"]:
+        sample = (
+            "[target.'cfg(windows)'.dependencies]\n"
+            "winreg = \"0.55\"\n"
+            "windows = { git = \"https://github.com/microsoft/windows-rs\", rev = \"abc\", features = [\n"
+            "    \"Win32_Foundation\",\n"
+            "] }\n\n"
+            "[features]\n"
+            "desktop = [\n"
+            "    \"dep:winreg\", \"dep:windows\",\n"
+            "]\n"
+        )
+        out, n = prune(sample)
+        assert n == 1, n
+        assert "windows-rs" not in out and "dep:windows" not in out, out
+        assert "dep:winreg" in out and "winreg = " in out, out
+        print("prune-windows-toml: self-test ok")
+    else:
+        main()
