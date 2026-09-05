@@ -174,9 +174,9 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
         ObjectAttributes: &raw mut attr,
     };
     let mut out = pod_init!(iddcx::IDARG_OUT_ADAPTER_INIT);
+    INIT_PENDING.store(true, Ordering::Release);
     // SAFETY: `init`/`out` are valid local storage; IddCxAdapterInitAsync reads the caps synchronously
     // (the adapter object itself is delivered later via adapter_init_finished). Called once per device.
-    INIT_PENDING.store(true, Ordering::Release);
     let st = unsafe { wdk_iddcx::IddCxAdapterInitAsync(&init, &mut out) };
     dbglog!("[pf-vd] IddCxAdapterInitAsync -> {st:#x}");
     if st < 0 {

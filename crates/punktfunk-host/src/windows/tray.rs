@@ -73,10 +73,12 @@ pub fn tray_exe() -> Option<PathBuf> {
 pub fn is_running() -> bool {
     use windows::core::w;
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZE};
+    use windows::Win32::System::Threading::OpenMutexW;
+    // SYNCHRONIZE: the least access an open needs; existence is all that is asked.
+    const SYNCHRONIZE: u32 = 0x0010_0000;
     // SAFETY: a static NUL-terminated name; the handle, when one comes back, is closed here.
     unsafe {
-        match OpenMutexW(SYNCHRONIZE.0, false, w!("Local\\PunktfunkTray")) {
+        match OpenMutexW(SYNCHRONIZE, false, w!("Local\\PunktfunkTray")) {
             Ok(h) => {
                 let _ = CloseHandle(h);
                 true
