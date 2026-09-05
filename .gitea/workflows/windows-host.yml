@@ -716,8 +716,16 @@ jobs:
           URL="https://${REGISTRY}/api/packages/${OWNER}/generic/${PKG}/${VER}/punktfunk-host-setup-${VER}.exe"
           curl -fsSL "$URL" -o /tmp/installer.exe
           SHA="$(sha256sum /tmp/installer.exe | awk '{print $1}')"
+          # The arm64 leg is continue-on-error; a missing asset leaves its key out of the manifest.
+          A64_URL="https://${REGISTRY}/api/packages/${OWNER}/generic/${PKG}/${VER}/punktfunk-host-setup-${VER}_arm64.exe"
+          if curl -fsSL "$A64_URL" -o /tmp/installer-arm64.exe; then
+            A64_SHA="$(sha256sum /tmp/installer-arm64.exe | awk '{print $1}')"
+          else
+            echo "no arm64 installer for ${VER} - publishing the x64 leg only"; A64_URL=""; A64_SHA=""
+          fi
           CHANNEL=canary VERSION="$VER" CI_RUN="${GITHUB_RUN_NUMBER}" \
             WINDOWS_URL="$URL" WINDOWS_SHA256="$SHA" \
+            WINDOWS_ARM64_URL="$A64_URL" WINDOWS_ARM64_SHA256="$A64_SHA" \
             NOTES_URL="https://git.unom.io/unom/punktfunk/releases" \
             bash scripts/ci/publish-update-manifest.sh
 

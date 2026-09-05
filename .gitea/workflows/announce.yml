@@ -111,8 +111,19 @@ jobs:
             echo "ERROR: installer signer '$SIGNER' is not '$AUTHENTICODE_SUBJECT'" >&2
             exit 1
           fi
+          # The arm64 installer is optional on a release; when present it carries the same leaf.
+          A64_URL="https://git.unom.io/unom/punktfunk/releases/download/${TAG}/punktfunk-host-setup-${VER}_arm64.exe"
+          if curl -fsSL "$A64_URL" -o /tmp/installer-arm64.exe; then
+            A64_SHA="$(sha256sum /tmp/installer-arm64.exe | awk '{print $1}')"
+            osslsigncode verify -CAfile /etc/ssl/certs/ca-certificates.crt \
+              -require-leaf-hash "sha256:$LEAF_SHA" -in /tmp/installer-arm64.exe >/dev/null || {
+              echo "ERROR: the arm64 installer is not signed by leaf $LEAF_SHA" >&2; exit 1; }
+          else
+            echo "no arm64 installer on ${TAG} - publishing the x64 leg only"; A64_URL=""; A64_SHA=""
+          fi
           CHANNEL=stable VERSION="$VER" REQUIRE_KEY=1 \
             WINDOWS_URL="$URL" WINDOWS_SHA256="$SHA" \
+            WINDOWS_ARM64_URL="$A64_URL" WINDOWS_ARM64_SHA256="$A64_SHA" \
             AUTHENTICODE_SHA256="$LEAF_SHA" AUTHENTICODE_SUBJECT="$AUTHENTICODE_SUBJECT" \
             NOTES_URL="https://git.unom.io/unom/punktfunk/releases/tag/${TAG}" \
             bash scripts/ci/publish-update-manifest.sh

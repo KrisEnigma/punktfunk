@@ -437,8 +437,13 @@ pub(crate) fn start_apply(force: bool, session_active: bool) -> Result<(), Apply
         if !newer {
             return Err(ApplyError::NothingToApply);
         }
-        // Linux legs resolve artifacts through the package manager.
-        let asset = checked.manifest.windows_host.clone();
+        // Linux legs resolve artifacts through the package manager. An ARM64 host reads only
+        // its own key: the x64 asset is the wrong exe, not a fallback.
+        let asset = if cfg!(target_arch = "aarch64") {
+            checked.manifest.windows_host_arm64.clone()
+        } else {
+            checked.manifest.windows_host.clone()
+        };
         if windows_leg && asset.is_none() {
             return Err(ApplyError::NothingToApply);
         }
