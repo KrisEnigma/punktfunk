@@ -68,6 +68,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **The management API answers cross-origin requests.** A page that is not served by the host
   could not read a response at all. `Access-Control-Allow-Credentials` is never sent — the API
   has no cookies — and `PUNKTFUNK_WEBTRANSPORT_ORIGINS` narrows which origins are answered.
+- **`@punktfunk/host` 0.2.0 runs in a browser.** `@punktfunk/host/core` is the SDK with nothing
+  Node in it — the generated client, the service, the errors, the event decoder — and a
+  `Credential` seam with `staticBearer` (every credential it had) and `deviceKey` (a paired
+  browser's nonce exchange, re-earned on 401). Tag `sdk-v0.2.0` after merge to publish; the
+  generated client is now drift-gated against `api/openapi.json` in CI.
 - **The browser plane honours `require_pairing`.** A browser sends that signature before its
   `Hello`, and a host that requires pairing refuses one that does not. Run `serve --open` to keep
   an unpaired browser streaming, as it already does for native clients.

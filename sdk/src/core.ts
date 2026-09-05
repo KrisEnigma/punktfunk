@@ -42,7 +42,7 @@ export {
 	signedMessage,
 	staticBearer,
 } from "./credential.js";
-export { derToRaw, fromBase64, rawToDer, toBase64 } from "./ecdsa.js";
+export { derToRaw, fromBase64, hexToBytes, rawToDer, toBase64 } from "./ecdsa.js";
 export { type HostApi, httpClientFor, makeHostApi } from "./api.js";
 export { HttpStatusError, httpRequest } from "./http.js";
 export type { EventStreamOptions, SseFrame } from "./sse.js";
