@@ -463,18 +463,21 @@ impl H264Planner {
                 }
                 NaluType::Slice | NaluType::SliceIdr => {
                     // After a flush, only an IDR restarts the decoding process.
-                    if current.is_none() && self.awaiting_idr {
-                        if !nalu.header.idr_pic_flag {
-                            return Err(PlanError::AwaitingIdr);
-                        }
-                        self.awaiting_idr = false;
+                    if current.is_none() && self.awaiting_idr && !nalu.header.idr_pic_flag {
+                        return Err(PlanError::AwaitingIdr);
                     }
                     let slice = match self.parser.parse_slice_header(nalu) {
                         Ok(slice) => slice,
                         Err(err) => return Err(Self::slice_parse_error(err)),
                     };
                     match &current {
-                        None => current = Some(self.begin_picture(&slice, &mut warnings)?),
+                        None => {
+                            current = Some(self.begin_picture(&slice, &mut warnings)?);
+                            // Only once the IDR plans: one that fails (an unknown
+                            // PPS) leaves the DPB empty, and the P behind it would
+                            // otherwise plan on no reference and be stored as one.
+                            self.awaiting_idr = false;
+                        }
                         // One picture per AU: a second `first_mb_in_slice == 0` is a mis-split.
                         Some(_) if slice.header.first_mb_in_slice == 0 => {
                             return Err(PlanError::OutsideEnvelope(
@@ -513,13 +516,15 @@ impl H264Planner {
             .ok_or_else(|| PlanError::Parse("access unit contains no coded picture".into()))?;
 
         // Slice reference lists, not the DPB snapshot: a resident unreferenced
-        // damaged picture does not taint this AU. An IDR has an empty list.
+        // damaged picture does not taint this AU. An IDR has an empty list, and
+        // so does a concealed picture — its own warnings keep it unclean, so a
+        // consumer reading the bit alone cannot lift onto it.
         let references_clean = self.clean.references_clean(
             slices
                 .iter()
                 .flat_map(|s: &SlicePlan| s.ref_list0.iter().chain(&s.ref_list1))
                 .map(|r| r.id),
-        );
+        ) && !warnings.iter().any(PlanWarning::is_integrity);
         // Before `finish_picture`: MMCO 5 rewrites stored POC after this, but
         // backends submit the 8.2.1 values.
         let picture = Self::picture_plan(&cur, recovery_point, references_clean);
@@ -671,16 +676,20 @@ impl H264Planner {
                     prev_pic_order_cnt_msb
                 };
 
+                // Saturating: `delta_pic_order_cnt_bottom` is an unbounded se(v).
                 if !matches!(pic.field, Field::Bottom) {
-                    pic.top_field_order_cnt = pic.pic_order_cnt_msb + pic.pic_order_cnt_lsb;
+                    pic.top_field_order_cnt =
+                        pic.pic_order_cnt_msb.saturating_add(pic.pic_order_cnt_lsb);
                 }
 
                 if !matches!(pic.field, Field::Top) {
                     if matches!(pic.field, Field::Frame) {
-                        pic.bottom_field_order_cnt =
-                            pic.top_field_order_cnt + pic.delta_pic_order_cnt_bottom;
+                        pic.bottom_field_order_cnt = pic
+                            .top_field_order_cnt
+                            .saturating_add(pic.delta_pic_order_cnt_bottom);
                     } else {
-                        pic.bottom_field_order_cnt = pic.pic_order_cnt_msb + pic.pic_order_cnt_lsb;
+                        pic.bottom_field_order_cnt =
+                            pic.pic_order_cnt_msb.saturating_add(pic.pic_order_cnt_lsb);
                     }
                 }
             }
@@ -891,6 +900,14 @@ impl H264Planner {
         ref_idx_lx: &mut usize,
     ) -> Result<(), String> {
         let pic_num_lx_no_wrap;
+        // 7.4.3.1: `0..MaxPicNum - 1`. Bounding it here keeps every sum below
+        // within `2 * MaxPicNum`; an unbounded ue(v) would overflow them.
+        if i64::from(rplm.abs_diff_pic_num_minus1) >= i64::from(max_pic_num) {
+            return Err(format!(
+                "abs_diff_pic_num_minus1 {} exceeds MaxPicNum {max_pic_num}",
+                rplm.abs_diff_pic_num_minus1
+            ));
+        }
         let abs_diff_pic_num = rplm.abs_diff_pic_num_minus1 as i32 + 1;
         let modification_of_pic_nums_idc = rplm.modification_of_pic_nums_idc;
 
@@ -2816,6 +2833,50 @@ mod tests {
         let plan = planner.plan_au(&write_p_slice(1, 2, 1, 1, None)).unwrap();
         assert!(picture_warnings(&plan).is_empty());
         assert_eq!(plan.slices[0].ref_list0.len(), 1);
+    }
+
+    /// An IDR that fails to plan restarts nothing. Clearing the latch on sight
+    /// of the IDR let the P behind it plan on an empty DPB and be stored as a
+    /// reference for everything after.
+    #[test]
+    fn an_idr_that_fails_to_plan_keeps_the_planner_awaiting_an_idr() {
+        let (sps, pps) = authored_sps_pps();
+        let mut au0 = param_set_au(&sps, &pps);
+        au0.extend(write_idr_slice());
+        let mut planner = H264Planner::new();
+        planner.plan_au(&au0).unwrap();
+        planner.flush();
+
+        // PPS 3 was never sent.
+        assert!(matches!(
+            planner.plan_au(&write_idr_slice_at(0, 3)),
+            Err(PlanError::NoActiveParamSet { pps_id: 3 })
+        ));
+        assert!(matches!(
+            planner.plan_au(&write_p_slice(1, 2, 1, 1, None)),
+            Err(PlanError::AwaitingIdr)
+        ));
+
+        let plan = planner.plan_au(&write_idr_slice()).unwrap();
+        assert!(plan.picture.is_idr);
+        let plan = planner.plan_au(&write_p_slice(1, 2, 1, 1, None)).unwrap();
+        assert!(picture_warnings(&plan).is_empty());
+        assert!(plan.picture.references_clean);
+    }
+
+    /// The clean bit is a statement about the whole chain, this picture
+    /// included. A concealed picture's empty list must not read as clean.
+    #[test]
+    fn a_concealed_picture_reports_unclean_references_of_its_own() {
+        let (sps, pps) = authored_sps_pps();
+        let mut au0 = param_set_au(&sps, &pps);
+        au0.extend(write_idr_slice());
+        let mut planner = H264Planner::new();
+        planner.plan_au(&au0).unwrap();
+        // frame_num 1 lost: the gap conceals this picture.
+        let plan = planner.plan_au(&write_p_slice(2, 4, 1, 1, None)).unwrap();
+        assert!(plan.warnings.iter().any(PlanWarning::is_integrity));
+        assert!(!plan.picture.references_clean);
     }
 
     #[test]

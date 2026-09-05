@@ -373,8 +373,9 @@ impl Av1Planner {
                     pending = Some((fh, Vec::new()));
                 }
                 Ok(ParsedObu::Frame(frame)) => {
-                    // A Frame OBU is a header plus its tile group, so it ends
-                    // any previous frame and is itself complete.
+                    // A Frame OBU is a header plus its first tile group, so it
+                    // ends any previous frame. It stays open like a bare header:
+                    // 5.10 lets further tile-group OBUs follow it.
                     if let Some((h, t)) = pending.take() {
                         plans.push(self.plan_one(h, t, std::mem::take(&mut warnings))?);
                     }
@@ -383,11 +384,7 @@ impl Av1Planner {
                         tg_start: frame.tile_group.tg_start,
                         tg_end: frame.tile_group.tg_end,
                     };
-                    plans.push(self.plan_one(
-                        frame.header,
-                        vec![tile],
-                        std::mem::take(&mut warnings),
-                    )?);
+                    pending = Some((frame.header, vec![tile]));
                 }
                 Ok(ParsedObu::TileGroup(tg)) => {
                     let tile = TilePlan {
@@ -457,6 +454,13 @@ impl Av1Planner {
             let shown = self.slots.get(usize::from(slot)).copied().flatten();
             if shown.is_none() {
                 warnings.push(PlanWarning::MissingShowExisting { slot });
+            }
+            // The parser loaded the shown key frame's state (7.21) and left
+            // the 7.20 slot write to us, as for a decoded frame. Skipping it
+            // leaves stale sizes and order hints behind every later inter
+            // frame. A shown non-key frame refreshes nothing; the call is a no-op.
+            if let Err(e) = self.parser.ref_frame_update(&header) {
+                return Err(PlanError::Parse(e));
             }
             // Showing a key frame this way resets the whole reference store
             // (7.20). Same slot writer as an ordinary refresh so removals have

@@ -1719,6 +1719,11 @@ impl Parser {
 
             if found_ref {
                 let rf = &self.ref_info[fh.ref_frame_idx[i] as usize];
+                // A never-filled slot has zero sizes: `tile_cols` would come out
+                // 0 and tile_info divide by it.
+                if rf.ref_upscaled_width == 0 || rf.ref_frame_height == 0 {
+                    return Err("found_ref names a reference slot that holds no frame".into());
+                }
                 fh.upscaled_width = rf.ref_upscaled_width;
                 fh.frame_width = fh.upscaled_width;
                 fh.frame_height = rf.ref_frame_height;

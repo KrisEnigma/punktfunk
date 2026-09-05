@@ -236,5 +236,18 @@ in the future."
     (`av1::tests::a_truncated_access_unit_is_a_plan_error_not_a_panic`).
     **Not filed upstream.**
 
+15. `src/codec/av1/parser.rs` — `frame_size_with_refs`: refuse a `found_ref` that names a
+    slot holding no frame. An inter frame with `frame_size_override_flag` set copies its
+    sizes from the named reference; a never-filled slot holds zeros, `compute_image_size`
+    then derives `mi_cols = 0`, and `parse_tile_info` divides by the resulting
+    `tile_cols`. Bounds checks and division-by-zero panic in release too, on the decode
+    thread. Reachable from a mid-stream join on a third-party encoder that codes
+    per-frame sizes (punktfunk hosts do not). Refused with the parser's usual `String`
+    error; `RefValid` is deliberately not consulted, so an error-resilient frame whose
+    `ref_order_hint` disagreed with a slot still parses and lets `pf-bitstream` report
+    the stale reference. No regression test: the synthesizer does not write
+    `frame_size_with_refs`, and authoring the syntax by hand is out of proportion for a
+    two-line zero check. **Not filed upstream.**
+
 Re-sync procedure: fetch the AOSP tree, re-apply this trim, diff `codec/` +
 `bitstream_utils.rs` (expect near-zero conflicts), update the commit pin above.
