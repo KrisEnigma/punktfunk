@@ -8,8 +8,32 @@
 //! idea at 500 ms). Keyboard/mouse/touch pass through. An older host keeps the legacy
 //! per-transition gamepad events. `HOST_CAP_PAD_AUDIO` gates flags bits 8/9; without
 //! it the whole flags word is the pad index.
+//!
+//! Events already queued behind the one just received fold into the same snapshot: an
+//! embedder pushes one pad report as one event per axis, and a datagram per axis was six
+//! per report on a stick being moved. The drain never waits, so nothing is delayed for it.
 
 use super::*;
+use crate::input::{GamepadSnapshot, MAX_PADS};
+
+/// One seq-stamped snapshot per pad flagged in `dirty`; clears the flags.
+fn flush_dirty(
+    conn: &quinn::Connection,
+    pads: &mut [Option<GamepadSnapshot>; MAX_PADS],
+    seq: &mut [u8; MAX_PADS],
+    dirty: &mut [bool; MAX_PADS],
+) {
+    for idx in 0..MAX_PADS {
+        if !std::mem::take(&mut dirty[idx]) {
+            continue;
+        }
+        if let Some(snap) = pads[idx].as_mut() {
+            seq[idx] = seq[idx].wrapping_add(1);
+            snap.seq = seq[idx];
+            let _ = conn.send_datagram(snap.to_event().encode().to_vec().into());
+        }
+    }
+}
 
 pub(super) async fn run(
     conn: quinn::Connection,
@@ -22,10 +46,12 @@ pub(super) async fn run(
     // by arrival events that already carry the bits.
     pad_audio_caps: std::sync::Arc<[std::sync::atomic::AtomicU8; crate::input::MAX_PADS]>,
 ) {
-    use crate::input::{GamepadSnapshot, InputKind, MAX_PADS};
+    use crate::input::InputKind;
     use std::sync::atomic::Ordering;
     // Slot appears on the first event for that index; refresh never invents a pad.
     let mut pads: [Option<GamepadSnapshot>; MAX_PADS] = [None; MAX_PADS];
+    // Pads folded into since their last send — see [`flush_dirty`].
+    let mut dirty = [false; MAX_PADS];
     // Wrapping seq persists across remove/re-add on the same index. Removal takes
     // seq+1; a re-add continues, so the host does not reject a restarted-at-0 seq.
     let mut seq: [u8; MAX_PADS] = [0; MAX_PADS];
@@ -58,64 +84,65 @@ pub(super) async fn run(
     loop {
         tokio::select! {
             ev = input_rx.recv() => {
-                let Some(ev) = ev else { break };
-                let idx = ev.flags as usize;
-                if gamepad_snapshots
-                    && matches!(ev.kind, InputKind::GamepadButton | InputKind::GamepadAxis)
-                    && idx < MAX_PADS
-                {
-                    // Driven again: cancel owed removal (fresh snapshot seq already wins).
-                    remove_owed[idx] = 0;
-                    let snap = pads[idx].get_or_insert(GamepadSnapshot {
-                        pad: idx as u8,
-                        ..Default::default()
-                    });
-                    // Unknown axis: don't send (host legacy fold drops them too).
-                    if snap.fold(&ev) {
-                        seq[idx] = seq[idx].wrapping_add(1);
-                        snap.seq = seq[idx];
-                        let _ = conn
-                            .send_datagram(snap.to_event().encode().to_vec().into());
-                    }
-                    continue;
-                }
-                if gamepad_snapshots && ev.kind == InputKind::GamepadRemove && idx < MAX_PADS {
-                    // Seq-stamped removal in the shared seq space so no reorder resurrects
-                    // the pad. Arm the burst; drop owed arrival (a re-plug sends its own).
-                    pads[idx] = None;
-                    arrival[idx] = None;
-                    arrival_owed[idx] = 0;
-                    seq[idx] = seq[idx].wrapping_add(1);
-                    remove_owed[idx] = REMOVE_RESENDS;
-                    let rem = crate::input::InputEvent {
-                        flags: crate::input::encode_gamepad_remove(idx as u8, seq[idx]),
-                        ..ev
-                    };
-                    let _ = conn.send_datagram(rem.encode().to_vec().into());
-                    continue;
-                }
-                if gamepad_snapshots && ev.kind == InputKind::GamepadArrival {
-                    // Index is the low byte; bits 8/9 may carry caps (raw events). Fold
-                    // them into the registry so the burst keeps them.
-                    let (pad, ev_caps) = crate::input::decode_gamepad_arrival(ev.flags);
-                    let idx = pad as usize;
-                    if idx < MAX_PADS {
-                        if ev_caps != 0 {
-                            pad_audio_caps[idx].fetch_or(ev_caps, Ordering::Relaxed);
-                        }
-                        // Kind + burst so the host learns it before the first frame under loss.
-                        arrival[idx] = Some(ev.code as u8);
-                        arrival_owed[idx] = ARRIVAL_RESENDS;
-                        arrival_caps_sent[idx] = caps_now(idx);
-                        let arr = crate::input::InputEvent {
-                            flags: arrival_flags(idx),
-                            ..ev
-                        };
-                        let _ = conn.send_datagram(arr.encode().to_vec().into());
+                let Some(first) = ev else { break };
+                let mut pending = Some(first);
+                while let Some(ev) = pending.take().or_else(|| input_rx.try_recv().ok()) {
+                    let idx = ev.flags as usize;
+                    if gamepad_snapshots
+                        && matches!(ev.kind, InputKind::GamepadButton | InputKind::GamepadAxis)
+                        && idx < MAX_PADS
+                    {
+                        // Driven again: cancel owed removal (fresh snapshot seq already wins).
+                        remove_owed[idx] = 0;
+                        let snap = pads[idx].get_or_insert(GamepadSnapshot {
+                            pad: idx as u8,
+                            ..Default::default()
+                        });
+                        // Unknown axis: nothing to send (host legacy fold drops them too).
+                        dirty[idx] |= snap.fold(&ev);
                         continue;
                     }
+                    // Anything else goes out behind the snapshots folded so far.
+                    flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
+                    if gamepad_snapshots && ev.kind == InputKind::GamepadRemove && idx < MAX_PADS {
+                        // Seq-stamped removal in the shared seq space so no reorder resurrects
+                        // the pad. Arm the burst; drop owed arrival (a re-plug sends its own).
+                        pads[idx] = None;
+                        arrival[idx] = None;
+                        arrival_owed[idx] = 0;
+                        seq[idx] = seq[idx].wrapping_add(1);
+                        remove_owed[idx] = REMOVE_RESENDS;
+                        let rem = crate::input::InputEvent {
+                            flags: crate::input::encode_gamepad_remove(idx as u8, seq[idx]),
+                            ..ev
+                        };
+                        let _ = conn.send_datagram(rem.encode().to_vec().into());
+                        continue;
+                    }
+                    if gamepad_snapshots && ev.kind == InputKind::GamepadArrival {
+                        // Index is the low byte; bits 8/9 may carry caps (raw events). Fold
+                        // them into the registry so the burst keeps them.
+                        let (pad, ev_caps) = crate::input::decode_gamepad_arrival(ev.flags);
+                        let idx = pad as usize;
+                        if idx < MAX_PADS {
+                            if ev_caps != 0 {
+                                pad_audio_caps[idx].fetch_or(ev_caps, Ordering::Relaxed);
+                            }
+                            // Kind + burst so the host learns it before the first frame under loss.
+                            arrival[idx] = Some(ev.code as u8);
+                            arrival_owed[idx] = ARRIVAL_RESENDS;
+                            arrival_caps_sent[idx] = caps_now(idx);
+                            let arr = crate::input::InputEvent {
+                                flags: arrival_flags(idx),
+                                ..ev
+                            };
+                            let _ = conn.send_datagram(arr.encode().to_vec().into());
+                            continue;
+                        }
+                    }
+                    let _ = conn.send_datagram(ev.encode().to_vec().into());
                 }
-                let _ = conn.send_datagram(ev.encode().to_vec().into());
+                flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
             }
             _ = refresh.tick() => {
                 for idx in 0..MAX_PADS {
@@ -145,10 +172,8 @@ pub(super) async fn run(
                             arrival_owed[idx] = 0;
                         }
                     }
-                    if let Some(snap) = pads[idx].as_mut() {
-                        seq[idx] = seq[idx].wrapping_add(1);
-                        snap.seq = seq[idx];
-                        let _ = conn.send_datagram(snap.to_event().encode().to_vec().into());
+                    if pads[idx].is_some() {
+                        dirty[idx] = true;
                     } else if remove_owed[idx] > 0 {
                         // Fresh-seq removal. Host no-op if already gone; a re-plug still wins by seq.
                         remove_owed[idx] -= 1;
@@ -164,7 +189,78 @@ pub(super) async fn run(
                         let _ = conn.send_datagram(rem.encode().to_vec().into());
                     }
                 }
+                flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::{gamepad, InputEvent, InputKind};
+    use std::sync::atomic::AtomicU8;
+
+    /// Six axis events queued together — one pad report — leave as ONE snapshot carrying all six,
+    /// not six datagrams each carrying one more axis. Current-thread runtime, so the task cannot
+    /// run between the sends.
+    #[tokio::test]
+    async fn one_pad_report_leaves_as_one_snapshot() {
+        let server = crate::quic::endpoint::server("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server.local_addr().unwrap();
+        let client = crate::quic::endpoint::client_insecure().unwrap();
+        let accept = tokio::spawn(async move {
+            let conn = server
+                .accept()
+                .await
+                .expect("incoming")
+                .await
+                .expect("host side connects");
+            (server, conn)
+        });
+        let client_conn = client.connect(addr, "punktfunk").unwrap().await.unwrap();
+        let (_server, host_conn) = accept.await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let caps = Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
+        let task = tokio::spawn(run(client_conn, rx, true, false, caps));
+        let axes = [
+            (gamepad::AXIS_LS_X, 1_000),
+            (gamepad::AXIS_LS_Y, -2_000),
+            (gamepad::AXIS_RS_X, 3_000),
+            (gamepad::AXIS_RS_Y, -4_000),
+            (gamepad::AXIS_LT, 50),
+            (gamepad::AXIS_RT, 200),
+        ];
+        for (code, x) in axes {
+            tx.send(InputEvent {
+                kind: InputKind::GamepadAxis,
+                _pad: [0; 3],
+                code,
+                x,
+                y: 0,
+                flags: 0,
+            })
+            .unwrap();
+        }
+        let dg = tokio::time::timeout(Duration::from_secs(2), host_conn.read_datagram())
+            .await
+            .expect("a datagram")
+            .unwrap();
+        let snap =
+            GamepadSnapshot::from_event(&InputEvent::decode(&dg).unwrap()).expect("a snapshot");
+        assert_eq!(
+            (
+                snap.seq,
+                snap.ls_x,
+                snap.ls_y,
+                snap.rs_x,
+                snap.rs_y,
+                snap.left_trigger,
+                snap.right_trigger
+            ),
+            (1, 1_000, -2_000, 3_000, -4_000, 50, 200),
+            "the first datagram is the whole report under seq 1"
+        );
+        task.abort();
     }
 }
