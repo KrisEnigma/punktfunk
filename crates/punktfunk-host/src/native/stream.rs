@@ -1831,6 +1831,8 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     let mut pace = CaptureCredit::new(std::time::Instant::now());
     // Predicted as `au_seq + inflight.len()`. Encoder-internal counters desync on the first ABR rebuild.
     let mut au_seq: u32 = 0;
+    // A chunked AU's FIRST went out and its LAST has not: `au_seq` still names that frame.
+    let mut wire_frame_open = false;
     let mut cur_mode = mode;
     const MAX_CAPTURE_REBUILDS: u32 = 5;
     let mut capture_rebuilds: u32 = 0;
@@ -3037,6 +3039,16 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     };
                     last_au_at = std::time::Instant::now();
                     encoder_resets = 0;
+                    // A FIRST while the previous AU's LAST never came (the driver dropped its
+                    // tail, or a reset abandoned it): close that frame on the wire first, or
+                    // this AU is spliced onto a truncated prefix under its own flags.
+                    if c.first && wire_frame_open {
+                        if inflight.len() > 1 {
+                            inflight.pop_front();
+                        }
+                        au_seq = au_seq.wrapping_add(1);
+                    }
+                    wire_frame_open = !c.last;
                     if c.first {
                         first_chunk_us = t_wait.elapsed().as_micros() as u32;
                         au_flags = if c.keyframe {
@@ -3491,10 +3503,12 @@ fn try_inplace_resize(
         None
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    // The driver-encode capturer reads the display's progress off the encoder, and these loops
+    // are the one place that polls it without the stream loop's own tick. SET_ENCODE retired
+    // `enc`'s section, so the clocks are the pre-opened encoder's or they never move.
+    let live: &dyn crate::encode::Encoder = pre_opened.as_deref().unwrap_or(&**enc);
     let new_frame = loop {
-        // The driver-encode capturer reads the display's progress off the encoder, and this
-        // loop is the one place that polls it without the stream loop's own tick.
-        capturer.observe_encoder(enc.telemetry());
+        capturer.observe_encoder(live.telemetry());
         match capturer.try_latest() {
             Ok(Some(f)) if (f.width, f.height) == (new_mode.width, new_mode.height) => break f,
             Ok(_) => {
@@ -3521,7 +3535,7 @@ fn try_inplace_resize(
         let first_pts = new_frame.pts_ns;
         let live_deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
-            capturer.observe_encoder(enc.telemetry());
+            capturer.observe_encoder(live.telemetry());
             match capturer.try_latest() {
                 Ok(Some(f)) if source_advanced(first_seq, first_pts, &f.provenance, f.pts_ns) => {
                     break f

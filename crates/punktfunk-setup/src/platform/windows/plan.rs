@@ -88,9 +88,12 @@ pub enum WinAction {
     MakeNetworkPrivate {
         network: String,
     },
-    /// Stop the service (SCM, waited), every tray, and the bun tasks. Captures nothing:
-    /// Facts already hold the restore data.
-    StopHostRuntime,
+    /// Stop the service (SCM, waited), every tray, the bun tasks, and every bun whose image
+    /// lives under `app_dir`, waited on so the copy that follows finds nothing mapped.
+    /// Captures nothing: Facts already hold the restore data.
+    StopHostRuntime {
+        app_dir: String,
+    },
     /// Re-enable only what was enabled before the stop. `None` = the task did not exist.
     RestoreTasks {
         web_enabled: Option<bool>,
@@ -225,7 +228,9 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
     if upgrade {
         plan.push(
             "Stopping the running host for the upgrade",
-            vec![WinAction::StopHostRuntime],
+            vec![WinAction::StopHostRuntime {
+                app_dir: app.clone(),
+            }],
         );
     }
 
@@ -255,6 +260,18 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
         );
     }
 
+    // Right after the files: whatever fails later, the box has an uninstaller registered and
+    // the version the tree now holds — the updater would otherwise re-run this forever.
+    plan.push(
+        "Register the uninstaller",
+        vec![WinAction::ArpRegister {
+            key: super::HOST_ARP_KEY.into(),
+            display_name: "Punktfunk Host".into(),
+            version: "<version>".into(),
+            location: app.clone(),
+        }],
+    );
+
     plan.push("Registry", registry_steps(facts, choices, &app));
     plan.push("Network", network_steps(facts, choices));
     plan.push(
@@ -262,9 +279,11 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
         coexist_steps(facts, choices),
     );
 
+    // Lenient, as the title promises: a driver leg that fails must not strand the box between
+    // the stopped old host and the service/uninstaller legs below.
     let mut drivers = vec![];
     if choices.install_driver {
-        drivers.push(run(&[
+        drivers.push(run_lenient(&[
             &host_exe,
             "driver",
             "install",
@@ -273,7 +292,7 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
         ]));
     }
     if choices.install_gamepad {
-        drivers.push(run(&[
+        drivers.push(run_lenient(&[
             &host_exe,
             "driver",
             "install",
@@ -326,16 +345,6 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
             }],
         );
     }
-
-    plan.push(
-        "Register the uninstaller",
-        vec![WinAction::ArpRegister {
-            key: super::HOST_ARP_KEY.into(),
-            display_name: "Punktfunk Host".into(),
-            version: "<version>".into(),
-            location: app.clone(),
-        }],
-    );
 
     if choices.tray_autostart {
         plan.push(
@@ -537,15 +546,16 @@ fn host_uninstall(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
     plan.push(
         format!("Uninstalling the host ({DOCS}/uninstall)"),
         vec![
-            // Service first: the host supervises the tray and would respawn it.
-            run(&[&host_exe, "service", "uninstall"]),
+            // Service first: the host supervises the tray and would respawn it. Lenient: a
+            // service already gone (or a deleted {app}) must not stop the sweep below.
+            run_lenient(&[&host_exe, "service", "uninstall"]),
             run_lenient(&[&format!("{app}\\punktfunk-tray.exe"), "--quit"]),
             run_lenient(&["taskkill", "/F", "/IM", "punktfunk-tray.exe"]),
             // All three legs even if this install never laid them down — an earlier
             // upgrade may have. `driver uninstall` also purges the trusted certs.
-            run(&[&host_exe, "driver", "uninstall"]),
-            run(&[&host_exe, "driver", "uninstall", "--gamepad"]),
-            run(&[&host_exe, "driver", "uninstall", "--audio"]),
+            run_lenient(&[&host_exe, "driver", "uninstall"]),
+            run_lenient(&[&host_exe, "driver", "uninstall", "--gamepad"]),
+            run_lenient(&[&host_exe, "driver", "uninstall", "--audio"]),
             run_lenient(&["schtasks", "/End", "/TN", "PunktfunkWeb"]),
             run_lenient(&["schtasks", "/Delete", "/TN", "PunktfunkWeb", "/F"]),
             run_lenient(&["schtasks", "/End", "/TN", "PunktfunkScripting"]),

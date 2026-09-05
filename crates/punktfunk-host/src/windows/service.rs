@@ -358,6 +358,9 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
                     session,
                     "failed to launch host into the active console session: {e:#}"
                 );
+                // A host that never starts is the boot loop the rollback exists for.
+                restarts += 1;
+                maybe_boot_loop_rollback(restarts, &mut rollback_attempted);
                 if web.wait(&[stop], 3000).is_some() {
                     break;
                 }
@@ -370,9 +373,25 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
         // closes them on drop (end of iteration / continue / break).
         let proc_h = HANDLE(child.process.as_raw_handle());
 
-        let reason = web.wait(&[stop, session_ev, proc_h], INFINITE);
+        // A notification for a session that is still ours (any logon signals the event) keeps
+        // the child and the same wait set: dropping `session_ev` here would miss the console
+        // switch that follows.
+        let reason = loop {
+            let r = web.wait(&[stop, session_ev, proc_h], INFINITE);
+            if r != Some(1) {
+                break (r, session);
+            }
+            // SAFETY: `session_ev` borrows SESSION_EVENT for the process lifetime; ResetEvent
+            // only clears the signalled state, no Rust memory.
+            unsafe { ResetEvent(session_ev) }.ok();
+            // SAFETY: takes no arguments; returns the session id by value.
+            let now = unsafe { WTSGetActiveConsoleSessionId() };
+            if now != session {
+                break (r, now);
+            }
+        };
         match reason {
-            Some(0) => {
+            (Some(0), _) => {
                 // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (not dropped
                 // until end of iteration). TerminateProcess only signals by handle; no Rust memory.
                 unsafe {
@@ -380,37 +399,19 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
                 }
                 break;
             }
-            Some(1) => {
-                // SAFETY: `session_ev` borrows SESSION_EVENT for the process lifetime; ResetEvent
-                // only clears the signalled state, no Rust memory.
-                unsafe { ResetEvent(session_ev) }.ok();
-                // SAFETY: takes no arguments; returns the session id by value.
-                let now = unsafe { WTSGetActiveConsoleSessionId() };
-                if now != session {
-                    tracing::info!(
-                        old = session,
-                        new = now,
-                        "console session changed — relaunching host"
-                    );
-                    // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (dropped
-                    // only at end of iteration). TerminateProcess only signals by handle.
-                    unsafe {
-                        let _ = TerminateProcess(proc_h, 0);
-                    }
-                    restarts = 0;
-                    continue;
-                }
-                // Same session (stray notification) — keep the child.
-                let r = web.wait(&[stop, proc_h], INFINITE);
-                // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (dropped only
-                // at end of iteration). TerminateProcess only signals by handle.
+            (Some(1), now) => {
+                tracing::info!(
+                    old = session,
+                    new = now,
+                    "console session changed — relaunching host"
+                );
+                // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (dropped
+                // only at end of iteration). TerminateProcess only signals by handle.
                 unsafe {
                     let _ = TerminateProcess(proc_h, 0);
                 }
-                if r == Some(0) {
-                    break;
-                }
-                // Child exited — fall through to relaunch.
+                restarts = 0;
+                continue;
             }
             _ => {
                 tracing::warn!(
@@ -523,6 +524,9 @@ unsafe fn spawn_host(
     // SAFETY: `proc_token` is live and owned here, closed exactly once and not used after.
     let _ = unsafe { CloseHandle(proc_token) };
     dup.context("DuplicateTokenEx(TokenPrimary)")?;
+    // SAFETY: `primary` is the owned handle `DuplicateTokenEx` just filled in; owning it here
+    // closes it on every early return below, not only the success path.
+    let _primary = unsafe { OwnedHandle::from_raw_handle(primary.0) };
 
     // SAFETY: `primary` is the live duplicated token; the value pointer is a local `u32` matching
     // what `TokenSessionId` expects, and the length argument is exactly its `size_of`.
@@ -591,11 +595,10 @@ unsafe fn spawn_host(
         )
     };
 
-    // SAFETY: both are live and owned here, each closed exactly once and not used after — the child
-    // holds its own inherited copy of `log`.
+    // SAFETY: `log` is live and owned here, closed exactly once and not used after — the child
+    // holds its own inherited copy. `primary` closes with `_primary`.
     unsafe {
         let _ = CloseHandle(log);
-        let _ = CloseHandle(primary);
     }
     created.context("CreateProcessAsUserW(host)")?;
 
@@ -1243,7 +1246,7 @@ fn ensure_default_host_env() -> Result<()> {
         #   punktfunk-host service stop && punktfunk-host service start\n\
         \n\
         # Encode backend: auto (default) detects the GPU vendor — NVIDIA->nvenc, AMD->amf, Intel->qsv.\n\
-        # Force one with nvenc | amf | qsv | mf | sw (software H.264). amf/qsv need an FFmpeg-built\n\
+        # Force one with nvenc | amf | qsv | mf (no software encoder: the driver encodes). amf/qsv need an FFmpeg-built\n\
         # host; mf is Media Foundation, any vendor's hardware encoder, 8-bit 4:2:0 only.\n\
         PUNKTFUNK_ENCODER=auto\n\
         PUNKTFUNK_VIDEO_SOURCE=virtual\n\

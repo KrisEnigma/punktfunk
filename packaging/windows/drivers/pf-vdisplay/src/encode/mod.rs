@@ -46,8 +46,10 @@ pub fn backends_linked() -> &'static [&'static str] {
 ///
 /// `Err` is an NTSTATUS for a malformed request or a target `owner` does not hold, with nothing
 /// adopted. `Ok` completes the IOCTL successfully whatever `status` says; from the map on, the
-/// driver owns the handles (`AuSection`). The open runs on the new encode thread and this call
-/// waits [`OPEN_BOUND`] for its reply. A displaced session's thread stops with no lock held.
+/// driver owns the handles (`AuSection`). The session already on the monitor stops first, with
+/// no lock held: two encode threads on one pool would split its slots, and the old one's exit
+/// clears the pool's `live` under its successor. The open runs on the new encode thread and
+/// this call waits [`OPEN_BOUND`] for its reply.
 pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
     // The bound is the name table's length: `open_listed` indexes it by `backend - 1`, and a
     // backend added there without widening this would be rejected here instead.
@@ -74,6 +76,13 @@ pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, 
         Ok(s) => s,
         Err(_) => return Err(STATUS_INVALID_PARAMETER),
     };
+    if let Some(old) = monitor.take_encode() {
+        old.stop();
+        // A thread that would not stop was detached still holding its slots.
+        if let Some(pool) = monitor.pool() {
+            pool.reclaim();
+        }
+    }
     let Some(luid) = monitor.render_luid() else {
         return Ok(fail_reply(wire::SET_ENCODE_NO_DEVICE, (-5, "noswap")));
     };

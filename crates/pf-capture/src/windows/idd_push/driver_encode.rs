@@ -574,7 +574,12 @@ impl Encoder for EncoderProxy {
 
     fn reset(&mut self) -> bool {
         // The domain restarts where this reader stands, so the loop's `au_seq` keeps matching.
-        let base = self.reader.next_wire_seq();
+        // A half-read AU already spent its index on the wire: the loop closes that frame at
+        // the next FIRST, so the domain restarts past it.
+        let base = self
+            .reader
+            .next_wire_seq()
+            .wrapping_add(u32::from(self.reader.mid_au()));
         if !self.ctl_logged("reset", encode::ENCODE_CTL_RESET, base, 0) {
             return false;
         }

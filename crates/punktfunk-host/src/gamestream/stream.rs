@@ -738,6 +738,48 @@ fn gs_session_plan(cfg: &StreamConfig, cursor_blend: bool) -> crate::session_pla
     )
 }
 
+/// The session's encoder at `frame`'s geometry. An IDD-push source has no pixels to submit —
+/// the driver encodes — so it gets the driver's encoder, which then owes access units through
+/// `ready_aus`; its wire domain continues at `wire_seq_base` (the loop's `au_seq`).
+#[allow(clippy::too_many_arguments)]
+fn gs_open_encoder(
+    plan: &crate::session_plan::SessionPlan,
+    capturer: &dyn Capturer,
+    frame: &crate::capture::CapturedFrame,
+    cfg: &StreamConfig,
+    enc_bps: u64,
+    cursor_blend: bool,
+    wire_seq_base: u32,
+) -> Result<Box<dyn encode::Encoder>> {
+    #[cfg(target_os = "windows")]
+    if plan.capture == crate::session_plan::CaptureBackend::IddPush {
+        return crate::capture::open_driver_encoder(
+            plan,
+            capturer,
+            (frame.width, frame.height),
+            cfg.fps,
+            enc_bps,
+            gs_bit_depth(frame.format),
+            wire_seq_base,
+        );
+    }
+    let _ = (plan, capturer, wire_seq_base);
+    encode::open_video(
+        cfg.codec,
+        frame.format,
+        frame.width,
+        frame.height,
+        cfg.fps,
+        enc_bps,
+        frame.is_cuda(),
+        gs_bit_depth(frame.format),
+        // Stock Moonlight cannot decode 4:4:4.
+        encode::ChromaFormat::Yuv420,
+        cursor_blend,
+        cfg.slices,
+    )
+}
+
 /// Encoder `bit_depth` from the captured format. Backends key the real profile off `format`;
 /// this keeps the argument honest (a hard-coded `8` mislabels a P010 stream).
 fn gs_bit_depth(format: crate::capture::PixelFormat) -> u8 {
@@ -1016,19 +1058,19 @@ fn stream_body(
     let mut adapt_lost_seen: u64 = 0;
     // Software paths refuse in-place retarget; raising FEC then overshoots the budget.
     let mut adapt_supported = true;
-    let mut enc = encode::open_video(
-        cfg.codec,
-        frame.format,
-        frame.width,
-        frame.height,
-        cfg.fps,
+    // Wire frameIndex owned here. `submit_indexed(au_seq + enc_inflight)` keeps RFI 1:1
+    // with Moonlight across in-place rebuilds (an internal counter would desync).
+    let mut au_seq: u32 = 0;
+    let mut enc_inflight: u32 = 0;
+    let plan = gs_session_plan(&cfg, cursor_blend);
+    let mut enc = gs_open_encoder(
+        &plan,
+        &**capturer,
+        &frame,
+        &cfg,
         enc_bps,
-        frame.is_cuda(),
-        gs_bit_depth(frame.format),
-        // Stock Moonlight cannot decode 4:4:4.
-        encode::ChromaFormat::Yuv420,
         cursor_blend,
-        cfg.slices,
+        au_seq,
     )
     .context("open video encoder for stream")?;
     // Without this, an in-place backend bounds itself by an env cap and the capturer rotates
@@ -1121,17 +1163,15 @@ fn stream_body(
     // A pipeline-head drop consumes no frameIndex; the client cannot see the gap. Arm an IDR
     // through the same coalesce gate so a burst of drops cannot become an IDR storm.
     let mut recover_after_drop = false;
-    // Wire frameIndex owned here. `submit_indexed(au_seq + enc_inflight)` keeps RFI 1:1
-    // with Moonlight across in-place rebuilds (an internal counter would desync).
-    let mut au_seq: u32 = 0;
-    let mut enc_inflight: u32 = 0;
 
     while running.load(Ordering::SeqCst) {
         let tick = Instant::now();
         let measure = perf || stats.is_armed();
+        let mut fresh = false;
         match capturer.try_latest() {
             Ok(Some(f)) => {
                 frame = f;
+                fresh = true;
                 uniq += 1;
                 rebuilds = 0;
             }
@@ -1166,18 +1206,14 @@ fn stream_body(
                 *capturer = new_cap;
                 capturer.set_active(true);
                 frame = capturer.next_frame().context("first frame after rebuild")?;
-                enc = encode::open_video(
-                    cfg.codec,
-                    frame.format,
-                    frame.width,
-                    frame.height,
-                    cfg.fps,
+                enc = gs_open_encoder(
+                    &plan,
+                    &**capturer,
+                    &frame,
+                    &cfg,
                     enc_bps,
-                    frame.is_cuda(),
-                    gs_bit_depth(frame.format),
-                    encode::ChromaFormat::Yuv420,
                     cursor_blend,
-                    cfg.slices,
+                    au_seq,
                 )
                 .context("reopen encoder after rebuild")?;
                 enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
@@ -1197,18 +1233,14 @@ fn stream_body(
         // resolution change in place; reopen at the delivered size. GameStream has no mid-stream
         // mode message — the client is not told.
         if enc_src != (frame.format, frame.width, frame.height) {
-            match encode::open_video(
-                cfg.codec,
-                frame.format,
-                frame.width,
-                frame.height,
-                cfg.fps,
+            match gs_open_encoder(
+                &plan,
+                &**capturer,
+                &frame,
+                &cfg,
                 enc_bps,
-                frame.is_cuda(),
-                gs_bit_depth(frame.format),
-                encode::ChromaFormat::Yuv420,
                 cursor_blend,
-                cfg.slices,
+                au_seq,
             ) {
                 Ok(e) => {
                     tracing::info!(
@@ -1278,7 +1310,16 @@ fn stream_body(
         }
         // Stock Moonlight tone-maps from in-band mastering/CLL SEI on keyframes. `None` is a no-op.
         enc.set_hdr_meta(capturer.hdr_meta());
-        if let Err(e) = enc.submit_indexed(&frame, au_seq.wrapping_add(enc_inflight)) {
+        // An encoder the loop does not feed (the Windows driver) already holds the access units
+        // it owes — waited for after a fresh frame, never on a repeat; every other backend
+        // takes this tick's frame.
+        let au_wait = if fresh { tick + frame_interval } else { tick };
+        let owed = enc.ready_aus(au_wait);
+        let submitted = match owed {
+            Some(_) => Ok(()),
+            None => enc.submit_indexed(&frame, au_seq.wrapping_add(enc_inflight)),
+        };
+        if let Err(e) = submitted {
             encoder_resets += 1;
             if encoder_resets > MAX_ENCODER_RESETS || !enc.reset() {
                 tracing::error!(
@@ -1304,7 +1345,7 @@ fn stream_body(
             std::thread::sleep(backoff);
             continue;
         }
-        enc_inflight = enc_inflight.wrapping_add(1);
+        enc_inflight = enc_inflight.wrapping_add(owed.map_or(1, |n| n as u32));
         let t_enc = tick.elapsed();
 
         // 90 kHz RTP from wall-clock so a variable capture rate stays correct.
@@ -1349,6 +1390,11 @@ fn stream_body(
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
                     dropped_batches += 1;
                     recover_after_drop = true;
+                    // The driver already spent these indexes; skipping them keeps its wire
+                    // domain and Moonlight's frameIndex aligned (the client reads a gap as loss).
+                    if owed.is_some() {
+                        au_seq = au_seq.wrapping_add(batch_len);
+                    }
                     if dropped_batches.is_power_of_two() {
                         tracing::warn!(
                             dropped_batches,

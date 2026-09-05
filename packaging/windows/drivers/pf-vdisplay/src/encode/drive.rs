@@ -24,6 +24,8 @@ const WEDGE_AFTER: Duration = Duration::from_secs(2);
 /// How long a produced chunk waits for heap space or a free slot before the AU is dropped and
 /// a keyframe requested; longer would stall the encoder behind a host that stopped reading.
 const SLOT_WAIT: Duration = Duration::from_millis(250);
+/// Consecutive failed submits before the thread gives up on its backend.
+const MAX_SUBMIT_FAILURES: u32 = 8;
 
 /// G3 fault injection: encode this many frames, then never return from the encode work
 /// (`PFVD_ENCODE_BLOCK_AFTER`, a frame count; unset or unparsable disables it). Read once per
@@ -73,6 +75,8 @@ impl<'a> Drive<'a> {
             inflight: VecDeque::new(),
             mid_au: false,
             dropping_au: false,
+            au_published: false,
+            submit_failures: 0,
             want_republish: false,
             qpc_hz: qpc_frequency(),
             frame_interval: Duration::from_micros(1_000_000 / u64::from(fps.max(1))),
@@ -123,6 +127,11 @@ pub struct Drive<'a> {
     mid_au: bool,
     /// The AU in progress could not be placed; its remaining chunks are dropped too.
     dropping_au: bool,
+    /// A chunk of the AU in progress reached the section, so its wire index is spent even if
+    /// the tail is dropped — the reader closes it as a gap, never splices the next AU on.
+    au_published: bool,
+    /// Consecutive `submit` failures; see [`MAX_SUBMIT_FAILURES`].
+    submit_failures: u32,
     /// A keyframe was asked for; if nothing composes, re-encode the stash instead of waiting.
     want_republish: bool,
     qpc_hz: u64,
@@ -165,6 +174,11 @@ impl Drive<'_> {
                 .or_else(|| self.cursor_frame());
             self.want_republish = false;
             let Some((slot, qpc, seq)) = next else {
+                // Nothing to submit: drain what is owed now, or the last AU of a burst waits
+                // for the next compose, which an idle desktop never makes.
+                if !self.inflight.is_empty() {
+                    self.collect(1);
+                }
                 self.wait();
                 continue;
             };
@@ -193,8 +207,18 @@ impl Drive<'_> {
                 dbglog!("[pf-vd] encode: submit failed: {e:#}");
                 self.pool.release(slot);
                 self.set_state(au::ENCODER_WEDGED);
+                // A lazy backend re-runs its whole bring-up per submit; stop retrying at the
+                // compose rate and leave the session threadless for the host's reset rung.
+                self.submit_failures += 1;
+                if self.submit_failures >= MAX_SUBMIT_FAILURES {
+                    dbglog!(
+                        "[pf-vd] encode: {MAX_SUBMIT_FAILURES} submits failed in a row — leaving"
+                    );
+                    break;
+                }
                 continue;
             }
+            self.submit_failures = 0;
             self.inflight.push_back((slot, qpc, seq));
             self.collect(MAX_INFLIGHT);
         }
@@ -331,14 +355,19 @@ impl Drive<'_> {
         self.mid_au = !chunk.last;
         if chunk.first {
             self.dropping_au = false;
+            self.au_published = false;
         }
-        if !self.dropping_au && !self.publish(&chunk, qpc, seq) {
-            self.dropping_au = true;
-            self.count_drop();
-            self.enc.request_keyframe();
+        if !self.dropping_au {
+            if self.publish(&chunk, qpc, seq) {
+                self.au_published = true;
+            } else {
+                self.dropping_au = true;
+                self.count_drop();
+                self.enc.request_keyframe();
+            }
         }
         if chunk.last {
-            if !self.dropping_au {
+            if self.au_published {
                 self.wire_seq = self.wire_seq.wrapping_add(1);
                 let n = self
                     .session
