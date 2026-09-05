@@ -63,7 +63,94 @@ pub unsafe extern "C" fn adapter_init_finished(
     }
     crate::adapter::set_adapter(adapter);
     crate::watchdog::start();
+    // A seat adapter must carry a display or the remoting stack drops the session, and this runs
+    // OFF the callback thread: the stack is waiting on adapter init, and arriving a monitor inline
+    // blocks it long enough to lose the display anyway.
+    if crate::adapter::is_seat_role() {
+        std::thread::spawn(present_seat_display);
+    }
     STATUS_SUCCESS
+}
+
+/// Give the seat adapter the display the remoting stack expects, then publish the configuration
+/// the OS needs before it will assign a swap chain. Runs on its own thread (see the call site).
+fn present_seat_display() {
+    let Some(adapter) = crate::adapter::adapter() else {
+        return;
+    };
+    // `PFVD_SEAT_MODE` is `<w>x<h>@<hz>`. The remoting stack matches the client's requested
+    // desktop against this, so the two have to agree until the seat learns the client's size.
+    let (w, h, hz) = crate::log::knob("PFVD_SEAT_MODE")
+        .and_then(|v| {
+            let (wh, hz) = v.split_once('@')?;
+            let (w, h) = wh.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?, hz.parse().ok()?))
+        })
+        .unwrap_or((1920u32, 1080u32, 60u32));
+    // The id becomes the monitor's EDID serial, so two seats sharing it present one monitor
+    // identity to the OS and only the first is usable.
+    let monitor_id = crate::log::knob("PFVD_SEAT_MONITOR_ID")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1);
+    // Owner 0: this monitor belongs to the driver, not to a host process. No requestor exists —
+    // the OS started the adapter — and pid 0 is never one, so it cannot collide with a real host.
+    // It also keeps the seat display out of the owner-gone reap: it lives with the adapter.
+    let made = crate::monitor::create_monitor(
+        0,
+        &pf_driver_proto::control::AddRequest {
+            session_id: 0,
+            width: w,
+            height: h,
+            refresh_hz: hz,
+            preferred_monitor_id: monitor_id,
+            max_luminance_nits: 0,
+            max_frame_avg_nits: 0,
+            min_luminance_millinits: 0,
+            hw_cursor: 0,
+        },
+    );
+    dbglog!(
+        "[pf-vd] seat adapter: presented {w}x{h}@{hz} -> {}",
+        made.is_some()
+    );
+    // A remote adapter only gets swap chains for the configuration it publishes here, so the
+    // arrival alone leaves the display dark. One path, the monitor we just made.
+    if let Some((id, ..)) = made
+        && let Some(object) = crate::registry::find(|m| m.id == id).and_then(|m| m.object())
+    {
+        let mut path = pod_init!(iddcx::IDDCX_DISPLAYCONFIGPATH2);
+        path.Size = core::mem::size_of::<iddcx::IDDCX_DISPLAYCONFIGPATH2>() as u32;
+        path.Flags = iddcx::IDDCX_DISPLAYCONFIGPATH2_FLAGS::IDDCX_DISPLAYCONFIGPATH2_FLAGS_MODE_VALID
+            | iddcx::IDDCX_DISPLAYCONFIGPATH2_FLAGS::IDDCX_DISPLAYCONFIGPATH2_FLAGS_MONITOR_SCALE_FACTOR_VALID;
+        path.MonitorObject = object;
+        path.Mode.Resolution.cx = w;
+        path.Mode.Resolution.cy = h;
+        path.Mode.Rotation = 1; // DISPLAYCONFIG_ROTATION_IDENTITY
+        path.Mode.RefreshRate.Numerator = hz;
+        path.Mode.RefreshRate.Denominator = 1;
+        path.Mode.VSyncFreqDivider = 1;
+        path.Mode.MonitorColorMode =
+            iddcx::IDDCX_DISPLAYCONFIG_MONITOR_COLORMODE::IDDCX_DISPLAYCONFIG_MONITOR_COLORMODE_SDR;
+        path.MonitorScaleFactor = 100;
+        let args = iddcx::IDARG_IN_ADAPTERDISPLAYCONFIGUPDATE2 {
+            PathCount: 1,
+            pPaths: &raw mut path,
+        };
+        // The session's display stack is still coming up, and a config published before it is
+        // ready is accepted and then ignored: no swap chain, and the stack discards the display.
+        // Republishing is free once one has landed, so repeat until it does.
+        for attempt in 0..8 {
+            // SAFETY: `adapter` is the stashed adapter object; `args`/`path` are live locals the
+            // DDI reads synchronously.
+            let st = unsafe { wdk_iddcx::IddCxAdapterDisplayConfigUpdate2(adapter, &args) };
+            let live = crate::registry::find(|m| m.id == id).is_some_and(|m| m.has_swap_chain());
+            dbglog!("[pf-vd] seat: display config #{attempt} -> {st:#x} (swap={live})");
+            if live {
+                break;
+            }
+            std::thread::sleep(core::time::Duration::from_millis(400));
+        }
+    }
 }
 
 /// `EvtCleanupCallback` on the WDFDEVICE (E1): the device is being removed (PnP / driver unload) — drop
@@ -493,4 +580,20 @@ pub unsafe extern "C" fn device_io_control(
 ) {
     // SAFETY: `request` is the framework-provided WDFREQUEST; `control::dispatch` completes it exactly once.
     unsafe { crate::control::dispatch(request, ioctl_code) };
+}
+
+/// `EvtIddCxMonitorGetPhysicalSize` — the remote-driver-only DDI. IddCx obligates a remote-session
+/// adapter to register it the way `CAN_PROCESS_FP16` obligates the `*2` set; the OS only CALLS it
+/// for a remote monitor with no description, and ours always ships an EDID. The size mirrors the
+/// EDID's own 16:9 block, since a zero here is invalid.
+pub unsafe extern "C" fn monitor_get_physical_size(
+    _monitor: iddcx::IDDCX_MONITOR,
+    p_out: *mut iddcx::IDARG_OUT_MONITORGETPHYSICALSIZE,
+) -> NTSTATUS {
+    // SAFETY: the framework supplies a valid out-args pointer for the call.
+    unsafe {
+        (*p_out).PhysicalWidth = 597;
+        (*p_out).PhysicalHeight = 336;
+    }
+    crate::STATUS_SUCCESS
 }
