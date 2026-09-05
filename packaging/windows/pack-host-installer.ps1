@@ -58,7 +58,10 @@ param(
     # the published artifact; ISCC (the default here) is the one-release revert path.
     [switch]$Engine,
     # 'auto' (default) = required iff this is a v* tag build; 'true'/'false' to force. See below.
-    [ValidateSet('auto', 'true', 'false')][string]$RequireSignedCert = 'auto'
+    [ValidateSet('auto', 'true', 'false')][string]$RequireSignedCert = 'auto',
+    # The installer's architecture (#298). -TargetDir must already hold that arch's host build;
+    # everything built HERE (drivers, Vulkan layer, wizard) follows it. x64 keeps its file names.
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64'
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -68,6 +71,9 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $iss = Join-Path $here 'punktfunk-host.iss'
+$triple = if ($Arch -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+$archSuffix = if ($Arch -eq 'arm64') { '_arm64' } else { '' }
+if ($Arch -ne 'x64' -and -not $Engine) { throw "-Arch $Arch needs -Engine: the Inno path stays x64-only" }
 $exe = Join-Path $TargetDir 'punktfunk-host.exe'
 if (-not (Test-Path $exe)) { throw "missing build artifact 'punktfunk-host.exe' in $TargetDir (did 'cargo build --release -p punktfunk-host --features nvenc' run?)" }
 $trayExe = Join-Path $TargetDir 'punktfunk-tray.exe'
@@ -282,9 +288,9 @@ $defines = @(
 # adds the fetched nefcon device tool. (Needs the WDK build env; -NoDriver skips it for a WDK-less pack.)
 if (-not $NoDriver) {
     $built = Join-Path $OutDir 'pfvd-built'
-    & (Join-Path $here 'build-pf-vdisplay.ps1') -Out $built
+    & (Join-Path $here 'build-pf-vdisplay.ps1') -Out $built -Arch $Arch
     $stage = Join-Path $OutDir 'stage'
-    & (Join-Path $here 'stage-pf-vdisplay.ps1') -OutDir $stage -VendorDir $built
+    & (Join-Path $here 'stage-pf-vdisplay.ps1') -OutDir $stage -VendorDir $built -Arch $Arch
     # The installer runs `punktfunk-host.exe driver install --dir {tmp}\pfvdisplay` (not a staged .ps1).
     $defines += "/DStageDir=$stage"
 }
@@ -300,7 +306,7 @@ if (-not $NoDriver) {
     $gpBuilt = Join-Path $OutDir 'gamepad-built'
     # -SkipBuild: build-pf-vdisplay.ps1 above already `cargo build`s the WHOLE drivers workspace (incl.
     # the gamepad cdylibs), so just sign+stage them here - no redundant second full build.
-    & (Join-Path $here 'build-gamepad-drivers.ps1') -Out $gpBuilt -SkipBuild
+    & (Join-Path $here 'build-gamepad-drivers.ps1') -Out $gpBuilt -SkipBuild -Arch $Arch
     $gpStage = Join-Path $OutDir 'gamepad'
     if (Test-Path $gpStage) { Remove-Item -Recurse -Force $gpStage }
     New-Item -ItemType Directory -Force -Path $gpStage | Out-Null
@@ -319,8 +325,9 @@ if (-not $NoDriver) {
 # A host built with --features amf-qsv link-imports avcodec/avutil/swscale/... so the shared DLLs
 # MUST sit next to the exe (it won't start otherwise). Bundle them from $FfmpegDir\bin - the same
 # BtbN lgpl-shared tree the build linked against. A nvenc/software-only build doesn't import them, so
-# this is a harmless extra there; skipped entirely when $FfmpegDir is unset.
-$ffmpegBinSrc = if ($FfmpegDir) { Join-Path $FfmpegDir 'bin' } else { $null }
+# this is a harmless extra there; skipped entirely when $FfmpegDir is unset. The ARM64 host has no
+# amf-qsv feature and the runner's tree is x64, so that arch never bundles them.
+$ffmpegBinSrc = if ($FfmpegDir -and $Arch -eq 'x64') { Join-Path $FfmpegDir 'bin' } else { $null }
 if ($ffmpegBinSrc -and (Test-Path $ffmpegBinSrc)) {
     $dlls = Get-ChildItem -Path $ffmpegBinSrc -Filter '*.dll' -ErrorAction SilentlyContinue
     if ($dlls) {
@@ -400,11 +407,11 @@ if (Test-Path (Join-Path $layerSrc 'Cargo.toml')) {
     $prevTarget = $env:CARGO_TARGET_DIR
     $env:CARGO_TARGET_DIR = $layerTarget
     Push-Location $layerSrc
-    & cargo build --release
+    & cargo build --release --target $triple
     $layerExit = $LASTEXITCODE
     Pop-Location
     if ($prevTarget) { $env:CARGO_TARGET_DIR = $prevTarget } else { Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
-    $layerDll = Join-Path $layerTarget 'release\pf_vkhdr_layer.dll'
+    $layerDll = Join-Path $layerTarget "$triple\release\pf_vkhdr_layer.dll"
     if ($layerExit -eq 0 -and (Test-Path $layerDll)) {
         $layerStage = Join-Path $OutDir 'vklayer'
         New-Item -ItemType Directory -Force -Path $layerStage | Out-Null
@@ -419,7 +426,7 @@ if (Test-Path (Join-Path $layerSrc 'Cargo.toml')) {
 else { Write-Host "no pf-vkhdr-layer crate -> installer built WITHOUT the HDR Vulkan layer" }
 
 # --- build the installer (from the non-redirected copy under C:\t) -----------------------------
-$setup = Join-Path $OutDir "punktfunk-host-setup-$Version.exe"
+$setup = Join-Path $OutDir "punktfunk-host-setup-$Version$archSuffix.exe"
 if ($Engine) {
     # The wizard crate builds into a target dir of its own: windows-reactor-setup stages the
     # self-contained WinAppSDK runtime next to the exe, and the packer takes everything in that
@@ -429,14 +436,25 @@ if ($Engine) {
     $prevTarget = $env:CARGO_TARGET_DIR
     $env:CARGO_TARGET_DIR = $wizTarget
     Push-Location $repoRoot
-    & cargo build --release -p punktfunk-setup-win
+    # windows-reactor-setup extracts the WinAppSDK runtime into ONE cache under LOCALAPPDATA,
+    # keyed by package version only: whichever arch fills it first is what every later wizard
+    # build stages. A cross-built wizard therefore gets a cache of its own.
+    $prevLocal = $env:LOCALAPPDATA
+    if ($Arch -ne 'x64') { $env:LOCALAPPDATA = Join-Path $OutDir "reactor-cache-$Arch" }
+    & cargo build --release -p punktfunk-setup-win --target $triple
     $wizExit = $LASTEXITCODE
+    $env:LOCALAPPDATA = $prevLocal
+    # The pack tool rewrites bytes on the runner, so a cross build needs a host-arch copy of it.
+    if ($wizExit -eq 0 -and $Arch -ne 'x64') {
+        & cargo build --release -p punktfunk-setup-win --bin punktfunk-setup-pack
+        $wizExit = $LASTEXITCODE
+    }
     Pop-Location
     if ($prevTarget) { $env:CARGO_TARGET_DIR = $prevTarget } else { Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
     if ($wizExit -ne 0) { throw "punktfunk-setup-win build failed ($wizExit)" }
-    $wizRel = Join-Path $wizTarget 'release'
+    $wizRel = Join-Path $wizTarget "$triple\release"
     $wizExe = Join-Path $wizRel 'punktfunk-setup-win.exe'
-    $packer = Join-Path $wizRel 'punktfunk-setup-pack.exe'
+    $packer = if ($Arch -eq 'x64') { Join-Path $wizRel 'punktfunk-setup-pack.exe' } else { Join-Path $wizTarget 'release\punktfunk-setup-pack.exe' }
 
     # The {app} tree - the .iss [Files] table as directories (a missing input is simply absent,
     # exactly as its #ifdef was). The plan's DeployFiles lays this down verbatim.
@@ -498,5 +516,6 @@ elseif (-not $NoSign) {
 }
 if ($env:GITHUB_ENV) {
     "HOST_SETUP_PATH=$setup" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    if ($Engine) { "HOST_PACK_TOOL=$packer" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
     if (-not $NoSign -and $signMode -ne 'azure') { "HOST_CER_PATH=$cerPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
 }
