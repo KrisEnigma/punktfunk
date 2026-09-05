@@ -326,9 +326,7 @@ impl Pool {
         }
         let mut st = lock(&self.state);
         let (slot, ..) = st.stash?;
-        if wire::republish_slot(Some(slot), st.full.len(), &st.free).is_none() {
-            return None;
-        }
+        wire::republish_slot(Some(slot), st.full.len(), &st.free)?;
         st.targets.refill_from_plate(slot).ok()?;
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);

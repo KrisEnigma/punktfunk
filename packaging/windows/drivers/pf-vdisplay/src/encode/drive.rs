@@ -276,7 +276,7 @@ impl Drive<'_> {
                 .last_cursor
                 .map(|t| self.frame_interval.saturating_sub(t.elapsed()))
                 .unwrap_or_default();
-            (due.as_millis() as u32).max(1).min(1000)
+            (due.as_millis() as u32).clamp(1, 1000)
         } else {
             1000
         };

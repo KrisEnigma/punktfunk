@@ -679,12 +679,12 @@ impl MfEncoder {
                 )
             })?;
         let name = friendly_name(&activate);
-        // SAFETY: the whole bring-up runs on this encode thread. Every interface is an
-        // owned windows-rs wrapper released on drop; `device.as_raw()` and the device
-        // manager's raw pointer are borrowed for the duration of the synchronous calls
-        // that consume them (the MFT AddRefs the manager it is handed), and the ring
-        // textures are created on and used from this one device.
         let brought = || -> Result<_> {
+            // SAFETY: the whole bring-up runs on this encode thread. Every interface is an
+            // owned windows-rs wrapper released on drop; `device.as_raw()` and the device
+            // manager's raw pointer are borrowed for the duration of the synchronous calls
+            // that consume them (the MFT AddRefs the manager it is handed), and the ring
+            // textures are created on and used from this one device.
             unsafe {
                 let mft: IMFTransform = activate
                     .ActivateObject()
