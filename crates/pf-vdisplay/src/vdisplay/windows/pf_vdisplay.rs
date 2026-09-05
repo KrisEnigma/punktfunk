@@ -42,9 +42,19 @@ use super::{Mode, VirtualDisplay, VirtualOutput};
 const PF_VDISPLAY_INTERFACE: GUID =
     GUID::from_u128(pf_driver_proto::PF_VDISPLAY_INTERFACE_GUID_U128);
 
-/// Per-session `u64` for `IOCTL_ADD`/`IOCTL_REMOVE`. Collision safety lives in the host refcount
-/// manager (a stale session cannot REMOVE a live one), so a monotonic counter is enough.
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The driver's key for a monitor: a per-process counter.
+///
+/// Two hosts both starting at 1 used to collide, and an `IOCTL_ADD` on a live
+/// key makes the driver depart the incumbent — so a second host's first ADD
+/// tore down the first host's display. #624 keys the driver's sessions by the
+/// requesting process, so identical counters in two hosts no longer meet.
+///
+/// A fresh key per ADD is also what the preempt-and-recreate path needs: it
+/// removes the old monitor, waits up to 400 ms for the departure, then adds
+/// regardless, and a reused key turns that last add into the depart-the-
+/// incumbent branch mid-churn.
 fn next_session_id() -> u64 {
     NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -630,8 +640,33 @@ impl VdisplayDriver for PfVdisplayDriver {
             info.protocol_version,
             watchdog_s
         );
-        // CLEAR_ALL only on the first open of the process. A reopen can race sessions that still
-        // believe they are live; an unconditional CLEAR_ALL would raze them.
+        // Per-version gaps. Bumps since v3 are additive; a blanket `< PROTOCOL_VERSION` named
+        // the wrong missing capability (told a v4 driver it lacked a v4 feature).
+        if info.protocol_version < 4 {
+            tracing::warn!(
+                "pf-vdisplay protocol {}: driver lacks the in-place mid-stream resize \
+                 (IOCTL_UPDATE_MODES, added in v4) — every mid-stream resize costs a monitor \
+                 re-arrival (one hotplug per switch) until the driver is updated",
+                info.protocol_version
+            );
+        }
+        if info.protocol_version < 5 {
+            tracing::warn!(
+                "pf-vdisplay protocol {}: driver lacks the IddCx hardware-cursor channel (added in \
+                 v5) — the pointer stays composited into the captured frame",
+                info.protocol_version
+            );
+        }
+        if info.protocol_version < 6 {
+            tracing::info!(
+                "pf-vdisplay protocol {}: driver lacks the mid-stream cursor-forward flip \
+                 (IOCTL_SET_CURSOR_FORWARD, added in v6) — the cursor model declared at monitor ADD \
+                 stands for the whole session",
+                info.protocol_version
+            );
+        }
+        // CLEAR_ALL needs sole ownership of the device. A reopen races sessions this process
+        // still believes live, and under a seats reservation another host owns monitors here.
         if !reap_orphans {
             reap_ghost_monitors();
             return Ok((device, watchdog_s, info.protocol_version));
@@ -1120,6 +1155,16 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    /// Every ADD needs its own key: the preempt path adds after a removal that
+    /// may not have landed, and a reused key would depart the incumbent.
+    #[test]
+    fn session_ids_are_fresh_per_add() {
+        let a = next_session_id();
+        let b = next_session_id();
+        assert_ne!(a, b);
+        assert!(b > a);
+    }
 
     /// A refusal must decode as a refusal, carrying its reason. PnP Status after a refused
     /// disable still reads `OK` and must never decode as `Reloaded`.
