@@ -24,13 +24,20 @@ driver interface not found". Gating the installer turns that late, confusing fai
 message. (Down-level SDR-only support would need a runtime IddCx version check in the driver —
 tracked as a possible future feature, not planned.)
 
-## x64 only (no ARM64)
+## ARM64 (Snapdragon X): built, unverified on hardware
 
-Unlike the client (which ships x64 + ARM64 MSIX), the host is **x64-only by design**. It is coupled to
-an NVIDIA GPU (NVENC, via `nvEncodeAPI64.dll` from the driver) and the **pf-vdisplay** virtual-display
-driver — neither exists on Windows ARM64 (no ARM64 NVIDIA driver; the driver builds x64-only). An
-ARM64 host would install but couldn't encode or create a virtual display, so we don't build one.
-Revisit if NVIDIA-ARM Windows PCs ever ship.
+`windows-host.yml` cross-builds a second leg for `aarch64-pc-windows-msvc` on the x64 runner (the
+MSVC ARM64 cross compiler, the WDK's `um\arm64` libs) and publishes it as
+`canary/punktfunk-host-setup_arm64.exe`. Every script in this directory takes `-Arch arm64`; the
+driver workspace's `nvenc`/`qsv`/`pyrowave` features are x86-64-only in its `Cargo.toml`, so an
+ARM64 `pf_vdisplay.dll` opens **Media Foundation and nothing else** (the Qualcomm MFT is the only
+hardware encoder on Adreno). What that leg does not have, by architecture: NVENC, QSV, the FFmpeg
+AMF/QSV fallback, PyroWave (Granite has no MSVC-ARM64 SIMD path).
+
+**It streams video only.** Steam ships its streaming-audio drivers (`SteamStreaming{Speakers,
+Microphone}.sys`) for x64 and x86, not arm64, and they are the host's whole audio substrate. The
+runtime logs that and carries on. No Windows-on-ARM box has run this build yet; #298 keeps the
+on-glass checklist (driver start, self-signed catalog acceptance, the MFT inside WUDFHost).
 
 ## Why not MSIX (like the client)
 

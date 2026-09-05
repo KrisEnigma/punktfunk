@@ -43,6 +43,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **An ARM64 Windows host installer**, `canary/punktfunk-host-setup_arm64.exe`, cross-built for
+  Snapdragon X with Media Foundation as its only encoder. It has not run on hardware yet and
+  streams video only: Steam ships no arm64 streaming-audio driver, so expect no game audio or
+  microphone until that substrate exists.
 - **`punktfunk-host plugins grant <dir>`.** The Windows runner is `LocalService` and cannot read
   your user profile, so a launcher installed there reads as "not installed"; grant the runner
   read on that one directory instead of hand-writing an icacls SID.
