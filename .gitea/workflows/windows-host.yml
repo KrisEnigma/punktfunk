@@ -207,6 +207,21 @@ jobs:
           "PUNKTFUNK_BUILD_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "host version $v"
 
+      - name: sccache preflight (a dead cache costs a cold build, not the leg)
+        shell: pwsh
+        # storage.unom.io has answered the daemon's startup check with a 401 (2026-09-04), which
+        # kills cargo at `rustc -vV` before a line compiles. A job that finds a daemon already
+        # running never re-runs that check, so one leg can pass while the next dies. Probe once
+        # here; when the daemon cannot start, drop the wrapper for the rest of the job, the way
+        # the Linux lanes fall back to a passthrough shim without cache secrets.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          & sccache --show-stats 2>&1 | Select-Object -First 12 | Write-Output
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "sccache daemon failed to start - building this leg without the cache"
+            "RUSTC_WRAPPER=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
       - name: Build (release, host)
         shell: pwsh
         # x64 = all-vendor host: NVENC (NVIDIA, direct SDK) + native QSV (Intel, static VPL
