@@ -329,6 +329,16 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The forwarded pointer is native-sized on a scaled Wayland client.** SDL hands the compositor
+  a custom cursor's pixel size as a viewport destination — surface-local units, so the display
+  scale is applied there — while the client folded that same scale into the bitmap it built,
+  drawing the pointer scale-squared too large (2.25× at 150 %). The fold now happens only on the
+  backends that present a cursor surface at 1:1 physical pixels; nothing to do.
+- **A KDE session's streamed display sits at the desktop origin.** KWin appends a new output to
+  the right of the row it joins and never re-normalizes, so an exclusive session — every physical
+  dark — left the only lit screen at a non-zero origin, an arrangement no display KCM produces
+  and one Plasma places popups off: the launcher pinned to the right edge, the desktop context
+  menu to the left. Nothing to do beyond the update.
 - **The Windows host is per-monitor DPI aware from launch.** Windows hands a DPI-unaware process
   the cursor bitmap for the DPI it was started at, so a host started on a 300 % desktop kept
   forwarding a 96 px pointer onto the 96 DPI virtual display, three times too large on every
