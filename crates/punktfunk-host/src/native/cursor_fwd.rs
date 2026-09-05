@@ -37,7 +37,7 @@ impl CursorForwarder {
     pub(super) fn tick(
         &mut self,
         cursor: Option<&pf_frame::CursorOverlay>,
-        conn: &quinn::Connection,
+        conn: &super::link::SessionLink,
         shape_tx: &tokio::sync::mpsc::UnboundedSender<CursorShape>,
     ) {
         let flags = match cursor {
@@ -61,7 +61,7 @@ impl CursorForwarder {
             x: self.last_pos.0,
             y: self.last_pos.1,
         };
-        let _ = conn.send_datagram(encode_cursor_state_datagram(&state).into());
+        conn.send_datagram(encode_cursor_state_datagram(&state));
     }
 }
 

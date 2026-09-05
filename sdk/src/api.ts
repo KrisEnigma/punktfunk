@@ -12,7 +12,7 @@ import { Effect } from "effect";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import type { ResolvedConfig } from "./config.js";
+import type { Connection } from "./connection.js";
 import * as gen from "./gen/punktfunk.js";
 
 /**
@@ -52,23 +52,57 @@ export type HostApi = {
 	>;
 };
 
-/** Build the pinning `HttpClient`: base URL + bearer + the config's CA-pinning fetch. */
-const httpClientFor = (cfg: ResolvedConfig): Promise<HttpClient.HttpClient> =>
-	Effect.runPromise(
-		HttpClient.HttpClient.pipe(
-			Effect.map((client) =>
-				HttpClient.mapRequest((request: HttpClientRequest.HttpClientRequest) =>
-					request.pipe(
-						HttpClientRequest.prependUrl(cfg.url),
-						HttpClientRequest.bearerToken(cfg.token),
-						HttpClientRequest.acceptJson,
+/**
+ * The `HttpClient` the generated client runs on: base URL, the credential, and the connection's
+ * fetch. Platform-neutral — this is what `@punktfunk/host/core` hands a browser.
+ *
+ * The credential is attached effectfully because a device key may have to run an exchange to
+ * produce one, and re-earned once on a 401 because such a token lapses. A static bearer cannot
+ * be re-earned, so for it a 401 is simply the answer.
+ */
+export const httpClientFor = (
+	cfg: Connection,
+): Effect.Effect<HttpClient.HttpClient> =>
+	HttpClient.HttpClient.pipe(
+		Effect.map((client) =>
+			client.pipe(
+				HttpClient.mapRequestEffect((request) =>
+					Effect.promise(() => cfg.credential.header()).pipe(
+						Effect.map((auth) =>
+							request.pipe(
+								HttpClientRequest.prependUrl(cfg.url),
+								HttpClientRequest.setHeader("authorization", auth),
+								HttpClientRequest.acceptJson,
+							),
+						),
 					),
-				)(client),
+				),
+				HttpClient.transform((response, request) =>
+					cfg.credential.kind === "device"
+						? response.pipe(
+								Effect.flatMap((res) => {
+									if (res.status !== 401) return Effect.succeed(res);
+									cfg.credential.invalidate();
+									return Effect.promise(() => cfg.credential.header()).pipe(
+										Effect.flatMap((auth) =>
+											client.execute(
+												request.pipe(
+													HttpClientRequest.prependUrl(cfg.url),
+													HttpClientRequest.setHeader("authorization", auth),
+													HttpClientRequest.acceptJson,
+												),
+											),
+										),
+									);
+								}),
+							)
+						: response,
+				),
 			),
-			Effect.provide(FetchHttpClient.layer),
-			// Override the default `globalThis.fetch` with the CA-pinning one (config.ts).
-			Effect.provideService(FetchHttpClient.Fetch, cfg.fetch),
 		),
+		Effect.provide(FetchHttpClient.layer),
+		// The connection's fetch: CA-pinning on Node, plain on a browser.
+		Effect.provideService(FetchHttpClient.Fetch, cfg.fetch),
 	);
 
 /** Skipped at runtime too (not just in the type): these aren't Promise-shaped API calls. */
@@ -79,8 +113,10 @@ const NON_API: ReadonlySet<string> = new Set<NonApiMethods>([
 ]);
 
 /** The typed API surface over a resolved connection — each method runs its Effect to a Promise. */
-export const makeHostApi = async (cfg: ResolvedConfig): Promise<HostApi> => {
-	const client = gen.make(await httpClientFor(cfg)) as unknown as Record<
+export const makeHostApi = async (cfg: Connection): Promise<HostApi> => {
+	const client = gen.make(
+		await Effect.runPromise(httpClientFor(cfg)),
+	) as unknown as Record<
 		string,
 		unknown
 	>;

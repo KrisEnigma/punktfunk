@@ -234,7 +234,7 @@ pub(super) fn host_cap(client_caps: u8) -> bool {
 /// `PUNKTFUNK_PAD_AUDIO_SLOTS`) or spawn fails; the pad still works, without audio.
 #[cfg(target_os = "windows")]
 pub(super) fn spawn(
-    conn: quinn::Connection,
+    conn: super::link::SessionLink,
     pad: u8,
     kinds: u8,
     _edge: bool,
@@ -341,7 +341,7 @@ impl crate::audio::AudioCapturer for LinuxPadCapture {
 /// real usbip card.
 #[cfg(target_os = "linux")]
 pub(super) fn spawn(
-    conn: quinn::Connection,
+    conn: super::link::SessionLink,
     pad: u8,
     kinds: u8,
     edge: bool,
@@ -391,7 +391,7 @@ pub(super) fn spawn(
 /// Other hosts have no virtual DualSense audio source; [`host_cap`] never advertises the cap.
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(super) fn spawn(
-    _conn: quinn::Connection,
+    _conn: super::link::SessionLink,
     _pad: u8,
     _kinds: u8,
     _edge: bool,
@@ -450,7 +450,7 @@ fn build_lanes(kinds: u8) -> Result<Vec<Lane>, opus::Error> {
 /// or a gone datagram path ends the thread; a single TooLarge costs that frame only.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn pad_audio_thread<C: crate::audio::AudioCapturer>(
-    conn: quinn::Connection,
+    conn: super::link::SessionLink,
     pad: u8,
     kinds: u8,
     open: impl Fn() -> anyhow::Result<C>,
@@ -534,12 +534,10 @@ fn pad_audio_thread<C: crate::audio::AudioCapturer>(
                         pts_ns,
                         &opus_buf[..n],
                     );
-                    match conn.send_datagram(d.into()) {
-                        Ok(()) => {}
-                        // The only outcome that really is "the session is over".
-                        Err(quinn::SendDatagramError::ConnectionLost(_)) => end_plane = true,
+                    match conn.send_datagram(d) {
+                        super::link::DatagramSend::Sent => {}
                         // One frame, not the plane. seq already advanced; client conceals the gap.
-                        Err(quinn::SendDatagramError::TooLarge) => {
+                        super::link::DatagramSend::TooLarge => {
                             oversized_drops += 1;
                             if oversized_drops.is_power_of_two() {
                                 tracing::warn!(
@@ -553,11 +551,10 @@ fn pad_audio_thread<C: crate::audio::AudioCapturer>(
                             }
                         }
                         // Datagrams are gone for this connection. Next frame will not land.
-                        Err(e) => {
+                        super::link::DatagramSend::Unavailable => {
                             tracing::warn!(
                                 pad,
-                                error = %e,
-                                "the QUIC datagram path is unavailable — ending this pad's audio"
+                                "the datagram path is unavailable — ending this pad's audio"
                             );
                             end_plane = true;
                         }

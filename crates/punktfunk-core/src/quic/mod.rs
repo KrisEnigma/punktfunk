@@ -1,4 +1,8 @@
-//! `punktfunk/1` — native control plane, behind the `quic` feature.
+//! `punktfunk/1` — the control plane's wire vocabulary, and the quinn transport that carries it.
+//!
+//! **The messages are not behind the `quic` feature; the transport is.** A browser speaks the
+//! same protocol over WebTransport, where quinn cannot go, so only [`endpoint`], [`io`],
+//! [`clipstream`] and [`pake`] need a feature.
 //!
 //! One QUIC bidirectional stream (quinn, tokio — control only, never the
 //! per-frame path) carries a length-prefixed handshake:
@@ -12,11 +16,9 @@
 //! Both sides then open a [`crate::session::Session`] over
 //! [`UdpTransport`](crate::transport::udp) (native threads). Welcome carries
 //! the negotiated data-plane config (FEC, shard size, key/salt). The host
-//! presents a long-lived self-signed cert ([`endpoint::server_with_identity`]);
-//! the client pins its SHA-256 fingerprint ([`endpoint::client_pinned`]; no
-//! pin = TOFU). Data-plane AES-GCM sits on top. Integers little-endian; every
-//! message is `u16 length || payload`. Submodules re-export here as
-//! `crate::quic::X`.
+//! presents a long-lived self-signed cert; the client pins its SHA-256
+//! fingerprint (no pin = TOFU). Data-plane AES-GCM sits on top. Integers
+//! little-endian; every message is `u16 length || payload`.
 
 /// Protocol magic + version; first bytes of Hello/Welcome/Start.
 pub const MAGIC: &[u8; 4] = b"PKF1";
@@ -37,16 +39,22 @@ mod pen;
 
 /// quinn endpoint constructors: host identity ([`endpoint::server_with_identity`]),
 /// client pin / TOFU ([`endpoint::client_pinned`]).
+#[cfg(feature = "quic")]
 pub mod endpoint;
 
+#[cfg(feature = "quic")]
 pub mod io;
 
 /// Per-transfer clipboard fetch streams (`PKFs` + kind, then request/response).
 /// Transport only; wire codecs in [`control`], state per side.
+#[cfg(feature = "quic")]
 pub mod clipstream;
 
 /// SPAKE2 over Ed25519 for pairing. Both certificate fingerprints are the SPAKE2
 /// identities, so a MITM that presents different certs on each leg cannot share a key.
+/// Its own feature, so a client that pairs over a different transport can have the ceremony
+/// without quinn.
+#[cfg(feature = "pake")]
 pub mod pake;
 
 pub use access::*;

@@ -25,7 +25,8 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { layer as hostLayer, PunktfunkHost } from "./client.js";
+import { PunktfunkHost } from "./client.js";
+import { layer as hostLayer } from "./effect.js";
 import { type ConnectOptions, configDir } from "./config.js";
 import { connect, type PluginDef } from "./index.js";
 

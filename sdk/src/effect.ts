@@ -12,38 +12,40 @@
 //     );
 //   });
 //   Effect.runPromise(program.pipe(Effect.provide(PunktfunkHostLive())));
-import { Effect, type Schema as S, Stream } from "effect";
+import { Effect, Layer, type Schema as S, Stream } from "effect";
 import {
 	EventStreamError,
+	makeService,
 	PunktfunkHost,
 	type RequestError,
+	TransportError,
 	type VersionSkew,
 } from "./client.js";
+import { type ConnectOptions, resolveConfig } from "./config.js";
 import type { EventStreamOptions, SseFrame } from "./sse.js";
 import type { HostEvent } from "./wire.js";
 
-export {
-	ApiError,
-	AuthError,
-	EventStreamError,
-	layer,
-	makeService,
-	PunktfunkHost,
-	type PunktfunkHostService,
-	PunktfunkHostLive,
-	type RequestError,
-	SseAuthError,
-	TransportError,
-	VersionSkew,
-} from "./client.js";
+// Everything platform-neutral is `/core`; this entry is that plus the Node half.
+export * from "./core.js";
 export { type ConnectOptions, configDir, resolveConfig } from "./config.js";
-export type { EventStreamOptions, SseFrame } from "./sse.js";
-export * from "./wire.js";
+
 /**
- * The generated REST surface: wire Schemas plus a typed `HttpClient`-based client (`make`),
- * from `@effect/openapi-generator` over `api/openapi.json`. Regenerate with `bun run gen`.
+ * The live layer: resolves URL/token/CA (env → host files) and provides [`PunktfunkHost`].
+ * Node only, because the resolution is; a browser builds a connection and uses `layerFrom`.
  */
-export * as api from "./gen/punktfunk.js";
+export const layer = (
+	options?: ConnectOptions,
+): Layer.Layer<PunktfunkHost, TransportError> =>
+	Layer.effect(
+		PunktfunkHost,
+		Effect.tryPromise({
+			try: () => resolveConfig(options),
+			catch: (cause) => new TransportError({ cause }),
+		}).pipe(Effect.map(makeService)),
+	);
+
+/** RFC-spelled alias of [`layer`]. */
+export const PunktfunkHostLive = layer;
 
 /** The decoded lifecycle-event stream of the ambient [`PunktfunkHost`]. */
 export const events = (

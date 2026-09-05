@@ -526,6 +526,14 @@ pub fn serve(
              the native punktfunk/1 plane + clients for untrusted/WAN use."
         );
     }
+    if let Some(bind) = native.webtransport_bind {
+        tracing::warn!(
+            %bind,
+            "WebTransport browser plane ENABLED (--webtransport): a second, externally-reachable \
+             transport whose certificate hash is published unauthenticated. A browser pairs over \
+             PAKE with its own device key, which is what proves it — the published hash does not."
+        );
+    }
     let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
     rt.block_on(async move {
         // rustls needs a process-wide crypto provider before any TLS config is built.
@@ -534,6 +542,25 @@ pub fn serve(
         // Hook runner consumes the live event tail for the host's lifetime. Spawned
         // before `host.started` so operator hooks observe the full lifecycle.
         tokio::spawn(crate::hooks::runner());
+        // The browser plane, when the operator asked for it. The native plane spawns it, because
+        // a browser runs the native session on the native plane's state. The long-lived identity
+        // signs the plane's throwaway certificate, so a paired browser can check it against the
+        // fingerprint it pinned. Same pairing store and same flag as the native plane: a device
+        // is paired with the host, not with a plane.
+        let web = native
+            .webtransport_bind
+            .map(|bind| crate::webtransport::Plane {
+                bind,
+                sans: vec![
+                    state.host.local_ip().to_string(),
+                    "localhost".to_string(),
+                    "127.0.0.1".to_string(),
+                ],
+                origins: pf_host_config::config().webtransport_origins.clone(),
+                identity: native_ident.clone(),
+                pairing: np.clone(),
+                require_pairing: native.require_pairing,
+            });
         // `host.started` as the planes come up; `host.stopping` on clean or error exit
         // so a consumer that reconnects still sees it.
         crate::events::emit(crate::events::EventKind::HostStarted {
@@ -583,7 +610,8 @@ pub fn serve(
                         native.mgmt_port,
                         np,
                         stats.clone(),
-                        native_ident
+                        native_ident,
+                        web,
                     ),
                 )
                 .map(|_| ())
@@ -608,7 +636,8 @@ pub fn serve(
                     native.mgmt_port,
                     np,
                     stats.clone(),
-                    native_ident
+                    native_ident,
+                    web,
                 ),
             )
             .map(|_| ())

@@ -43,6 +43,43 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **A browser client, in its own repo.** `pf-console-ui` compiled to `wasm32-unknown-emscripten`
+  draws the console on a WebGL2 canvas, and video streams to it over WebTransport — handshake,
+  FEC, decrypt, reassembly and pairing are this crate's, unchanged. It lives at
+  [punktfunk/client-web](https://github.com/punktfunk/client-web) and takes `punktfunk-core`,
+  `pf-console-ui` and `pf-client-core` as pinned git dependencies, the way client-webos does.
+- **A WebTransport plane on the host, off by default.** `--webtransport` /
+  `PUNKTFUNK_WEBTRANSPORT` serves browsers on UDP 9778 with its own short-lived P-256 certificate,
+  published at `GET /api/v1/webtransport`. Narrow it with `PUNKTFUNK_WEBTRANSPORT_BIND` and
+  `PUNKTFUNK_WEBTRANSPORT_ORIGINS` — a browser applies no same-origin rule to WebTransport, so
+  without the second any page the user has open can reach the port.
+- **`GET /api/v1/webtransport` attests the browser plane's certificate.** `cert_hash_sig` and
+  `host_cert_der` carry the host's long-lived identity signing that plane's throwaway certificate
+  hash, so a browser that paired earlier can chain the two before it dials. Both are absent on a
+  host still serving the legacy RSA identity.
+- **Browsers pair with a device key, and prove it once per session.** `PairRequest` gains an
+  optional trailing `device_key` (P-256 SPKI) whose SHA-256 becomes the SPAKE2 identity and the
+  stored fingerprint; two new control messages, `AuthChallenge` (0x14) and `AuthResponse` (0x15),
+  carry a host nonce and the client's signature over it bound to the transport certificate. A
+  client with a certificate sends neither and its bytes on the wire are unchanged.
+- **A browser can authenticate to the management API.** `POST /api/v1/auth/device/challenge`
+  returns a nonce, `POST /api/v1/auth/device/token` exchanges a signature by a paired device key
+  for a short-lived bearer token. That token reaches exactly the paired-certificate route set and
+  nothing more, so a browser can read the library it could not reach before.
+- **The management API answers cross-origin requests.** A page that is not served by the host
+  could not read a response at all. `Access-Control-Allow-Credentials` is never sent — the API
+  has no cookies — and `PUNKTFUNK_WEBTRANSPORT_ORIGINS` narrows which origins are answered.
+- **`@punktfunk/host` 0.2.0 runs in a browser.** `@punktfunk/host/core` is the SDK with nothing
+  Node in it — the generated client, the service, the errors, the event decoder — and a
+  `Credential` seam with `staticBearer` (every credential it had) and `deviceKey` (a paired
+  browser's nonce exchange, re-earned on 401). Tag `sdk-v0.2.0` after merge to publish; the
+  generated client is now drift-gated against `api/openapi.json` in CI.
+- **The browser plane honours `require_pairing`.** A browser sends that signature before its
+  `Hello`, and a host that requires pairing refuses one that does not. Run `serve --open` to keep
+  an unpaired browser streaming, as it already does for native clients.
+- **`Platform::Web` in `pf-console-ui`.** The browser takes the desktop's glyphs and ring but the
+  no-live-chord settings wording, since a page binds none. An embedder switching on `Platform`
+  gains an arm to handle.
 - **An ARM64 Windows host installer**, `canary/punktfunk-host-setup_arm64.exe`, cross-built for
   Snapdragon X with Media Foundation as its only encoder. It has not run on hardware yet and
   streams video only: Steam ships no arm64 streaming-audio driver, so expect no game audio or
@@ -213,6 +250,18 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **`pf-client-core` and `pf-console-ui` build for `wasm32-unknown-emscripten`.** Their portable
+  module gates name `target_family = "wasm"` beside android, and `punktfunk-core` now takes
+  `if-addrs` off wasm only, keeps its Apple `recv_batch` off it, and `trust`'s identity, pair,
+  probe and `preferred_codec` entry points are absent there — a browser has no quinn. No other
+  target changes.
+- **`punktfunk_core::quic`'s messages no longer need the `quic` feature.** Only `endpoint`, `io`,
+  `clipstream`, `pake` and `clock_sync` do; the codecs build on every target, so a client that
+  speaks punktfunk/1 over another transport can name `Hello` without pulling quinn. Every existing
+  path is unchanged. SPAKE2 moves behind a new `pake` feature that `quic` turns on.
+- **`punktfunk_core`'s C ABI is absent on wasm.** Nothing in a browser embeds this crate over the
+  C ABI, and its `#[no_mangle]` roots made the cdylib cargo builds regardless unlinkable there. An
+  embedder is unaffected on every target that has one.
 - **`capture_health` reports the classes the driver's clocks support.** `stall_class` is now
   `worker` / `encoder` / `presentation` / `driver` (`transport` and `conversion` are gone),
   `evidence` is `input` / `canary`, and the object gains `present_to_arrival_ms` plus a

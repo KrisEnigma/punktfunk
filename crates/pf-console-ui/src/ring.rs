@@ -233,10 +233,9 @@ impl Ring {
         self.facts = facts.clone();
     }
 
-    // In-stream surface (`skia_overlay`). Android uses this type only as the editor,
-    // so clippy sees these unused — `allow` rather than `cfg`, which would cascade
-    // into the parameter types' imports.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    // In-stream surface (`skia_overlay`), so a build without that overlay sees these unused.
+    // `allow` rather than `cfg`, which would cascade into the parameter types' imports.
+    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
     pub(crate) fn input(&mut self, input: RingInput) {
         match input {
             RingInput::Turn {
@@ -315,18 +314,18 @@ impl Ring {
         }
     }
 
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
     pub(crate) fn take_command(&mut self) -> Option<RingCommand> {
         self.pending.pop_front()
     }
 
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
     pub(crate) fn take_cmds(&mut self) -> Vec<ConsoleCmd> {
         std::mem::take(&mut self.cmds)
     }
 
     /// Overlay damage key: redraw only when this changes.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
     pub(crate) fn damage(&self) -> u64 {
         if !self.visible() {
             return 0;
@@ -354,7 +353,7 @@ impl Ring {
 
     /// True while a spring, ease, or entrance is short of its target. Read before
     /// the next frame: this is the state the last render left.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
     fn animating(&self) -> bool {
         if self.closing {
             return true;
@@ -782,7 +781,7 @@ impl Ring {
     }
 
     /// Pad vocabulary on keys. Always consumed while open, including unknown keys.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
     pub(crate) fn key(&mut self, key: Key) -> bool {
         if !self.open() {
             return false;

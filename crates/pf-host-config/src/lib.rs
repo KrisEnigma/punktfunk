@@ -115,6 +115,22 @@ pub struct HostConfig {
     /// `PUNKTFUNK_GAMESTREAM` — GameStream/Moonlight-compat planes. `--gamestream`
     /// also turns them on. **Default OFF**: they carry plain-HTTP pairing.
     pub gamestream: bool,
+    /// `PUNKTFUNK_WEBTRANSPORT` — the browser plane. `--webtransport` also turns it on.
+    /// **Default OFF**, like GameStream: a new externally-reachable transport should not
+    /// appear on a host because it was upgraded.
+    pub webtransport: bool,
+    /// `PUNKTFUNK_WEBTRANSPORT_ORIGINS` — comma-separated browser origins allowed to open a
+    /// session (`https://host:47990`). Unset = any, because a host has no way to know its own
+    /// origin until the console offers the choice. WebTransport is not subject to CORS, so this
+    /// is the only thing that separates the real client from any page the user has open.
+    pub webtransport_origins: Vec<String>,
+    /// `PUNKTFUNK_WEBTRANSPORT_BIND` — browser-plane listen address. `--webtransport-bind` wins.
+    /// Unset = `[::]`, every interface, matching the native plane. Narrow it to put the browser
+    /// plane on one interface without moving the rest of the host.
+    pub webtransport_bind: Option<String>,
+    /// `PUNKTFUNK_WEBTRANSPORT_PORT` — browser-plane listen port. `--webtransport-port` wins.
+    /// Unset = 9778. Raw string so a typo is a startup error, not a silent default.
+    pub webtransport_port: Option<String>,
     /// `PUNKTFUNK_ENCODER` — encoder-backend override (lowercased). Empty = auto-detect by GPU vendor.
     pub encoder_pref: String,
     /// `PUNKTFUNK_RENDER_ADAPTER` — discrete render-GPU pin by description substring.
@@ -254,6 +270,19 @@ impl HostConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             gamestream: env_on("PUNKTFUNK_GAMESTREAM").unwrap_or(false),
+            webtransport: env_on("PUNKTFUNK_WEBTRANSPORT").unwrap_or(false),
+            webtransport_origins: val("PUNKTFUNK_WEBTRANSPORT_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            webtransport_bind: val("PUNKTFUNK_WEBTRANSPORT_BIND")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            webtransport_port: val("PUNKTFUNK_WEBTRANSPORT_PORT")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             encoder_pref: std::env::var("PUNKTFUNK_ENCODER")
                 .unwrap_or_default()
                 .to_ascii_lowercase(),

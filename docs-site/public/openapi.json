@@ -121,6 +121,74 @@
         }
       }
     },
+    "/api/v1/auth/device/challenge": {
+      "post": {
+        "tags": [
+          "host"
+        ],
+        "summary": "Start a device exchange",
+        "operationId": "postDeviceChallenge",
+        "responses": {
+          "200": {
+            "description": "A single-use nonce to sign",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Challenge"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/v1/auth/device/token": {
+      "post": {
+        "tags": [
+          "host"
+        ],
+        "summary": "Exchange a device signature for a token",
+        "operationId": "postDeviceToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A bearer token for the paired-device lane",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenGrant"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unknown device, stale nonce, or a bad signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/api/v1/client-logs": {
       "get": {
         "tags": [
@@ -4405,6 +4473,40 @@
           }
         }
       }
+    },
+    "/api/v1/webtransport": {
+      "get": {
+        "tags": [
+          "host"
+        ],
+        "summary": "Where to reach the browser plane",
+        "operationId": "getWebTransport",
+        "responses": {
+          "200": {
+            "description": "The live certificate hash and port",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebTransportInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The browser plane is not enabled on this host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
     }
   },
   "components": {
@@ -5399,6 +5501,26 @@
             "items": {
               "$ref": "#/components/schemas/SourceView"
             }
+          }
+        }
+      },
+      "Challenge": {
+        "type": "object",
+        "description": "`POST /auth/device/challenge` → the nonce to sign.",
+        "required": [
+          "nonce",
+          "expires_in"
+        ],
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds this nonce remains signable.",
+            "minimum": 0
+          },
+          "nonce": {
+            "type": "string",
+            "description": "32 random bytes, lowercase hex. Single-use, and short-lived."
           }
         }
       },
@@ -9067,6 +9189,52 @@
           }
         }
       },
+      "TokenGrant": {
+        "type": "object",
+        "required": [
+          "token",
+          "expires_at",
+          "fingerprint"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds."
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "The device's own fingerprint, so a client can show which identity it is using."
+          },
+          "token": {
+            "type": "string",
+            "description": "Present as `Authorization: Bearer <token>`."
+          }
+        }
+      },
+      "TokenRequest": {
+        "type": "object",
+        "description": "`POST /auth/device/token` — what a paired browser presents.",
+        "required": [
+          "device_key",
+          "nonce",
+          "signature"
+        ],
+        "properties": {
+          "device_key": {
+            "type": "string",
+            "description": "Base64 SPKI of the device's P-256 public key — the same bytes it paired with, whose\nSHA-256 the host stored."
+          },
+          "nonce": {
+            "type": "string",
+            "description": "The nonce from `challenge`."
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64 ECDSA-P256-SHA256 signature, ASN.1 DER, over the same message the control stream\nuses: context, the host's identity fingerprint, then the nonce."
+          }
+        }
+      },
       "Topology": {
         "type": "string",
         "description": "Host topology while managed virtual displays are up.",
@@ -9393,6 +9561,52 @@
               "null"
             ],
             "description": "One-click apply is possible but not opted in — command to run\n(Linux: join `punktfunk-update`)."
+          }
+        }
+      },
+      "WebTransportInfo": {
+        "type": "object",
+        "description": "Everything `new WebTransport(url, { serverCertificateHashes })` needs.",
+        "required": [
+          "port",
+          "cert_hash_sha256",
+          "expires_at",
+          "allow_pooling"
+        ],
+        "properties": {
+          "allow_pooling": {
+            "type": "boolean",
+            "description": "`allowPooling: true` is a `TypeError` when combined with `serverCertificateHashes`, so a\nclient must pass this. Stated here because a browser that ignores it fails at Web PKI\nvalidation with no useful error."
+          },
+          "cert_hash_sha256": {
+            "type": "string",
+            "description": "Lowercase hex SHA-256 of the leaf certificate DER — the bytes that go in\n`serverCertificateHashes[0].value`."
+          },
+          "cert_hash_sig": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hex ECDSA-P256-SHA256 signature (ASN.1 DER) by the host's long-lived native identity over\n`\"punktfunk-wt-cert-v1:\" + cert_hash_sha256`. Absent when that identity is the legacy RSA\npair. A browser that has paired MUST check this; one that has not cannot, and does not."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds. Past this the certificate has rotated and the hash above is stale; fetch\nagain rather than cache. Always under two weeks out — the spec refuses anything longer.",
+            "minimum": 0
+          },
+          "host_cert_der": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 DER of the native identity's leaf certificate — the key that verifies\n`cert_hash_sig`. A browser hashes it and compares with the fingerprint it stored at\npairing; trusting it without that check would defeat the whole exercise."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "UDP port the plane listens on. Not the management port, and not the native plane's.",
+            "minimum": 0
           }
         }
       }

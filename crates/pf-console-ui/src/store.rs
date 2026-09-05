@@ -61,6 +61,15 @@ pub fn file_store() -> &'static dyn SettingsStore {
     &FILE_STORE
 }
 
+/// The screen tests all build their screen around `file_store()`, and off the desktop there is no
+/// file to store into — so on those targets they get one in-memory store instead. Shared, which is
+/// safe here only because a target without a file store is also a target without test threads.
+#[cfg(all(test, not(any(target_os = "linux", windows))))]
+pub fn file_store() -> &'static dyn SettingsStore {
+    static STORE: std::sync::OnceLock<SnapshotStore> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| SnapshotStore::new(Settings::default(), Vec::new()))
+}
+
 /// In-memory snapshot the host pushes and polls. `save` replaces it and bumps
 /// `saved_gen`; `set` does not. Android JNI; tests that must not touch a file.
 pub struct SnapshotStore {

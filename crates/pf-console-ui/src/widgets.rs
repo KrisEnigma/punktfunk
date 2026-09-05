@@ -300,7 +300,12 @@ impl MenuList {
 
     /// True while an entrance, ease, or spring is still moving. The damage-gated
     /// stream overlay redraws until this is false; the console paints every frame.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    // Unused on Android, and on any build without the Vulkan overlay — the wasm console is the
+    // second of those.
+    #[cfg_attr(
+        any(target_os = "android", not(feature = "vulkan-overlay")),
+        allow(dead_code)
+    )]
     pub fn animating(&self) -> bool {
         !self.settled
     }
@@ -1833,6 +1838,10 @@ mod tests {
     /// is fixed once settled, so any change there is escaped text.
     #[test]
     fn a_stepped_value_stays_inside_its_field() {
+        // This one needs motion, and `reduce_motion` is a thread-local: a harness that gives every
+        // test its own thread hides that, a single-threaded one (wasm) hands over whatever the
+        // last shell render left. Say what this test needs rather than inherit it.
+        crate::theme::set_reduce_motion(false);
         let fonts = crate::theme::build_fonts().unwrap();
         let (w, h) = (900, 600);
         let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();

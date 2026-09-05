@@ -716,7 +716,7 @@ impl PadAudioSlots {
     /// stays empty (arrivals retry a few times). Only an actual open spends
     /// [`MAX_PAD_AUDIO_STARTS`]. `edge` selects DualSense Edge on Linux; Windows
     /// endpoints are pre-stamped so it is ignored there.
-    fn ensure(&mut self, conn: &quinn::Connection, pad: u8, kinds: u8, edge: bool) {
+    fn ensure(&mut self, conn: &super::link::SessionLink, pad: u8, kinds: u8, edge: bool) {
         let idx = pad as usize;
         if idx >= MAX_WIRE_PADS {
             return;
@@ -918,7 +918,7 @@ fn rumble_silent(lv: RumbleLevels) -> bool {
 /// The v1 hatch has no trigger tail. "Trigger rumble stopped" is an expected
 /// symptom of the hatch — do not bisect a trigger bug into it.
 fn send_rumble(
-    conn: &quinn::Connection,
+    conn: &super::link::SessionLink,
     envelope_on: bool,
     pad: u16,
     lv: RumbleLevels,
@@ -932,7 +932,7 @@ fn send_rumble(
     } else {
         punktfunk_core::quic::encode_rumble_datagram(pad, low, high).to_vec()
     };
-    let _ = conn.send_datagram(d.into());
+    conn.send_datagram(d);
 }
 
 /// Per-session input thread. Pointer/keyboard go through [`InputRoute`]; gamepad
@@ -948,7 +948,7 @@ fn send_rumble(
 /// drops trigger rumble ([`send_rumble`]).
 pub(super) fn input_thread(
     rx: std::sync::mpsc::Receiver<ClientInput>,
-    conn: quinn::Connection,
+    conn: super::link::SessionLink,
     inj_tx: InputRoute,
     gamepad: GamepadPref,
     pad_audio_on: bool,
@@ -1210,7 +1210,7 @@ pub(super) fn input_thread(
                 }
             },
             |h| {
-                let _ = conn.send_datagram(h.encode().into());
+                conn.send_datagram(h.encode());
             },
         );
         // Held-steady UHID pads send no wire events; heartbeat re-emits. Xbox is a no-op.
@@ -1240,7 +1240,7 @@ pub(super) fn input_thread(
                 for (i, &(low, high, _, _)) in rumble_state.iter().enumerate() {
                     if rumble_seen[i] {
                         let d = punktfunk_core::quic::encode_rumble_datagram(i as u16, low, high);
-                        let _ = conn.send_datagram(d.to_vec().into());
+                        conn.send_datagram(d.to_vec());
                     }
                 }
             }

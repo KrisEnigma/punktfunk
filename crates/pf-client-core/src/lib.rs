@@ -29,32 +29,72 @@ pub mod discovery;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod gamepad;
 // Menu-event synthesizer and pad descriptors. Desktop `gamepad` re-exports them; Android feeds the same synthesizer from Kotlin samples (`design/android-skia-console-port.md`).
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod menu_nav;
 // Audio-format vocabulary (`session` re-exports) and decoder-preference migration (`video` re-exports). Split out so the platform-bound modules stay platform-bound.
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod audio_format;
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod decoder_pref;
 // Console actions, pointer input, and session phases. Shared by the Vulkan overlay and the Android GL host.
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod console;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod keymap;
 // Library model (`GameEntry`, `Artwork`, running set) is portable; the ureq fetches stay desktop-gated.
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod library;
 // Per-host catalog cache, so a library screen has titles to show while a sleeping host boots.
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod library_cache;
 // Host power actions (`design/host-actions.md`). Android gets the row type and labels; ureq stays desktop-gated (Android uses OkHttp).
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod host_actions;
 // Log ring (note/render, std only) on every platform. `send_to_host` stays desktop-gated; Android posts via OkHttp (`SkiaConsole.sendLogs`).
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod logring;
 // `punktfunk://` grammar (`design/client-deep-links.md`). One parser/emitter, held to the Swift/Kotlin ports by a shared vector file.
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod deeplink;
 // Connect, the wake state machine, and the session spawn + stdout contract (`design/client-architecture-split.md`).
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
@@ -84,11 +124,21 @@ pub mod ring;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod pad_audio;
 // Override catalog + connect-time resolver (`design/client-settings-profiles.md`). Bindings live on `trust`'s host records.
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod profiles;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod session;
-#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 pub mod trust;
 // Client half of the signed-manifest update check (`design/host-update-from-web-console.md`).
 // Linux only: Windows ships inside the host installer, macOS through `clients/apple`.

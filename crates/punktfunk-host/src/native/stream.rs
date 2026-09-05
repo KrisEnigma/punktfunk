@@ -43,7 +43,7 @@ pub(super) fn synthetic_stream(
     probe_rx: &std::sync::mpsc::Receiver<ProbeRequest>,
     probe_result_tx: &tokio::sync::mpsc::UnboundedSender<ProbeResult>,
     fec_target: &AtomicU8,
-    timing_conn: Option<&quinn::Connection>,
+    timing_conn: Option<&super::link::SessionLink>,
     probe_seq: bool,
 ) -> Result<()> {
     let interval = std::time::Duration::from_millis(1000 / 60);
@@ -66,12 +66,81 @@ pub(super) fn synthetic_stream(
                 stages: None,
                 applied_phase_ns: None,
             };
-            let _ = tc.send_datagram(punktfunk_core::quic::encode_host_timing_datagram(&t).into());
+            let _ = tc.send_datagram(punktfunk_core::quic::encode_host_timing_datagram(&t));
         }
         std::thread::sleep(interval);
     }
     tracing::info!(frames, "synthetic stream complete");
     Ok(())
+}
+
+/// A moving picture through the software H.264 encoder until the session stops. Linux only,
+/// because the encoder is; elsewhere a client gets a refusal it can read, not a hang.
+///
+/// Named, not resolved from the ladder: `auto` never picks software, and `PUNKTFUNK_ENCODER`
+/// is latched long before a session arrives.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn software_stream(
+    session: &mut Session,
+    codec: crate::encode::Codec,
+    mode: punktfunk_core::config::Mode,
+    bitrate_kbps: u32,
+    stop: &AtomicBool,
+    probe_rx: &std::sync::mpsc::Receiver<ProbeRequest>,
+    probe_result_tx: &tokio::sync::mpsc::UnboundedSender<ProbeResult>,
+    fec_target: &AtomicU8,
+    probe_seq: bool,
+) -> Result<()> {
+    use crate::capture::Capturer;
+    anyhow::ensure!(
+        codec == crate::encode::Codec::H264,
+        "the software source encodes H.264 only, and {codec:?} was negotiated"
+    );
+    let (w, h, fps) = (mode.width, mode.height, mode.refresh_hz.max(1));
+    let mut capturer = crate::capture::SyntheticCapturer::new(w, h, fps);
+    let mut frame = capturer.next_frame().context("first synthetic frame")?;
+    let mut encoder =
+        pf_encode::open_software_h264(frame.format, w, h, fps, u64::from(bitrate_kbps) * 1000)
+            .context("open the software encoder")?;
+    let interval = std::time::Duration::from_nanos(1_000_000_000 / u64::from(fps));
+    let mut frames = 0u64;
+    while !stop.load(Ordering::SeqCst) {
+        apply_fec_target(session, fec_target);
+        service_probes(session, stop, probe_rx, probe_result_tx, probe_seq);
+        encoder.submit(&frame).context("encode submit")?;
+        while let Some(au) = encoder.poll().context("encode poll")? {
+            let mut flags = u32::from(FLAG_PIC);
+            if au.keyframe {
+                flags |= u32::from(FLAG_SOF);
+            }
+            if session.submit_frame(&au.data, au.pts_ns, flags).is_err() {
+                tracing::info!(frames, "software stream ended: the transport refused");
+                return Ok(());
+            }
+            frames += 1;
+        }
+        std::thread::sleep(interval);
+        frame = capturer.next_frame().context("synthetic frame")?;
+    }
+    tracing::info!(frames, "software stream complete");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn software_stream(
+    _session: &mut Session,
+    _codec: crate::encode::Codec,
+    _mode: punktfunk_core::config::Mode,
+    _bitrate_kbps: u32,
+    _stop: &AtomicBool,
+    _probe_rx: &std::sync::mpsc::Receiver<ProbeRequest>,
+    _probe_result_tx: &tokio::sync::mpsc::UnboundedSender<ProbeResult>,
+    _fec_target: &AtomicU8,
+    _probe_seq: bool,
+) -> Result<()> {
+    anyhow::bail!("the software source needs the software encoder, which is Linux-only")
 }
 
 /// Probe ceiling: 10 Gbps / 5 s. Above the session cap ([`MAX_BITRATE_KBPS`], 2 Gbps) so a
@@ -700,7 +769,7 @@ fn send_loop(
     // Applied between AUs only — a streamed AU's tiling is derived from the size it began with.
     shard_rx: std::sync::mpsc::Receiver<usize>,
     stats: SendStats,
-    timing_conn: Option<quinn::Connection>,
+    timing_conn: Option<super::link::SessionLink>,
     phase: Arc<PhaseCtl>,
     probe_seq: bool,
 ) {
@@ -823,7 +892,7 @@ fn send_loop(
                                     ),
                                 };
                                 let _ = tc.send_datagram(
-                                    punktfunk_core::quic::encode_host_timing_datagram(&t).into(),
+                                    punktfunk_core::quic::encode_host_timing_datagram(&t),
                                 );
                             }
                         }
@@ -1104,8 +1173,8 @@ pub(super) struct SessionContext {
     pub(super) retarget_tx: tokio::sync::mpsc::UnboundedSender<u32>,
     pub(super) gap_tx: tokio::sync::mpsc::UnboundedSender<u32>,
     pub(super) fec_target: Arc<AtomicU8>,
-    pub(super) conn: quinn::Connection,
-    pub(super) timing_conn: Option<quinn::Connection>,
+    pub(super) conn: super::link::SessionLink,
+    pub(super) timing_conn: Option<super::link::SessionLink>,
     pub(super) phase: Arc<PhaseCtl>,
     pub(super) cursor_forward: bool,
     /// `true` = client draws; `false` = host composites. Always `true` (inert) for non-cap sessions.
@@ -1325,9 +1394,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     // Re-dial re-sends `Hello::launch` verbatim. Adopt against the original stamp or procscan refuses it.
     let launch_claim = launch_target.as_ref().map(|t| {
         crate::launchreg::claim(
-            endpoint::peer_fingerprint(&conn)
-                .map(hex::encode)
-                .as_deref(),
+            conn.peer_fingerprint().map(hex::encode).as_deref(),
             t.game.id.as_deref(),
             fresh_stamp,
         )
@@ -1408,7 +1475,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         None => {
             // Open first: Windows `open` inits the manager; `vdm()` before that panics.
             let mut vd = crate::vdisplay::open(compositor)?;
-            vd.set_client_identity(endpoint::peer_fingerprint(&conn));
+            vd.set_client_identity(conn.peer_fingerprint());
             vd.set_client_hdr(client_hdr);
             // HDR verdict, not the depth — a 10-bit SDR session leaves the output SDR.
             vd.set_hdr(hdr);
@@ -1429,7 +1496,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         // A rejected slot means this host would drive a connector that belongs to
                         // another one. Refusing the session beats attaching to someone else's display.
                         let slot = crate::vdisplay::manager::slot_id_for(
-                            endpoint::peer_fingerprint(&conn),
+                            conn.peer_fingerprint(),
                             (mode.width, mode.height),
                         )
                         .context(REJECTED_SLOT)?;
@@ -1492,9 +1559,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     if !adopt_launch {
         if let Some(t) = launch_target.as_ref() {
             crate::gamelease::end_others_for_new_launch(
-                endpoint::peer_fingerprint(&conn)
-                    .map(hex::encode)
-                    .as_deref(),
+                conn.peer_fingerprint().map(hex::encode).as_deref(),
                 t.game.id.as_deref(),
             );
         }
@@ -1592,10 +1657,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 return;
             }
             tracing::info!("the launched game exited — ending the session cleanly (APP_EXITED)");
-            conn.close(
-                punktfunk_core::quic::APP_EXITED_CLOSE_CODE.into(),
-                b"game exited",
-            );
+            conn.close(punktfunk_core::quic::APP_EXITED_CLOSE_CODE, b"game exited");
             quit.store(true, Ordering::SeqCst);
             stop.store(true, Ordering::SeqCst);
         }
@@ -1663,7 +1725,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         crate::gamelease::SessionGuard::new(
             lease,
             quit.clone(),
-            endpoint::peer_fingerprint(&conn).map(hex::encode),
+            conn.peer_fingerprint().map(hex::encode),
             launch_claim,
         )
     });
@@ -2484,10 +2546,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         "dedicated game session: the game exited — ending the session cleanly"
                     );
                     quit.store(true, Ordering::SeqCst);
-                    conn.close(
-                        punktfunk_core::quic::APP_EXITED_CLOSE_CODE.into(),
-                        b"game exited",
-                    );
+                    conn.close(punktfunk_core::quic::APP_EXITED_CLOSE_CODE, b"game exited");
                     break;
                 }
                 capture_rebuilds += 1;
@@ -3001,8 +3060,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                                 let _ = conn.send_datagram(
                                     punktfunk_core::quic::encode_hdr_meta_datagram(
                                         &crate::encode::hdr_meta_to_wire(m),
-                                    )
-                                    .into(),
+                                    ),
                                 );
                                 resend_meta = false;
                             }
@@ -3101,12 +3159,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
             if let Some(m) = last_hdr_meta {
                 if au.keyframe || resend_meta {
-                    let _ = conn.send_datagram(
-                        punktfunk_core::quic::encode_hdr_meta_datagram(
-                            &crate::encode::hdr_meta_to_wire(m),
-                        )
-                        .into(),
-                    );
+                    let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(
+                        &crate::encode::hdr_meta_to_wire(m),
+                    ));
                     resend_meta = false;
                 }
             }

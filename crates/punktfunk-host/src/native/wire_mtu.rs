@@ -89,7 +89,7 @@ fn jumbo_verdicts() -> &'static Mutex<HashMap<PathKey, JumboVerdict>> {
     JUMBO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn path_key(conn: &quinn::Connection) -> PathKey {
+fn path_key(conn: &super::link::SessionLink) -> PathKey {
     PathKey {
         local: conn.local_ip(),
         peer: conn.remote_address().ip(),
@@ -152,7 +152,7 @@ fn jumbo_session_start(i: JumboStart, peer: IpAddr) -> Option<usize> {
 /// [`JUMBO_PROOF_WAIT`], entered only on a path a previous session already
 /// proved jumbo.
 pub(super) async fn negotiated_shard_payload(
-    conn: &quinn::Connection,
+    conn: &super::link::SessionLink,
     client_ceiling: u16,
 ) -> usize {
     let peer = conn.remote_address().ip();
@@ -172,7 +172,7 @@ pub(super) async fn negotiated_shard_payload(
     let mut jumbo = JumboStart {
         target_wire_mtu,
         client_ceiling,
-        live_udp_mtu: conn.stats().path.current_mtu,
+        live_udp_mtu: conn.current_mtu(),
         proven_udp_budget,
         clamped_udp_budget: learned_budget,
     };
@@ -184,7 +184,7 @@ pub(super) async fn negotiated_shard_payload(
             let t0 = std::time::Instant::now();
             while t0.elapsed() < JUMBO_PROOF_WAIT {
                 tokio::time::sleep(JUMBO_PROOF_POLL).await;
-                jumbo.live_udp_mtu = conn.stats().path.current_mtu;
+                jumbo.live_udp_mtu = conn.current_mtu();
                 if jumbo.live_udp_mtu >= sealed {
                     break;
                 }
@@ -274,7 +274,7 @@ fn resolve(
 /// ends after the last sample (~10 s, a `Connection` handle); after a grow
 /// or a jumbo start it stays as the revert guard until the connection closes.
 pub(super) fn spawn_watch(
-    conn: quinn::Connection,
+    conn: super::link::SessionLink,
     session_shard_payload: usize,
     client_ceiling: u16,
     reneg: Option<ShardReneg>,
@@ -297,7 +297,7 @@ pub(super) fn spawn_watch(
         let mut settled = 0u16;
         for wait_s in [3u64, 7] {
             tokio::time::sleep(std::time::Duration::from_secs(wait_s)).await;
-            settled = settled.max(conn.stats().path.current_mtu);
+            settled = settled.max(conn.current_mtu());
             if settled >= goal {
                 break;
             }
@@ -417,7 +417,7 @@ pub(super) fn spawn_watch(
                 if conn.close_reason().is_some() {
                     return;
                 }
-                let mtu_now = conn.stats().path.current_mtu;
+                let mtu_now = conn.current_mtu();
                 if (mtu_now as usize) < sealed_datagram_bytes(current) {
                     jumbo_verdicts().lock().unwrap().remove(&path_key(&conn));
                     tracing::warn!(peer = %peer, discovered_udp_mtu = mtu_now,
@@ -478,7 +478,7 @@ pub(super) fn spawn_watch(
             if conn.close_reason().is_some() {
                 return;
             }
-            let mtu_now = conn.stats().path.current_mtu;
+            let mtu_now = conn.current_mtu();
             if (mtu_now as usize) < sealed_datagram_bytes(current) {
                 let back = shard_payload_for_udp_budget(mtu_now as usize, peer);
                 tracing::warn!(peer = %peer, discovered_udp_mtu = mtu_now,

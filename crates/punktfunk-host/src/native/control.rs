@@ -21,8 +21,8 @@ use punktfunk_core::quic::{ClipControl, ClipOffer, ClipState};
 /// Named fields, not a 30-argument spawn: `retarget_rx` and `gap_rx` are both
 /// bare `u32`, so a positional swap would compile and fail at runtime.
 pub(super) struct Task {
-    pub(super) ctrl_send: quinn::SendStream,
-    pub(super) ctrl_recv: quinn::RecvStream,
+    pub(super) ctrl_send: super::link::CtlSend,
+    pub(super) ctrl_recv: super::link::CtlRecv,
     pub(super) initial_mode: punktfunk_core::Mode,
     pub(super) codec: crate::encode::Codec,
     pub(super) live_reconfig_ok: bool,

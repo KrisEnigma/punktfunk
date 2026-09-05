@@ -1,38 +1,40 @@
-//! Length-prefixed QUIC control frames: `u16` LE length, then payload, capped at 64 KiB.
+//! Length-prefixed control frames: `u16` LE length, then payload, capped at 64 KiB.
 //!
-//! [`read_msg`] is not cancel-safe (two `read_exact`s; quinn keeps consumed bytes only
-//! in the future). Handshake/pairing, run-to-completion, only.
-//! [`MsgReader`] stores the partial frame in `buf` so a dropped future resumes.
-//! Tests at the foot pin mid-frame cancel.
+//! Generic over `AsyncRead`/`AsyncWrite` rather than tied to quinn, because the same protocol
+//! runs over a WebTransport stream for the browser client — and `wtransport`'s streams implement
+//! both traits, as quinn's do. Nothing here knows which carrier it is on.
+//!
+//! [`read_msg`] is not cancel-safe (two `read_exact`s; the consumed bytes live only in the
+//! future). Handshake/pairing, run-to-completion, only. [`MsgReader`] stores the partial frame in
+//! `buf` so a dropped future resumes. Tests at the foot pin mid-frame cancel.
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
 /// Read one framed message. **Not cancel-safe**: two `read_exact`s; drop misaligns
 /// the stream. Sequential handshake/pairing only. Use [`MsgReader`] under `select!`
 /// or `timeout`.
-pub async fn read_msg(recv: &mut quinn::RecvStream) -> std::io::Result<Vec<u8>> {
+pub async fn read_msg<R: AsyncRead + Unpin>(recv: &mut R) -> std::io::Result<Vec<u8>> {
     let mut len = [0u8; 2];
-    recv.read_exact(&mut len)
-        .await
-        .map_err(std::io::Error::other)?;
+    recv.read_exact(&mut len).await?;
     let n = u16::from_le_bytes(len) as usize;
     let mut buf = vec![0u8; n];
-    recv.read_exact(&mut buf)
-        .await
-        .map_err(std::io::Error::other)?;
+    recv.read_exact(&mut buf).await?;
     Ok(buf)
 }
 
 /// Cancel-safe framed reader: the in-progress frame lives in `buf`, not the future.
 /// Dropping the future (a `select!` sibling or a read timeout) resumes. [`read_msg`]
 /// permanently misaligns a frame that straddles two wakeups.
-pub struct MsgReader {
-    recv: quinn::RecvStream,
+pub struct MsgReader<R> {
+    recv: R,
     /// In-progress frame, length prefix included.
     buf: Vec<u8>,
     /// Target length: 2 while reading the prefix, then `2 + payload`.
     need: usize,
 }
 
-impl MsgReader {
-    pub fn new(recv: quinn::RecvStream) -> Self {
+impl<R: AsyncRead + Unpin> MsgReader<R> {
+    pub fn new(recv: R) -> Self {
         MsgReader {
             recv,
             buf: Vec::new(),
@@ -46,21 +48,17 @@ impl MsgReader {
             while self.buf.len() < self.need {
                 let mut chunk = [0u8; 2048];
                 let want = (self.need - self.buf.len()).min(chunk.len());
-                // `read` is cancel-safe: it reports only the bytes it returns, and those
-                // land in `self.buf` before the next await.
-                match self
-                    .recv
-                    .read(&mut chunk[..want])
-                    .await
-                    .map_err(std::io::Error::other)?
-                {
-                    Some(n) => self.buf.extend_from_slice(&chunk[..n]),
-                    None => {
+                // `AsyncReadExt::read` is cancel-safe: it reports only the bytes it returns,
+                // and those land in `self.buf` before the next await. That is what lets a
+                // dropped future resume rather than desync the frame.
+                match self.recv.read(&mut chunk[..want]).await? {
+                    0 => {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
                             "control stream finished mid-frame",
                         ))
                     }
+                    n => self.buf.extend_from_slice(&chunk[..n]),
                 }
             }
             if self.need == 2 {
@@ -79,10 +77,8 @@ impl MsgReader {
     }
 }
 
-pub async fn write_msg(send: &mut quinn::SendStream, payload: &[u8]) -> std::io::Result<()> {
-    send.write_all(&super::frame(payload))
-        .await
-        .map_err(std::io::Error::other)
+pub async fn write_msg<W: AsyncWrite + Unpin>(send: &mut W, payload: &[u8]) -> std::io::Result<()> {
+    send.write_all(&super::frame(payload)).await
 }
 
 /// [`MsgReader`] must survive a dropped read future (`select!` / timeout).

@@ -9,7 +9,7 @@ use super::*;
 pub(super) struct ControlTask {
     pub(super) ctrl_rx: tokio::sync::mpsc::Receiver<CtrlRequest>,
     pub(super) ctrl_send: quinn::SendStream,
-    pub(super) ctrl_recv: io::MsgReader,
+    pub(super) ctrl_recv: io::MsgReader<quinn::RecvStream>,
     /// `None` = no connect-time skew handshake (old host); clock re-sync stays off.
     pub(super) clock_rtt_ns: Option<u64>,
     pub(super) mode_slot: Arc<Mutex<Mode>>,

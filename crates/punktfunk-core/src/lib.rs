@@ -17,6 +17,11 @@
 #![deny(unsafe_code)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+// For the cdylib/staticlib embedders — Swift, Kotlin, C — and no browser is one. Cargo builds
+// the cdylib on wasm regardless, and these `#[no_mangle]` roots are what make it fail there:
+// wasm-ld exports the mangled symbols they reach, and emcc rejects the first name that is not a
+// JS identifier.
+#[cfg(not(target_family = "wasm"))]
 pub mod abi;
 #[cfg(feature = "quic")]
 mod abr;
@@ -36,7 +41,6 @@ pub mod fec;
 pub mod input;
 pub mod packet;
 pub mod phase;
-#[cfg(feature = "quic")]
 pub mod quic;
 pub mod reanchor;
 pub mod reject;

@@ -31,6 +31,8 @@ use std::sync::Arc;
 pub(crate) use pf_frame::thread_qos::boost_thread_priority;
 
 mod compositor;
+// The session's control connection, whichever transport carries it (quinn or WebTransport).
+pub(crate) mod link;
 use compositor::resolve_compositor;
 
 /// GameStream presents the same virtual pad and must pick `windows_xbox_hid` from this definition.
@@ -38,7 +40,7 @@ pub(crate) mod gamepad;
 use gamepad::{resolve_gamepad, resolve_pad_kind, route_decision};
 
 mod pairing;
-use pairing::pair_ceremony;
+pub(crate) use pairing::pair_ceremony;
 
 mod audio;
 use audio::audio_thread;
@@ -60,7 +62,7 @@ mod control;
 mod cursor_fwd;
 
 mod stream;
-use stream::{reconfig_allowed, synthetic_stream, virtual_stream, SessionContext};
+use stream::{reconfig_allowed, software_stream, synthetic_stream, virtual_stream, SessionContext};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Punktfunk1Source {
@@ -68,6 +70,9 @@ pub enum Punktfunk1Source {
     Synthetic,
     /// Virtual display at the requested mode → NVENC.
     Virtual,
+    /// A moving test picture through the software H.264 encoder, unbounded. No display and no
+    /// GPU: what a headless host serves so a real client can be proved against it.
+    Software,
 }
 
 pub struct Punktfunk1Options {
@@ -157,7 +162,7 @@ use crate::send_pacing::{percentile, PaceStat};
 use crate::stats_recorder::StatsRecorder;
 
 /// Bounds online PIN guessing: SPAKE2 already gives one guess per ceremony; this caps the rate.
-const PAIRING_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const PAIRING_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// `u32 LE index` then `data[i] = idx + i` (wrapping) — the client byte-checks this.
 pub fn test_frame(idx: u32, len: usize) -> Vec<u8> {
@@ -210,7 +215,7 @@ pub fn run(opts: Punktfunk1Options) -> Result<()> {
     // Standalone resolves identity itself; unified `serve` does it once for both planes.
     let ident = crate::identity::load_or_adopt(&np).context("native host identity")?;
     // No management API → advertise no `mgmt` port (0).
-    rt.block_on(serve(opts, 0, np, stats, ident))
+    rt.block_on(serve(opts, 0, np, stats, ident, None))
 }
 
 /// [`run`] with an in-memory identity. Tests must not mint `native-cert.pem` in the real
@@ -229,7 +234,7 @@ fn run_ephemeral(opts: Punktfunk1Options) -> Result<()> {
     )?);
     let stats = StatsRecorder::new(crate::stats_recorder::default_dir());
     let ident = crate::identity::ephemeral()?;
-    rt.block_on(serve(opts, 0, np, stats, ident))
+    rt.block_on(serve(opts, 0, np, stats, ident, None))
 }
 
 fn fingerprint_hex(fp: &[u8; 32]) -> String {
@@ -247,6 +252,9 @@ pub(crate) struct NativeServe {
     pub data_port: Option<u16>,
     /// Gates `_punktfunk._udp` and GameStream `_nvstream` together. See [`Punktfunk1Options::mdns`].
     pub mdns: bool,
+    /// Where the browser plane listens, or `None` when it is off — which is the default
+    /// (`--webtransport` / `PUNKTFUNK_WEBTRANSPORT`). See `crate::webtransport`.
+    pub webtransport_bind: Option<std::net::SocketAddr>,
 }
 
 /// NVENC session cap (high-res split-encode holds two). Overflow waits in the accept queue.
@@ -262,10 +270,20 @@ pub(crate) fn idle_timeout_from_env() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_millis)
 }
 
+/// `PUNKTFUNK_SOURCE=software`: a software-encoded test picture instead of a display, so a
+/// headless box with the management API can prove a client end to end. Anything else is the
+/// display.
+fn source_from_env() -> Punktfunk1Source {
+    match std::env::var("PUNKTFUNK_SOURCE").as_deref() {
+        Ok("software") => Punktfunk1Source::Software,
+        _ => Punktfunk1Source::Virtual,
+    }
+}
+
 pub(crate) fn native_serve_opts(cfg: &NativeServe) -> Punktfunk1Options {
     Punktfunk1Options {
         port: cfg.port,
-        source: Punktfunk1Source::Virtual,
+        source: source_from_env(),
         seconds: 7 * 24 * 3600, // 7 days: a cap, not a cut of a live stream
         frames: 0,
         max_sessions: 0,
@@ -287,6 +305,9 @@ pub(crate) async fn serve(
     stats: Arc<StatsRecorder>,
     // Caller-resolved so the planes cannot race adoption (P-256 vs legacy RSA).
     identity: crate::identity::NativeIdentity,
+    // The browser plane, when the operator asked for it. Spawned from here, not joined: a browser
+    // runs this plane's session on this plane's capturer, injector and session pool.
+    web: Option<crate::webtransport::Plane>,
 ) -> Result<()> {
     let fingerprint = endpoint::fingerprint_of_pem(&identity.cert_pem)
         .map_err(|e| anyhow!("cert fingerprint: {e}"))?;
@@ -382,6 +403,23 @@ pub(crate) async fn serve(
         n => n,
     };
     let sem = Arc::new(tokio::sync::Semaphore::new(permits));
+    // Secondary tier: a port it cannot bind must not take the streaming host down. Loud, though.
+    if let Some(plane) = web {
+        let host = SessionHost {
+            opts: Arc::clone(&opts),
+            audio_cap: audio_cap.clone(),
+            inj_tx: injector.sender(),
+            mic_tx: mic_service.sender(),
+            np: np.clone(),
+            stats: stats.clone(),
+        };
+        let (bind, sem) = (plane.bind, sem.clone());
+        tokio::spawn(async move {
+            if let Err(e) = crate::webtransport::serve(plane, host, sem).await {
+                tracing::error!(%bind, error = %e, "WebTransport plane stopped");
+            }
+        });
+    }
     let mut sessions = tokio::task::JoinSet::new();
     let max_sessions = opts.max_sessions;
     let mut accepted = 0u32;
@@ -425,7 +463,7 @@ pub(crate) async fn serve(
         let conn_err = conn.clone();
         sessions.spawn(async move {
             match serve_session(
-                conn,
+                conn.into(),
                 &opts,
                 &audio_cap,
                 inj_tx,
@@ -540,8 +578,8 @@ const REJECT_BUSY_CODE: u32 = punktfunk_core::reject::REJECT_BUSY_CLOSE_CODE;
 
 /// Close with the typed reject code before the session task returns `Err`. A bare drop
 /// closes with code 0, which the client cannot tell from transport trouble.
-fn close_rejected(conn: &quinn::Connection, reason: punktfunk_core::reject::RejectReason) {
-    conn.close(reason.close_code().into(), reason.to_string().as_bytes());
+fn close_rejected(conn: &link::SessionLink, reason: punktfunk_core::reject::RejectReason) {
+    conn.close(reason.close_code(), reason.to_string().as_bytes());
 }
 
 /// One counter and one `warn!` per grant class per session. Totals at end-of-stream;
@@ -642,7 +680,7 @@ fn access_sleep(deadline: Option<i64>, warned: &[bool; 2], now: i64) -> std::tim
 /// and on every grant edit; folds the live mask within one event; typed-close at deadline,
 /// "expire now", or unpair. Closes only this connection — the owner's stream is untouched.
 async fn access_lifecycle(
-    conn: quinn::Connection,
+    conn: link::SessionLink,
     mut watch_rx: tokio::sync::watch::Receiver<crate::native_pairing::AccessState>,
     grants: Arc<AtomicU32>,
     clip_enabled: Arc<AtomicBool>,
@@ -1031,7 +1069,7 @@ const PENDING_APPROVAL_WAIT: std::time::Duration = std::time::Duration::from_sec
 
 /// A QUIC handshake that closes code 0 with no control stream is a reachability probe
 /// (`--reachable` / hosts-page pips). Log at debug, not warn.
-enum Served {
+pub(crate) enum Served {
     Session,
     ProbeClose,
 }
@@ -1041,39 +1079,35 @@ enum Served {
 // Distinct host-lifetime handles from `serve`; a context struct would hide the lifetimes.
 #[allow(clippy::too_many_arguments)]
 async fn serve_session(
-    conn: quinn::Connection,
-    opts: &Punktfunk1Options,
+    conn: link::SessionLink,
+    opts: &Arc<Punktfunk1Options>,
     audio_cap: &AudioCapSlot,
     inj_tx: std::sync::mpsc::Sender<InputEvent>,
     mic_tx: std::sync::mpsc::SyncSender<crate::audio::MicFrame>,
     host_fp: &[u8; 32],
-    np: &NativePairing,
+    np_arc: &Arc<NativePairing>,
     last_pairing: &std::sync::Mutex<Option<std::time::Instant>>,
     stats: Arc<StatsRecorder>,
     // Owned here: an unpaired knock releases it while parked and re-acquires on approval.
     mut permit: tokio::sync::OwnedSemaphorePermit,
     sem: Arc<tokio::sync::Semaphore>,
 ) -> Result<Served> {
+    let np: &NativePairing = np_arc;
     let peer = conn.remote_address();
-
-    let (mut send, mut recv) = match tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.accept_bi())
+    let (send, mut recv) = match tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.accept_bi())
         .await
-        .map_err(|_| anyhow!("control stream timeout"))?
+        .map_err(|_| anyhow!("control stream timeout"))??
     {
         // Clean close before any control stream: reachability probe ([`Served::ProbeClose`]).
-        Err(quinn::ConnectionError::ApplicationClosed(ref ac))
-            if ac.error_code == quinn::VarInt::from_u32(0) =>
-        {
-            return Ok(Served::ProbeClose);
-        }
-        r => r.context("accept control stream")?,
+        link::Accepted::ProbeClose => return Ok(Served::ProbeClose),
+        link::Accepted::Stream(send, recv) => (send, recv),
     };
     let first = tokio::time::timeout(HANDSHAKE_TIMEOUT, io::read_msg(&mut recv))
         .await
         .map_err(|_| anyhow!("first message timeout"))??;
     if let Ok(req) = PairRequest::decode(&first) {
         // Fingerprint-bound PIN window: only this device may consume (or burn) it.
-        let Some(client_fp) = endpoint::peer_fingerprint(&conn) else {
+        let Some(client_fp) = conn.peer_fingerprint() else {
             close_rejected(
                 &conn,
                 punktfunk_core::reject::RejectReason::IdentityRequired,
@@ -1117,7 +1151,7 @@ async fn serve_session(
                 )
             }
         };
-        return pair_ceremony(&conn, send, recv, req, host_fp, np, &pin)
+        return pair_ceremony(&conn, send, recv, req, &client_fp, host_fp, np, &pin)
             .await
             .map(|()| Served::Session);
     }
@@ -1138,7 +1172,7 @@ async fn serve_session(
                 punktfunk_core::WIRE_VERSION
             );
         }
-        let fp = endpoint::peer_fingerprint(&conn);
+        let fp = conn.peer_fingerprint();
         // `effective`, not `is_paired`: an expired record is listed but not authorized, so it
         // knocks like an unpaired device and re-approval is the re-grant.
         let authorized = fp
@@ -1209,12 +1243,115 @@ async fn serve_session(
                 .expect("session semaphore is never closed");
         }
     }
-    // RAII frees the slot on return (original or re-acquired).
+    // Admitted. From here the session is the same on every carrier; the certificate's
+    // fingerprint is what this plane admitted by, and the browser plane passes its own.
+    let session_fp_hex = conn.peer_fingerprint().map(|fp| fingerprint_hex(&fp));
+    let host = SessionHost {
+        opts: Arc::clone(opts),
+        audio_cap: audio_cap.clone(),
+        inj_tx,
+        mic_tx,
+        np: np_arc.clone(),
+        stats,
+    };
+    run_admitted(
+        conn,
+        send,
+        recv,
+        first,
+        session_fp_hex,
+        &host,
+        DataPlane::Udp,
+        permit,
+    )
+    .await
+}
+
+/// Everything a session needs from the plane that admitted it. One value, cloned per session,
+/// because the browser plane admits differently (a device key, not a certificate) and then runs
+/// exactly this session — and a second copy of the runner is the thing this must never become.
+#[derive(Clone)]
+pub(crate) struct SessionHost {
+    pub(crate) opts: Arc<Punktfunk1Options>,
+    pub(crate) audio_cap: AudioCapSlot,
+    pub(crate) inj_tx: std::sync::mpsc::Sender<InputEvent>,
+    pub(crate) mic_tx: std::sync::mpsc::SyncSender<crate::audio::MicFrame>,
+    pub(crate) np: Arc<NativePairing>,
+    pub(crate) stats: Arc<StatsRecorder>,
+}
+
+impl SessionHost {
+    /// A host with nothing behind it: every channel's receiver is dropped. For tests of the
+    /// admission code, which never reach the pipeline.
+    #[cfg(test)]
+    pub(crate) fn for_tests(np: Arc<NativePairing>) -> SessionHost {
+        SessionHost {
+            opts: Arc::new(Punktfunk1Options {
+                port: 0,
+                source: Punktfunk1Source::Synthetic,
+                seconds: 0,
+                frames: 0,
+                max_sessions: 0,
+                max_concurrent: 1,
+                require_pairing: true,
+                allow_pairing: false,
+                pairing_pin: None,
+                paired_store: None,
+                data_port: None,
+                idle_timeout: None,
+                mdns: false,
+            }),
+            audio_cap: Arc::new(std::sync::Mutex::new(None)),
+            inj_tx: std::sync::mpsc::channel().0,
+            mic_tx: std::sync::mpsc::sync_channel(1).0,
+            np,
+            stats: StatsRecorder::new(crate::stats_recorder::default_dir()),
+        }
+    }
+}
+
+/// Where video goes.
+///
+/// The native plane binds a UDP socket during the handshake and hole-punches to the client; a
+/// browser has no second socket, so its video rides the same WebTransport connection as
+/// everything else. The stream thread turns either into the `Box<dyn Transport>` that
+/// `Session` was always written against, which is why nothing below it knows the difference.
+pub(crate) enum DataPlane {
+    Udp,
+    Web(crate::webtransport::WebTransportPlane),
+}
+
+/// The session proper, after admission. Carrier-agnostic: the control stream is a [`link::CtlSend`]
+/// / [`link::CtlRecv`] pair, datagrams go through [`link::SessionLink`], and video through
+/// whatever [`DataPlane`] the caller built.
+#[allow(clippy::too_many_arguments)] // one value per thing the two admission paths resolve
+pub(crate) async fn run_admitted(
+    conn: link::SessionLink,
+    send: link::CtlSend,
+    recv: link::CtlRecv,
+    first: Vec<u8>,
+    session_fp_hex: Option<String>,
+    host: &SessionHost,
+    data_plane: DataPlane,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Served> {
+    let SessionHost {
+        opts,
+        audio_cap,
+        inj_tx,
+        mic_tx,
+        np,
+        stats,
+    } = host;
+    let (opts, np, stats) = (opts.as_ref(), np.as_ref(), stats.clone());
+    let (inj_tx, mic_tx) = (inj_tx.clone(), mic_tx.clone());
+    let (mut send, mut recv) = (send, recv);
+    let peer = conn.remote_address();
+    // RAII frees the slot on return.
     let _permit = permit;
 
     // Grants once at admission: effective mask + deadline + watch. Anonymous (`--open`) and
     // an identity with no record keep full control — nothing on the trust record to enforce.
-    let session_fp_hex = endpoint::peer_fingerprint(&conn).map(|fp| fingerprint_hex(&fp));
     let admit_unix = wall_unix_now();
     let (initial_grants, deadline_unix, access_watch) = match session_fp_hex.as_deref() {
         Some(fp_hex) => match np.effective(fp_hex, admit_unix) {
@@ -1266,9 +1403,7 @@ async fn serve_session(
         let conn = conn.clone();
         tokio::spawn(async move {
             let reason = conn.closed().await;
-            if matches!(&reason, quinn::ConnectionError::ApplicationClosed(ac)
-                if ac.error_code == quinn::VarInt::from_u32(QUIT_CODE))
-            {
+            if reason.closed_with(QUIT_CODE) {
                 quit.store(true, Ordering::SeqCst);
             }
             stop.store(true, Ordering::SeqCst);
@@ -1285,7 +1420,8 @@ async fn serve_session(
                 &first,
                 source,
                 frames,
-                data_port,
+                // No UDP socket for a browser: its video rides the connection it is already on.
+                matches!(data_plane, DataPlane::Udp).then_some(data_port),
                 &bringup,
                 quit.clone(),
                 stop.clone(),
@@ -1361,13 +1497,17 @@ async fn serve_session(
     let (shard_change_tx, shard_change_rx) = tokio::sync::mpsc::unbounded_channel::<u16>();
     let (shard_ack_tx, shard_ack_rx) = tokio::sync::mpsc::unbounded_channel::<u16>();
     let (shard_apply_tx, shard_apply_rx) = std::sync::mpsc::channel::<usize>();
-    let shard_reneg = (hello.max_shard_payload > 0 && codec != crate::encode::Codec::PyroWave)
-        .then_some(wire_mtu::ShardReneg {
-            client_ceiling: hello.max_shard_payload,
-            change_tx: shard_change_tx,
-            ack_rx: shard_ack_rx,
-            apply_tx: shard_apply_tx,
-        });
+    // Not for a browser either: the driver's targets are UDP-over-IP maths, and a WebTransport
+    // datagram also carries QUIC and HTTP/3 framing, so a grow it computed would not fit.
+    let shard_reneg = (hello.max_shard_payload > 0
+        && codec != crate::encode::Codec::PyroWave
+        && matches!(data_plane, DataPlane::Udp))
+    .then_some(wire_mtu::ShardReneg {
+        client_ceiling: hello.max_shard_payload,
+        change_tx: shard_change_tx,
+        ack_rx: shard_ack_rx,
+        apply_tx: shard_apply_tx,
+    });
     // Path-MTU watch: clamp for the next session, and heal/grow this one if the driver exists.
     wire_mtu::spawn_watch(
         conn.clone(),
@@ -1394,8 +1534,13 @@ async fn serve_session(
     // Without CLIPBOARD the coordinator never starts (a watcher that doesn't exist can't leak).
     // Inert handle (`available: false`) keeps control-task arms uniform: NOT_PERMITTED, and
     // the decline loop still answers stray fetches.
-    let clip = if initial_grants & GRANT_CLIPBOARD != 0 {
-        pf_clipboard::start(conn.clone(), clip_enabled.clone(), compositor.is_some()).await
+    // The clipboard's fetch transfers are quinn streams, so it is on offer only where there are
+    // some — a browser takes the declining arm below until the control plane is carrier-agnostic.
+    let clip_quic = (initial_grants & GRANT_CLIPBOARD != 0)
+        .then(|| conn.as_quic().cloned())
+        .flatten();
+    let clip = if let Some(quic) = clip_quic {
+        pf_clipboard::start(quic, clip_enabled.clone(), compositor.is_some()).await
     } else {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_offer_tx, offer_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1474,7 +1619,9 @@ async fn serve_session(
     }
     // No backend: decline fetches instead of hanging (coordinator owns `accept_bi` when live).
     if !clip_available && pf_clipboard::enabled() {
-        pf_clipboard::spawn_decline_loop(conn.clone());
+        if let Some(quic) = conn.as_quic() {
+            pf_clipboard::spawn_decline_loop(quic.clone());
+        }
     }
 
     // Isolated gamescope: per-session input/audio/mic. Identity is the cert-fingerprint prefix
@@ -1632,7 +1779,7 @@ async fn serve_session(
     // Handshake complete: CONNECTED. A client rejected earlier never emits either.
     let event_client = crate::events::ClientRef {
         name: hello.name.clone().unwrap_or_default(),
-        fingerprint: endpoint::peer_fingerprint(&conn).map(|fp| fingerprint_hex(&fp)),
+        fingerprint: conn.peer_fingerprint().map(|fp| fingerprint_hex(&fp)),
         plane: crate::events::Plane::Native,
     };
     crate::events::emit(crate::events::EventKind::ClientConnected {
@@ -1642,14 +1789,12 @@ async fn serve_session(
         let conn = conn.clone();
         tokio::spawn(async move {
             let reason = conn.closed().await;
-            let why = match &reason {
-                quinn::ConnectionError::ApplicationClosed(ac)
-                    if ac.error_code == quinn::VarInt::from_u32(QUIT_CODE) =>
-                {
-                    crate::events::DisconnectReason::Quit
-                }
-                quinn::ConnectionError::TimedOut => crate::events::DisconnectReason::Timeout,
-                _ => crate::events::DisconnectReason::Error,
+            let why = if reason.closed_with(QUIT_CODE) {
+                crate::events::DisconnectReason::Quit
+            } else if matches!(reason, link::LinkClosed::TimedOut) {
+                crate::events::DisconnectReason::Timeout
+            } else {
+                crate::events::DisconnectReason::Error
             };
             crate::events::emit(crate::events::EventKind::ClientDisconnected {
                 client: event_client,
@@ -1660,7 +1805,7 @@ async fn serve_session(
 
     // Mode-conflict admission: later clients see this identity + mode + stop (and may `steal`).
     let _live_guard = {
-        let id = endpoint::peer_fingerprint(&conn);
+        let id = conn.peer_fingerprint();
         let label = id
             .map(|fp| {
                 fp.iter()
@@ -1681,8 +1826,9 @@ async fn serve_session(
         )
     };
 
-    // Virtual source only. Best-effort: a spawn error must not early-return (threads already up).
-    let audio_handle = if opts.source == Punktfunk1Source::Virtual {
+    // Not for the byte-pattern source, which has a test client that wants nothing else on the
+    // wire. Best-effort: a spawn error must not early-return (threads already up).
+    let audio_handle = if opts.source != Punktfunk1Source::Synthetic {
         let conn = conn.clone();
         let stop = stop.clone();
         let cap = audio_cap.clone();
@@ -1702,7 +1848,9 @@ async fn serve_session(
         let iso_sink = None;
         std::thread::Builder::new()
             .name("punktfunk1-audio".into())
-            .spawn(move || audio_thread(conn, stop, cap, channels, budget, audio_plane, iso_sink))
+            .spawn(move || {
+                audio_thread(conn, stop, cap, channels, budget, audio_plane, iso_sink)
+            })
             .map_err(|e| tracing::warn!(error = %e, "audio thread spawn failed — session continues without audio"))
             .ok()
     } else {
@@ -1716,7 +1864,7 @@ async fn serve_session(
         let meta = hello
             .display_hdr
             .unwrap_or_else(|| crate::encode::hdr_meta_to_wire(pf_frame::hdr::generic_hdr10()));
-        let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&meta).into());
+        let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&meta));
         tracing::info!(
             client_volume = hello.display_hdr.is_some(),
             "sent HDR10 static metadata (0xCE baseline)"
@@ -1733,7 +1881,7 @@ async fn serve_session(
         let d = punktfunk_core::quic::encode_rumble_datagram_v3(
             0, 0x4000, 0x8000, 0, 400, 0x2000, 0x6000,
         );
-        let _ = conn.send_datagram(d.to_vec().into());
+        let _ = conn.send_datagram(d.to_vec());
         for h in [
             HidOutput::Led {
                 pad: 0,
@@ -1751,7 +1899,7 @@ async fn serve_session(
                 effect: vec![0x21, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             },
         ] {
-            let _ = conn.send_datagram(h.encode().into());
+            let _ = conn.send_datagram(h.encode());
         }
         tracing::info!("PUNKTFUNK_TEST_FEEDBACK: scripted rumble + hidout burst sent");
     }
@@ -1810,7 +1958,7 @@ async fn serve_session(
     // Reconnect inside the game's window: cancel pending termination. Data plane re-adopts via
     // `launchreg` (carries the original launch instant). Matched on (this client, this title).
     if let Some(target) = launch_target.as_ref() {
-        let fp = punktfunk_core::quic::endpoint::peer_fingerprint(&conn).map(hex::encode);
+        let fp = conn.peer_fingerprint().map(hex::encode);
         // `readopt` already logged leftover processes.
         let _reprieved = crate::gamelease::readopt(fp.as_deref(), target.game.id.as_deref());
     }
@@ -1865,11 +2013,13 @@ async fn serve_session(
     let multi_slice = hello.video_caps & punktfunk_core::quic::VIDEO_CAP_MULTI_SLICE != 0;
     let stats_dp = stats;
     // Stats label: cert-fingerprint prefix, else peer IP (anonymous TOFU/--open).
-    let client_label = endpoint::peer_fingerprint(&conn)
+    let client_label = conn
+        .peer_fingerprint()
         .map(|fp| fingerprint_hex(&fp)[..12].to_string())
         .unwrap_or_else(|| conn.remote_address().ip().to_string());
     // Tray toast: trust-store name (rename at approval wins), else sanitized Hello. `None` if nameless.
-    let client_name = endpoint::peer_fingerprint(&conn)
+    let client_name = conn
+        .peer_fingerprint()
         .map(|fp| fingerprint_hex(&fp))
         .and_then(|fp_hex| {
             np.list()
@@ -1898,6 +2048,16 @@ async fn serve_session(
     let control_local_ip = conn.local_ip();
     let result: Result<()> = async {
         let stream_thread = tokio::task::spawn_blocking(move || -> Result<()> {
+            let transport: Box<dyn punktfunk_core::transport::Transport> = match (data_plane, data_sock) {
+                // A browser's video goes out on the connection it arrived on. Nothing to bind,
+                // nothing to punch, and the source-address check below has no second socket to
+                // compare — the datagrams leave from wherever the QUIC path already is.
+                (DataPlane::Web(plane), _) => {
+                    bringup_dp.mark("punch_done");
+                    Box::new(plane)
+                }
+                (DataPlane::Udp, None) => anyhow::bail!("the native plane negotiated no data socket"),
+                (DataPlane::Udp, Some(data_sock)) => {
             // Default: hole-punch, then stream to the observed source (NAT / stateful firewall).
             // `direct` (`--data-port`): skip the wait, stream to the reported address (trusts
             // the reported port; cannot cross a client-side NAT that remaps it).
@@ -1967,9 +2127,23 @@ async fn serve_session(
                      executable (any port), or pin --data-port and open that one"
                 );
             }
-            let mut session = Session::new(cfg, Box::new(transport))
+            Box::new(transport)
+                }
+            };
+            let mut session = Session::new(cfg, transport)
                 .map_err(|e| anyhow!("host session: {e:?}"))?;
             match source {
+                Punktfunk1Source::Software => software_stream(
+                    &mut session,
+                    codec,
+                    mode,
+                    bitrate_kbps,
+                    &stop_stream,
+                    &probe_rx,
+                    &probe_result_tx,
+                    &fec_target_dp,
+                    probe_seq,
+                ),
                 Punktfunk1Source::Synthetic => synthetic_stream(
                     &mut session,
                     frames,
@@ -2087,7 +2261,7 @@ async fn serve_session(
     // Every path: stop audio, close, join side threads. Close ends the datagram task → input.
     stop.store(true, Ordering::SeqCst);
     conn.close(
-        if result.is_ok() { 0u32 } else { 1u32 }.into(),
+        if result.is_ok() { 0u32 } else { 1u32 },
         if result.is_ok() { b"done" } else { b"error" },
     );
     // Bounded join: a stuck side thread must not hold the permit/admission entry.
@@ -2898,6 +3072,7 @@ mod tests {
                     std::env::temp_dir().join(format!("pf-approval-stats-{}", std::process::id())),
                 ),
                 crate::identity::ephemeral().unwrap(),
+                None,
             ))
         });
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -3193,6 +3368,7 @@ mod tests {
                         .join(format!("pf-access-stats-{port}-{}", std::process::id())),
                 ),
                 crate::identity::ephemeral().unwrap(),
+                None,
             ))
         })
     }

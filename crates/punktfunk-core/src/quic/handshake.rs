@@ -1483,6 +1483,7 @@ mod tests {
         let pr = PairRequest {
             name: "x".into(),
             spake_a: vec![0u8; 33],
+            device_key: Vec::new(),
         }
         .encode();
         assert!(Hello::decode(&pr).is_err());

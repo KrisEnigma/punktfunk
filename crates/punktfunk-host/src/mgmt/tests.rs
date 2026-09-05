@@ -96,6 +96,7 @@ fn test_app(state: Arc<AppState>, token: Option<&str>) -> Router {
         test_client_logs_dir(),
         // GameStream-compat off: the native-only default these tests model.
         false,
+        None,
     )
 }
 
@@ -111,6 +112,8 @@ fn test_app_native(state: Arc<AppState>, np: Arc<crate::native_pairing::NativePa
         stats,
         test_client_logs_dir(),
         false,
+        // A fixed binding, so a device test signs what the host will check.
+        Some([0x5a; 32]),
     )
 }
 
@@ -1472,6 +1475,16 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
     const EXPECTED: &[(&str, &str, bool, bool)] = &[
         // Host/status: plugin-readable; the small read-only set is the cert lane's.
         ("GET", "/api/v1/health", true, false), // always open, handled before either gate
+        // The browser plane's certificate hash. Neither gate admits it and neither needs to:
+        // `require_auth` exempts the path outright, because a browser that has never paired holds
+        // no credential and the response authorises nothing — a certificate hash is what any peer
+        // learns by connecting. See `mgmt::webtransport`.
+        ("GET", "/api/v1/webtransport", false, false),
+        // The device exchange. Same reason as the row above: `require_auth` exempts both paths,
+        // because they are what a browser calls in order to authenticate at all. See
+        // `mgmt::device_auth`.
+        ("POST", "/api/v1/auth/device/challenge", false, false),
+        ("POST", "/api/v1/auth/device/token", false, false),
         ("GET", "/api/v1/host", true, true),
         ("GET", "/api/v1/status", true, true),
         ("GET", "/api/v1/local/summary", true, false), // loopback-only, handled before the gates
@@ -3003,4 +3016,210 @@ async fn provider_running_report_validation() {
     // A report of unpublished titles must not hold a real lease open.
     assert!(!crate::runstate::speaks_for(Some("playnite:no-such-title")));
     crate::runstate::forget("playnite");
+}
+
+/// The browser's whole route into the management API: challenge, sign, exchange, then use the
+/// token on the paired-device lane — and be refused everywhere that lane does not reach.
+///
+/// The signature is made with a real P-256 key over `auth_signed_message`, the same function the
+/// control stream uses, so a divergence between the two shows up here rather than against a live
+/// browser.
+#[tokio::test]
+async fn a_paired_device_key_buys_the_cert_lane_and_no_more() {
+    use base64::Engine as _;
+    use rcgen::{KeyPair, PublicKeyData as _, SigningKey as _, PKCS_ECDSA_P256_SHA256};
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let path = std::env::temp_dir().join(format!("pf-mgmt-device-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let np =
+        Arc::new(crate::native_pairing::NativePairing::load_with(Some(path), None, false).unwrap());
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let spki = key.subject_public_key_info();
+    let fp: String = crate::webtransport::sha256(&spki)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let app = test_app_native(test_state(), np.clone());
+
+    // The exchange, as the page runs it.
+    let exchange = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let req = axum::http::Request::post("/api/v1/auth/device/token")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            // No bearer: this route is reached without a credential, which is the point.
+            let res = app.oneshot(req).await.unwrap();
+            let status = res.status();
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        }
+    };
+    let challenge = || {
+        let app = app.clone();
+        async move {
+            let req = axum::http::Request::post("/api/v1/auth/device/challenge")
+                .body(Body::empty())
+                .unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            v["nonce"].as_str().unwrap().to_string()
+        }
+    };
+    let signed = |nonce: &str| {
+        let raw: Vec<u8> = (0..64)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&nonce[i..i + 2], 16).unwrap())
+            .collect();
+        let mut n = [0u8; 32];
+        n.copy_from_slice(&raw);
+        // `[0x5a; 32]` is the binding `test_app_native` installs as the host identity.
+        b64.encode(
+            key.sign(&punktfunk_core::quic::auth_signed_message(&[0x5a; 32], &n))
+                .unwrap(),
+        )
+    };
+
+    // Unpaired: a perfect signature buys nothing.
+    let nonce = challenge().await;
+    let (status, _) = exchange(serde_json::json!({
+        "device_key": b64.encode(&spki),
+        "nonce": nonce,
+        "signature": signed(&nonce),
+    }))
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "not paired yet");
+
+    np.add("Browser", &fp).unwrap();
+
+    // A stale nonce is refused, and the refusal is indistinguishable from any other.
+    let (status, _) = exchange(serde_json::json!({
+        "device_key": b64.encode(&spki),
+        "nonce": "ff".repeat(32),
+        "signature": signed(&"ff".repeat(32)),
+    }))
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "a nonce we never issued");
+
+    // A live nonce with the wrong signature burns that nonce anyway.
+    let nonce = challenge().await;
+    let (status, _) = exchange(serde_json::json!({
+        "device_key": b64.encode(&spki),
+        "nonce": nonce,
+        "signature": b64.encode([7u8; 70]),
+    }))
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "a bad signature");
+    let (status, _) = exchange(serde_json::json!({
+        "device_key": b64.encode(&spki),
+        "nonce": nonce,
+        "signature": signed(&nonce),
+    }))
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "and the nonce is spent");
+
+    // The real thing.
+    let nonce = challenge().await;
+    let (status, grant) = exchange(serde_json::json!({
+        "device_key": b64.encode(&spki),
+        "nonce": nonce,
+        "signature": signed(&nonce),
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(grant["fingerprint"].as_str(), Some(fp.as_str()));
+    let token = grant["token"].as_str().unwrap().to_string();
+
+    let with_token = |path: &str| {
+        let (app, token) = (app.clone(), token.clone());
+        let path = path.to_string();
+        async move {
+            let req = axum::http::Request::get(&path)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            app.oneshot(req).await.unwrap().status()
+        }
+    };
+    // Exactly the paired-device set: the library it came for, and not the roster that names
+    // every other device.
+    assert_eq!(with_token("/api/v1/library").await, StatusCode::OK);
+    assert_eq!(with_token("/api/v1/status").await, StatusCode::OK);
+    assert_ne!(
+        with_token("/api/v1/native/clients").await,
+        StatusCode::OK,
+        "a device token must not reach the admin lane"
+    );
+
+    // Unpairing revokes at once, rather than when the token lapses.
+    np.remove(&fp).unwrap();
+    assert_ne!(
+        with_token("/api/v1/library").await,
+        StatusCode::OK,
+        "the store is re-read on every request"
+    );
+}
+
+/// The second wall in front of a browser, after the certificate one. A preflight has to be
+/// answered without a credential — `require_auth` would correctly refuse it — and the answer
+/// must never claim credentials are allowed.
+#[tokio::test]
+async fn a_preflight_is_answered_and_never_allows_credentials() {
+    use axum::http::header;
+
+    let app = test_app(test_state(), None);
+    let preflight = axum::http::Request::builder()
+        .method("OPTIONS")
+        .uri("/api/v1/library")
+        .header(header::ORIGIN, "https://web.punktfunk.io")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(preflight).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::NO_CONTENT,
+        "answered, not refused"
+    );
+    let h = res.headers();
+    assert_eq!(
+        h.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+        "https://web.punktfunk.io"
+    );
+    assert!(
+        h.get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("authorization"),
+        "the header that makes a preflight happen at all"
+    );
+    assert!(
+        h.get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none(),
+        "no ambient authority: see mgmt::cors"
+    );
+
+    // A real request carries the header too, or the browser discards the response it just got.
+    let mut req = get_req("/api/v1/host");
+    req.headers_mut()
+        .insert(header::ORIGIN, "https://web.punktfunk.io".parse().unwrap());
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert!(res
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .is_some());
+
+    // A caller that sent no Origin is not a browser, and its response is left exactly as it was.
+    let res = app.oneshot(get_req("/api/v1/health")).await.unwrap();
+    assert!(res
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .is_none());
 }

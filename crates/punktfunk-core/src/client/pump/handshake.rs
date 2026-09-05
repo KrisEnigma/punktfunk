@@ -11,7 +11,7 @@ pub(super) struct HandshakeOut {
     pub(super) ep: quinn::Endpoint,
     pub(super) session: Session,
     pub(super) ctrl_send: quinn::SendStream,
-    pub(super) ctrl_recv: io::MsgReader,
+    pub(super) ctrl_recv: io::MsgReader<quinn::RecvStream>,
     pub(super) negotiated: Negotiated,
     pub(super) host_caps: u8,
 }

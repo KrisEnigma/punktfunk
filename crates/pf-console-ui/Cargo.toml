@@ -83,9 +83,20 @@ ash = { version = "0.38", features = ["loaded"], optional = true }
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
 pf-client-core = { path = "../pf-client-core", default-features = false }
 
+# The web client (design/web-client-implementation-plan.md §1 R4): the same crate over Skia's GL
+# backend, this time on a WebGL2 canvas the JS glue owns. `gl` for the same reason Android has it
+# — and rust-skia publishes the key for this target too, so nothing builds Skia from source:
+#   skia-binaries-a25a0fdb7d90429aa2d1-wasm32-unknown-emscripten-gl-jpegd-jpege-pdf-textlayout.tar.gz
+# ⚠ Emscripten's `gl` means GLES over WebGL2; a Ganesh context comes up on the canvas the
+# `-sOFFSCREEN_FRAMEBUFFER`-free default binds. The WebGPU swap replaces the VIDEO canvas only
+# (R1/R2), never this one.
+[target.'cfg(target_family = "wasm")'.dependencies]
+skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
+pf-client-core = { path = "../pf-client-core", default-features = false }
+
 # Everything the shell itself needs, on every platform it runs on (macOS stays an empty crate:
 # the Mac client is clients/apple).
-[target.'cfg(any(target_os = "linux", windows, target_os = "android"))'.dependencies]
+[target.'cfg(any(target_os = "linux", windows, target_os = "android", target_family = "wasm"))'.dependencies]
 anyhow = "1"
 tracing = "0.1"
 # The host-facing model types (`HostRow`, `ConsoleCmd`, `LibraryGame`, …) derive serde so a host

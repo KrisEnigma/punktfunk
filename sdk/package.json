@@ -1,6 +1,6 @@
 {
 	"name": "@punktfunk/host",
-	"version": "0.1.6",
+	"version": "0.2.0",
 	"description": "TypeScript SDK for the punktfunk streaming host: typed management-API client + lifecycle event stream, built on Effect.",
 	"type": "module",
 	"license": "MIT OR Apache-2.0",
@@ -30,6 +30,10 @@
 		"./effect": {
 			"types": "./dist/effect.d.ts",
 			"default": "./dist/effect.js"
+		},
+		"./core": {
+			"types": "./dist/core.d.ts",
+			"default": "./dist/core.js"
 		}
 	},
 	"bin": {

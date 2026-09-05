@@ -1,47 +1,55 @@
-// The one HTTP implementation both surfaces share (RFC §7: two surfaces, one core): the
-// Effect service wraps these with typed errors; the Promise facade calls them directly.
-import type { ResolvedConfig } from "./config.js";
+// `@punktfunk/host/core` — the SDK with nothing Node in it.
+//
+// The generated client and its Schemas, the `PunktfunkHost` service, the typed errors, the
+// event-stream decoder, and the credential kinds — everything a program needs to talk to a host
+// once it already knows how to reach one. What it lacks is deliberate: resolving a connection
+// from environment and token files is `config.ts`, which imports `node:fs`, and the runner,
+// plugins and log shipping are Node by nature. Those stay on the package root and `/effect`.
+//
+// `core-neutral.test.ts` walks the import graph from this file and fails on any `node:`
+// specifier, so this entry stays consumable from a browser by construction rather than by
+// habit.
+//
+//   import { api, connection, deviceKey, httpClientFor } from "@punktfunk/host/core";
+//
+//   const conn = connection({ url, credential: deviceKey({ url, hostFingerprint, signer }) });
+//   const program = Effect.gen(function* () {
+//     const client = api.make(yield* httpClientFor(conn));
+//     return yield* client.getLibrary();
+//   });
 
-/** A non-2xx response, with the host's `ApiError` envelope message when present. */
-export class HttpStatusError extends Error {
-	constructor(
-		readonly status: number,
-		message: string,
-	) {
-		super(message);
-	}
-}
-
+export {
+	ApiError,
+	AuthError,
+	EventStreamError,
+	layerFrom,
+	makeService,
+	PunktfunkHost,
+	type PunktfunkHostService,
+	type RequestError,
+	SseAuthError,
+	TransportError,
+	VersionSkew,
+} from "./client.js";
+export { type Connection, connection, type Fetch } from "./connection.js";
+export {
+	type Credential,
+	DEVICE_AUTH_CONTEXT,
+	type DeviceKeyOptions,
+	DeviceRefused,
+	deviceKey,
+	type Signer,
+	signedMessage,
+	staticBearer,
+} from "./credential.js";
+export { derToRaw, fromBase64, hexToBytes, rawToDer, toBase64 } from "./ecdsa.js";
+export { type HostApi, httpClientFor, makeHostApi } from "./api.js";
+export { HttpStatusError, httpRequest } from "./http.js";
+export type { EventStreamOptions, SseFrame } from "./sse.js";
+export * from "./wire.js";
 /**
- * One management-API request under `/api/v1`. Returns the parsed JSON body (or `undefined`
- * for 204/empty). Throws [`HttpStatusError`] on a non-2xx (401 included — callers type it).
+ * The generated REST surface: wire Schemas plus a typed `HttpClient`-based client (`make`),
+ * from `@effect/openapi-generator` over `api/openapi.json`. Regenerate with `bun run gen`; CI
+ * fails if this file and the spec disagree.
  */
-export const httpRequest = async (
-	cfg: ResolvedConfig,
-	method: string,
-	apiPath: string,
-	body?: unknown,
-): Promise<unknown> => {
-	const headers: Record<string, string> = {
-		authorization: `Bearer ${cfg.token}`,
-	};
-	if (body !== undefined) headers["content-type"] = "application/json";
-	const resp = await cfg.fetch(`${cfg.url}/api/v1${apiPath}`, {
-		method,
-		headers,
-		body: body !== undefined ? JSON.stringify(body) : undefined,
-	});
-	if (!resp.ok) {
-		let message = `HTTP ${resp.status}`;
-		try {
-			const err = (await resp.json()) as { error?: string };
-			if (typeof err.error === "string") message = err.error;
-		} catch {
-			// non-JSON error body — keep the status message
-		}
-		throw new HttpStatusError(resp.status, message);
-	}
-	if (resp.status === 204) return undefined;
-	const text = await resp.text();
-	return text.length === 0 ? undefined : JSON.parse(text);
-};
+export * as api from "./gen/punktfunk.js";

@@ -297,9 +297,9 @@ const CUSTOM_MAX_MBPS: u32 = 2_000;
 fn bitrate_ceiling_kbps(platform: crate::platform::Platform) -> u32 {
     match platform {
         crate::platform::Platform::WebOS => 200_000,
-        crate::platform::Platform::Desktop | crate::platform::Platform::Android => {
-            CUSTOM_MAX_MBPS * 1_000
-        }
+        crate::platform::Platform::Desktop
+        | crate::platform::Platform::Android
+        | crate::platform::Platform::Web => CUSTOM_MAX_MBPS * 1_000,
     }
 }
 
@@ -1404,8 +1404,8 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                  for games), Desktop leaves it free and sends absolute positions. \
                  Ctrl+Alt+Shift+M switches live while streaming."
             }
-            // No live chord to name: neither host binds one.
-            Platform::Android | Platform::WebOS => {
+            // No live chord to name: none of these hosts binds one.
+            Platform::Android | Platform::WebOS | Platform::Web => {
                 "How a physical mouse drives the host: Capture locks the pointer (relative, \
                  for games), Desktop leaves it free and sends absolute positions."
             }
@@ -1453,7 +1453,7 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                 "How much the overlay shows: Compact (one line) → Normal → Detailed. \
                  Ctrl+Alt+Shift+S cycles it live while streaming."
             }
-            Platform::Android | Platform::WebOS => {
+            Platform::Android | Platform::WebOS | Platform::Web => {
                 "How much the overlay shows: Compact (one line) → Normal → Detailed."
             }
         },
@@ -1493,7 +1493,9 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
              the plain immediate left click."
         }
         RowId::GamepadUi => match platform {
-            Platform::Desktop | Platform::Android => {
+            // `row_on` offers this to Android and webOS only; Desktop and Web are here for
+            // exhaustiveness, never to be read.
+            Platform::Desktop | Platform::Android | Platform::Web => {
                 "Front the app with this console instead of the touch interface. Off returns \
                  to the touch home immediately — switch it back on there."
             }
@@ -1503,7 +1505,7 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
             }
         },
         RowId::GamepadUiMode => match platform {
-            Platform::Desktop | Platform::Android => {
+            Platform::Desktop | Platform::Android | Platform::Web => {
                 "When this console fronts the app: whenever a controller is attached, or \
                  always — for a device that lives docked to a TV. The switch above turns it \
                  off altogether."

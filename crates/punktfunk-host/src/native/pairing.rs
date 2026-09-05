@@ -1,9 +1,16 @@
-//! Host SPAKE2 pairing for native QUIC sessions.
+//! Host SPAKE2 pairing.
 //!
 //! `serve_session` dispatches a first-message `PairRequest` here after resolving
 //! the armed PIN. This is SPAKE2 role B: the PIN is consumed after the host
 //! confirmation so an attacker gets one online guess, then the client fingerprint
 //! is persisted on success.
+//!
+//! **The caller supplies both identities.** The ceremony binds the SPAKE2 key to them and does
+//! not care where they came from — which is what lets a carrier without mTLS use it. On the
+//! native plane they are the two certificate fingerprints. A browser presents no certificate, so
+//! `client_fp` has to come from a key it holds and `host_fp` from the certificate hash it pinned
+//! to connect (`design/web-client-implementation-plan.md`, Phase 3). Resolving them here, from a
+//! connection, is what would have forced a second ceremony.
 //!
 //! A lapsed or re-armed window mints nothing (`consume_window`; tests at the
 //! foot). Protocol: `punktfunk_core::quic::pake`. Access stored via
@@ -18,18 +25,29 @@ const PAIRING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Host SPAKE2 (role B). Consumes the armed PIN after the challenge write so a
 /// vanished client still burns the one online guess. Both stream writes time out.
-pub(super) async fn pair_ceremony(
-    conn: &quinn::Connection,
-    mut send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
+///
+/// `client_fp` and `host_fp` are the SPAKE2 identities: whatever the caller binds this pairing
+/// to. Getting them wrong does not fail loudly — it yields a different key and a MAC mismatch,
+/// which is indistinguishable from a wrong PIN, so the caller owns that decision deliberately.
+// Eight orthogonal inputs, not a struct waiting to happen: the two identities are the whole
+// point of the signature, and grouping them would hide the decision the caller has to make.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn pair_ceremony<W, R>(
+    conn: &super::link::SessionLink,
+    mut send: W,
+    mut recv: R,
     req: PairRequest,
+    client_fp: &[u8; 32],
     host_fp: &[u8; 32],
     np: &NativePairing,
     pin: &str,
-) -> Result<()> {
+) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
     use punktfunk_core::quic::pake;
-    let client_fp = endpoint::peer_fingerprint(conn)
-        .ok_or_else(|| anyhow!("pairing requires the client to present a certificate"))?;
+    let client_fp = *client_fp;
     let client_fp_hex = fingerprint_hex(&client_fp);
     // Unpaired wire name: scrub once here and log only that value.
     // ANSI/C0 and bidi otherwise reach the operator terminal and the journal.
@@ -89,11 +107,12 @@ pub(super) async fn pair_ceremony(
     )
     .await
     .map_err(|_| anyhow!("pairing timed out sending the result"))??;
-    let _ = send.finish();
+    // The generic write side's "no more data": quinn's `finish` under another name.
+    let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
     // 5 s: wait for the client to ACK PairResult before we close. A vanished
     // peer must not occupy the sequential host.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), conn.closed()).await;
-    conn.close(0u32.into(), b"pairing done");
+    conn.close(0, b"pairing done");
     anyhow::ensure!(ok, "pairing rejected (wrong PIN)");
     Ok(())
 }

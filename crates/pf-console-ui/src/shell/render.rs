@@ -392,7 +392,7 @@ fn glyph_style(
     let keys = || match platform {
         // A TV remote either way — the legend says D-pad, not keys.
         crate::platform::Platform::Android | crate::platform::Platform::WebOS => GlyphStyle::Remote,
-        crate::platform::Platform::Desktop => GlyphStyle::Keyboard,
+        crate::platform::Platform::Desktop | crate::platform::Platform::Web => GlyphStyle::Keyboard,
     };
     match (source, pad_pref) {
         (Some(crate::console::InputSource::Keys), _) => keys(),
