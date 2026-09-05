@@ -12,12 +12,8 @@ import {
 	Schema as S,
 	Stream,
 } from "effect";
-import {
-	type ConnectOptions,
-	type ResolvedConfig,
-	resolveConfig,
-} from "./config.js";
-import { HttpStatusError, httpRequest } from "./core.js";
+import type { Connection } from "./connection.js";
+import { HttpStatusError, httpRequest } from "./http.js";
 import {
 	type EventStreamOptions,
 	type SseFrame,
@@ -52,7 +48,7 @@ export class EventStreamError extends Data.TaggedError("EventStreamError")<{
 export type RequestError = AuthError | ApiError | TransportError;
 
 export interface PunktfunkHostService {
-	readonly config: ResolvedConfig;
+	readonly config: Connection;
 	/** One management-API request under `/api/v1`; the parsed JSON body. */
 	readonly request: (
 		method: string,
@@ -93,7 +89,7 @@ const toRequestError = (path: string, cause: unknown): RequestError => {
 	return new TransportError({ cause });
 };
 
-export const makeService = (cfg: ResolvedConfig): PunktfunkHostService => {
+export const makeService = (cfg: Connection): PunktfunkHostService => {
 	const request = (method: string, path: string, body?: unknown) =>
 		Effect.tryPromise({
 			try: () => httpRequest(cfg, method, path, body),
@@ -155,20 +151,11 @@ export const makeService = (cfg: ResolvedConfig): PunktfunkHostService => {
 };
 
 /**
- * The live layer: resolves URL/token/CA (env → host files) and provides [`PunktfunkHost`].
+ * The service over a connection the caller already built — a browser's device key, a test's
+ * stub, anything. The Node-resolving [`layer`] lives beside `config.ts`, because resolving a
+ * connection from files is the one part of this that is not platform-neutral.
  */
-export const layer = (
-	options?: ConnectOptions,
-): Layer.Layer<PunktfunkHost, TransportError> =>
-	Layer.effect(
-		PunktfunkHost,
-		Effect.tryPromise({
-			try: () => resolveConfig(options),
-			catch: (cause) => new TransportError({ cause }),
-		}).pipe(Effect.map(makeService)),
-	);
-
-/** RFC-spelled alias of [`layer`]. */
-export const PunktfunkHostLive = layer;
+export const layerFrom = (conn: Connection): Layer.Layer<PunktfunkHost> =>
+	Layer.succeed(PunktfunkHost, makeService(conn));
 
 export { SseAuthError };

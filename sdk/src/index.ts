@@ -17,7 +17,7 @@ import {
 	type ResolvedConfig,
 	resolveConfig,
 } from "./config.js";
-import { HttpStatusError, httpRequest } from "./core.js";
+import { HttpStatusError, httpRequest } from "./http.js";
 import { type SseFrame, sseFrames } from "./sse.js";
 import {
 	decodeHostEvent,
@@ -28,7 +28,7 @@ import {
 } from "./wire.js";
 
 export type { HostApi } from "./api.js";
-export { HttpStatusError } from "./core.js";
+export { HttpStatusError } from "./http.js";
 export type { ConnectOptions } from "./config.js";
 // A plugin persists its state here — the one dir the de-privileged Windows runner may write.
 export { pluginStateDir } from "./config.js";

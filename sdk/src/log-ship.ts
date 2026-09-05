@@ -221,7 +221,7 @@ export const installLogShipper = (
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					authorization: `Bearer ${resolved.token}`,
+					authorization: await resolved.credential.header(),
 				},
 				body: JSON.stringify({ entries: batch }),
 			});

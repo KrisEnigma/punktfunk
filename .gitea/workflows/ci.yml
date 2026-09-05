@@ -423,6 +423,17 @@ jobs:
           bash ../scripts/ci/retry.sh 3 bun install --frozen-lockfile --ignore-scripts
           bun run typecheck
           bun run build
+      # The generated client is committed so consumers never need the generator, which means it
+      # can drift from api/openapi.json without anything noticing. This is the thing that notices:
+      # the same shape as the host's own OpenAPI drift gate, one layer down.
+      - name: SDK client matches api/openapi.json
+        working-directory: sdk
+        run: |
+          bun run gen
+          git diff --exit-code -- src/gen/ || {
+            echo "::error::sdk/src/gen/punktfunk.ts is stale — run 'bun run gen' in sdk/ and commit"
+            exit 1
+          }
       - name: Typecheck plugin kit
         working-directory: plugin-kit
         run: |

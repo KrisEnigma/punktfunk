@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { SseAuthError, SseParser, sseFrames } from "../src/sse.js";
 import type { ResolvedConfig } from "../src/config.js";
+import { staticBearer } from "../src/credential.js";
 
 describe("SseParser", () => {
 	test("parses frames split across arbitrary chunks, skipping comments", () => {
@@ -26,6 +27,7 @@ describe("SseParser", () => {
 const cfgFor = (port: number, token = "t"): ResolvedConfig => ({
 	url: `http://127.0.0.1:${port}`,
 	token,
+	credential: staticBearer(token),
 	fetch,
 });
 

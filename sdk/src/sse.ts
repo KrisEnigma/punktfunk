@@ -3,7 +3,7 @@
 // there is exactly one implementation of connect/parse/resume (RFC §7: "two surfaces, one
 // core"). Reconnects carry `Last-Event-ID` (the host replays from its ring); backoff is
 // exponential + jittered, capped, and resets after a healthy connection.
-import type { ResolvedConfig } from "./config.js";
+import type { Connection } from "./connection.js";
 
 /** One parsed SSE frame. */
 export interface SseFrame {
@@ -104,7 +104,7 @@ const HEALTHY_MS = 30_000;
  * dropping the iterator, which aborts the in-flight request) or throws [`SseAuthError`].
  */
 export async function* sseFrames(
-	cfg: ResolvedConfig,
+	cfg: Connection,
 	opts: EventStreamOptions = {},
 ): AsyncGenerator<SseFrame> {
 	const warn = opts.onWarning ?? ((m) => console.warn(`[punktfunk] ${m}`));
@@ -117,7 +117,7 @@ export async function* sseFrames(
 			if (opts.kinds && opts.kinds.length > 0)
 				url.searchParams.set("kinds", opts.kinds.join(","));
 			const headers: Record<string, string> = {
-				authorization: `Bearer ${cfg.token}`,
+				authorization: await cfg.credential.header(),
 				accept: "text/event-stream",
 			};
 			if (lastId !== 0) headers["last-event-id"] = String(lastId);

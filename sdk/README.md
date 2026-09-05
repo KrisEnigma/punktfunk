@@ -4,7 +4,7 @@ TypeScript SDK for the [punktfunk](https://git.unom.io/unom/punktfunk) streaming
 management-API client plus the host's lifecycle **event stream** (client connect/disconnect,
 stream start/stop, pairing, displays, library) — built on [Effect](https://effect.website).
 
-Two surfaces, one core:
+Three surfaces, one core:
 
 - **`@punktfunk/host`** — the Promise facade, the front door. `connect()`, then `pf.api.*` (the
   typed management API — every endpoint autocompletes, every response is typed) and `pf.events.on()`.
@@ -14,6 +14,37 @@ Two surfaces, one core:
   (`AuthError | ApiError | TransportError | VersionSkew`), and every wire shape as an
   `effect/Schema` (REST shapes generated from the host's OpenAPI spec; event shapes mirroring
   the host's snapshot-tested wire format).
+- **`@punktfunk/host/core`** — the same Effect surface with **nothing Node in it**, for a
+  browser. Resolving a connection from token files is the one part that is not portable, so
+  `/core` takes a `Connection` you build — an origin plus a credential — and `layerFrom(conn)`
+  provides the service. A test walks its import graph and fails on any `node:` module.
+
+### Credentials
+
+Every request presents a `Credential`. A plugin or the console holds a bearer token the host wrote
+to a file — `staticBearer(token)`, and what `connect()` resolves. A browser holds no token and no
+client certificate; it holds a **non-extractable P-256 key it paired with**, and proves that the
+way it does on the streaming control stream: `deviceKey({ url, hostFingerprint, signer })` asks the
+host for a nonce, signs it bound to the host's own identity, exchanges the signature for a
+short-lived token, and re-earns one the first time the host answers 401. The signing is never in
+the SDK — a `Signer` is handed in by whoever owns the key.
+
+```ts
+import { Effect } from "effect";
+import { api, connection, deviceKey, httpClientFor } from "@punktfunk/host/core";
+
+const url = "https://192.168.1.25:47990";
+const conn = connection({
+  url,
+  credential: deviceKey({ url, hostFingerprint, signer }),
+});
+// The generated client, on an HttpClient that carries the credential and re-earns it on 401.
+const library = Effect.gen(function* () {
+  const client = api.make(yield* httpClientFor(conn));
+  return yield* client.getLibrary(); // ReadonlyArray<OperatorGameEntry>, schema-decoded
+});
+await Effect.runPromise(library);
+```
 
 ## Install
 

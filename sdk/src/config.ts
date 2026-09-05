@@ -19,6 +19,8 @@
 // IS the pin for the loopback hop. Per-runtime plumbing differs: Bun takes `tls.ca` on fetch,
 // Node (undici) takes a dispatcher with a CA-carrying TLS connector; anything else falls back
 // to plain fetch (document PUNKTFUNK_MGMT_CA + NODE_EXTRA_CA_CERTS there).
+import type { Connection } from "./connection.js";
+import { staticBearer } from "./credential.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,12 +34,12 @@ export interface ConnectOptions {
 	ca?: string;
 }
 
-export interface ResolvedConfig {
-	url: string;
+/**
+ * A Node-resolved connection: a [`Connection`] plus the bearer it was built from, kept because
+ * the log shipper and the runner read it directly.
+ */
+export interface ResolvedConfig extends Connection {
 	token: string;
-	ca?: string;
-	/** A fetch honoring `ca` on this runtime. */
-	fetch: typeof fetch;
 }
 
 /** The host's config dir — the same resolution the host itself uses. */
@@ -157,7 +159,13 @@ export const resolveConfig = async (
 				(readIfExists(path.join(configDir(), "native-cert.pem")) ??
 				readIfExists(path.join(configDir(), "cert.pem")))
 			: undefined);
-	return { url, token, ca, fetch: await makeFetch(ca) };
+	return {
+		url,
+		token,
+		credential: staticBearer(token),
+		ca,
+		fetch: await makeFetch(ca),
+	};
 };
 
 /**
