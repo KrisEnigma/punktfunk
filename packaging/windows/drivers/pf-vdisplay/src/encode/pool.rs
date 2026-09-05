@@ -232,11 +232,10 @@ impl Pool {
             let blend = self.cursor.blends();
             let passed = bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| {
                 st.targets.pass(&src, i, blend)?;
-                // Keep the clean source so a cursor move can re-encode this frame with the
-                // pointer elsewhere; only while blending, so a client-drawn session pays nothing.
-                if blend {
-                    let _ = st.targets.keep_plate(&src);
-                }
+                // Keep the clean source every frame, so the first pointer move after the client
+                // hands the cursor back already has a cursor-free plate that predates the blend.
+                // One copy at the compose rate; a still desktop reaches it barely.
+                let _ = st.targets.keep_plate(&src);
                 Ok(())
             });
             if passed.is_err() {
