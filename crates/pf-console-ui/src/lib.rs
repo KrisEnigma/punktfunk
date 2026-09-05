@@ -40,6 +40,13 @@ pub mod art_stats;
     target_os = "android",
     target_family = "wasm"
 ))]
+pub mod brand;
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
 mod collate;
 #[cfg(any(
     target_os = "linux",
