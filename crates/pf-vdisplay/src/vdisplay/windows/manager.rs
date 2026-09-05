@@ -571,23 +571,18 @@ impl VirtualDisplayManager {
         self.driver.name()
     }
 
-    /// Opens and caches the control device. A first legacy owner may clear
-    /// global orphans; seats mode and handle reopens cannot because sibling
-    /// processes or sessions may still own monitors. The returned `Arc` keeps
-    /// each IOCTL's handle alive across concurrent retirement.
+    /// Opens and caches the control device, clearing orphans on the first open
+    /// only. #624 scopes `CLEAR_ALL` to the calling process's own monitors, so
+    /// a seat cannot reap a sibling's and this needs no reservation gate. The
+    /// returned `Arc` keeps each IOCTL's handle alive across concurrent
+    /// retirement.
     fn ensure_device(&self) -> Result<Arc<OwnedHandle>> {
         let mut slot = self.device.lock().unwrap();
         if let Some(d) = &slot.current {
             return Ok(d.clone());
         }
-        let plan = process_slot_plan().map_err(anyhow::Error::new)?;
-        let reap = !slot.opened_once && plan.allows_clear_all();
+        let reap = !slot.opened_once;
         claim_instance()?;
-        if !slot.opened_once && !reap {
-            tracing::info!(
-                "pf-vdisplay startup keeps existing monitors because seats slots are reserved"
-            );
-        }
         // `open` is safe: it discharges FFI inside its body. The `device`
         // mutex serializes racing opens — serialization, not soundness, so
         // this is not `unsafe`.

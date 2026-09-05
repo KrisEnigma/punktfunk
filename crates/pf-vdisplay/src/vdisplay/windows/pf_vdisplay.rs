@@ -42,40 +42,21 @@ use super::{Mode, VirtualDisplay, VirtualOutput};
 const PF_VDISPLAY_INTERFACE: GUID =
     GUID::from_u128(pf_driver_proto::PF_VDISPLAY_INTERFACE_GUID_U128);
 
-/// `PFSLOT` namespace, so a reserved key can never collide with a counter.
-const SLOT_SESSION_PREFIX: u64 = 0x5046_534c_4f54_0000;
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
-/// The driver's key for a monitor.
+/// The driver's key for a monitor: a per-process counter.
 ///
-/// An `IOCTL_ADD` whose key is already live makes the driver depart the
-/// incumbent, and a counter starts at 1 in every process — so under a
-/// reservation, where a second host exists, the key comes from the connector
-/// instead and two hosts can only collide on a connector the slot plan already
-/// keeps apart.
+/// Two hosts both starting at 1 used to collide, and an `IOCTL_ADD` on a live
+/// key makes the driver depart the incumbent — so a second host's first ADD
+/// tore down the first host's display. #624 keys the driver's sessions by the
+/// requesting process, so identical counters in two hosts no longer meet.
 ///
-/// Without a reservation there is one host and the counter stays, because a
-/// fresh key per ADD is what the preempt-and-recreate path expects: it removes
-/// the old monitor, waits up to 400 ms for the departure, then adds regardless,
-/// and a reused key turns that last add into the driver's depart-the-incumbent
-/// branch mid-churn. Making this unconditional cost eight native session tests
-/// on a real box. Scoping the driver's own device-wide state per owner is the
-/// driver-side half of this work, and this wants revisiting with it.
-fn session_id_for(reservation_enabled: bool, preferred_monitor_id: u32, next: u64) -> u64 {
-    if reservation_enabled {
-        SLOT_SESSION_PREFIX | u64::from(preferred_monitor_id)
-    } else {
-        next
-    }
-}
-
-fn next_session_id(preferred_monitor_id: u32) -> u64 {
-    let next = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    session_id_for(
-        pf_win_display::seats_addon_reserves_display_slots(),
-        preferred_monitor_id,
-        next,
-    )
+/// A fresh key per ADD is also what the preempt-and-recreate path needs: it
+/// removes the old monitor, waits up to 400 ms for the departure, then adds
+/// regardless, and a reused key turns that last add into the depart-the-
+/// incumbent branch mid-churn.
+fn next_session_id() -> u64 {
+    NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// One METHOD_BUFFERED `DeviceIoControl`. Empty `input`/`output` are allowed; `bytemuck` at the
@@ -713,7 +694,7 @@ impl VdisplayDriver for PfVdisplayDriver {
         client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
     ) -> Result<AddedMonitor> {
-        let session_id = next_session_id(preferred_monitor_id);
+        let session_id = next_session_id();
         // EDID CTA HDR block; all-zero = unknown → driver defaults (also what a driver that
         // reads only the legacy 24-byte prefix does).
         let (max_luminance_nits, max_frame_avg_nits, min_luminance_millinits) = client_hdr
@@ -1175,14 +1156,14 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    /// Every ADD needs its own key: the preempt path adds after a removal that
+    /// may not have landed, and a reused key would depart the incumbent.
     #[test]
-    fn reserved_session_ids_are_stable_and_slot_scoped() {
-        assert_eq!(session_id_for(true, 12, 99), SLOT_SESSION_PREFIX | 12);
-        assert_eq!(session_id_for(true, 12, 1), SLOT_SESSION_PREFIX | 12);
-        assert_ne!(session_id_for(true, 12, 1), session_id_for(true, 13, 1));
-        assert_eq!(session_id_for(false, 12, 99), 99);
-        // A reserved key is far above any counter the unreserved host can reach.
-        assert!(session_id_for(true, 15, 1) > u64::from(u32::MAX));
+    fn session_ids_are_fresh_per_add() {
+        let a = next_session_id();
+        let b = next_session_id();
+        assert_ne!(a, b);
+        assert!(b > a);
     }
 
     /// A refusal must decode as a refusal, carrying its reason. PnP Status after a refused

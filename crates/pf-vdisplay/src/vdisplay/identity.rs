@@ -43,10 +43,6 @@ impl WindowsSlotPlan {
         }
     }
 
-    pub(crate) const fn allows_clear_all(self) -> bool {
-        matches!(self, Self::Unreserved)
-    }
-
     pub(crate) const fn seat_slot(self) -> Option<u32> {
         match self {
             Self::Seat(slot) => Some(slot),
