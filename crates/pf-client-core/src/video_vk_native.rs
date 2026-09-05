@@ -1632,6 +1632,10 @@ mod tests {
                 slot: 3,
                 ref_index: 1,
             },
+            Av1::StaleReference {
+                slot: 3,
+                ref_index: 1,
+            },
             Av1::MissingShowExisting { slot: 5 },
             Av1::TruncatedAu { offset: 900 },
         ] {

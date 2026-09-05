@@ -230,6 +230,11 @@ pub enum PlanWarning {
     /// A frame named a slot holding no picture. No AV1 process empties a slot
     /// behind the stream's back, so the reference was lost upstream.
     MissingReference { slot: u8, ref_index: u8 },
+    /// An error-resilient frame coded the order hint it expects in `slot`
+    /// (5.9.2 `ref_order_hint`) and the resident picture's differs: the frame
+    /// the encoder predicts from was lost and an older one still sits there.
+    /// The only AV1 syntax that can expose a lost inter frame.
+    StaleReference { slot: u8, ref_index: u8 },
     /// `show_existing_frame` named an empty slot — nothing to display.
     MissingShowExisting { slot: u8 },
     /// The OBU walk stopped early. The plan covers what was read; `offset` is
@@ -242,12 +247,14 @@ impl PlanWarning {
     /// [`crate::h264::PlanWarning::is_integrity`]; `pf_vkdecode` delegates here.
     ///
     /// Every AV1 variant is damage: the codec has no reorder envelope and no MMCO
-    /// to report, so the only warnings are missing pictures and a walk that stopped
-    /// early. `MissingShowExisting` is damage too — the stream chose a picture that
-    /// was lost, so the screen keeps the previous one. Exhaustive, no wildcard.
+    /// to report, so the only warnings are missing or wrong pictures and a walk
+    /// that stopped early. `MissingShowExisting` is damage too — the stream chose
+    /// a picture that was lost, so the screen keeps the previous one. Exhaustive,
+    /// no wildcard.
     pub fn is_integrity(&self) -> bool {
         match self {
             PlanWarning::MissingReference { .. }
+            | PlanWarning::StaleReference { .. }
             | PlanWarning::MissingShowExisting { .. }
             | PlanWarning::TruncatedAu { .. } => true,
         }
@@ -497,13 +504,29 @@ impl Av1Planner {
             header.frame_type,
             FrameType::KeyFrame | FrameType::IntraOnlyFrame
         ) {
+            // An error-resilient frame codes the order hint it expects in every
+            // slot (5.9.2). A lost inter frame leaves the older picture in its
+            // slot, so occupancy alone never sees the loss; the hint does. The
+            // Vulkan host codes its recovery frame this way.
+            let hints_coded = header.error_resilient_mode && sequence.enable_order_hint;
             for (ref_index, &slot) in header.ref_frame_idx.iter().enumerate() {
+                // Seven references; the cast cannot truncate.
+                let ref_index_u8 = ref_index as u8;
                 match self.slots.get(usize::from(slot)).copied().flatten() {
-                    Some(pic) => refs[ref_index] = Some(pic),
+                    Some(pic) => {
+                        refs[ref_index] = Some(pic);
+                        if hints_coded
+                            && header.ref_order_hint[usize::from(slot)] != pic.state.order_hint
+                        {
+                            warnings.push(PlanWarning::StaleReference {
+                                slot,
+                                ref_index: ref_index_u8,
+                            });
+                        }
+                    }
                     None => warnings.push(PlanWarning::MissingReference {
                         slot,
-                        // Seven references; the cast cannot truncate.
-                        ref_index: ref_index as u8,
+                        ref_index: ref_index_u8,
                     }),
                 }
             }
@@ -520,12 +543,14 @@ impl Av1Planner {
         }
         let removed = self.refresh_slots(header.refresh_frame_flags, id, RefState::of(&header));
 
-        // Resolved names only: a `None` hole already pushed `MissingReference`
-        // and condemns this frame through `concealed` below. Vacuous for key
-        // and intra-only (`CleanLedger::references_clean`).
+        // Resolved names, and no damage of this frame's own: a hole or a stale
+        // slot is a warning above, and a consumer reading the bit alone must
+        // not lift onto a concealed picture. Vacuous for key and intra-only
+        // (`CleanLedger::references_clean`).
         let references_clean = self
             .clean
-            .references_clean(refs.iter().flatten().map(|r| r.id));
+            .references_clean(refs.iter().flatten().map(|r| r.id))
+            && !warnings.iter().any(PlanWarning::is_integrity);
 
         let picture = picture_plan(&header, &sequence, references_clean);
         let outputs = if header.show_frame {
@@ -824,6 +849,69 @@ mod tests {
             "every surviving name must still sit at ITS OWN index — a compacted \
              list would read [0, 1, 3, 4, 2, 6] and rename four references"
         );
+    }
+
+    /// A lost inter frame leaves the older picture in its slot, so the slot is
+    /// occupied and nothing else in the syntax can tell. An error-resilient
+    /// frame codes the order hint it expects per slot (5.9.2); a mismatch is
+    /// the loss, and the frame must read unclean.
+    #[test]
+    fn an_error_resilient_frame_exposes_a_stale_slot_through_its_order_hint() {
+        let mut planner = Av1Planner::new();
+        let first = IvfIterator::new(AV1_25FPS).next().expect("a first packet");
+        let sequence = planner
+            .plan_au(first)
+            .expect("the key frame plans")
+            .first()
+            .expect("a frame")
+            .sequence
+            .clone();
+        assert!(sequence.enable_order_hint, "the vector codes order hints");
+        // Every slot holds the key frame at order hint 0. The encoder's frame
+        // expects the picture at hint 5 in slot 5: that frame was lost.
+        let mut ref_order_hint = [0u32; NUM_REF_SLOTS];
+        ref_order_hint[5] = 5;
+        let header = FrameHeaderObu {
+            frame_type: FrameType::InterFrame,
+            error_resilient_mode: true,
+            ref_order_hint,
+            ref_frame_idx: [0, 1, 5, 3, 4, 2, 6],
+            refresh_frame_flags: 0,
+            ..Default::default()
+        };
+        let plan = planner
+            .plan_frame(header, sequence.clone(), Vec::new(), Vec::new())
+            .expect("a stale reference is concealment, not a plan error");
+        assert_eq!(
+            plan.warnings,
+            vec![PlanWarning::StaleReference {
+                slot: 5,
+                ref_index: 2
+            }]
+        );
+        assert!(
+            plan.refs[2].is_some(),
+            "the slot is occupied — by the wrong picture"
+        );
+        assert!(
+            !plan.picture.references_clean,
+            "a frame predicting from a stale slot must not lift a freeze"
+        );
+
+        // Without error resilience the hints are not coded and the same frame
+        // plans clean: the check must not invent damage.
+        let header = FrameHeaderObu {
+            frame_type: FrameType::InterFrame,
+            ref_order_hint,
+            ref_frame_idx: [0, 1, 5, 3, 4, 2, 6],
+            refresh_frame_flags: 0,
+            ..Default::default()
+        };
+        let plan = planner
+            .plan_frame(header, sequence, Vec::new(), Vec::new())
+            .expect("plans");
+        assert!(plan.warnings.is_empty());
+        assert!(plan.picture.references_clean);
     }
 
     /// `RefFrameSignBias` must come out spec-indexed (bit 1 = `LAST_FRAME`);
