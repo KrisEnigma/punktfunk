@@ -33,13 +33,11 @@
 // from `GamepadManager.reserveExternalPadIndex()` — the SAME lowest-free allocator the
 // GameController slots use, so an SC2 and a GC pad can never collide.
 //
-// No global "SC2 is active" suppression flag exists here (the obvious such design mutes ALL
-// pads' normal feed — a known trap): on punktfunk there is no double feed by
-// construction — GameController never surfaces the raw Valve device on Apple, and the BLE
-// lizard-mode kb/mouse never produces gamepad events — so no suppression wiring exists here.
-// If GameController ever does surface it, the designed-in idioms are the per-plane source-drop
-// (the DeviceGyro precedent) and GamepadCapture's single computed `wire` nil-gate; wire one of
-// those rather than resurrecting a global flag.
+// macOS DOES surface a captured pad to GameController (on-glass 2026-08-31, vendorName "Steam
+// Controller Puck"), so without help the host is handed the same hardware twice. The answer is
+// the per-plane source-drop (the DeviceGyro precedent), never a global "SC2 is active" flag —
+// that design mutes every other pad's normal feed too. `syncShadowSuppression` drops the twin
+// only while a slot is claimed, so a pad this capture cannot open keeps the ordinary path.
 //
 // Threading: reports arrive on the link's serial queue; the host's hidRaw replay arrives on
 // the feedback drain thread; start/stop/suspend run on the main actor. All mutable state sits
@@ -199,9 +197,6 @@ public final class Sc2Capture {
         stopped = false
         suspended = false
         lock.unlock()
-        // This capture owns every SC2 for its lifetime — drop the GameController shadows so the
-        // host never sees the same physical pad twice (see GamepadManager).
-        manager.steamController2Suppressed = true
         #if os(macOS)
         let resign = NSApplication.willResignActiveNotification
         let activate = NSApplication.didBecomeActiveNotification
@@ -454,6 +449,23 @@ public final class Sc2Capture {
             guard let self else { return }
             MainActor.assumeIsolated {
                 let index = self.manager.reserveExternalPadIndex()
+                // Resolve the identity BEFORE the slot goes live. Setting `padIndex` is what
+                // opens the raw plane on this index, so everything between it and the arrival
+                // is a window in which a report can precede the declaration — and both reads
+                // below take the link's own lock, which must not be held under `lock` anyway.
+                //
+                // A Puck slot is its own host-side backend (native seven-interface topology,
+                // four controller slots; a Windows host folds it onto the wired identity), so
+                // it declares its own kind — a wired or BLE pad stays `.steamController2`.
+                let dongle = self.isDongleSource(source)
+                let kind: PunktfunkConnection.GamepadType =
+                    dongle ? .steamController2Puck : .steamController2
+                #if os(macOS)
+                let serial = source == Sc2Capture.bleSource
+                    ? nil : self.usbLink.serial(source: source)
+                #else
+                let serial: String? = nil
+                #endif
                 self.lock.lock()
                 guard let src = self.sources[source], src.claimPending else {
                     // The source went away between the report that scheduled this claim and
@@ -480,18 +492,6 @@ public final class Sc2Capture {
                 }
                 src.padIndex = index
                 self.lock.unlock()
-                // A Puck slot is its own host-side backend (native seven-interface topology,
-                // four controller slots; a Windows host folds it onto the wired identity), so
-                // it declares its own kind — a wired or BLE pad stays `.steamController2`.
-                let dongle = self.isDongleSource(source)
-                let kind: PunktfunkConnection.GamepadType =
-                    dongle ? .steamController2Puck : .steamController2
-                #if os(macOS)
-                let serial = source == Sc2Capture.bleSource
-                    ? nil : self.usbLink.serial(source: source)
-                #else
-                let serial: String? = nil
-                #endif
                 self.connection.send(.gamepadArrival(pref: kind.rawValue, pad: UInt32(index)))
                 // Replay the connect edge the Puck emitted before this slot existed, ahead of
                 // any state — see `handleWireless`.
@@ -501,6 +501,8 @@ public final class Sc2Capture {
                     self.forwardRawLocked(src, &pending, pad: index)
                 }
                 self.lock.unlock()
+                // This pad is ours now, so its GameController twin must stop being forwarded.
+                self.syncShadowSuppression()
                 let via = dongle ? "Puck" : (self.currentTransport == .usb ? "USB" : "BLE")
                 log.info(
                     "SC2 captured → wire pad \(index) (\(via, privacy: .public) passthrough, pref \(kind.rawValue), serial \(serial ?? "?"))"
@@ -531,10 +533,27 @@ public final class Sc2Capture {
         DispatchQueue.main.async { [weak self, manager] in
             MainActor.assumeIsolated {
                 manager.releaseExternalPadIndex(index)
+                // Hand the GameController twin back the moment the last slot goes.
+                self?.syncShadowSuppression()
                 if lastClaimed { self?.onPhaseChange?(.released) }
             }
         }
         log.info("SC2: wire pad \(index) released (\(reason))")
+    }
+
+    /// Drop the GameController shadow exactly while this capture holds a claimed wire slot.
+    ///
+    /// Not for the capture's lifetime: the capture is built for every stream the toggle is on
+    /// for, whether or not an SC2 is reachable, and suppressing on that would leave a pad the
+    /// capture cannot open (Input Monitoring refused, nothing paired) forwarded on NEITHER
+    /// plane — worse than the double feed this exists to stop. Never called holding `lock`:
+    /// the setter rebuilds the manager's published pad list.
+    @MainActor
+    private func syncShadowSuppression() {
+        lock.lock()
+        let owned = sources.values.contains { $0.padIndex != nil }
+        lock.unlock()
+        manager.steamController2Suppressed = owned
     }
 
     /// Release every source — the stop/suspend teardown.

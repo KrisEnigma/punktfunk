@@ -302,7 +302,10 @@ final class Sc2UsbLink {
     /// ours alone, so the register → set-queue → activate order the API requires holds.
     private func adopt(_ matched: IOHIDDevice) {
         guard started else { return }
-        let id = Self.registryID(matched)
+        guard let id = Self.registryID(matched) else {
+            log.error("SC2 USB: matched collection has no registry id — cannot key it")
+            return
+        }
         guard open[id] == nil else { return }
         let service = IOHIDDeviceGetService(matched)
         guard service != MACH_PORT_NULL,
@@ -353,7 +356,7 @@ final class Sc2UsbLink {
     /// A collection went away: retire it and tell the capture, so ONE pad of several unplugging
     /// releases exactly its own wire slot — a Puck losing one slot is not a dongle unplug.
     private func drop(_ matched: IOHIDDevice) {
-        let id = Self.registryID(matched)
+        guard let id = Self.registryID(matched) else { return }
         denied.removeValue(forKey: id)
         serialAttempted.remove(id)
         // Cancel OUR minted device (see `adopt`) — the manager's object was never activated,
@@ -378,17 +381,18 @@ final class Sc2UsbLink {
     private func handle(
         device: IOHIDDevice, reportID: UInt32, report: UnsafeMutablePointer<UInt8>, len: CFIndex
     ) {
-        guard len > 0 else { return }
-        let source = Self.registryID(device)
+        guard len > 0, let source = Self.registryID(device) else { return }
         let id = UInt8(truncatingIfNeeded: reportID)
         // The payload byte position follows the same id-in-band rule the framing below applies.
         let wirelessPayload: UInt8? = (id == Sc2Device.idWireless || id == Sc2Device.idWirelessX)
             ? (report[0] == id ? (len >= 2 ? report[1] : nil) : report[0])
             : nil
-        if wirelessPayload == Sc2Device.wirelessDisconnect {
+        if wirelessPayload == Sc2Device.wirelessDisconnect, isDongle(source: source) {
             // A disconnect edge re-arms the serial read: whatever bonds to this slot next may
             // be a DIFFERENT pad, and serving pad A's engraved identity for pad B is the one
-            // failure the serial must never have.
+            // failure the serial must never have. Dongle-gated for the same reason
+            // `Sc2Capture.handleWireless` is — a WIRED pad emits this too, truthfully saying
+            // "no radio link", and acting on it would re-arm a blocking GET on every one.
             serialAttempted.remove(source)
             dongleLock.lock()
             serials.removeValue(forKey: source)
@@ -398,8 +402,11 @@ final class Sc2UsbLink {
             // adopt a Puck slot is usually empty (pads bond later), and a blocking feature GET
             // against a silent slot could stall this shared queue for every pad. A slot that
             // just spoke has a live pad behind it, which answers control transfers promptly.
+            // Marked attempted either way, so a wired pad costs one `isDongle` per bond cycle.
             serialAttempted.insert(source)
-            readSerial(id: source, device: dev)
+            // Puck slots only: they all share the dongle's USB serial, which is what makes the
+            // engraved one worth a control transfer. A wired pad's USB serial is already its own.
+            if isDongle(source: source) { readSerial(id: source, device: dev) }
         }
         if seenIds.insert(id).inserted {
             log.info(
@@ -492,16 +499,17 @@ final class Sc2UsbLink {
     /// A stable per-collection key. `IOHIDDevice` is a CF type with no usable identity in a
     /// Swift dictionary, and the Puck's four collections share VID/PID, so the IOKit registry
     /// entry id is what tells them apart.
-    private static func registryID(_ device: IOHIDDevice) -> UInt64 {
+    ///
+    /// It must come from the SERVICE, and nil when there is none. `adopt`/`drop` key off the
+    /// MANAGER's matched object while `handle` sees the one we minted from the same service
+    /// — only the service's id is equal across the two, so any object-derived fallback would
+    /// silently split one collection into two keys: no serial, and every host write dropped.
+    private static func registryID(_ device: IOHIDDevice) -> UInt64? {
         let service = IOHIDDeviceGetService(device)
+        guard service != MACH_PORT_NULL else { return nil }
         var id: UInt64 = 0
-        if service != MACH_PORT_NULL, IORegistryEntryGetRegistryEntryID(service, &id) == KERN_SUCCESS {
-            return id
-        }
-        // No registry entry (should not happen for a matched USB device). The pointer is still a
-        // stable per-collection identity for as long as we hold the device, which is all this key
-        // is for.
-        return UInt64(UInt(bitPattern: Unmanaged.passUnretained(device).toOpaque()))
+        guard IORegistryEntryGetRegistryEntryID(service, &id) == KERN_SUCCESS else { return nil }
+        return id
     }
 }
 
