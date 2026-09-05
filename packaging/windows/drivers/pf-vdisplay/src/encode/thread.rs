@@ -300,7 +300,10 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
     let (depth, chroma) = (spec.bit_depth, spec.chroma);
     let format = pixel_format(spec.kind);
     let luid = Some(adapter.luid62());
+    // NVENC, QSV and PyroWave are x86-64 only (see Cargo.toml); an ARM64 driver refuses their
+    // ids here and the host falls through to Media Foundation.
     let opened: anyhow::Result<Box<dyn Encoder>> = match spec.backend {
+        #[cfg(target_arch = "x86_64")]
         1 => pf_encode_win::nvenc::NvencD3d11Encoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, 1, luid,
         )
@@ -309,10 +312,12 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
         .map(|e| Box::new(e) as Box<dyn Encoder>),
+        #[cfg(target_arch = "x86_64")]
         3 => pf_encode_win::qsv::QsvEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
         .map(|e| Box::new(e) as Box<dyn Encoder>),
+        #[cfg(target_arch = "x86_64")]
         4 => {
             // Layers were disabled at `driver_entry`; doing it here would race the live threads.
             pf_encode_win::pyrowave::PyroWaveEncoder::open(

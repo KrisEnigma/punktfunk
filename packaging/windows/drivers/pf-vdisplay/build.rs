@@ -11,9 +11,12 @@ fn main() -> Result<(), wdk_build::ConfigError> {
 /// are NOT interchangeable: the stub's `IddFunctions` dispatch table must match the running framework
 /// (linking the `1.0` stub made even IddCxDeviceInitConfig fail; the box framework is 1.10, and upstream
 /// virtual-display-rs pins 1.10). So pick the HIGHEST `iddcx\<X.Y>` dir that has the lib (version-aware,
-/// since "1.10" < "1.2" lexically). x64 only.
+/// since "1.10" < "1.2" lexically). `<arch>` follows the cargo target: `x64` or `ARM64`.
 fn link_iddcx_stub() {
-    const ARCH: &str = "x64";
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH");
+    let cpu = wdk_build::CpuArchitecture::try_from_cargo_str(&target_arch)
+        .unwrap_or_else(|| panic!("no WDK lib dir for target arch {target_arch}"));
+    let arch = cpu.as_windows_str();
     const ROOTS: [&str; 2] = [
         r"C:\Program Files (x86)\Windows Kits\10\Lib",
         r"C:\Program Files\Windows Kits\10\Lib",
@@ -24,7 +27,7 @@ fn link_iddcx_stub() {
             continue;
         };
         for ver in versions.flatten() {
-            let iddcx = ver.path().join("um").join(ARCH).join("iddcx");
+            let iddcx = ver.path().join("um").join(arch).join("iddcx");
             let Ok(subdirs) = std::fs::read_dir(&iddcx) else {
                 continue;
             };
@@ -46,7 +49,7 @@ fn link_iddcx_stub() {
     }
     let Some((_, dir)) = best else {
         panic!(
-            "IddCxStub.lib not found under any Windows Kits Lib\\<ver>\\um\\{ARCH}\\iddcx\\<iddcxver>\\"
+            "IddCxStub.lib not found under any Windows Kits Lib\\<ver>\\um\\{arch}\\iddcx\\<iddcxver>\\"
         );
     };
     println!("cargo:rustc-link-search={}", dir.display());

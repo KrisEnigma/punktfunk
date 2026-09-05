@@ -15,7 +15,7 @@
   sign the .dll -> stampinf a strictly-increasing DriverVer into the INF -> Inf2Cat the catalog -> sign the
   catalog -> export the public .cer. Output (-Out): pf_vdisplay.{dll,inf,cat} + punktfunk-driver.cer.
 
-  Requires the WDK build env: cargo + the x64 MSVC toolset, an LLVM compatible with the driver's bindgen
+  Requires the WDK build env: cargo + the x64 MSVC toolset (its ARM64 cross compiler for -Arch arm64), an LLVM compatible with the driver's bindgen
   (>= 0.72 supports current clang), LIBCLANG_PATH, and the Windows 10/11 WDK (the runner has these). Sets
   Version_Number for wdk-build if the caller didn't.
 
@@ -31,7 +31,8 @@ param(
     [string]$CertPassword = $env:DRIVER_CERT_PASSWORD,
     # 'auto' (default) = required iff this is a v* tag build; 'true'/'false' to force. See below.
     [ValidateSet('auto', 'true', 'false')][string]$RequireSignedCert = 'auto',
-    [switch]$SkipBuild                                    # reuse an existing target\...\release\pf_vdisplay.dll
+    [switch]$SkipBuild,                                   # reuse an existing target\...\release\pf_vdisplay.dll
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64'    # the driver's target; the tools stay the runner's
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -69,12 +70,16 @@ if (-not $env:LIBCLANG_PATH -and (Test-Path 'C:\Program Files\LLVM\bin\libclang.
 # a drive onto the repo root, because the encoder deps build CMake projects whose MSBuild .tlog
 # paths overflow MAX_PATH on a deep checkout. That script owns the reasoning; do not duplicate it.
 $drvTarget = Join-Path $DriversDir 'target'
-$dll = Join-Path $drvTarget 'x86_64-pc-windows-msvc\release\pf_vdisplay.dll'
+# ARM64 rides the same crt-static config (drivers/.cargo/config.toml) under an explicit --target.
+$triple = if ($Arch -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+$stampArch = if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64' }
+$catOs = if ($Arch -eq 'arm64') { '10_NI_ARM64' } else { '10_X64' }   # both floor at 22H2 (22621)
+$dll = Join-Path $drvTarget "$triple\release\pf_vdisplay.dll"
 
 # --- 1. build (release) -----------------------------------------------------------------------
 if (-not $SkipBuild) {
-    Write-Host "==> cargo build --release (pf-vdisplay) in $DriversDir (default target -> $drvTarget)"
-    & (Join-Path $PSScriptRoot 'drivers-cargo.ps1') 'build --release'
+    Write-Host "==> cargo build --release --target $triple (pf-vdisplay) in $DriversDir (-> $drvTarget)"
+    & (Join-Path $PSScriptRoot 'drivers-cargo.ps1') "build --release --target $triple"
     $rc = $LASTEXITCODE
     if ($rc -ne 0) { throw "pf-vdisplay cargo build failed ($rc)" }
 }
@@ -140,8 +145,8 @@ if (-not $DriverVer) { $now = Get-Date; $DriverVer = '9.9.{0}.{1}' -f $now.ToStr
 
 & $signtool sign /fd SHA256 @signArgs $sDll | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "signtool sign (dll) failed ($LASTEXITCODE)" }
-& $stampinf -f $sInf -d '*' -a 'amd64' -u '2.15.0' -v $DriverVer | Out-Null
-& $inf2cat /driver:$Out /os:10_X64 /uselocaltime | Out-Null
+& $stampinf -f $sInf -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
+& $inf2cat /driver:$Out /os:$catOs /uselocaltime | Out-Null
 if (-not (Test-Path $sCat)) { throw "Inf2Cat did not produce $sCat" }
 & $signtool sign /fd SHA256 @signArgs $sCat | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "signtool sign (cat) failed ($LASTEXITCODE)" }

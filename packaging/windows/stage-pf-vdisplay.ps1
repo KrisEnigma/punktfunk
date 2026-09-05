@@ -23,6 +23,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$OutDir,
     [Parameter(Mandatory = $true)][string]$VendorDir,   # the build-pf-vdisplay.ps1 output dir
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64', # picks the matching nefconc.exe from the zip
     # PINNED nefcon release (https://github.com/nefarius/nefcon/releases). MIT-licensed.
     [string]$NefconUrl = 'https://github.com/nefarius/nefcon/releases/download/v1.17.40/nefcon_v1.17.40.zip',
     [string]$NefconSha256 = '812bae7ed7dfb7d6d2284bc7de2f8ccebc92ed2a0b1ae893c53b337096e50c1a'
@@ -57,7 +58,7 @@ try {
     else { Write-Warning "no pinned nefcon SHA-256 - computed $got (PIN THIS in stage-pf-vdisplay.ps1)" }
     Expand-Archive -Path $zip -DestinationPath $work -Force
     $nefc = Get-ChildItem -Path $work -Recurse -Filter 'nefconc.exe' |
-        Where-Object { $_.FullName -match '(?i)\\x64\\' } | Select-Object -First 1
+        Where-Object { $_.FullName -match "(?i)\\$Arch\\" } | Select-Object -First 1
     if (-not $nefc) { $nefc = Get-ChildItem -Path $work -Recurse -Filter 'nefconc.exe' | Select-Object -First 1 }
     if (-not $nefc) { throw "nefconc.exe not found in $NefconUrl" }
     Copy-Item $nefc.FullName (Join-Path $OutDir 'nefconc.exe') -Force

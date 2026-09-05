@@ -38,8 +38,10 @@ type Rtv = d3d::ID3D11RenderTargetView;
 type Srv = d3d::ID3D11ShaderResourceView;
 
 /// The pooled device's adapter, as the backends want it named: the LUID for NVENC/AMF/QSV,
-/// the PCI ids for PyroWave (LUIDs are invalid in session 0).
+/// the PCI ids for PyroWave (LUIDs are invalid in session 0). Without PyroWave (ARM64) the
+/// PCI ids have no reader outside the probe build.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub struct AdapterId {
     pub luid: LUID,
     pub vendor_id: u32,

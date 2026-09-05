@@ -26,6 +26,7 @@ function info($m) { Write-Host "[provision-wdk] $m" }
 $kitRoot  = 'C:\Program Files (x86)\Windows Kits\10'
 $iddcxInc = Join-Path $kitRoot "Include\$SdkVersion\um\iddcx"   # iddcx ships ONLY with the WDK -> reliable "installed" signal
 $kmDir    = Join-Path $kitRoot "Include\$SdkVersion\km"          # kernel-mode SDK headers (ntddk/wdm) — also WDK-only
+$iddcxA64 = Join-Path $kitRoot "Lib\$SdkVersion\um\arm64\iddcx"  # the ARM64 host leg links IddCxStub from here
 
 # ---- 1. WDK ---- (iddcx presence is the reliable "WDK installed" signal)
 if (Test-Path $iddcxInc) {
@@ -75,6 +76,7 @@ found 'Include\wdf\umdf vers' "[$umdfVers]"
 found 'wdf.h'                 ($(if ($umdfHdr) { $umdfHdr } else { 'MISSING' }))
 found 'km SDK headers'        ($(if (Test-Path $kmDir) { $kmDir } else { 'MISSING' }))
 found 'um/iddcx versions'     "[$iddcxVers]"
+found 'Lib um/arm64/iddcx'    ($(if (Test-Path $iddcxA64) { $iddcxA64 } else { 'MISSING' }))
 foreach ($t in 'inf2cat.exe','stampinf.exe','signtool.exe','makecat.exe','InfVerif.exe') {
   $hit = Get-ChildItem -Path $kitRoot -Filter $t -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
   found $t ($(if ($hit) { $hit } else { 'MISSING' }))
@@ -86,6 +88,6 @@ found 'default libclang'      ($(if (Test-Path $defClang) { $defClang } else { '
 
 # Block only on the genuinely build-essential pieces (headers + iddcx + cargo-wdk).
 # inf2cat arch quirks are non-fatal — cargo-wdk locates the WDK tools itself.
-$essential = ($null -ne $umdfHdr) -and (Test-Path $kmDir) -and ($iddcxVers -ne '') -and ($cw -match 'wdk')
-if (-not $essential) { throw "provisioning incomplete: need wdf.h + km headers + iddcx + cargo-wdk (see above)" }
+$essential = ($null -ne $umdfHdr) -and (Test-Path $kmDir) -and ($iddcxVers -ne '') -and (Test-Path $iddcxA64) -and ($cw -match 'wdk')
+if (-not $essential) { throw "provisioning incomplete: need wdf.h + km headers + iddcx (x64 + arm64 libs) + cargo-wdk (see above)" }
 info "WDK + cargo-wdk provisioned OK. Driver builds use Version_Number=$SdkVersion + the runner-default clang (bindgen 0.72)."

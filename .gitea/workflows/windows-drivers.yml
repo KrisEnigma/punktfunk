@@ -210,3 +210,17 @@ jobs:
         # LAST on purpose: same profile and target dir, so it overwrites pf_vdisplay.dll and would
         # otherwise hand the PE-inspection steps above the probe DLL instead of the shipped one.
         run: ../drivers-cargo.ps1 'build -p pf-vdisplay --features encode-probe -v'
+      - name: cargo build + clippy the driver workspace for aarch64-pc-windows-msvc
+        # The ARM64 host leg (#298). Same x64 runner: the MSVC ARM64 cross compiler and the WDK's
+        # um\arm64 libs are provisioned above. Build + lint only, the DLLs cannot run here. Debug
+        # profile like the x64 steps; the encoder features drop out via the driver's target table.
+        run: |
+          ../drivers-cargo.ps1 'build --target aarch64-pc-windows-msvc -p pf-vdisplay -p pf-gamepad -p pf-mouse -p pf-xusb -v'
+          ../drivers-cargo.ps1 'clippy --target aarch64-pc-windows-msvc -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --all-targets -- -D warnings'
+          $dll = "target\aarch64-pc-windows-msvc\debug\pf_vdisplay.dll"
+          if (-not (Test-Path $dll)) { throw "ARM64 pf_vdisplay.dll not produced at $dll" }
+          $b = [IO.File]::ReadAllBytes($dll)
+          $pe = [BitConverter]::ToInt32($b, 0x3c)
+          $machine = [BitConverter]::ToUInt16($b, $pe + 4)   # FileHeader.Machine: 0xAA64 = ARM64
+          if ($machine -ne 0xAA64) { throw ("ARM64 pf_vdisplay.dll has Machine 0x{0:X4}, expected 0xAA64" -f $machine) }
+          Write-Host ("ARM64 pf_vdisplay.dll built OK ({0:N0} bytes, Machine 0xAA64)" -f (Get-Item $dll).Length)

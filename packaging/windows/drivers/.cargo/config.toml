@@ -4,9 +4,12 @@
 # Setting an EXPLICIT build target is the trick that makes `target-feature=+crt-static` apply ONLY to the
 # driver cdylib and NOT to host build-scripts/proc-macros (which must stay dynamic-CRT): with an explicit
 # --target, cargo compiles host artifacts for the implicit host and the `[target.<triple>]` rustflags
-# apply only to the target. The Windows host (and thus its drivers) is x64-only by design.
+# apply only to the target. x64 is the default; the ARM64 leg passes `--target` explicitly.
 [build]
 target = "x86_64-pc-windows-msvc"
 
 [target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
