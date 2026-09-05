@@ -111,6 +111,10 @@ pub(crate) enum ToastKind {
     Error,
 }
 
+/// How long an armed exit stays armed. Long enough to be a deliberate second press, short
+/// enough that a Back pressed minutes later is a fresh accident rather than a confirmation.
+const EXIT_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Mark ahead of toast text. Geometric on purpose: glyph art is Skia paths
 /// that must read from 0.75× to 3× `k`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -275,6 +279,9 @@ pub(crate) struct Shell {
     /// window or navigation races the wake ungated.
     wake_optimistic: bool,
     toast: Option<Toast>,
+    /// When Back at the root was last pressed, where that press has to be repeated to exit.
+    /// See [`EXIT_CONFIRM_WINDOW`].
+    exit_armed: Option<std::time::Instant>,
     mesh: RuntimeEffect,
     /// Palette id baked into `mesh`. [`Self::sync`] recompiles when
     /// `settings.ui_palette` moves.
@@ -372,6 +379,7 @@ impl Shell {
             wake: None,
             wake_optimistic: false,
             toast: None,
+            exit_armed: None,
             mesh,
             mesh_lift,
             mesh_scrim,
@@ -1256,12 +1264,32 @@ impl Shell {
                 if self.stack.len() > 1 {
                     let leaving = self.stack.pop().expect("len > 1");
                     self.begin_nav(NavKind::Pop, Some(Box::new(leaving)));
+                } else if self.exit_needs_confirming() {
+                    // B at home is the app's exit, and on a TV remote it is the same button
+                    // the user has been backing out of screens with — so it lands by accident.
+                    // Armed once, fired on the repeat, in the shell's own press-again idiom
+                    // rather than a modal it has no other use for.
+                    self.exit_armed = Some(std::time::Instant::now());
+                    self.show_toast("Press Back again to exit".to_string());
                 } else {
-                    // B at home: pop of the root quits.
+                    self.exit_armed = None;
                     self.actions.push_back(OverlayAction::Quit);
                 }
             }
         }
+    }
+
+    /// Whether Back at the root should arm rather than quit.
+    ///
+    /// webOS only for now: there the shell IS the app, and Back is the same key used to leave
+    /// every screen, so one press too many closes it. A Deck's B at the root is a deliberate
+    /// exit to Gaming Mode and stays immediate — widening this is a line here.
+    fn exit_needs_confirming(&self) -> bool {
+        if self.platform != Platform::WebOS {
+            return false;
+        }
+        self.exit_armed
+            .is_none_or(|t| t.elapsed() >= EXIT_CONFIRM_WINDOW)
     }
 
     /// In-flight spring position. `1.0` when there is no transition, so

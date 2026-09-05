@@ -95,6 +95,12 @@ enum RowId {
     /// off strands the user with no UI.
     GamepadUi,
     GamepadUiMode,
+    /// Which path decodes the stream's audio on a TV — see `WEBOS_AUDIO_ROUTES`. webOS only:
+    /// the offload route is that client's NDL audio plane, which no other platform has.
+    AudioRoute,
+    /// Long-press the remote's OK to send a right click. webOS only — it exists because a
+    /// Magic Remote has no second button.
+    CursorGestures,
     /// Action row: opens the in-process controllers screen.
     Controllers,
     /// Action row: asks the host to open the platform licences screen.
@@ -110,6 +116,17 @@ mod android_keys {
     pub const DS_CAPTURE: &str = "android.ds_capture";
     pub const REDUCE_UI_RES: &str = "android.reduce_ui_resolution";
 }
+
+/// The `Settings::extra` keys the webOS rows share with that client (`services::store::shared`),
+/// which namespaces everything only it models.
+mod webos_keys {
+    pub const AUDIO_ROUTE: &str = "webos.audio_route";
+    pub const CURSOR_GESTURES: &str = "webos.cursor_gestures";
+}
+
+/// Stored `webos.audio_route` values, spelled as that client's enum serializes.
+const WEBOS_AUDIO_ROUTES: [(&str, &str); 2] =
+    [("software", "Software (SDL)"), ("ndlopus", "Offload (NDL)")];
 
 /// The console-vs-fallback pair, unprefixed: webOS carries the same two keys (its
 /// fallback is the cursor UI, not a touch home), so they name a concept rather than
@@ -188,6 +205,7 @@ const TABS: [(&str, &[RowId]); 7] = [
         "Audio",
         &[
             RowId::Audio,
+            RowId::AudioRoute,
             RowId::AudioFormat,
             RowId::KeepHostAudio,
             RowId::Mic,
@@ -216,6 +234,7 @@ const TABS: [(&str, &[RowId]); 7] = [
         &[
             RowId::Touch,
             RowId::Mouse,
+            RowId::CursorGestures,
             RowId::InvertScroll,
             RowId::Shortcuts,
             RowId::QuickActions,
@@ -269,6 +288,29 @@ const BITRATES: [u32; 30] = [
 ];
 /// Typed-field ceiling in Mbps — the ladder's top. Host range is 500 kbps–8 Gbps.
 const CUSTOM_MAX_MBPS: u32 = 2_000;
+
+/// The highest fixed bitrate this client may be set to, in kbps.
+///
+/// webOS is the one platform with a real ceiling: the TV client bounds its own slider at
+/// 200 Mbps and clamps the document to it, so a shell offering more would write a number the
+/// classic menus take straight back off again. Everywhere else the ladder's own top stands.
+fn bitrate_ceiling_kbps(platform: crate::platform::Platform) -> u32 {
+    match platform {
+        crate::platform::Platform::WebOS => 200_000,
+        crate::platform::Platform::Desktop | crate::platform::Platform::Android => {
+            CUSTOM_MAX_MBPS * 1_000
+        }
+    }
+}
+
+/// How many ladder rungs this platform may reach — everything up to its ceiling.
+fn bitrate_rungs(platform: crate::platform::Platform) -> usize {
+    let ceiling = bitrate_ceiling_kbps(platform);
+    BITRATES
+        .iter()
+        .position(|b| *b > ceiling)
+        .unwrap_or(BITRATES.len())
+}
 const COMPOSITORS: [(&str, &str); 5] = [
     ("auto", "Automatic"),
     ("kwin", "KWin"),
@@ -422,7 +464,8 @@ impl SettingsScreen {
         }
         // Rebase first: another writer may have stored the file while the keyboard was up.
         *ctx.settings = ctx.store.load();
-        ctx.settings.bitrate_kbps = mbps.min(CUSTOM_MAX_MBPS) * 1000;
+        let ceiling_mbps = bitrate_ceiling_kbps(ctx.platform) / 1_000;
+        ctx.settings.bitrate_kbps = mbps.min(ceiling_mbps) * 1000;
         ctx.store.save(ctx.settings);
     }
 
@@ -886,6 +929,8 @@ fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         // DualSense capture — the pad reaches webOS over Bluetooth HID, not hidraw, so the
         // concept is real there too (punktfunk-webos docs/NOTES.md).
         RowId::DsCapture => &[Android, WebOS],
+        // That client's own audio plane and its remote's missing second button.
+        RowId::AudioRoute | RowId::CursorGestures => &[WebOS],
         // Decoder choice, chroma/bit-depth and the window-manager knobs: the TV decodes
         // through NDL and has no window manager, so none of these is a control it could obey.
         RowId::Decoder
@@ -1187,6 +1232,20 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
             "DualSense over USB",
             on_off(extra_bool(s, android_keys::DS_CAPTURE, true)).into(),
         ),
+        RowId::AudioRoute => (
+            None,
+            "Audio processing",
+            label_for(
+                &WEBOS_AUDIO_ROUTES,
+                extra_str(s, webos_keys::AUDIO_ROUTE, "software"),
+            )
+            .into(),
+        ),
+        RowId::CursorGestures => (
+            None,
+            "Long press to right-click",
+            on_off(extra_bool(s, webos_keys::CURSOR_GESTURES, false)).into(),
+        ),
         RowId::GamepadUi => (
             None,
             "Controller-optimized UI",
@@ -1410,6 +1469,14 @@ fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         }
         // The other UI is named, not called "the other UI": the sentence has to tell
         // the reader where "off" lands, and that is a different place per client.
+        RowId::AudioRoute => {
+            "Where the stream's audio is decoded. Offload hands the TV's own plane the Opus \
+             stream and spends no CPU on it — stereo only, and not every set plays it."
+        }
+        RowId::CursorGestures => {
+            "Hold OK to send a right click, for a remote with no second button. Off, OK stays \
+             the plain immediate left click."
+        }
         RowId::GamepadUi => match platform {
             Platform::Desktop | Platform::Android => {
                 "Front the app with this console instead of the touch interface. Off returns \
@@ -1493,6 +1560,7 @@ fn audio_format_label(value: &str) -> &'static str {
 /// Step (`wrap=false`, clamp; `None` = boundary) or cycle (`wrap=true`).
 /// Toggles: left = off, right = on. A no-op is a boundary.
 fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
+    let platform = ctx.platform;
     let s = &mut *ctx.settings;
     match id {
         RowId::Resolution => {
@@ -1528,16 +1596,21 @@ fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             }
             // Off-ladder must not snap to Automatic (index 0). Step to the neighbour
             // the thumb is heading for.
-            let stepped = match BITRATES.iter().position(|b| *b == s.bitrate_kbps) {
-                Some(i) => step_option(Some(i), BITRATES.len(), delta, wrap),
-                None if delta < 0 => BITRATES.iter().rposition(|b| *b < s.bitrate_kbps),
+            // Only the rungs this platform may reach — see [`bitrate_rungs`]. A value stored
+            // above them (set on another client, or in a shared profile) still steps DOWN
+            // from where it is rather than being silently rewritten here.
+            let rungs = &BITRATES[..bitrate_rungs(platform)];
+            let stepped = match rungs.iter().position(|b| *b == s.bitrate_kbps) {
+                Some(i) => step_option(Some(i), rungs.len(), delta, wrap),
+                None if delta < 0 => rungs.iter().rposition(|b| *b < s.bitrate_kbps),
                 // Above the ceiling: wrap goes to Automatic; clamp thuds.
-                None => BITRATES
-                    .iter()
-                    .position(|b| *b > s.bitrate_kbps)
-                    .or(if wrap { Some(0) } else { None }),
+                None => rungs.iter().position(|b| *b > s.bitrate_kbps).or(if wrap {
+                    Some(0)
+                } else {
+                    None
+                }),
             };
-            stepped.map(|i| s.bitrate_kbps = BITRATES[i])
+            stepped.map(|i| s.bitrate_kbps = rungs[i])
         }
         RowId::Compositor => step_str(&COMPOSITORS, &mut s.compositor, delta, wrap),
         RowId::Codec => step_str(&CODECS, &mut s.codec, delta, wrap),
@@ -1680,6 +1753,16 @@ fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
         RowId::PhoneGyro => toggle_extra(s, android_keys::PHONE_GYRO, false, delta, wrap),
         RowId::Sc2Passthrough => toggle_extra(s, android_keys::SC2, true, delta, wrap),
         RowId::DsCapture => toggle_extra(s, android_keys::DS_CAPTURE, true, delta, wrap),
+        RowId::CursorGestures => toggle_extra(s, webos_keys::CURSOR_GESTURES, false, delta, wrap),
+        RowId::AudioRoute => {
+            let mut v = extra_str(s, webos_keys::AUDIO_ROUTE, "software").to_string();
+            step_str(&WEBOS_AUDIO_ROUTES, &mut v, delta, wrap).map(|()| {
+                s.extra.insert(
+                    webos_keys::AUDIO_ROUTE.to_string(),
+                    serde_json::Value::String(v),
+                );
+            })
+        }
         RowId::GamepadUi => toggle_extra(s, GAMEPAD_UI_KEY, true, delta, wrap),
         RowId::GamepadUiMode => {
             let mut v = extra_str(s, GAMEPAD_UI_MODE_KEY, "connected").to_string();
@@ -2490,11 +2573,13 @@ pub(crate) mod tests {
             off_desktop,
             vec![
                 RowId::LowLatency,
+                RowId::AudioRoute,
                 RowId::PhoneRumble,
                 RowId::PhoneGyro,
                 RowId::Sc2Passthrough,
                 RowId::DsCapture,
                 RowId::Controllers,
+                RowId::CursorGestures,
                 RowId::ReduceUiResolution,
                 RowId::GamepadUi,
                 RowId::GamepadUiMode,
@@ -2514,13 +2599,18 @@ pub(crate) mod tests {
                 RowId::TenBitSdr,
                 RowId::Vsync,
                 RowId::AllowVrr,
+                RowId::AudioRoute,
+                RowId::CursorGestures,
                 RowId::Shortcuts,
                 RowId::Fullscreen,
             ]
         );
-        assert!(all
-            .iter()
-            .all(|id| row_on(*id, Platform::Desktop) || row_on(*id, Platform::Android)));
+        // Every row reaches at least one platform: a row listed in a tab and offered nowhere
+        // is dead weight the tab still spends a line on. webOS is in the set because it now
+        // has rows of its own — its audio plane, and a remote with no second button.
+        assert!(all.iter().all(|id| row_on(*id, Platform::Desktop)
+            || row_on(*id, Platform::Android)
+            || row_on(*id, Platform::WebOS)));
     }
 
     #[test]
@@ -2566,6 +2656,46 @@ pub(crate) mod tests {
         });
     }
 
+    /// webOS bounds its own slider at 200 Mbps and clamps the document to it, so the shell
+    /// must not offer more there — and must not take anything away from the others.
+    #[test]
+    fn the_bitrate_ceiling_is_webos_only() {
+        use crate::platform::Platform;
+        assert_eq!(bitrate_ceiling_kbps(Platform::WebOS), 200_000);
+        assert_eq!(
+            bitrate_ceiling_kbps(Platform::Desktop),
+            *BITRATES.last().expect("rungs"),
+            "the ladder's own top still stands off the TV"
+        );
+        assert_eq!(
+            bitrate_ceiling_kbps(Platform::Android),
+            bitrate_ceiling_kbps(Platform::Desktop)
+        );
+
+        // Stepping up from the rung below the cap lands ON it and goes no further.
+        with_ctx(|ctx| {
+            ctx.platform = Platform::WebOS;
+            ctx.settings.bitrate_kbps = 150_000;
+            assert!(adjust(RowId::Bitrate, 1, false, ctx));
+            assert_eq!(ctx.settings.bitrate_kbps, 200_000);
+            assert!(
+                !adjust(RowId::Bitrate, 1, false, ctx),
+                "200 Mbps is the last rung a TV may reach"
+            );
+            assert_eq!(ctx.settings.bitrate_kbps, 200_000);
+            // Down still works, so the cap is a ceiling and not a trap.
+            assert!(adjust(RowId::Bitrate, -1, false, ctx));
+            assert_eq!(ctx.settings.bitrate_kbps, 150_000);
+        });
+
+        // The same step on a desktop keeps climbing.
+        with_ctx(|ctx| {
+            ctx.settings.bitrate_kbps = 200_000;
+            assert!(adjust(RowId::Bitrate, 1, false, ctx));
+            assert_eq!(ctx.settings.bitrate_kbps, 250_000);
+        });
+    }
+
     #[test]
     fn every_row_has_exactly_one_tab() {
         let mut seen: Vec<RowId> = Vec::new();
@@ -2575,7 +2705,7 @@ pub(crate) mod tests {
                 seen.push(*id);
             }
         }
-        assert_eq!(seen.len(), 49, "{seen:?}");
+        assert_eq!(seen.len(), 51, "{seen:?}");
         assert!(seen.contains(&RowId::FollowOsTheme));
         assert!(seen.contains(&RowId::Palette));
         assert!(seen.contains(&RowId::ReduceMotion));
