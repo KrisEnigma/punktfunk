@@ -293,6 +293,17 @@ fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
     allowed.is_empty() || origin.is_some_and(|o| allowed.iter().any(|a| a == o))
 }
 
+/// May this plane bind at all?
+///
+/// `serve --open` waives the device signature, so the origin list becomes the only thing between
+/// the desktop and any page the user has open — and a page needs no certificate trust to dial,
+/// because `serverCertificateHashes` never consults the trust store. Either choice alone is an
+/// operator's to make. Together they are a machine any website can drive, and a startup refusal
+/// is the honest answer: unpaired is what `--open` asked for, unreachable is not.
+pub fn is_confined(require_pairing: bool, origins: &[String]) -> bool {
+    require_pairing || !origins.is_empty()
+}
+
 /// One browser session: check the origin, take a session slot, then hand the connection to
 /// [`session::run`]. `/echo` keeps Phase 1's loopback for the measurement pages.
 async fn session(
@@ -473,6 +484,20 @@ mod tests {
         // Unconfigured means "any", which is what a host with no console setting has to mean.
         assert!(origin_allowed(Some("https://anything"), &[]));
         assert!(origin_allowed(None, &[]));
+    }
+
+    /// `--open` and an empty origin list are each an operator's choice; together they are a
+    /// desktop any page can drive, because nothing else stands in front of the session.
+    #[test]
+    fn an_open_plane_must_name_the_pages_that_may_reach_it() {
+        let named = vec!["https://web.punktfunk.io".to_string()];
+        assert!(is_confined(true, &[]), "pairing carries it alone");
+        assert!(
+            is_confined(false, &named),
+            "the origin list carries it alone"
+        );
+        assert!(is_confined(true, &named));
+        assert!(!is_confined(false, &[]), "neither: refuse to bind");
     }
 
     /// The whole point of the attestation: a browser holding only a host fingerprint can decide

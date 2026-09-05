@@ -66,9 +66,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   returns a nonce, `POST /api/v1/auth/device/token` exchanges a signature by a paired device key
   for a short-lived bearer token. That token reaches exactly the paired-certificate route set and
   nothing more, so a browser can read the library it could not reach before.
-- **The management API answers cross-origin requests.** A page that is not served by the host
-  could not read a response at all. `Access-Control-Allow-Credentials` is never sent — the API
-  has no cookies — and `PUNKTFUNK_WEBTRANSPORT_ORIGINS` narrows which origins are answered.
+- **The management API answers cross-origin requests, where a host serves browsers.** The headers
+  appear only once the plane is running or `PUNKTFUNK_WEBTRANSPORT_ORIGINS` names the pages that
+  may call, and `Access-Control-Allow-Credentials` is never sent because the API has no cookies.
+  Set the origins list when you serve the browser client from a fixed page; an empty list still
+  means any origin, but now only on a host that enabled the plane.
 - **`@punktfunk/host` 0.2.0 runs in a browser.** `@punktfunk/host/core` is the SDK with nothing
   Node in it — the generated client, the service, the errors, the event decoder — and a
   `Credential` seam with `staticBearer` (every credential it had) and `deviceKey` (a paired
@@ -385,6 +387,19 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   the Polaris/Vega driver branch (frozen at 1.4.31) never reaches, so RX 400/500 and Vega hosts
   failed every session. Nothing to do; such a host now encodes on the core path and the newer
   optional properties degrade individually.
+
+### Security
+
+- **`GET /api/v1/local/summary` is never answered cross-origin.** It is admitted by loopback with
+  no credential, so the same-origin policy was the only thing keeping a page off it, and the CORS
+  layer now exempts every route authorised by network position. Nothing to do: a host that never
+  enabled the browser plane no longer sends CORS headers at all.
+- **`serve --open` with the browser plane refuses to start.** `--open` waives the device signature
+  and an empty origin list admits any page, which together let any website the user visits stream
+  and inject input. Set `PUNKTFUNK_WEBTRANSPORT_ORIGINS`, or drop `--open`.
+- **The device-auth nonce cap evicts one challenge, not all of them.** An unauthenticated caller
+  could flush every outstanding nonce with 256 requests to `POST /api/v1/auth/device/challenge`,
+  cancelling a real browser's exchange in flight. Nothing to do.
 
 ---
 

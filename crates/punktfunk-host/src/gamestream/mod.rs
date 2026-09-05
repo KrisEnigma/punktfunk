@@ -561,6 +561,9 @@ pub fn serve(
                 pairing: np.clone(),
                 require_pairing: native.require_pairing,
             });
+        // Read before `web` is moved into the native plane below. The management API answers a
+        // cross-origin call only where there is a browser to answer.
+        let browser_plane = web.is_some();
         // `host.started` as the planes come up; `host.stopping` on clean or error exit
         // so a consumer that reconnects still sees it.
         crate::events::emit(crate::events::EventKind::HostStarted {
@@ -604,6 +607,7 @@ pub fn serve(
                         stats.clone(),
                         gamestream,
                         native_ident.clone(),
+                        browser_plane,
                     ),
                     crate::native::serve(
                         native_opts,
@@ -630,6 +634,7 @@ pub fn serve(
                     stats.clone(),
                     gamestream,
                     native_ident.clone(),
+                    browser_plane,
                 ),
                 crate::native::serve(
                     native_opts,

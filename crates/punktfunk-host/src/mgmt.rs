@@ -183,6 +183,9 @@ pub async fn run(
     // Same identity as native QUIC — paired clients pin one fingerprint for
     // both. The caller resolves once and hands it to both.
     identity: crate::identity::NativeIdentity,
+    // Whether the browser plane is running, which is the only reason to answer
+    // a cross-origin call at all. See `mgmt::cors`.
+    browser_plane: bool,
 ) -> Result<()> {
     // Close a leftover apply-intent from the previous boot (`update/jobs.rs`).
     // Once per process, before serving.
@@ -229,12 +232,13 @@ pub async fn run(
         crate::client_logs::default_dir(),
         gamestream_enabled,
         identity_fingerprint,
+        browser_plane,
     );
     serve_https(opts.bind, app, tls).await
 }
 
 /// Handler tests call this directly (not only [`run`]).
-#[allow(clippy::too_many_arguments)] // composition root: one param per `MgmtState` field
+#[allow(clippy::too_many_arguments)] // composition root: a param per `MgmtState` field, plus CORS
 fn app(
     state: Arc<AppState>,
     token: Option<String>,
@@ -246,6 +250,9 @@ fn app(
     client_logs_dir: std::path::PathBuf,
     gamestream_enabled: bool,
     identity_fingerprint: Option<[u8; 32]>,
+    // Whether the WebTransport plane is running. State only for `cors::enabled`, so it is not
+    // on `MgmtState` — no handler asks.
+    browser_plane: bool,
 ) -> Router {
     let shared = Arc::new(MgmtState {
         app: state,
@@ -260,14 +267,22 @@ fn app(
         identity_fingerprint,
     });
     let (api_routes, api) = api_router_parts();
-    api_routes
-        .route_layer(middleware::from_fn_with_state(
-            shared.clone(),
-            auth::require_auth,
-        ))
-        // Outside the auth gate, because a CORS preflight carries no credential and must be
-        // answered rather than refused. See `mgmt::cors`.
-        .layer(middleware::from_fn(cors::cors))
+    let routed = api_routes.route_layer(middleware::from_fn_with_state(
+        shared.clone(),
+        auth::require_auth,
+    ));
+    // Outside the auth gate, because a CORS preflight carries no credential and must be
+    // answered rather than refused. Absent entirely on a host that serves no browsers, so a
+    // plane nobody enabled cannot widen what a page may read. See `mgmt::cors`.
+    let routed = if cors::enabled(
+        browser_plane,
+        &pf_host_config::config().webtransport_origins,
+    ) {
+        routed.layer(middleware::from_fn(cors::cors))
+    } else {
+        routed
+    };
+    routed
         .with_state(shared)
         .merge(Scalar::with_url("/api/docs", api.clone()))
         .route(
