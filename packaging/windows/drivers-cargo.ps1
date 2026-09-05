@@ -28,7 +28,7 @@
 # A single quoted string reaches us intact and only cargo parses it.
 param([string]$CommandLine)
 # @() is load-bearing: a one-word command line leaves a scalar, and splatting a string
-# passes it one CHARACTER per argument — `build` reaches cargo as `b u i l d`.
+# passes it one CHARACTER per argument - `build` reaches cargo as `b u i l d`.
 $CargoArgs = @($CommandLine -split '\s+' | Where-Object { $_ -ne '' })
 
 $ErrorActionPreference = 'Continue'
