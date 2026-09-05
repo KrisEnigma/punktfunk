@@ -1,9 +1,11 @@
 //! The punktfunk mark: two discs and the lens where they overlap, on the theme's accent.
 //!
 //! Geometry is the app icon's (`Punktfunk_App-Icon_512.svg`): equal discs of radius a third of
-//! the box, centres offset by `(r, -r)`, so the lens runs from lower left to upper right. The
-//! colours follow [`crate::theme`]'s accent rather than the brand violet, so the mark reads on
-//! every palette the same way the rest of the chrome does.
+//! the box, centres offset by `(r, -r)`, and a highlight that is NOT their overlap — it is the
+//! lens between the deep disc and a copy of itself shifted one radius down the axis, so it runs
+//! from the deep rim to the deep centre with its tips 60° either side of the axis, lit from
+//! nothing at the rim to the foreground at the centre. The colours follow [`crate::theme`]'s
+//! accent rather than the brand violet, so the mark reads on every palette like the chrome.
 //!
 //! [`draw`] also plays the website's one-shot entrance (`BrandMark.tsx`): the discs orbit in
 //! antiphase on an axis into the screen — swelling toward and away from the viewer with a small
@@ -11,7 +13,7 @@
 //! tail. The caller owns the clock: pass [`intro_progress`] of the seconds since the mark first
 //! showed, or `1.0` for the resting mark. Honours [`crate::theme::reduce_motion`].
 
-use skia_safe::{Canvas, Color4f};
+use skia_safe::{gradient, Canvas, ClipOp, Color4f, Path, Point, TileMode};
 
 use crate::theme::{accent, fg, fill, reduce_motion};
 
@@ -80,24 +82,36 @@ pub fn draw(canvas: &Canvas, x: f32, y: f32, side: f32, intro: f32) {
             &paint,
         );
     }
-    // The lens is the resting discs' overlap, scaled about its own centre as it fades in — the
-    // crisp shape only reads once the discs have settled onto it.
+    // The highlight fades and scales in about its own centre once the discs are nearly home —
+    // the crisp shape only reads against settled discs.
     let lens = ease_out_quint(((intro - LENS_FROM) / LENS_LEN).clamp(0.0, 1.0));
     if lens <= 0.0 {
         return;
     }
-    let (cx, cy) = ((light.0 + deep.0) / 2.0, (light.1 + deep.1) / 2.0);
+    let shift = r * std::f32::consts::FRAC_1_SQRT_2;
+    let rim = (deep.0 - shift, deep.1 + shift);
+    let (cx, cy) = ((rim.0 + deep.0) / 2.0, (rim.1 + deep.1) / 2.0);
     let grow = 0.6 + 0.4 * lens;
     canvas.save();
     canvas.translate((cx, cy));
     canvas.scale((grow, grow));
     canvas.translate((-cx, -cy));
-    let lens_clip = skia_safe::Path::circle(light, r, None);
-    canvas.clip_path(&lens_clip, skia_safe::ClipOp::Intersect, true);
-    let mut c = toward_fg(0.68);
-    c.a = lens;
-    paint.set_color4f(c, None);
-    canvas.draw_circle(deep, r, &paint);
+    canvas.clip_path(&Path::circle(rim, r, None), ClipOp::Intersect, true);
+    let mut from = toward_fg(0.68);
+    from.a = 0.0;
+    let mut to = fg(1.0);
+    to.a = lens;
+    let mut glow = fill(to);
+    glow.set_anti_alias(true);
+    glow.set_shader(gradient::shaders::linear_gradient(
+        (Point::new(rim.0, rim.1), Point::new(deep.0, deep.1)),
+        &gradient::Gradient::new(
+            gradient::Colors::new_evenly_spaced(&[from, to], TileMode::Clamp, None),
+            gradient::Interpolation::default(),
+        ),
+        None,
+    ));
+    canvas.draw_circle(deep, r, &glow);
     canvas.restore();
 }
 
