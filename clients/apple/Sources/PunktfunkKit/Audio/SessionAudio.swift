@@ -400,7 +400,7 @@ public final class SessionAudio {
                 #if os(iOS)
                 self.steerBuiltInOutputToSpeaker(AVAudioSession.sharedInstance())
                 #endif
-                DispatchQueue.main.async { self.reviveStoppedEngines("the audio route changed") }
+                self.reviveStoppedEngines("the audio route changed")
             }
         }
         stateLock.lock()
@@ -673,18 +673,28 @@ public final class SessionAudio {
 
     /// Restart the engines if — and only if — playback is down. The conservative trigger: it is
     /// what a route change (iOS/tvOS) and the macOS backstop get to do, since a HEALTHY engine
-    /// that followed the change on its own must not be interrupted for it.
+    /// that followed the change on its own must not be interrupted for it. Safe from any thread.
+    ///
+    /// The liveness check runs on `engineQueue`, BEHIND any start or rebuild in flight. A
+    /// voice-processing start takes about a second and posts route changes of its own, so a check
+    /// made on the main queue found the engines mid-swap, read that as "stopped", and scheduled
+    /// the rebuild that would trigger the next one — the iPad mic-on loop, one rebuild per
+    /// backoff step for the whole session.
     ///
     /// Gated on a start having been ATTEMPTED rather than on an engine existing, which is the
     /// difference between recovering a session whose very first `startPlayback` failed — no
-    /// output device at the moment it connected — and leaving it silent for good. On iOS the same
-    /// flag keeps this from racing the asynchronous start, where no engine yet is normal.
+    /// output device at the moment it connected — and leaving it silent for good.
     private func reviveStoppedEngines(_ reason: String) {
-        stateLock.lock()
-        let attempted = enginesAttempted
-        stateLock.unlock()
-        guard !flag.isStopped, attempted, !playbackIsLive else { return }
-        scheduleEngineRebuild(reason: "playback is stopped and \(reason)")
+        engineQueue.async { [weak self] in
+            guard let self, !self.flag.isStopped else { return }
+            self.stateLock.lock()
+            let attempted = self.enginesAttempted
+            self.stateLock.unlock()
+            guard attempted, !self.playbackIsLive else { return }
+            DispatchQueue.main.async {
+                self.scheduleEngineRebuild(reason: "playback is stopped and \(reason)")
+            }
+        }
     }
 
     /// Is the render side actually running? Both engines can carry it (`combinedEngine` when the
@@ -865,9 +875,7 @@ public final class SessionAudio {
                 // The full activation, not a bare `setActive`: an interruption can drop the
                 // category configuration too, and on iOS the earpiece steer is per-route.
                 self.activateAudioSession(micEnabled: micEnabled)
-                DispatchQueue.main.async {
-                    self.reviveStoppedEngines("an audio interruption ended")
-                }
+                self.reviveStoppedEngines("an audio interruption ended")
             }
         }
         stateLock.lock()
