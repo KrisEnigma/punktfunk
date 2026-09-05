@@ -14,7 +14,7 @@
   CLEAR the FORCE_INTEGRITY PE bit (wdk-build links /INTEGRITYCHECK, which a non-EV cert can't satisfy) ->
   sign the .dll -> stampinf a strictly-increasing DriverVer into the INF -> Inf2Cat the catalog -> sign the
   catalog -> export the public .cer. Output (-Out): pf_vdisplay.{dll,inf,cat} + punktfunk-driver.cer,
-  plus pf_vdisplay_seats.{inf,cat} — the same driver claiming the seat display ids, which the seats
+  plus pf_vdisplay_seats.{inf,cat} - the same driver claiming the seat display ids, which the seats
   add-on installs INSTEAD of nothing and which nobody else should install (see below).
 
   Requires the WDK build env: cargo + the x64 MSVC toolset (its ARM64 cross compiler for -Arch arm64), an LLVM compatible with the driver's bindgen
@@ -142,7 +142,7 @@ Copy-Item $inx $sInf -Force   # stampinf rewrites this copy in place
 
 # The SEATS variant, built from the same .inx and signed with the same key. It exists because
 # claiming `RdpIdd_IndirectDisplay` takes over EVERY RDP session on the machine, so it cannot ride
-# the package everyone installs — but the seats add-on cannot mint it either, having neither the
+# the package everyone installs - but the seats add-on cannot mint it either, having neither the
 # DLL nor the signing key. Two packages, one build, and the installer chooses.
 # It claims ONLY the seat ids, so it never competes for the console `Root\pf_vdisplay` node.
 $sInfSeats = Join-Path $Out 'pf_vdisplay_seats.inf'
@@ -170,7 +170,7 @@ if ($LASTEXITCODE -ne 0) { throw "signtool sign (dll) failed ($LASTEXITCODE)" }
 & $stampinf -f $sInf -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
 # Same DriverVer on both: the date is what wins `RdpIdd_IndirectDisplay` against the inbox driver,
 # whose rank is identical to ours and whose date is frozen at 06/21/2006. A seats package stamped
-# older than inbox loses the id silently (`windows-seat-display-tier.md` §5d).
+# older than inbox loses the id silently (`windows-seat-display-tier.md` sec 5d).
 & $stampinf -f $sInfSeats -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
 & $inf2cat /driver:$Out /os:$catOs /uselocaltime | Out-Null
 if (-not (Test-Path $sCat)) { throw "Inf2Cat did not produce $sCat" }

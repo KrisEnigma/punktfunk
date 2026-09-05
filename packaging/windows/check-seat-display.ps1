@@ -5,13 +5,13 @@
 .DESCRIPTION
   The seats add-on needs `pf_vdisplay_seats.inf` to win the hardware id `RdpIdd_IndirectDisplay`,
   and losing it is SILENT: the seat session still starts, on Microsoft's own remote display adapter,
-  and only the missing stream says otherwise. So this asserts the thing that matters — WHICH driver
-  bound each seat devnode — rather than that a session came up.
+  and only the missing stream says otherwise. So this asserts the thing that matters - WHICH driver
+  bound each seat devnode - rather than that a session came up.
 
   Winning that id is not about the certificate. Inbox `rdpidd.inf` reports the same driver rank we
   do (0x00FF0000), and the tie goes to the newer DriverVer DATE; inbox is frozen at 06/21/2006, so
   any current build wins until a servicing update re-dates it. That is the failure this exists to
-  catch (planning `windows-seat-display-tier.md` §5d).
+  catch (planning `windows-seat-display-tier.md` sec 5d).
 
   Exit 0 = every live seat devnode is ours. Exit 1 = at least one is not, or the package is absent.
   Seat devnodes only exist while a seat session is connected, so run this with one up.
