@@ -120,9 +120,10 @@ fn run(
     slot: &Mutex<Option<pf_frame::CursorOverlay>>,
     stop: &AtomicBool,
 ) {
-    // Physical pixels on this thread: `rect` is CCD (always physical). A
-    // DPI-virtualized `GetCursorInfo` would miss the frame pixel on a scaled display.
-    // Thread-scoped; the rest of the host is untouched.
+    // Physical pixels on this thread: `rect` is CCD (always physical), and a virtualized
+    // `GetCursorInfo` misses the frame pixel on a scaled display. The BITMAP is a process
+    // matter: an unaware or system-aware process is handed the cursor for its launch-time
+    // DPI whatever this thread says, so the host manifest declares v2 (build.rs).
 
     // SAFETY: takes and returns only a by-value context handle; affects this thread only.
     let _ = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };

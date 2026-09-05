@@ -78,21 +78,23 @@ pub fn install_gpu_pref_hook() {
         use windows::Win32::UI::HiDpi::{
             GetAwarenessFromDpiAwarenessContext, GetThreadDpiAwarenessContext,
             SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            DPI_AWARENESS_PER_MONITOR_AWARE,
         };
-        // Per-monitor-v2: UNAWARE/SYSTEM virtualizes window and cursor coords, while
-        // host geometry is CCD physical pixels. Mix them and `SetCursorPos` / cursor
-        // blend miss on a scaled display. Earliest process-wide hook point.
-        // E_ACCESS_DENIED if already set — log the effective awareness too.
-        match SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) {
-            Ok(()) => tracing::info!("DPI awareness set: PER_MONITOR_AWARE_V2"),
-            Err(e) => tracing::warn!(error = ?e,
-                "SetProcessDpiAwarenessContext failed (already set?) — cursor/desktop coordinates \
-                 may be DPI-virtualized against the host's physical-pixel CCD geometry"),
+        // 0=UNAWARE 1=SYSTEM 2=PER_MONITOR(_V2). Below 2 the OS virtualizes window and
+        // cursor coordinates while host geometry is CCD physical pixels, so `SetCursorPos`
+        // and the cursor blend miss on a scaled display. The host exe declares v2 in its
+        // manifest (punktfunk-host/build.rs); this covers every other process using DXGI.
+        let awareness = || GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()).0;
+        if awareness() < DPI_AWARENESS_PER_MONITOR_AWARE.0 {
+            match SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) {
+                Ok(()) => tracing::info!("DPI awareness set: PER_MONITOR_AWARE_V2"),
+                Err(e) => tracing::warn!(error = ?e,
+                    "SetProcessDpiAwarenessContext failed — cursor/desktop coordinates may be \
+                     DPI-virtualized against the host's physical-pixel CCD geometry"),
+            }
         }
-        // 0=UNAWARE 1=SYSTEM 2=PER_MONITOR(_V2). Physical-pixel coordinates need 2.
-        let awareness = GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()).0;
         tracing::info!(
-            awareness,
+            awareness = awareness(),
             "effective DPI awareness (need 2=PER_MONITOR for physical-pixel coordinates)"
         );
         // The patch is x86-64 machine code; a Snapdragon SoC has one GPU, so DXGI has
