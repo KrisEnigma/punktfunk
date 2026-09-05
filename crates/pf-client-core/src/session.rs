@@ -1444,17 +1444,19 @@ fn pump(
         // means the only recovery keyframe is one we request.
         let dropped = connector.frames_dropped();
         let now = Instant::now();
-        flush_pending_rfi(&mut pending_rfi, &mut last_kf_req, now, &connector);
         if gate.poll(dropped, now)
             && last_kf_req.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(100))
         {
             last_kf_req = Some(now);
+            // The IDR repairs everything a pending RFI would have named.
+            pending_rfi = None;
             let _ = connector.request_keyframe();
             tracing::debug!(
                 dropped,
                 "requested keyframe (loss recovery / overdue re-anchor)"
             );
         }
+        flush_pending_rfi(&mut pending_rfi, &mut last_kf_req, now, &connector);
 
         if window_start.elapsed() >= Duration::from_secs(1) {
             // ~1 Hz phase-lock report, riding the stats window. Quiet until the
