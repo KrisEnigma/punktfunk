@@ -60,6 +60,7 @@ impl<'a> Drive<'a> {
         session: &'a EncodeSession,
         stop: HANDLE,
         live: &'a AtomicBool,
+        fps: u32,
     ) -> Self {
         let (heap_offset, heap_bytes) = session.section.heap();
         Self {
@@ -74,10 +75,31 @@ impl<'a> Drive<'a> {
             dropping_au: false,
             want_republish: false,
             qpc_hz: qpc_frequency(),
+            frame_interval: Duration::from_micros(1_000_000 / u64::from(fps.max(1))),
+            last_cursor: None,
             state: au::ENCODER_OPEN,
             stop,
             live,
         }
+    }
+
+    /// A cursor-only frame when the pointer moved but nothing composed, capped to the refresh so
+    /// a 1 kHz mouse cannot outrun the encoder — between caps the mark coalesces to the latest
+    /// position. `None` when no move is pending, the cap has not elapsed, or the re-encode was
+    /// pre-empted by a queued composed frame.
+    fn cursor_frame(&mut self) -> Option<(usize, u64, u64)> {
+        if !self.pool.cursor_pending() {
+            return None;
+        }
+        if self
+            .last_cursor
+            .is_some_and(|t| t.elapsed() < self.frame_interval)
+        {
+            return None;
+        }
+        let framed = self.pool.cursor_republish()?;
+        self.last_cursor = Some(Instant::now());
+        Some(framed)
     }
 }
 
@@ -104,6 +126,10 @@ pub struct Drive<'a> {
     /// A keyframe was asked for; if nothing composes, re-encode the stash instead of waiting.
     want_republish: bool,
     qpc_hz: u64,
+    /// The display's frame period — the floor between cursor-only re-encodes.
+    frame_interval: Duration,
+    /// When the last cursor-only frame went out; `None` before the first.
+    last_cursor: Option<Instant>,
     state: u32,
     stop: HANDLE,
     live: &'a AtomicBool,
@@ -135,7 +161,8 @@ impl Drive<'_> {
             let next = self
                 .pool
                 .take_full()
-                .or_else(|| self.want_republish.then(|| self.pool.republish()).flatten());
+                .or_else(|| self.want_republish.then(|| self.pool.republish()).flatten())
+                .or_else(|| self.cursor_frame());
             self.want_republish = false;
             let Some((slot, qpc, seq)) = next else {
                 self.wait();
@@ -217,11 +244,22 @@ impl Drive<'_> {
     }
 
     /// One bounded wait on `{stop, pool event}`; a signal raised while nobody waited latches.
+    /// A cursor move held off by the refresh cap gets a short bound, so the pointer's resting
+    /// spot lands within one frame period instead of after the idle 1 s.
     fn wait(&self) {
+        let ms = if self.pool.cursor_pending() {
+            let due = self
+                .last_cursor
+                .map(|t| self.frame_interval.saturating_sub(t.elapsed()))
+                .unwrap_or_default();
+            (due.as_millis() as u32).max(1).min(1000)
+        } else {
+            1000
+        };
         let handles = [self.stop, self.pool.event()];
         // SAFETY: `stop` is the worker's stop event, alive until the worker joins or leaks; the
         // pool event lives as long as the pool, which the session's thread borrows.
-        let _ = unsafe { WaitForMultipleObjects(&handles, false, 1000) };
+        let _ = unsafe { WaitForMultipleObjects(&handles, false, ms) };
     }
 
     fn states(&self) -> [u32; au::AU_SLOTS as usize] {

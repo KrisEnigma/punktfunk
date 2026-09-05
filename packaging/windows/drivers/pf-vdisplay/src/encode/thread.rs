@@ -234,7 +234,7 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         // The caller gave up waiting: nothing will install this session.
         return;
     }
-    Drive::new(enc, &pool, &ctx.session, stop, &live).run();
+    Drive::new(enc, &pool, &ctx.session, stop, &live, spec.fps).run();
     if live.load(Ordering::Acquire) {
         section.store_u32(offset_of!(AuHeader, encoder_state), au::ENCODER_CLOSED);
     }

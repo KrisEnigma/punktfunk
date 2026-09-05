@@ -70,10 +70,8 @@ impl CursorState {
     /// worker is the only shape source. `excluded` is [`registry::any_declared`], read before
     /// the caller took this monitor's lock.
     fn set_blend(&self, excluded: bool) {
-        self.cell.blend.store(
-            !self.forward_on && self.worker.is_some() && excluded,
-            Ordering::Release,
-        );
+        self.cell
+            .set_blend(!self.forward_on && self.worker.is_some() && excluded);
     }
 }
 
@@ -557,7 +555,7 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
         c.forward_on = enable;
         c.set_blend(excluded);
         had_worker |= c.worker.is_some();
-        blend_now |= c.cell.blend.load(Ordering::Acquire);
+        blend_now |= c.cell.blends();
         if c.worker.is_some() {
             declare_on = Some((
                 m.object(),
