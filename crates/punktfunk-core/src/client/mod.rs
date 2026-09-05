@@ -1090,6 +1090,13 @@ impl NativeClient {
         sent
     }
 
+    /// Whether a burst is in flight — an embedder speed test or the startup capacity probe. Loss
+    /// inside it is the burst's own doing on a link it exceeds, so a "connection issues" notice
+    /// gated on this stays quiet for it.
+    pub fn probe_active(&self) -> bool {
+        self.probe.lock().unwrap().active
+    }
+
     /// Speed-test measurement: partial until `done`, then the host's end-of-burst report.
     pub fn probe_result(&self) -> ProbeOutcome {
         let p = self.probe.lock().unwrap();
