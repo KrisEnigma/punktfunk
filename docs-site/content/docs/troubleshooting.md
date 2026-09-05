@@ -131,28 +131,28 @@ source address and stream back to it, so a session can cross a NAT or a stateful
   case a fixed, forwardable data port would solve.
 
 To remove the ~2.5 s fallback delay, **pin the data port** in [`host.env`](/docs/configuration) and
-open exactly that one port. The host then binds that fixed port, skips the punch-wait, and streams
-straight to the client — no timeout to pay:
+open exactly that one port. The punch then lands on a port your firewall lets through, so the host
+answers it at once — no timeout to pay:
 
 ```ini
 # ~/.config/punktfunk/host.env (Linux) · %ProgramData%\punktfunk\host.env (Windows)
-PUNKTFUNK_DATA_PORT=9778
+PUNKTFUNK_DATA_PORT=9779
 ```
 
 ```sh
 systemctl --user restart punktfunk-host    # pick the change up (Windows: punktfunk-host service restart)
-sudo ufw allow 9778/udp                    # open exactly that one port
+sudo ufw allow 9779/udp                    # open exactly that one port
 ```
 
-Running `serve` by hand instead? Pass `--data-port 9778` on that command line — but don't start one
+Running `serve` by hand instead? Pass `--data-port 9779` on that command line — but don't start one
 alongside the service, which already holds these ports.
 
-Two caveats. A fixed data port serves **one session at a time**; a second concurrent session finds it
-busy and transparently falls back to a random port + hole-punch (logged). And `--data-port` streams
-to the client's *reported* address, so use it only where that address is reachable — a flat LAN, or a
-port-forward that doesn't remap the client's source. Leave it **off** (the default) to keep the
-NAT-crossing hole-punch. On a normal single-LAN setup you can also just leave the data port closed and
-accept the one-time ~2.5 s punch-timeout, or not run a host firewall on a trusted LAN at all.
+One caveat. A fixed data port serves **one session at a time**; a second concurrent session finds it
+busy and transparently falls back to a random port (logged). Pinning changes nothing about how video
+is addressed — the host still waits for the client's punch and answers whatever source it heard from,
+which is what lets a forwarded port or a port proxy work behind the client's own NAT. On a normal
+single-LAN setup you can also just leave the data port closed and accept the one-time ~2.5 s
+punch-timeout, or not run a host firewall on a trusted LAN at all.
 
 ## `nvidia-smi` says it can't communicate with the driver
 

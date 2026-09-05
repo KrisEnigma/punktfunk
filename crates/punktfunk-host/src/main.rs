@@ -589,7 +589,7 @@ fn real_main() -> Result<()> {
                 allow_pairing: true,
                 pairing_pin,
                 paired_store: None,
-                // Fixed port: direct send, no ~2.5 s punch-timeout on a firewalled host. Absent = random + punch.
+                // Fixed port = one number to open or proxy; the client's punch still picks the path.
                 data_port: get("--data-port")
                     .map(str::to_string)
                     .or_else(|| std::env::var("PUNKTFUNK_DATA_PORT").ok())
@@ -628,7 +628,7 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
     let mut opts = mgmt::Options::default();
     let mut native_port: u16 = 9777;
 
-    // Env default; `--data-port` overrides. `Some` = direct bind; `None` = random + hole-punch (~2.5 s).
+    // Env default; `--data-port` overrides. `Some` = bind that port; `None` = ephemeral.
     let mut data_port: Option<u16> = std::env::var("PUNKTFUNK_DATA_PORT")
         .ok()
         .and_then(|s| s.parse().ok());
@@ -957,10 +957,11 @@ SERVE OPTIONS:
     --native-port <PORT>         native QUIC port (or PUNKTFUNK_NATIVE_PORT in host.env, which
                                  this flag overrides). Default 9777. Clients follow via mDNS, and
                                  a manually-added host keeps whatever port it was added with
-    --data-port <PORT>           pin the per-session video data plane to this fixed UDP port and
-                                 stream direct (no hole-punch) — open exactly this port in a host
-                                 firewall to avoid the ~2.5 s punch-timeout. Default (unset) or
-                                 PUNKTFUNK_DATA_PORT: a random port + hole-punch (crosses NAT)
+    --data-port <PORT>           pin the per-session video data plane to this fixed UDP port —
+                                 one number to open in a firewall, forward on a router or share
+                                 through a port proxy. Video still follows the client's hole-punch,
+                                 so a remapping NAT on the client's side works. Default (unset) or
+                                 PUNKTFUNK_DATA_PORT: a fresh random port per session
     --open                       disable mandatory native pairing (default: pairing REQUIRED —
                                  an open host any LAN device can stream from is insecure)
     --no-mdns                    skip the mDNS adverts (native + GameStream) — for multicast-dead
@@ -975,9 +976,9 @@ PUNKTFUNK1-HOST OPTIONS:
     --max-sessions <N>           exit after N sessions; 0 = serve forever (default: 0)
     --max-concurrent <N>         stream at most N sessions at once (NVENC bound); overflow waits
                                  in the accept queue; 0 = unlimited (default: 4)
-    --data-port <PORT>           pin the video data plane to this fixed UDP port and stream direct
-                                 (no hole-punch; open exactly this port to skip the ~2.5 s punch-
-                                 timeout). Default or PUNKTFUNK_DATA_PORT: random port + hole-punch.
+    --data-port <PORT>           pin the video data plane to this fixed UDP port (one number to
+                                 open, forward or proxy; video still follows the client's punch).
+                                 Default or PUNKTFUNK_DATA_PORT: a random port per session.
                                  A fixed port fits one session; concurrent ones fall back to random
     --allow-tofu                 also accept UNPAIRED clients (trust-on-first-use) and advertise
                                  pair=optional. Default: pairing REQUIRED — the host rejects

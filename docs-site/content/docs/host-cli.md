@@ -58,7 +58,7 @@ punktfunk-host serve --gamestream
 | `--mgmt-bind <IP:PORT>` | Management API address (default `0.0.0.0:47990` — all interfaces, so paired clients can browse the game library over mTLS; pass `127.0.0.1:47990` to keep it loopback-only). |
 | `--mgmt-token <TOKEN>` | Override the bearer token for the management API. |
 | `--no-mdns` | Skip the mDNS adverts (native + GameStream) — for networks/containers where multicast doesn't work. Clients connect via a manually added host instead. Same as `PUNKTFUNK_MDNS=0`. |
-| `--data-port <PORT>` | Pin the per-session video data plane to this fixed UDP port and stream direct (no hole-punch) — open exactly that port in the host firewall. Same as `PUNKTFUNK_DATA_PORT`; default is a random port + hole-punch. |
+| `--data-port <PORT>` | Pin the per-session video data plane to this fixed UDP port — one number to open in a firewall, forward on a router or share through a port proxy. Video still follows the client's hole-punch, so a NAT on the client's side that remaps ports works. Same as `PUNKTFUNK_DATA_PORT`; default is a fresh random port per session. |
 
 These are the only flags `serve` accepts.
 
@@ -212,7 +212,7 @@ punktfunk-host punktfunk1-host --source virtual
 | `--max-sessions <N>` | Exit after N sessions (0 = serve forever). |
 | `--allow-tofu` | Also accept **unpaired** clients (trust-on-first-use) and advertise pairing as optional. Pairing is required by default; trusted LANs only. (`--allow-pairing`/`--require-pairing` are the old names for the default behaviour and are accepted as no-ops.) |
 | `--pairing-pin <PIN>` | Use a fixed pairing PIN instead of a fresh random one per ceremony. For test harnesses/CI only — a guessable PIN defeats the ceremony's rate limit. |
-| `--data-port <PORT>` | Pin the video data plane to this fixed UDP port and stream direct (no hole-punch). Same as `PUNKTFUNK_DATA_PORT`. |
+| `--data-port <PORT>` | Pin the video data plane to this fixed UDP port; video still follows the client's hole-punch. Same as `PUNKTFUNK_DATA_PORT`. |
 | `--idle-timeout-ms <MS>` | Disconnect-detection latency — the QUIC control-connection idle timeout (default 8000). |
 | `--no-mdns` | Skip the `_punktfunk._udp` advert; clients use `--connect HOST:PORT`. Same as `PUNKTFUNK_MDNS=0`. |
 
