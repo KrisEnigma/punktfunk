@@ -781,6 +781,20 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
             .then_some(webtransport_bind),
         ..native
     };
+    // Refused here rather than at bind: the plane is spawned as a secondary tier whose errors
+    // only log, and this combination must not be something an operator can miss.
+    if native.webtransport_bind.is_some()
+        && !webtransport::is_confined(
+            native.require_pairing,
+            &pf_host_config::config().webtransport_origins,
+        )
+    {
+        anyhow::bail!(
+            "--open leaves the browser plane unauthenticated, and with no origin list any page \
+             the user visits can stream and inject input (WebTransport gets no same-origin rule). \
+             Set PUNKTFUNK_WEBTRANSPORT_ORIGINS, or drop --open"
+        );
+    }
     Ok((opts, native, gamestream))
 }
 

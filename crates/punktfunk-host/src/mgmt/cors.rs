@@ -2,19 +2,21 @@
 //!
 //! The page is not served by the host — it is a static build that can live anywhere — so every
 //! call it makes is cross-origin, and without these headers the browser refuses to let it read
-//! the response. That is the second wall after the certificate one; both have to come down
-//! before a browser can list a library.
+//! the response. Installed only where a host actually serves browsers ([`enabled`]).
 //!
 //! **`Access-Control-Allow-Credentials` is never sent, and that is what makes this safe.** The
 //! management API has no cookies and no ambient session: authority comes from a bearer token a
 //! caller must have earned by signing a nonce with a paired device key, or from a client
 //! certificate the browser cannot present at all. So allowing an origin to *read* a response
-//! grants nothing it could not already have — it must still hold a credential to get one worth
-//! reading, and CORS never stopped a page from *sending* a request in the first place.
+//! grants nothing it could not already have.
 //!
-//! `PUNKTFUNK_WEBTRANSPORT_ORIGINS` narrows it, the same list that confines the browser plane:
-//! one setting for "which pages may talk to this host". Empty means any, which is what a host
-//! with no configured origins has to mean until the console can offer the choice.
+//! **Unless the credential is the network itself.** [`POSITION_AUTHENTICATED`] names the routes
+//! `mgmt::auth` admits on loopback with no token at all. The same-origin policy was the only
+//! thing keeping a page off those, so this never stamps them — an exemption, not a setting.
+//!
+//! No `Access-Control-Allow-Private-Network` either, and not by oversight: that header is what
+//! lets a public page reach a private host, so it may only be added once every route below
+//! carries a credential of its own.
 
 use axum::extract::Request;
 use axum::http::{header, HeaderValue, Method, StatusCode};
@@ -25,11 +27,31 @@ use axum::response::Response;
 /// it is not on the CORS safelist, so every authenticated call is preceded by an `OPTIONS`.
 const ALLOW_HEADERS: &str = "authorization, content-type";
 
+/// Routes whose only credential is where the caller connected from: `mgmt::auth` admits these
+/// from loopback with nothing presented. A page on a machine that trusts the host certificate
+/// reaches loopback too, so without this the browser would be allowed to read one.
+const POSITION_AUTHENTICATED: &[&str] = &["/api/v1/local/summary"];
+
+/// Should this host stamp cross-origin headers at all?
+///
+/// Only where there is a browser to serve: the plane is running, or an operator named the pages
+/// that may talk to this host in `PUNKTFUNK_WEBTRANSPORT_ORIGINS`. Every other host answers as
+/// it did before the browser client existed, so a feature nobody turned on cannot widen what
+/// the management API lets a page read.
+pub(crate) fn enabled(browser_plane: bool, origins: &[String]) -> bool {
+    browser_plane || !origins.is_empty()
+}
+
 /// Answer the preflight, then stamp the actual response.
 ///
 /// A request with no `Origin` is not from a browser's cross-origin path and is left untouched:
 /// native clients and the tray must not have headers grown around them.
 pub(crate) async fn cors(req: Request, next: Next) -> Response {
+    // Before the preflight below, not after: answering that would tell a page it is welcome to
+    // try a route no credential guards.
+    if POSITION_AUTHENTICATED.contains(&req.uri().path()) {
+        return next.run(req).await;
+    }
     let origin = req
         .headers()
         .get(header::ORIGIN)
@@ -85,7 +107,8 @@ fn stamp(headers: &mut axum::http::HeaderMap, origin: &str, preflight: bool) {
     // here is authorised by anything the browser attaches on its own.
 }
 
-/// Exact match, or anything when the operator has configured no list.
+/// Exact match, or anything when the operator has configured no list. Reached only where
+/// [`enabled`] already said this host serves browsers.
 fn allowed(origin: &str, configured: &[String]) -> bool {
     configured.is_empty() || configured.iter().any(|a| a == origin)
 }
@@ -104,6 +127,25 @@ mod tests {
         assert!(!allowed("https://evil.web.punktfunk.io", &list));
         // Unconfigured means any, as it does for the browser plane itself.
         assert!(allowed("https://anything", &[]));
+    }
+
+    /// The gate that keeps a host nobody asked to serve browsers answering as it always did.
+    /// Without it every host stamps `Allow-Origin` on an upgrade, for a plane that is off.
+    #[test]
+    fn cors_is_off_until_a_host_serves_browsers() {
+        assert!(!enabled(false, &[]), "no plane and no list: no headers");
+        assert!(enabled(true, &[]), "the plane is running");
+        assert!(
+            enabled(false, &["https://web.punktfunk.io".to_string()]),
+            "an operator named the pages that may call"
+        );
+    }
+
+    /// Every entry must be a route `mgmt::auth` really admits with no credential — the list is
+    /// only correct against that one, so it is checked there too.
+    #[test]
+    fn the_exempt_list_names_the_loopback_lane() {
+        assert!(POSITION_AUTHENTICATED.contains(&"/api/v1/local/summary"));
     }
 
     /// The one header that would turn this into a hole. Pinned so a future edit has to argue

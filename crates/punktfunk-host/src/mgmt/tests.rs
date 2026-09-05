@@ -97,6 +97,25 @@ fn test_app(state: Arc<AppState>, token: Option<&str>) -> Router {
         // GameStream-compat off: the native-only default these tests model.
         false,
         None,
+        // No browser plane: the default, and the one that must emit no CORS headers.
+        false,
+    )
+}
+
+/// A host that is serving browsers. Only the CORS lane differs, and it differs entirely.
+fn test_app_browser(state: Arc<AppState>) -> Router {
+    let stats = state.stats.clone();
+    app(
+        state,
+        Some("test-secret".to_string()),
+        Some("plugin-secret".to_string()),
+        DEFAULT_PORT,
+        None,
+        stats,
+        test_client_logs_dir(),
+        false,
+        None,
+        true,
     )
 }
 
@@ -114,6 +133,7 @@ fn test_app_native(state: Arc<AppState>, np: Arc<crate::native_pairing::NativePa
         false,
         // A fixed binding, so a device test signs what the host will check.
         Some([0x5a; 32]),
+        false,
     )
 }
 
@@ -1209,6 +1229,7 @@ async fn blank_token_rejected() {
         test_stats(),
         false,
         crate::identity::ephemeral().unwrap(),
+        false,
     )
     .await
     .unwrap_err();
@@ -3173,7 +3194,7 @@ async fn a_paired_device_key_buys_the_cert_lane_and_no_more() {
 async fn a_preflight_is_answered_and_never_allows_credentials() {
     use axum::http::header;
 
-    let app = test_app(test_state(), None);
+    let app = test_app_browser(test_state());
     let preflight = axum::http::Request::builder()
         .method("OPTIONS")
         .uri("/api/v1/library")
@@ -3222,4 +3243,70 @@ async fn a_preflight_is_answered_and_never_allows_credentials() {
         .headers()
         .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
         .is_none());
+}
+
+/// `/local/summary` is admitted by network position alone, so the same-origin policy was the
+/// only thing keeping a page off it. A host that serves browsers must still not stamp it: a
+/// page on a machine that trusts the host certificate reaches loopback like anything else.
+#[tokio::test]
+async fn the_loopback_lane_is_never_readable_cross_origin() {
+    use axum::http::header;
+
+    let app = test_app_browser(test_state());
+    let origin = "https://evil.example";
+
+    let preflight = axum::http::Request::builder()
+        .method("OPTIONS")
+        .uri("/api/v1/local/summary")
+        .header(header::ORIGIN, origin)
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(preflight).await.unwrap();
+    assert!(
+        res.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none(),
+        "a preflight here would tell a page it is welcome to try"
+    );
+
+    let mut req = get_req("/api/v1/local/summary");
+    req.headers_mut()
+        .insert(header::ORIGIN, origin.parse().unwrap());
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "loopback still reads it");
+    assert!(
+        res.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none(),
+        "served, but the browser must discard it"
+    );
+}
+
+/// The browser plane is off by default, so the headers that exist to serve it must be too.
+/// Otherwise every host starts answering cross-origin on an upgrade, for a plane nobody enabled.
+#[tokio::test]
+async fn a_host_with_no_browser_plane_stamps_nothing() {
+    use axum::http::header;
+
+    let app = test_app(test_state(), None);
+    let mut req = get_req("/api/v1/host");
+    req.headers_mut()
+        .insert(header::ORIGIN, "https://web.punktfunk.io".parse().unwrap());
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert!(res
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .is_none());
+
+    // And the preflight is not answered either — `require_auth` refuses it, as it did before.
+    let preflight = axum::http::Request::builder()
+        .method("OPTIONS")
+        .uri("/api/v1/library")
+        .header(header::ORIGIN, "https://web.punktfunk.io")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(preflight).await.unwrap();
+    assert_ne!(res.status(), StatusCode::NO_CONTENT, "no CORS answer");
 }

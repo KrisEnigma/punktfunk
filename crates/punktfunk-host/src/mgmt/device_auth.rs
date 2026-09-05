@@ -68,8 +68,18 @@ impl DeviceAuth {
             .retain(|_, at| now.duration_since(*at) < NONCE_TTL);
         guard.tokens.retain(|_, s| s.expires > now);
         // A flood of challenges must not evict a live token, so only the nonce map is capped.
-        if guard.nonces.len() >= MAX_NONCES {
-            guard.nonces.clear();
+        // Oldest one out per new one in, never the whole map: clearing it let any unauthenticated
+        // caller cancel a real browser's exchange in flight, 256 requests at a time.
+        while guard.nonces.len() >= MAX_NONCES {
+            let Some(oldest) = guard
+                .nonces
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(nonce, _)| nonce.clone())
+            else {
+                break;
+            };
+            guard.nonces.remove(&oldest);
         }
         let mut raw = [0u8; 32];
         rand::rng().fill_bytes(&mut raw);
@@ -295,6 +305,27 @@ mod tests {
         assert!(
             auth.device_for(&token).is_some(),
             "a flood of challenges must not evict a live session"
+        );
+    }
+
+    /// One in, one out. Wiping the map instead let an unauthenticated caller cancel whatever
+    /// exchange a real browser had in flight, which is a denial nobody had to authenticate for.
+    #[test]
+    fn the_cap_evicts_one_nonce_not_the_whole_map() {
+        let auth = DeviceAuth::default();
+        for _ in 0..MAX_NONCES {
+            let _ = auth.challenge();
+        }
+        assert_eq!(
+            auth.inner.lock().unwrap().nonces.len(),
+            MAX_NONCES,
+            "the cap is reached, not overshot"
+        );
+        let _ = auth.challenge();
+        assert_eq!(
+            auth.inner.lock().unwrap().nonces.len(),
+            MAX_NONCES,
+            "still full: a `clear()` here would have left 1"
         );
     }
 }
