@@ -226,6 +226,9 @@ jobs:
             "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$GEN_REF/cargo/flatpak-cargo-generator.py"
           echo "$GEN_SHA  /tmp/flatpak-cargo-generator.py" | sha256sum -c - \
             || { echo "::error::flatpak-cargo-generator.py sha256 mismatch at $GEN_REF"; exit 1; }
+          # The manifest prune runs inside the sandbox (io.unom.Punktfunk.yml); its self-test
+          # here fails the job before flatpak-builder spends its minutes.
+          python3 packaging/flatpak/prune-windows-toml.py --self-test
           python3 packaging/flatpak/prune-windows-lock.py Cargo.lock /tmp/Cargo.flatpak.lock
           python3 /tmp/flatpak-cargo-generator.py /tmp/Cargo.flatpak.lock \
             -o packaging/flatpak/cargo-sources.json
