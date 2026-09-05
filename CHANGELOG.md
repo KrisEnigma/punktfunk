@@ -61,6 +61,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   stored fingerprint; two new control messages, `AuthChallenge` (0x14) and `AuthResponse` (0x15),
   carry a host nonce and the client's signature over it bound to the transport certificate. A
   client with a certificate sends neither and its bytes on the wire are unchanged.
+- **A browser can authenticate to the management API.** `POST /api/v1/auth/device/challenge`
+  returns a nonce, `POST /api/v1/auth/device/token` exchanges a signature by a paired device key
+  for a short-lived bearer token. That token reaches exactly the paired-certificate route set and
+  nothing more, so a browser can read the library it could not reach before.
+- **The management API answers cross-origin requests.** A page that is not served by the host
+  could not read a response at all. `Access-Control-Allow-Credentials` is never sent — the API
+  has no cookies — and `PUNKTFUNK_WEBTRANSPORT_ORIGINS` narrows which origins are answered.
 - **The browser plane honours `require_pairing`.** A browser sends that signature before its
   `Hello`, and a host that requires pairing refuses one that does not. Run `serve --open` to keep
   an unpaired browser streaming, as it already does for native clients.

@@ -27,6 +27,8 @@ mod actions;
 mod auth;
 mod client_logs;
 mod clients;
+mod cors;
+mod device_auth;
 mod diagnostics;
 mod display;
 mod events;
@@ -162,6 +164,12 @@ pub(crate) struct MgmtState {
     plugin_token: Option<String>,
     /// Bound port, echoed in [`PortMap`].
     port: u16,
+    /// Live device challenges and the tokens they became. See [`mgmt::device_auth`].
+    device_auth: device_auth::DeviceAuth,
+    /// SHA-256 of this host's own leaf certificate — the channel binding a device signs, and the
+    /// fingerprint a paired browser stored. `None` only if the identity could not be parsed, in
+    /// which case the device lane refuses rather than binding to nothing.
+    identity_fingerprint: Option<[u8; 32]>,
 }
 
 /// `native` is the shared punktfunk/1 pairing handle when the unified host
@@ -203,6 +211,14 @@ pub async fn run(
         auth = "mTLS (paired cert) or bearer (required)",
         "management API listening over HTTPS (docs at /api/docs, spec at /api/v1/openapi.json)"
     );
+    // The channel binding a device signs: this host's own leaf, which is the fingerprint a
+    // browser stored when it paired. Parsed once here rather than per request.
+    let identity_fingerprint = x509_parser::pem::parse_x509_pem(identity.cert_pem.as_bytes())
+        .ok()
+        .map(|(_, pem)| crate::webtransport::sha256(&pem.contents));
+    if identity_fingerprint.is_none() {
+        tracing::warn!("the host identity did not parse — browsers cannot use the device lane");
+    }
     let app = app(
         state,
         Some(token),
@@ -212,6 +228,7 @@ pub async fn run(
         stats,
         crate::client_logs::default_dir(),
         gamestream_enabled,
+        identity_fingerprint,
     );
     serve_https(opts.bind, app, tls).await
 }
@@ -228,6 +245,7 @@ fn app(
     // Injected so handler tests use a temp dir, not the real config dir.
     client_logs_dir: std::path::PathBuf,
     gamestream_enabled: bool,
+    identity_fingerprint: Option<[u8; 32]>,
 ) -> Router {
     let shared = Arc::new(MgmtState {
         app: state,
@@ -238,6 +256,8 @@ fn app(
         token,
         plugin_token,
         port,
+        device_auth: device_auth::DeviceAuth::default(),
+        identity_fingerprint,
     });
     let (api_routes, api) = api_router_parts();
     api_routes
@@ -245,6 +265,9 @@ fn app(
             shared.clone(),
             auth::require_auth,
         ))
+        // Outside the auth gate, because a CORS preflight carries no credential and must be
+        // answered rather than refused. See `mgmt::cors`.
+        .layer(middleware::from_fn(cors::cors))
         .with_state(shared)
         .merge(Scalar::with_url("/api/docs", api.clone()))
         .route(
@@ -299,6 +322,8 @@ fn api_router_parts() -> (Router<Arc<MgmtState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(clients::submit_pairing_pin));
     let api_v1 = api_v1
         .routes(routes!(webtransport::get_webtransport))
+        .routes(routes!(device_auth::post_device_challenge))
+        .routes(routes!(device_auth::post_device_token))
         .routes(routes!(native::get_native_pairing))
         .routes(routes!(native::arm_native_pairing))
         .routes(routes!(native::disarm_native_pairing))

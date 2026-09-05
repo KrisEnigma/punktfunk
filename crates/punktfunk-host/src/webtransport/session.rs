@@ -124,7 +124,7 @@ fn admit(auth: &AuthResponse, nonce: &[u8; 32], serving: &Serving) -> Result<Str
 /// Every P-256 SPKI starts with the same 26-byte header — the SEQUENCE, the two OIDs and the BIT
 /// STRING tag are all fixed by the key type — so matching it whole both locates the point and
 /// rejects any other key type, which is what we want: the verifier is P-256 only.
-fn spki_p256_point(spki: &[u8]) -> Option<&[u8]> {
+pub(crate) fn spki_p256_point(spki: &[u8]) -> Option<&[u8]> {
     const P256_SPKI_HEADER: [u8; 26] = [
         0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
         0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
@@ -133,7 +133,7 @@ fn spki_p256_point(spki: &[u8]) -> Option<&[u8]> {
     (head == P256_SPKI_HEADER && point.len() == 65 && point[0] == 0x04).then_some(point)
 }
 
-fn sha256(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     use sha2::Digest as _;
     sha2::Sha256::digest(bytes).into()
 }

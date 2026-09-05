@@ -1,9 +1,11 @@
-//! Auth gate for `/api/v1`: a paired client cert (mTLS, from anywhere) or a bearer token
-//! (loopback peers only).
+//! Auth gate for `/api/v1`: a paired device (from anywhere) or a bearer token (loopback peers
+//! only).
 //!
 //! Three lanes:
-//! - **paired streaming cert** — [`cert_may_access`] (status reads plus two writes: log
-//!   upload and host-action invoke).
+//! - **paired device** — [`cert_may_access`] (status reads plus two writes: log upload and
+//!   host-action invoke). Proven either by a client certificate over mTLS, or — for a browser,
+//!   which has none — by a device token from [`super::device_auth`]. Same authority either way,
+//!   because it is the same pairing.
 //! - **plugin token** (bearer, loopback) — [`plugin_may_access`]: admin minus hooks, pairing
 //!   admin, host logs, store, and update.
 //! - **admin token** (bearer, loopback) — everything.
@@ -24,13 +26,23 @@ use sha2::{Digest, Sha256};
 /// [`plugin_may_access`] answers route reachability; this answers field authority. Some
 /// payloads carry operator-privileged fields (`prep`, `launch.kind == "command"`) on routes
 /// a plugin may otherwise call. See [`crate::library::reject_privileged_fields`].
+/// The paired device behind this request, stamped by [`require_auth`] on the `Cert` lane.
+///
+/// One extension for both proofs, because everything downstream — grant masks, expiry, the
+/// power check in `mgmt::actions` — asks "which paired device is this", never "how did it
+/// prove itself". Reading the TLS peer certificate directly would have answered only one of
+/// the two.
+#[derive(Clone, Debug)]
+pub(crate) struct PairedDevice(pub String);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthLane {
     /// Operator admin bearer (loopback): everything, including privileged fields.
     Admin,
     /// Scripting-runner bearer (loopback): [`plugin_may_access`] routes, never privileged fields.
     Plugin,
-    /// Paired streaming cert (mTLS): the [`cert_may_access`] set.
+    /// A paired device: the [`cert_may_access`] set. Its fingerprint is stamped as
+    /// [`PairedDevice`], whichever way it was proven.
     Cert,
     /// Open route (`/health`) or loopback-only tray summary — no credential.
     Public,
@@ -69,6 +81,12 @@ pub(crate) async fn require_auth(
         next.run(req).await
     }
 
+    /// The `Cert` lane, plus which device it is. Handlers re-read the pairing store from this.
+    async fn forward_device(mut req: Request, next: Next, fp: String) -> Response {
+        req.extensions_mut().insert(PairedDevice(fp));
+        forward(req, next, AuthLane::Cert).await
+    }
+
     if req.uri().path() == "/api/v1/health" {
         return forward(req, next, AuthLane::Public).await;
     }
@@ -76,6 +94,15 @@ pub(crate) async fn require_auth(
     // client certificate to present, and the response authorises nothing — see
     // `mgmt::webtransport` for why PAKE, not this route, is what proves the peer.
     if req.uri().path() == "/api/v1/webtransport" {
+        return forward(req, next, AuthLane::Public).await;
+    }
+    // The device exchange itself. Unauthenticated by necessity — this is what a client calls in
+    // order to authenticate — and it hands out nothing but a random nonce until a signature by a
+    // paired key arrives. See `mgmt::device_auth`.
+    if matches!(
+        req.uri().path(),
+        "/api/v1/auth/device/challenge" | "/api/v1/auth/device/token"
+    ) {
         return forward(req, next, AuthLane::Public).await;
     }
     // Tray status: unauthenticated, loopback only. On Windows the token file is
@@ -107,7 +134,24 @@ pub(crate) async fn require_auth(
                 .as_ref()
                 .is_some_and(|n| n.effective(fp, unix_now()).is_some())
         {
-            return forward(req, next, AuthLane::Cert).await;
+            let fp = fp.clone();
+            return forward_device(req, next, fp).await;
+        }
+    }
+    // A browser's device token. The same lane and the same route set as the certificate above:
+    // it is the same pairing, proven with the key instead of with TLS. `effective` is re-read
+    // here rather than trusted from the exchange, so unpairing a device revokes it at once
+    // rather than when its token lapses.
+    if let Some(token) = bearer(&req) {
+        if let Some(fp) = st.device_auth.device_for(token) {
+            if cert_may_access(req.method(), req.uri().path())
+                && st
+                    .native
+                    .as_ref()
+                    .is_some_and(|n| n.effective(&fp, unix_now()).is_some())
+            {
+                return forward_device(req, next, fp).await;
+            }
         }
     }
     // Full admin surface, so loopback only — the listener binds all interfaces so paired
@@ -127,11 +171,7 @@ pub(crate) async fn require_auth(
     let Some(expected) = st.token.as_deref() else {
         return api_error(StatusCode::UNAUTHORIZED, "authentication required");
     };
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+    let presented = bearer(&req);
     match presented {
         Some(token) if token_eq(token, expected) => forward(req, next, AuthLane::Admin).await,
         // Same loopback confinement. Checked AFTER the admin token so equal tokens
@@ -154,9 +194,18 @@ pub(crate) async fn require_auth(
         }
         _ => api_error(
             StatusCode::UNAUTHORIZED,
-            "missing or invalid credentials (a paired client cert, or a bearer token)",
+            "missing or invalid credentials (a paired device, or a bearer token)",
         ),
     }
+}
+
+/// The `Authorization: Bearer` value, if there is one. Every lane that takes a token reads it
+/// through here so they cannot disagree about the prefix.
+fn bearer(req: &Request) -> Option<&str> {
+    req.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
 }
 
 /// Allowlist of routes the plugin token may reach. A later route is denied until classified
@@ -276,7 +325,7 @@ pub(crate) fn token_eq(presented: &str, expected: &str) -> bool {
 
 /// Host wall clock, unix seconds — the clock every stored access deadline is expressed in.
 /// Sampled at each check, same as `mgmt::native`'s copy.
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

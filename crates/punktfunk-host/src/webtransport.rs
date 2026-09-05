@@ -22,6 +22,9 @@ mod datagrams;
 mod session;
 
 pub(crate) use datagrams::{Inbox, WebTransportPlane};
+// The management API's device lane verifies the same key shape against the same digest, and
+// must not grow a second opinion about either.
+pub(crate) use session::{sha256, spki_p256_point};
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
