@@ -481,6 +481,16 @@ impl Presenter {
                 },
                 &[subresource_range()],
             );
+            // Clear and blit both write the swapchain image; transfer commands carry no
+            // implicit order. RDNA fast-clears DCC metadata beside the blit, and where
+            // the clear lands second the tile shows black (the AMD "equaliser" report).
+            barrier(
+                &self.device,
+                self.cmd_buf,
+                swap_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            );
             if let Some(v) = &self.video {
                 let (dst0, dst1) = letterbox(self.extent, v.width, v.height);
                 let blit = vk::ImageBlit::default()
