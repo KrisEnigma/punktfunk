@@ -486,6 +486,12 @@ public final class Sc2Capture {
                 let dongle = self.isDongleSource(source)
                 let kind: PunktfunkConnection.GamepadType =
                     dongle ? .steamController2Puck : .steamController2
+                #if os(macOS)
+                let serial = source == Sc2Capture.bleSource
+                    ? nil : self.usbLink.serial(source: source)
+                #else
+                let serial: String? = nil
+                #endif
                 self.connection.send(.gamepadArrival(pref: kind.rawValue, pad: UInt32(index)))
                 // Replay the connect edge the Puck emitted before this slot existed, ahead of
                 // any state — see `handleWireless`.
@@ -497,7 +503,7 @@ public final class Sc2Capture {
                 self.lock.unlock()
                 let via = dongle ? "Puck" : (self.currentTransport == .usb ? "USB" : "BLE")
                 log.info(
-                    "SC2 captured → wire pad \(index) (\(via, privacy: .public) passthrough, pref \(kind.rawValue))"
+                    "SC2 captured → wire pad \(index) (\(via, privacy: .public) passthrough, pref \(kind.rawValue), serial \(serial ?? "?"))"
                 )
                 self.onPhaseChange?(.captured(pad: index))
             }

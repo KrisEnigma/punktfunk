@@ -81,20 +81,26 @@ final class Sc2UsbLink {
     /// expected only for a source that just unplugged, and a persistent one is invisible
     /// otherwise).
     private var loggedNoTarget = false
+    /// Sources whose serial GET already ran this bond cycle — one blocking GET per live pad,
+    /// re-armed by a wireless-disconnect edge so a DIFFERENT pad bonding to the same slot is
+    /// re-read instead of inheriting the previous pad's identity. On `queue`.
+    private var serialAttempted: Set<UInt64> = []
 
-    /// The sources that belong to a Puck dongle; written on `queue`, read from any thread,
-    /// hence the dedicated lock (the capture reads it on the main actor at claim time).
+    /// The sources that belong to a Puck dongle, and each source's engraved serial; written on
+    /// `queue`, read from any thread, hence the dedicated lock (the capture reads both on the
+    /// main actor at claim time).
     private let dongleLock = NSLock()
     private var dongleSources: Set<UInt64> = []
+    private var serials: [UInt64: String] = [:]
 
-    /// Whether `source` is a Puck-dongle collection rather than a directly-attached pad. Read
-    /// by `Sc2Capture` to pick the declared wire kind and to decide whether wireless-status
-    /// reports are authoritative — a WIRED pad emits them too, truthfully reporting "no radio
-    /// link". Safe from any thread.
-    func isDongle(source: UInt64) -> Bool {
+    /// The pad's engraved serial (`FXA…`), read once on the slot's first report — nil when the
+    /// pad never answered. Safe from any thread. Logged with the claim today; the durable
+    /// identity a future wire extension carries to the host, whose virtual pads currently mint
+    /// serials by a positional pad slot (an ordering that reshuffles across sessions).
+    func serial(source: UInt64) -> String? {
         dongleLock.lock()
         defer { dongleLock.unlock() }
-        return dongleSources.contains(source)
+        return serials[source]
     }
 
     /// Re-adopt every device the Input Monitoring gate refused, once the grant is present.
@@ -107,6 +113,16 @@ final class Sc2UsbLink {
         denied.removeAll()
         log.info("SC2 USB: Input Monitoring granted — retrying \(retry.count, privacy: .public) denied open(s)")
         for (_, device) in retry { adopt(device) }
+    }
+
+    /// Whether `source` is a Puck-dongle collection rather than a directly-attached pad. Read
+    /// by `Sc2Capture` to pick the declared wire kind and to decide whether wireless-status
+    /// reports are authoritative — a WIRED pad emits them too, truthfully reporting "no radio
+    /// link". Safe from any thread.
+    func isDongle(source: UInt64) -> Bool {
+        dongleLock.lock()
+        defer { dongleLock.unlock() }
+        return dongleSources.contains(source)
     }
 
     /// `IOHIDDeviceRegisterInputReportCallback`'s report buffer size. The Triton's longest input
@@ -207,9 +223,11 @@ final class Sc2UsbLink {
             denied.removeAll()
             dongleLock.lock()
             dongleSources.removeAll()
+            serials.removeAll()
             dongleLock.unlock()
             seenIds.removeAll()
             loggedNoTarget = false
+            serialAttempted.removeAll()
             if let mgr = manager {
                 // Dispatch-queue mode: Cancel, never Close/UnscheduleFromRunLoop — mixing the
                 // run-loop teardown API with a queue-scheduled manager is undefined and crashes.
@@ -337,12 +355,14 @@ final class Sc2UsbLink {
     private func drop(_ matched: IOHIDDevice) {
         let id = Self.registryID(matched)
         denied.removeValue(forKey: id)
+        serialAttempted.remove(id)
         // Cancel OUR minted device (see `adopt`) — the manager's object was never activated,
         // and cancelling a non-activated device is its own trap.
         guard let mine = open.removeValue(forKey: id) else { return }
         cancel(id: id, device: mine)
         dongleLock.lock()
         dongleSources.remove(id)
+        serials.removeValue(forKey: id)
         dongleLock.unlock()
         onSourceClosed(id)
         guard open.isEmpty else { return }
@@ -361,6 +381,26 @@ final class Sc2UsbLink {
         guard len > 0 else { return }
         let source = Self.registryID(device)
         let id = UInt8(truncatingIfNeeded: reportID)
+        // The payload byte position follows the same id-in-band rule the framing below applies.
+        let wirelessPayload: UInt8? = (id == Sc2Device.idWireless || id == Sc2Device.idWirelessX)
+            ? (report[0] == id ? (len >= 2 ? report[1] : nil) : report[0])
+            : nil
+        if wirelessPayload == Sc2Device.wirelessDisconnect {
+            // A disconnect edge re-arms the serial read: whatever bonds to this slot next may
+            // be a DIFFERENT pad, and serving pad A's engraved identity for pad B is the one
+            // failure the serial must never have.
+            serialAttempted.remove(source)
+            dongleLock.lock()
+            serials.removeValue(forKey: source)
+            dongleLock.unlock()
+        } else if !serialAttempted.contains(source), let dev = open[source] {
+            // Read the engraved serial lazily, on the slot's FIRST report of a bond cycle: at
+            // adopt a Puck slot is usually empty (pads bond later), and a blocking feature GET
+            // against a silent slot could stall this shared queue for every pad. A slot that
+            // just spoke has a live pad behind it, which answers control transfers promptly.
+            serialAttempted.insert(source)
+            readSerial(id: source, device: dev)
+        }
         if seenIds.insert(id).inserted {
             log.info(
                 "SC2 USB: report id=0x\(String(id, radix: 16), privacy: .public) seen (len=\(len, privacy: .public))"
@@ -384,6 +424,34 @@ final class Sc2UsbLink {
             log.debug("SC2 USB in: \(framed.map { String(format: "%02x", $0) }.joined(), privacy: .public)")
         }
         onReport(source, framed)
+    }
+
+    /// One feature-2 GET per bond cycle — the engraved per-pad serial (`Sc2Device.
+    /// featureSerial`). Blocking and synchronous at the kernel boundary, so it obeys the
+    /// once-per-pad rule the Android transport pins for GET_REPORT: never per input report. A
+    /// pad that answers with nothing parseable simply has no serial recorded; the capture logs
+    /// `serial ?` and everything else works. On `queue`.
+    private func readSerial(id: UInt64, device: IOHIDDevice) {
+        var buf = [UInt8](repeating: 0, count: 65)
+        buf[0] = Sc2Device.featureSerial
+        var len: CFIndex = buf.count
+        let rc = buf.withUnsafeMutableBufferPointer { p in
+            IOHIDDeviceGetReport(
+                device, kIOHIDReportTypeFeature,
+                CFIndex(Sc2Device.featureSerial), p.baseAddress!, &len)
+        }
+        guard rc == kIOReturnSuccess, len > 0,
+              let serial = Sc2Device.parseSerial(Array(buf[..<min(Int(len), buf.count)]))
+        else {
+            log.info(
+                "SC2 USB: no engraved serial (GET 0x02 rc=0x\(String(format: "%08x", rc), privacy: .public))"
+            )
+            return
+        }
+        dongleLock.lock()
+        serials[id] = serial
+        dongleLock.unlock()
+        log.info("SC2 USB: slot serial \(serial)")
     }
 
     // MARK: - Lizard keep-alive
