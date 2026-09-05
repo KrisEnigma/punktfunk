@@ -4,12 +4,19 @@
 //! `blend` is the render model: on while the client draws no pointer and a hardware cursor is
 //! declared on the adapter, which excludes the pointer from every frame for the WUDFHost's
 //! life. The image is frame-relative (the desktop position minus the host-stamped origin) so
-//! the pool can draw it without knowing where the monitor sits. Pure: no DDI, no handle.
+//! the pool can draw it without knowing where the monitor sits.
+//!
+//! A hardware cursor moves without DWM composing, so while the pool blends, a publish that
+//! changes what the client would see is DAMAGE: the cell marks itself dirty and wakes the
+//! pool's encode thread, which re-encodes its stash with the pointer where it is now
+//! (`encode/drive.rs`). No DDI here.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use pf_driver_proto::cursor::{CursorShm, ShapeRgba};
+
+use crate::encode::pool::Pool;
 
 /// Straight-alpha RGBA at its frame-relative top-left. `serial` is the OS shape id.
 #[derive(Clone)]
@@ -25,20 +32,75 @@ pub struct CursorImage {
     pub visible: bool,
 }
 
+impl CursorImage {
+    /// What a viewer sees of this pointer: where it is, which shape, whether at all.
+    fn seen(&self) -> (i32, i32, u32, bool) {
+        (self.x, self.y, self.serial, self.visible)
+    }
+}
+
 /// See the module docs. The worker and the pool hold clones; neither pins the monitor.
 #[derive(Default)]
 pub struct CursorCell {
     pub image: Mutex<Option<CursorImage>>,
-    pub blend: AtomicBool,
+    blend: AtomicBool,
     /// The host's SDR-white scale for an FP16 frame, as `f32` bits; 0 until the first publish.
     pub sdr_white_scale: AtomicU32,
+    /// A blended pointer changed since the encode thread last consumed it.
+    dirty: AtomicBool,
+    /// The pool whose encode thread a dirty pointer wakes; `Weak` so a pool's life stays the
+    /// monitor's business.
+    waker: Mutex<Option<Weak<Pool>>>,
 }
 
 impl CursorCell {
+    /// Whether the pool blends the pointer into every frame.
+    pub fn blends(&self) -> bool {
+        self.blend.load(Ordering::Relaxed)
+    }
+
+    /// Flip the render model. Turning the blend on is itself damage: the stash was encoded
+    /// without a pointer and the client just stopped drawing its own. Only the off→on edge is
+    /// damage, so a re-declare that leaves it on encodes nothing.
+    pub fn set_blend(&self, on: bool) {
+        if on && !self.blend.swap(on, Ordering::Release) {
+            self.mark_dirty();
+        } else {
+            self.blend.store(on, Ordering::Release);
+        }
+    }
+
+    /// A blended pointer has changed since the encode thread last consumed it — a peek that
+    /// leaves the mark, so the drive loop can rate-limit before it takes it.
+    pub fn is_dirty(&self) -> bool {
+        self.blends() && self.dirty.load(Ordering::Acquire)
+    }
+
+    /// The pool this cell wakes; set once per pool build.
+    pub fn set_waker(&self, pool: Weak<Pool>) {
+        *crate::registry::lock(&self.waker) = Some(pool);
+    }
+
+    /// Consume the dirty mark: `true` once per changed pointer while blending, so the caller
+    /// encodes the latest position exactly once however many publishes coalesced into it.
+    pub fn take_dirty(&self) -> bool {
+        self.blends() && self.dirty.swap(false, Ordering::AcqRel)
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+        let pool = crate::registry::lock(&self.waker)
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(pool) = pool {
+            pool.wake();
+        }
+    }
+
     /// The pointer to blend now: `None` unless blending is on and a visible shape was
     /// published. The scale is the FP16 SDR-white factor (1.0 when the host stamped none).
     pub fn to_blend(&self) -> Option<(CursorImage, f32)> {
-        if !self.blend.load(Ordering::Relaxed) {
+        if !self.blends() {
             return None;
         }
         let image = crate::registry::lock(&self.image).clone()?;
@@ -52,7 +114,8 @@ impl CursorCell {
 
     /// Fold one worker tick in: a new `shape` replaces the pixels, every tick moves the
     /// position and visibility. `image` is the worker's copy, kept across shape-less ticks;
-    /// nothing is published until the first shape.
+    /// nothing is published until the first shape. A tick that changes what the viewer sees
+    /// marks the cell dirty while the pool blends.
     pub fn publish(
         &self,
         image: &mut Option<CursorImage>,
@@ -81,6 +144,65 @@ impl CursorCell {
         img.x = hdr.x - hdr.origin_x;
         img.y = hdr.y - hdr.origin_y;
         img.visible = visible;
-        *crate::registry::lock(&self.image) = Some(img.clone());
+        let changed = {
+            let mut slot = crate::registry::lock(&self.image);
+            let changed = slot.as_ref().is_none_or(|old| old.seen() != img.seen());
+            *slot = Some(img.clone());
+            changed
+        };
+        if changed && self.blends() {
+            self.mark_dirty();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shm(x: i32, y: i32, shape_id: u32) -> CursorShm {
+        let mut h: CursorShm = bytemuck::Zeroable::zeroed();
+        h.x = x;
+        h.y = y;
+        h.shape_id = shape_id;
+        h
+    }
+
+    fn arrow() -> ShapeRgba {
+        ShapeRgba {
+            w: 2,
+            h: 2,
+            hot_x: 0,
+            hot_y: 0,
+            rgba: vec![255; 16],
+        }
+    }
+
+    #[test]
+    fn a_move_while_blending_is_dirty_once_until_taken() {
+        let cell = CursorCell::default();
+        let mut image = None;
+        cell.set_blend(true);
+        assert!(cell.take_dirty(), "the flip itself is damage");
+        cell.publish(&mut image, &shm(10, 10, 1), Some(arrow()), true);
+        cell.publish(&mut image, &shm(11, 10, 1), None, true);
+        assert!(cell.take_dirty());
+        assert!(!cell.take_dirty(), "two publishes coalesce into one take");
+        cell.publish(&mut image, &shm(11, 10, 1), None, true);
+        assert!(
+            !cell.take_dirty(),
+            "a publish that changes nothing is not damage"
+        );
+    }
+
+    #[test]
+    fn a_move_while_the_client_draws_is_not_damage() {
+        let cell = CursorCell::default();
+        let mut image = None;
+        cell.publish(&mut image, &shm(10, 10, 1), Some(arrow()), true);
+        cell.publish(&mut image, &shm(50, 50, 1), None, true);
+        assert!(!cell.take_dirty());
+        cell.set_blend(false);
+        assert!(!cell.take_dirty());
     }
 }

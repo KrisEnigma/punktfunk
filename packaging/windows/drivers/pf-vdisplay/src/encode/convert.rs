@@ -257,6 +257,10 @@ pub struct Targets {
     /// The cursor quad, built on first use; `None` after a build failure, logged once.
     blend: Option<CursorBlendPass>,
     blend_failed: bool,
+    /// The newest source frame, cursor-free (DWM excludes the hardware cursor), kept only while
+    /// the pool blends. A cursor-only re-encode re-fills the stash slot from this so the pointer
+    /// moves without a re-blend piling onto the last one. Source format; made on first keep.
+    plate: Option<Tex>,
 }
 
 impl Targets {
@@ -350,7 +354,37 @@ impl Targets {
             deferred: vec![false; slots],
             blend: None,
             blend_failed: false,
+            plate: None,
         })
+    }
+
+    /// Keep `src` as the clean plate for a later cursor-only re-encode: one copy of the source
+    /// frame, which carries no pointer because DWM excludes the declared hardware cursor. Costs
+    /// one `CopyResource` per composed frame while blending; the pool gates it on the blend.
+    pub fn keep_plate(&mut self, src: &Tex) -> Result<(), Fail> {
+        if self.plate.is_none() {
+            let bind = (d3d::D3D11_BIND_RENDER_TARGET.0 | d3d::D3D11_BIND_SHADER_RESOURCE.0) as u32;
+            self.plate = Some(make_tex62(
+                &self.dev,
+                (self.width, self.height),
+                source_format(self.kind),
+                bind,
+                0,
+            )?);
+        }
+        let plate = self.plate.as_ref().ok_or((-2, "plate"))?;
+        // SAFETY: `src` and `plate` are same-size, same-format textures on the same device whose
+        // immediate context is multithread-protected (`Direct3DDevice`).
+        unsafe { self.ctx.CopyResource(plate, src) };
+        Ok(())
+    }
+
+    /// Re-fill slot `i` from the clean plate — the same path as a fresh [`Self::pass`], so the
+    /// following [`Self::frame`] blends the current cursor onto cursor-free pixels. `Err` if no
+    /// plate was kept (blending began before any frame composed).
+    pub fn refill_from_plate(&mut self, i: usize) -> Result<(), Fail> {
+        let plate = self.plate.clone().ok_or((-2, "plate"))?;
+        self.pass(&plate, i, true)
     }
 
     /// One GPU pass from `src` (BGRA or FP16, the pool's size) into slot `i`: a copy for BGRA,

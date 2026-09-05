@@ -138,7 +138,7 @@ impl Pool {
             .then(|| OwnedHandle::event(false))
             .flatten();
         let bypass = release_event.is_some();
-        Ok(Arc::new(Self {
+        let pool = Arc::new(Self {
             device_epoch: device.epoch(),
             width: size.0,
             height: size.1,
@@ -159,7 +159,13 @@ impl Pool {
             cursor,
             bypass,
             release_event,
-        }))
+        });
+        // The cursor worker wakes this pool's encode thread when a blended pointer moves over a
+        // desktop that composed nothing. `Weak`, so the cell never keeps a retired pool alive.
+        if !bypass {
+            pool.cursor.set_waker(Arc::downgrade(&pool));
+        }
+        Ok(pool)
     }
 
     /// Whether this pool runs the S6 bypass ([`bypass_enabled`]).
@@ -223,9 +229,16 @@ impl Pool {
             let Some(i) = st.free.pop().or(recycled) else {
                 return self.drop_one();
             };
-            let blend = self.cursor.blend.load(Ordering::Relaxed);
-            let passed =
-                bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| st.targets.pass(&src, i, blend));
+            let blend = self.cursor.blends();
+            let passed = bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| {
+                st.targets.pass(&src, i, blend)?;
+                // Keep the clean source so a cursor move can re-encode this frame with the
+                // pointer elsewhere; only while blending, so a client-drawn session pays nothing.
+                if blend {
+                    let _ = st.targets.keep_plate(&src);
+                }
+                Ok(())
+            });
             if passed.is_err() {
                 st.free.push(i);
                 return self.drop_one();
@@ -286,6 +299,35 @@ impl Pool {
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
         Some((slot, qpc, seq))
+    }
+
+    /// A blended pointer moved since the encode thread last looked — a peek that leaves the
+    /// mark, so the drive loop can rate-limit to the refresh before it re-encodes.
+    pub fn cursor_pending(&self) -> bool {
+        !self.bypass && self.cursor.is_dirty()
+    }
+
+    /// Re-encode the stash with the pointer where it is NOW. DWM excludes the hardware cursor and
+    /// composes only on damage, so a cursor move over a still desktop yields no frame; this makes
+    /// the move itself the frame. The clean plate is re-blended (never the last blend again), the
+    /// slot is taken like [`Self::republish`], and the source counter advances so the move reads
+    /// as real progress. `None` unless a move is pending, a plate exists, the slot is idle and no
+    /// composed frame is queued — a queued frame carries the current pointer itself.
+    pub fn cursor_republish(&self) -> Option<(usize, u64, u64)> {
+        if !self.cursor.take_dirty() {
+            return None;
+        }
+        let mut st = lock(&self.state);
+        let (slot, ..) = st.stash?;
+        if wire::republish_slot(Some(slot), st.full.len(), &st.free).is_none() {
+            return None;
+        }
+        st.targets.refill_from_plate(slot).ok()?;
+        st.free.retain(|&s| s != slot);
+        st.encoding.push(slot);
+        let seq = self.source_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        dbglog!("[pf-vd] cursor: re-encode on pointer move (no compose) slot={slot} seq={seq}");
+        Some((slot, qpc_now(), seq))
     }
 
     /// Hand a slot back, whether its AU was published or it was skipped. In bypass this is
