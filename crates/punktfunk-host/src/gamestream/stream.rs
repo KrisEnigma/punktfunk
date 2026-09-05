@@ -314,7 +314,7 @@ fn run(
                 spawned_now = true;
                 None
             }
-            Some(cmd) => match crate::library::launch_session_command(compositor, cmd) {
+            Some(cmd) => match crate::library::launch_session_command(compositor, cmd, None) {
                 Ok(spawned) => {
                     spawned_now = true;
                     Some(spawned)

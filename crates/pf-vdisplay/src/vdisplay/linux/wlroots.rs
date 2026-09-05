@@ -214,6 +214,7 @@ impl VirtualDisplay for WlrootsDisplay {
             // Absolute input aims at this `wl_output.name`; with real heads the
             // HEADLESS-* sits beside them.
             output_name: Some(name),
+            seat: None,
         })
     }
 }

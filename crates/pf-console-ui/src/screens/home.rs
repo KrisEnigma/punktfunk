@@ -221,6 +221,16 @@ impl HomeScreen {
                 self.step(if up { -1 } else { 1 }, len, false);
                 true
             }
+            // Hover focuses, so the press that follows is the one that OPENS the card rather
+            // than the one that reaches it. The move-then-press fallback below stays for a
+            // pointer that cannot hover: a touchscreen sends Press with no Move before it.
+            PointerKind::Move => match p.pick(&self.geom).filter(|i| *i < len) {
+                Some(i) if i != self.cursor as usize => {
+                    self.cursor = i as i32;
+                    true
+                }
+                _ => false,
+            },
             // Geometry is a frame old: discovery can shorten the strip between draw
             // and press, and an index past `len` would land on Add Host.
             PointerKind::Press => match p.pick(&self.geom).filter(|i| *i < len) {

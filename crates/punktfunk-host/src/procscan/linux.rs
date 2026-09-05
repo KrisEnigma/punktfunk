@@ -165,22 +165,23 @@ impl Scanner {
         let cmdline = read_capped(&dir_path.join("cmdline"));
         if let Some(cmdline) = cmdline.as_deref() {
             if let Some(tok) = steam_tok {
-                // Both tokens, exact: `AppId=57` must not satisfy 570. Skip `fossilize_replay` —
-                // Steam wraps shader pre-caching in the same `SteamLaunch AppId=` reaper, and adopting
-                // it treats the compile's exit as the game exiting.
+                // Both tokens, exact: `AppId=57` must not satisfy 570. Skip the pre-launch payloads —
+                // Steam wraps shader pre-caching and Proton's install-script step in the same
+                // `SteamLaunch AppId=` reaper, and adopting one treats its exit as the game exiting.
                 let mut launch = false;
                 let mut appid = false;
-                let mut shader = false;
+                let mut prelaunch = false;
                 for arg in cmdline.split(|&b| b == 0) {
+                    let name = program_name(arg);
                     if arg == b"SteamLaunch" {
                         launch = true;
                     } else if arg == tok.as_bytes() {
                         appid = true;
-                    } else if program_name(arg) == b"fossilize_replay" {
-                        shader = true;
+                    } else if name == b"fossilize_replay" || name == b"iscriptevaluator.exe" {
+                        prelaunch = true;
                     }
                 }
-                if launch && appid && !shader {
+                if launch && appid && !prelaunch {
                     return true;
                 }
             }
@@ -446,6 +447,39 @@ mod tests {
         let s = scanner(td.path());
         assert_eq!(pids(s.find(&DetectSpec::steam(570), None)), vec![30]);
         assert_eq!(pids(s.find(&DetectSpec::steam(57), None)), vec![31]);
+    }
+
+    #[test]
+    fn steam_install_script_evaluator_is_not_the_game() {
+        // Balatro's real launch on .21: the evaluator reaper carries the appid and outlives the
+        // shim window, so adopting it ended the session 3 s before Steam created the game.
+        let td = fake_proc_root(
+            1000.0,
+            &[
+                FakeProc::new(37, 50_000).cmdline(&[
+                    "/home/p/.steam/ubuntu12_32/reaper",
+                    "SteamLaunch",
+                    "AppId=2379780",
+                    "Install=1",
+                    "--",
+                    "/home/p/.steam/steamapps/common/Proton - Experimental/proton",
+                    "run",
+                    "/home/p/.steam/legacycompat/iscriptevaluator.exe",
+                    "legacycompat\\evaluatorscript_2379780.vdf",
+                ]),
+                FakeProc::new(38, 50_000).cmdline(&[
+                    "/home/p/.steam/ubuntu12_32/reaper",
+                    "SteamLaunch",
+                    "AppId=2379780",
+                    "--",
+                    "/home/p/.steam/steamapps/common/Proton - Experimental/proton",
+                    "waitforexitandrun",
+                    "/home/p/.steam/steamapps/common/Balatro/Balatro.exe",
+                ]),
+            ],
+        );
+        let s = scanner(td.path());
+        assert_eq!(pids(s.find(&DetectSpec::steam(2_379_780), None)), vec![38]);
     }
 
     #[test]

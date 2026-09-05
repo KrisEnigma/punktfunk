@@ -248,6 +248,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A dedicated game session runs on its own gamescope.** A second launch either started nothing
+  or spawned a rival compositor that Steam's single instance immediately killed, and the session
+  ended on a process scan that mistook Steam's install-script step for the game — so the stream
+  dropped seconds before it started. The seat's one live spawn now serves every title, and the
+  session ends on gamescope's own atoms; nothing to do.
 - **A sleeping host now reads Offline, and auto-wake fires for it.** Every client took a live mDNS
   advert as proof of life, but a suspending host sends no goodbye and its record lingers for up to
   75 minutes — so the pip stayed green and Wake-on-LAN, gated on "not advertising", never fired.

@@ -224,6 +224,15 @@ impl MenuList {
     pub fn pointer(&mut self, p: Pointer, len: usize) -> (ListMsg, Option<MenuPulse>) {
         match p.kind {
             PointerKind::Scroll { up } => (ListMsg::None, self.step(if up { -1 } else { 1 }, len)),
+            // Hover focuses. Only a real change pulses: a pointer resting on a row emits a
+            // Move every frame, and a pulse per frame would be a stuck note.
+            PointerKind::Move => match p.pick(&self.geom) {
+                Some(i) if i < len && i != self.cursor => {
+                    self.cursor = i;
+                    (ListMsg::None, Some(MenuPulse::Move))
+                }
+                _ => (ListMsg::None, None),
+            },
             PointerKind::Press => match p.pick(&self.geom) {
                 Some(i) if i < len => {
                     self.cursor = i;

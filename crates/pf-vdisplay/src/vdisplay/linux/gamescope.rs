@@ -26,7 +26,7 @@ use discovery::{
     check_gamescope_version, find_gamescope_eis_socket, find_gamescope_node, gamescope_bin,
     gamescope_can_composite_external_overlay, gamescope_can_offer_refresh_rates,
     gamescope_honours_xkb_env, gamescope_node_present, gamescope_paints_on_commit,
-    poll_managed_node, wait_for_node,
+    poll_managed_node, wait_for_node, wayland_name_from_log,
 };
 pub(crate) use discovery::{
     game_session_exited, gamescope_can_composite_cursor, gamescope_hdr_capable, is_available,
@@ -56,6 +56,9 @@ pub struct GamescopeDisplay {
     isolation: Option<crate::SessionIsolation>,
     /// Exclusive darken-hold release, picked up by [`VirtualDisplay::take_topology_restore`].
     pending_restore: Option<Box<dyn FnOnce() + Send>>,
+    /// This acquire spawned gamescope, so `cmd` is already its primary child. A keep-alive reuse
+    /// leaves it `false` and the session must launch into the live compositor instead.
+    spawned_nested_launch: bool,
 }
 
 /// Mode + HDR the managed session was launched at. HDR is in the reuse key: gamescope cannot
@@ -431,9 +434,14 @@ impl VirtualDisplay for GamescopeDisplay {
         matches!(self.route, None | Some(crate::GamescopeRoute::Spawn))
     }
 
-    fn launch_command(&self) -> Option<String> {
-        // Reuse key: a kept spawn running game A must never serve a session launching game B.
-        self.cmd.clone()
+    fn nested_launch_started(&self) -> bool {
+        self.spawned_nested_launch
+    }
+
+    fn sole_instance(&self) -> bool {
+        // Bare spawn only; managed/attach do not own the socket name. Same route test as
+        // `poolable_now` — a second spawn is what breaks the `gamescope-N` lock and Steam.
+        self.poolable_now()
     }
 
     fn kept_display_alive(&mut self, node_id: u32) -> bool {
@@ -482,6 +490,7 @@ impl VirtualDisplay for GamescopeDisplay {
                 pool_gen: None,
                 expect_exact_dims: false,
                 output_name: None, // EIS seat, not a wlr virtual pointer to aim by name
+                seat: None,
             });
         }
         check_gamescope_version(); // diagnostic only — warns on known-deadlock-prone versions
@@ -551,11 +560,21 @@ impl VirtualDisplay for GamescopeDisplay {
             crate::panel_dpms::acquire_stream_darken();
             self.pending_restore = Some(Box::new(crate::panel_dpms::release_stream_darken));
         }
-        Ok(VirtualOutput::owned(
+        self.spawned_nested_launch = true;
+        let mut out = VirtualOutput::owned(
             node_id,
             Some((mode.width, mode.height, mode.refresh_hz)),
             Box::new(proc),
-        ))
+        );
+        // From the same log `wait_for_node` just read. `None` only if gamescope changed the line;
+        // every discovery then falls back to unscoped, which is what it did before seats.
+        out.seat = wayland_name_from_log(&log);
+        tracing::info!(
+            node_id,
+            seat = out.seat.as_deref().unwrap_or("-"),
+            "gamescope: seat key"
+        );
+        Ok(out)
     }
 }
 
@@ -642,6 +661,7 @@ fn create_managed_session(client: &str, mode: Mode, hdr: bool) -> Result<Virtual
             pool_gen: None,
             expect_exact_dims: false,
             output_name: None, // EIS seat, not a wlr virtual pointer to aim by name
+            seat: None,
         });
     }
     // Desktop Steam also holds the instance; SESSION_UNIT's own Steam is exempt via cgroup.
@@ -726,6 +746,7 @@ fn managed_output(node_id: u32, mode: Mode) -> VirtualOutput {
         pool_gen: None,
         expect_exact_dims: false,
         output_name: None, // EIS seat, not a wlr virtual pointer to aim by name
+        seat: None,
     }
 }
 
@@ -806,10 +827,10 @@ fn descends_from(mut pid: u32, ancestor: u32) -> bool {
 /// Run `cmd` inside the live session (managed / SteamOS / attach — [`spawn`]'s nesting does not
 /// apply). Best-effort display env from a process already inside; without it, host env (a
 /// `steam steam://…` still reaches the running Steam over its pipe).
-pub fn launch_into_session(cmd: &str) -> Result<std::process::Child> {
+pub fn launch_into_session(cmd: &str, seat: Option<&str>) -> Result<std::process::Child> {
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd);
-    match discover_session_display_env() {
+    match discover_session_display_env(seat) {
         Some((x11, wayland, _xauth)) => {
             tracing::info!(
                 command = %cmd,
@@ -835,11 +856,12 @@ pub fn launch_into_session(cmd: &str) -> Result<std::process::Child> {
         .context("spawn launch command into gamescope session")
 }
 
-/// Every nested Xwayland `(DISPLAY, XAUTHORITY)` the session exposes. Gaming Mode uses two
+/// Every nested Xwayland `(DISPLAY, XAUTHORITY)` ONE seat exposes. Gaming Mode uses two
 /// (`--xwayland-count`); the pointer lives on whichever is focused, so the XFixes source connects
-/// to all. Empty when none exposes a `DISPLAY`.
+/// to all of that seat's. `seat` is the instance's `GAMESCOPE_WAYLAND_DISPLAY`; `None` keeps every
+/// gamescope, which is only right when the caller has no seat to be wrong about.
 #[cfg(target_os = "linux")]
-pub(crate) fn xwayland_cursor_targets() -> Vec<(String, Option<String>)> {
+pub(crate) fn xwayland_cursor_targets(seat: Option<&str>) -> Vec<(String, Option<String>)> {
     let uid = crate::proc::current_uid();
     let mut out: Vec<(String, Option<String>)> = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -866,8 +888,11 @@ pub(crate) fn xwayland_cursor_targets() -> Vec<(String, Option<String>)> {
         let (mut display, mut is_gamescope, mut xauth) = (None, false, None);
         for kv in raw.split(|&b| b == 0) {
             let kv = String::from_utf8_lossy(kv);
-            if kv.starts_with("GAMESCOPE_WAYLAND_DISPLAY=") {
-                is_gamescope = true;
+            if let Some(v) = kv.strip_prefix("GAMESCOPE_WAYLAND_DISPLAY=") {
+                // A sandboxed client rewrites this to a bind path (`/run/pressure-vessel/…`), so
+                // it never matches a seat name. That is fine: the un-sandboxed members — the
+                // wrapper, `steam.sh`, the splash — all carry the real name, and one is enough.
+                is_gamescope = seat.is_none_or(|want| v == want);
             } else if let Some(v) = kv.strip_prefix("DISPLAY=") {
                 if !v.is_empty() {
                     display = Some(v.to_string());
@@ -890,9 +915,12 @@ pub(crate) fn xwayland_cursor_targets() -> Vec<(String, Option<String>)> {
     out
 }
 
-/// `(DISPLAY, WAYLAND_DISPLAY, XAUTHORITY)` from a same-uid process carrying
-/// `GAMESCOPE_WAYLAND_DISPLAY`. Any one can be absent.
-fn discover_session_display_env() -> Option<(Option<String>, Option<String>, Option<String>)> {
+/// `(DISPLAY, WAYLAND_DISPLAY, XAUTHORITY)` from a same-uid process on `seat` — matched by its
+/// `GAMESCOPE_WAYLAND_DISPLAY`. Any one can be absent. Without the key this took the first
+/// gamescope in `/proc`, which on a multi-seat host launches into somebody else's session.
+fn discover_session_display_env(
+    seat: Option<&str>,
+) -> Option<(Option<String>, Option<String>, Option<String>)> {
     let uid = crate::proc::current_uid();
     for e in std::fs::read_dir("/proc").ok()?.flatten() {
         let name = e.file_name();
@@ -918,6 +946,9 @@ fn discover_session_display_env() -> Option<(Option<String>, Option<String>, Opt
         for kv in raw.split(|&b| b == 0) {
             let kv = String::from_utf8_lossy(kv);
             if let Some(v) = kv.strip_prefix("GAMESCOPE_WAYLAND_DISPLAY=") {
+                if seat.is_some_and(|want| v != want) {
+                    continue;
+                }
                 if !v.is_empty() {
                     gs_wayland = Some(v.to_string());
                 }
@@ -2976,7 +3007,7 @@ fn sync_session_keyboard_layout() {
     let Some(layout) = resolved.names.layout.as_deref() else {
         return;
     };
-    let targets = xwayland_cursor_targets();
+    let targets = xwayland_cursor_targets(None);
     if targets.is_empty() {
         return;
     }
