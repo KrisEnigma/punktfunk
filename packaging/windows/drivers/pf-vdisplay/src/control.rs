@@ -60,8 +60,56 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
             let reply = crate::encode_probe::status();
             write_output_prefix_complete(request, &reply, size_of::<control::EncodeProbeReply>());
         }
-        _ => request.complete(STATUS_NOT_FOUND),
+        // The remoting stack drives a seat display over RdpIdd's own private opcodes and treats
+        // STATUS_NOT_FOUND as "this is not a display driver" (`RDPIDD_OPCODE_TYPE_BIND_DRIVER` ->
+        // `IddInterfaceArrivalFailure`). Log what it asks for and answer, so the protocol it needs
+        // can be learnt from the trace rather than guessed. The console device still refuses.
+        IOCTL_RDPIDD_TRANSPORT if crate::adapter::is_seat_role() => rdpidd_transport(request),
+        _ => {
+            if crate::adapter::is_seat_role() {
+                dbglog!("[pf-vd] seat: refusing unknown IOCTL {ioctl_code:#010x}");
+            }
+            request.complete(STATUS_NOT_FOUND)
+        }
     }
+}
+
+/// The private transport the remoting stack drives a seat display over.
+///
+/// One buffered IOCTL carries every message, and none of it is documented — this layout is read off
+/// the wire and off RdpIdd's own `ProcessIoctl`:
+///
+/// ```text
+/// +0x00  u64  total message length (equals the input buffer size)
+/// +0x08  u32  opcode
+/// +0x0c  ..   opcode-specific payload
+/// ```
+///
+/// Observed: `0x408` binds the driver and is the only one wanting output (12 bytes); `0x409`,
+/// `0x40a` and `0x40b` follow it and want none. `STATUS_NOT_FOUND` reads as "not a display driver"
+/// and an empty output reads as a refusal, so the reply is a zeroed buffer of the size asked for.
+///
+/// This is ANSWERED, not implemented: the payloads are not understood, so an opcode outside the
+/// observed set is logged rather than silently accepted as understood.
+const IOCTL_RDPIDD_TRANSPORT: u32 = 0x8000_0040;
+const RDPIDD_OPCODES_SEEN: core::ops::RangeInclusive<u32> = 0x408..=0x40b;
+
+fn rdpidd_transport(request: Request) {
+    let (input, in_len) = request.input_bytes(16).unwrap_or_default();
+    let opcode = input
+        .get(8..12)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, u32::from_le_bytes);
+    let out_len = request.output_buffer_len();
+    if !RDPIDD_OPCODES_SEEN.contains(&opcode) {
+        dbglog!("[pf-vd] seat: unknown rdpidd opcode {opcode:#x} in={in_len} out={out_len}");
+    }
+    let status = if out_len > 0 {
+        request.copy_to_output(&vec![0u8; out_len])
+    } else {
+        STATUS_SUCCESS
+    };
+    request.complete(status);
 }
 
 /// `IOCTL_SET_ENCODE` (v7): open an encoder on the delivered AU section. A well-formed request
