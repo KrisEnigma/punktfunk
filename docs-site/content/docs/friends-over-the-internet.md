@@ -96,18 +96,17 @@ friend's *client* platform run it, and what does the friend get to see.
 | Tool | Friend needs | What they can reach | Works with Punktfunk today |
 |---|---|---|---|
 | **Tailscale machine sharing** (above) | a free Tailscale account + app | one host, two ports | yes — direct peer-to-peer, relayed only when NAT defeats it |
-| **[Porthole](https://porthole.sestudio.org/)** (free Steam app) | Steam + Porthole on a PC / Mac / Steam Deck | only the ports you share | **not yet** — see below |
+| **[Porthole](https://porthole.sestudio.org/)** (free Steam app) | Steam + Porthole on a PC / Mac / Steam Deck | only the ports you share | yes — see below |
 | **ZeroTier** | a free ZeroTier account + app, your network id | the whole host, no other machines | yes — same shape as Tailscale without the ACL step; no Apple TV app; free tier is one network, ten devices |
 | Hamachi, Radmin VPN | the app | the whole host | yes, PC-only friends (Radmin is Windows-only; Hamachi's free tier is five machines) |
 | playit.gg, ngrok, Cloudflare Tunnel | nothing | a public address anyone can knock on | no — TCP-only, or a throttled relay that cannot carry a video stream |
 
 **Porthole** is the friendliest of the lot for PC-to-PC: both of you run it, the friend joins with a
 share code or from your Steam friends list, and the ports you share appear on *their* machine at
-`127.0.0.1`. Punktfunk's control plane would work through it. Its video plane does not yet: a port
-proxy hands the host a translated source address, and with a pinned data port the host currently
-sends video to the port the client *reported* instead of the one it *heard from*. That is a host
-change on the roadmap, not something you can configure around. We have not tested Porthole; from
-the code, it and any other port proxy connect and then show a black screen.
+`127.0.0.1`. Pin the data port as in step 1, share UDP `9777` and `9779` without remapping them, and
+the friend connects to `127.0.0.1:9777`. Add TCP `47990` if they should see your game library. One
+Porthole friend at a time: the pinned port serves a single session, and a second one falls back to
+a random port Porthole does not carry.
 
 **ZeroTier** is the closest to "friendly and safe" without editing rules: create a network, the
 friend joins it by id, you tick them as authorized. The scope is inherently one host — but *all* of
@@ -118,9 +117,7 @@ it two ports.
 ## Plain port forwarding
 
 Forwarding UDP `9777` and your pinned data port on the router works — no tunnel, no account, the
-friend connects to your public address — with one catch: video reaches the friend only if *their*
-router keeps the port number their client used (most home routers do; none promise it), for the
-same reason Porthole fails. What a stranger who finds the port gets is a TLS handshake
+friend connects to your public address. What a stranger who finds the port gets is a TLS handshake
 and a refusal, and a pairing attempt is only possible during the short window you arm and can only
 guess the PIN once. Two honest caveats, which are why this page leads with Tailscale: **approve
 without a PIN is not safe on a forwarded port** — a stranger's knock looks exactly like your

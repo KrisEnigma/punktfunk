@@ -95,9 +95,10 @@ pub struct Punktfunk1Options {
     pub pairing_pin: Option<String>,
     /// Tests: store path. `None` = the default config path.
     pub paired_store: Option<std::path::PathBuf>,
-    /// Fixed data-plane UDP port. `None`/`Some(0)`: ephemeral bind + ~2.5 s hole-punch,
-    /// then the reported address. `Some(p)`: bind `p` and stream direct (no punch wait);
-    /// a busy fixed port falls back to ephemeral + punch ([`bind_data_socket`]).
+    /// Fixed data-plane UDP port. `None`/`Some(0)`: an ephemeral port per session.
+    /// `Some(p)`: bind `p` (busy → ephemeral, [`bind_data_socket`]). Either way the
+    /// client's hole-punch picks the return path; a fixed port only gives a firewall or
+    /// a port proxy one number to open.
     pub data_port: Option<u16>,
     /// Disconnect-detection latency. `None` = core default (8 s). From
     /// `PUNKTFUNK_IDLE_TIMEOUT_MS`; ≥1 s floor, keep-alive scales so a live session
@@ -107,10 +108,12 @@ pub struct Punktfunk1Options {
     pub mdns: bool,
 }
 
-/// Bind the per-session data-plane UDP socket ([`Punktfunk1Options::data_port`]).
-/// Returns `(socket, direct)`: `direct` = a bound fixed port (stream to the reported
-/// address, no punch); otherwise hole-punch. Held from handshake through streaming —
-/// no drop-then-rebind window that could steal a fixed port.
+/// Bind the per-session data-plane UDP socket ([`Punktfunk1Options::data_port`]): the
+/// fixed port when set and free, else an ephemeral one. Held from handshake through
+/// streaming — no drop-then-rebind window that could steal a fixed port. It never decides
+/// how video is addressed: every session waits for the client's hole-punch on whatever
+/// port this bound, because a fixed port fixes only the host's side of the path — the
+/// client's NAT, or a port proxy such as Porthole, still remaps the source to answer.
 ///
 /// `local_ip` is the address the QUIC connection was received on. Bind it: the client's
 /// data socket is `connect`ed to the host IP it dialed, and its kernel drops any other
@@ -119,7 +122,7 @@ pub struct Punktfunk1Options {
 fn bind_data_socket(
     data_port: Option<u16>,
     local_ip: Option<std::net::IpAddr>,
-) -> std::io::Result<(std::net::UdpSocket, bool)> {
+) -> std::io::Result<std::net::UdpSocket> {
     // Dual-stack endpoints report IPv4-mapped v6; unmap so a v4 `connect` can bind.
     let local_ip = local_ip.map(|ip| match ip {
         std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, std::net::IpAddr::V4),
@@ -130,7 +133,7 @@ fn bind_data_socket(
     };
     if let Some(p) = data_port.filter(|p| *p != 0) {
         match std::net::UdpSocket::bind((wildcard(local_ip), p)) {
-            Ok(sock) => return Ok((sock, true)),
+            Ok(sock) => return Ok(sock),
             Err(e) => tracing::warn!(
                 data_port = p,
                 error = %e,
@@ -140,7 +143,7 @@ fn bind_data_socket(
         }
     }
     match std::net::UdpSocket::bind((wildcard(local_ip), 0)) {
-        Ok(sock) => Ok((sock, false)),
+        Ok(sock) => Ok(sock),
         // The control connection arrived here; a bind failure means the adapter dropped.
         // Wildcard still reaches a routable client.
         Err(e) if local_ip.is_some() => {
@@ -151,7 +154,7 @@ fn bind_data_socket(
                  — falling back to the wildcard. On a multi-homed host video may now egress from \
                  a different interface than the client dialed, which it silently drops."
             );
-            Ok((std::net::UdpSocket::bind("0.0.0.0:0")?, false))
+            Ok(std::net::UdpSocket::bind("0.0.0.0:0")?)
         }
         Err(e) => Err(e),
     }
@@ -1410,7 +1413,7 @@ pub(crate) async fn run_admitted(
         });
     }
 
-    let (hello, welcome, udp_port, data_sock, direct, start, compositor, gamescope_route, prep) =
+    let (hello, welcome, udp_port, data_sock, start, compositor, gamescope_route, prep) =
         tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             handshake::negotiate(
@@ -2058,20 +2061,16 @@ pub(crate) async fn run_admitted(
                 }
                 (DataPlane::Udp, None) => anyhow::bail!("the native plane negotiated no data socket"),
                 (DataPlane::Udp, Some(data_sock)) => {
-            // Default: hole-punch, then stream to the observed source (NAT / stateful firewall).
-            // `direct` (`--data-port`): skip the wait, stream to the reported address (trusts
-            // the reported port; cannot cross a client-side NAT that remaps it).
-            let bound = if direct {
-                UdpTransport::from_socket(data_sock, &client_udp.to_string()).map(|t| (t, false))
-            } else {
-                UdpTransport::from_socket_punch(
-                    data_sock,
-                    &client_udp.to_string(),
-                    // Punch discovers the NAT-remapped port; IP is the host-observed QUIC remote.
-                    client_udp.ip(),
-                    std::time::Duration::from_millis(2500),
-                )
-            };
+            // Wait for the client's punch and stream to its observed source — the port a NAT or
+            // a port proxy actually answers from. A fixed --data-port is no exception (it fixes
+            // only the host's side), so the client-reported port is the fallback for a punch
+            // that never arrives, never the first choice. IP is the host-observed QUIC remote.
+            let bound = UdpTransport::from_socket_punch(
+                data_sock,
+                &client_udp.to_string(),
+                client_udp.ip(),
+                std::time::Duration::from_millis(2500),
+            );
             let (transport, punched) = match bound {
                 Ok(v) => v,
                 Err(e) => {
@@ -2086,12 +2085,10 @@ pub(crate) async fn run_admitted(
             tracing::info!(
                 %client_udp,
                 udp_port,
-                direct,
                 punched,
                 local = ?local,
-                "data plane bound (direct=true → fixed --data-port, streaming to the reported \
-                 address with no hole-punch; else punched=true → the client's observed source, \
-                 false → no punch seen, the reported address)"
+                "data plane bound (punched=true → the client's observed source; false → no \
+                 punch seen, the reported address)"
             );
             // Wrong egress: the client's connected socket drops every datagram before userspace.
             if let (Some(l), Some(c)) = (local.map(|a| a.ip()), control_local_ip) {
@@ -2114,9 +2111,9 @@ pub(crate) async fn run_admitted(
                     );
                 }
             }
-            // No punch: inbound UDP to this port looks blocked. Video then goes to an unverified
-            // claimed address. `direct` skips the punch by operator choice, so it is not a failure.
-            if !direct && !punched {
+            // No punch: inbound UDP to this port looks blocked, fixed or not, and video now goes
+            // to an address the client only claimed.
+            if !punched {
                 tracing::warn!(
                     %client_udp,
                     udp_port,
@@ -2604,17 +2601,16 @@ mod tests {
     }
 
     #[test]
-    fn data_socket_defaults_to_random_hole_punch() {
-        // No fixed port (and 0) → ephemeral, not direct: the caller hole-punches.
+    fn data_socket_defaults_to_an_ephemeral_port() {
+        // No fixed port (and 0) → some ephemeral port, never 0.
         for req in [None, Some(0)] {
-            let (sock, direct) = bind_data_socket(req, None).expect("bind random data socket");
-            assert!(!direct, "req={req:?} must hole-punch, not stream direct");
+            let sock = bind_data_socket(req, None).expect("bind random data socket");
             assert_ne!(sock.local_addr().unwrap().port(), 0);
         }
     }
 
     #[test]
-    fn data_socket_fixed_binds_direct_then_falls_back_when_busy() {
+    fn data_socket_fixed_binds_it_then_falls_back_when_busy() {
         // Reserve-then-rebind like the host. A race here is flaky, not wrong.
         let free = std::net::UdpSocket::bind("0.0.0.0:0")
             .unwrap()
@@ -2622,15 +2618,12 @@ mod tests {
             .unwrap()
             .port();
 
-        // Free fixed port binds exactly it, in direct mode.
-        let (held, direct) = bind_data_socket(Some(free), None).expect("bind fixed data socket");
-        assert!(direct, "a fixed --data-port must stream direct");
+        // Free fixed port binds exactly it.
+        let held = bind_data_socket(Some(free), None).expect("bind fixed data socket");
         assert_eq!(held.local_addr().unwrap().port(), free);
 
-        // Busy fixed port falls back to ephemeral + punch, not fail.
-        let (fallback, direct2) =
-            bind_data_socket(Some(free), None).expect("busy fixed port falls back");
-        assert!(!direct2, "a busy fixed port must fall back to hole-punch");
+        // Busy fixed port falls back to ephemeral, not fail.
+        let fallback = bind_data_socket(Some(free), None).expect("busy fixed port falls back");
         assert_ne!(
             fallback.local_addr().unwrap().port(),
             free,
@@ -2644,18 +2637,16 @@ mod tests {
     #[test]
     fn data_socket_binds_the_address_the_control_plane_arrived_on() {
         let loopback = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-        let (sock, direct) =
-            bind_data_socket(None, Some(loopback)).expect("bind pinned data socket");
-        assert!(!direct);
+        let sock = bind_data_socket(None, Some(loopback)).expect("bind pinned data socket");
         assert_eq!(sock.local_addr().unwrap().ip(), loopback);
 
         // Dual-stack reports IPv4-mapped v6; unmap or the socket binds v6 and cannot `connect` v4.
         let mapped = std::net::IpAddr::V6(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped());
-        let (sock, _) = bind_data_socket(None, Some(mapped)).expect("bind mapped data socket");
+        let sock = bind_data_socket(None, Some(mapped)).expect("bind mapped data socket");
         assert_eq!(sock.local_addr().unwrap().ip(), loopback);
 
         // No reported local address keeps the wildcard.
-        let (sock, _) = bind_data_socket(None, None).expect("bind wildcard data socket");
+        let sock = bind_data_socket(None, None).expect("bind wildcard data socket");
         assert!(sock.local_addr().unwrap().ip().is_unspecified());
     }
 

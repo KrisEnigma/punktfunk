@@ -282,7 +282,6 @@ pub(super) async fn negotiate(
     Welcome,
     u16,
     Option<std::net::UdpSocket>,
-    bool,
     Start,
     Option<crate::vdisplay::Compositor>,
     // Gamescope sub-mode as a value, not process env — a concurrent connect would overwrite env.
@@ -413,15 +412,15 @@ pub(super) async fn negotiate(
 
     // Hold the socket through streaming — no bind→read→drop→rebind race on a fixed port.
     // Bound to this connection's local IP, not wildcard: the client accepts video only from
-    // the host IP it dialed. Fixed `--data-port` → `direct` (no punch-wait).
-    let (data_sock, direct, udp_port) = match data_port {
+    // the host IP it dialed.
+    let (data_sock, udp_port) = match data_port {
         Some(port) => {
-            let (sock, direct) = bind_data_socket(port, conn.local_ip())?;
+            let sock = bind_data_socket(port, conn.local_ip())?;
             let udp_port = sock.local_addr()?.port();
-            (Some(sock), direct, udp_port)
+            (Some(sock), udp_port)
         }
         // A browser: nothing to bind, nothing to punch, no second port to name.
-        None => (None, true, 0),
+        None => (None, 0),
     };
 
     // Before Welcome: a path a previous session proved jumbo is given a bounded moment to
@@ -679,7 +678,6 @@ pub(super) async fn negotiate(
         welcome,
         udp_port,
         data_sock,
-        direct,
         start,
         compositor,
         gamescope_route,

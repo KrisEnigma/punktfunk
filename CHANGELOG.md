@@ -250,6 +250,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **A pinned data port no longer skips the hole-punch.** `--data-port` / `PUNKTFUNK_DATA_PORT`
+  used to stream to the port the client reported, which a NAT or a port proxy on the client's
+  side remaps; the host now answers the source it heard the punch from on every port. Nothing to
+  do, unless a fleet script relied on the flag to suppress the "no hole-punch reached" warning —
+  that warning now also fires on a pinned port whose inbound UDP is blocked.
 - **`pf-client-core` and `pf-console-ui` build for `wasm32-unknown-emscripten`.** Their portable
   module gates name `target_family = "wasm"` beside android, and `punktfunk-core` now takes
   `if-addrs` off wasm only, keeps its Apple `recv_batch` off it, and `trust`'s identity, pair,
