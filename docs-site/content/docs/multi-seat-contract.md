@@ -8,6 +8,19 @@ has one host on the machine's console session and behaves exactly as it always h
 describes the contract that a separate, opt-in supervisor uses to run *several* hosts on one
 Windows box, one per seat, so that several people can play on it at once.
 
+## What Windows requires
+
+Several people using one Windows machine at the same time is a Windows licensing question before it
+is a punktfunk one, and punktfunk does not change the answer.
+
+- **Windows Server**, plus a **Remote Desktop Services CAL for every seat**. Per-Device CALs
+  usually suit fixed seats better than Per-User, since a seat is a place rather than a person.
+- **A client edition of Windows serves one session at a time.** Multi-seat on Windows 10 or 11 is
+  not a configuration this software provides; a single seat works there and is a legitimate setup.
+
+`check-seat-display.ps1` names the edition it finds so this is caught at install rather than after.
+If you are sizing a deployment, price the CALs first — they usually dominate.
+
 The supervisor is [`punktfunk-seats`](https://git.unom.io/unom/punktfunk-seats), a separate program
 with its own installer. It owns the seat accounts, the Windows sessions and everything else about
 how a seat comes to exist. The host never learns any of that. This page exists so the two can be
@@ -82,6 +95,34 @@ before it reports the seat as healthy, and it is the quickest way to answer "why
 working" by hand.
 
 Drop `--hdr` to ask the same question without requiring a 10-bit path.
+
+## The seat display driver is a second package
+
+A seat's display is created and started by Windows' own terminal-services stack, and that stack
+starts exactly one thing: a driver claiming the hardware id `RdpIdd_IndirectDisplay`. Claiming it
+**takes over every RDP session on the machine**, ordinary Remote Desktop and administrator sessions
+included. So it cannot ride the package everyone installs, and the build produces two:
+
+| Package | Claims | Installed by |
+|---|---|---|
+| `pf_vdisplay.{inf,cat}` | the console display device | every punktfunk install, unchanged |
+| `pf_vdisplay_seats.{inf,cat}` | the seat display ids | the seats add-on, on an explicit choice |
+
+Both come from the same source and the same signing key. A machine that never installs the add-on
+never claims the id, and its Remote Desktop behaves exactly as it always did.
+
+**Losing that claim is silent.** Windows ranks our package and its own `rdpidd.inf` identically, so
+the id is decided on the newer driver date — and a seat whose display went to Microsoft's adapter
+still logs in, still looks fine, and simply never streams. Check it rather than assume it:
+
+```
+powershell -File check-seat-display.ps1
+```
+
+Run with at least one seat connected, since the devnodes only exist while a session is. It reports
+which driver owns each live seat display, compares both driver dates and warns before the tie can
+be lost, and names the Windows edition — a client edition serves one session at a time however
+well the display works.
 
 ## What the host never knows
 
