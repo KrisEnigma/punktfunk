@@ -685,11 +685,14 @@ impl MenuList {
                 crate::theme::panel_highlight(canvas, r, 14.0, k as f32);
             }
 
-            // A note under the label lifts the label; the two share the row's height.
+            // A note under the label lifts the label; the two share the row's height. The value
+            // stays on the row's centre line with the switch and the chevrons — lifted with the
+            // label it sat visibly above them on every row that carries a note.
+            let centred = cy + 16.0 * k * 0.36;
             let baseline = if row.note.is_some() {
                 cy - 2.0 * k
             } else {
-                cy + 16.0 * k * 0.36
+                centred
             };
             let tone = |on: skia_safe::Color4f, off: skia_safe::Color4f| {
                 if row.danger {
@@ -946,7 +949,7 @@ impl MenuList {
                         canvas,
                         &prev_text,
                         place(&prev_text) + dx + p.offset * k,
-                        baseline,
+                        centred,
                         W::Medium,
                         15.0 * k,
                         alpha(vcolor, gone),
@@ -956,7 +959,7 @@ impl MenuList {
                     canvas,
                     &shown,
                     place(&shown) + dx,
-                    baseline,
+                    centred,
                     W::Medium,
                     15.0 * k,
                     alpha(vcolor, 1.0 - gone),
