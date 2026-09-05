@@ -119,7 +119,9 @@ function Find-VcRedistCrt([string]$arch) {
     $hit = $roots | Where-Object { Test-Path $_ } |
         ForEach-Object { Get-ChildItem -Path $_ -Recurse -Directory -Filter 'Microsoft.VC143.CRT' -ErrorAction SilentlyContinue } |
         Where-Object { $_.FullName -match "\\$arch\\Microsoft\.VC143\.CRT$" } |
-        Sort-Object { [version]([regex]::Match($_.FullName, '\\(\d+\.\d+\.\d+)\\').Groups[1].Value) } |
+        # Newest version wins; at equal version the desktop set beats onecore\<arch> (Build Tools
+        # ships arm64 only under onecore, so that one stays as the fallback).
+        Sort-Object { [version]([regex]::Match($_.FullName, '\\(\d+\.\d+\.\d+)\\').Groups[1].Value) }, { $_.FullName -notmatch '\\onecore\\' } |
         Select-Object -Last 1
     if (-not $hit) { throw "Microsoft.VC143.CRT for $arch not found under $($roots -join '; ') - install the MSVC v143 toolset." }
     $hit.FullName
