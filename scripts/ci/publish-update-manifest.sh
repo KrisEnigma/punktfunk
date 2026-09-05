@@ -21,6 +21,8 @@
 #   CI_RUN               CI run number                                     (required for canary)
 #   WINDOWS_URL          immutable per-version installer URL               (required for stable)
 #   WINDOWS_SHA256       hex sha256 of that installer                      (paired with WINDOWS_URL)
+#   WINDOWS_ARM64_URL    the ARM64 installer's immutable URL               (optional; same pins/subject)
+#   WINDOWS_ARM64_SHA256 hex sha256 of that installer                      (paired with WINDOWS_ARM64_URL)
 #   AUTHENTICODE_SHA256  comma-separated signing-leaf sha256s              (required for stable)
 #   AUTHENTICODE_SUBJECT expected signing-cert subject CN — the host then  (required for stable)
 #                        demands a trusted chain (S_OK) + this subject
@@ -115,6 +117,8 @@ jq -n \
   --argjson serial "$SERIAL" \
   --arg win_url "${WINDOWS_URL:-}" \
   --arg win_sha "${WINDOWS_SHA256:-}" \
+  --arg a64_url "${WINDOWS_ARM64_URL:-}" \
+  --arg a64_sha "${WINDOWS_ARM64_SHA256:-}" \
   --argjson auth "$AUTH_JSON" \
   --arg auth_subject "${AUTHENTICODE_SUBJECT:-}" \
   --arg ci_run "${CI_RUN:-}" \
@@ -123,6 +127,8 @@ jq -n \
   + (if $notes_url != "" then {notes_url: $notes_url} else {} end)
   + (if $ci_run != "" then {ci_run: ($ci_run | tonumber)} else {} end)
   + (if $win_url != "" then {windows_host: ({url: $win_url, sha256: $win_sha, authenticode_sha256: $auth}
+      + (if $auth_subject != "" then {authenticode_subject: $auth_subject} else {} end))} else {} end)
+  + (if $a64_url != "" then {windows_host_arm64: ({url: $a64_url, sha256: $a64_sha, authenticode_sha256: $auth}
       + (if $auth_subject != "" then {authenticode_subject: $auth_subject} else {} end))} else {} end)
   ' > "$MANIFEST"
 echo "manifest:"; cat "$MANIFEST"

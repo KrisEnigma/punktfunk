@@ -2,7 +2,8 @@
 //!
 //! Keys live in the consuming binary and are checked by [`crate::sig`]. TLS and
 //! the serving registry are transport, never trust. Host and Linux client share
-//! `version`/`ci_run`; ignore a payload leg you do not need (`windows_host` today).
+//! `version`/`ci_run`; ignore a payload leg you do not need (`windows_host` today,
+//! `windows_host_arm64` for an ARM64 host).
 //!
 //! Fail closed: signature over the exact bytes, then strict JSON — HTML stubs
 //! never parse. `channel` must match the URL we fetched (canary cannot replay
@@ -41,6 +42,10 @@ pub struct Manifest {
     /// Other consumers ignore this leg.
     #[serde(default)]
     pub windows_host: Option<WindowsHostAsset>,
+    /// The ARM64 host's installer. Absent until the arm64 leg publishes one; an ARM64 host
+    /// never falls back to `windows_host`, which would hand it the x64 exe.
+    #[serde(default)]
+    pub windows_host_arm64: Option<WindowsHostAsset>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -97,31 +102,40 @@ pub fn parse_verified(bytes: &[u8], expected_channel: &str) -> Result<Manifest> 
     if !m.notes_url.is_empty() && !m.notes_url.starts_with(NOTES_ORIGIN) {
         bail!("manifest notes_url is not on {NOTES_ORIGIN}");
     }
-    if let Some(w) = &m.windows_host {
-        if !w.url.starts_with("https://") {
-            bail!("windows_host.url must be https");
-        }
-        if w.sha256.len() != 64 || !w.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            bail!("windows_host.sha256 is not a hex SHA-256");
-        }
-        if w.authenticode_sha256
-            .iter()
-            .any(|pin| pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_hexdigit()))
-        {
-            bail!("windows_host.authenticode_sha256 contains an invalid pin");
-        }
-        if w.authenticode_subject.len() > 256
-            || w.authenticode_subject.chars().any(char::is_control)
-        {
-            bail!("windows_host.authenticode_subject is invalid");
-        }
-        if expected_channel == "stable"
-            && (w.authenticode_sha256.is_empty() || w.authenticode_subject.is_empty())
-        {
-            bail!("stable windows_host requires an Authenticode leaf pin and subject");
+    for (key, asset) in [
+        ("windows_host", &m.windows_host),
+        ("windows_host_arm64", &m.windows_host_arm64),
+    ] {
+        if let Some(w) = asset {
+            validate_asset(key, w, expected_channel)?;
         }
     }
     Ok(m)
+}
+
+/// The per-asset rules; `key` names the leg in the error.
+fn validate_asset(key: &str, w: &WindowsHostAsset, expected_channel: &str) -> Result<()> {
+    if !w.url.starts_with("https://") {
+        bail!("{key}.url must be https");
+    }
+    if w.sha256.len() != 64 || !w.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("{key}.sha256 is not a hex SHA-256");
+    }
+    if w.authenticode_sha256
+        .iter()
+        .any(|pin| pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        bail!("{key}.authenticode_sha256 contains an invalid pin");
+    }
+    if w.authenticode_subject.len() > 256 || w.authenticode_subject.chars().any(char::is_control) {
+        bail!("{key}.authenticode_subject is invalid");
+    }
+    if expected_channel == "stable"
+        && (w.authenticode_sha256.is_empty() || w.authenticode_subject.is_empty())
+    {
+        bail!("stable {key} requires an Authenticode leaf pin and subject");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -229,6 +243,25 @@ mod tests {
         let mut v = doc();
         v.as_object_mut().unwrap().remove("windows_host");
         assert!(parse_verified(&bytes(&v), "stable").is_ok());
+    }
+
+    /// The arm64 leg is optional and validated by the same rules as the x64 one.
+    #[test]
+    fn arm64_asset_is_optional_and_validated() {
+        let m = parse_verified(&bytes(&doc()), "stable").unwrap();
+        assert!(m.windows_host_arm64.is_none());
+        let mut v = doc();
+        v["windows_host_arm64"] = v["windows_host"].clone();
+        let m = parse_verified(&bytes(&v), "stable").unwrap();
+        assert_eq!(
+            m.windows_host_arm64.unwrap().url,
+            m.windows_host.unwrap().url
+        );
+        v["windows_host_arm64"]["sha256"] = serde_json::json!("nothex");
+        let err = parse_verified(&bytes(&v), "stable")
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("windows_host_arm64."), "{err}");
     }
 
     #[test]
