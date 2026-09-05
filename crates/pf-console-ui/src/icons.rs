@@ -10,22 +10,22 @@ use skia_safe::{utils::parse_path, Canvas, Color4f, PaintCap, PaintJoin};
 
 /// One icon's 24×24 path data.
 #[derive(Clone, Copy)]
-pub(crate) struct Icon(pub &'static str);
+pub struct Icon(pub &'static str);
 
-pub(crate) const CHEVRON_DOWN: Icon = Icon(pf_client_core::lucide::CHEVRON_DOWN);
-pub(crate) const CHEVRON_LEFT: Icon = Icon(pf_client_core::lucide::CHEVRON_LEFT);
-pub(crate) const CHEVRON_RIGHT: Icon = Icon(pf_client_core::lucide::CHEVRON_RIGHT);
-pub(crate) const CHEVRON_UP: Icon = Icon(pf_client_core::lucide::CHEVRON_UP);
-pub(crate) const CORNER_DOWN_LEFT: Icon = Icon(pf_client_core::lucide::CORNER_DOWN_LEFT);
-pub(crate) const PLUS: Icon = Icon(pf_client_core::lucide::PLUS);
+pub const CHEVRON_DOWN: Icon = Icon(pf_client_core::lucide::CHEVRON_DOWN);
+pub const CHEVRON_LEFT: Icon = Icon(pf_client_core::lucide::CHEVRON_LEFT);
+pub const CHEVRON_RIGHT: Icon = Icon(pf_client_core::lucide::CHEVRON_RIGHT);
+pub const CHEVRON_UP: Icon = Icon(pf_client_core::lucide::CHEVRON_UP);
+pub const CORNER_DOWN_LEFT: Icon = Icon(pf_client_core::lucide::CORNER_DOWN_LEFT);
+pub const PLUS: Icon = Icon(pf_client_core::lucide::PLUS);
 
-pub(crate) fn by_name(name: &str) -> Option<Icon> {
+pub fn by_name(name: &str) -> Option<Icon> {
     pf_client_core::lucide::path(name).map(Icon)
 }
 
 /// Centre `(x, y)`, 24-unit box scaled to `box_px`. Stroke 2 is Lucide's
 /// native weight, so it scales with the box.
-pub(crate) fn draw_icon(canvas: &Canvas, icon: Icon, x: f32, y: f32, box_px: f32, color: Color4f) {
+pub fn draw_icon(canvas: &Canvas, icon: Icon, x: f32, y: f32, box_px: f32, color: Color4f) {
     let Some(path) = parse_path::from_svg(icon.0) else {
         return;
     };

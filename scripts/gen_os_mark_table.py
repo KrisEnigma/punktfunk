@@ -112,7 +112,7 @@ fn glyph(token: &str) -> Option<Glyph> {{
 /// draws its monogram, exactly as every tile did before OS marks existed. A chain we only
 /// partly know still resolves: `linux/fedora/bazzite` on a build shipping no Bazzite mark falls
 /// to Fedora, then to Tux, because that is the order the shared resolver hands back.
-pub(crate) fn os_mark(chain: &str, dst: Rect) -> Option<Path> {{
+pub fn os_mark(chain: &str, dst: Rect) -> Option<Path> {{
     let (path, vw, vh) = pf_client_core::os::os_icon_tokens(chain)
         .into_iter()
         .find_map(|token| glyph(&token))?;

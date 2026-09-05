@@ -240,6 +240,7 @@ fn spec(row: Row, ctx: &Ctx) -> RowSpec {
                 caret: false,
                 adjustable: false,
                 enabled: pad.rumble,
+                ..RowSpec::default()
             }
         }
         Row::Passthrough(i) => {
@@ -252,6 +253,7 @@ fn spec(row: Row, ctx: &Ctx) -> RowSpec {
                 caret: false,
                 adjustable: false,
                 enabled: true,
+                ..RowSpec::default()
             }
         }
     }

@@ -47,7 +47,7 @@ pub(crate) enum Bg {
 }
 
 /// Per-event screen context. `settings` is mut — the settings screen persists in place.
-pub(crate) struct Ctx<'a> {
+pub struct Ctx<'a> {
     pub hosts: &'a [HostRow],
     /// Live library slot; the top screen owns it.
     pub library: &'a LibraryShared,

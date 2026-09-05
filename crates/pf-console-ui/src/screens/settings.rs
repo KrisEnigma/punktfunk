@@ -24,7 +24,7 @@ use skia_safe::{Canvas, Rect};
 /// Dispatch key for adjust/activate. The pad list under "Use controller" can
 /// churn between frames, so an index would act on the wrong row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowId {
+pub enum RowId {
     /// Index into [`SettingsScreen::profiles`]. Activate opens pin-to-hosts;
     /// the console never edits a profile.
     Profile(usize),
@@ -326,6 +326,15 @@ const CODECS: [(&str, &str); 5] = [
     // 100–400 Mbps class, 8-bit SDR. Host must support it; else HEVC.
     ("pyrowave", "PyroWave (wired LAN)"),
 ];
+
+/// The codecs this platform decodes. The TV's NDL pipeline takes H.264 and HEVC only:
+/// no AV1 (never presented a picture) and no PyroWave (no Vulkan presentation).
+fn codecs(platform: crate::platform::Platform) -> &'static [(&'static str, &'static str)] {
+    match platform {
+        crate::platform::Platform::WebOS => &CODECS[..3],
+        _ => &CODECS,
+    }
+}
 // Per-OS hardware rungs. Windows has no VAAPI (`Decoder::new` has no branch).
 // Stored values are `native-*`; `migrate_decoder_pref` rewrites a legacy store
 // on read, but until the user re-picks it will not match a preset here.
@@ -907,7 +916,7 @@ impl SettingsScreen {
 ///
 /// [`TABS`] is the union so a setting sits under the same word on every client.
 /// A concept the platform does not have is absent, never a no-op control.
-fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
+pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
     use crate::platform::Platform;
     // Rows name the platforms that OFFER them. "Everything except the other one's rows" is
     // well defined for two platforms and ambiguous for three: a new host would inherit every
@@ -951,7 +960,7 @@ fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
 /// visible. Smoothness buffer is a knob on one of two intents — under Lowest
 /// latency the quantity does not exist, so the row is dropped. It sits directly
 /// below the intent row so the cursor is never on a row that vanishes.
-fn row_applies(id: RowId, ctx: &Ctx) -> bool {
+pub fn row_applies(id: RowId, ctx: &Ctx) -> bool {
     match id {
         RowId::SmoothBuffer => ctx.settings.present_priority == "smooth",
         // Needs `fallback_ui`; otherwise off strands the user with no UI.
@@ -969,7 +978,7 @@ fn row_applies(id: RowId, ctx: &Ctx) -> bool {
     }
 }
 
-fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
+pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
     // Pin count from live host rows, matching the carousel.
     match id {
         RowId::Profile(i) => {
@@ -991,6 +1000,7 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
                 caret: false,
                 adjustable: false,
                 enabled: true,
+                ..RowSpec::default()
             };
         }
         RowId::NoProfiles => {
@@ -1070,7 +1080,11 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
             "Compositor",
             label_for(&COMPOSITORS, &s.compositor).into(),
         ),
-        RowId::Codec => (None, "Video codec", label_for(&CODECS, &s.codec).into()),
+        RowId::Codec => (
+            None,
+            "Video codec",
+            label_for(codecs(ctx.platform), &s.codec).into(),
+        ),
         // Migrate before lookup or a legacy store (`vulkan`/`vaapi`) shows "—".
         RowId::Decoder => (
             None,
@@ -1277,11 +1291,12 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
         caret: false,
         adjustable: enabled,
         enabled,
+        ..RowSpec::default()
     }
 }
 
 /// One-line explainer. Platform so Android is not taught desktop-only chords.
-fn detail(id: RowId, ctx: &Ctx) -> &'static str {
+pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
     use crate::platform::Platform;
     let platform = ctx.platform;
     match id {
@@ -1559,7 +1574,7 @@ fn audio_format_label(value: &str) -> &'static str {
 
 /// Step (`wrap=false`, clamp; `None` = boundary) or cycle (`wrap=true`).
 /// Toggles: left = off, right = on. A no-op is a boundary.
-fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
+pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
     let platform = ctx.platform;
     let s = &mut *ctx.settings;
     match id {
@@ -1613,7 +1628,7 @@ fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             stepped.map(|i| s.bitrate_kbps = rungs[i])
         }
         RowId::Compositor => step_str(&COMPOSITORS, &mut s.compositor, delta, wrap),
-        RowId::Codec => step_str(&CODECS, &mut s.codec, delta, wrap),
+        RowId::Codec => step_str(codecs(platform), &mut s.codec, delta, wrap),
         RowId::Decoder => {
             // Migrate first or a legacy value jumps to first/last instead of its neighbour.
             s.decoder = pf_client_core::decoder_pref::migrate_decoder_pref(&s.decoder);
@@ -2139,6 +2154,32 @@ pub(crate) mod tests {
         assert!(!ctx.settings.echo_cancel);
         assert!(adjust(RowId::EchoCancel, 1, true, &mut ctx));
         assert!(ctx.settings.echo_cancel);
+    }
+
+    /// The TV's codec row wraps from H.264 back to Automatic: no AV1, no PyroWave.
+    #[test]
+    fn webos_offers_only_the_codecs_ndl_decodes() {
+        let (mut settings, pads) = ctx_parts();
+        settings.codec = "h264".into();
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::WebOS,
+            pads: &pads,
+            deck: false,
+            fallback_ui: true,
+            device_name: "t",
+            t: 0.0,
+        };
+        assert!(adjust(RowId::Codec, 1, true, &mut ctx));
+        assert_eq!(ctx.settings.codec, "auto");
+        ctx.platform = crate::platform::Platform::Desktop;
+        ctx.settings.codec = "h264".into();
+        assert!(adjust(RowId::Codec, 1, true, &mut ctx));
+        assert_eq!(ctx.settings.codec, "av1");
     }
 
     #[test]

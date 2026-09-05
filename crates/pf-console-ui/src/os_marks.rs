@@ -55,7 +55,7 @@ fn glyph(token: &str) -> Option<Glyph> {
 /// Fitted mark for an OS-identity `chain`, aspect preserved — masters are not all square.
 /// `None` when no token has art; the tile then draws its monogram. Partial chains still
 /// resolve because the shared resolver walks most-specific-first.
-pub(crate) fn os_mark(chain: &str, dst: Rect) -> Option<Path> {
+pub fn os_mark(chain: &str, dst: Rect) -> Option<Path> {
     let (path, vw, vh) = pf_client_core::os::os_icon_tokens(chain)
         .into_iter()
         .find_map(|token| glyph(&token))?;

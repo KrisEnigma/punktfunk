@@ -1362,8 +1362,9 @@ pub fn effective_settings(
 /// without touching the config directory: one-off ?? title ?? host ?? none.
 ///
 /// A title binding beats the host's default because it is the more specific answer to
-/// the same question — the host default is what a title with no opinion inherits.
-pub(crate) fn resolve_profile(
+/// the same question — the host default is what a title with no opinion inherits. Public
+/// for the clients that keep their own document (webOS) and must launch with this order.
+pub fn resolve_profile(
     catalog: &ProfilesFile,
     bound: Option<&str>,
     per_game: Option<&str>,
