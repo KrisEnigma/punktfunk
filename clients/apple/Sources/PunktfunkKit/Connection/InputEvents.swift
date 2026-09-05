@@ -35,9 +35,16 @@ public extension PunktfunkInputEvent {
         make((down ? PUNKTFUNK_INPUT_KIND_KEY_DOWN : PUNKTFUNK_INPUT_KIND_KEY_UP).rawValue, code: vk, x: 0, y: 0)
     }
     /// WHEEL_DELTA(120)-scaled; positive = up (vertical) / right (horizontal) — the
-    /// convention Moonlight/SDL use; the host maps onto the ei/wl axes.
-    static func scroll(_ delta: Int32, horizontal: Bool = false) -> PunktfunkInputEvent {
-        make(PUNKTFUNK_INPUT_KIND_MOUSE_SCROLL.rawValue, code: horizontal ? 1 : 0, x: delta, y: 0)
+    /// convention Moonlight/SDL use; the host maps onto the ei/wl axes. `precise` marks a
+    /// delta MEASURED off a trackpad or Magic Mouse rather than counted off a notched wheel,
+    /// so the host scrolls by that distance instead of expanding each detent into a full
+    /// scroll step (`SCROLL_FLAG_PRECISE`).
+    static func scroll(
+        _ delta: Int32, horizontal: Bool = false, precise: Bool = false
+    ) -> PunktfunkInputEvent {
+        make(
+            PUNKTFUNK_INPUT_KIND_MOUSE_SCROLL.rawValue, code: horizontal ? 1 : 0, x: delta, y: 0,
+            flags: precise ? UInt32(SCROLL_FLAG_PRECISE) : 0)
     }
 
     // Gamepad (wire contract in punktfunk_core::input::gamepad): one transition per event,

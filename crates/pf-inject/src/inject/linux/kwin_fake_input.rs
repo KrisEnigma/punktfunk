@@ -17,7 +17,7 @@
 
 use super::{gs_button_to_evdev, vk_to_evdev, InputEvent, InputInjector};
 use anyhow::{Context, Result};
-use punktfunk_core::input::InputKind;
+use punktfunk_core::input::{InputKind, PRECISE_PX_PER_DETENT, SCROLL_FLAG_PRECISE};
 use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
@@ -353,16 +353,25 @@ impl InputInjector for KwinFakeInjector {
                 }
             }
             InputKind::MouseScroll => {
-                // GameStream WHEEL_DELTA is 120; a notch ≈ 15 px. Vertical flips Wayland axis sign.
+                // Wire is WHEEL_DELTA(120); vertical flips the Wayland axis sign. `fake_input`
+                // has only a bare `axis` — no source, no discrete — so the px scale is the sole
+                // lever: 15 px per detent for a wheel, the measured distance for a precise
+                // delta. KWin still reads it as a wheel, so a trackpad cannot go fully smooth
+                // here the way it does on wlroots.
                 let horizontal = event.code == SCROLL_HORIZONTAL;
                 let axis = if horizontal {
                     AXIS_HORIZONTAL
                 } else {
                     AXIS_VERTICAL
                 };
+                let px_per_detent = if event.flags & SCROLL_FLAG_PRECISE != 0 {
+                    PRECISE_PX_PER_DETENT
+                } else {
+                    15.0
+                };
                 let notches = event.x as f64 / 120.0;
                 let sign = if horizontal { 1.0 } else { -1.0 };
-                self.fake.axis(axis, sign * notches * 15.0);
+                self.fake.axis(axis, sign * notches * px_per_detent);
             }
             InputKind::KeyDown | InputKind::KeyUp => {
                 // Evdev code; KWin owns the keymap and modifier state — no modifiers request.

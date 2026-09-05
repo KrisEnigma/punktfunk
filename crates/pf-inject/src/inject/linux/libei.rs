@@ -24,7 +24,7 @@ use ashpd::desktop::{
 };
 use ashpd::zbus;
 use futures_util::StreamExt;
-use punktfunk_core::input::{InputEvent, InputKind};
+use punktfunk_core::input::{InputEvent, InputKind, PRECISE_PX_PER_DETENT, SCROLL_FLAG_PRECISE};
 use reis::ei;
 use reis::event::{DeviceCapability, EiEvent};
 use std::collections::HashMap;
@@ -848,16 +848,27 @@ impl EiState {
             }
             InputKind::MouseScroll => match slot.interface::<ei::Scroll>() {
                 Some(s) => {
-                    // Wire `x` is WHEEL_DELTA(120). Emit discrete (120/detent) and
-                    // continuous px (15 px/detent). Without the px axis Mutter floors
-                    // a sub-detent delta to zero. Vertical is negated; horizontal is not.
-                    const PX_PER_DETENT: f32 = 15.0;
-                    let px = ev.x as f32 / 120.0 * PX_PER_DETENT;
+                    // Wire `x` is WHEEL_DELTA(120); vertical is negated. A precise delta is a
+                    // distance, so it gets the continuous axis ALONE — a discrete step would
+                    // cost the app ~3 lines per 10 px of finger. A wheel keeps both: Mutter
+                    // floors a sub-detent delta to zero without the px axis.
+                    let precise = ev.flags & SCROLL_FLAG_PRECISE != 0;
+                    let px_per_detent = if precise {
+                        PRECISE_PX_PER_DETENT as f32
+                    } else {
+                        15.0
+                    };
+                    let px = ev.x as f32 / 120.0 * px_per_detent;
+                    let steps = if precise { 0 } else { ev.x };
                     if ev.code == SCROLL_HORIZONTAL {
-                        s.scroll_discrete(ev.x, 0);
+                        if steps != 0 {
+                            s.scroll_discrete(steps, 0);
+                        }
                         s.scroll(px, 0.0);
                     } else {
-                        s.scroll_discrete(0, -ev.x);
+                        if steps != 0 {
+                            s.scroll_discrete(0, -steps);
+                        }
                         s.scroll(0.0, -px);
                     }
                 }

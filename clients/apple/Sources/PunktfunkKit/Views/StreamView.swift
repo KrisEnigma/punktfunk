@@ -417,16 +417,20 @@ public final class StreamLayerView: NSView {
     /// mid-view, so this view receives every scroll event. Precise (gesture) deltas are
     /// pixels — ~0.1 wheel notch per pixel (SDL's factor) → ×12 for WHEEL_DELTA(120);
     /// classic wheels report lines, one notch = ±1 → ×120. Signs pass through as-is,
-    /// preserving the user's local (natural-)scrolling preference.
+    /// preserving the user's local (natural-)scrolling preference. The precise flag rides
+    /// along so the host scrolls a gesture by the distance the fingers moved, instead of
+    /// reading each 10 px as a wheel click and expanding it into a full scroll step.
     public override func scrollWheel(with event: NSEvent) {
         guard captured, let inputCapture else {
             super.scrollWheel(with: event)
             return
         }
-        let scale: Float = event.hasPreciseScrollingDeltas ? 12 : 120
+        let precise = event.hasPreciseScrollingDeltas
+        let scale: Float = precise ? 12 : 120
         inputCapture.sendScroll(
             dx: Float(event.scrollingDeltaX) * scale,
-            dy: Float(event.scrollingDeltaY) * scale)
+            dy: Float(event.scrollingDeltaY) * scale,
+            precise: precise)
     }
 
     // While captured, the view is first responder and SENDS key events to the host straight

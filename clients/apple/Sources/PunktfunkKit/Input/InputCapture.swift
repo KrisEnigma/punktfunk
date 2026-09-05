@@ -883,7 +883,7 @@ public final class InputCapture {
         #if os(tvOS)
         input.scroll.valueChangedHandler = { [weak self] _, dx, dy in
             guard let self, self.forwarding, self.gcMouseForwarding else { return }
-            self.sendScroll(dx: dx * 120, dy: dy * 120)
+            self.sendScroll(dx: dx * 120, dy: dy * 120) // a real wheel: notches, not distance
         }
         #endif
         #endif
@@ -934,7 +934,10 @@ public final class InputCapture {
     /// Moonlight's convention). Fed by StreamLayerView.scrollWheel — the only delivery
     /// path that covers trackpad/Magic Mouse gestures (GCMouse never reports them).
     /// Fractional remainders accumulate so slow two-finger scrolling isn't truncated away.
-    public func sendScroll(dx rawDx: Float, dy rawDy: Float) {
+    /// `precise` says the delta was MEASURED off such a surface rather than counted off a
+    /// notched wheel, so the host travels that distance instead of expanding each detent into
+    /// a full scroll step.
+    public func sendScroll(dx rawDx: Float, dy rawDy: Float, precise: Bool = false) {
         guard forwarding else { return }
         // Optionally invert both axes (read live). Every POINTER scroll lands here — the macOS
         // wheel, the iOS trackpad pan, a GCMouse wheel — so the toggle flips them consistently.
@@ -951,8 +954,8 @@ public final class InputCapture {
         let ix = fx.rounded(.towardZero)
         residualScrollY = fy - iy
         residualScrollX = fx - ix
-        if iy != 0 { connection.send(.scroll(Int32(iy))) }
-        if ix != 0 { connection.send(.scroll(Int32(ix), horizontal: true)) }
+        if iy != 0 { connection.send(.scroll(Int32(iy), precise: precise)) }
+        if ix != 0 { connection.send(.scroll(Int32(ix), horizontal: true, precise: precise)) }
     }
 
     private func attach(keyboard: GCKeyboard) {

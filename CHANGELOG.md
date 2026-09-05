@@ -43,6 +43,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **High-resolution scrolling.** `InputKind::MouseScroll` gained a `flags` bit,
+  `SCROLL_FLAG_PRECISE`, marking a delta measured off a trackpad or Magic Mouse instead of
+  counted off a notched wheel; the Apple clients set it and the Linux injectors scroll by that
+  distance rather than one wheel click per 10 px. Nothing to negotiate — a host that predates
+  the bit ignores it — but a client sending it to an older host still over-scrolls, so update
+  both.
 - **A browser client, in its own repo.** `pf-console-ui` compiled to `wasm32-unknown-emscripten`
   draws the console on a WebGL2 canvas, and video streams to it over WebTransport — handshake,
   FEC, decrypt, reassembly and pairing are this crate's, unchanged. It lives at
@@ -306,6 +312,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Trackpad scrolling on a Linux host no longer runs away.** Every injector announced
+  `axis_source = wheel` and sent no discrete step, so a compositor read each 10 px of finger
+  travel as a full wheel click and the app expanded it into its own ~3 lines — roughly five
+  times too far, worst on the macOS client where all scrolling is precise. wlroots now emits a
+  finger-source axis for precise deltas and a coupled `axis_discrete` for real wheels; nothing
+  to do.
 - **A frame whose reference chain the decoder concealed is never shown.** The Vulkan lanes
   only used their per-picture clean bit to refuse a host recovery anchor, so a damaged picture
   reaching an unfrozen gate (a reordered straggler decoded after its successors, an encoder
