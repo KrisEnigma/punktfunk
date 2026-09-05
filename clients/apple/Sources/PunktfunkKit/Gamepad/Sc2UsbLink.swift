@@ -64,6 +64,11 @@ final class Sc2UsbLink {
     /// Every opened controller collection, by IOKit registry entry id. The Puck contributes up
     /// to four; a wired pad exactly one.
     private var open: [UInt64: IOHIDDevice] = [:]
+    /// Matched devices whose open failed with not-permitted — the Input Monitoring grant was
+    /// missing. Held (as the MANAGER's objects, never opened) so a later `start()` can retry
+    /// them once the user flips the grant in System Settings: the manager fires its matching
+    /// callback once per device, so without this the pads stay dead until an app relaunch.
+    private var denied: [UInt64: IOHIDDevice] = [:]
     /// Per-device input buffer, kept alive for as long as the device is open:
     /// `IOHIDDeviceRegisterInputReportCallback` writes into this memory for the device's whole
     /// lifetime, so a Swift array's storage would be a dangling pointer the moment it moved.
@@ -90,6 +95,18 @@ final class Sc2UsbLink {
         dongleLock.lock()
         defer { dongleLock.unlock() }
         return dongleSources.contains(source)
+    }
+
+    /// Re-adopt every device the Input Monitoring gate refused, once the grant is present.
+    /// On `queue`.
+    private func retryDenied() {
+        guard !denied.isEmpty,
+              IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        else { return }
+        let retry = denied
+        denied.removeAll()
+        log.info("SC2 USB: Input Monitoring granted — retrying \(retry.count, privacy: .public) denied open(s)")
+        for (_, device) in retry { adopt(device) }
     }
 
     /// `IOHIDDeviceRegisterInputReportCallback`'s report buffer size. The Triton's longest input
@@ -136,10 +153,16 @@ final class Sc2UsbLink {
     }
 
     /// Begin acquisition. Idempotent; safe from any thread. Devices attached later are picked up
-    /// by the manager's matching callback, so a pad plugged in mid-session simply joins.
+    /// by the manager's matching callback, so a pad plugged in mid-session simply joins — and a
+    /// re-`start()` on a running link retries any opens the Input Monitoring gate refused, which
+    /// is how returning from System Settings recovers the pads without a relaunch (the app's
+    /// did-become-active path re-runs `startTransport`).
     func start() {
         queue.async { [self] in
-            guard manager == nil else { return }
+            guard manager == nil else {
+                retryDenied()
+                return
+            }
             started = true
             // The controller interface carries the lizard KEYBOARD collection too (on-glass
             // census, see the header), so opening it sits behind the Input Monitoring TCC gate.
@@ -181,6 +204,7 @@ final class Sc2UsbLink {
             stopKeepAlive()
             for (id, dev) in open { cancel(id: id, device: dev) }
             open.removeAll()
+            denied.removeAll()
             dongleLock.lock()
             dongleSources.removeAll()
             dongleLock.unlock()
@@ -271,10 +295,12 @@ final class Sc2UsbLink {
         }
         let rc = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
         guard rc == kIOReturnSuccess else {
-            // kIOReturnNotPermitted here would mean the usage-pair match failed to keep us off a
-            // keyboard collection (see the file header) — say so plainly rather than leaving a
-            // bare hex code, because the fix is a TCC grant, not a retry.
+            // Not-permitted = the Input Monitoring grant is missing (the controller interface
+            // carries the lizard keyboard collection). Park the matched device for
+            // `retryDenied` — the manager will not re-fire matching for it, so without the
+            // stash the pad stays dead until an app relaunch.
             let hint = rc == kIOReturnNotPermitted ? " — not permitted (Input Monitoring)" : ""
+            if rc == kIOReturnNotPermitted { denied[id] = matched }
             log.error(
                 "SC2 USB: open failed (0x\(String(format: "%08x", rc), privacy: .public))\(hint, privacy: .public)"
             )
@@ -310,6 +336,7 @@ final class Sc2UsbLink {
     /// releases exactly its own wire slot — a Puck losing one slot is not a dongle unplug.
     private func drop(_ matched: IOHIDDevice) {
         let id = Self.registryID(matched)
+        denied.removeValue(forKey: id)
         // Cancel OUR minted device (see `adopt`) — the manager's object was never activated,
         // and cancelling a non-activated device is its own trap.
         guard let mine = open.removeValue(forKey: id) else { return }
