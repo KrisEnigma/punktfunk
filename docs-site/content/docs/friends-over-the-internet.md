@@ -1,126 +1,96 @@
 ---
 title: Friends over the internet
-description: Let a friend stream from your host without putting them on your home network — Tailscale machine sharing scoped to Punktfunk's two ports, the guest access level that goes with it, and which other tunnels do and don't work.
+description: Let a friend stream from your host without putting them on your home network — Porthole for PC friends, Tailscale sharing for everything else, and what not to use.
 ---
 
-You want a friend to join your host for an evening — a second controller, a time limit, nothing
-else — and they are not on your LAN. The obvious move, inviting them into your Tailscale network,
-works, but it hands them **every machine and every service** your tailnet can reach: your NAS, your
-printer, the management console of anything with a web page. This guide sets it up so the friend
-reaches exactly one thing: Punktfunk, on one host.
+A friend wants to join your host for the evening — a second controller, a time limit, nothing
+else — and they are not on your LAN. Inviting them into your Tailscale network works, but it hands
+them every machine and service on it. This page gets them to Punktfunk on one host and nothing else.
 
-## What the friend actually gets
+Punktfunk already does the hard part. Nothing streams without [pairing](/docs/pairing), you set
+what a device may do and for how long ([Access levels](/docs/access-levels)), and video is
+encrypted per session. All you need to solve is how the friend reaches the host.
 
-Punktfunk is safe to point a friend at because the host already defends itself:
+## Pick a path
 
-- **Nothing streams without pairing.** A device you have not admitted gets a refusal, whatever
-  network it comes from ([Pairing](/docs/pairing)).
-- **You choose what the device may do**, and for how long — *Controller only* for the evening is
-  the guest preset ([Access levels](/docs/access-levels)). The host enforces it; the client cannot
-  widen its own access.
-- **Video is encrypted per session** and addressed only to the device the host admitted.
+| Your friend streams from | Use |
+|---|---|
+| A PC, Mac or Steam Deck with Steam | [Porthole](#porthole) — easiest, nothing to configure on your router |
+| A phone, tablet, Apple TV, or no Steam | [Tailscale machine sharing](#tailscale) |
+| Anything, and you manage your own router | [Port forwarding](#port-forwarding) |
 
-So the whole job is to make the host *reachable* by the friend and *only* the host. Everything else
-on this page is that.
+Both tunnels need the video port pinned first.
 
-## Share the host over Tailscale
+## Pin the video port
 
-Tailscale can share a **single machine** with someone outside your tailnet. They see that one
-machine and nothing else — not your other devices, not your subnets — and *your* access rules
-still apply to what they may reach on it. That last part is the step people skip.
-
-### 1. Pin the video port
-
-The video plane normally uses a fresh random UDP port per session (the client opens it with a
-hole-punch). An access rule has to name a port, so pin one. In `~/.config/punktfunk/host.env`
-(Windows: `%ProgramData%\punktfunk\host.env`):
+The video plane normally picks a random UDP port per session. A tunnel or a rule has to name one,
+so pin it in `~/.config/punktfunk/host.env` (Windows: `%ProgramData%\punktfunk\host.env`) and
+restart the host:
 
 ```ini
 PUNKTFUNK_DATA_PORT=9779
 ```
 
-Restart the host. Any free UDP port works; avoid 9778, which the browser client's WebTransport
-plane takes when you enable it.
+Any free UDP port works. Avoid 9778, which the browser client's WebTransport plane uses.
 
-### 2. Share the machine
+## Porthole
 
-In the [Tailscale admin console](https://login.tailscale.com/admin/machines), open the host's
-**⋯** menu → **Share** → send the invite link. Your friend accepts it with any Tailscale account —
-a free personal one is fine — and installs Tailscale on the device they will stream from. Tailscale
-has apps for every platform Punktfunk has a client on except LG webOS ([Clients](/docs/clients)).
+[Porthole](https://porthole.sestudio.org/) is a free Steam app that shares ports you pick with
+Steam friends. It works behind any router, and the friend sees only the ports you share.
 
-### 3. Restrict what a shared user may reach
+1. Both of you install Porthole from Steam.
+2. You create a lobby and share UDP `9777` and `9779`, without remapping. Add TCP `47990` if the
+   friend should browse your game library.
+3. The friend joins with your share code or from the friends list, accepts the ports, and adds
+   `127.0.0.1:9777` as a host in their Punktfunk client.
+4. [Admit them as a guest](#admit-them-as-a-guest).
 
-Tailscale's default access rule is `"src": ["*"]`, and **`*` includes people you shared a machine
-with** — so out of the box your friend could reach every port on the host. Edit the
-[access controls](https://login.tailscale.com/admin/acls) so members keep everything and shared
-users get Punktfunk's two ports, using the host's Tailscale IP (`100.x.y.z` in the machine list):
+One Porthole friend at a time: the pinned port serves a single session.
 
-```jsonc
-"acls": [
-  { "action": "accept", "src": ["autogroup:member"], "dst": ["*:*"] },
-  { "action": "accept", "src": ["autogroup:shared"], "dst": ["100.x.y.z:9777,9779"] }
-]
-```
+## Tailscale
 
-Add `47990` to that list only if the friend should browse your game library — it is the
-management API's read-only surface, which paired clients reach over mutual TLS. A *Controller only*
-guest cannot launch anything, so they do not need it.
+Tailscale can share one machine with someone outside your network. They see that machine only.
+Your access rules still decide what they may reach on it, and the default rule lets them reach
+everything — that is the step people skip.
 
-### 4. Connect and admit them
+1. In the [admin console](https://login.tailscale.com/admin/machines), open the host's **⋯** menu
+   → **Share** and send the invite. Any free Tailscale account can accept it; the friend installs
+   Tailscale on the device they stream from (every Punktfunk client platform except LG webOS).
+2. In [access controls](https://login.tailscale.com/admin/acls), replace the default `"src": ["*"]`
+   rule — `*` includes shared users — with one rule for members and one for shared users, using
+   the host's Tailscale IP:
 
-Discovery does not cross Tailscale, so the friend adds the host by address: `100.x.y.z:9777`.
-Easier: send them a [link](/docs/profiles-and-links#punktfunk-links) that carries it —
+   ```jsonc
+   "acls": [
+     { "action": "accept", "src": ["autogroup:member"], "dst": ["*:*"] },
+     { "action": "accept", "src": ["autogroup:shared"], "dst": ["100.x.y.z:9777,9779"] }
+   ]
+   ```
 
-```text
-punktfunk://connect/100.x.y.z:9777
-```
+   Add `47990` only if the friend should browse your game library.
+3. The friend adds `100.x.y.z:9777` as a host, or opens a
+   [link](/docs/profiles-and-links#punktfunk-links) you send them: `punktfunk://connect/100.x.y.z:9777`.
+4. [Admit them as a guest](#admit-them-as-a-guest).
 
-They open it, the client asks them to confirm the new host, and the connect shows up on your
-console as a pending device. Admit it with a [PIN](/docs/pairing#pair-with-a-pin) rather than a bare Approve
-— you read the PIN out over voice chat — and pick **Controller only** with an expiry
+## Admit them as a guest
+
+The friend's first connect shows up on your console as a pending device. Admit it with a
+[PIN](/docs/pairing#pair-with-a-pin), not a bare Approve — read the PIN out over voice chat — and
+pick **Controller only** with an expiry
 ([choosing access](/docs/pairing#choosing-access-when-you-admit-a-device)).
 
-### 5. Afterwards
+When the expiry passes the device is refused until you re-grant it. **Expire now** or **Unpair**
+on the Paired devices table ends a running session at once. There is no "unpair when they
+disconnect" yet, so set an expiry that fits the evening.
 
-When the expiry passes the device is refused until you re-grant it; **Expire now** or **Unpair**
-on the Paired devices table ends a running session on the spot. There is no "unpair when they
-disconnect" yet — set an expiry that fits the evening.
+## Port forwarding
 
-## Other tunnels
+Forward UDP `9777` and `9779` to the host and give the friend your public address. A stranger who
+finds the ports gets a refusal, and a pairing attempt is only possible during the short window you
+arm. Two rules: admit only with a PIN, because the host cannot tell a stranger's knock from your
+friend's, and never forward `47990` or `9778`.
 
-The Tailscale steps are more than most people want to do. These are the alternatives people ask
-about, measured against what matters here: does it carry UDP at streaming bitrates, does the
-friend's *client* platform run it, and what does the friend get to see.
+## What not to use
 
-| Tool | Friend needs | What they can reach | Works with Punktfunk today |
-|---|---|---|---|
-| **Tailscale machine sharing** (above) | a free Tailscale account + app | one host, two ports | yes — direct peer-to-peer, relayed only when NAT defeats it |
-| **[Porthole](https://porthole.sestudio.org/)** (free Steam app) | Steam + Porthole on a PC / Mac / Steam Deck | only the ports you share | yes — see below |
-| **ZeroTier** | a free ZeroTier account + app, your network id | the whole host, no other machines | yes — same shape as Tailscale without the ACL step; no Apple TV app; free tier is one network, ten devices |
-| Hamachi, Radmin VPN | the app | the whole host | yes, PC-only friends (Radmin is Windows-only; Hamachi's free tier is five machines) |
-| playit.gg, ngrok, Cloudflare Tunnel | nothing | a public address anyone can knock on | no — TCP-only, or a throttled relay that cannot carry a video stream |
-
-**Porthole** is the friendliest of the lot for PC-to-PC: both of you run it, the friend joins with a
-share code or from your Steam friends list, and the ports you share appear on *their* machine at
-`127.0.0.1`. Pin the data port as in step 1, share UDP `9777` and `9779` without remapping them, and
-the friend connects to `127.0.0.1:9777`. Add TCP `47990` if they should see your game library. One
-Porthole friend at a time: the pinned port serves a single session, and a second one falls back to
-a random port Porthole does not carry.
-
-**ZeroTier** is the closest to "friendly and safe" without editing rules: create a network, the
-friend joins it by id, you tick them as authorized. The scope is inherently one host — but *all* of
-that host's ports, so anything else the PC serves (file shares, remote desktop) is reachable by
-the friend too. Tailscale sharing without step 3 has exactly the same scope; step 3 is what makes
-it two ports.
-
-## Plain port forwarding
-
-Forwarding UDP `9777` and your pinned data port on the router works — no tunnel, no account, the
-friend connects to your public address. What a stranger who finds the port gets is a TLS handshake
-and a refusal, and a pairing attempt is only possible during the short window you arm and can only
-guess the PIN once. Two honest caveats, which are why this page leads with Tailscale: **approve
-without a PIN is not safe on a forwarded port** — a stranger's knock looks exactly like your
-friend's — so admit only via a PIN bound to the pending device; and the host has no idea a knock
-came from the internet, so nothing stops you from clicking Approve anyway. Never forward `47990`
-or `9778`.
+ZeroTier, Hamachi and Radmin VPN work, but they expose every port on the host to the friend, not
+just Punktfunk's. playit.gg, ngrok and Cloudflare Tunnel cannot carry a video stream.
