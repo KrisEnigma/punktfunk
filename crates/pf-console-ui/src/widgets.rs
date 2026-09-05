@@ -19,7 +19,7 @@ use skia_safe::{Canvas, Paint, PathBuilder, RRect, Rect};
 
 /// What a consumed menu event means for the owning screen.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ListMsg {
+pub enum ListMsg {
     None,
     /// Left/right on the focused row.
     Adjust(i32),
@@ -28,7 +28,7 @@ pub(crate) enum ListMsg {
 
 /// One row, rebuilt by the screen each frame.
 #[derive(Clone)]
-pub(crate) struct RowSpec {
+pub struct RowSpec {
     /// Header above this row; only the first row of a group carries it.
     pub header: Option<&'static str>,
     pub label: String,
@@ -45,7 +45,7 @@ pub(crate) struct RowSpec {
 }
 
 impl RowSpec {
-    pub(crate) fn field(label: impl Into<String>, value: String, placeholder: &str) -> RowSpec {
+    pub fn field(label: impl Into<String>, value: String, placeholder: &str) -> RowSpec {
         let empty = value.is_empty();
         RowSpec {
             header: None,
@@ -62,7 +62,7 @@ impl RowSpec {
         }
     }
 
-    pub(crate) fn action(label: impl Into<String>, enabled: bool) -> RowSpec {
+    pub fn action(label: impl Into<String>, enabled: bool) -> RowSpec {
         RowSpec {
             header: None,
             label: label.into(),
@@ -75,10 +75,10 @@ impl RowSpec {
     }
 }
 
-pub(crate) const ROW_H: f64 = 50.0;
+pub const ROW_H: f64 = 50.0;
 const ROW_GAP: f64 = 6.0;
 const HEADER_H: f64 = 34.0;
-pub(crate) const ROW_MAX_W: f64 = 620.0;
+pub const ROW_MAX_W: f64 = 620.0;
 
 /// How far a stepped value slips before springing back, design units.
 /// One sprung offset plus a crossfade: rows draw a single text run, not neighbouring values.
@@ -105,7 +105,7 @@ struct SlipPrev {
     arm: f64,
 }
 
-pub(crate) struct MenuList {
+pub struct MenuList {
     pub cursor: usize,
     bump: Spring,
     scroll: f64,
@@ -141,8 +141,14 @@ pub(crate) struct MenuList {
     settled: bool,
 }
 
+impl Default for MenuList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MenuList {
-    pub(crate) fn new() -> MenuList {
+    pub fn new() -> MenuList {
         MenuList {
             cursor: 0,
             bump: Spring::rest(0.0),
@@ -166,20 +172,20 @@ impl MenuList {
     /// True while an entrance, ease, or spring is still moving. The damage-gated
     /// stream overlay redraws until this is false; the console paints every frame.
     #[cfg_attr(target_os = "android", allow(dead_code))]
-    pub(crate) fn animating(&self) -> bool {
+    pub fn animating(&self) -> bool {
         !self.settled
     }
 
     /// Move the cursor without the scroll gliding. For a tab switch: chasing
     /// would sweep through rows that no longer exist.
-    pub(crate) fn jump_to(&mut self, cursor: usize) {
+    pub fn jump_to(&mut self, cursor: usize) {
         self.cursor = cursor;
         self.snap = true;
     }
 
     /// Up/down move focus (Boundary = recoil). Left/right → [`ListMsg::Adjust`],
     /// A → [`ListMsg::Activate`]. B is the screen's.
-    pub(crate) fn menu(&mut self, ev: MenuEvent, len: usize) -> (ListMsg, Option<MenuPulse>) {
+    pub fn menu(&mut self, ev: MenuEvent, len: usize) -> (ListMsg, Option<MenuPulse>) {
         match ev {
             MenuEvent::Move(MenuDir::Up) => (ListMsg::None, self.step(-1, len)),
             MenuEvent::Move(MenuDir::Down) => (ListMsg::None, self.step(1, len)),
@@ -209,13 +215,13 @@ impl MenuList {
 
     /// Last-drawn row rect; tests assert what a press can reach.
     #[cfg(test)]
-    pub(crate) fn row_rect(&self, i: usize) -> Option<Rect> {
+    pub fn row_rect(&self, i: usize) -> Option<Rect> {
         self.geom.get(i).copied().filter(|r| !r.is_empty())
     }
 
     /// Press focuses and activates the row under it (click = move + A). A press
     /// in empty margin is swallowed so it does not fall through to the screen.
-    pub(crate) fn pointer(&mut self, p: Pointer, len: usize) -> (ListMsg, Option<MenuPulse>) {
+    pub fn pointer(&mut self, p: Pointer, len: usize) -> (ListMsg, Option<MenuPulse>) {
         match p.kind {
             PointerKind::Scroll { up } => (ListMsg::None, self.step(if up { -1 } else { 1 }, len)),
             PointerKind::Press => match p.pick(&self.geom) {
@@ -249,7 +255,7 @@ impl MenuList {
     /// Draw the rows in `rect`. `active` is false when a keyboard tray parks
     /// focus: rows keep their look, the focus ring rests.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render(
+    pub fn render(
         &mut self,
         canvas: &Canvas,
         rect: Rect,
@@ -602,16 +608,16 @@ impl MenuList {
 // Tab strip
 
 /// Strip band height, including air under the pills before the first row.
-pub(crate) const TAB_STRIP_H: f64 = 46.0;
+pub const TAB_STRIP_H: f64 = 46.0;
 
 /// Pill row inside the band: top 2, height 30; the remaining 14 is air below.
 /// Published so a backdrop (library focus wash) uses the row, not the 46 band.
-pub(crate) const TAB_PILL_TOP: f64 = 2.0;
-pub(crate) const TAB_PILL_H: f64 = 30.0;
+pub const TAB_PILL_TOP: f64 = 2.0;
+pub const TAB_PILL_H: f64 = 30.0;
 
 /// Horizontal section switcher. Presentational: the screen owns selection and
 /// the shoulders; this draws the pills and slides one highlight between them.
-pub(crate) struct TabStrip {
+pub struct TabStrip {
     /// Highlight `(x, width)` in device px, sprung so velocity carries across
     /// rapid L1/R1. `None` until first render so a new screen does not fly in
     /// from x = 0.
@@ -637,13 +643,19 @@ fn pill_widths(labels: &[&str], fonts: &Fonts, k: f64) -> (Vec<f64>, f64) {
     (widths, total)
 }
 
+impl Default for TabStrip {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TabStrip {
     /// Drawn width of this pill run, for a caller placing it on a trailing edge.
-    pub(crate) fn width(labels: &[&str], fonts: &Fonts, k: f64) -> f64 {
+    pub fn width(labels: &[&str], fonts: &Fonts, k: f64) -> f64 {
         pill_widths(labels, fonts, k).1
     }
 
-    pub(crate) fn new() -> TabStrip {
+    pub fn new() -> TabStrip {
         TabStrip {
             indicator: None,
             pills: Vec::new(),
@@ -652,13 +664,13 @@ impl TabStrip {
 
     /// Last-drawn pill rect; tests assert what a press can reach.
     #[cfg(test)]
-    pub(crate) fn pill(&self, i: usize) -> Option<Rect> {
+    pub fn pill(&self, i: usize) -> Option<Rect> {
         self.pills.get(i).copied()
     }
 
     /// Tab a press landed on. Hit box is the full strip height: pills are too
     /// small for a tap that misses the text.
-    pub(crate) fn pointer(&self, p: Pointer) -> Option<usize> {
+    pub fn pointer(&self, p: Pointer) -> Option<usize> {
         p.press().then(|| p.pick(&self.pills)).flatten()
     }
 
@@ -666,7 +678,7 @@ impl TabStrip {
     /// `focused` is D-pad focus (no-shoulder remote): highlight brightens and
     /// grows ‹ ›, the same left/right affordance as a focused value row.
     #[allow(clippy::too_many_arguments)] // same render signature as MenuList
-    pub(crate) fn render(
+    pub fn render(
         &mut self,
         canvas: &Canvas,
         rect: Rect,
@@ -788,14 +800,14 @@ fn chevron(canvas: &Canvas, x: f64, cy: f64, r: f64, left: bool, alpha: f32) {
 
 /// What a field accepts (backspace always works).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Charset {
+pub enum Charset {
     Free,
     /// Hostnames: everything but whitespace.
     Hostname,
     Digits,
 }
 
-pub(crate) fn permits(charset: Charset, ch: char) -> bool {
+pub fn permits(charset: Charset, ch: char) -> bool {
     match charset {
         Charset::Free => true,
         Charset::Hostname => !ch.is_whitespace(),
@@ -804,7 +816,7 @@ pub(crate) fn permits(charset: Charset, ch: char) -> bool {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum KeyMsg {
+pub enum KeyMsg {
     None,
     Type(char),
     Backspace,
@@ -837,7 +849,7 @@ fn key_rows() -> &'static [Vec<Key>] {
 
 /// Controller keyboard: fixed grid in a bottom tray. D-pad moves, A types, X
 /// backspaces, B/Y/Done confirms. Edits apply live; closing is done.
-pub(crate) struct Keyboard {
+pub struct Keyboard {
     row: usize,
     col: usize,
     /// Tray slide-in, 0 hidden → 1 seated. Swift `.spring(0.32, 0.86)`.
@@ -847,8 +859,14 @@ pub(crate) struct Keyboard {
     keys: Vec<(Rect, Key)>,
 }
 
+impl Default for Keyboard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Keyboard {
-    pub(crate) fn new() -> Keyboard {
+    pub fn new() -> Keyboard {
         Keyboard {
             row: 1, // letter row, not digits
             col: 0,
@@ -860,7 +878,7 @@ impl Keyboard {
 
     /// Press types the key under it and moves the cursor there. A miss between
     /// keys is swallowed: the tray is modal and must not reach the list behind.
-    pub(crate) fn pointer(&mut self, p: Pointer) -> (KeyMsg, Option<MenuPulse>) {
+    pub fn pointer(&mut self, p: Pointer) -> (KeyMsg, Option<MenuPulse>) {
         if !p.press() {
             return (KeyMsg::None, None);
         }
@@ -888,13 +906,13 @@ impl Keyboard {
 
     /// Whether `p` hits the tray. The screen asks first so a press outside a
     /// raised keyboard dismisses it instead of falling through to the list.
-    pub(crate) fn covers(&self, p: Pointer) -> bool {
+    pub fn covers(&self, p: Pointer) -> bool {
         self.keys.iter().any(|(r, _)| p.hits(*r))
     }
 
     /// The screen applies `Type`/`Backspace` (charset included); a refusal
     /// comes back as Boundary from the screen.
-    pub(crate) fn menu(&mut self, ev: MenuEvent) -> (KeyMsg, Option<MenuPulse>) {
+    pub fn menu(&mut self, ev: MenuEvent) -> (KeyMsg, Option<MenuPulse>) {
         let rows = key_rows();
         match ev {
             MenuEvent::Move(dir) => {
@@ -942,7 +960,7 @@ impl Keyboard {
     }
 
     /// Step the tray toward shown/hidden. Returns 0..1; exactly 0 while hidden so the caller can skip draw.
-    pub(crate) fn seat(&mut self, shown: bool, dt: f64) -> f64 {
+    pub fn seat(&mut self, shown: bool, dt: f64) -> f64 {
         self.tray
             .step(if shown { 1.0 } else { 0.0 }, TRAY_K, TRAY_C, dt);
         self.tray.settle(if shown { 1.0 } else { 0.0 }, 0.001, 0.01);
@@ -951,14 +969,14 @@ impl Keyboard {
     }
 
     /// Tray height in design units (pre-`k`), for layout above it.
-    pub(crate) fn tray_height() -> f64 {
+    pub fn tray_height() -> f64 {
         5.0 * 42.0 + 4.0 * 7.0 + 2.0 * 14.0
     }
 
     /// Draw the tray with its bottom at `bottom`, centred, slid by `seat` (0..1).
     /// The caller clips nothing: the tray rises from below the screen.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render(
+    pub fn render(
         &mut self,
         canvas: &Canvas,
         fonts: &Fonts,

@@ -44,7 +44,7 @@ fn glyph(token: &str) -> Option<Glyph> {
 }
 
 /// Aspect preserved: the masters' viewports are not all square.
-pub(crate) fn launcher_mark(token: &str, dst: Rect) -> Option<Path> {
+pub fn launcher_mark(token: &str, dst: Rect) -> Option<Path> {
     let (path, vw, vh) = glyph(token)?;
     let scale = (dst.width() / vw).min(dst.height() / vh);
     let mut m = Matrix::new_identity();

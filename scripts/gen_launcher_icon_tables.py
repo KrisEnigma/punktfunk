@@ -250,7 +250,7 @@ fn glyph(token: &str) -> Option<Glyph> {{
 
 /// The mark for `token`, scaled to fit `dst` and centred in it — aspect ratio preserved, because
 /// the masters' viewports are not all square. `None` when there is no mark to draw.
-pub(crate) fn launcher_mark(token: &str, dst: Rect) -> Option<Path> {{
+pub fn launcher_mark(token: &str, dst: Rect) -> Option<Path> {{
     let (path, vw, vh) = glyph(token)?;
     let scale = (dst.width() / vw).min(dst.height() / vh);
     let mut m = Matrix::new_identity();

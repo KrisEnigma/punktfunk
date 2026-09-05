@@ -14,9 +14,14 @@
 //! Everything but `skia_overlay.rs` is platform-free: screens draw to
 //! `&Canvas`, settings through [`store::SettingsStore`], keys as
 //! [`input::Key`], platform rows as [`platform::Platform`].
+//!
+//! The drawing kit — [`theme`], [`widgets`], [`icons`], [`glyphs`], [`anim`],
+//! [`pointer`], the mark tables — is `pub` for one consumer: the webOS
+//! pointer UI (`webos-pointer-ui-overhaul.md` D3). No stability promise; a
+//! kit change there is a re-pin plus a compile fix, by design.
 
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-mod anim;
+pub mod anim;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod art_stats;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
@@ -24,25 +29,25 @@ mod collate;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod console;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-mod glyphs;
+pub mod glyphs;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-mod icons;
+pub mod icons;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod input;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-mod launcher_icons;
+pub mod launcher_icons;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod library;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod model;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-mod os_marks;
+pub mod os_marks;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod os_theme;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod platform;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-mod pointer;
+pub mod pointer;
 // In-stream ring is the desktop shell's (Android has Compose). Android
 // draws this module only as the settings editor; the host-action cache
 // is desktop-gated and is not consulted there.
@@ -57,9 +62,9 @@ mod skia_overlay;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod store;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-mod theme;
+pub mod theme;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-mod widgets;
+pub mod widgets;
 
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub use art_stats::{art_stats, ArtStats};
