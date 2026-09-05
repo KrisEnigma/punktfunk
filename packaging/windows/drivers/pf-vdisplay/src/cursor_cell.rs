@@ -205,4 +205,18 @@ mod tests {
         cell.set_blend(false);
         assert!(!cell.take_dirty());
     }
+
+    #[test]
+    fn a_still_pointer_while_blending_sends_no_frame() {
+        let cell = CursorCell::default();
+        let mut image = None;
+        cell.set_blend(true);
+        cell.publish(&mut image, &shm(10, 10, 1), Some(arrow()), true);
+        assert!(cell.take_dirty(), "the first pointer is one frame");
+        // Idle ticks at the same spot: a still desktop keeps composing nothing.
+        for _ in 0..10 {
+            cell.publish(&mut image, &shm(10, 10, 1), None, true);
+        }
+        assert!(!cell.take_dirty(), "a stationary pointer marks no damage");
+    }
 }
