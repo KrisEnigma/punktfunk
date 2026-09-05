@@ -28,7 +28,9 @@ pub enum InputKind {
     MouseMoveAbs = 3,
     MouseButtonDown = 4,
     MouseButtonUp = 5,
-    /// `x` carries the (signed) scroll delta.
+    /// `x` carries the signed delta in 120-per-detent units, `code` the axis (0 = vertical,
+    /// 1 = horizontal), `flags` optionally [`SCROLL_FLAG_PRECISE`]. Sub-120 magnitudes are
+    /// legal: the unit is a fixed-point detent, not a click count.
     MouseScroll = 6,
     /// `code` = button bit ([`gamepad`] `BTN_*`), `x` ≠ 0 = pressed, `flags` = pad index.
     GamepadButton = 7,
@@ -80,6 +82,25 @@ pub fn encode_gamepad_remove(pad: u8, seq: u8) -> u32 {
 pub fn decode_gamepad_remove(flags: u32) -> (u8, u8) {
     (flags as u8, (flags >> 24) as u8)
 }
+
+/// [`InputKind::MouseScroll`] `flags` bit: the delta was MEASURED off a precise surface (a
+/// trackpad, a Magic Mouse, a touchscreen pan), not counted off a notched wheel. `x` stays in
+/// 120-per-detent units; the bit says that number is a distance expressed in detents, not a
+/// tally of clicks.
+///
+/// The two need opposite injection. A detent is a STEP — the app scrolls its own ~3 lines per
+/// click. A precise delta is a DISTANCE — the content must travel as far as the finger did.
+/// Injecting the latter as a wheel multiplies it by that step, which is why a 10 px flick moves
+/// a page three lines. Honouring hosts emit a continuous finger-source axis at
+/// [`PRECISE_PX_PER_DETENT`] and no discrete steps; a host that predates the bit ignores it and
+/// keeps the old behaviour, so nothing needs negotiating.
+pub const SCROLL_FLAG_PRECISE: u32 = 1;
+
+/// Pixels one detent of a [`SCROLL_FLAG_PRECISE`] delta is worth — the inverse of the
+/// 0.1-units-per-point factor SDL and the Apple clients use to put measured pixels INTO
+/// 120-space. Undoing it exactly is what makes the content travel as far as the finger; any
+/// other value re-introduces a scale factor.
+pub const PRECISE_PX_PER_DETENT: f64 = 10.0;
 
 /// [`InputKind::GamepadArrival`] `flags` bit 8: this pad renders haptics
 /// ([`PAD_AUDIO_KIND_HAPTICS`](crate::quic::PAD_AUDIO_KIND_HAPTICS)). Sent only toward

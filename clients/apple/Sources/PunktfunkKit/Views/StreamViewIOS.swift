@@ -583,8 +583,8 @@ public final class StreamViewController: StreamViewControllerBase {
         // scrolling entirely under lock. Nothing double-sends because iOS installs no GCMouse scroll
         // handler at all: this recognizer sees the wheel too, already carrying the system's Natural
         // Scrolling preference, which the raw GameController axis does not.
-        streamView.onScroll = { [weak self] dx, dy in
-            self?.inputCapture?.sendScroll(dx: dx, dy: dy)
+        streamView.onScroll = { [weak self] dx, dy, precise in
+            self?.inputCapture?.sendScroll(dx: dx, dy: dy, precise: precise)
         }
 
         let capture = InputCapture(connection: connection)
@@ -1103,7 +1103,8 @@ final class StreamLayerUIView: UIView {
     /// Indirect-pointer buttons (GameStream ids: 1=left 3=right); `down` = press.
     var onPointerButton: ((_ button: UInt32, _ down: Bool) -> Void)?
     /// Trackpad two-finger / wheel scroll (no lock) → host scroll deltas, WHEEL(120)-scaled.
-    var onScroll: ((_ dx: Float, _ dy: Float) -> Void)?
+    /// `precise` = a continuous (trackpad) device, not a notched wheel.
+    var onScroll: ((_ dx: Float, _ dy: Float, _ precise: Bool) -> Void)?
     /// The two-finger twist turning the quick-action ring.
     var onDial: ((DialEvent) -> Void)?
 
@@ -1169,13 +1170,20 @@ final class StreamLayerUIView: UIView {
         // forward it as absolute cursor moves so the host cursor tracks without a click held.
         addGestureRecognizer(
             UIHoverGestureRecognizer(target: self, action: #selector(handleHover)))
-        // Trackpad two-finger / wheel scroll → a scroll-ONLY pan: allowedTouchTypes = []
-        // rejects finger drags (those stay host touches), allowedScrollTypesMask accepts the
-        // indirect scroll devices. Forwarded as host scroll deltas.
-        let scrollPan = UIPanGestureRecognizer(target: self, action: #selector(handleScroll))
-        scrollPan.allowedScrollTypesMask = .all
-        scrollPan.allowedTouchTypes = []
-        addGestureRecognizer(scrollPan)
+        // Trackpad two-finger / wheel scroll → scroll-ONLY pans: allowedTouchTypes = []
+        // rejects finger drags (those stay host touches). One recognizer per scroll type so
+        // UIKit itself says which device this is: a continuous trackpad delta is a measured
+        // DISTANCE the host must travel, a discrete wheel delta is a click count. Asking for
+        // `.all` on one recognizer merges them and forces the host to guess.
+        for (mask, sel) in [
+            (UIScrollTypeMask.continuous, #selector(handlePreciseScroll)),
+            (UIScrollTypeMask.discrete, #selector(handleWheelScroll)),
+        ] {
+            let scrollPan = UIPanGestureRecognizer(target: self, action: sel)
+            scrollPan.allowedScrollTypesMask = mask
+            scrollPan.allowedTouchTypes = []
+            addGestureRecognizer(scrollPan)
+        }
         // Pencil squeeze / double-tap → the pen plane's barrel buttons (no-op while
         // `penEnabled` is false — PencilStream ignores interactions out of range).
         let pencilInteraction = UIPencilInteraction()
@@ -1326,11 +1334,19 @@ final class StreamLayerUIView: UIView {
     /// it — +y is a wheel-forward notch, the one that moves content down. Negating y here, as this
     /// did, pinned the stream to traditional scrolling and inverted the setting for everyone on the
     /// default. macOS passes `NSEvent.scrollingDeltaY` through for exactly the same reason.
-    @objc private func handleScroll(_ g: UIPanGestureRecognizer) {
+    @objc private func handlePreciseScroll(_ g: UIPanGestureRecognizer) {
+        forwardScroll(g, precise: true)
+    }
+
+    @objc private func handleWheelScroll(_ g: UIPanGestureRecognizer) {
+        forwardScroll(g, precise: false)
+    }
+
+    private func forwardScroll(_ g: UIPanGestureRecognizer, precise: Bool) {
         guard g.state == .began || g.state == .changed else { return }
         let t = g.translation(in: self)
         g.setTranslation(.zero, in: self)
-        onScroll?(Float(t.x) * 12, Float(t.y) * 12)
+        onScroll?(Float(t.x) * 12, Float(t.y) * 12, precise)
     }
 
     /// Map a view-space point through the aspect-fit letterbox into host-mode pixels; points

@@ -512,7 +512,7 @@ object NativeBridge {
     external fun nativeSendPointerButton(handle: Long, button: Int, down: Boolean)
 
     /** One scroll step. axis: 0=vertical 1=horizontal. delta: signed, 120-scaled, +=up/right. */
-    external fun nativeSendScroll(handle: Long, axis: Int, delta: Int)
+    external fun nativeSendScroll(handle: Long, axis: Int, delta: Int, precise: Boolean)
 
     /**
      * One REAL touchscreen transition (the touch-passthrough input mode). [kind]: 0=down 1=move

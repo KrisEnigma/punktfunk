@@ -43,6 +43,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **High-resolution scrolling.** `InputKind::MouseScroll` gained a `flags` bit,
+  `SCROLL_FLAG_PRECISE`, marking a delta measured off a trackpad instead of counted off a
+  notched wheel; every client sets it and every injector scrolls that distance rather than
+  pricing each 10 px as a wheel click. Nothing to negotiate — a host that predates the bit
+  ignores it — but a client sending it to an older host still over-scrolls, so update both.
+- **`NativeBridge.nativeSendScroll` takes a `precise` flag.** The Android JNI entry point gained
+  a trailing `Boolean`. Rebuild the kit against the matching native library; an unchanged caller
+  will not link.
 - **A browser client, in its own repo.** `pf-console-ui` compiled to `wasm32-unknown-emscripten`
   draws the console on a WebGL2 canvas, and video streams to it over WebTransport — handshake,
   FEC, decrypt, reassembly and pairing are this crate's, unchanged. It lives at
@@ -308,6 +316,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Trackpad scrolling no longer runs away.** A client priced 10 px of finger travel as one
+  wheel detent and every host then expanded that detent into a full scroll step (~3 lines) —
+  roughly five times too far, on Windows as well as Linux, and worst on macOS where all
+  scrolling is precise. wlroots now emits a finger-source axis for a precise delta and a
+  coupled `axis_discrete` for a real wheel, and Windows reprices against the user's own
+  `SPI_GETWHEELSCROLLLINES`; nothing to do.
 - **A frame whose reference chain the decoder concealed is never shown.** The Vulkan lanes
   only used their per-picture clean bit to refuse a host recovery anchor, so a damaged picture
   reaching an unfrozen gate (a reordered straggler decoded after its successors, an encoder

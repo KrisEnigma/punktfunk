@@ -136,7 +136,7 @@ fn injector_service_thread(
     tracing::debug!("injector service stopped (host shutting down)");
 }
 
-/// Sum adjacent relative-mouse and same-axis scroll. Buttons, keys, absolute moves, and type
+/// Sum adjacent relative-mouse and same-axis, same-precision scroll. Buttons, keys, moves, and type
 /// changes pass through in order: a key between two moves flushes the accumulated motion first.
 fn coalesce(events: Vec<InputEvent>) -> Vec<InputEvent> {
     let mut out: Vec<InputEvent> = Vec::with_capacity(events.len());
@@ -149,7 +149,8 @@ fn coalesce(events: Vec<InputEvent>) -> Vec<InputEvent> {
             Some(last)
                 if last.kind == InputKind::MouseScroll
                     && ev.kind == InputKind::MouseScroll
-                    && last.code == ev.code =>
+                    && last.code == ev.code
+                    && last.flags == ev.flags =>
             {
                 last.x = last.x.saturating_add(ev.x);
             }
@@ -162,7 +163,7 @@ fn coalesce(events: Vec<InputEvent>) -> Vec<InputEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use punktfunk_core::input::{InputEvent, InputKind};
+    use punktfunk_core::input::{InputEvent, InputKind, SCROLL_FLAG_PRECISE};
 
     fn mk(kind: InputKind, code: u32, x: i32, y: i32) -> InputEvent {
         InputEvent {
@@ -211,5 +212,18 @@ mod tests {
     fn coalesce_handles_empty_and_singleton() {
         assert!(coalesce(vec![]).is_empty());
         assert_eq!(coalesce(vec![mk(InputKind::MouseMove, 0, 7, 8)]).len(), 1);
+    }
+
+    /// A trackpad delta and a wheel detent mean different distances, so summing one into the
+    /// other would inject the pair at whichever precision happened to arrive first.
+    #[test]
+    fn coalesce_keeps_precise_scroll_apart_from_wheel() {
+        let wheel = mk(InputKind::MouseScroll, 0, 120, 0);
+        let mut precise = mk(InputKind::MouseScroll, 0, 12, 0);
+        precise.flags = SCROLL_FLAG_PRECISE;
+        let out = coalesce(vec![precise, precise, wheel, wheel]);
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].x, out[0].flags), (24, SCROLL_FLAG_PRECISE));
+        assert_eq!((out[1].x, out[1].flags), (240, 0));
     }
 }

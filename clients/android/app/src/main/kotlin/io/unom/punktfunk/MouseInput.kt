@@ -66,6 +66,8 @@ class MouseForwarder(
     private val heldButtons = mutableSetOf<Int>()
     private var scrollAccV = 0f
     private var scrollAccH = 0f
+    /** This mouse has reported a sub-detent delta, so it measures distance rather than clicks. */
+    private var preciseWheel = false
     private var moveAccX = 0f
     private var moveAccY = 0f
 
@@ -191,16 +193,22 @@ class MouseForwarder(
     private fun wheel(ev: MotionEvent) {
         val dir = if (invertScroll) -1f else 1f
         // Android: AXIS_VSCROLL + = up/away, AXIS_HSCROLL + = right — the wire's convention too.
-        scrollAccV += ev.getAxisValue(MotionEvent.AXIS_VSCROLL) * 120f * dir
-        scrollAccH += ev.getAxisValue(MotionEvent.AXIS_HSCROLL) * 120f * dir
+        val rawV = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
+        val rawH = ev.getAxisValue(MotionEvent.AXIS_HSCROLL)
+        // A notched wheel reports whole detents; anything finer MEASURES distance (trackpad,
+        // high-res wheel). Android names no scroll source, so the fraction is the only tell.
+        // Latched, because one exact 1.0 mid-gesture would inject a whole click and jump the page.
+        if (rawV % 1f != 0f || rawH % 1f != 0f) preciseWheel = true
+        scrollAccV += rawV * 120f * dir
+        scrollAccH += rawH * 120f * dir
         val v = scrollAccV.toInt()
         if (v != 0) {
-            NativeBridge.nativeSendScroll(handle, 0, v)
+            NativeBridge.nativeSendScroll(handle, 0, v, preciseWheel)
             scrollAccV -= v
         }
         val h = scrollAccH.toInt()
         if (h != 0) {
-            NativeBridge.nativeSendScroll(handle, 1, h)
+            NativeBridge.nativeSendScroll(handle, 1, h, preciseWheel)
             scrollAccH -= h
         }
     }

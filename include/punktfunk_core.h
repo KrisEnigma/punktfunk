@@ -359,6 +359,25 @@
 // Serialized [`InputEvent`] size (tag + fields). The C struct is larger (`_pad`).
 #define PUNKTFUNK_INPUT_WIRE_LEN (((((1 + 1) + 4) + 4) + 4) + 4)
 
+// [`InputKind::MouseScroll`] `flags` bit: the delta was MEASURED off a precise surface (a
+// trackpad, a Magic Mouse, a touchscreen pan), not counted off a notched wheel. `x` stays in
+// 120-per-detent units; the bit says that number is a distance expressed in detents, not a
+// tally of clicks.
+//
+// The two need opposite injection. A detent is a STEP — the app scrolls its own ~3 lines per
+// click. A precise delta is a DISTANCE — the content must travel as far as the finger did.
+// Injecting the latter as a wheel multiplies it by that step, which is why a 10 px flick moves
+// a page three lines. Honouring hosts emit a continuous finger-source axis at
+// [`PRECISE_PX_PER_DETENT`] and no discrete steps; a host that predates the bit ignores it and
+// keeps the old behaviour, so nothing needs negotiating.
+#define SCROLL_FLAG_PRECISE 1
+
+// Pixels one detent of a [`SCROLL_FLAG_PRECISE`] delta is worth — the inverse of the
+// 0.1-units-per-point factor SDL and the Apple clients use to put measured pixels INTO
+// 120-space. Undoing it exactly is what makes the content travel as far as the finger; any
+// other value re-introduces a scale factor.
+#define PRECISE_PX_PER_DETENT 10.0
+
 // [`InputKind::GamepadArrival`] `flags` bit 8: this pad renders haptics
 // ([`PAD_AUDIO_KIND_HAPTICS`](crate::quic::PAD_AUDIO_KIND_HAPTICS)). Sent only toward
 // a [`HOST_CAP_PAD_AUDIO`](crate::quic::HOST_CAP_PAD_AUDIO) host — an older host
@@ -1169,7 +1188,9 @@ enum PunktfunkInputKind
     PUNKTFUNK_INPUT_KIND_MOUSE_MOVE_ABS = 3,
     PUNKTFUNK_INPUT_KIND_MOUSE_BUTTON_DOWN = 4,
     PUNKTFUNK_INPUT_KIND_MOUSE_BUTTON_UP = 5,
-    // `x` carries the (signed) scroll delta.
+    // `x` carries the signed delta in 120-per-detent units, `code` the axis (0 = vertical,
+    // 1 = horizontal), `flags` optionally [`SCROLL_FLAG_PRECISE`]. Sub-120 magnitudes are
+    // legal: the unit is a fixed-point detent, not a click count.
     PUNKTFUNK_INPUT_KIND_MOUSE_SCROLL = 6,
     // `code` = button bit ([`gamepad`] `BTN_*`), `x` ≠ 0 = pressed, `flags` = pad index.
     PUNKTFUNK_INPUT_KIND_GAMEPAD_BUTTON = 7,
