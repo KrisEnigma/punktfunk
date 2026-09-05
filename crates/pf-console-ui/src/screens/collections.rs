@@ -172,6 +172,10 @@ impl CollectionsScreen {
         if want.is_empty() {
             return;
         }
+        // Already decoded by the host: a move, not work this frame.
+        for (id, poster) in library.drain_decoded() {
+            self.art.insert(id, poster.into_image());
+        }
         // Against the clock, like the shelf's own drain — one at a time, at least one a frame.
         let started = std::time::Instant::now();
         while let Some((id, bytes)) = library.take_art_for(&want, 1).pop() {

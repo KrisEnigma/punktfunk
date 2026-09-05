@@ -68,7 +68,9 @@ pub use console::{Console, ConsoleEntry, ConsoleHandles, InputSource, Insets, Vi
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub use input::Key;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
-pub use library::{LibraryGame, LibraryPhase, LibraryShared, Stale};
+pub use library::decode_poster_off_thread;
+#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+pub use library::{DecodedPoster, LibraryGame, LibraryPhase, LibraryShared, Stale};
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub use model::{
     ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, PairPhase, ProfileChip, WakeStatus,

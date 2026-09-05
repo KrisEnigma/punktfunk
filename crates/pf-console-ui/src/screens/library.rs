@@ -71,6 +71,19 @@ fn art_cache_size(src: (i32, i32), k: f64) -> (i32, i32) {
     )
 }
 
+/// Decode a poster on a thread that is not drawing, ready to hand to the shell.
+///
+/// The whole point of the seam: on a 2020 TV a full-size PNG cover costs ~90 ms, and paying
+/// that in the frame loop stops the shelf five frames at a time. A host with a fetch thread
+/// already has somewhere better to spend it. `k` comes from [`LibraryShared::art_scale`], so
+/// the size matches what this screen would have cached anyway.
+///
+/// `None` when the bytes will not decode, or when the result cannot be moved between threads —
+/// either way the caller still has its encoded bytes and can push those instead.
+pub fn decode_poster_off_thread(bytes: &[u8], k: f64) -> Option<crate::library::DecodedPoster> {
+    crate::library::DecodedPoster::new(decode_poster(bytes, k)?)
+}
+
 /// Decode here (not at first draw) and bake mips at [`art_cache_size`].
 ///
 /// `Image::from_encoded` defers decode until use; a GPU purge then re-decodes JPEG on
@@ -694,6 +707,13 @@ impl LibraryScreen {
             }
         }
         let k = self.art_k;
+        // Publish the size a host should decode at, so one that can decode off-thread produces
+        // exactly what this screen would have cached.
+        shared.set_art_scale(k);
+        // Already-decoded posters cost a move, so there is no budget to spend on them.
+        for (id, poster) in shared.drain_decoded() {
+            self.art.insert(id, poster.into_image());
+        }
         // One at a time against the clock rather than a fixed count — see [`ART_FRAME_BUDGET`].
         // The deadline is checked AFTER a decode so every frame lands at least one.
         let started = std::time::Instant::now();

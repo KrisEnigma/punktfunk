@@ -8,6 +8,7 @@
 //! Rendering is `skia_overlay`. Palette ids and the derived 16-cell meshes are pinned by
 //! `clients/shared/console-vectors.json`, and by `GamepadPalette.kt` / `.swift`.
 
+use skia_safe::{ConditionallySend, Image};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -746,6 +747,12 @@ struct Shared {
     stale: Stale,
     /// Fetched poster bytes the renderer hasn't decoded yet (id, encoded image).
     art_in: VecDeque<(String, Vec<u8>)>,
+    /// Posters a host decoded on its own thread, waiting to be adopted. Separate from
+    /// [`Shared::art_in`] because taking one costs nothing: the work is already done.
+    decoded_in: VecDeque<(String, DecodedPoster)>,
+    /// The scale the shelf caches art at, published for hosts that decode off-thread so they
+    /// size it the way this crate would. `None` until a shelf has drawn once.
+    art_scale: Option<f64>,
     /// Bumped on phase/games changes so the renderer re-syncs its snapshot.
     generation: u64,
     /// Bumped once per fetch, by [`LibraryShared::begin_fetch`].
@@ -769,6 +776,36 @@ pub(crate) struct LibrarySnapshot {
     pub generation: u64,
 }
 
+/// One poster, decoded and ready to draw, on its way from a worker thread to the shell.
+///
+/// Skia's handles are only conditionally `Send` — safe to move while nothing else holds a
+/// reference, which a freshly decoded image satisfies. [`crate::decode_poster_off_thread`] is
+/// the only way to make one, so that condition is checked once, there, rather than trusted.
+pub struct DecodedPoster(skia_safe::Sendable<Image>);
+
+/// Decode a poster on a thread that is not drawing — see
+/// [`crate::screens::library::decode_poster_off_thread`], which this forwards to so the sizing
+/// policy stays with the screen that owns the cache.
+pub fn decode_poster_off_thread(bytes: &[u8], k: f64) -> Option<DecodedPoster> {
+    crate::screens::library::decode_poster_off_thread(bytes, k)
+}
+
+impl DecodedPoster {
+    pub(crate) fn new(image: Image) -> Option<Self> {
+        image.wrap_send().ok().map(DecodedPoster)
+    }
+
+    pub(crate) fn into_image(self) -> Image {
+        self.0.into_inner()
+    }
+}
+
+impl std::fmt::Debug for DecodedPoster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DecodedPoster")
+    }
+}
+
 /// Binary write handle / overlay read handle. Fetch threads push; the renderer drains per frame.
 #[derive(Clone)]
 pub struct LibraryShared(Arc<Mutex<Shared>>);
@@ -780,6 +817,8 @@ impl Default for LibraryShared {
             games: Vec::new(),
             stale: Stale::No,
             art_in: VecDeque::new(),
+            decoded_in: VecDeque::new(),
+            art_scale: None,
             generation: 0,
             fetch_epoch: 0,
             states: std::collections::HashMap::new(),
@@ -894,6 +933,33 @@ impl LibraryShared {
 
     pub fn push_art(&self, id: String, bytes: Vec<u8>) {
         self.0.lock().unwrap().art_in.push_back((id, bytes));
+    }
+
+    /// A poster a host already decoded, off the thread that draws.
+    ///
+    /// The reason this exists: on a 2020 TV one full-size PNG cover costs ~90 ms, which is five
+    /// frames. Decoded here it is a move and a hash insert, so a shelf fills without the frame
+    /// loop stopping for each cover. [`Self::push_art`] stays for hosts with nowhere else to
+    /// decode — they get the old behaviour, budgeted per frame.
+    pub fn push_decoded(&self, id: String, poster: DecodedPoster) {
+        self.0.lock().unwrap().decoded_in.push_back((id, poster));
+    }
+
+    /// The scale a host should decode at, once a shelf has published one. `None` before that —
+    /// a host with nothing to go on should push encoded bytes and let the shelf size them.
+    #[must_use]
+    pub fn art_scale(&self) -> Option<f64> {
+        self.0.lock().unwrap().art_scale
+    }
+
+    pub(crate) fn set_art_scale(&self, k: f64) {
+        self.0.lock().unwrap().art_scale = Some(k);
+    }
+
+    /// Every poster decoded since the last call. Unbounded on purpose: adopting one is a move,
+    /// so there is no frame budget to spend and holding them back only delays the picture.
+    pub(crate) fn drain_decoded(&self) -> Vec<(String, DecodedPoster)> {
+        self.0.lock().unwrap().decoded_in.drain(..).collect()
     }
 
     pub(crate) fn generation(&self) -> u64 {
