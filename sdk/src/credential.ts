@@ -13,6 +13,7 @@
 // Platform-neutral. The signing itself is never here: a `Signer` is handed in by whoever owns
 // the key, which in a browser is the wasm glue and nowhere else.
 
+import type { Fetch } from "./connection.js";
 import { hexToBytes, rawToDer, toBase64 } from "./ecdsa.js";
 
 /**
@@ -58,7 +59,7 @@ export interface DeviceKeyOptions {
 	readonly hostFingerprint: string;
 	readonly signer: Signer;
 	/** Defaults to `globalThis.fetch`. A CA-pinning fetch goes here where one exists. */
-	readonly fetch?: typeof fetch;
+	readonly fetch?: Fetch;
 	/** Seconds before expiry at which the token is treated as gone. Default 60. */
 	readonly renewMarginSeconds?: number;
 }
@@ -110,7 +111,7 @@ export class DeviceRefused extends Error {
  * point. A burst of calls runs one exchange rather than four.
  */
 export const deviceKey = (opts: DeviceKeyOptions): Credential => {
-	const doFetch = opts.fetch ?? globalThis.fetch;
+	const doFetch: Fetch = opts.fetch ?? ((i, init) => globalThis.fetch(i, init));
 	const margin = opts.renewMarginSeconds ?? 60;
 	let token: string | null = null;
 	let expiresAt = 0;

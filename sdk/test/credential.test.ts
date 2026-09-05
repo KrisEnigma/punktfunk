@@ -13,7 +13,7 @@ import {
 } from "../src/credential.js";
 import { derToRaw, fromBase64, rawToDer } from "../src/ecdsa.js";
 import { httpRequest } from "../src/http.js";
-import { connection } from "../src/connection.js";
+import { connection, type Fetch } from "../src/connection.js";
 
 /** A signer that records what it was asked to sign and returns a recognisable raw signature. */
 const recordingSigner = (): Signer & { signed: Uint8Array[] } => {
@@ -37,7 +37,7 @@ const stubHost = () => {
 	let issued = 0;
 	let live = new Set<string>();
 	let calls: string[] = [];
-	const fetchImpl: typeof fetch = async (input, init) => {
+	const fetchImpl: Fetch = async (input, init) => {
 		const url = String(input);
 		const method = init?.method ?? "GET";
 		calls.push(`${method} ${new URL(url).pathname}`);

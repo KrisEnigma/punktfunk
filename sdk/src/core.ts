@@ -31,7 +31,7 @@ export {
 	TransportError,
 	VersionSkew,
 } from "./client.js";
-export { type Connection, connection } from "./connection.js";
+export { type Connection, connection, type Fetch } from "./connection.js";
 export {
 	type Credential,
 	DEVICE_AUTH_CONTEXT,

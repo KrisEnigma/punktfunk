@@ -7,6 +7,11 @@
 
 import type { Credential } from "./credential.js";
 
+/** Anything shaped like `fetch`. The callable and nothing else: a runtime's own `fetch` has
+ *  statics (`preconnect`, on Bun) that a CA-pinning wrapper or a test stub does not, and none of
+ *  them are used here. */
+export type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
 export interface Connection {
 	/** Management API base URL, no trailing slash. */
 	readonly url: string;
@@ -15,12 +20,12 @@ export interface Connection {
 	 *  trusts what the user accepted). Informational here; `fetch` is what actually pins. */
 	readonly ca?: string;
 	/** A fetch honoring `ca` on this runtime. `globalThis.fetch` where nothing pins. */
-	readonly fetch: typeof fetch;
+	readonly fetch: Fetch;
 }
 
 /** A connection from parts, defaulting the fetch. */
 export const connection = (
-	c: Omit<Connection, "fetch"> & { readonly fetch?: typeof fetch },
+	c: Omit<Connection, "fetch"> & { readonly fetch?: Fetch },
 ): Connection => ({
 	...c,
 	url: c.url.replace(/\/+$/, ""),
