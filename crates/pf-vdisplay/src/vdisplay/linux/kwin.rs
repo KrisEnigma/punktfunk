@@ -128,9 +128,20 @@ impl KwinDisplay {
             Topology::Exclusive => TopologyKind::Exclusive,
             Topology::Primary => TopologyKind::Primary,
             Topology::Extend | Topology::Auto => {
-                // No topology — but KWin restores a stored `replicationSource` onto our
-                // stable name. Clear it only if we really are mirroring.
-                crate::kwin_output_mgmt::clear_replication_source(our_prefix, dims.0, dims.1);
+                // Takes no primary and darkens nothing — but KWin restores a stored setup
+                // onto our stable name, so the apply still has to clear a mirror source
+                // and keep our origin off a live screen.
+                let outcome = crate::kwin_output_mgmt::apply_topology(
+                    our_prefix,
+                    dims.0,
+                    dims.1,
+                    TopologyKind::Extend,
+                );
+                if outcome.handled {
+                    self.our_uuid = outcome.our_uuid;
+                } else {
+                    crate::kwin_output_mgmt::clear_replication_source(our_prefix, dims.0, dims.1);
+                }
                 // These topologies promise physicals stay lit; undo KWin switching them off
                 // in reaction to our output appearing.
                 reenable_stranded(pre_enabled.to_vec());
@@ -1122,7 +1133,8 @@ fn apply_virtual_primary(ours: &str) -> Vec<(String, String)> {
     let kscreen = |args: &[String]| kscreen_ok(args);
     // First-slot-wins: only grab primary if no managed member has it, so a second
     // exclusive session joins as a secondary instead of stealing the shell.
-    if !a_managed_output_is_primary() {
+    let sole = !a_managed_output_is_primary();
+    if sole {
         if !kscreen(&[format!("output.{ours}.primary")]) {
             tracing::warn!(
                 "KWin: could not set the virtual output primary; client may see only the wallpaper"
@@ -1133,14 +1145,19 @@ fn apply_virtual_primary(ours: &str) -> Vec<(String, String)> {
     // Disable still-enabled non-managed outputs (bootstrap / physical). Capture each
     // with its current mode so teardown restores the real refresh.
     let others = other_enabled_outputs();
-    if others.is_empty() {
-        tracing::info!("KWin: streamed output set as the sole desktop (nothing else was enabled)");
-        return others;
-    }
-    let args: Vec<String> = others
+    let mut args: Vec<String> = others
         .iter()
         .map(|(o, _mode)| format!("output.{o}.disable"))
         .collect();
+    // Ours ends up the whole desktop, so it belongs at the desktop origin: KWin parks
+    // a new output right of the existing row and never re-normalizes once the row goes
+    // dark, and Plasma places popups off a screen whose origin is not zero.
+    if sole {
+        args.push(format!("output.{ours}.position.0,0"));
+    }
+    if args.is_empty() {
+        return others;
+    }
     if kscreen(&args) {
         tracing::info!(also_disabled = ?others, "KWin: streamed output set as the sole desktop");
     } else {

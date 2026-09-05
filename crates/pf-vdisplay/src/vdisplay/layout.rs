@@ -97,11 +97,93 @@ fn arrange_manual(members: &[Member], layout: &Layout) -> Vec<Placement> {
         .collect()
 }
 
+/// One lit output in compositor-logical space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// Do two rects share a pixel? Edge-to-edge is not overlap.
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+/// Origin for the streamed output, given every output that stays lit beside it
+/// (`lit`) and its own current rect. `None` keeps the compositor's arrangement.
+///
+/// Alone it takes the desktop origin: a compositor appends a new output to the
+/// right of the row and need not re-normalize when the row goes dark, and a lone
+/// screen whose origin is not zero makes KDE place popups off it. Beside a lit
+/// screen the arrangement stands — unless a stored origin sits us on top of one.
+pub fn origin_for(lit: &[Rect], ours: Option<Rect>) -> Option<Placement> {
+    if lit.is_empty() {
+        return Some(Placement { x: 0, y: 0 });
+    }
+    let ours = ours?;
+    lit.iter().any(|s| overlaps(ours, *s)).then(|| Placement {
+        x: lit
+            .iter()
+            .map(|r| r.x.saturating_add(r.w.max(0)))
+            .max()
+            .unwrap_or(0),
+        y: 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::policy::Position;
     use std::collections::BTreeMap;
+
+    fn r(x: i32, w: i32) -> Rect {
+        Rect {
+            x,
+            y: 0,
+            w,
+            h: 1080,
+        }
+    }
+
+    #[test]
+    fn a_lone_streamed_output_takes_the_desktop_origin() {
+        // Every physical is dark: KWin left ours parked right of the row it appended to.
+        assert_eq!(
+            origin_for(&[], Some(r(3840, 1920))),
+            Some(Placement { x: 0, y: 0 })
+        );
+    }
+
+    #[test]
+    fn a_lit_screen_keeps_its_arrangement() {
+        // Ours sits to the right of the physical — nothing to repair.
+        assert_eq!(origin_for(&[r(0, 3840)], Some(r(3840, 1920))), None);
+        // Unknown geometry is not a reason to move a screen that is not alone.
+        assert_eq!(origin_for(&[r(0, 3840)], None), None);
+    }
+
+    #[test]
+    fn a_stored_origin_never_stacks_us_on_a_lit_screen() {
+        // An earlier exclusive session stored (0, 0) for our name; the physical is back.
+        assert_eq!(
+            origin_for(&[r(0, 3840)], Some(r(0, 1920))),
+            Some(Placement { x: 3840, y: 0 })
+        );
+        // Past the rightmost edge of every lit screen, not just the one we hit.
+        assert_eq!(
+            origin_for(&[r(0, 2560), r(2560, 1920)], Some(r(0, 1920))),
+            Some(Placement { x: 4480, y: 0 })
+        );
+    }
+
+    #[test]
+    fn touching_edges_do_not_count_as_overlap() {
+        assert!(!overlaps(r(0, 1920), r(1920, 1280)));
+        assert!(overlaps(r(0, 1920), r(1919, 1280)));
+    }
 
     fn m(slot: Option<u32>, width: i32) -> Member {
         Member {

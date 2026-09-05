@@ -124,6 +124,9 @@ pub(crate) enum TopologyKind {
     Exclusive,
     /// Make ours primary but leave the other outputs enabled.
     Primary,
+    /// Add ours beside the others: no primary, nothing disabled. Still an apply —
+    /// KWin restores a stored setup onto our name, and the origin has to be sane.
+    Extend,
 }
 
 pub(crate) struct TopologyOutcome {
@@ -623,6 +626,20 @@ impl Session {
         self.state.mode_dims.get(id).copied()
     }
 
+    /// The output's rect in the logical space `position` and popup placement use:
+    /// mode pixels over applied scale. `None` for an output with no current mode.
+    fn logical_rect(&self, dev: &DeviceState) -> Option<crate::layout::Rect> {
+        let (w, h, _) = self.current_dims(dev)?;
+        let scale = dev.scale.filter(|s| *s > 0.0).unwrap_or(1.0);
+        let logical = |px: u32| (f64::from(px) / scale).ceil() as i32;
+        Some(crate::layout::Rect {
+            x: dev.position.0,
+            y: dev.position.1,
+            w: logical(w),
+            h: logical(h),
+        })
+    }
+
     /// Our just-created virtual output: managed-prefix name AND current size equal to
     /// the size we created it at. During a supersede the replacement reuses the
     /// per-slot name while the predecessor is still alive; only the new one sits at
@@ -688,9 +705,9 @@ pub(crate) fn list_monitors() -> anyhow::Result<Vec<crate::monitors::PhysicalMon
     Ok(out)
 }
 
-/// Make the streamed output (name starts with `our_prefix`, current size
-/// `our_w`×`our_h`) primary — and, for `Exclusive`, disable every other enabled
-/// output. In-process; a miss leaves `handled = false` for the `kscreen-doctor` path.
+/// Place the streamed output (name starts with `our_prefix`, current size
+/// `our_w`×`our_h`) in the desktop: primary unless `Extend`, and for `Exclusive`
+/// every other enabled output goes dark. In-process; a miss leaves `handled = false` for the `kscreen-doctor` path.
 pub(crate) fn apply_topology(
     our_prefix: &str,
     our_w: u32,
@@ -743,6 +760,9 @@ pub(crate) fn apply_topology(
                 .is_some_and(|n| n.starts_with(MANAGED_PREFIX))
     });
 
+    // Extend adds a screen beside the others and never takes primary.
+    let take_primary = kind != TopologyKind::Extend && !sibling_is_primary;
+
     let mut to_disable: Vec<(OutputDevice, String, String)> = Vec::new();
     if kind == TopologyKind::Exclusive {
         for d in sess.state.devices.values() {
@@ -760,8 +780,25 @@ pub(crate) fn apply_topology(
         }
     }
 
-    // One atomic apply: enable ours, take primary unless a sibling holds it, disable
-    // the others. Drive primary through `set_priority` (management ≥ 3): KWin's
+    // Where ours sits. KWin parks a new output right of the existing row and never
+    // re-normalizes, so once the physicals go dark the sole screen keeps a non-zero
+    // origin — an arrangement no display KCM can produce, and Plasma then places
+    // popups off it. `origin_for` holds the rule; this only feeds it the lit rects.
+    let lit: Vec<crate::layout::Rect> = sess
+        .state
+        .devices
+        .values()
+        .filter(|d| d.enabled && d.proxy.as_ref().map(|p| p.id()) != our_id)
+        .filter(|d| {
+            let id = d.proxy.as_ref().map(|p| p.id());
+            !to_disable.iter().any(|(p, _, _)| Some(p.id()) == id)
+        })
+        .filter_map(|d| sess.logical_rect(d))
+        .collect();
+    let origin = crate::layout::origin_for(&lit, sess.logical_rect(&ours));
+
+    // One atomic apply: enable ours, place it, take primary unless a sibling holds
+    // it, disable the others. Drive primary through `set_priority` (management ≥ 3): KWin's
     // `set_primary_output` handler is `// intentionally ignored`. Still send
     // `set_primary_output` for pre-`set_priority` compositors that honored it.
     let mgmt_version = sess
@@ -779,7 +816,10 @@ pub(crate) fn apply_topology(
         if mgmt_version >= REPLICATION_SOURCE_SINCE {
             config.set_replication_source(proxy, NO_REPLICATION_SOURCE.to_string());
         }
-        if !sibling_is_primary {
+        if let Some(at) = origin {
+            config.position(proxy, at.x, at.y);
+        }
+        if take_primary {
             config.set_primary_output(proxy);
             if mgmt_version >= 3 {
                 config.set_priority(proxy, 1);
@@ -845,10 +885,10 @@ pub(crate) fn apply_topology(
                 _ => None, // pre-v18 devices carry no priority event
             }
         };
-        if sibling_is_primary || verified != Some(false) {
+        if !take_primary || verified != Some(false) {
             tracing::info!(
                 also_disabled = ?disabled,
-                primary_requested = !sibling_is_primary,
+                primary_requested = take_primary,
                 primary_verified = ?verified,
                 "KWin output management: streamed output set as the desktop (in-process)"
             );
