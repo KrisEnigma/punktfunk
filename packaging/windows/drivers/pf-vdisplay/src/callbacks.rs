@@ -9,10 +9,18 @@
 //! `CAN_PROCESS_FP16` cap obligates the whole `*2` + gamma/HDR-metadata set. Each mode pair shares one
 //! fill helper ([`fill_monitor_modes`], [`fill_target_modes`]); only the emitted struct differs.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use wdk_sys::iddcx;
 use wdk_sys::{NTSTATUS, WDFDEVICE, WDFOBJECT, WDFREQUEST, call_unsafe_wdf_function_binding};
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::System::Threading::WaitForSingleObject;
+
+use crate::worker::Worker;
+
+/// The seat presenter thread, so device cleanup can join it: detached, it would call IddCx DDIs
+/// and create monitors against a device the framework is deleting.
+static SEAT_PRESENTER: Mutex<Option<Worker>> = Mutex::new(None);
 
 use crate::{
     STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED,
@@ -38,6 +46,9 @@ pub unsafe extern "C" fn device_d0_entry(
             | wdk_sys::_WDF_POWER_DEVICE_STATE::WdfPowerDeviceD3
     ) {
         dbglog!("[pf-vd] device_d0_entry: power-cycle resume — re-initializing the adapter");
+        // The monitors belong to the incarnation being retired: kept, they hold its ids (a
+        // re-ADD is refused its stable id) and their departure would hit a dead handle.
+        crate::monitor::cleanup_for_device_removal();
         crate::adapter::clear_adapter();
     }
     crate::adapter::init_adapter(device)
@@ -53,6 +64,7 @@ pub unsafe extern "C" fn adapter_init_finished(
     // SAFETY: the framework supplies a valid, live input-args pointer for the call.
     let status = unsafe { (*p_in).AdapterInitStatus };
     dbglog!("[pf-vd] adapter_init_finished (AdapterInitStatus={status:#010x})");
+    crate::adapter::init_settled();
     // The MS sample gates on NT_SUCCESS(AdapterInitStatus). An adapter whose async init FAILED is a
     // husk the contract forbids using: monitors created on it arrive but are never activated (no
     // swap-chain ever assigned) — every session then black-screens with no visible cause. Leaving
@@ -67,14 +79,19 @@ pub unsafe extern "C" fn adapter_init_finished(
     // OFF the callback thread: the stack is waiting on adapter init, and arriving a monitor inline
     // blocks it long enough to lose the display anyway.
     if crate::adapter::is_seat_role() {
-        std::thread::spawn(present_seat_display);
+        let old = std::mem::replace(
+            &mut *crate::registry::lock(&SEAT_PRESENTER),
+            Worker::spawn("pf-vd-seat", present_seat_display),
+        );
+        drop(old);
     }
     STATUS_SUCCESS
 }
 
 /// Give the seat adapter the display the remoting stack expects, then publish the configuration
-/// the OS needs before it will assign a swap chain. Runs on its own thread (see the call site).
-fn present_seat_display() {
+/// the OS needs before it will assign a swap chain. Runs on its own thread (see the call site);
+/// `stop` is device cleanup asking it to leave.
+fn present_seat_display(stop: HANDLE) {
     let Some(adapter) = crate::adapter::adapter() else {
         return;
     };
@@ -148,7 +165,10 @@ fn present_seat_display() {
             if live {
                 break;
             }
-            std::thread::sleep(core::time::Duration::from_millis(400));
+            // SAFETY: `stop` is the worker's stop event, alive until the worker joins.
+            if unsafe { WaitForSingleObject(stop, 400) } == WAIT_OBJECT_0 {
+                return;
+            }
         }
     }
 }
@@ -159,6 +179,10 @@ fn present_seat_display() {
 /// [`crate::monitor::cleanup_for_device_removal`].
 pub unsafe extern "C" fn device_cleanup(_object: WDFOBJECT) {
     dbglog!("[pf-vd] device cleanup — releasing monitors");
+    // The seat presenter first: joined here, so it cannot create a monitor after the registry
+    // is drained or hit a DDI on the departing device.
+    let presenter = crate::registry::lock(&SEAT_PRESENTER).take();
+    drop(presenter);
     // Stop the host-liveness watchdog FIRST, and WAIT: a reap that fired mid-cleanup would race
     // this teardown over the same monitor list (the hazard `monitor.rs` documents).
     crate::watchdog::stop();

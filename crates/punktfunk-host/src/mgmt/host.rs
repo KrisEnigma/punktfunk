@@ -129,6 +129,11 @@ pub(crate) struct DisplayHealth {
     /// Monitor devnodes disabled for a stream and not yet re-enabled (a leftover here after a
     /// crash is what the next host start replays).
     pnp_leases: u32,
+    /// Protocol the installed pf-vdisplay driver answered at the last handshake; absent until a session ran one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    driver_protocol: Option<u32>,
+    /// Protocol this host drives; a driver answering less fails every session.
+    host_protocol: u32,
 }
 
 /// One topology transaction as the display actor recorded it.
@@ -261,6 +266,8 @@ fn display_health() -> Option<DisplayHealth> {
             took_ms: t.took.as_millis().min(u64::MAX as u128) as u64,
         }),
         pnp_leases: pf_win_display::monitor_devnode::leases().len() as u32,
+        driver_protocol: crate::vdisplay::manager::driver_protocol(),
+        host_protocol: pf_driver_proto::PROTOCOL_VERSION,
     })
 }
 

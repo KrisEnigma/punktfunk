@@ -1160,7 +1160,7 @@ fn install(args: &[String]) -> Result<()> {
 /// Stop, wait until Stopped, then start. A bare `sc stop && sc start` races: START fails with
 /// "instance already running" while the old process winds down.
 fn restart() -> Result<()> {
-    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
@@ -1173,33 +1173,45 @@ fn restart() -> Result<()> {
         .context("open service (run elevated)")?;
     // ERROR_SERVICE_NOT_ACTIVE means restart == start.
     let _ = svc.stop();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let state = svc.query_status().context("query service status")?;
-        if state.current_state == ServiceState::Stopped {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!("service did not stop within 30 s");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
+    wait_stopped(&svc)?;
     svc.start(&[] as &[&std::ffi::OsStr])
         .context("start service")?;
     println!("Restarted service '{SERVICE_NAME}'.");
     Ok(())
 }
 
+/// Poll until the SCM reports the service stopped, 30 s at most. A stop is asynchronous: a
+/// delete or a start issued before this lands races the still-running host.
+fn wait_stopped(svc: &windows_service::service::Service) -> Result<()> {
+    use windows_service::service::ServiceState;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let state = svc.query_status().context("query service status")?;
+        if state.current_state == ServiceState::Stopped {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("service did not stop within 30 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 fn uninstall() -> Result<()> {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-    let _ = sc(&["stop", SERVICE_NAME]); // best-effort stop first
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("open Service Control Manager (run elevated)")?;
     let svc = manager
-        .open_service(SERVICE_NAME, ServiceAccess::DELETE)
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::STOP | ServiceAccess::QUERY_STATUS | ServiceAccess::DELETE,
+        )
         .context("open service for delete")?;
+    // ERROR_SERVICE_NOT_ACTIVE means there is nothing to wait for.
+    let _ = svc.stop();
+    wait_stopped(&svc)?;
     svc.delete().context("delete service")?;
     remove_firewall_rules();
     println!("Removed service '{SERVICE_NAME}' and its firewall rules.");
@@ -1250,10 +1262,8 @@ fn ensure_default_host_env() -> Result<()> {
         # host; mf is Media Foundation, any vendor's hardware encoder, 8-bit 4:2:0 only.\n\
         PUNKTFUNK_ENCODER=auto\n\
         PUNKTFUNK_VIDEO_SOURCE=virtual\n\
-        # Virtual display = the bundled pf-vdisplay driver; capture is IDD-push from its shared ring\n\
-        # (the sole capture path — zero-copy; DDA/WGC were removed). The secure desktop (UAC / lock /\n\
-        # login) is always captured — there is no setting for it.\n\
-        PUNKTFUNK_VDISPLAY=pf\n\
+        # The virtual display is the bundled pf-vdisplay driver, which also encodes; there is no\n\
+        # other capture path, and the secure desktop (UAC / lock / login) is always captured.\n\
         RUST_LOG=info\n\
         \n\
         # The host subcommand the service launches (default: serve --gamestream = native + Moonlight\n\

@@ -763,6 +763,7 @@ dependencies = [
  "pf-encode-win",
  "pf-frame",
  "pf-umdf-util",
+ "tracing",
  "wdk-build",
  "wdk-iddcx",
  "wdk-sys",

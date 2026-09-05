@@ -83,7 +83,6 @@ mod native;
 #[forbid(unsafe_code)]
 mod native_pairing;
 mod osinfo;
-mod pipeline;
 mod plugins;
 mod power;
 // Process-table half of session⇄game binding — design/session-game-lifetime.md. Empty on macOS.

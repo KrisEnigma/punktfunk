@@ -5,7 +5,7 @@
 //! fences still provide aggregate consistency with the peer process.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const FILE_MAP_RW: u32 = 0x0002 | 0x0004; // FILE_MAP_WRITE | FILE_MAP_READ
@@ -155,34 +155,32 @@ impl MappedView {
         self.byte(off).store(v, Ordering::Relaxed);
     }
 
-    /// Read a native-endian `u16` from two relaxed atomic bytes.
+    /// Relaxed `u16` load at `off` (must be 2-aligned): one instruction, so a peer's aligned
+    /// store is seen whole — byte-wise reads can return a value neither side ever wrote.
     #[inline]
     pub fn read_u16(&self, off: usize) -> u16 {
-        let mut bytes = [0; 2];
-        self.read_bytes(off, &mut bytes);
-        u16::from_ne_bytes(bytes)
+        let _access = self.lock_access();
+        self.check(off, 2, 2);
+        // SAFETY: as `load_u32`, with 2-byte size/alignment checked and local access serialized.
+        unsafe { (*(self.base.add(off) as *const AtomicU16)).load(Ordering::Relaxed) }
     }
 
-    /// Read a native-endian `u32` from four relaxed atomic bytes.
+    /// Relaxed `u32` load at `off` (must be 4-aligned); see [`Self::read_u16`].
     #[inline]
     pub fn read_u32(&self, off: usize) -> u32 {
-        let mut bytes = [0; 4];
-        self.read_bytes(off, &mut bytes);
-        u32::from_ne_bytes(bytes)
+        self.load_u32(off, Ordering::Relaxed)
     }
 
-    /// Write a native-endian `u32` as four relaxed atomic bytes.
+    /// Relaxed `u32` store at `off` (must be 4-aligned); see [`Self::read_u16`].
     #[inline]
     pub fn write_u32(&self, off: usize, v: u32) {
-        self.write_bytes(off, &v.to_ne_bytes());
+        self.store_u32(off, v, Ordering::Relaxed);
     }
 
-    /// Read a native-endian `i16` from two relaxed atomic bytes.
+    /// Relaxed `i16` load at `off` (must be 2-aligned); see [`Self::read_u16`].
     #[inline]
     pub fn read_i16(&self, off: usize) -> i16 {
-        let mut bytes = [0; 2];
-        self.read_bytes(off, &mut bytes);
-        i16::from_ne_bytes(bytes)
+        self.read_u16(off) as i16
     }
 
     /// Load `dst.len()` bulk bytes with relaxed atomic semantics.

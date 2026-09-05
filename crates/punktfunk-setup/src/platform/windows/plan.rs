@@ -301,6 +301,14 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
             r"<staging>\gamepad",
         ]));
     }
+    if upgrade && !choices.install_driver {
+        // The host and its driver ship as a pair; a host that outruns the driver fails every
+        // session with "driver outdated", and nothing else says why.
+        drivers.push(note(
+            Level::Warn,
+            "the virtual-display driver is NOT being updated with this host — the two must match, or every session ends with 'driver outdated'",
+        ));
+    }
     plan.push("Drivers (a hiccup warns and never aborts)", drivers);
 
     // `None` omits the flag and the box keeps its state. Only a `Some` rewrites.

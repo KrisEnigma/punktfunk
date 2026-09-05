@@ -3089,11 +3089,18 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     let (cap_ns, sub_ns, deadline) = *inflight.front().expect("inflight non-empty");
                     let wait_total_us = t_wait.elapsed().as_micros() as u32;
                     let encode_us = (now_ns().saturating_sub(sub_ns) / 1000) as u32;
+                    // The driver stamps each AU with its own present time; the tick's clock
+                    // would give every AU of a burst the same one.
+                    let capture_ns = if owed.is_some() && c.pts_ns > 0 {
+                        c.pts_ns
+                    } else {
+                        cap_ns
+                    };
                     let msg = ChunkMsg {
                         data: c.data,
                         first: c.first,
                         last,
-                        capture_ns: cap_ns,
+                        capture_ns,
                         flags: au_flags,
                         frame_index: au_seq,
                         deadline,
@@ -3184,9 +3191,15 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 }
             }
             let encode_us = (now_ns().saturating_sub(sub_ns) / 1000) as u32;
+            // As in the chunked arm: the driver's per-AU present time over the tick's clock.
+            let capture_ns = if owed.is_some() && au.pts_ns > 0 {
+                au.pts_ns
+            } else {
+                cap_ns
+            };
             let msg = FrameMsg {
                 data: au.data,
-                capture_ns: cap_ns,
+                capture_ns,
                 flags,
                 frame_index: au_seq,
                 deadline,

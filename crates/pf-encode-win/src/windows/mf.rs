@@ -440,6 +440,10 @@ impl Inner {
 /// Drain one `METransformHaveOutput`: `ProcessOutput`, copy the bitstream out, pair it with
 /// the oldest submitted frame.
 fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
+    // The MFT has handed this frame over, so its entry is spent whatever the payload turns
+    // out to be — a failed ProcessOutput included. Popping only on the success path would pair
+    // every later AU with the wrong frame's timestamp for the rest of the session.
+    let meta = inner.pending.pop_front();
     // SAFETY: the MFT is live on this thread and owes exactly one output per HaveOutput
     // event. `MFT_OUTPUT_DATA_BUFFER`'s `ManuallyDrop` members are reclaimed with
     // `ManuallyDrop::take` on every path, so the sample and the event collection the MFT
@@ -458,10 +462,6 @@ fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
         call.context("IMFTransform::ProcessOutput")?;
         sample.ok_or_else(|| anyhow!("MFT signalled HaveOutput with no sample"))?
     };
-    // The MFT has handed this frame over, so its entry is spent whatever the payload turns
-    // out to be. Popping only on the success path would pair every later AU with the wrong
-    // frame's timestamp for the rest of the session.
-    let meta = inner.pending.pop_front();
     // SAFETY: `sample` is owned here. The `Lock`ed pointer is read only for the length the
     // same call reported, and the buffer is unlocked before it drops.
     let (data, keyframe) = unsafe {

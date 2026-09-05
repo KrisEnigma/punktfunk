@@ -26,8 +26,8 @@ with its own installer. It owns the seat accounts, the Windows sessions and ever
 how a seat comes to exist. The host never learns any of that. This page exists so the two can be
 built and versioned apart.
 
-**Contract version: `SEAT_CONTRACT 1`.** The supervisor checks it against `punktfunk-host --version`
-and refuses a host it does not understand.
+**Contract version: 1.** There is no runtime handshake yet: the supervisor and the host are
+versioned together, and a mismatch shows up as the markers below not being honoured.
 
 ## The reservation marker
 

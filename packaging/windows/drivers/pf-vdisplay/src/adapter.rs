@@ -5,6 +5,7 @@
 //! `callbacks.rs`) together enable HDR. STEP 3.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use wdk_sys::{NTSTATUS, WDFDEVICE, iddcx};
 use windows::core::w;
@@ -26,6 +27,34 @@ unsafe impl Sync for SendAdapter {}
 // in `monitor.rs` (panic = abort here, so poisoning is unreachable anyway).
 static ADAPTER: Mutex<Option<SendAdapter>> = Mutex::new(None);
 
+/// The WDFDEVICE the last `init_adapter` ran on (as an integer: the handle is opaque), so an ADD
+/// that finds no adapter can ask for another init. `0` before the first D0 entry.
+static DEVICE: AtomicUsize = AtomicUsize::new(0);
+
+/// An `IddCxAdapterInitAsync` is in flight: its `adapter_init_finished` has not run yet, so a
+/// second init would race the first.
+static INIT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// `adapter_init_finished` ran, whatever it reported.
+pub fn init_settled() {
+    INIT_PENDING.store(false, Ordering::Release);
+}
+
+/// Ask for the adapter init again — an ADD found no adapter because the async init failed, and
+/// for a root-enumerated devnode no further D0 entry would ever retry it. `true` when an init
+/// was issued; the calling ADD still fails, the host's retry lands after the completion.
+pub fn retry_init() -> bool {
+    if adapter().is_some() || INIT_PENDING.load(Ordering::Acquire) {
+        return false;
+    }
+    let device = DEVICE.load(Ordering::Acquire);
+    if device == 0 {
+        return false;
+    }
+    dbglog!("[pf-vd] adapter: no adapter at ADD — re-issuing the init");
+    init_adapter(device as WDFDEVICE) >= 0
+}
+
 /// Set once this device takes the remote-session role. The OS starts that adapter itself and then
 /// expects a display on it, so the seat path presents one without waiting for a host ADD.
 static SEAT_ROLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -42,6 +71,7 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
         return STATUS_SUCCESS;
     }
     dbglog!("[pf-vd] init_adapter");
+    DEVICE.store(device as usize, Ordering::Release);
 
     // Firmware/hardware version (telemetry). The oracle points BOTH at one IDDCX_ENDPOINT_VERSION.
     // `version` is a stack local read synchronously by IddCxAdapterInitAsync (same as the oracle). `.Size`
@@ -146,8 +176,12 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     let mut out = pod_init!(iddcx::IDARG_OUT_ADAPTER_INIT);
     // SAFETY: `init`/`out` are valid local storage; IddCxAdapterInitAsync reads the caps synchronously
     // (the adapter object itself is delivered later via adapter_init_finished). Called once per device.
+    INIT_PENDING.store(true, Ordering::Release);
     let st = unsafe { wdk_iddcx::IddCxAdapterInitAsync(&init, &mut out) };
     dbglog!("[pf-vd] IddCxAdapterInitAsync -> {st:#x}");
+    if st < 0 {
+        INIT_PENDING.store(false, Ordering::Release);
+    }
     st
 }
 

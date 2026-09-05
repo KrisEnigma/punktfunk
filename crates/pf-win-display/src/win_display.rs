@@ -431,13 +431,18 @@ pub fn wait_target_departed(key: CcdTargetKey, ceiling: std::time::Duration) -> 
     let deadline = std::time::Instant::now() + ceiling;
     let mut absent_streak = 0u32;
     loop {
-        if resolve_gdi_name(key).is_none() {
-            absent_streak += 1;
-            if absent_streak >= 2 {
-                return true;
+        // A failed query is unknown, not absent: it neither advances nor resets the streak.
+        match query_display_config(QDC_ONLY_ACTIVE_PATHS) {
+            Ok((paths, _)) if paths.iter().any(|p| path_target_key(p) == key) => {
+                absent_streak = 0;
             }
-        } else {
-            absent_streak = 0;
+            Ok(_) => {
+                absent_streak += 1;
+                if absent_streak >= 2 {
+                    return true;
+                }
+            }
+            Err(_) => {}
         }
         if std::time::Instant::now() >= deadline {
             return false;

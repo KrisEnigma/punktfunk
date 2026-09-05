@@ -133,7 +133,14 @@ impl WinExecutor<'_> {
         }
         let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
         match self.run.probe(&argv[0], &args) {
-            Some(out) if out.ok() || lenient => Ok(()),
+            Some(out) if out.ok() || lenient => {
+                // The host degrades a failed driver leg to a `warning:` on stderr and exits 0;
+                // the transcript is the only place that warning can reach the operator.
+                if let Some(line) = out.stderr.lines().rev().find(|l| !l.trim().is_empty()) {
+                    self.ui.warn(line.trim());
+                }
+                Ok(())
+            }
             Some(out) => Err(Failed(format!(
                 "'{}' exited {} — {}",
                 argv[0],

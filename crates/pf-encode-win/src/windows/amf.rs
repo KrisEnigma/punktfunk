@@ -449,8 +449,9 @@ fn usage_from_env(codec: Codec) -> i64 {
 /// mark *before* the loss point.
 const NUM_LTR_SLOTS: usize = 2;
 
-/// LTR loss recovery is on unless `PUNKTFUNK_NO_AMF_LTR=1`. AMF intra-refresh has no
-/// constrained-intra property and is mutually exclusive with LTR, so LTR wins.
+/// LTR loss recovery is on unless `PUNKTFUNK_NO_AMF_LTR=1` or `PUNKTFUNK_INTRA_REFRESH` asked
+/// for intra-refresh instead: AMF has no constrained-intra property, so the two exclude each
+/// other and the operator's pick wins, as on QSV.
 fn ltr_disabled() -> bool {
     super::policy::env_flag("PUNKTFUNK_NO_AMF_LTR")
 }
@@ -712,7 +713,9 @@ impl AmfEncoder {
 
     /// Attempt LTR-RFI: AVC/HEVC only, unless `PUNKTFUNK_NO_AMF_LTR`. Driver accept is `ltr_active`.
     fn ltr_wanted(&self) -> bool {
-        !ltr_disabled() && matches!(self.codec, Codec::H264 | Codec::H265)
+        !ltr_disabled()
+            && !super::policy::intra_refresh_requested()
+            && matches!(self.codec, Codec::H264 | Codec::H265)
     }
 
     /// VBV/HRD buffer (bits) at `bps`: ~1 frame interval, `PUNKTFUNK_VBV_FRAMES`-scaled.
@@ -723,7 +726,7 @@ impl AmfEncoder {
 
     /// Static encoder config, before `Init` and again on `reset()` re-`Init` (Terminate does not
     /// keep properties on every driver). Returns `(ir_active, ltr_active)` as requested AND
-    /// accepted. Mutually exclusive — LTR wins.
+    /// accepted. Mutually exclusive — see [`Self::ltr_wanted`].
     unsafe fn apply_static_props(&self, comp: *mut sys::AmfComponent) -> Result<(bool, bool)> {
         let p = &self.props;
         // Usage first: it fully configures the parameter set; everything after is an override.
@@ -1360,7 +1363,7 @@ impl Encoder for AmfEncoder {
         // First submit on a component must be a forced IDR. Use the ring counter, not
         // `frame_idx == 0`: `submit_indexed` pins wire indexes that are non-zero after a rebuild.
         let opening = self.inner.as_ref().is_none_or(|i| i.next == 0);
-        let forced = std::mem::take(&mut self.force_kf) || opening;
+        let mut forced = std::mem::take(&mut self.force_kf) || opening;
         let pts_100ns = self.frame_idx * 10_000_000 / self.fps.max(1) as i64;
         self.frame_idx += 1;
         // LTR decisions before borrowing `inner`: the test hook re-enters `&mut self`, and
@@ -1496,6 +1499,9 @@ impl Encoder for AmfEncoder {
                         amf_code = r,
                         "AMF forced-keyframe picture type rejected"
                     );
+                    // Only the component's first frame is an IDR without the property; flagging
+                    // any other AU a keyframe hands the client a join point that is not one.
+                    forced = opening;
                 }
                 match self.codec {
                     Codec::H264 => {
@@ -1537,6 +1543,8 @@ impl Encoder for AmfEncoder {
                             amf_code = r,
                             "AMF LTR mark rejected"
                         );
+                        // The mirror must not claim a slot the hardware never marked.
+                        self.ltr_slots[slot] = None;
                     }
                 }
                 if let Some(slot) = force_slot {
@@ -1555,9 +1563,11 @@ impl Encoder for AmfEncoder {
                         tracing::warn!(
                             slot,
                             result = result_name(r),
-                amf_code = r,
-                            "AMF LTR force-reference rejected — client stays frozen until its IDR fallback"
+                            amf_code = r,
+                            "AMF LTR force-reference rejected — forcing an IDR on the next frame"
                         );
+                        // The host booked a recovery on this frame; make the next one real.
+                        self.force_kf = true;
                     }
                 }
             }
