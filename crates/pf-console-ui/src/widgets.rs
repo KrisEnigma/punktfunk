@@ -65,6 +65,15 @@ pub struct RowSpec {
     pub danger: bool,
     /// Accent dot before the label — a value this scope overrides.
     pub dot: bool,
+    /// Round icon buttons after the value (rename, remove). The pointer shells' rows carry
+    /// these; a pad steps onto them with left/right, which is the screen's to track.
+    pub buttons: &'static [&'static str],
+    /// Which of [`buttons`](Self::buttons) is lit on the focused row.
+    pub button: Option<usize>,
+    /// A grip before the label: the row can be picked up and moved.
+    pub handle: bool,
+    /// The row is picked up — the grip lights and the row reads as in hand.
+    pub held: bool,
 }
 
 impl Default for RowSpec {
@@ -82,6 +91,10 @@ impl Default for RowSpec {
             note: None,
             danger: false,
             dot: false,
+            buttons: &[],
+            button: None,
+            handle: false,
+            held: false,
         }
     }
 }
@@ -162,7 +175,25 @@ impl RowSpec {
         self.note = Some(why.into());
         self
     }
+
+    /// Trailing icon buttons, `lit` the one the pad has stepped onto.
+    pub fn with_buttons(mut self, buttons: &'static [&'static str], lit: Option<usize>) -> RowSpec {
+        self.buttons = buttons;
+        self.button = lit;
+        self
+    }
+
+    /// A drag grip before the label, `held` while the row is picked up.
+    pub fn with_handle(mut self, held: bool) -> RowSpec {
+        self.handle = true;
+        self.held = held;
+        self
+    }
 }
+
+/// Trailing button diameter and pitch, design units.
+const BUTTON_D: f64 = 32.0;
+const BUTTON_PITCH: f64 = 40.0;
 
 pub const ROW_H: f64 = 50.0;
 const ROW_GAP: f64 = 6.0;
@@ -227,6 +258,8 @@ pub struct MenuList {
     /// Last-drawn row rects, device px. Empty for rows scrolled out of view, so
     /// an index here is an index into `rows`.
     geom: Vec<Rect>,
+    /// Last-drawn trailing button rects per row, same indexing.
+    buttons_geom: Vec<Vec<Rect>>,
     /// True once nothing is still moving. `false` until the first render so a
     /// fresh list always asks for a frame.
     settled: bool,
@@ -257,6 +290,7 @@ impl MenuList {
             age: 0.0,
             snap: true,
             geom: Vec::new(),
+            buttons_geom: Vec::new(),
             settled: false,
         }
     }
@@ -303,6 +337,15 @@ impl MenuList {
     /// Confirm dip. Separate from [`Self::armed`]: an action row still presses.
     fn dip(&mut self) {
         self.press.pos = PRESS_DIP;
+    }
+
+    /// The trailing button under the pointer, as `(row, button)`. The screen decides what
+    /// a hover or a press on it does; [`Self::pointer`] only knows rows.
+    pub fn button_at(&self, p: Pointer) -> Option<(usize, usize)> {
+        self.buttons_geom
+            .iter()
+            .enumerate()
+            .find_map(|(i, rects)| p.pick(rects).map(|j| (i, j)))
     }
 
     /// Last-drawn row rect; tests assert what a press can reach.
@@ -537,6 +580,8 @@ impl MenuList {
         canvas.clip_rect(rect, None, true);
         self.geom.clear();
         self.geom.resize(rows.len(), Rect::new_empty());
+        self.buttons_geom.clear();
+        self.buttons_geom.resize(rows.len(), Vec::new());
         for (i, row) in rows.iter().enumerate() {
             let f = self.focus[i];
             let top = f64::from(rect.top) + tops[i] * k - self.scroll + self.bump.pos * k;
@@ -641,6 +686,67 @@ impl MenuList {
                 );
                 label_x += 16.0 * k;
             }
+            if row.handle {
+                if let Some(grip) = crate::icons::by_name("grip-vertical") {
+                    let grip_tone = if row.held {
+                        accent(1.0)
+                    } else {
+                        tone(fg(0.7), fg(0.3))
+                    };
+                    crate::icons::draw_icon(
+                        canvas,
+                        grip,
+                        (label_x + 8.0 * k) as f32,
+                        cy as f32,
+                        (20.0 * k) as f32,
+                        grip_tone,
+                    );
+                }
+                label_x += 28.0 * k;
+            }
+            // Trailing buttons take the row's right end; the value field ends before them.
+            let buttons_w = row.buttons.len() as f64 * BUTTON_PITCH * k;
+            for (j, name) in row.buttons.iter().enumerate() {
+                let cx = x0 + row_w - 16.0 * k - buttons_w + (j as f64 + 0.5) * BUTTON_PITCH * k;
+                let d = BUTTON_D * k;
+                let r = Rect::from_xywh(
+                    (cx - d / 2.0) as f32,
+                    (cy - d / 2.0) as f32,
+                    d as f32,
+                    d as f32,
+                );
+                self.buttons_geom[i].push(r);
+                let lit = row.button == Some(j) && f > 0.5;
+                if lit {
+                    canvas.draw_circle(
+                        (cx as f32, cy as f32),
+                        (d / 2.0) as f32,
+                        &fill(accent(1.0)),
+                    );
+                } else {
+                    canvas.draw_circle(
+                        (cx as f32, cy as f32),
+                        (d / 2.0) as f32,
+                        &fill(fg(0.04 + 0.06 * f as f32)),
+                    );
+                }
+                if let Some(icon) = crate::icons::by_name(name) {
+                    let icon_tone = if lit {
+                        crate::theme::on_accent()
+                    } else {
+                        tone(fg(0.9), fg(0.45))
+                    };
+                    crate::icons::draw_icon(
+                        canvas,
+                        icon,
+                        cx as f32,
+                        cy as f32,
+                        (18.0 * k) as f32,
+                        icon_tone,
+                    );
+                }
+            }
+            let row_w = row_w - buttons_w;
             if let Some(note) = &row.note {
                 fonts.draw_clipped(
                     canvas,
@@ -1730,6 +1836,60 @@ mod tests {
             );
         }
         assert!(armed, "the step must have animated, or this proves nothing");
+    }
+
+    /// Trailing buttons sit at the row's right end, in the order given, and the pointer
+    /// picks them by index; the lit one is accent-filled. A handle shifts the label.
+    #[test]
+    fn trailing_buttons_are_hit_in_order_and_light_when_focused() {
+        crate::theme::set_ink(crate::theme::Ink::of(crate::library::palette("violet")));
+        let fonts = crate::theme::build_fonts().unwrap();
+        let (w, h) = (900, 400);
+        let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+        let rect = Rect::from_xywh(0.0, 0.0, w as f32, h as f32);
+        let rows = vec![
+            RowSpec::choice("Favourites", "3 games")
+                .with_handle(true)
+                .with_buttons(&["pencil", "trash-2"], Some(1)),
+            RowSpec::action("Add collection", true),
+        ];
+        let mut list = MenuList::new();
+        for _ in 0..90 {
+            surface
+                .canvas()
+                .clear(skia_safe::Color4f::new(0.0, 0.0, 0.0, 1.0));
+            list.render(surface.canvas(), rect, &rows, &fonts, 1.0, 1.0 / 60.0, true);
+        }
+        let r0 = list.row_rect(0).unwrap();
+        let pencil = list.buttons_geom[0][0];
+        let trash = list.buttons_geom[0][1];
+        assert!(pencil.right < trash.left && trash.right <= r0.right);
+        let at = |r: Rect| Pointer {
+            x: f64::from(r.center_x()),
+            y: f64::from(r.center_y()),
+            kind: PointerKind::Move,
+        };
+        assert_eq!(list.button_at(at(pencil)), Some((0, 0)));
+        assert_eq!(list.button_at(at(trash)), Some((0, 1)));
+        assert_eq!(list.button_at(at(list.row_rect(1).unwrap())), None);
+        // The lit button is accent (blue-heavy in BGRA), the other is not.
+        let buf = read_back(&mut surface, w, h);
+        let px = |r: Rect| {
+            let (x, y) = (r.center_x() as i32 - 10, r.center_y() as i32 - 10);
+            let i = ((y * w + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2]]
+        };
+        assert!(
+            px(trash)[0] > 150 && px(trash)[1] < 150,
+            "lit: {:?}",
+            px(trash)
+        );
+        assert!(
+            px(trash)[0] > px(pencil)[0] + 60,
+            "unlit is dimmer: {:?} vs {:?}",
+            px(pencil),
+            px(trash)
+        );
     }
 
     /// The pointer shells' controls: a switch's knob crosses its track when the row flips
