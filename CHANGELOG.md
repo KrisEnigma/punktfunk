@@ -396,6 +396,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **A Deck in Game Mode forwards every controller Steam Input wraps, not only the newest.** When
   each connected pad is a Steam virtual gamepad none of them shadows a real one, so all are
   forwarded instead of just the last. Nothing to do.
+- **A native crash in the Windows client names its module.** `punktfunk-session` and the shell
+  now install the host's unhandled-exception filter, so `client.log` records the exception code,
+  fault address and faulting DLL, and the "Couldn't connect" banner calls an access violation one
+  instead of printing `-1073741819`. Send the log as before; the crash line is what to look for.
 
 ### Fixed
 

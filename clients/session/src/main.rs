@@ -666,6 +666,9 @@ mod session_main {
                 )
                 .init();
         }
+        // SEH last-resort: a driver AV otherwise leaves only an exit code in the shell's log.
+        #[cfg(windows)]
+        punktfunk_core::crash::install();
 
         // Before ANY Vulkan call — and that includes the two probe flags below, which is the
         // whole reason this sits at the top of `run` instead of beside the session setup it

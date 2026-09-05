@@ -93,6 +93,8 @@ fn main() {
     if let Some(p) = logfile::path() {
         tracing::info!(path = %p.display(), "client log file (rotated at 10 MB, one .old kept)");
     }
+    // SEH last-resort: a native crash in the shell otherwise ends the log mid-sentence.
+    punktfunk_core::crash::install();
 
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().any(|a| a == name);
