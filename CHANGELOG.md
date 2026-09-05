@@ -43,6 +43,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`GamepadType.steamController2Puck` (pref `10`) is declared by an Apple client.** The macOS
+  SC2 passthrough now captures over USB — a cabled pad or a Puck dongle, each collection its own
+  wire pad — and a Puck slot declares kind 10 where a wired or BLE pad still declares 9. Nothing
+  to negotiate: the host has resolved pref 10 since the Linux virtual Puck landed.
 - **High-resolution scrolling.** `InputKind::MouseScroll` gained a `flags` bit,
   `SCROLL_FLAG_PRECISE`, marking a delta measured off a trackpad instead of counted off a
   notched wheel; every client sets it and every injector scrolls that distance rather than
@@ -260,6 +264,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **A Windows host serves pref `10` as the wired Triton pad.** It used to degrade to the Xbox 360
+  pad, because 28DE:1304 has no Windows synthesis; it now folds onto the same 28DE:1302 virtual
+  pad a cabled SC2 mints, which Steam treats as the canonical controller. Nothing to do — a Puck
+  session that reached Windows as an Xbox pad now arrives with native Steam Input.
 - **A pinned data port no longer skips the hole-punch.** `--data-port` / `PUNKTFUNK_DATA_PORT`
   used to stream to the port the client reported, which a NAT or a port proxy on the client's
   side remaps; the host now answers the source it heard the punch from on every port. Nothing to

@@ -45,7 +45,16 @@
 	<!-- Game controllers over USB + USB HID mouse/keyboard via the GameController framework.
 	     device.usb gates the IOHIDLibUserClient path the framework uses for wired devices
 	     (per Apple DTS); without it, plugged-in controllers deliver no input. Justify in App
-	     Review notes ("reads input from USB game controllers"). -->
+	     Review notes ("reads input from USB game controllers").
+
+	     ALSO gates the Steam Controller 2 as-is passthrough's raw-HID USB transport
+	     (Sc2UsbLink), which opens a wired SC2 or a Steam Controller Puck dongle directly.
+	     That open additionally sits behind the Input Monitoring (kTCCServiceListenEvent)
+	     user grant: on-glass (macOS 27, 2026-08-31) each controller interface is one HID
+	     device that carries the lizard-mode keyboard collection beside the vendor controller
+	     collection, so the keyboard surface cannot be matched away. Sc2UsbLink raises the
+	     prompt via IOHIDRequestAccess before its first open. Same App Review justification
+	     line covers it: it reads controller input from a USB game controller. -->
 	<key>com.apple.security.device.usb</key>
 	<true/>
 

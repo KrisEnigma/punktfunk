@@ -211,6 +211,23 @@ public final class GamepadManager: ObservableObject {
         rebuild()
     }
 
+    /// While the SC2 passthrough owns the physical hardware, its GameController shadow must not
+    /// ALSO be forwarded: macOS surfaces a captured Steam Controller 2 / Puck as an ordinary
+    /// controller (on-glass 2026-08-31, vendorName "Steam Controller Puck"), and forwarding both
+    /// hands the host the same pad twice. Held only while `Sc2Capture` has a claimed wire slot
+    /// (`syncShadowSuppression`), never for its lifetime: an SC2 the capture cannot open must
+    /// keep the ordinary path rather than be forwarded on neither.
+    var steamController2Suppressed = false {
+        didSet { if steamController2Suppressed != oldValue { rebuild() } }
+    }
+
+    /// Whether a GameController device is the SC2 family's shadow. Keyed on the measured
+    /// vendorName; GameController surfaced no Valve device before the SC2 family, so the prefix
+    /// only matches hardware `Sc2Capture` captures.
+    private static func isSteamController2(_ c: GCController) -> Bool {
+        (c.vendorName ?? "").hasPrefix("Steam Controller")
+    }
+
     private func rebuild() {
         let present = GCController.controllers()
         connectOrder.removeAll { key in !present.contains { ObjectIdentifier($0) == key } }
@@ -232,7 +249,9 @@ public final class GamepadManager: ObservableObject {
     }
 
     private func reselect() {
-        let candidates = controllers.filter(\.isExtended)
+        let candidates = controllers.filter {
+            $0.isExtended && !(steamController2Suppressed && Self.isSteamController2($0.controller))
+        }
         // The pin wins when present; otherwise the most recently connected extended pad
         // (list is in connect order). A stale pin falls back to automatic.
         let pinned = candidates.last { $0.id == preferredID }

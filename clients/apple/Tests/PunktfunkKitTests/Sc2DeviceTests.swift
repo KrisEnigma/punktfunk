@@ -50,6 +50,79 @@ final class Sc2DeviceTests: XCTestCase {
         XCTAssertNil(Sc2Device.strippedOutputLen(id: 0x00))
     }
 
+    // MARK: - USB identity (macOS `Sc2UsbLink`)
+
+    func testUsbPIDsCoverTheWiredPadAndBothPucksButNotBLE() {
+        XCTAssertEqual(Sc2Device.vidValve, 0x28DE)
+        // Exactly the ids Android's `Sc2Device.USB_PIDS` matches: wired + both dongles.
+        XCTAssertEqual(Sc2Device.usbPIDs.sorted(), [0x1302, 0x1304, 0x1305])
+        // 0x1303 is the DIRECT BLE identity. Matching it on USB would open a device the BLE link
+        // owns, so the two transports would fight over one pad.
+        XCTAssertFalse(Sc2Device.usbPIDs.contains(Sc2Device.pidBLE))
+        XCTAssertEqual(Sc2Device.pidBLE, 0x1303)
+    }
+
+    func testOnlyTheDonglePIDsAreAPuck() {
+        // Decides the declared wire kind AND whether wireless-status reports are authoritative —
+        // getting this backwards tears the wire slot down on a wired pad (Android's on-glass bug).
+        XCTAssertTrue(Sc2Device.isDongle(pid: Sc2Device.pidDongleProteus))
+        XCTAssertTrue(Sc2Device.isDongle(pid: Sc2Device.pidDongleNereid))
+        XCTAssertFalse(Sc2Device.isDongle(pid: Sc2Device.pidWired))
+        XCTAssertFalse(Sc2Device.isDongle(pid: Sc2Device.pidBLE))
+        XCTAssertFalse(Sc2Device.isDongle(pid: 0x0000))
+    }
+
+    func testTheMatchedUsagePairIsTheVendorCollectionNotAKeyboardOrMouse() {
+        // The SC2's controller collection is vendor-defined page 0xFF00 usage 0x01 — the THIRD
+        // top-level collection in `pf_driver_proto::triton::RDESC`, behind the lizard mouse
+        // (Generic Desktop 01:02) and keyboard (01:06).
+        XCTAssertEqual(Sc2Device.usagePageVendor, 0xFF00)
+        XCTAssertEqual(Sc2Device.usageController, 0x01)
+        // The invariant that matters: macOS surfaces one IOHIDDevice per collection, so matching
+        // Generic Desktop (0x01) would open the pad's KEYBOARD — putting the whole app behind the
+        // Input Monitoring TCC gate for no benefit. Vendor pages start at 0xFF00.
+        XCTAssertGreaterThanOrEqual(Sc2Device.usagePageVendor, 0xFF00)
+        XCTAssertNotEqual(Sc2Device.usagePageVendor, 0x01)
+        XCTAssertEqual(Sc2Device.dongleIfaces, 2...5)
+    }
+
+    func testWirelessStatusPayloadValues() {
+        // `idWireless`/`idWirelessX` byte 1 — mirrors Android's WIRELESS_CONNECT/DISCONNECT.
+        XCTAssertEqual(Sc2Device.wirelessDisconnect, 1)
+        XCTAssertEqual(Sc2Device.wirelessConnect, 2)
+    }
+
+    func testEngravedSerialParsing() {
+        // Reply shape: report id + binary header, then the engraved serial as printable ASCII.
+        var reply = [UInt8](repeating: 0, count: 65)
+        reply[0] = Sc2Device.featureSerial
+        reply[1] = 0x11
+        reply[2] = 0xFE
+        let serial = Array("FXA1234567890".utf8)
+        reply.replaceSubrange(8 ..< 8 + serial.count, with: serial)
+        XCTAssertEqual(Sc2Device.parseSerial(reply), "FXA1234567890")
+        // Runs outside 8–20 never qualify — a garbage reply degrades to no serial, not a
+        // wrong one: too short (7), and an over-long printable run (an ASCII error string).
+        XCTAssertNil(Sc2Device.parseSerial(Array("ABCDEFG".utf8)))
+        XCTAssertNil(Sc2Device.parseSerial(Array(repeating: UInt8(ascii: "A"), count: 65)))
+        XCTAssertNil(Sc2Device.parseSerial([0x02, 0x41, 0x42, 0x00, 0x43, 0x44]))
+        XCTAssertNil(Sc2Device.parseSerial([]))
+        // Ties keep the FIRST longest run.
+        XCTAssertEqual(Sc2Device.parseSerial(Array("ABCDEFGH:IJKLMNOP".utf8)), "ABCDEFGH")
+    }
+
+    func testWirelessReplayNormalizesEitherIdTo0x79() {
+        // The replay must carry 0x79 whichever wireless id the Puck emitted: 0x46 is not in the
+        // virtual identity's report descriptor, and the Windows driver drops undeclared ids.
+        XCTAssertEqual(
+            Sc2Device.wirelessReplay([Sc2Device.idWirelessX, Sc2Device.wirelessConnect]),
+            [Sc2Device.idWireless, Sc2Device.wirelessConnect])
+        XCTAssertEqual(
+            Sc2Device.wirelessReplay([Sc2Device.idWireless, Sc2Device.wirelessConnect]),
+            [Sc2Device.idWireless, Sc2Device.wirelessConnect])
+        XCTAssertEqual(Sc2Device.wirelessReplay([Sc2Device.idWireless]).count, 2)
+    }
+
     func testFeatureCommandBytesVerbatim() {
         // DISABLE_LIZARD: [1][0x87 ID_SET_SETTINGS_VALUES][3][9 SETTING_LIZARD_MODE][0 0 u16],
         // zero-padded to the 64-byte feature size (Android sends the identical frame).
@@ -57,6 +130,13 @@ final class Sc2DeviceTests: XCTestCase {
         XCTAssertEqual(
             Array(Sc2Device.disableLizard[0 ..< 6]), [0x01, 0x87, 0x03, 0x09, 0x00, 0x00])
         XCTAssertTrue(Sc2Device.disableLizard[6...].allSatisfy { $0 == 0 })
+        // NORMALIZE_JOYSTICKS (USB only): the same framing with SETTING_ENABLE_RAW_JOYSTICK
+        // (0x2e) = 0. Android sends the identical 64-byte frame — its `Sc2DeviceTest` pins these
+        // same bytes from the other side, so the pair goes red on either edit alone.
+        XCTAssertEqual(Sc2Device.normalizeJoysticks.count, 64)
+        XCTAssertEqual(
+            Array(Sc2Device.normalizeJoysticks[0 ..< 6]), [0x01, 0x87, 0x03, 0x2E, 0x00, 0x00])
+        XCTAssertTrue(Sc2Device.normalizeJoysticks[6...].allSatisfy { $0 == 0 })
         // The gyro-enable REFERENCE (WRITE_REGISTER reg 0x30 GYRO_MODE val 0x0018) — kept for
         // logging/tests only; nothing in the client may ever send it unprompted.
         XCTAssertEqual(Sc2Device.gyroEnableReference, [0x01, 0x87, 0x03, 0x30, 0x18, 0x00])
