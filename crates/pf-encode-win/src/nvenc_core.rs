@@ -765,8 +765,8 @@ pub enum RangePlan {
     /// anchor: the client re-asking means the previous anchor AU may itself have
     /// been lost.
     Covered,
-    /// Invalidate `first..=last` (clamped). Record these values in `last_rfi_range`
-    /// on success.
+    /// Invalidate `first..=last`, where `last` is the encode head. Record these
+    /// values in `last_rfi_range` on success.
     Invalidate { first: i64, last: i64 },
     /// Recovery without an IDR is impossible. Do not clear `pending_anchor` on
     /// decline (Vulkan's decline; AMF/QSV clear `pending_force` — see `crate::rfi`).
@@ -777,10 +777,14 @@ pub enum RangePlan {
 /// Step order is load-bearing:
 ///
 /// 1. nonsense range (`first < 0 || first > last`) → [`RangePlan::Decline`];
-/// 2. covering-range dedup with the unclamped `last`, before the DPB window,
+/// 2. covering-range dedup with the client's `last`, before the DPB window,
 ///    so a covered re-ask never touches the driver after leaving the DPB;
-/// 3. DPB window: `first < next_ts - RFI_DPB` → Decline;
-/// 4. clamp `last` to `next_ts - 1`; inverted after clamp → Decline.
+/// 3. anchor check: a frame older than `first`, still in the DPB and not already
+///    invalidated must exist, else Decline;
+/// 4. `last` becomes `next_ts - 1`: every frame encoded since the loss predicts
+///    from it, so the client decoded all of them against a hole. Invalidating
+///    only the frames the client named left NVENC anchoring on one of these.
+///    A `first` at or past the head is a prediction desync → Decline.
 ///
 /// `next_ts` is `frame_idx`: the next timestamp to assign. `teardown()` clears
 /// `last_rfi_range` but not `frame_idx`, so a post-reset call can see a
@@ -799,11 +803,14 @@ pub fn plan_range_recovery(
             return RangePlan::Covered;
         }
     }
-    let oldest_in_dpb = next_ts - RFI_DPB as i64;
-    if first < oldest_in_dpb {
+    let oldest_in_dpb = (next_ts - RFI_DPB as i64).max(0);
+    let newest_anchor = first - 1;
+    let prior_covers =
+        last_rfi_range.is_some_and(|(pf, pl)| pf <= oldest_in_dpb && pl >= newest_anchor);
+    if oldest_in_dpb > newest_anchor || prior_covers {
         return RangePlan::Decline;
     }
-    let last = last.min(next_ts - 1);
+    let last = next_ts - 1;
     if first > last {
         return RangePlan::Decline;
     }
@@ -844,6 +851,28 @@ mod range_policy_tests {
         );
     }
 
+    /// The client names the lost frames; the host has encoded past them by the time
+    /// the ask lands, and each of those predicts from the hole. The range runs to
+    /// the encode head so the anchor predates the loss.
+    #[test]
+    fn the_range_runs_to_the_encode_head() {
+        assert!(matches!(
+            plan(100, 100, 103),
+            RangePlan::Invalidate {
+                first: 100,
+                last: 102
+            }
+        ));
+        // Newest possible loss: the head itself is the only frame invalidated.
+        assert!(matches!(
+            plan(99, 99, 100),
+            RangePlan::Invalidate {
+                first: 99,
+                last: 99
+            }
+        ));
+    }
+
     #[test]
     fn covering_range_dedups_partial_overlap_does_not() {
         let prior = Some((90i64, 95i64));
@@ -857,12 +886,12 @@ mod range_policy_tests {
             plan_range_recovery(92, 94, 100, prior),
             RangePlan::Covered
         ));
-        // Partial overlap re-invalidates the full new range. `next_ts = 98` keeps
-        // the window open; at 100 the same range would age out and Decline.
+        // A later loss re-invalidates from its own `first` to the head: the prior
+        // anchor (96) survives, so recovery is still possible.
         assert!(matches!(
-            plan_range_recovery(93, 97, 98, prior),
+            plan_range_recovery(97, 97, 98, prior),
             RangePlan::Invalidate {
-                first: 93,
+                first: 97,
                 last: 97
             }
         ));
@@ -881,35 +910,52 @@ mod range_policy_tests {
         assert!(matches!(plan(10, 12, 100), RangePlan::Decline));
     }
 
+    /// An anchor must be older than the loss and still resident: with the whole
+    /// DPB inside the corrupt window nothing valid remains and NVENC must not be
+    /// asked to reference it.
     #[test]
     fn dpb_window_boundary() {
         let next_ts = 100i64;
         let oldest = next_ts - RFI_DPB as i64;
         assert!(matches!(
-            plan(oldest, oldest, next_ts),
+            plan(oldest + 1, oldest + 1, next_ts),
             RangePlan::Invalidate { .. }
         ));
+        assert!(matches!(plan(oldest, oldest, next_ts), RangePlan::Decline));
+    }
+
+    /// The previous loss already invalidated every candidate older than this one:
+    /// its anchor was itself lost and nothing before it is left in the DPB.
+    #[test]
+    fn a_prior_invalidation_can_exhaust_the_anchors() {
+        // Loss at 100 was repaired at head 103 (100..102 invalid, anchor 103).
+        // The anchor is lost; the client reports it at head 105.
         assert!(matches!(
-            plan(oldest - 1, oldest, next_ts),
+            plan_range_recovery(103, 103, 105, Some((100, 102))),
             RangePlan::Decline
+        ));
+        // With the anchor received and a later loss, 103 anchors the repair.
+        assert!(matches!(
+            plan_range_recovery(104, 104, 106, Some((100, 102))),
+            RangePlan::Invalidate {
+                first: 104,
+                last: 105
+            }
         ));
     }
 
-    /// `last` clamps to `next_ts - 1`; Invalidate carries the clamped value,
-    /// which the caller records in `last_rfi_range`.
     #[test]
-    fn clamps_to_newest_encoded() {
-        assert!(matches!(
-            plan(98, 150, 100),
-            RangePlan::Invalidate {
-                first: 98,
-                last: 99
-            }
-        ));
-        // Entirely in the future inverts under the clamp → Decline (prediction desync).
+    fn future_and_fresh_session_ranges_decline() {
+        // Entirely in the future → Decline (prediction desync).
         assert!(matches!(plan(100, 150, 100), RangePlan::Decline));
-        // Fresh session (`frame_idx == 0`): window passes but clamp gives last = -1.
+        // Fresh session (`frame_idx == 0`): nothing encoded yet.
         assert!(matches!(plan(0, 3, 0), RangePlan::Decline));
+        // The opening IDR lost with one frame encoded after it: no older anchor.
+        assert!(matches!(plan(0, 0, 2), RangePlan::Decline));
+        assert!(matches!(
+            plan(1, 1, 2),
+            RangePlan::Invalidate { first: 1, last: 1 }
+        ));
     }
 }
 
