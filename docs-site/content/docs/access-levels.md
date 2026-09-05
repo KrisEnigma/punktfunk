@@ -6,7 +6,8 @@ description: What each paired device may do, and for how long — the three pres
 Pairing used to be all-or-nothing: a paired device had full control of the host, forever. Now every
 paired device carries an **access level** — what it may send to the host — and optionally an
 expiry: a friend's phone as a second controller for the evening, a TV that can play but never type,
-a spectator who only watches.
+a spectator who only watches. A friend who is not on your LAN needs one more thing — a way to
+reach the host and nothing else — see [Friends over the internet](/docs/friends-over-the-internet).
 
 Access is **enforced by the host**. A client's UI reflects its access as a courtesy, but the host
 drops anything a device isn't granted regardless of what the client sends — nothing a client sends
