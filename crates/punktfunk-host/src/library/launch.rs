@@ -895,12 +895,14 @@ pub struct SpawnedLaunch {
 /// * **gamescope (managed / SteamOS / attach)** — spawn inside the running
 ///   session ([`crate::vdisplay::launch_into_gamescope_session`]). `steam
 ///   steam://…` also forwards over Steam's pipe.
-/// * **gamescope (bare spawn)** — not here: nested via `set_launch_command`
-///   (`vdisplay::launch_is_nested`).
+/// * **gamescope (bare spawn)** — only after a keep-alive reuse, which spawned
+///   nothing. A fresh spawn nests via `set_launch_command`
+///   ([`crate::vdisplay::launch_is_nested`]).
 #[cfg(target_os = "linux")]
 pub fn launch_session_command(
     compositor: crate::vdisplay::Compositor,
     cmd: &str,
+    seat: Option<&str>,
 ) -> Result<SpawnedLaunch> {
     use std::os::unix::process::CommandExt;
     let cmd = cmd.trim();
@@ -913,9 +915,10 @@ pub fn launch_session_command(
         }
     }
     let (child, group_leader) = match compositor {
-        crate::vdisplay::Compositor::Gamescope => {
-            (crate::vdisplay::launch_into_gamescope_session(cmd)?, false)
-        }
+        crate::vdisplay::Compositor::Gamescope => (
+            crate::vdisplay::launch_into_gamescope_session(cmd, seat)?,
+            false,
+        ),
         _ => (
             std::process::Command::new("sh")
                 .arg("-c")
