@@ -71,6 +71,75 @@ pub(super) fn synthetic_stream(
     Ok(())
 }
 
+/// A moving picture through the software H.264 encoder until the session stops. Linux only,
+/// because the encoder is; elsewhere a client gets a refusal it can read, not a hang.
+///
+/// Named, not resolved from the ladder: `auto` never picks software, and `PUNKTFUNK_ENCODER`
+/// is latched long before a session arrives.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn software_stream(
+    session: &mut Session,
+    codec: crate::encode::Codec,
+    mode: punktfunk_core::config::Mode,
+    bitrate_kbps: u32,
+    stop: &AtomicBool,
+    probe_rx: &std::sync::mpsc::Receiver<ProbeRequest>,
+    probe_result_tx: &tokio::sync::mpsc::UnboundedSender<ProbeResult>,
+    fec_target: &AtomicU8,
+    probe_seq: bool,
+) -> Result<()> {
+    use crate::capture::Capturer;
+    anyhow::ensure!(
+        codec == crate::encode::Codec::H264,
+        "the software source encodes H.264 only, and {codec:?} was negotiated"
+    );
+    let (w, h, fps) = (mode.width, mode.height, mode.refresh_hz.max(1));
+    let mut capturer = crate::capture::SyntheticCapturer::new(w, h, fps);
+    let mut frame = capturer.next_frame().context("first synthetic frame")?;
+    let mut encoder =
+        pf_encode::open_software_h264(frame.format, w, h, fps, u64::from(bitrate_kbps) * 1000)
+            .context("open the software encoder")?;
+    let interval = std::time::Duration::from_nanos(1_000_000_000 / u64::from(fps));
+    let mut frames = 0u64;
+    while !stop.load(Ordering::SeqCst) {
+        apply_fec_target(session, fec_target);
+        service_probes(session, stop, probe_rx, probe_result_tx, probe_seq);
+        encoder.submit(&frame).context("encode submit")?;
+        while let Some(au) = encoder.poll().context("encode poll")? {
+            let mut flags = u32::from(FLAG_PIC);
+            if au.keyframe {
+                flags |= u32::from(FLAG_SOF);
+            }
+            if session.submit_frame(&au.data, au.pts_ns, flags).is_err() {
+                tracing::info!(frames, "software stream ended: the transport refused");
+                return Ok(());
+            }
+            frames += 1;
+        }
+        std::thread::sleep(interval);
+        frame = capturer.next_frame().context("synthetic frame")?;
+    }
+    tracing::info!(frames, "software stream complete");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn software_stream(
+    _session: &mut Session,
+    _codec: crate::encode::Codec,
+    _mode: punktfunk_core::config::Mode,
+    _bitrate_kbps: u32,
+    _stop: &AtomicBool,
+    _probe_rx: &std::sync::mpsc::Receiver<ProbeRequest>,
+    _probe_result_tx: &tokio::sync::mpsc::UnboundedSender<ProbeResult>,
+    _fec_target: &AtomicU8,
+    _probe_seq: bool,
+) -> Result<()> {
+    anyhow::bail!("the software source needs the software encoder, which is Linux-only")
+}
+
 /// Probe ceiling: 10 Gbps / 5 s. Above the session cap ([`MAX_BITRATE_KBPS`], 2 Gbps) so a
 /// probe can show headroom past the rate a session will actually use.
 const MAX_PROBE_KBPS: u32 = 10_000_000;

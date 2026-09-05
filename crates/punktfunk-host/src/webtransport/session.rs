@@ -1,114 +1,127 @@
-//! One browser session: the punktfunk/1 handshake on a WebTransport stream, then video.
-//!
-//! **This is Phase 2's path, not the native one.** `native::serve_session` is built around a
-//! `quinn::Connection` — audio, cursor, rumble and HID all call `conn.send_datagram` on it
-//! directly — so reusing it would mean abstracting that connection first. Video is the half that
-//! is already transport-agnostic ([`Session`] holds a `Box<dyn Transport>`), and video is what
-//! "first frame on screen" needs, so this is deliberately the video half and says so.
-//!
-//! The frame source is synthetic and the encoder is openh264. That is not a placeholder for
-//! testing's sake: it is what lets a headless box with no GPU serve a browser, which is what the
-//! browser tier is being proven against.
+//! One browser session: device-key admission on a WebTransport stream, then the native session.
 //!
 //! **Identity, with no client certificate.** The browser speaks first — a stream it opens does
 //! not reach the host until it writes on it, so a host that greeted first would wait for a client
 //! that was waiting for it. A first-time browser sends a `PairRequest` carrying its WebCrypto
 //! device key; any other opens with `Hello`, and a host that requires pairing answers that with
 //! an [`AuthChallenge`] rather than a `Welcome`. The signature that comes back is looked up in
-//! the same store native clients live in. What mTLS does per packet, this does once — see
-//! `design/web-client-implementation-plan.md` Phase 3 for the honest comparison.
+//! the same store native clients live in. What mTLS does per packet, this does once.
+//!
+//! Admitted, the browser is a native client: the same `Hello` bytes, the same control stream
+//! (as a [`crate::native::link::CtlSend`] pair) and the same pipeline run through
+//! [`crate::native::run_admitted`], with video on a [`WebTransportPlane`] instead of a UDP
+//! socket. Nothing below admission is browser-specific, and a second copy of the session is the
+//! thing this file must never grow back into.
 
-use super::{Inbox, Serving, WebTransportPlane};
+use super::{Serving, WebTransportPlane};
+use crate::native::link::{CtlRecv, CtlSend, SessionLink};
+use crate::native::{DataPlane, Served};
 use anyhow::{Context, Result};
-use punktfunk_core::config::{CompositorPref, FecConfig, FecScheme, GamepadPref, Role};
 use punktfunk_core::quic::io::{read_msg, write_msg};
-use punktfunk_core::quic::ColorInfo;
-use punktfunk_core::quic::{
-    auth_signed_message, AuthChallenge, AuthResponse, Hello, PairRequest, Start, Welcome,
-};
-use punktfunk_core::session::Session;
+use punktfunk_core::quic::{auth_signed_message, AuthChallenge, AuthResponse, PairRequest};
 use rand::RngCore;
 use std::sync::Arc;
 use wtransport::Connection;
 
-/// Read the handshake, then stream until the browser goes away.
-pub(crate) async fn run(conn: Connection, inbox: Arc<Inbox>, serving: Arc<Serving>) -> Result<()> {
+/// A refusal with the close code the native plane would use for it. Anything that is not one
+/// of these closes as [`punktfunk_core::reject::SETUP_FAILED_CLOSE_CODE`].
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    pub(crate) code: u32,
+    pub(crate) what: &'static str,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.what)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+fn refused(code: u32, what: &'static str) -> anyhow::Error {
+    anyhow::Error::new(Refusal { code, what })
+}
+
+/// Admit the browser, then run the native session on its connection.
+///
+/// The permit is the same pool the native plane draws from: a browser holds a session slot, not
+/// a browser slot. It is taken before the first read so a slow handshake never lets a host that
+/// is full accept a fifth encoder.
+pub(crate) async fn run(
+    conn: Connection,
+    serving: Arc<Serving>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Served> {
     let (mut tx, mut rx) = conn.accept_bi().await.context("accept control stream")?;
     let first = read_msg(&mut rx).await.context("read the first message")?;
 
     // A `PairRequest` ends the session either way — pairing is its own connection, as on the
     // native plane, so a browser reconnects to stream.
     if let Ok(req) = PairRequest::decode(&first) {
-        return pair(&conn, tx, rx, req, &serving).await;
+        pair(&conn, tx, rx, req, &serving).await?;
+        return Ok(Served::Session);
     }
-    let hello = Hello::decode(&first).map_err(|e| anyhow::anyhow!("bad Hello: {e:?}"))?;
 
     // Nothing is offered until the device answers. The nonce is fresh per connection, so a
-    // captured response does not open a second one.
-    if serving.plane.require_pairing {
+    // captured response does not open a second one. Off (`serve --open`), the browser is as
+    // anonymous as a native client would be, and the trust record enforces nothing.
+    let device_fp_hex = if serving.plane.require_pairing {
         let mut nonce = [0u8; 32];
         rand::rng().fill_bytes(&mut nonce);
         write_msg(&mut tx, &AuthChallenge { nonce }.encode())
             .await
             .context("write AuthChallenge")?;
         let answer = read_msg(&mut rx).await.context("read AuthResponse")?;
-        let auth = AuthResponse::decode(&answer)
-            .map_err(|_| anyhow::anyhow!("this host requires pairing — no device signature"))?;
-        let name = admit(&auth, &nonce, &serving)?;
+        let auth = AuthResponse::decode(&answer).map_err(|_| {
+            refused(
+                punktfunk_core::reject::PAIR_NO_IDENTITY_CLOSE_CODE,
+                "this host requires pairing — no device signature",
+            )
+        })?;
+        let (name, fp_hex) = admit(&auth, &nonce, &serving)?;
         tracing::info!(device = %name, "browser authenticated");
-    }
-    tracing::info!(
-        width = hello.mode.width,
-        height = hello.mode.height,
-        fps = hello.mode.refresh_hz,
-        name = hello.name.as_deref().unwrap_or("<unnamed>"),
-        "browser Hello"
-    );
+        Some(fp_hex)
+    } else {
+        None
+    };
 
-    let welcome = offer(&conn, &hello);
-    write_msg(&mut tx, &welcome.encode())
-        .await
-        .context("write Welcome")?;
-
-    // `Start` carries a UDP port on the native plane; a browser has no second plane, so the
-    // message is only a "begin" marker here.
-    let start_bytes = read_msg(&mut rx).await.context("read Start")?;
-    Start::decode(&start_bytes).map_err(|e| anyhow::anyhow!("bad Start: {e:?}"))?;
-
-    let cfg = welcome.session_config(Role::Host);
-    let session = Session::new(cfg, Box::new(WebTransportPlane::new(conn.clone(), inbox)))
-        .map_err(|e| anyhow::anyhow!("host session: {e:?}"))?;
-    tracing::info!(
-        codec = welcome.codec,
-        shard_payload = welcome.shard_payload,
-        "browser session streaming"
-    );
-
-    // The encoder and the pump are synchronous; give them a thread rather than block the runtime.
-    let mode = welcome.mode;
-    let bitrate_kbps = welcome.bitrate_kbps;
-    let streamed = tokio::task::spawn_blocking(move || stream(session, mode, bitrate_kbps)).await;
-    match streamed {
-        Ok(r) => r,
-        Err(e) => Err(anyhow::anyhow!("stream thread: {e}")),
-    }
+    crate::native::run_admitted(
+        SessionLink::Web(conn.clone()),
+        CtlSend::Web(tx),
+        CtlRecv::Web(rx),
+        first,
+        device_fp_hex,
+        &serving.host,
+        DataPlane::Web(WebTransportPlane::new(conn)),
+        permit,
+    )
+    .await
 }
 
 /// Is this device one the host paired with, and does it still hold the key?
 ///
 /// Both halves matter and neither is enough. A signature by an unpaired key proves possession of
 /// something the host never trusted; a fingerprint in the store with no signature is a public
-/// value anyone can replay. Returns the stored device name, for the log.
-fn admit(auth: &AuthResponse, nonce: &[u8; 32], serving: &Serving) -> Result<String> {
+/// value anyone can replay. Returns the stored device name and the hex fingerprint the
+/// session's grants are keyed by.
+fn admit(auth: &AuthResponse, nonce: &[u8; 32], serving: &Serving) -> Result<(String, String)> {
     let fp = sha256(&auth.device_key);
     let hex: String = fp.iter().map(|b| format!("{b:02x}")).collect();
+    // `PAIR_DENIED`: the code a native client reads as "this host does not admit you"; a browser
+    // that was paired once takes it as the pairing being gone.
     let paired = serving
         .plane
         .pairing
         .list()
         .into_iter()
         .find(|c| c.fingerprint == hex)
-        .context("this device is not paired with the host")?;
+        .ok_or_else(|| {
+            refused(
+                punktfunk_core::reject::PAIR_DENIED_CLOSE_CODE,
+                "this device is not paired with the host",
+            )
+        })?;
     let msg = auth_signed_message(&serving.cert_hash, nonce);
     aws_lc_rs::signature::UnparsedPublicKey::new(
         &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
@@ -116,7 +129,7 @@ fn admit(auth: &AuthResponse, nonce: &[u8; 32], serving: &Serving) -> Result<Str
     )
     .verify(&msg, &auth.signature)
     .map_err(|_| anyhow::anyhow!("the device signature does not verify"))?;
-    Ok(paired.name)
+    Ok((paired.name, hex))
 }
 
 /// The 65-byte uncompressed point inside a P-256 SPKI.
@@ -161,7 +174,10 @@ async fn pair(
     {
         let mut last = serving.last_pairing.lock().unwrap();
         if last.is_some_and(|t| t.elapsed() < crate::native::PAIRING_COOLDOWN) {
-            anyhow::bail!("pairing rate-limited — retry shortly");
+            return Err(refused(
+                punktfunk_core::reject::PAIR_RATE_LIMITED_CLOSE_CODE,
+                "pairing rate-limited — retry shortly",
+            ));
         }
         *last = Some(std::time::Instant::now());
     }
@@ -174,10 +190,16 @@ async fn pair(
     ) {
         crate::native_pairing::PinAttempt::Pin(pin) => pin,
         crate::native_pairing::PinAttempt::Disarmed => {
-            anyhow::bail!("pairing is not armed — arm it in the console, then retry")
+            return Err(refused(
+                punktfunk_core::reject::PAIR_NOT_ARMED_CLOSE_CODE,
+                "pairing is not armed — arm it in the console, then retry",
+            ))
         }
         crate::native_pairing::PinAttempt::BoundToOther => {
-            anyhow::bail!("pairing is armed for a different device")
+            return Err(refused(
+                punktfunk_core::reject::PAIR_BOUND_OTHER_CLOSE_CODE,
+                "pairing is armed for a different device",
+            ))
         }
     };
     crate::native::pair_ceremony(
@@ -191,119 +213,6 @@ async fn pair(
         &pin,
     )
     .await
-}
-
-/// What this host will serve a browser. Deliberately narrow: no host capability bits, because
-/// the features they gate (cursor forwarding, clipboard, pen, audio redundancy) all ride the
-/// quinn connection this session does not have.
-fn offer(conn: &Connection, hello: &Hello) -> Welcome {
-    let mut key = [0u8; 16];
-    rand::rng().fill_bytes(&mut key);
-    let mut salt = [0u8; 4];
-    rand::rng().fill_bytes(&mut salt);
-
-    // A WebTransport datagram is smaller than the ~1408 B a 1500-MTU UDP path allows — the QUIC
-    // and HTTP/3 framing come out of the same budget. Ask the connection rather than assume, and
-    // fall back to the conservative 1200 every QUIC path guarantees.
-    let budget = conn.max_datagram_size().unwrap_or(1200);
-    let shard_payload =
-        punktfunk_core::config::shard_payload_for_udp_budget(budget, conn.remote_address().ip());
-
-    Welcome {
-        abi_version: punktfunk_core::WIRE_VERSION,
-        // No second plane to reach: everything rides the one WebTransport session.
-        udp_port: 0,
-        mode: hello.mode,
-        fec: FecConfig {
-            scheme: FecScheme::Gf16,
-            fec_percent: 20,
-            max_data_per_block: 4096,
-        },
-        shard_payload: shard_payload as u16,
-        encrypt: true,
-        key,
-        salt,
-        // Unbounded: the browser streams until it closes.
-        frames: 0,
-        compositor: CompositorPref::Auto,
-        gamepad: GamepadPref::Auto,
-        bitrate_kbps: if hello.bitrate_kbps == 0 {
-            20_000
-        } else {
-            hello.bitrate_kbps
-        },
-        bit_depth: 8,
-        color: ColorInfo::SDR_BT709,
-        chroma_format: punktfunk_core::quic::CHROMA_IDC_420,
-        audio_channels: 0,
-        codec: punktfunk_core::quic::CODEC_H264,
-        host_caps: 0,
-        host_caps2: 0,
-        cipher: punktfunk_core::quic::CIPHER_AES_128_GCM,
-        key_chacha: None,
-        audio_codec: 0,
-        audio_rate_hz: 0,
-        audio_bits: 0,
-        audio_frame_us: 0,
-        mgmt_port: 0,
-        grants: 0,
-        expires_in_secs: 0,
-    }
-}
-
-/// Generate, encode and submit until the session ends.
-///
-/// Linux only, because the software encoder is: Windows has no GPU-less encode path at all. A
-/// browser reaching a host that cannot software-encode gets a refusal it can read, not a hang.
-#[cfg(target_os = "linux")]
-fn stream(
-    mut session: Session,
-    mode: punktfunk_core::config::Mode,
-    bitrate_kbps: u32,
-) -> Result<()> {
-    use pf_capture::Capturer;
-    use punktfunk_core::packet::{FLAG_PIC, FLAG_SOF};
-
-    let (w, h, fps) = (mode.width, mode.height, mode.refresh_hz.max(1));
-    // The house synthetic source: a sweeping bar over an animated gradient, every pixel changing,
-    // already `Bgrx` + a CPU payload, which is exactly what openh264 wants with no conversion.
-    let mut capturer = pf_capture::SyntheticCapturer::new(w, h, fps);
-    let mut frame = capturer.next_frame().context("first synthetic frame")?;
-    // Named, not resolved from the ladder: `auto` never picks software, and the environment that
-    // would have said so is latched long before a browser connects.
-    let mut encoder =
-        pf_encode::open_software_h264(frame.format, w, h, fps, u64::from(bitrate_kbps) * 1000)
-            .context("open the software encoder")?;
-
-    let interval = std::time::Duration::from_nanos(1_000_000_000 / u64::from(fps));
-    loop {
-        encoder.submit(&frame).context("encode submit")?;
-        while let Some(au) = encoder.poll().context("encode poll")? {
-            // The reassembler needs the picture and start-of-frame markers to find AU
-            // boundaries; a keyframe is also where a joining decoder can start.
-            let mut flags = u32::from(FLAG_PIC);
-            if au.keyframe {
-                flags |= u32::from(FLAG_SOF);
-            }
-            if session.submit_frame(&au.data, au.pts_ns, flags).is_err() {
-                // The peer is gone, or the transport refused — either way this session is over.
-                return Ok(());
-            }
-        }
-        std::thread::sleep(interval);
-        frame = capturer.next_frame().context("synthetic frame")?;
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn stream(
-    _session: Session,
-    _mode: punktfunk_core::config::Mode,
-    _bitrate_kbps: u32,
-) -> Result<()> {
-    anyhow::bail!(
-        "the browser plane's synthetic source needs the software encoder, which is Linux-only"
-    )
 }
 
 #[cfg(test)]
@@ -329,11 +238,12 @@ mod tests {
                 sans: Vec::new(),
                 origins: Vec::new(),
                 identity: crate::identity::ephemeral().unwrap(),
-                pairing,
+                pairing: pairing.clone(),
                 require_pairing: true,
             },
             cert_hash: [0x11; 32],
             last_pairing: std::sync::Mutex::new(None),
+            host: crate::native::SessionHost::for_tests(pairing),
         }
     }
 
@@ -385,7 +295,12 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         np.add("Enrico's browser", &fp).unwrap();
-        assert_eq!(admit(&auth, &nonce, &s).unwrap(), "Enrico's browser");
+        let (name, admitted_fp) = admit(&auth, &nonce, &s).unwrap();
+        assert_eq!(name, "Enrico's browser");
+        assert_eq!(
+            admitted_fp, fp,
+            "the session is keyed by the device fingerprint"
+        );
 
         // Paired, but the signature must still be over this nonce on this channel.
         assert!(admit(&auth, &[0x78; 32], &s).is_err(), "replayed nonce");

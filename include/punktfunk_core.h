@@ -995,6 +995,14 @@
 
 #define PUNKTFUNK_MSG_AUTH_RESPONSE 21
 
+// `host → client`, browser plane: why the host is about to close. The native plane says this
+// with the QUIC close code and reason; a browser cannot read those in every engine (WebKit
+// hands back a bare error), so the same code and text go on the control stream first.
+#define PUNKTFUNK_MSG_REFUSED 22
+
+// Longest `reason` on the wire. Enough for one host sentence.
+#define PUNKTFUNK_REFUSED_REASON_MAX 256
+
 // Implied by [`PEN_TOUCHING`]; [`PenTracker`] ORs it so a client that only sets TOUCHING still looks in-range.
 #define PUNKTFUNK_PEN_IN_RANGE 1
 

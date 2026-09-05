@@ -23,6 +23,10 @@ pub const MSG_PAIR_PROOF: u8 = 0x12;
 pub const MSG_PAIR_RESULT: u8 = 0x13;
 pub const MSG_AUTH_CHALLENGE: u8 = 0x14;
 pub const MSG_AUTH_RESPONSE: u8 = 0x15;
+/// `host → client`, browser plane: why the host is about to close. The native plane says this
+/// with the QUIC close code and reason; a browser cannot read those in every engine (WebKit
+/// hands back a bare error), so the same code and text go on the control stream first.
+pub const MSG_REFUSED: u8 = 0x16;
 
 /// Domain separation for [`AuthResponse::signature`]. A device key may sign other things; a
 /// signature over a session nonce must not be replayable as one over any of them.
@@ -99,6 +103,18 @@ pub struct PairProof {
 pub struct PairResult {
     pub ok: bool,
 }
+
+/// `host → client`: the close that follows, in words. `code` is one of
+/// [`crate::reject`]'s close codes; `reason` is the sentence the native plane would have put in
+/// the close frame, capped so a hostile host cannot make a client render pages of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub code: u32,
+    pub reason: String,
+}
+
+/// Longest `reason` on the wire. Enough for one host sentence.
+pub const REFUSED_REASON_MAX: usize = 256;
 
 fn put_bytes(b: &mut Vec<u8>, x: &[u8]) {
     b.extend_from_slice(&(x.len() as u16).to_le_bytes());
@@ -271,9 +287,58 @@ impl PairResult {
     }
 }
 
+impl Refused {
+    pub fn encode(&self) -> Vec<u8> {
+        let reason = super::handshake::truncate_to(&self.reason, REFUSED_REASON_MAX).as_bytes();
+        let mut b = Vec::with_capacity(11 + reason.len());
+        b.extend_from_slice(CTL_MAGIC);
+        b.push(MSG_REFUSED);
+        b.extend_from_slice(&self.code.to_le_bytes());
+        put_bytes(&mut b, reason);
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Refused> {
+        if b.len() < 9 || &b[0..4] != CTL_MAGIC || b[4] != MSG_REFUSED {
+            return Err(PunktfunkError::InvalidArg("bad Refused"));
+        }
+        let code = u32::from_le_bytes([b[5], b[6], b[7], b[8]]);
+        let (reason, end) = get_bytes(b, 9)?;
+        if end != b.len() {
+            return Err(PunktfunkError::InvalidArg("trailing bytes"));
+        }
+        let reason = core::str::from_utf8(reason)
+            .map_err(|_| PunktfunkError::InvalidArg("Refused reason is not UTF-8"))?;
+        Ok(Refused {
+            code,
+            reason: reason.to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::quic::*;
+
+    #[test]
+    fn refused_roundtrips_and_caps_the_reason() {
+        let r = Refused {
+            code: crate::reject::SETUP_FAILED_CLOSE_CODE,
+            reason: "no usable compositor".into(),
+        };
+        assert_eq!(Refused::decode(&r.encode()).unwrap(), r);
+        let long = Refused {
+            code: 1,
+            reason: "é".repeat(400),
+        };
+        let back = Refused::decode(&long.encode()).unwrap();
+        assert!(back.reason.len() <= REFUSED_REASON_MAX, "capped");
+        assert!(
+            back.reason.chars().all(|c| c == 'é'),
+            "cut on a char boundary"
+        );
+        assert!(Refused::decode(&PairResult { ok: true }.encode()).is_err());
+    }
 
     #[test]
     fn pair_messages_roundtrip() {

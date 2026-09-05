@@ -21,14 +21,14 @@
 mod datagrams;
 mod session;
 
-pub(crate) use datagrams::{Inbox, WebTransportPlane};
+pub(crate) use datagrams::WebTransportPlane;
 // The management API's device lane verifies the same key shape against the same digest, and
 // must not grow a second opinion about either.
 pub(crate) use session::{sha256, spki_p256_point};
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use wtransport::{Endpoint, Identity, ServerConfig};
 
@@ -128,6 +128,9 @@ struct Serving {
     /// Last pairing attempt on this plane, for the same rate limit the native one applies.
     /// SPAKE2 caps a ceremony at one online guess; this caps the ceremonies.
     last_pairing: std::sync::Mutex<Option<std::time::Instant>>,
+    /// The native plane's capturer, injector, mic and pairing store: an admitted browser runs
+    /// the same session on the same state, which is why this plane is spawned from there.
+    host: crate::native::SessionHost,
 }
 
 static PUBLISHED: RwLock<Option<Published>> = RwLock::new(None);
@@ -199,7 +202,14 @@ fn mint(
 /// A rotation rebuilds the endpoint, which drops whatever is connected. Once every twelve days,
 /// and a browser reconnects on its own — cheaper than teaching quinn to swap a certificate under
 /// live sessions, and the reconnect path has to work anyway.
-pub async fn serve(plane: Plane) -> Result<()> {
+///
+/// `sem` is the native plane's session pool. A browser takes a slot from it like any client, so
+/// `max_concurrent` means what it says whichever carrier the sessions arrive on.
+pub(crate) async fn serve(
+    plane: Plane,
+    host: crate::native::SessionHost,
+    sem: Arc<tokio::sync::Semaphore>,
+) -> Result<()> {
     let port = plane.bind.port();
     loop {
         let (identity, publish) = mint(port, &plane.sans, &plane.identity)?;
@@ -227,14 +237,15 @@ pub async fn serve(plane: Plane) -> Result<()> {
         }
         let bind = plane.bind;
         tracing::info!(%bind, "WebTransport plane listening");
-        let serving = std::sync::Arc::new(Serving {
+        let serving = Arc::new(Serving {
             plane: plane.clone(),
             cert_hash,
             last_pairing: std::sync::Mutex::new(None),
+            host: host.clone(),
         });
         // Accept until the certificate is due for replacement, then fall out and re-mint.
         tokio::select! {
-            _ = accept_loop(endpoint, serving) => {}
+            _ = accept_loop(endpoint, serving, sem.clone()) => {}
             () = tokio::time::sleep(ROTATE_AFTER) => {
                 tracing::info!("WebTransport certificate due for rotation");
             }
@@ -244,13 +255,15 @@ pub async fn serve(plane: Plane) -> Result<()> {
 
 async fn accept_loop(
     endpoint: Endpoint<wtransport::endpoint::endpoint_side::Server>,
-    serving: std::sync::Arc<Serving>,
+    serving: Arc<Serving>,
+    sem: Arc<tokio::sync::Semaphore>,
 ) {
     loop {
         let incoming = endpoint.accept().await;
         let serving = serving.clone();
+        let sem = sem.clone();
         tokio::spawn(async move {
-            if let Err(e) = session(incoming, &serving).await {
+            if let Err(e) = session(incoming, &serving, sem).await {
                 tracing::debug!(error = %e, "WebTransport session ended");
             }
         });
@@ -280,12 +293,12 @@ fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
     allowed.is_empty() || origin.is_some_and(|o| allowed.iter().any(|a| a == o))
 }
 
-/// One browser session: check the origin, then hand the connection to [`session::run`] while
-/// this task feeds inbound datagrams to the pump. `/echo` keeps Phase 1's loopback for the
-/// measurement pages.
+/// One browser session: check the origin, take a session slot, then hand the connection to
+/// [`session::run`]. `/echo` keeps Phase 1's loopback for the measurement pages.
 async fn session(
     incoming: wtransport::endpoint::IncomingSession,
-    serving: &std::sync::Arc<Serving>,
+    serving: &Arc<Serving>,
+    sem: Arc<tokio::sync::Semaphore>,
 ) -> Result<()> {
     let request = incoming.await.context("await session request")?;
     // The peer picks `:path` and nothing upstream value-checks it, so control characters would
@@ -324,34 +337,59 @@ async fn session(
         return echo(connection).await;
     }
 
-    // The session's inbound queue: filled here, because only this task can await the connection,
-    // and drained by the pump's `Transport` on its own thread.
-    let inbox = std::sync::Arc::new(Inbox::default());
-    let mut pump = tokio::spawn(session::run(
-        connection.clone(),
-        inbox.clone(),
-        serving.clone(),
-    ));
-    loop {
-        tokio::select! {
-            datagram = connection.receive_datagram() => {
-                match datagram {
-                    Ok(d) => inbox.push(d.to_vec()),
-                    // The peer is gone; let the pump notice and finish.
-                    Err(_) => break,
-                }
+    // Slot after the handshake, as the native plane does: a full host still accepts, so the
+    // browser sees a live path (keep-alive) instead of a silent dial timeout.
+    let permit = sem
+        .acquire_owned()
+        .await
+        .expect("session semaphore is never closed");
+    let peer = connection.remote_address();
+    match session::run(connection.clone(), serving.clone(), permit).await {
+        Ok(crate::native::Served::Session) => tracing::info!(%peer, "browser session complete"),
+        Ok(crate::native::Served::ProbeClose) => {}
+        Err(e) => {
+            // The typed close the native plane would send, and the same code and sentence on a
+            // stream first: WebKit hands a page nothing about an application close, so the
+            // stream is the only way a Safari user reads why.
+            let code = e
+                .downcast_ref::<session::Refusal>()
+                .map_or(punktfunk_core::reject::SETUP_FAILED_CLOSE_CODE, |r| r.code);
+            let detail = format!("{e:#}");
+            let mut cut = detail.len().min(256);
+            while !detail.is_char_boundary(cut) {
+                cut -= 1;
             }
-            finished = &mut pump => {
-                match finished {
-                    Ok(Ok(())) => tracing::info!("browser session ended"),
-                    Ok(Err(e)) => tracing::warn!(error = %e, "browser session failed"),
-                    Err(e) => tracing::warn!(error = %e, "browser session task panicked"),
-                }
-                return Ok(());
-            }
+            refuse(&connection, code, &detail[..cut]).await;
+            connection.close(
+                wtransport::VarInt::from_u32(code),
+                &detail.as_bytes()[..cut],
+            );
+            tracing::warn!(%peer, code, error = %detail, "browser session ended with error");
         }
     }
     Ok(())
+}
+
+/// Say why on a fresh unidirectional stream, then give the browser a moment to read it. The
+/// close that follows carries no retransmit, so the wait is what makes the message arrive.
+async fn refuse(connection: &wtransport::Connection, code: u32, reason: &str) {
+    let msg = punktfunk_core::quic::Refused {
+        code,
+        reason: reason.to_string(),
+    }
+    .encode();
+    let sent = async {
+        let mut uni = connection.open_uni().await?.await?;
+        punktfunk_core::quic::io::write_msg(&mut uni, &msg).await?;
+        uni.finish().await?;
+        anyhow::Ok(())
+    };
+    if tokio::time::timeout(Duration::from_secs(1), sent)
+        .await
+        .is_ok()
+    {
+        let _ = tokio::time::timeout(Duration::from_millis(300), connection.closed()).await;
+    }
 }
 
 /// Phase 1's echo, still reachable at `/echo`: the page connects, sends datagrams and control

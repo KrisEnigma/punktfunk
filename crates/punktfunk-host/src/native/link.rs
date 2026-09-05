@@ -15,6 +15,67 @@
 //! both. Only the two genuinely carrier-shaped questions branch.
 
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+/// The control stream's write half, whichever carrier. Delegates every poll, because both
+/// halves already implement tokio's traits — this exists so the session code can name one type.
+pub(crate) enum CtlSend {
+    Quic(quinn::SendStream),
+    Web(wtransport::SendStream),
+}
+
+/// The control stream's read half. See [`CtlSend`].
+pub(crate) enum CtlRecv {
+    Quic(quinn::RecvStream),
+    Web(wtransport::RecvStream),
+}
+
+impl AsyncWrite for CtlSend {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            CtlSend::Quic(s) => AsyncWrite::poll_write(Pin::new(s), cx, buf),
+            CtlSend::Web(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            CtlSend::Quic(s) => AsyncWrite::poll_flush(Pin::new(s), cx),
+            CtlSend::Web(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            CtlSend::Quic(s) => AsyncWrite::poll_shutdown(Pin::new(s), cx),
+            CtlSend::Web(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+impl AsyncRead for CtlRecv {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            CtlRecv::Quic(s) => AsyncRead::poll_read(Pin::new(s), cx, buf),
+            CtlRecv::Web(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+/// What accepting the control stream produced.
+pub(crate) enum Accepted {
+    Stream(CtlSend, CtlRecv),
+    /// A clean application close before any stream: a reachability probe, not a client.
+    ProbeClose,
+}
 
 /// One client's control connection. Cheap to clone — both variants are handles.
 #[derive(Clone)]
@@ -109,14 +170,33 @@ impl SessionLink {
         LinkClosed::from(self.quic().closed().await)
     }
 
-    /// The quinn connection, for the parts that are still quinn-shaped: the handshake and
-    /// control streams, and the peer certificate a browser does not have.
+    /// The peer's first bidirectional stream — the control stream on both carriers.
     ///
-    /// `None` for a browser. **This is the seam that is still to be cut** — the control plane's
-    /// framing (`punktfunk_core::quic::io`) reads a `quinn::RecvStream` concretely, so
-    /// generalising it over `AsyncRead` is what would let a browser share the long-lived control
-    /// loop instead of running its own handshake. Datagrams needed none of that, which is why
-    /// they went first.
+    /// A clean close before any stream is a reachability probe, and is reported rather than
+    /// failed. Anything else that is not a stream is the error it was.
+    pub(crate) async fn accept_bi(&self) -> anyhow::Result<Accepted> {
+        match self {
+            SessionLink::Quic(c) => match c.accept_bi().await {
+                Ok((send, recv)) => Ok(Accepted::Stream(CtlSend::Quic(send), CtlRecv::Quic(recv))),
+                Err(quinn::ConnectionError::ApplicationClosed(ref ac))
+                    if ac.error_code == quinn::VarInt::from_u32(0) =>
+                {
+                    Ok(Accepted::ProbeClose)
+                }
+                Err(e) => Err(anyhow::Error::new(e).context("accept control stream")),
+            },
+            SessionLink::Web(c) => {
+                let (send, recv) = c
+                    .accept_bi()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("accept control stream: {e:?}"))?;
+                Ok(Accepted::Stream(CtlSend::Web(send), CtlRecv::Web(recv)))
+            }
+        }
+    }
+
+    /// The quinn connection, for the two things that are still quinn-shaped: clipboard, whose
+    /// transfers are quinn streams, and the peer certificate a browser does not have.
     pub(crate) fn as_quic(&self) -> Option<&quinn::Connection> {
         match self {
             SessionLink::Quic(c) => Some(c),

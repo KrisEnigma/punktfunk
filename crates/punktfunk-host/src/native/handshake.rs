@@ -260,12 +260,14 @@ pub(super) fn cursor_forward(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) async fn negotiate(
     conn: &super::link::SessionLink,
-    send: &mut quinn::SendStream,
-    recv: &mut quinn::RecvStream,
+    send: &mut super::link::CtlSend,
+    recv: &mut super::link::CtlRecv,
     first: &[u8],
     source: Punktfunk1Source,
     frames: u32,
-    data_port: Option<u16>,
+    // `Some(port request)` binds a UDP data socket; `None` is a browser, whose video rides the
+    // connection it is already on and which is told `udp_port: 0`.
+    data_port: Option<Option<u16>>,
     // `welcome` / `start` stamps; Welcome-time display prep threads this into pipeline-build.
     bringup: &Arc<crate::bringup::Trace>,
     // Created before the handshake so Welcome-time display prep sees a vanished client
@@ -279,7 +281,7 @@ pub(super) async fn negotiate(
     Hello,
     Welcome,
     u16,
-    std::net::UdpSocket,
+    Option<std::net::UdpSocket>,
     bool,
     Start,
     Option<crate::vdisplay::Compositor>,
@@ -412,12 +414,29 @@ pub(super) async fn negotiate(
     // Hold the socket through streaming — no bind→read→drop→rebind race on a fixed port.
     // Bound to this connection's local IP, not wildcard: the client accepts video only from
     // the host IP it dialed. Fixed `--data-port` → `direct` (no punch-wait).
-    let (data_sock, direct) = bind_data_socket(data_port, conn.local_ip())?;
-    let udp_port = data_sock.local_addr()?.port();
+    let (data_sock, direct, udp_port) = match data_port {
+        Some(port) => {
+            let (sock, direct) = bind_data_socket(port, conn.local_ip())?;
+            let udp_port = sock.local_addr()?.port();
+            (Some(sock), direct, udp_port)
+        }
+        // A browser: nothing to bind, nothing to punch, no second port to name.
+        None => (None, true, 0),
+    };
 
     // Before Welcome: a path a previous session proved jumbo is given a bounded moment to
     // re-prove itself on this connection (`negotiated_shard_payload` awaits that).
-    let shard_payload = wire_mtu::negotiated_shard_payload(conn, hello.max_shard_payload).await;
+    let mut shard_payload = wire_mtu::negotiated_shard_payload(conn, hello.max_shard_payload).await;
+    // A browser's video rides this connection's datagrams, which are smaller than a UDP payload
+    // (QUIC and HTTP/3 framing come out of the same budget). Ask, falling back to the 1200 every
+    // QUIC path guarantees; a shard that does not fit is dropped at send, and FEC cannot cover all.
+    if data_port.is_none() {
+        let budget = conn.max_datagram_size().unwrap_or(1200);
+        shard_payload = shard_payload.min(punktfunk_core::config::shard_payload_for_udp_budget(
+            budget,
+            conn.remote_address().ip(),
+        ));
+    }
 
     let mut key = [0u8; 16];
     rand::rng().fill_bytes(&mut key);
@@ -466,7 +485,8 @@ pub(super) async fn negotiate(
         salt,
         frames: match source {
             Punktfunk1Source::Synthetic => frames,
-            Punktfunk1Source::Virtual => 0, // unbounded; client streams until we close
+            // Unbounded; the client streams until we close.
+            Punktfunk1Source::Virtual | Punktfunk1Source::Software => 0,
         },
         // Auto for the synthetic source (no compositor).
         compositor: compositor
@@ -697,7 +717,7 @@ async fn negotiate_compositor(
                     .context("resolve compositor task")??,
             )
         }
-        Punktfunk1Source::Synthetic => None,
+        Punktfunk1Source::Synthetic | Punktfunk1Source::Software => None,
     };
     // Split the pair: compositor for Welcome/cursor; gamescope route as a value, not process env.
     let gamescope_route = compositor.as_ref().and_then(|(_, r)| r.clone());
