@@ -166,6 +166,7 @@ impl PinHostsScreen {
                     caret: false,
                     adjustable: true,
                     enabled: true,
+                    ..RowSpec::default()
                 }
             })
             .collect();

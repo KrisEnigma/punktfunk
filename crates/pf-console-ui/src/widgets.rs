@@ -26,7 +26,21 @@ pub enum ListMsg {
     Activate,
 }
 
-/// One row, rebuilt by the screen each frame.
+/// What sits at a row's trailing end. [`Value`](Self::Value) is the console's own row —
+/// text, `‹ ›` when adjustable. The rest are the pointer shells' controls (a switch, a
+/// track), drawn so a hover-to-focus pointer and a pad read the same row.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Control {
+    #[default]
+    Value,
+    /// A switch, on or off. The value string is not drawn.
+    Toggle(bool),
+    /// A track filled to `frac` ∈ [0, 1], the value string beside it.
+    Slider(f32),
+}
+
+/// One row, rebuilt by the screen each frame. `..RowSpec::default()` fills what a row
+/// does not name.
 #[derive(Clone)]
 pub struct RowSpec {
     /// Header above this row; only the first row of a group carries it.
@@ -42,13 +56,40 @@ pub struct RowSpec {
     pub adjustable: bool,
     /// Dimmed when not actionable (a setting that depends on another being on).
     pub enabled: bool,
+    pub control: Control,
+    /// Lucide mark before the label (`icons::by_name`).
+    pub icon: Option<&'static str>,
+    /// One line under the label, small: why a row is locked, what a value costs.
+    pub note: Option<String>,
+    /// A loss: label and value in the error tone.
+    pub danger: bool,
+    /// Accent dot before the label — a value this scope overrides.
+    pub dot: bool,
+}
+
+impl Default for RowSpec {
+    fn default() -> Self {
+        RowSpec {
+            header: None,
+            label: String::new(),
+            value: None,
+            value_dim: false,
+            caret: false,
+            adjustable: false,
+            enabled: true,
+            control: Control::Value,
+            icon: None,
+            note: None,
+            danger: false,
+            dot: false,
+        }
+    }
 }
 
 impl RowSpec {
     pub fn field(label: impl Into<String>, value: String, placeholder: &str) -> RowSpec {
         let empty = value.is_empty();
         RowSpec {
-            header: None,
             label: label.into(),
             value: Some(if empty {
                 placeholder.to_string()
@@ -56,22 +97,70 @@ impl RowSpec {
                 value
             }),
             value_dim: empty,
-            caret: false,
-            adjustable: false,
-            enabled: true,
+            ..RowSpec::default()
         }
     }
 
     pub fn action(label: impl Into<String>, enabled: bool) -> RowSpec {
         RowSpec {
-            header: None,
             label: label.into(),
-            value: None,
-            value_dim: false,
-            caret: false,
-            adjustable: false,
             enabled,
+            ..RowSpec::default()
         }
+    }
+
+    /// A switch row. Activate flips it; the value string is the switch.
+    pub fn toggle(label: impl Into<String>, on: bool) -> RowSpec {
+        RowSpec {
+            label: label.into(),
+            value: Some(if on { "On" } else { "Off" }.into()),
+            control: Control::Toggle(on),
+            ..RowSpec::default()
+        }
+    }
+
+    /// A stepped pick: the value with `‹ ›`, Activate cycles it forward.
+    pub fn choice(label: impl Into<String>, value: impl Into<String>) -> RowSpec {
+        RowSpec {
+            label: label.into(),
+            value: Some(value.into()),
+            adjustable: true,
+            ..RowSpec::default()
+        }
+    }
+
+    /// A track at `frac`, with `value` as its readout; left/right step it.
+    pub fn slider(label: impl Into<String>, value: impl Into<String>, frac: f32) -> RowSpec {
+        RowSpec {
+            label: label.into(),
+            value: Some(value.into()),
+            adjustable: true,
+            control: Control::Slider(frac.clamp(0.0, 1.0)),
+            ..RowSpec::default()
+        }
+    }
+
+    pub fn with_icon(mut self, icon: &'static str) -> RowSpec {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> RowSpec {
+        self.note = Some(note.into());
+        self
+    }
+
+    pub fn with_header(mut self, header: &'static str) -> RowSpec {
+        self.header = Some(header);
+        self
+    }
+
+    /// Greyed, with the reason under the label. Still focusable, so the reason can be read.
+    pub fn locked(mut self, why: impl Into<String>) -> RowSpec {
+        self.enabled = false;
+        self.adjustable = false;
+        self.note = Some(why.into());
+        self
     }
 }
 
@@ -126,6 +215,8 @@ pub struct MenuList {
     step_dir: i32,
     /// Last-drawn value per row: the "before" of the crossfade, and whether an adjust landed.
     shown: Vec<String>,
+    /// Switch knob position per row, eased toward 0/1 so a flip slides rather than snaps.
+    knobs: Vec<f64>,
     /// Mount entrance. Not replayed on a tab switch: `jump_to` seats instantly,
     /// and chasing rows that no longer exist reads as a glitch.
     entrance: Option<Entrance>,
@@ -160,6 +251,7 @@ impl MenuList {
             slip_prev: None,
             step_dir: 0,
             shown: Vec::new(),
+            knobs: Vec::new(),
             entrance: None,
             entrance_armed: false,
             age: 0.0,
@@ -296,6 +388,26 @@ impl MenuList {
         }
         self.focus.resize(rows.len(), 0.0);
         self.focus_pop.resize(rows.len(), Spring::rest(0.0));
+        if self.snap || self.knobs.len() != rows.len() {
+            self.knobs.clear();
+            self.knobs.extend(rows.iter().map(|r| match r.control {
+                Control::Toggle(on) => f64::from(u8::from(on)),
+                _ => 0.0,
+            }));
+        }
+        for (knob, row) in self.knobs.iter_mut().zip(rows) {
+            if let Control::Toggle(on) = row.control {
+                let target = f64::from(u8::from(on));
+                *knob = if reduce {
+                    target
+                } else {
+                    approach(*knob, target, dt, 0.05)
+                };
+                if (*knob - target).abs() < 0.005 {
+                    *knob = target;
+                }
+            }
+        }
         for (i, f) in self.focus.iter_mut().enumerate() {
             let target = if active && i == self.cursor { 1.0 } else { 0.0 };
             *f = if self.snap {
@@ -411,7 +523,12 @@ impl MenuList {
             && self.press.pos == 1.0
             && self.press.vel == 0.0
             && self.slip.pos == 0.0
-            && self.scroll == target;
+            && self.scroll == target
+            && self
+                .knobs
+                .iter()
+                .zip(rows)
+                .all(|(knob, r)| !matches!(r.control, Control::Toggle(on) if *knob != f64::from(u8::from(on))));
 
         let row_w = (ROW_MAX_W * k).min(f64::from(rect.width()) - 48.0 * k);
         let x0 = f64::from(rect.left) + (f64::from(rect.width()) - row_w) / 2.0;
@@ -488,9 +605,56 @@ impl MenuList {
                 crate::theme::panel_highlight(canvas, r, 14.0, k as f32);
             }
 
-            let baseline = cy + 16.0 * k * 0.36;
+            // A note under the label lifts the label; the two share the row's height.
+            let baseline = if row.note.is_some() {
+                cy - 2.0 * k
+            } else {
+                cy + 16.0 * k * 0.36
+            };
+            let tone = |on: skia_safe::Color4f, off: skia_safe::Color4f| {
+                if row.danger {
+                    crate::theme::ERROR
+                } else if row.enabled {
+                    on
+                } else {
+                    off
+                }
+            };
+            // Leading marks shift the label: a Lucide icon, then the override dot.
+            let mut label_x = x0 + 16.0 * k;
+            if let Some(icon) = row.icon.and_then(crate::icons::by_name) {
+                crate::icons::draw_icon(
+                    canvas,
+                    icon,
+                    (label_x + 10.0 * k) as f32,
+                    cy as f32,
+                    (20.0 * k) as f32,
+                    tone(fg(0.85), fg(0.4)),
+                );
+                label_x += 32.0 * k;
+            }
+            if row.dot {
+                canvas.draw_circle(
+                    ((label_x + 4.0 * k) as f32, cy as f32),
+                    (4.0 * k) as f32,
+                    &fill(accent(1.0)),
+                );
+                label_x += 16.0 * k;
+            }
+            if let Some(note) = &row.note {
+                fonts.draw_clipped(
+                    canvas,
+                    note,
+                    label_x,
+                    cy + 14.0 * k,
+                    W::Regular,
+                    11.5 * k,
+                    fg(0.5),
+                    row_w * 0.6,
+                );
+            }
             if row.value.is_none() {
-                let color = if row.enabled { accent(1.0) } else { fg(0.35) };
+                let color = tone(accent(1.0), fg(0.35));
                 let tw = fonts.measure(&row.label, W::SemiBold, 16.0 * k) as f64;
                 fonts.draw(
                     canvas,
@@ -501,18 +665,56 @@ impl MenuList {
                     16.0 * k,
                     color,
                 );
+            } else if let Control::Toggle(_) = row.control {
+                fonts.draw(
+                    canvas,
+                    &row.label,
+                    label_x,
+                    baseline,
+                    W::SemiBold,
+                    16.0 * k,
+                    tone(fg(1.0), fg(0.55)),
+                );
+                // The switch: a 36×20 track, the knob eased across it, accent when on.
+                let knob = self.knobs.get(i).copied().unwrap_or(0.0);
+                let (tw, th) = (36.0 * k, 20.0 * k);
+                let track = Rect::from_xywh(
+                    (x0 + row_w - 16.0 * k - tw) as f32,
+                    (cy - th / 2.0) as f32,
+                    tw as f32,
+                    th as f32,
+                );
+                let on_alpha = if row.enabled { 1.0 } else { 0.35 };
+                let track_color = skia_safe::Color4f::new(
+                    accent(1.0).r * knob as f32 + fg(0.25).r * (1.0 - knob as f32),
+                    accent(1.0).g * knob as f32 + fg(0.25).g * (1.0 - knob as f32),
+                    accent(1.0).b * knob as f32 + fg(0.25).b * (1.0 - knob as f32),
+                    (0.25 + 0.75 * knob as f32) * on_alpha,
+                );
+                canvas.draw_rrect(
+                    RRect::new_rect_xy(track, th as f32 / 2.0, th as f32 / 2.0),
+                    &fill(track_color),
+                );
+                let kx = track.left as f64 + th / 2.0 + knob * (tw - th);
+                canvas.draw_circle(
+                    (kx as f32, cy as f32),
+                    (th / 2.0 - 3.0 * k) as f32,
+                    &fill(skia_safe::Color4f::new(1.0, 1.0, 1.0, on_alpha)),
+                );
             } else {
                 fonts.draw(
                     canvas,
                     &row.label,
-                    x0 + 16.0 * k,
+                    label_x,
                     baseline,
                     W::SemiBold,
                     16.0 * k,
-                    if row.enabled { fg(1.0) } else { fg(0.55) },
+                    tone(fg(1.0), fg(0.55)),
                 );
                 let value = row.value.as_deref().unwrap_or_default();
-                let vcolor = if row.value_dim {
+                let vcolor = if row.danger {
+                    crate::theme::ERROR
+                } else if row.value_dim || !row.enabled {
                     fg(0.35)
                 } else if f > 0.5 {
                     fg(1.0)
@@ -521,12 +723,46 @@ impl MenuList {
                 };
                 let chevron_w = if row.adjustable { 18.0 * k } else { 0.0 };
                 let caret_w = if row.caret { 8.0 * k } else { 0.0 };
+                // A slider's track sits inside the value field, the readout to its left.
+                let track_w = if let Control::Slider(_) = row.control {
+                    120.0 * k
+                } else {
+                    0.0
+                };
+                if let Control::Slider(frac) = row.control {
+                    let (th, right) = (6.0 * k, x0 + row_w - 16.0 * k - chevron_w);
+                    let track = Rect::from_xywh(
+                        (right - track_w) as f32,
+                        (cy - th / 2.0) as f32,
+                        track_w as f32,
+                        th as f32,
+                    );
+                    canvas.draw_rrect(
+                        RRect::new_rect_xy(track, th as f32 / 2.0, th as f32 / 2.0),
+                        &fill(fg(0.18)),
+                    );
+                    let filled = Rect::from_xywh(
+                        track.left,
+                        track.top,
+                        track.width() * frac,
+                        track.height(),
+                    );
+                    canvas.draw_rrect(
+                        RRect::new_rect_xy(filled, th as f32 / 2.0, th as f32 / 2.0),
+                        &fill(if row.enabled { accent(1.0) } else { fg(0.35) }),
+                    );
+                }
                 // Each string right-aligns on its own measured width against a
                 // fixed right edge. Sharing the incoming string's anchor left-
                 // aligns the outgoing one by the width delta and hangs it past
                 // the field.
-                let vmax = row_w * 0.55;
-                let val_right = x0 + row_w - 16.0 * k - chevron_w - caret_w;
+                let vmax = row_w * 0.55 - track_w;
+                let val_right = x0 + row_w
+                    - 16.0 * k
+                    - chevron_w
+                    - caret_w
+                    - track_w
+                    - if track_w > 0.0 { 12.0 * k } else { 0.0 };
                 let place = |s: &str| val_right - f64::from(fonts.measure(s, W::Medium, 15.0 * k));
                 // Gate on index AND label: an index is not identity across a rebuild.
                 let slipping = self
@@ -1333,13 +1569,10 @@ mod tests {
 
     fn value_row(value: &str) -> Vec<RowSpec> {
         vec![RowSpec {
-            header: None,
             label: "Bitrate".into(),
             value: Some(value.into()),
-            value_dim: false,
-            caret: false,
             adjustable: true,
-            enabled: true,
+            ..RowSpec::default()
         }]
     }
 
@@ -1352,13 +1585,10 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, v)| RowSpec {
-                header: None,
                 label: format!("Option {i}"),
                 value: Some((*v).to_string()),
-                value_dim: false,
-                caret: false,
                 adjustable: true,
-                enabled: true,
+                ..RowSpec::default()
             })
             .collect()
     }
@@ -1500,6 +1730,110 @@ mod tests {
             );
         }
         assert!(armed, "the step must have animated, or this proves nothing");
+    }
+
+    /// The pointer shells' controls: a switch's knob crosses its track when the row flips
+    /// and lands accent-lit; a slider's fill follows its fraction; an icon and a note draw
+    /// beside the label without leaving the row.
+    #[test]
+    fn toggle_and_slider_rows_draw_their_controls() {
+        crate::theme::set_ink(crate::theme::Ink::of(crate::library::palette("violet")));
+        let fonts = crate::theme::build_fonts().unwrap();
+        let (w, h) = (900, 600);
+        let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+        let rect = Rect::from_xywh(0.0, 0.0, w as f32, h as f32);
+        let clear = skia_safe::Color4f::new(0.0, 0.0, 0.0, 1.0);
+        let dt = 1.0 / 60.0;
+        let rows = |on: bool, frac: f32| {
+            vec![
+                RowSpec::toggle("HDR", on)
+                    .with_icon("sun")
+                    .with_note("10-bit, BT.2020 PQ"),
+                RowSpec::slider("Bitrate", "40 Mb/s", frac),
+                RowSpec::choice("Codec", "HEVC"),
+            ]
+        };
+        let mut list = MenuList::new();
+        for _ in 0..120 {
+            surface.canvas().clear(clear);
+            list.render(
+                surface.canvas(),
+                rect,
+                &rows(false, 0.25),
+                &fonts,
+                1.0,
+                dt,
+                true,
+            );
+        }
+        let off = read_back(&mut surface, w, h);
+        let r0 = list.row_rect(0).unwrap();
+        let r1 = list.row_rect(1).unwrap();
+        // The knob rests at the track's left while off: that end is lit, the right end is not.
+        let knob_off = (
+            f64::from(r0.right) - 16.0 - 36.0 + 10.0,
+            f64::from(r0.center_y()),
+        );
+        let knob_on = (f64::from(r0.right) - 16.0 - 10.0, f64::from(r0.center_y()));
+        let px = |buf: &[u8], (x, y): (f64, f64)| {
+            let i = ((y as i32 * w + x as i32) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2]]
+        };
+        assert!(
+            px(&off, knob_off).iter().all(|c| *c > 200),
+            "knob at left while off: {:?}",
+            px(&off, knob_off)
+        );
+        assert!(
+            !px(&off, knob_on).iter().all(|c| *c > 200),
+            "no knob at the right while off: {:?}",
+            px(&off, knob_on)
+        );
+
+        for _ in 0..120 {
+            surface.canvas().clear(clear);
+            list.render(
+                surface.canvas(),
+                rect,
+                &rows(true, 0.75),
+                &fonts,
+                1.0,
+                dt,
+                true,
+            );
+        }
+        let on = read_back(&mut surface, w, h);
+        assert!(
+            px(&on, knob_on).iter().all(|c| *c > 200),
+            "knob at right while on: {:?}",
+            px(&on, knob_on)
+        );
+        // The track under the knob's old seat is now accent-coloured, not grey. `read_back`
+        // is n32, so the bytes come out B, G, R here — the accent's blue leads.
+        let seat = px(&on, knob_off);
+        assert!(seat[0] > seat[1] + 20, "accent track while on: {seat:?}");
+        // Slider: the fill at a quarter is dark past the midpoint, lit at three quarters.
+        let mid = (
+            f64::from(r1.right) - 16.0 - 18.0 - 60.0,
+            f64::from(r1.center_y()),
+        );
+        assert!(
+            px(&off, mid)[0] < 110,
+            "quarter fill leaves the midpoint dark: {:?}",
+            px(&off, mid)
+        );
+        assert!(
+            px(&on, mid)[0] > 150,
+            "three-quarter fill lights the midpoint: {:?}",
+            px(&on, mid)
+        );
+        // The icon sits in the gutter the label used to start in, so something is inked there.
+        let gutter = (f64::from(r0.left) + 26.0, f64::from(r0.center_y()));
+        assert!(
+            px(&on, gutter).iter().any(|c| *c > 80),
+            "icon in the gutter: {:?}",
+            px(&on, gutter)
+        );
     }
 
     /// Slip arms only when the value actually changed, and settles back to

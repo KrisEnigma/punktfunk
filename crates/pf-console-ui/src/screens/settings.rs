@@ -991,6 +991,7 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
                 caret: false,
                 adjustable: false,
                 enabled: true,
+                ..RowSpec::default()
             };
         }
         RowId::NoProfiles => {
@@ -1277,6 +1278,7 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
         caret: false,
         adjustable: enabled,
         enabled,
+        ..RowSpec::default()
     }
 }
 

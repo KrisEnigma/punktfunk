@@ -227,6 +227,7 @@ impl BindProfileScreen {
                     caret: false,
                     adjustable: false,
                     enabled: true,
+                    ..RowSpec::default()
                 }
             })
             .collect();
