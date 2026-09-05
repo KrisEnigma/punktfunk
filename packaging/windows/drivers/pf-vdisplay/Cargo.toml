@@ -30,7 +30,9 @@ pool-bypass = []
 
 [dependencies]
 # The encoder backends this driver opens inside WUDFHost — the only Windows video transport.
-pf-encode-win = { workspace = true, features = ["nvenc", "qsv", "pyrowave"] }
+# AMF and Media Foundation ride along on every arch; the three x86-64 ones sit in the target
+# table at the end of this file.
+pf-encode-win.workspace = true
 pf-frame.workspace = true
 # The backends' error type; the driver only formats it.
 anyhow = "1"
@@ -73,3 +75,9 @@ features = [
 
 [lints]
 workspace = true
+
+# NVENC needs cudarc, QSV CMakes Intel's dispatcher and PyroWave's Granite has no MSVC-ARM64 SIMD
+# path (`simd.hpp: #error "Implement me."`). None of that hardware exists on a Snapdragon SoC
+# either: an ARM64 driver opens Media Foundation and nothing else.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+pf-encode-win = { workspace = true, features = ["nvenc", "qsv", "pyrowave"] }

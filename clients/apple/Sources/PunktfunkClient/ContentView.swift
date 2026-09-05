@@ -300,6 +300,22 @@ struct ContentView: View {
                 home
             }
         }
+        // The launch hold rides OVER this switch, because it starts before it: the cover leaves
+        // its shelf tile at the tap, while `home` is still up, and the swap to `sessionView`
+        // happens behind it. Mounting is instant (the view fades its own backdrop in over the
+        // shelf — that fade IS the transition); only the reveal fades out.
+        .overlay {
+            if let hold = model.launchHold {
+                LaunchHoldView(
+                    entry: hold.entry, host: model.activeHost,
+                    connecting: model.connection == nil, sourceRect: hold.sourceRect,
+                    onShow: { model.revealStream() })
+                    // Its own view per launch — a reused one keeps the last flight's state.
+                    .id(hold.seq)
+                    .transition(.asymmetric(insertion: .identity, removal: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: model.launchHold)
         .onAppear {
             seedDefaultModeIfNeeded()
             autoConnectIfAsked()
@@ -527,7 +543,9 @@ struct ContentView: View {
         #if os(macOS)
         .sheet(item: $libraryTarget) { shelf in
             NavigationStack {
-                LibraryView(store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) })
+                LibraryView(
+                    store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) },
+                    onConnect: { connectFromShelf(shelf) })
             }
             .frame(minWidth: 940, minHeight: 620)
             // The stack draws the title, and it sits outside LibraryView's own ink — see the tvOS
@@ -544,7 +562,9 @@ struct ContentView: View {
         // presentation the new mode owns.
         .fullScreenCover(item: touchLibraryTarget) { shelf in
             NavigationStack {
-                LibraryView(store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) })
+                LibraryView(
+                    store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) },
+                    onConnect: { connectFromShelf(shelf) })
             }
         }
         #endif
@@ -922,7 +942,8 @@ struct ContentView: View {
             #if os(tvOS)
             // The focus engine only enters the takeover once nothing under it can hold focus;
             // then Menu reaches the overlay's `.onExitCommand` instead of the launcher — or the app.
-            .disabled(connectingOverlayName != nil || waker.waking != nil)
+            .disabled(
+                connectingOverlayName != nil || waker.waking != nil || model.launchHold != nil)
             #endif
             .overlay {
                 ConnectOverlay(
@@ -940,7 +961,10 @@ struct ContentView: View {
     /// during the delegated-approval wait (that has its own "Waiting for approval" prompt, so the
     /// takeover must not stack over it) and, of course, when idle or streaming.
     private var connectingOverlayName: String? {
-        guard awaitingApproval == nil, model.phase == .connecting, let host = model.activeHost
+        // A launch dial has the launch hold instead — that says which GAME is coming, and stacking
+        // "Connecting to <host>" on top of it would be two takeovers for one act.
+        guard awaitingApproval == nil, model.launchHold == nil,
+              model.phase == .connecting, let host = model.activeHost
         else { return nil }
         return host.displayName
     }
@@ -955,6 +979,7 @@ struct ContentView: View {
                     onPaired: handlePaired, waker: waker,
                     connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
                     launchTitle: launchTitle,
+                    connectShelf: connectFromShelf,
                     wakeOnly: { wakeOnly($0) },
                     promptActive: consolePromptShowing)
             } else {
@@ -963,7 +988,8 @@ struct ContentView: View {
                     showAddHost: $showAddHost, pairingTarget: $pairingTarget,
                     speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
                     connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
-                    onPaired: handlePaired, onLaunchTitle: launchTitle, wake: { wakeOnly($0) })
+                    onPaired: handlePaired, onLaunchTitle: launchTitle,
+                    onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
             }
         }
         #else
@@ -975,6 +1001,7 @@ struct ContentView: View {
                     onPaired: handlePaired, waker: waker,
                     connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
                     launchTitle: launchTitle,
+                    connectShelf: connectFromShelf,
                     wakeOnly: { wakeOnly($0) },
                     promptActive: consolePromptShowing)
                 // On tvOS pairing/library normally present from HomeView's navigationDestinations
@@ -1000,7 +1027,10 @@ struct ContentView: View {
                 }
                 .fullScreenCover(item: $libraryTarget) { shelf in
                     NavigationStack {
-                        LibraryView(store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) })
+                        LibraryView(
+                            store: store, target: shelf,
+                            onLaunch: { launchTitle(shelf, $0) },
+                            onConnect: { connectFromShelf(shelf) })
                     }
                     .onExitCommand { libraryTarget = nil }
                     // On the STACK, not just inside LibraryView: the navigation title is drawn by
@@ -1018,7 +1048,8 @@ struct ContentView: View {
                     speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
                     showSettings: $showSettings,
                     connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
-                    onPaired: handlePaired, onLaunchTitle: launchTitle, wake: { wakeOnly($0) })
+                    onPaired: handlePaired, onLaunchTitle: launchTitle,
+                    onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
             }
         }
         #endif
@@ -1401,6 +1432,7 @@ struct ContentView: View {
             padAvailable: { [model] in model.virtualPadAvailable },
             padShown: { [model] in model.virtualPadShown },
             togglePad: { [model] in model.toggleVirtualPad() },
+            tapPadButton: { [model] bit in model.tapPadButton(bit) },
             currentMode: {
                 let m = conn.currentMode()
                 return (m.width, m.height, m.refreshHz)
@@ -1439,7 +1471,8 @@ struct ContentView: View {
     /// in the edit sheet (design §5.2).
     private func connect(
         _ host: StoredHost, launchID: String? = nil,
-        profile: ProfileSelection = .inherit, allowTofu: Bool? = nil
+        profile: ProfileSelection = .inherit, allowTofu: Bool? = nil,
+        fromLibrary: Bool = false
     ) {
         // A pinned host connects on its stored fingerprint; an unpinned host may only TOFU when
         // the host's LIVE advert says `pair=optional` (rule 3a). When the caller doesn't already
@@ -1460,7 +1493,8 @@ struct ContentView: View {
             }
         }
         startSession(
-            host, launchID: launchID, profile: profile, allowTofu: host.pinnedSHA256 == nil)
+            host, launchID: launchID, profile: profile, allowTofu: host.pinnedSHA256 == nil,
+            fromLibrary: fromLibrary)
     }
 
     /// Resolve the stream mode + input prefs and hand off to the session model. The gamepad-type
@@ -1470,31 +1504,36 @@ struct ContentView: View {
     private func startSession(
         _ host: StoredHost, launchID: String? = nil,
         profile: ProfileSelection = .inherit,
-        allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil
+        allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil,
+        fromLibrary: Bool = false
     ) {
+        // Dial the record as it stands NOW: a host that came back on a new DHCP lease was re-keyed
+        // by the reachability check while we waited, and the value captured here is then stale.
         let go = {
             startSessionDirect(
-                host, launchID: launchID, profile: profile, allowTofu: allowTofu,
-                requestAccess: requestAccess, approvalReq: approvalReq)
+                store.hosts.first { $0.id == host.id } ?? host,
+                launchID: launchID, profile: profile, allowTofu: allowTofu,
+                requestAccess: requestAccess, approvalReq: approvalReq,
+                fromLibrary: fromLibrary)
         }
-        // Not advertising and we can wake it? DIAL FIRST anyway — no mDNS advert does NOT mean
-        // unreachable: a host reached over a routed network (Tailscale/VPN/another subnet) is
-        // mDNS-blind forever, and gating the dial on presence bricked exactly those reconnects
-        // (the host log shows no connection attempt at all; the tile pip and this gate share the
-        // LAN-only `advertises` predicate). `prepareWake` inside the dial already fires the magic
-        // packet up front, so a genuinely-asleep host is waking while the connect times out; only
-        // when that dial FAILS do we fall into the visible "Waking…" wait — a cold box takes far
-        // longer to boot than a connect will sit — and redial once it's back on mDNS.
+        // Down (by the probe, not by mDNS — a sleeping host advertises for another 75 minutes) and
+        // we can wake it? DIAL FIRST anyway, since unreachable-looking is not unreachable: a host
+        // over a routed network (Tailscale/VPN/another subnet) answers a dial it never advertised
+        // for. `prepareWake` inside the dial already fires the magic packet up front, so a
+        // genuinely-asleep host is waking while the connect times out; only when that dial FAILS do
+        // we fall into the visible "Waking…" wait — a cold box takes far longer to boot than a
+        // connect will sit — and redial once it answers.
         if autoWakeEnabled, PunktfunkConnection.wakeOnLANAvailable,
-           !host.wakeMacs.isEmpty, !discovery.advertises(host) {
-            discovery.start() // so the wake-wait can observe it reappear
+           !host.wakeMacs.isEmpty, !store.probedOnline.contains(host.id) {
+            discovery.start() // so the wake-wait can pick up a host that moved address
             startSessionDirect(
                 host, launchID: launchID, profile: profile, allowTofu: allowTofu,
-                requestAccess: requestAccess, approvalReq: approvalReq,
+                requestAccess: requestAccess, approvalReq: approvalReq, fromLibrary: fromLibrary,
                 onUnreachable: {
                     waker.start(
                         host: host, connectsAfter: true, macs: host.wakeMacs, lastIP: host.address,
-                        isOnline: { discovery.advertises(host) }, onOnline: go)
+                        isOnline: { await store.isReachable(host, discovery: discovery) },
+                        onOnline: go)
                 })
         } else {
             go()
@@ -1509,6 +1548,7 @@ struct ContentView: View {
         _ host: StoredHost, launchID: String? = nil,
         profile: ProfileSelection = .inherit,
         allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil,
+        fromLibrary: Bool = false,
         onUnreachable: (@MainActor () -> Void)? = nil
     ) {
         prepareWake(for: host)
@@ -1527,32 +1567,34 @@ struct ContentView: View {
                 setting: PunktfunkConnection.GamepadType(
                     rawValue: UInt32(clamping: effective.gamepadType)) ?? .auto),
             launchID: launchID,
-            // Where a game exit returns to, when this connect launched a title: the shelf that
-            // title was picked on — the host's own, or the pinned card whose profile this connect
-            // is using. Ignored by the model unless there is a launchID.
-            shelf: LibraryTarget(host: host, profile: profile),
+            // Where this session goes back to when it ends: the shelf it started from — the
+            // host's own, or the pinned card whose profile it is using. nil for a connect that
+            // did NOT come off a shelf, which is what keeps a plain host-list connect ending on
+            // the host list.
+            shelf: launchID != nil || fromLibrary
+                ? LibraryTarget(host: host, profile: profile) : nil,
             allowTofu: allowTofu,
             requestAccess: requestAccess,
             onUnreachable: onUnreachable)
     }
 
     /// Learn-while-awake, wake-while-asleep — run just before every connect:
-    ///  • host currently advertising (awake) → refresh its stored Wake-on-LAN MAC(s) from the live
-    ///    advert, so a later wake has an up-to-date target;
-    ///  • host NOT advertising (likely asleep/off) and we have MAC(s) → fire a magic packet first.
-    ///    The connect that follows already retries/times out long enough for a woken host to come
-    ///    up; if it's genuinely off/unreachable the connect fails as before. Best-effort and
-    ///    non-blocking (the send runs off the main thread).
+    ///  • an advert matches this host → refresh the MAC(s), OS chain and mgmt port it publishes, so
+    ///    a later wake has an up-to-date target and the library keeps working once this device can
+    ///    no longer see the advert (VPN, routed subnet, multicast-dead Wi-Fi);
+    ///  • the probe did NOT reach it and we have MAC(s) → fire a magic packet first. The two are
+    ///    independent: a sleeping host keeps advertising for up to 75 minutes, so a live advert is
+    ///    no reason to withhold the packet — reading it as one is why auto-wake stayed silent for
+    ///    the host it was meant to wake. Best-effort and non-blocking (the send is off-main).
     private func prepareWake(for host: StoredHost) {
         if let live = discovery.hosts.first(where: { host.matches($0) }) {
             store.updateMacs(host.id, macs: live.macAddresses) // learn — on every platform
             store.updateOsChain(host.id, chain: live.osChain) // ditto for the card's OS mark
-            // ...and the mgmt port, so the library keeps working against a host that moved it once
-            // this device can no longer see the advert (VPN, routed subnet, multicast-dead Wi-Fi).
             store.updateMgmtPort(host.id, port: live.mgmtPort)
-        } else if autoWakeEnabled, PunktfunkConnection.wakeOnLANAvailable, !host.wakeMacs.isEmpty {
-            // Auto-wake only: fire the up-front packet so a genuinely-asleep host is booting while the
-            // dial times out. With auto-wake off, connects go straight through (no packet).
+        }
+        // Auto-wake only. With it off, connects go straight through (no packet).
+        if autoWakeEnabled, PunktfunkConnection.wakeOnLANAvailable, !host.wakeMacs.isEmpty,
+           !store.probedOnline.contains(host.id) {
             let macs = host.wakeMacs
             let ip = host.address
             DispatchQueue.global(qos: .userInitiated).async {
@@ -1584,7 +1626,7 @@ struct ContentView: View {
         discovery.start()
         waker.start(
             host: host, connectsAfter: false, macs: host.wakeMacs, lastIP: host.address,
-            isOnline: { discovery.advertises(host) }, onOnline: {})
+            isOnline: { await store.isReachable(host, discovery: discovery) }, onOnline: {})
     }
 
     /// Picked a title in the (experimental) library: dismiss the browser and start a session that
@@ -1596,6 +1638,17 @@ struct ContentView: View {
     private func launchTitle(_ shelf: LibraryTarget, _ id: String) {
         libraryTarget = nil
         connect(shelf.host, launchID: id, profile: shelf.profile)
+    }
+
+    /// A shelf's own Connect / Resume: dial its host launching NOTHING. The host is already
+    /// showing whatever is up, and asking it to launch the game it is running is how a second
+    /// copy starts — so this is also the only way back into a launch the host cannot track.
+    ///
+    /// `fromLibrary` is what makes the session remember the shelf: quitting the game (or the
+    /// session) comes back here rather than to the host list.
+    private func connectFromShelf(_ shelf: LibraryTarget) {
+        libraryTarget = nil
+        connect(shelf.host, profile: shelf.profile, fromLibrary: true)
     }
 
     /// Tap a discovered host: save it (so the session has a stored identity and the trust pin

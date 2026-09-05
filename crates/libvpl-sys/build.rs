@@ -28,10 +28,12 @@ fn main() {
     let bindings_path = out.join("bindings.rs");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os != "windows" {
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    // Intel GPUs are x86-64 hardware; on ARM64 Windows the dispatcher would build for nothing.
+    if target_os != "windows" || target_arch != "x86_64" {
         std::fs::write(
             &bindings_path,
-            "// libvpl-sys: Windows-only, empty on this target\n",
+            "// libvpl-sys: Windows x86-64 only, empty on this target\n",
         )
         .unwrap();
         return;

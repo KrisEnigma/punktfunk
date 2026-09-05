@@ -26,6 +26,15 @@ unsafe impl Sync for SendAdapter {}
 // in `monitor.rs` (panic = abort here, so poisoning is unreachable anyway).
 static ADAPTER: Mutex<Option<SendAdapter>> = Mutex::new(None);
 
+/// Set once this device takes the remote-session role. The OS starts that adapter itself and then
+/// expects a display on it, so the seat path presents one without waiting for a host ADD.
+static SEAT_ROLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when this device is a seat (remote-session) adapter rather than the console one.
+pub fn is_seat_role() -> bool {
+    SEAT_ROLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Build the adapter caps (FP16/HDR-capable) and kick off the async adapter creation. Called from
 /// `EvtDeviceD0Entry`; idempotent across re-entrant D0 transitions.
 pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
@@ -69,7 +78,56 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     // with the INF still at UmdfExtensions=IddCx0102. GammaSupport stays NONE (set above). Enum is bindgen
     // ModuleConsts — the variant is a plain-int const assignable straight to the `Flags` field.
     caps.Flags = iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16;
+    // IddCx roles are exclusive, so the role is per DEVICE and the hardware id decides it. The
+    // shipped console devnode is `Root\pf_vdisplay` and structurally cannot take the seat branch
+    // below (`design/windows-seat-display-tier.md`).
+    // SAFETY: `device` is the live WDFDEVICE this D0 entry is initialising, which is the contract
+    // `query_hardware_ids` requires.
+    let hardware_ids = unsafe { pf_umdf_util::wdf::query_hardware_ids(device) };
     caps.MaxMonitorsSupported = 16;
+    // `rdpidd_indirectdisplay` is the devnode the terminal-services stack creates for a session and
+    // then starts itself — the one thing it will start. This driver outranks the inbox one for that
+    // id, so the seat role has to cover it too.
+    let seat_devnode = hardware_ids.contains("pf_vdisplay_indirectdisplay")
+        || hardware_ids.contains("rdpidd_indirectdisplay");
+    SEAT_ROLE.store(seat_devnode, std::sync::atomic::Ordering::Relaxed);
+    if seat_devnode {
+        // A remote adapter must also set USE_SMALLEST_MODE — IddCx rejects the pair
+        // REMOTE_SESSION_DRIVER-without-it as STATUS_NOT_SUPPORTED. FP16 stays on: our monitor modes
+        // carry HDR wire bits, and without it every mode fails validation and no monitor arrives.
+        // `PFVD_SEAT_CAPS` overrides the mask while the shape is still being probed.
+        let caps_override = crate::log::knob("PFVD_SEAT_CAPS").and_then(|v| v.parse::<u32>().ok());
+        caps.Flags = caps_override.unwrap_or(
+            iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER
+                | iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_USE_SMALLEST_MODE
+                | iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16,
+        );
+        // The OS keeps every active mode inside this bandwidth budget. Our modes report no rate of
+        // their own, so it only has to be non-zero — zero leaves nothing schedulable. Seat-only:
+        // the console adapter shipped with 0 and stays untouched. Pixels/s at 16 × 4K144.
+        caps.MaxDisplayPipelineRate = crate::log::knob("PFVD_PIPELINE_RATE")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(16 * 4096 * 2160 * 144);
+        // Transmission stays WIRED_OTHER: the framework validates the enum and rejects
+        // NETWORK_OTHER (9) outright, header notwithstanding. The monitor count keeps the console's
+        // 16 because a monitor id has to be BELOW it, and the host numbers its first monitor 1.
+        diag.TransmissionType = crate::log::knob("PFVD_SEAT_TRANSMISSION")
+            .and_then(|v| v.parse::<u32>().ok())
+            .map(|v| v as _)
+            .unwrap_or(iddcx::IDDCX_TRANSMISSION_TYPE::IDDCX_TRANSMISSION_TYPE_WIRED_OTHER);
+        caps.MaxMonitorsSupported = crate::log::knob("PFVD_SEAT_MONITORS")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(16);
+        dbglog!(
+            "[pf-vd] adapter: seat devnode ({hardware_ids}) caps={:#x} monitors={} transmission={} rate={}",
+            caps.Flags,
+            caps.MaxMonitorsSupported,
+            diag.TransmissionType,
+            caps.MaxDisplayPipelineRate
+        );
+    } else {
+        dbglog!("[pf-vd] adapter: console role (hwids: {hardware_ids})");
+    }
     caps.EndPointDiagnostics = diag;
 
     // The adapter WDF object's attributes. Execution/Synchronization must be spelled out: a zeroed
@@ -120,15 +178,35 @@ pub(crate) fn adapter() -> Option<iddcx::IDDCX_ADAPTER> {
         .map(|a| a.0)
 }
 
-/// Honor the host's `IOCTL_SET_RENDER_ADAPTER`: pin the GPU the IddCx swap-chain renders on. On a
+/// The pin in force and the owner that set it. IddCx has one render adapter per IddCx adapter,
+/// so this cannot be scoped: another owner may repeat it, not move it ([`set_render_adapter`]).
+static RENDER_PIN: Mutex<Option<(i64, u32)>> = Mutex::new(None);
+
+/// Honor `owner`'s `IOCTL_SET_RENDER_ADAPTER`: pin the GPU the IddCx swap-chain renders on. On a
 /// hybrid iGPU+dGPU box the OS may otherwise pick the iGPU to render the virtual monitor, and the
-/// encode pool then opens on an adapter whose encoder the host never selected. Unconditional —
-/// NOT the SudoVDA-parity default-off branch (`design/windows-host-rewrite.md` §2.8). Returns
-/// `STATUS_NOT_FOUND` if called before the adapter exists.
-pub fn set_render_adapter(luid_low: u32, luid_high: i32) -> NTSTATUS {
+/// encode pool then opens on an adapter whose encoder the host never selected. The pin is
+/// adapter-wide and moving it flaps every live swap-chain, so a different GPU is refused with
+/// `STATUS_ACCESS_DENIED` while the owner that pinned the current one still holds a monitor; the
+/// host tolerates that and streams on the GPU in force. `STATUS_NOT_FOUND` before the adapter
+/// exists.
+pub fn set_render_adapter(owner: u32, luid_low: u32, luid_high: i32) -> NTSTATUS {
     let Some(adapter) = adapter() else {
         return crate::STATUS_NOT_FOUND;
     };
+    let packed = (i64::from(luid_high) << 32) | i64::from(luid_low);
+    let pin = *crate::registry::lock(&RENDER_PIN);
+    if let Some((held, by)) = pin
+        && held != packed
+        && by != owner
+        && crate::registry::find(|m| m.owner == by).is_some()
+    {
+        dbglog!(
+            "[pf-vd] set_render_adapter: owner {owner} asked for {luid_high:08x}:{luid_low:08x} \
+             while owner {by} holds monitors on the pinned GPU — refused"
+        );
+        return crate::STATUS_ACCESS_DENIED;
+    }
+    *crate::registry::lock(&RENDER_PIN) = Some((packed, owner));
     let mut in_args = pod_init!(iddcx::IDARG_IN_ADAPTERSETRENDERADAPTER);
     in_args.PreferredRenderAdapter = wdk_sys::LUID {
         LowPart: luid_low,

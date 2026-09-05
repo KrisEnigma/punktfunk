@@ -69,10 +69,18 @@ pub struct GameEntry {
     pub title: String,
     #[serde(default)]
     pub art: Artwork,
-    /// Free-form display string from the host's flattened `GameMeta`. Other
-    /// metadata stays undecoded until a UI needs it.
+    /// Free-form display string from the host's flattened `GameMeta`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// The rest of that `GameMeta` the launch hold has room to show. The host has sent these
+    /// since the library API existed and nothing read them until a screen wanted more than a
+    /// title. Every one is optional on the wire, so an older host simply says nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_year: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
     /// `"game"` (default; older hosts omit) or `"launcher"`. A plain string: the
     /// host owns the vocabulary; an unknown value must not fail the catalog decode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,6 +266,92 @@ pub fn fetch_running(
     serde_json::from_str::<HostStatus>(&body)
         .map(|s| s.games)
         .unwrap_or_default()
+}
+
+/// 20 s. What a host has up changes minute to minute, unlike the grants
+/// [`crate::host_actions::TTL`] governs — but a home carousel ticks far faster
+/// than that, so this is the rate limit, not the display cadence.
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+pub const RUNNING_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Process-wide, keyed by host fingerprint — the [`crate::host_actions`] cache
+/// with a shorter fuse. One cache so a host tile, its shelf and the menu on it
+/// cannot each answer "what is up" differently.
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+type RunningCache =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<RunningGame>)>>;
+
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+fn running_cache() -> &'static RunningCache {
+    static C: std::sync::OnceLock<RunningCache> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// The title to name on a host tile: what this host last said it has up.
+///
+/// Empty until [`refresh_running`] answers, for a host running nothing, and for
+/// one whose entry carries no title — a shell renders the empty string as "no
+/// line", which is also the right answer for a host too old to be asked.
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+pub fn now_playing(fp_hex: &str) -> String {
+    running_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(fp_hex)
+        .and_then(|(_, games)| games.iter().find(|g| !g.title.is_empty()))
+        .map(|g| g.title.clone())
+        .unwrap_or_default()
+}
+
+/// Spawn a worker unless the cache is still inside [`RUNNING_TTL`]. Idempotent;
+/// call it on whatever tick a shell already refreshes host rows on.
+///
+/// Stamped before the request, so a hung host cannot spawn a worker per tick —
+/// [`crate::host_actions::refresh`]'s rule, and for the same reason.
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+pub fn refresh_running(addr: &str, mgmt_port: u16, fp_hex: &str) {
+    if fp_hex.is_empty() {
+        return; // empty fingerprint cannot authenticate or key the cache
+    }
+    {
+        let mut c = running_cache().lock().unwrap_or_else(|e| e.into_inner());
+        match c.get_mut(fp_hex) {
+            Some(entry) if entry.0.elapsed() < RUNNING_TTL => return,
+            Some(entry) => entry.0 = std::time::Instant::now(),
+            None => {
+                c.insert(fp_hex.to_string(), (std::time::Instant::now(), Vec::new()));
+            }
+        }
+    }
+    let (addr, fp_hex) = (addr.to_string(), fp_hex.to_string());
+    std::thread::Builder::new()
+        .name("punktfunk-nowplaying".into())
+        .spawn(move || {
+            let Ok(identity) = crate::trust::load_or_create_identity() else {
+                return;
+            };
+            let pin = crate::trust::parse_hex32(&fp_hex);
+            let up: Vec<RunningGame> = fetch_running(&addr, mgmt_port, &identity, pin)
+                .into_iter()
+                .filter(RunningGame::is_up)
+                .collect();
+            running_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(fp_hex, (std::time::Instant::now(), up));
+        })
+        .ok();
+}
+
+/// Drop what this host said — the caller just ended a session on it, so the
+/// answer is about to change and the next tick must ask rather than wait out
+/// [`RUNNING_TTL`].
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+pub fn invalidate_running(fp_hex: &str) {
+    running_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(fp_hex);
 }
 
 /// 16 MiB. Steam heroes are a few MB; larger is not an image for the decoder.

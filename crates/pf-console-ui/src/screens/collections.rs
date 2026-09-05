@@ -172,12 +172,21 @@ impl CollectionsScreen {
         if want.is_empty() {
             return;
         }
-        for (id, bytes) in library.take_art_for(&want, super::library::ART_DECODES_PER_FRAME) {
+        // Already decoded by the host: a move, not work this frame.
+        for (id, poster) in library.drain_decoded() {
+            self.art.insert(id, poster.into_image());
+        }
+        // Against the clock, like the shelf's own drain — one at a time, at least one a frame.
+        let started = std::time::Instant::now();
+        while let Some((id, bytes)) = library.take_art_for(&want, 1).pop() {
             match super::library::decode_poster(&bytes, self.art_k) {
                 Some(img) => {
                     self.art.insert(id, img);
                 }
                 None => tracing::debug!(%id, "undecodable poster"),
+            }
+            if started.elapsed() >= super::library::ART_FRAME_BUDGET {
+                break;
             }
         }
     }
@@ -271,6 +280,16 @@ impl CollectionsScreen {
                 self.step(if up { -1 } else { 1 });
                 true
             }
+            // Hover focuses, so the press that follows is the one that OPENS the card rather
+            // than the one that reaches it. The move-then-press fallback below stays for a
+            // pointer that cannot hover: a touchscreen sends Press with no Move before it.
+            PointerKind::Move => match p.pick(&self.geom).filter(|i| *i < self.groups.len()) {
+                Some(i) if i != self.cursor as usize => {
+                    self.cursor = i as i32;
+                    true
+                }
+                _ => false,
+            },
             PointerKind::Press => {
                 if let Some(i) = self.sort_tabs.pointer(p) {
                     let all = SortKey::ALL;
@@ -731,6 +750,8 @@ mod tests {
             actions: Vec::new(),
             pin: None,
             bound_profile: None,
+            running: String::new(),
+            game_profiles: Default::default(),
         }
     }
 
@@ -747,6 +768,9 @@ mod tests {
                     launcher: false,
                     icon: String::new(),
                     platform: Some(if i < 4 { "PS2".into() } else { "PS3".into() }),
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
                     running: false,
                 })
                 .collect(),
@@ -937,6 +961,9 @@ mod tests {
                 launcher: true,
                 icon: "steam".into(),
                 platform: Some("Launchers".into()),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             },
             LibraryGame {
@@ -946,6 +973,9 @@ mod tests {
                 launcher: false,
                 icon: String::new(),
                 platform: Some("PS3".into()),
+                developer: None,
+                year: None,
+                genres: Vec::new(),
                 running: false,
             },
         ]);

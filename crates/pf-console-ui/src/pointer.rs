@@ -10,14 +10,14 @@
 use skia_safe::Rect;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Pointer {
+pub struct Pointer {
     pub x: f64,
     pub y: f64,
     pub kind: PointerKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum PointerKind {
+pub enum PointerKind {
     /// Primary button down, or a finger down — the acting edge.
     Press,
     /// Primary button or finger up. Ignored today; kept so a drag can close.
@@ -33,18 +33,18 @@ pub(crate) enum PointerKind {
 }
 
 impl Pointer {
-    pub(crate) fn press(&self) -> bool {
+    pub fn press(&self) -> bool {
         self.kind == PointerKind::Press
     }
 
     /// Half-open, so neighbours can share an edge. An empty rect never hits — culled
     /// list rows store `Rect::new_empty()` and keep their indices aligned.
-    pub(crate) fn hits(&self, rect: Rect) -> bool {
+    pub fn hits(&self, rect: Rect) -> bool {
         let (x, y) = (self.x as f32, self.y as f32);
         x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
     }
 
-    pub(crate) fn pick(&self, rects: &[Rect]) -> Option<usize> {
+    pub fn pick(&self, rects: &[Rect]) -> Option<usize> {
         rects.iter().position(|r| self.hits(*r))
     }
 }

@@ -24,6 +24,17 @@ DriverVer=
 
 [Standard.NT$ARCH$]
 %DeviceName%=pf_vdisplay_Install, Root\pf_vdisplay
+; Our own per-session id. Nothing creates a devnode with it today, so this line binds nothing on a
+; normal install; it exists so the seat sections below have a claim that is ours to make.
+%DeviceName%=pf_vdisplay_Seat_Install, pf_vdisplay_IndirectDisplay
+; DELIBERATELY NOT CLAIMED HERE:
+;   %DeviceName%=pf_vdisplay_Seat_Install, RdpIdd_IndirectDisplay
+; That id is the one the terminal-services stack actually starts, so a seat display needs it — but
+; claiming it takes over EVERY RDP session on the machine, admin sessions included. It is an
+; install-time choice the seats add-on makes, never something installing punktfunk implies. The
+; seats package ships its own INF that adds the line back; see docs/multi-seat-contract.
+; Winning the id is not about the certificate: inbox rdpidd.inf ranks 0x00FF0000 too, and the tie
+; goes to the newer DriverVer date (`windows-seat-display-tier.md` §5d).
 
 [SourceDisksFiles]
 pf_vdisplay.dll=1
@@ -48,6 +59,33 @@ HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
 ; ACE (SudoVDA ships one for its user-mode host): the control plane creates/removes monitors and
 ; opens the encoder on the sealed AU section (IOCTL_SET_ENCODE), so it is not for unprivileged callers.
 HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+; =================== seat (remote-session) device ====================
+; Same driver, one difference that matters: the remoting stack OPENS this device itself, under the
+; SESSION's own token, and a SYSTEM+Admins DACL fails that open with E_ACCESSDENIED — the server
+; reports `IddInterfaceArrivalFailure` and drops the session. That opener is TermService, so
+; NETWORK SERVICE is the whole grant — no user reaches this control plane, where RdpIdd ships
+; `D:P(A;;GA;;;WD)`. The console device keeps its own locked-down DACL.
+
+[pf_vdisplay_Seat_Install.NT]
+CopyFiles=UMDriverCopy
+
+[pf_vdisplay_Seat_Install.NT.hw]
+AddReg=pf_vdisplay_SeatDeviceSettings
+
+[pf_vdisplay_SeatDeviceSettings]
+HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
+HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;NS)"
+
+[pf_vdisplay_Seat_Install.NT.Services]
+AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
+
+[pf_vdisplay_Seat_Install.NT.Wdf]
+UmdfService=pf_vdisplay, pf_vdisplay_Install
+UmdfServiceOrder=pf_vdisplay
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfHostProcessSharing=ProcessSharingDisabled
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 
 [pf_vdisplay_Install.NT.Services]
 AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall

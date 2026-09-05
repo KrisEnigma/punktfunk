@@ -56,6 +56,16 @@ enum ShotScenes {
             ShotScene(name: "11e-library-options", orientation: .landscape, colorScheme: .dark) {
                 AnyView(ShotLibrary(options: true))
             },
+            // The launch hold, settled: what the player looks at from the tap until the game is
+            // actually running.
+            ShotScene(name: "13-launch-hold", orientation: .landscape, colorScheme: .dark) {
+                AnyView(ShotLaunchHold())
+            },
+            // The same screen ARRIVING, on a loop: the cover leaves its shelf tile every few
+            // seconds so the flight can be watched rather than guessed at from a still.
+            ShotScene(name: "13b-launch-hold-flight", orientation: .landscape, colorScheme: .dark) {
+                AnyView(ShotLaunchHold(flight: true))
+            },
         ]
         #if os(iOS) || os(macOS)
         // The gamepad-mode console screens (no tvOS — native focus engine there). Dev-only shots
@@ -177,13 +187,15 @@ enum ShotMock {
                 pinnedSHA256: hostFingerprint(6), macAddresses: ["00:1a:2b:3c:4d:5e"],
                 osChain: "windows/11"),
         ]
+        // Which cards read ONLINE. Seeded, because presence is a live probe and a capture has no
+        // network — the same three hosts `discovery()` advertises, so both halves agree.
+        store.debugSetProbedOnline([battlestationID, livingRoomID, officeID])
         return store
     }
 
-    /// Discovery, seeded rather than live. Two saved hosts advertise (so their cards read ONLINE
-    /// through the real `advertises` path, and the reachability probe skips them — no network from
-    /// a capture), "Workshop" stays quiet so the grid shows an asleep machine, and one genuinely
-    /// new host populates the "On this network" section.
+    /// Discovery, seeded rather than live. Three saved hosts advertise (matching the seeded
+    /// reachable set above), "Workshop" stays quiet so the grid shows an asleep machine, and one
+    /// genuinely new host populates the "On this network" section.
     ///
     /// A live browse made the shot non-deterministic AND leaked whatever was on the capturing
     /// machine's LAN into the App Store listing.
@@ -235,8 +247,11 @@ enum ShotMock {
         let json = """
         [
           {"id": "custom:aurora", "store": "custom", "title": "Aurora Drift",
-           "platform": "PS3", "art": {"portrait": "shot://art/aurora"}},
+           "platform": "PS3", "release_year": 2009, "developer": "Nine Lanterns",
+           "genres": ["Racing"], "art": {"portrait": "shot://art/aurora"}},
           {"id": "steam:starfall", "store": "steam", "title": "Starfall Vale",
+           "platform": "PC", "release_year": 2024, "developer": "Meridian Foundry",
+           "genres": ["Action", "Adventure"],
            "art": {"portrait": "shot://art/starfall"}},
           {"id": "heroic:neon", "store": "heroic", "title": "Neon Circuit",
            "platform": "PC", "art": {"portrait": "shot://art/neon"}},
@@ -273,7 +288,8 @@ private struct ShotHome: View {
             showAddHost: .constant(false), pairingTarget: .constant(nil),
             speedTestTarget: .constant(nil), libraryTarget: .constant(nil),
             connect: { _, _ in }, connectDiscovered: { _ in },
-            onPaired: { _, _ in }, onLaunchTitle: { _, _ in }, wake: { _ in })
+            onPaired: { _, _ in }, onLaunchTitle: { _, _ in }, onConnectShelf: { _ in },
+            wake: { _ in })
         #else
         HomeView(
             store: store, model: model, discovery: discovery,
@@ -281,7 +297,8 @@ private struct ShotHome: View {
             speedTestTarget: .constant(nil), libraryTarget: .constant(nil),
             showSettings: .constant(false),
             connect: { _, _ in }, connectDiscovered: { _ in },
-            onPaired: { _, _ in }, onLaunchTitle: { _, _ in }, wake: { _ in })
+            onPaired: { _, _ in }, onLaunchTitle: { _, _ in }, onConnectShelf: { _ in },
+            wake: { _ in })
         #endif
     }
 }
@@ -322,11 +339,69 @@ private struct ShotLibrary: View {
         LibraryConsoleView(
             games: games, artLoader: ShotPosterArt.source,
             onLaunch: { _ in }, onDismiss: {},
-            // The mock has a clipboard action so the Options menu has its row to show.
+            // The mock has a clipboard action, and a game up, so the Options menu shows both
+            // of the rows a real shelf offers.
             onCopyLink: { _ in }, hostName: "Battlestation",
+            nowPlaying: "Hollow Knight", onConnect: {},
             controllerActive: interactive,
             arrangementOverride: arrangement, barFocusedInitially: barFocused,
             startInCollectionsOverride: collections, optionsInitially: options)
+    }
+}
+
+// MARK: - Launch hold
+
+/// The launch hold over the real shelf.
+///
+/// The shelf underneath is the actual `LibraryConsoleView`, not a backdrop image, which is what
+/// makes the flight real: its posters publish their rects to `TileFrames` exactly as they do in
+/// the app, so the cover here leaves the tile it is drawn in rather than a rect this scene made
+/// up. `flight` replays the arrival every few seconds — the still frame cannot show it.
+private struct ShotLaunchHold: View {
+    var flight = false
+    /// Which mock title launches. Its tile has to be on screen for a rect to exist.
+    private let launched = ShotMock.games.first { $0.id == "steam:starfall" } ?? ShotMock.games[0]
+
+    @State private var showing = false
+    /// Bumped per replay, for the same reason the app counts launches: without a fresh
+    /// identity the second hold inherits the first one's state and never flies.
+    @State private var cycle = 0
+
+    var body: some View {
+        ZStack {
+            // The GRID for the flight: the coverflow's centred card already sits where the hold
+            // puts it, so a cover leaving it barely travels. A grid tile is small and off to one
+            // side, which is the move the animation is actually for.
+            ShotLibrary(arrangement: flight ? .grid : nil)
+            if showing {
+                LaunchHoldView(
+                    entry: launched, host: nil, connecting: true,
+                    sourceRect: TileFrames.rect(launched.id),
+                    artOverride: ShotPosterArt.source,
+                    onShow: {})
+                    .id(cycle)
+                    .transition(.asymmetric(insertion: .identity, removal: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: showing)
+        .task {
+            guard flight else {
+                // The still: the hold is the whole frame, so there is nothing to wait for.
+                showing = true
+                return
+            }
+            // Let the shelf's own entrance finish first, so the tile the cover flies out of is
+            // where it will finally sit and the only thing moving after that is the cover.
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            showing = true
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_600_000_000)
+                showing = false
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                cycle += 1
+                showing = true
+            }
+        }
     }
 }
 
@@ -345,7 +420,7 @@ private struct ShotGamepadHome: View {
             libraryTarget: .constant(nil), pairingTarget: .constant(nil),
             onPaired: { _, _ in }, waker: waker,
             connect: { _, _ in }, connectDiscovered: { _ in }, launchTitle: { _, _ in },
-            wakeOnly: { _ in })
+            connectShelf: { _ in }, wakeOnly: { _ in })
     }
 }
 
@@ -405,7 +480,7 @@ private struct ShotConnect: View {
                 libraryTarget: .constant(nil), pairingTarget: .constant(nil),
             onPaired: { _, _ in }, waker: waker,
                 connect: { _, _ in }, connectDiscovered: { _ in }, launchTitle: { _, _ in },
-            wakeOnly: { _ in })
+            connectShelf: { _ in }, wakeOnly: { _ in })
         } else {
             ShotHome()
         }

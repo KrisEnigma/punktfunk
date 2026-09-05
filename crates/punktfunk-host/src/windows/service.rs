@@ -1243,7 +1243,8 @@ fn ensure_default_host_env() -> Result<()> {
         #   punktfunk-host service stop && punktfunk-host service start\n\
         \n\
         # Encode backend: auto (default) detects the GPU vendor — NVIDIA->nvenc, AMD->amf, Intel->qsv.\n\
-        # Force one with nvenc | amf | qsv | sw (software H.264). amf/qsv need an FFmpeg-built host.\n\
+        # Force one with nvenc | amf | qsv | mf | sw (software H.264). amf/qsv need an FFmpeg-built\n\
+        # host; mf is Media Foundation, any vendor's hardware encoder, 8-bit 4:2:0 only.\n\
         PUNKTFUNK_ENCODER=auto\n\
         PUNKTFUNK_VIDEO_SOURCE=virtual\n\
         # Virtual display = the bundled pf-vdisplay driver; capture is IDD-push from its shared ring\n\

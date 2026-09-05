@@ -247,6 +247,11 @@ public final class SessionAudio {
     /// per frame for nothing. Never below 1.
     private var wireFrameMS: Int { max(1, (wireFrameUs + 999) / 1000) }
 
+    /// IO quantum asked of `AVAudioSession` on iOS/tvOS, every session, mic on or off. Two wire
+    /// packets: the playback ring's floor is one quantum plus one packet, so this sets that floor
+    /// at 15 ms. Best-effort — `activateAudioSession` logs the granted value.
+    static let preferredIOBufferSeconds: Double = 0.010
+
     #if !os(macOS)
     /// Route + policy live in the session, not per-engine: stereo playback, mic capture when
     /// enabled, Bluetooth allowed. Failure is non-fatal (defaults). Runs on `sessionQueue`.
@@ -287,29 +292,16 @@ public final class SessionAudio {
                 try session.setCategory(
                     .playAndRecord, mode: .default,
                     options: [.allowBluetoothA2DP, .mixWithOthers])
-                // Uplink latency: ask for 10 ms IO quanta at the wire rate (the default ~23 ms
-                // quantum is most of the mic path's burst latency). Best-effort — the hardware
-                // has the final word (a Bluetooth route will ignore both), and whatever quantum
-                // is actually granted, the capture tap handles the buffers it gets.
-                //
-                // 10 ms, NOT the 5 ms this used to ask for. The IO buffer duration is a property
-                // of the whole IO unit, so a shorter quantum is not free to the PLAYBACK side —
-                // and it bought the uplink nothing, because the encoder frames at 10 ms
-                // (`installMicTap` installs with `bufferSize: 480` and `OpusEncoder` consumes
-                // whole `framesPerPacket` chunks): at a 5 ms quantum the tap simply fired twice
-                // per packet, for the same packet latency. What it did buy was a halved deadline
-                // for the render callback and — because the de-prime fuse used to be a callback
-                // COUNT — half the starvation hysteresis in the jitter ring, on the one platform
-                // whose transport bunches hardest. Both ends of that are fixed now (`AudioRing`
-                // measures the fuse in ms), but there is still no reason to ask for a quantum
-                // finer than the packets we send.
-                try? session.setPreferredIOBufferDuration(0.010)
             } else {
                 try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }
             #else // tvOS — no app-accessible mic
             try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             #endif
+            // Asked for on every branch, mic on or off. The hardware IO buffer is one shared,
+            // device-wide setting: a session that asks for nothing runs at whatever iOS or another
+            // mixing app chose (85 ms seen), and the ring's floor is this quantum plus one packet.
+            try? session.setPreferredIOBufferDuration(Self.preferredIOBufferSeconds)
             // The session's rate, asked for on EVERY branch — the `.playback` ones (mic off, and
             // all of tvOS) used to ask for nothing at all, which was invisible while the answer
             // was always 48 kHz and is the difference between real and resampled hi-res now. Set
@@ -326,12 +318,27 @@ public final class SessionAudio {
             // the ring's behaviour depends on the quantum it really gets — without this, a report of
             // audio jitter arrives with no way to tell a 10 ms session from a 5 ms or a 23 ms one,
             // which is exactly the gap that made the last round of this take a simulation to close.
+            let grantedMS = session.ioBufferDuration * 1000
+            let askedMS = Self.preferredIOBufferSeconds * 1000
             log.info("""
                 AVAudioSession active: io_buffer_ms=\
-                \(session.ioBufferDuration * 1000, format: .fixed(precision: 2)) \
+                \(grantedMS, format: .fixed(precision: 2)) asked_ms=\(Int(askedMS)) \
                 sample_rate=\(Int(session.sampleRate)) wire_rate=\(Int(wanted)) \
-                route=\(session.currentRoute.outputs.first?.portType.rawValue ?? "none")
+                route=\(session.currentRoute.outputs.first?.portType.rawValue ?? "none") \
+                input=\(session.currentRoute.inputs.first?.portType.rawValue ?? "none")
                 """)
+            // The ring cannot hold less than quantum + one packet, so a grant far above the
+            // request IS the audio delay — said at connect, with what is known to cause it.
+            if grantedMS > askedMS * 2 {
+                log.warning("""
+                    AVAudioSession granted a \(grantedMS, format: .fixed(precision: 0)) ms IO \
+                    buffer against a \(Int(askedMS)) ms request — expect audio ≥ \
+                    \(grantedMS + Double(wireFrameMS), format: .fixed(precision: 0)) ms behind the \
+                    picture. Another app's active audio session (this one mixes with others), a \
+                    USB/Bluetooth accessory on the route, or Low Power Mode holds the hardware \
+                    buffer at this size.
+                    """)
+            }
             #if os(iOS)
             // Only the `.playAndRecord` session can land on the earpiece, and only it accepts an
             // output override — so the mic-off (`.playback`) path deliberately does neither.
@@ -393,7 +400,7 @@ public final class SessionAudio {
                 #if os(iOS)
                 self.steerBuiltInOutputToSpeaker(AVAudioSession.sharedInstance())
                 #endif
-                DispatchQueue.main.async { self.reviveStoppedEngines("the audio route changed") }
+                self.reviveStoppedEngines("the audio route changed")
             }
         }
         stateLock.lock()
@@ -666,18 +673,28 @@ public final class SessionAudio {
 
     /// Restart the engines if — and only if — playback is down. The conservative trigger: it is
     /// what a route change (iOS/tvOS) and the macOS backstop get to do, since a HEALTHY engine
-    /// that followed the change on its own must not be interrupted for it.
+    /// that followed the change on its own must not be interrupted for it. Safe from any thread.
+    ///
+    /// The liveness check runs on `engineQueue`, BEHIND any start or rebuild in flight. A
+    /// voice-processing start takes about a second and posts route changes of its own, so a check
+    /// made on the main queue found the engines mid-swap, read that as "stopped", and scheduled
+    /// the rebuild that would trigger the next one — the iPad mic-on loop, one rebuild per
+    /// backoff step for the whole session.
     ///
     /// Gated on a start having been ATTEMPTED rather than on an engine existing, which is the
     /// difference between recovering a session whose very first `startPlayback` failed — no
-    /// output device at the moment it connected — and leaving it silent for good. On iOS the same
-    /// flag keeps this from racing the asynchronous start, where no engine yet is normal.
+    /// output device at the moment it connected — and leaving it silent for good.
     private func reviveStoppedEngines(_ reason: String) {
-        stateLock.lock()
-        let attempted = enginesAttempted
-        stateLock.unlock()
-        guard !flag.isStopped, attempted, !playbackIsLive else { return }
-        scheduleEngineRebuild(reason: "playback is stopped and \(reason)")
+        engineQueue.async { [weak self] in
+            guard let self, !self.flag.isStopped else { return }
+            self.stateLock.lock()
+            let attempted = self.enginesAttempted
+            self.stateLock.unlock()
+            guard attempted, !self.playbackIsLive else { return }
+            DispatchQueue.main.async {
+                self.scheduleEngineRebuild(reason: "playback is stopped and \(reason)")
+            }
+        }
     }
 
     /// Is the render side actually running? Both engines can carry it (`combinedEngine` when the
@@ -858,9 +875,7 @@ public final class SessionAudio {
                 // The full activation, not a bare `setActive`: an interruption can drop the
                 // category configuration too, and on iOS the earpiece steer is per-route.
                 self.activateAudioSession(micEnabled: micEnabled)
-                DispatchQueue.main.async {
-                    self.reviveStoppedEngines("an audio interruption ended")
-                }
+                self.reviveStoppedEngines("an audio interruption ended")
             }
         }
         stateLock.lock()

@@ -314,7 +314,7 @@ nothing to install.
 | Windows desktop | Vulkan Video → D3D11VA → software ¹ | H.264, HEVC, AV1 ² | ✅ ³ | ⚠️ ⁴ |
 | Steam Deck (via Decky) | as Linux desktop ⁵ | H.264, HEVC, AV1 ² | ✅ | ⚠️ ⁴ |
 | macOS · iOS · tvOS | VideoToolbox only | H.264, HEVC, AV1 ⁶ | ⚠️ ⁷ | ⚠️ ⁸ |
-| Android · Android TV | MediaCodec only ⁹ | H.264, HEVC, AV1 ¹⁰ | ⚠️ ⁷ | ❌ |
+| Android · Android TV | MediaCodec ⁹, or Vulkan compute for PyroWave | H.264, HEVC, AV1 ¹⁰ | ⚠️ ⁷ | ❌ |
 | Moonlight | your Moonlight app's | negotiated | ⚠️ ¹¹ | ❌ |
 | LG webOS (`pf-webos`) | ❓ | ❓ | ❓ | ❓ ¹² |
 
@@ -369,7 +369,10 @@ nothing to install.
    The desktop clients need no such probe (note 4). For HEVC it only ever resolves against an
    NVIDIA host.
 9. Chosen by name from a ranked device list that prefers hardware, real SoC vendors and low-latency
-   decoders, and blocks the known-bad software ones. There is no software rung.
+   decoders, and blocks the known-bad software ones. There is no software rung. PyroWave is the
+   one exception on this row: it is not a MediaCodec at all but GPU compute presenting through its
+   own swapchain, offered only on a 64-bit device whose GPU passes the probe (Vulkan 1.3 plus the
+   codec's compute feature set) and only when you pick it.
 10. H.264 and HEVC are assumed universal on Android hardware; AV1 is probed.
 11. Whether HDR is offered is decided by the host and layered into what Moonlight is told, so an
     HDR toggle only appears in Moonlight when the host could really do it. See

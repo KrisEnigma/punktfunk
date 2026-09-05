@@ -109,6 +109,8 @@ pub fn run(target: Option<&str>) -> u8 {
                 actions: Vec::new(),
                 pin: None,
                 bound_profile: None,
+                running: String::new(),
+                game_profiles: Default::default(),
             };
             let label = row.name.clone();
             if k.is_none() {
@@ -261,8 +263,12 @@ pub fn run(target: Option<&str>) -> u8 {
                     // same one `--connect` goes through. A pinned card's connect arrives as a
                     // one-off profile id; the resolver prefers it over the binding, and a
                     // dangling id falls back to the defaults without blocking the connect.
-                    let (settings, profile) =
-                        trust::effective_settings(&addr, port, profile.as_deref());
+                    let (settings, profile) = trust::effective_settings(
+                        &addr,
+                        port,
+                        profile.as_deref(),
+                        launch.as_deref(),
+                    );
                     let mut params = session_params(
                         &settings,
                         profile.map(|p| p.name),
@@ -305,6 +311,9 @@ pub fn run(target: Option<&str>) -> u8 {
                 // to the enum keeps failing loudly here instead of falling into a
                 // wildcard that silently drops it.
                 OverlayAction::CopyText(_) => ActionOutcome::Handled,
+                // This console is drawn OVER the session's stream, so the hold coming down is
+                // the shell's own business and the picture is already behind it.
+                OverlayAction::ShowStream => ActionOutcome::Handled,
                 OverlayAction::Quit => ActionOutcome::Quit,
             }
         });
@@ -366,6 +375,8 @@ fn fake_host_row() -> HostRow {
         actions: Vec::new(),
         pin: None,
         bound_profile: None,
+        running: String::new(),
+        game_profiles: Default::default(),
     }
 }
 
@@ -461,7 +472,7 @@ impl ServiceState {
             if self.last_probe.elapsed() >= Duration::from_secs(10) {
                 self.last_probe = Instant::now();
                 self.sweep();
-                self.refresh_actions();
+                self.refresh_host_state();
             }
 
             self.console.set_hosts(self.rows());
@@ -497,6 +508,9 @@ impl ServiceState {
                 );
             }
             ConsoleCmd::RefreshRunning { addr, mgmt, fp_hex } => {
+                // The carousel behind the shelf reads a different cache for the same fact;
+                // dropping it here is what stops a tile advertising the game just quit.
+                library::invalidate_running(&fp_hex);
                 // Blocking network on a worker, like every other command here: the service
                 // loop's own host refresh must keep running while a just-ended stream's host
                 // is asked what it still has up.
@@ -506,7 +520,7 @@ impl ServiceState {
                 std::thread::Builder::new()
                     .name("punktfunk-running".into())
                     .spawn(move || {
-                        shared.set_running(&running_ids(&addr, mgmt, &identity, pin));
+                        shared.set_running(&library::fetch_running(&addr, mgmt, &identity, pin));
                     })
                     .ok();
             }
@@ -760,19 +774,34 @@ impl ServiceState {
                 // `run` refreshes the rows right after this drain, so the carousel and
                 // the pin screen reflect the new card within the same service pass.
             }
-            ConsoleCmd::BindProfile { key, profile_id } => {
-                // The BINDING half of the profile pair — `KnownHost::profile_id`, what a
-                // plain A-press on the primary tile connects with. `SetPin` above is the
-                // presentation half and never touches this field; this never touches the
-                // pins. Same store discipline, same refresh-after-drain.
+            ConsoleCmd::BindProfile {
+                key,
+                game,
+                profile_id,
+            } => {
+                // The BINDING half of the profile pair — `KnownHost::profile_id` for the
+                // host, `game_profiles` for one title. `SetPin` above is the presentation
+                // half and never touches either; this never touches the pins. Same store
+                // discipline, same refresh-after-drain.
                 let mut known = trust::KnownHosts::load();
                 let idx = index_for_key(&known, &key);
                 let Some(h) = idx.and_then(|i| known.hosts.get_mut(i)) else {
                     tracing::warn!(%key, "profile bind for an unknown host — ignoring");
                     return;
                 };
-                if h.profile_id != profile_id {
-                    h.profile_id = profile_id;
+                let changed = match &game {
+                    Some(id) => {
+                        let moved = h.profile_for_game(id) != profile_id.as_deref();
+                        h.bind_game_profile(id, profile_id.as_deref());
+                        moved
+                    }
+                    None => {
+                        let moved = h.profile_id != profile_id;
+                        h.profile_id = profile_id;
+                        moved
+                    }
+                };
+                if changed {
                     if let Err(e) = known.save() {
                         tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
                     }
@@ -797,8 +826,10 @@ impl ServiceState {
         }
     }
 
-    /// One parallel reachability pass over every non-advertising row (advertising ones
-    /// are online by definition). Runs on its own thread; at most one in flight.
+    /// One parallel reachability pass over every row. Advertising ones are NOT online by
+    /// definition — an advert is a cache entry with a 75-minute TTL that a suspending host sends
+    /// no goodbye for, so skipping them left a sleeping machine reading Online (and, since the
+    /// wake item is gated on `!online`, unwakeable). Runs on its own thread; at most one in flight.
     fn sweep(&self) {
         if self.probe_inflight.swap(true, Ordering::SeqCst) {
             return;
@@ -806,7 +837,6 @@ impl ServiceState {
         let targets: Vec<(String, (String, u16))> = self
             .rows()
             .into_iter()
-            .filter(|r| !self.advertised(r))
             .map(|r| (r.key.clone(), (r.addr.clone(), r.port)))
             .collect();
         let probed = self.probed.clone();
@@ -825,22 +855,17 @@ impl ServiceState {
             .ok();
     }
 
-    /// Keep every paired, reachable host's advertised actions fresh (the shared TTL'd cache in
-    /// `pf_client_core::host_actions`). Idempotent and cheap — it only reaches the network when
-    /// an entry has actually lapsed.
-    fn refresh_actions(&self) {
+    /// Keep every paired, reachable host's advertised actions and running title fresh (the
+    /// shared TTL'd caches in `pf_client_core`). Idempotent and cheap — each only reaches the
+    /// network when its own entry has lapsed, and the running one lapses far sooner: what a
+    /// host has UP is what changes between two visits to the carousel.
+    fn refresh_host_state(&self) {
         for r in self.rows() {
             if r.paired && r.online && r.pin.is_none() {
                 pf_client_core::host_actions::refresh(&r.addr, r.mgmt_port, &r.fp_hex);
+                library::refresh_running(&r.addr, r.mgmt_port, &r.fp_hex);
             }
         }
-    }
-
-    fn advertised(&self, row: &HostRow) -> bool {
-        self.discovered.values().any(|d| {
-            (!row.fp_hex.is_empty() && d.fp_hex == row.fp_hex)
-                || (d.addr == row.addr && d.port == row.port)
-        })
     }
 
     /// The console home's rows: saved hosts (most recent first) — each followed by its
@@ -870,13 +895,11 @@ impl ServiceState {
                     (!h.fp_hex.is_empty() && d.fp_hex == h.fp_hex)
                         || (d.addr == h.addr && d.port == h.port)
                 });
-                let online = advert.is_some() || probed.get(&key).copied().unwrap_or(false);
-                // Write down everything the advert teaches while the host is visible: the mgmt
-                // port (so this console keeps working against a moved one once it is not), the
-                // OS chain, and the wake MAC — which matters most here, because this console and
-                // the Decky panel are the only surfaces a Deck in Gaming Mode ever runs, and a
-                // record that never learned a MAC can never be woken. No-op (and no disk write)
-                // when unchanged, so this is safe on every refresh tick.
+                let online = probed.get(&key).copied().unwrap_or(false);
+                // Everything the advert teaches, while it is visible: mgmt port, OS chain, wake
+                // MAC — a Deck in Gaming Mode runs only this console and the Decky panel, and a
+                // record with no MAC can never be woken — and the address, so a host back on a
+                // new lease is dialed and probed where it lives. No disk write when unchanged.
                 if let Some(a) = advert {
                     pf_client_core::trust::learn_from_advert(
                         &h.fp_hex,
@@ -886,6 +909,7 @@ impl ServiceState {
                         &a.os,
                         a.mgmt_port,
                     );
+                    pf_client_core::trust::rekey_addr(&h.fp_hex, &a.addr, a.port);
                 }
                 let row = HostRow {
                     key: key.clone(),
@@ -930,6 +954,13 @@ impl ServiceState {
                         .as_deref()
                         .and_then(|id| catalog.find_by_id(id))
                         .map(chip),
+                    // What this host last said it has up, from the same TTL'd cache the
+                    // actions come from. Empty until the first refresh answers — and for
+                    // an unpaired host, which has nothing to authenticate the ask with.
+                    running: library::now_playing(&h.fp_hex),
+                    // Ids straight through, dangling ones included: the bind screen only
+                    // compares, and a deleted profile falls back at resolve, not here.
+                    game_profiles: h.game_profiles.clone(),
                 };
                 // A pinned card shares the primary tile's live state; its key rides the
                 // profile id behind a NUL (impossible in a fingerprint or `addr:port`),
@@ -980,10 +1011,13 @@ impl ServiceState {
                 clipboard_sync: false,
                 last_used: None,
                 os: d.os.clone(),
-                // Discovered but unsaved: not paired, so there is nothing it would let us do.
+                // Discovered but unsaved: not paired, so there is nothing it would let us
+                // do, and no identity to ask what it is running.
                 actions: Vec::new(),
                 pin: None,
                 bound_profile: None,
+                running: String::new(),
+                game_profiles: Default::default(),
             })
             .collect();
         extra.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1176,7 +1210,7 @@ fn spawn_fetch(
             // What the host has up right now, so a title the player can return to says so.
             // Deliberately after the catalog — a slow `/status` must not hold the titles back —
             // and never fatal: an older host answers nothing and every badge simply stays off.
-            shared.set_running(&running_ids(&addr, mgmt, &identity, pin));
+            shared.set_running(&library::fetch_running(&addr, mgmt, &identity, pin));
             if !jobs.is_empty() {
                 let rx = library::spawn_art_fetch(base, identity, pin, jobs);
                 while let Ok((id, bytes)) = rx.recv_blocking() {
@@ -1207,27 +1241,11 @@ fn to_model(games: &[library::GameEntry]) -> Vec<LibraryGame> {
             launcher: g.is_launcher(),
             icon: g.icon_token().unwrap_or_default().to_string(),
             platform: g.platform.clone(),
+            developer: g.developer.clone(),
+            year: g.release_year,
+            genres: g.genres.clone(),
             running: false,
         })
-        .collect()
-}
-
-/// Which library ids the host has up right now — the Resume set.
-///
-/// Best-effort by contract (see [`library::fetch_running`]): an older host, an unreachable one or
-/// a shape we don't recognise yields an empty set, which correctly clears every badge rather than
-/// failing anything. Entries with no `app_id` — an operator-typed GameStream command — are dropped:
-/// there is no catalog entry to badge.
-fn running_ids(
-    addr: &str,
-    mgmt: u16,
-    identity: &(String, String),
-    pin: Option<[u8; 32]>,
-) -> std::collections::HashSet<String> {
-    library::fetch_running(addr, mgmt, identity, pin)
-        .into_iter()
-        .filter(|g| g.is_up())
-        .filter_map(|g| g.app_id)
         .collect()
 }
 

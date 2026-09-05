@@ -65,6 +65,43 @@ final class FrameMeter: @unchecked Sendable {
     }
 }
 
+/// A held launch: the title, and the tile its cover flies out of.
+struct LaunchHoldTarget: Equatable {
+    let entry: GameEntry
+    /// The shelf tile's rect in global (window) coordinates, when the launch came off a tile the
+    /// hold can fly from. nil scales the cover up in place instead.
+    let sourceRect: CGRect?
+    /// Which launch this is, counting up for the life of the process — the hold's identity.
+    ///
+    /// Load-bearing, not bookkeeping: a hold that is removed and raised again lands in the same
+    /// place in the view tree, and SwiftUI hands the new one the OLD one's state. Its cover then
+    /// starts already landed, and the flight silently stops happening after the first launch.
+    let seq: Int
+}
+
+/// The entry behind a `connect(launchID:)`, handed over out of band: the shelf's launch callbacks
+/// carry only the id (five call sites, three tile views), and the launch hold needs the title, art
+/// and tile rect. Keyed by id on the way out, so a stale entry can never dress a different launch.
+enum LaunchedEntry {
+    private static var last: (entry: GameEntry, rect: CGRect?)?
+
+    static func remember(_ entry: GameEntry?, from rect: CGRect?) {
+        last = entry.map { ($0, rect) }
+    }
+
+    static func take(_ id: String, seq: Int) -> LaunchHoldTarget? {
+        defer { last = nil }
+        guard let last, last.entry.id == id else { return nil }
+        return LaunchHoldTarget(entry: last.entry, sourceRect: last.rect, seq: seq)
+    }
+}
+
+/// How long the launch hold waits on a title the host still calls `launching` (a cold Steam boot
+/// with shader work runs to minutes), and on one the host never lists at all (the launch did not
+/// resolve; the host logs it and streams on).
+private let launchHoldMax: TimeInterval = 120
+private let launchNoLease: TimeInterval = 15
+
 @MainActor
 final class SessionModel: ObservableObject {
     enum Phase: Equatable {
@@ -79,6 +116,18 @@ final class SessionModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var connection: PunktfunkConnection?
+    /// The launched title whose game is not up yet: its cover flies out of the shelf tile at the
+    /// tap and holds the screen — through the dial, and then over the stream — until the host's
+    /// `/status` says the game left `launching` (`punktfunk-host::gamelease`), or the player asks
+    /// to see. nil for a desktop connect, a launcher tile, and once revealed.
+    ///
+    /// Raised at `connect`, not at first frame: the shelf is still on screen at the tap, which is
+    /// the only moment the cover has somewhere to fly FROM, and holding from there means one
+    /// unbroken screen from the tap to the game rather than a stream of the launcher in between.
+    @Published private(set) var launchHold: LaunchHoldTarget?
+    private var launchWatch: Task<Void, Never>?
+    /// Counts launches, so each hold is a view of its own — see `LaunchHoldTarget.seq`.
+    private var launchSeq = 0
     /// The host this session is for (a value copy; identity = id).
     @Published private(set) var activeHost: StoredHost?
     /// The library entry this session was launched with (`connect(launchID:)`), or nil if the user
@@ -325,6 +374,12 @@ final class SessionModel: ObservableObject {
         #endif
     }
 
+    /// One synthetic system-button tap on the host's pad (a `GamepadWire` bit) — the ring's
+    /// guide / quick-access slots, which reach the host where the physical button cannot.
+    func tapPadButton(_ bit: UInt32) {
+        gamepadCapture?.tapButton(bit)
+    }
+
     /// The virtual on-screen controller (design/touch-client-overlay.md §4): shown from the
     /// ring's `pad` slot, per session. While up it holds one wire pad, so the host sees one
     /// controller arrive and, on hide, one leave (§9). Never toggled by the ring's own open and
@@ -441,8 +496,9 @@ final class SessionModel: ObservableObject {
     func connect(to host: StoredHost, effective: EffectiveSettings,
                  gamepad: PunktfunkConnection.GamepadType = .auto,
                  launchID: String? = nil,
-                 /// The library shelf `launchID` was picked on, so a game exit can return to it.
-                 /// Only meaningful alongside a `launchID`; nil for a plain desktop connect.
+                 /// The library shelf this session started from, so its end can return there —
+                 /// the title's shelf for a launch, and the shelf itself for a Resume, which
+                 /// launches nothing. nil for a connect that did not come off one.
                  shelf: LibraryTarget? = nil,
                  allowTofu: Bool = false,
                  autoTrust: Bool = false,
@@ -453,6 +509,10 @@ final class SessionModel: ObservableObject {
         activeHost = host
         launchedTitleID = launchID
         launchedShelf = shelf
+        // The host never tracks a launcher tile, so there is nothing to wait for.
+        launchSeq += 1
+        launchHold = launchID.flatMap { LaunchedEntry.take($0, seq: launchSeq) }
+            .flatMap { $0.entry.isLauncher ? nil : $0 }
         errorMessage = nil
         settings = effective
         statsVerbosity = StatsVerbosity(rawValue: effective.statsVerbosity) ?? .normal
@@ -1023,9 +1083,18 @@ final class SessionModel: ObservableObject {
         }
         connection = nil
         activeHost = nil
+        // A user-ended stream that STARTED on a shelf goes back to it — the same rule a game
+        // exit follows, because "I'm done with this game" arrives both ways. Gated on having
+        // actually streamed, so a refused or cancelled dial still ends where it was raised
+        // from. `sessionEnded` has already set this for the paths it owns; it disconnects
+        // non-deliberately, so the two can never both fire.
+        if deliberate, phase == .streaming, let shelf = launchedShelf {
+            returnToLibrary = shelf
+        }
         // Read by `sessionEnded` BEFORE it calls us, so clearing here can't rob it of the answer.
         launchedTitleID = nil
         launchedShelf = nil
+        revealStream()
         phase = .idle
         fps = 0
         mbps = 0
@@ -1059,14 +1128,12 @@ final class SessionModel: ObservableObject {
         // (per-client access §4) files under `.hostError` there, and "ended with an error"
         // is the wrong sentence for "your access expired".
         let rejection = conn.endRejection
-        // Where a game exit sends us: back into the library this title was launched from, so the
-        // next one is a tap away. Only for a launch that CAME from the library — a game exiting in
-        // a plain desktop session has no library to return to.
+        // Where a game exit sends us: back into the library this session started from, so the
+        // next title is a tap away. A plain desktop connect has no shelf, and so no way back.
         let host = activeHost
-        let cameFromLibrary = launchedTitleID != nil
-        // The shelf it came off — falling back to the host's own if a caller launched a title
-        // without naming one, which is what that launch effectively browsed.
-        let shelf = launchedShelf ?? activeHost.map { LibraryTarget(host: $0) }
+        // The SHELF is what says this came from the library, not the launch id: a Resume off a
+        // shelf launches nothing and still has somewhere to go back to.
+        let shelf = launchedShelf
         let endLine = "session ended by \(name) reason=\(reason) "
             + "rejection=\(rejection.map { String(describing: $0) } ?? "-")"
         sessionLog.info("\(endLine, privacy: .public)")
@@ -1080,7 +1147,7 @@ final class SessionModel: ObservableObject {
         case .gameExited:
             // The player quit their own game. Not a failure, and they are probably after the next
             // title — so no banner, and back to the library it came from.
-            if cameFromLibrary, host != nil, let shelf {
+            if host != nil, let shelf {
                 returnToLibrary = shelf
             }
         case .hostEnded, .local:
@@ -1115,11 +1182,54 @@ final class SessionModel: ObservableObject {
         resizing = resizeIndicator.active
     }
 
+    /// Drop the launch hold and let the stream through.
+    func revealStream() {
+        launchWatch?.cancel()
+        launchWatch = nil
+        launchHold = nil
+    }
+
+    /// Poll the host once a second for the launched title's state, and reveal when it has
+    /// answered — or when it never will. Same lane and identity as the shelf's Resume badge.
+    private func watchLaunch() {
+        guard let hold = launchHold?.entry, let host = activeHost else { return }
+        let port = connection.map(\.hostMgmtPort).flatMap { $0 > 0 ? $0 : nil } ?? host.effectiveMgmtPort
+        guard let identity = (try? ClientIdentityStore.shared.load())?.identity else {
+            revealStream()
+            return
+        }
+        let began = Date()
+        launchWatch?.cancel()
+        launchWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                let games = await LibraryClient.running(
+                    address: host.address, port: port,
+                    certPEM: identity.certPEM, keyPEM: identity.keyPEM,
+                    hostFingerprint: host.pinnedSHA256)
+                let state = games.first { $0.appID == hold.id }?.state
+                let elapsed = Date().timeIntervalSince(began)
+                let done: Bool
+                switch state {
+                case "launching": done = elapsed >= launchHoldMax
+                // running, exited, untracked, grace: the host has said all it will.
+                case .some: done = true
+                case nil: done = elapsed >= launchNoLease
+                }
+                if done {
+                    self?.revealStream()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: NSEC_PER_SEC)
+            }
+        }
+    }
+
     private func beginStreaming() {
         guard let conn = connection else { return }
         // Input capture itself is owned by StreamView (engaged by the captureEnabled
         // flip this phase change causes, released/re-engaged by the user from there).
         phase = .streaming
+        watchLaunch()
         displaySleepGuard.acquire()
         // Audio starts with streaming, not during the trust prompt — no host sound (or
         // mic uplink!) before the user trusted the host. Devices and the mic switch come from the

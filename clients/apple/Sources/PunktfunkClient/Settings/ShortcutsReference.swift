@@ -84,6 +84,7 @@ enum ShortcutsCatalog {
         }
         groups.append(.init(title: "Hardware keyboard", items: keyboard))
         groups.append(.init(title: "Touch", items: [
+            .init(keys: "Two-finger twist", text: "Open the quick actions dial"),
             .init(keys: "Three-finger tap", text: "Cycle the statistics overlay"),
         ]))
         #elseif os(tvOS)
@@ -92,8 +93,8 @@ enum ShortcutsCatalog {
         // gesture is genuinely stuck — which is why this was the one banner that could not simply
         // be deleted without putting the words somewhere findable first.
         groups.append(.init(title: "Siri Remote", items: [
+            .init(keys: "Back", text: "Open the quick actions dial"),
             .init(keys: "Hold Back", text: "Disconnect"),
-            .init(keys: "Back", text: "Open the quick actions ring"),
             .init(keys: "Touch surface", text: "Move the pointer"),
             .init(keys: "Press", text: "Click"),
             .init(keys: "Play/Pause", text: "Right-click"),

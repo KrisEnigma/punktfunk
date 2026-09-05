@@ -94,6 +94,8 @@ fn hosts() -> Vec<HostRow> {
         actions: Vec::new(),
         pin: None,
         bound_profile: None,
+        running: String::new(),
+        game_profiles: Default::default(),
     };
     vec![
         HostRow {
@@ -257,6 +259,9 @@ fn a_pinned_cards_library_launches_with_its_profile() {
         launcher: false,
         icon: String::new(),
         platform: None,
+        developer: None,
+        year: None,
+        genres: Vec::new(),
         running: false,
     }]);
     s.handle_menu(MenuEvent::Confirm);
@@ -289,6 +294,9 @@ fn a_primary_tiles_library_leaves_the_profile_to_the_binding() {
         launcher: false,
         icon: String::new(),
         platform: None,
+        developer: None,
+        year: None,
+        genres: Vec::new(),
         running: false,
     }]);
     s.handle_menu(MenuEvent::Confirm);
@@ -752,6 +760,9 @@ fn mixed_library(library: &LibraryShared) {
             launcher,
             icon: String::new(),
             platform: platform.map(str::to_string),
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         }
     };
@@ -892,6 +903,9 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         },
         crate::library::LibraryGame {
@@ -901,6 +915,9 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         },
     ]);
@@ -1141,6 +1158,9 @@ fn dump_console_screens() {
             launcher: false,
             icon: String::new(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         })
         .collect(),
@@ -1167,6 +1187,21 @@ fn dump_console_screens() {
     // 80 frames, not 40: no art means the 400 ms art-wait deadline, and 40×8 ms can
     // finish inside it and dump the spinner as the coverflow.
     dump(&mut s2, 80, 8, "07-library", true);
+
+    // The launch hold, mid-flight and settled. Confirm on a settled shelf raises it, so
+    // these two frames are the cover leaving its tile and the screen it lands on — the
+    // one sequence a still cannot show by itself.
+    {
+        let mut s5 = shelf_shell();
+        s5.handle_menu(MenuEvent::Move(MenuDir::Right));
+        dump(&mut s5, 80, 8, "_07d-settle", true);
+        s5.handle_menu(MenuEvent::Confirm);
+        // ~90 ms in: the spring is a third of the way over and a third of the way round.
+        dump(&mut s5, 3, 30, "07d-launch-hold-flight", true);
+        dump(&mut s5, 40, 16, "07e-launch-hold", true);
+        s5.session_streaming();
+        dump(&mut s5, 20, 16, "07f-launch-hold-streaming", true);
+    }
 
     // Sort/view bar focused: the only state that draws the accent wash. Both palette
     // poles — `accent(0.14)` reads differently over dark than pale.
@@ -1292,6 +1327,9 @@ fn platform_games() -> Vec<crate::library::LibraryGame> {
         launcher: false,
         icon: String::new(),
         platform: Some((*platform).to_string()),
+        developer: None,
+        year: None,
+        genres: Vec::new(),
         running: false,
     })
     .collect()
@@ -1541,4 +1579,198 @@ fn paints_are_built_by_the_theme_constructors() {
          paint:\n  {}",
         offenders.join("\n  ")
     );
+}
+
+// --- Launch hold -------------------------------------------------------------------
+
+mod launch_hold {
+    use super::*;
+    use crate::library::LibraryGame;
+    use pf_client_core::library::RunningGame;
+
+    fn game(id: &str, title: &str, launcher: bool) -> LibraryGame {
+        LibraryGame {
+            id: id.into(),
+            title: title.into(),
+            store: "steam".into(),
+            launcher,
+            icon: String::new(),
+            platform: Some("PC".into()),
+            developer: None,
+            year: None,
+            genres: Vec::new(),
+            running: false,
+        }
+    }
+
+    fn running(id: &str, state: &str) -> Vec<RunningGame> {
+        vec![RunningGame {
+            app_id: Some(id.into()),
+            title: String::new(),
+            state: state.into(),
+        }]
+    }
+
+    fn intent(id: &str) -> ConnectIntent {
+        ConnectIntent {
+            addr: "10.0.0.1".into(),
+            port: 47989,
+            fp_hex: "aa11".into(),
+            launch: Some(id.into()),
+            title: "Deck".into(),
+            request_access: false,
+            profile: None,
+        }
+    }
+
+    /// A shell standing on a shelf, with the bus kept so the poll can be witnessed.
+    fn on_shelf() -> (Shell, LibraryShared, ConsoleBus) {
+        fake_home();
+        let console = ConsoleShared::default();
+        console.set_hosts(hosts());
+        let library = LibraryShared::default();
+        let bus = ConsoleBus::default();
+        let mut s = Shell::new(
+            console,
+            library.clone(),
+            bus.clone(),
+            ConsoleOptions::desktop("deck".into(), false),
+            vec![
+                Screen::Home(HomeScreen::new()),
+                Screen::Library(LibraryScreen::new(&hosts()[0], 0)),
+            ],
+        )
+        .unwrap();
+        s.fake_clock = Some((100.0, 0.0));
+        library.set_games(vec![
+            game("steam:570", "Dota 2", false),
+            game("steam:ui", "Big Picture", true),
+        ]);
+        (s, library, bus)
+    }
+
+    fn at(s: &mut Shell, t: f64) {
+        s.fake_clock = Some((t, 0.0));
+    }
+
+    #[test]
+    fn a_launched_title_holds_the_stream_until_the_host_says_running() {
+        let (mut s, library, bus) = on_shelf();
+        s.start_connect(intent("steam:570"));
+        assert!(matches!(
+            s.take_action(),
+            Some(OverlayAction::Launch { .. })
+        ));
+        assert!(
+            s.holds_stream(),
+            "the hold is up from the press, not the first frame"
+        );
+        assert!(
+            s.connecting.is_none(),
+            "and it replaces the connect card rather than stacking on it"
+        );
+        assert_eq!(
+            s.launching.as_ref().map(|l| l.facts.as_str()),
+            Some("PC · Steam"),
+            "platform, year, store — this mock has no year"
+        );
+
+        // Nothing to ask the host until there is a session behind the launch.
+        s.sync();
+        assert!(
+            bus.drain().is_empty(),
+            "no lease exists before the dial lands"
+        );
+
+        s.session_streaming();
+        assert!(
+            s.holds_stream() && !s.in_stream,
+            "the handshake alone reveals nothing"
+        );
+        s.sync();
+        assert!(
+            bus.drain()
+                .iter()
+                .any(|c| matches!(c, ConsoleCmd::RefreshRunning { mgmt: 47990, .. })),
+            "the hold asks the shelf's host"
+        );
+        // The next poll waits for that answer, then a second.
+        at(&mut s, 101.5);
+        s.sync();
+        assert!(bus.drain().is_empty(), "no answer yet, no second question");
+        library.set_running(&running("steam:570", "launching"));
+        at(&mut s, 101.5);
+        s.sync();
+        assert!(s.holds_stream(), "launching is the wait itself");
+        assert!(!bus.drain().is_empty(), "answer landed and a second passed");
+
+        library.set_running(&running("steam:570", "running"));
+        s.sync();
+        assert!(!s.holds_stream() && s.in_stream);
+    }
+
+    /// B belongs to the dial while it is in flight: the hold stands where the connect
+    /// card used to, so it has to answer for it.
+    #[test]
+    fn back_cancels_the_dial_while_the_hold_is_still_connecting() {
+        let (mut s, _library, _bus) = on_shelf();
+        s.start_connect(intent("steam:570"));
+        assert!(matches!(
+            s.take_action(),
+            Some(OverlayAction::Launch { .. })
+        ));
+        s.handle_menu(MenuEvent::Back);
+        assert!(matches!(
+            s.take_action(),
+            Some(OverlayAction::CancelConnect)
+        ));
+        assert!(
+            !s.holds_stream() && !s.in_stream,
+            "cancelled back onto the shelf, not into a stream"
+        );
+    }
+
+    #[test]
+    fn the_hold_ignores_state_read_before_the_launch_and_gives_up_without_a_lease() {
+        let (mut s, library, _bus) = on_shelf();
+        // The shelf's own refresh, from before this launch: the previous copy exited.
+        library.set_running(&running("steam:570", "exited"));
+        s.start_connect(intent("steam:570"));
+        s.session_streaming();
+        s.sync();
+        assert!(
+            s.holds_stream(),
+            "a read from before the launch is not this launch"
+        );
+        at(&mut s, 100.0 + LAUNCH_NO_LEASE);
+        s.sync();
+        assert!(
+            s.in_stream,
+            "the host never listed it — nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn launcher_tiles_skip_the_hold_and_a_press_ends_it() {
+        let (mut s, _library, _bus) = on_shelf();
+        s.start_connect(intent("steam:ui"));
+        assert!(
+            s.connecting.is_some(),
+            "a launcher tile keeps the plain connect card"
+        );
+        s.session_streaming();
+        assert!(
+            s.in_stream && !s.holds_stream(),
+            "the host never tracks a launcher"
+        );
+
+        s.session_ended(None);
+        s.start_connect(intent("steam:570"));
+        s.session_streaming();
+        assert!(s.holds_stream());
+        assert!(s.handle_menu(MenuEvent::Move(MenuDir::Left)).is_none());
+        assert!(s.holds_stream(), "a nudge is not a request to see");
+        s.handle_menu(MenuEvent::Confirm);
+        assert!(s.in_stream && !s.holds_stream());
+    }
 }

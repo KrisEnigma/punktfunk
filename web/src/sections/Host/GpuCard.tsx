@@ -47,7 +47,7 @@ const fmtVram = (mb: number) =>
 
 /**
  * The vendor an explicit `PUNKTFUNK_ENCODER` pin can open on (display name) — the console mirror
- * of the host's backend→vendor table. Vendor-agnostic pins (software) and unknown/multi-vendor
+ * of the host's backend→vendor table. Vendor-agnostic pins (software, mf) and unknown/multi-vendor
  * spellings (vaapi, vulkan, pyrowave) map to nothing: no conflict to warn about.
  */
 const encoderPinVendor: Record<string, string> = {

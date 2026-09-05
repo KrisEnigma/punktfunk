@@ -24,6 +24,9 @@ pub unsafe extern "system" fn driver_entry(
         "[pf-vd] encode: {} linked",
         crate::encode::backends_linked().join(" ")
     );
+    // Before any thread of ours exists: mutating the environment is unsound once they do, and
+    // PyroWave's Vulkan instance hangs in session 0 without these.
+    crate::encode::thread::disable_implicit_vulkan_layers();
     let mut config = pod_init!(WDF_DRIVER_CONFIG);
     config.Size = core::mem::size_of::<WDF_DRIVER_CONFIG>() as ULONG;
     config.EvtDriverDeviceAdd = Some(driver_add);
@@ -53,6 +56,25 @@ extern "C" fn driver_add(_driver: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTSTA
         call_unsafe_wdf_function_binding!(WdfDeviceInitSetPnpPowerEventCallbacks, init, &mut pnp);
     }
 
+    // A control handle's close is the owner-gone signal (`watchdog::evt_file_cleanup`), so a
+    // crashed host's monitors depart at once instead of after the watchdog window. Set before
+    // IddCx's own init: should the class extension take the slot, the silence watchdog still
+    // covers a dead host.
+    let mut files = pod_init!(wdk_sys::WDF_FILEOBJECT_CONFIG);
+    files.Size = core::mem::size_of::<wdk_sys::WDF_FILEOBJECT_CONFIG>() as ULONG;
+    files.EvtFileCleanup = Some(crate::watchdog::evt_file_cleanup);
+    files.AutoForwardCleanupClose = wdk_sys::_WDF_TRI_STATE::WdfUseDefault;
+    files.FileObjectClass = wdk_sys::_WDF_FILEOBJECT_CLASS::WdfFileObjectWdfCannotUseFsContexts;
+    // SAFETY: init is the framework-provided device-init; files is valid for the call.
+    unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceInitSetFileObjectConfig,
+            init,
+            &mut files,
+            WDF_NO_OBJECT_ATTRIBUTES
+        );
+    }
+
     // Build the IddCx client config and wire the SDR callbacks. `.Size` = size_of (1.10 structs, 1.10 fw).
     let mut cfg = pod_init!(iddcx::IDD_CX_CLIENT_CONFIG);
     cfg.Size = core::mem::size_of::<iddcx::IDD_CX_CLIENT_CONFIG>() as u32;
@@ -75,6 +97,9 @@ extern "C" fn driver_add(_driver: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTSTA
     cfg.EvtIddCxMonitorSetGammaRamp = Some(callbacks::set_gamma_ramp);
     cfg.EvtIddCxMonitorAssignSwapChain = Some(callbacks::assign_swap_chain);
     cfg.EvtIddCxMonitorUnassignSwapChain = Some(callbacks::unassign_swap_chain);
+    // Obligated for a remote-session adapter (the seat devnode's role); harmless on the console,
+    // where the OS never calls it because every monitor ships an EDID.
+    cfg.EvtIddCxMonitorGetPhysicalSize = Some(callbacks::monitor_get_physical_size);
     cfg.EvtIddCxDeviceIoControl = Some(callbacks::device_io_control);
 
     // SAFETY: init is the framework device-init; cfg is fully populated + sized. (Links IddCxStub.)

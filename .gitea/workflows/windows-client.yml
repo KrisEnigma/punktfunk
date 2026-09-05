@@ -217,6 +217,21 @@ jobs:
           "MSIX_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "MSIX version $v  arch ${{ matrix.arch }}  target ${{ matrix.target }}  target-dir ${{ matrix.td }}"
 
+      - name: sccache preflight (a dead cache costs a cold build, not the leg)
+        shell: pwsh
+        # A daemon that cannot reach S3 fails cargo at `rustc -vV`, before a line compiles — and
+        # cargo PINS that failed probe in <target-dir>/.rustc_info.json, so one transient 401
+        # wedges this leg on every later run until the file is deleted. A 2026-09-04 blip cost the
+        # arm64 leg 11 runs that way. Probe once here and drop the wrapper when it fails, so the
+        # cached probe records a success.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          & sccache --show-stats 2>&1 | Select-Object -First 12 | Write-Output
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "sccache daemon failed to start - building this leg without the cache"
+            "RUSTC_WRAPPER=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
       # All three client binaries, ONCE, in release. The shell spawns punktfunk-session.exe (a
       # package sibling) for every stream, and punktfunk-cli builds the `punktfunk.exe` the manifest
       # aliases and pack-msix.ps1 requires (bf981027 added the requirement without the build — the

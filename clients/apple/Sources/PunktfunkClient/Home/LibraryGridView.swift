@@ -282,7 +282,7 @@ struct LibraryGridView: View {
             candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
             icon: game.iconToken,
             drawnSize: CGSize(width: width, height: height),
-            onLoaded: { artSettled += 1 })
+            onLoaded: { artSettled += 1 }, frameID: game.id)
             .frame(width: width, height: height)
             .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
             .overlay(alignment: .topTrailing) {

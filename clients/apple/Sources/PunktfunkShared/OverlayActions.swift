@@ -12,6 +12,8 @@ import Foundation
 /// `OverlayConfig.shortcuts` by id.
 public enum SlotId: Equatable, Sendable {
     case endStream, disconnectLinger, touchMode, keyboard, stats, mic, pad, sendText
+    /// The host's guide button (Xbox / PS / Steam) and its quick-access `…`, as synthetic pad taps.
+    case guide, qam
     case host(String)
     case shortcut(String)
 
@@ -26,6 +28,8 @@ public enum SlotId: Equatable, Sendable {
         case .mic: return "mic"
         case .pad: return "pad"
         case .sendText: return "send_text"
+        case .guide: return "guide"
+        case .qam: return "qam"
         case .host(let id): return "host:\(id)"
         case .shortcut(let id): return "shortcut:\(id)"
         }
@@ -42,6 +46,8 @@ public enum SlotId: Equatable, Sendable {
         case "mic": return .mic
         case "pad": return .pad
         case "send_text": return .sendText
+        case "guide": return .guide
+        case "qam": return .qam
         default:
             if s.hasPrefix("host:"), s.count > 5 { return .host(String(s.dropFirst(5))) }
             if s.hasPrefix("shortcut:"), s.count > 9 { return .shortcut(String(s.dropFirst(9))) }

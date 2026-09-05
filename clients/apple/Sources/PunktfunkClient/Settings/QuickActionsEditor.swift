@@ -41,6 +41,9 @@ private let builtinGroups: [SlotGroup] = [
         .init(id: "pad", label: "Virtual controller",
               note: noMacNote ?? "Shows or hides the on-screen controller"),
         .init(id: "send_text", label: "Send text", note: "Not on this device yet"),
+        .init(id: "guide", label: "Guide button", note: "The host's Xbox / PS / Steam button"),
+        .init(id: "qam", label: "Quick access menu",
+              note: "Only where the host's pad is Steam-shaped"),
     ]),
     .init(id: "View", options: [.init(id: "stats", label: "Statistics")]),
     .init(id: "Audio", options: [.init(id: "mic", label: "Microphone")]),
@@ -280,7 +283,7 @@ struct QuickActionsEditor: View {
             micAvailable: { true }, micMuted: { false }, toggleMic: {},
             hostActions: { previewHosts }, invokeHost: { _ in },
             sendShortcut: { _ in },
-            padAvailable: { true }, padShown: { false }, togglePad: {},
+            padAvailable: { true }, padShown: { false }, togglePad: {}, tapPadButton: { _ in },
             currentMode: { (1920, 1080, 60) }, requestMode: { _, _, _ in })
     }
 

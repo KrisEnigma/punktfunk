@@ -54,9 +54,14 @@ pub(crate) fn steam_appid_from_launch(cmd: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// [`SteamGameWatch::Exited`] only after the reaper was seen running; a cold Steam boot is [`Cancelled`].
+/// [`SteamGameWatch::Exited`] only after the game was seen on screen; a cold Steam boot is
+/// [`Cancelled`]. Both edges come from gamescope's own root atoms, never from process shape:
+/// Steam wraps its pre-launch work (shader precompile, the install-script evaluator) in the same
+/// `reaper SteamLaunch AppId=` the game gets, so a `/proc` match adopts a tree that was never the
+/// game and reads its exit as the game exiting.
 pub(crate) fn wait_for_steam_game_exit(
     appid: u32,
+    seat: Option<&str>,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> SteamGameWatch {
     use std::sync::atomic::Ordering;
@@ -68,18 +73,28 @@ pub(crate) fn wait_for_steam_game_exit(
     const EXIT_CONFIRM: Duration = Duration::from_secs(3);
 
     let start_deadline = Instant::now() + START_GRACE;
-    while !steam_game_running(appid) {
+    // Coming up is `GAMESCOPE_FOCUSED_APP`, which also picks the display: a seat runs its own
+    // gamescope with its own Xwayland, and only the one actually running this appid focuses it.
+    // (`seat` has already narrowed it; this stays correct if the key is ever unavailable.)
+    let dpy = loop {
+        if let Some(d) = display_presenting(appid, seat) {
+            break d;
+        }
         if cancel.load(Ordering::Relaxed) || Instant::now() >= start_deadline {
             return SteamGameWatch::Cancelled;
         }
         std::thread::sleep(POLL);
-    }
+    };
+    tracing::info!(appid, dpy = %dpy, "gamescope: the launched game is on screen");
     let mut gone_since: Option<Instant> = None;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return SteamGameWatch::Cancelled;
         }
-        if steam_game_running(appid) {
+        // Going away is baselayer membership, not focus: opening the Steam overlay moves focus
+        // to the client UI while the game is still running, and that must not read as an exit.
+        // A vanished display (gamescope gone) also ends it — nothing left to present into.
+        if baselayer_has(&dpy, appid) {
             gone_since = None;
         } else if gone_since.get_or_insert_with(Instant::now).elapsed() >= EXIT_CONFIRM {
             return SteamGameWatch::Exited;
@@ -88,44 +103,63 @@ pub(crate) fn wait_for_steam_game_exit(
     }
 }
 
-/// Exact `AppId=<appid>` so 57 never hits 570; shader precompile is not reaper-wrapped.
-fn steam_game_running(appid: u32) -> bool {
-    let uid = crate::proc::current_uid();
-    let appid_tok = format!("AppId={appid}");
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
-    };
-    for e in entries.flatten() {
-        let name = e.file_name();
-        let Some(pid_str) = name.to_str() else {
-            continue;
-        };
-        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        let Ok(md) = std::fs::metadata(e.path()) else {
-            continue;
-        };
-        use std::os::unix::fs::MetadataExt;
-        if md.uid() != uid {
-            continue;
-        }
-        let Ok(cmdline) = std::fs::read(e.path().join("cmdline")) else {
-            continue;
-        };
-        let (mut launch, mut appid_match) = (false, false);
-        for arg in cmdline.split(|&b| b == 0) {
-            if arg == b"SteamLaunch" {
-                launch = true;
-            } else if arg == appid_tok.as_bytes() {
-                appid_match = true;
-            }
-        }
-        if launch && appid_match {
-            return true;
-        }
+/// The gamescope Xwayland presenting `appid` on this seat, when one is.
+fn display_presenting(appid: u32, seat: Option<&str>) -> Option<String> {
+    xwayland_cursor_targets(seat)
+        .into_iter()
+        .map(|(d, _xauth)| d)
+        .find(|d| focused_app(d) == Some(appid))
+}
+
+/// Connect to gamescope's Xwayland root. Never `setenv` XAUTHORITY to reach it: glibc rewrites
+/// process-global `environ` and `getenv` takes no lock. Gamescope starts Xwayland with no
+/// `-auth`, so an empty token connects — the same fallback `pf-capture`'s cursor source uses.
+fn root_atoms(display: &str) -> Option<(x11rb::rust_connection::RustConnection, u32)> {
+    use x11rb::connection::Connection;
+    use x11rb::rust_connection::{DefaultStream, RustConnection};
+    let parsed =
+        x11rb::reexports::x11rb_protocol::parse_display::parse_display(Some(display)).ok()?;
+    let screen = usize::from(parsed.screen);
+    let stream = parsed
+        .connect_instruction()
+        .into_iter()
+        .find_map(|addr| DefaultStream::connect(&addr).ok())
+        .map(|(s, _peer)| s)?;
+    let conn =
+        RustConnection::connect_to_stream_with_auth_info(stream, screen, Vec::new(), Vec::new())
+            .ok()?;
+    let root = conn.setup().roots.get(screen)?.root;
+    Some((conn, root))
+}
+
+/// One `CARDINAL` list from `display`'s root window. `None` once the display is gone.
+fn root_cardinals(display: &str, name: &[u8]) -> Option<Vec<u32>> {
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+    let (conn, root) = root_atoms(display)?;
+    let atom = conn.intern_atom(true, name).ok()?.reply().ok()?.atom;
+    if atom == 0 {
+        return None; // never interned: this gamescope is not in --steam mode
     }
-    false
+    let prop = conn
+        .get_property(false, root, atom, AtomEnum::CARDINAL, 0, 16)
+        .ok()?
+        .reply()
+        .ok()?;
+    prop.value32().map(|v| v.collect())
+}
+
+/// The appid `display` is presenting, or `None` when it says nothing.
+fn focused_app(display: &str) -> Option<u32> {
+    root_cardinals(display, b"GAMESCOPE_FOCUSED_APP")?
+        .first()
+        .copied()
+}
+
+/// Is `appid` in `GAMESCOPECTRL_BASELAYER_APPID`? Steam adds it as the launch starts and removes
+/// it within a second of the game process going (measured on .21). The list also carries ids no
+/// game is running, so this only decides *going away* for an appid already seen focused.
+fn baselayer_has(display: &str, appid: u32) -> bool {
+    root_cardinals(display, b"GAMESCOPECTRL_BASELAYER_APPID").is_some_and(|v| v.contains(&appid))
 }
 
 /// Managed/SteamOS is single-session and logs to journald, so this is unscoped.
@@ -190,6 +224,29 @@ fn node_from_log(log: &std::path::Path) -> Option<u32> {
             let digits: String = tail.chars().filter(|c| c.is_ascii_digit()).collect();
             if let Ok(id) = digits.parse() {
                 return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// This instance's `GAMESCOPE_WAYLAND_DISPLAY` name, from `Running compositor on wayland
+/// display 'gamescope-N'`. It is the seat key: every discovery below filters on it, because a
+/// concurrent seat's gamescope is equally discoverable and taking the first match delivers one
+/// seat's launch (and cursor) to another's screen.
+pub(super) fn wayland_name_from_log(log: &std::path::Path) -> Option<String> {
+    const MARK: &str = "Running compositor on wayland display ";
+    let text = std::fs::read_to_string(log).ok()?;
+    for line in text.lines().rev() {
+        if let Some(pos) = line.find(MARK) {
+            let tail = &line[pos + MARK.len()..];
+            let name: String = tail
+                .trim_start_matches(['\'', '"'])
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
             }
         }
     }
@@ -543,6 +600,47 @@ fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
 }
 
 #[cfg(test)]
+mod live_probe {
+    /// Reads the atoms off a real `--steam` gamescope. Ignored: needs one running.
+    /// `cargo test -p pf-vdisplay --bins -- --ignored steam_atoms --nocapture`
+    #[test]
+    #[ignore]
+    fn steam_atoms_are_readable() {
+        let targets = super::xwayland_cursor_targets(None);
+        assert!(!targets.is_empty(), "no gamescope Xwayland found");
+        for (dpy, _) in &targets {
+            println!(
+                "{dpy}: focused={:?} baselayer={:?}",
+                super::focused_app(dpy),
+                super::root_cardinals(dpy, b"GAMESCOPECTRL_BASELAYER_APPID"),
+            );
+        }
+        assert!(
+            targets.iter().any(|(d, _)| super::focused_app(d).is_some()),
+            "no display answered GAMESCOPE_FOCUSED_APP — the empty-token connect failed"
+        );
+    }
+
+    /// With two gamescopes up, the seat key must select exactly one. Ignored: needs both.
+    /// `PF_SEAT_A=gamescope-0 PF_SEAT_B=gamescope-1 cargo test -p pf-vdisplay -- --ignored seat_key --nocapture`
+    #[test]
+    #[ignore]
+    fn seat_key_selects_one_gamescope() {
+        let all = super::xwayland_cursor_targets(None);
+        println!("unscoped: {all:?}");
+        assert!(all.len() >= 2, "need two live gamescopes for this probe");
+        for var in ["PF_SEAT_A", "PF_SEAT_B"] {
+            let Ok(seat) = std::env::var(var) else {
+                continue;
+            };
+            let scoped = super::xwayland_cursor_targets(Some(&seat));
+            println!("{var}={seat}: {scoped:?}");
+            assert_eq!(scoped.len(), 1, "{seat} did not select exactly one display");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         parse_patch_level, parse_version, steam_appid_from_launch, MIN_GAMESCOPE,
@@ -570,6 +668,28 @@ mod tests {
         assert_eq!(parse_patch_level("3.16.25+pfhdr (gcc)"), 0);
         // The version triple must never be mistaken for the level.
         assert_eq!(parse_patch_level("gamescope version 3.16.25"), 0);
+    }
+
+    /// The seat key comes off the spawn log gamescope already writes, ANSI colouring and all.
+    #[test]
+    fn reads_the_seat_key_from_the_spawn_log() {
+        let dir = std::env::temp_dir().join(format!("pf-seat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("gs.log");
+        std::fs::write(
+            &log,
+            "[gs] \u{1b}[0;34mInfo\u{1b}[0m wlserver: [wayland] unable to lock lockfile\n\
+             [gs] Info  wlserver: Running compositor on wayland display 'gamescope-1'\n\
+             [gs] Info  wlserver: Starting Xwayland on :3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::wayland_name_from_log(&log).as_deref(),
+            Some("gamescope-1")
+        );
+        std::fs::write(&log, "no such line here\n").unwrap();
+        assert_eq!(super::wayland_name_from_log(&log), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

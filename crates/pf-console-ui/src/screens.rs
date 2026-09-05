@@ -10,6 +10,7 @@ pub(crate) mod collections;
 pub(crate) mod controllers;
 pub(crate) mod home;
 pub(crate) mod library;
+
 pub(crate) mod options;
 pub(crate) mod pair;
 pub(crate) mod pin_hosts;
@@ -46,7 +47,7 @@ pub(crate) enum Bg {
 }
 
 /// Per-event screen context. `settings` is mut — the settings screen persists in place.
-pub(crate) struct Ctx<'a> {
+pub struct Ctx<'a> {
     pub hosts: &'a [HostRow],
     /// Live library slot; the top screen owns it.
     pub library: &'a LibraryShared,
@@ -266,7 +267,7 @@ impl Screen {
             Screen::ShortcutEditor(s) => s.title(),
             Screen::Pair(s) => format!("Pair with {}", s.host_name()),
             Screen::PinHosts(s) => format!("Pin \u{201c}{}\u{201d}", s.profile_name()),
-            Screen::BindProfile(s) => format!("Default for {}", s.host_name()),
+            Screen::BindProfile(s) => s.heading(),
             Screen::Controllers(_) => "Connected controllers".into(),
             Screen::HostOptions(s) => s.title(),
         }

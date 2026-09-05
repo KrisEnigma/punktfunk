@@ -19,10 +19,10 @@ use windows::{
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
             Direct3D11::{
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
                 D3D11_CREATE_DEVICE_PREVENT_ALTERING_LAYER_SETTINGS_FROM_REGISTRY,
-                D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-                ID3D11Multithread,
+                D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+                ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
             },
             Dxgi::{CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory5},
         },
@@ -85,24 +85,38 @@ impl Direct3DDevice {
         let mut device = None;
         let mut device_context = None;
 
-        // SAFETY: `adapter` is a live IDXGIAdapter1; `device`/`device_context` are valid local out-params
-        // (checked for None below); the flag set + SDK version are valid constants. `?` returns on failure.
-        unsafe {
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                None,
-                // NO `D3D11_CREATE_DEVICE_SINGLETHREADED`: the DEVICE_POOL shares this device (and
-                // its immediate context) across every swap-chain processor on the LUID, so the
-                // single-caller guarantee that flag declares no longer holds with >1 monitor.
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT
-                    | D3D11_CREATE_DEVICE_PREVENT_ALTERING_LAYER_SETTINGS_FROM_REGISTRY,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut device_context),
-            )?;
+        // NO `D3D11_CREATE_DEVICE_SINGLETHREADED`: the pool shares this device across every
+        // swap-chain processor on the LUID, so that flag's single-caller guarantee is false.
+        const BASE: D3D11_CREATE_DEVICE_FLAG = D3D11_CREATE_DEVICE_FLAG(
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT.0
+                | D3D11_CREATE_DEVICE_PREVENT_ALTERING_LAYER_SETTINGS_FROM_REGISTRY.0,
+        );
+        let mut create = |flags: D3D11_CREATE_DEVICE_FLAG| {
+            // SAFETY: `adapter` is a live IDXGIAdapter1; `device`/`device_context` are valid local
+            // out-params (checked for None below); the flag set + SDK version are valid constants.
+            unsafe {
+                D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    None,
+                    flags,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut device_context),
+                )
+            }
+        };
+        // `IMFDXGIDeviceManager::ResetDevice` demands VIDEO_SUPPORT: without it Media Foundation
+        // fails `SET_D3D_MANAGER` with a bare E_FAIL. The fallback keeps capture on an adapter
+        // that refuses the flag — no other backend needs it.
+        if let Err(e) = create(BASE | D3D11_CREATE_DEVICE_VIDEO_SUPPORT) {
+            dbglog!(
+                "[pf-vd] D3D11 device refused VIDEO_SUPPORT ({e:?}) — retrying without it; the \
+                 Media Foundation backend will not open on this adapter"
+            );
+            create(BASE)?;
         }
 
         let device = device.ok_or_else(|| Error::new(E_FAIL, "ID3D11Device not found"))?;

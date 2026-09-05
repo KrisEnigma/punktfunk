@@ -490,13 +490,13 @@ pub fn store_split_verdict(key: SplitKey, mode: u32) {
     split_verdicts().lock().unwrap().insert(key, mode);
 }
 
-#[cfg(any(target_os = "linux", windows))]
-/// Drop every cached verdict. Test-only: the cache is process-global, so an
+/// Drop every cached verdict. For tests: the cache is process-global, so an
 /// on-hardware arbitration would otherwise leak into later tests that open
 /// the same config with `PUNKTFUNK_SPLIT_ENCODE` unset.
-// Linux-only: sole caller is `nvenc_cuda`'s on-hw test. Ungated it is dead
-// on Windows — the same item-level `dead_code` trap.
-#[cfg(all(test, target_os = "linux"))]
+// Gated like its two siblings, NOT on `test`: the sole caller is `nvenc_cuda`'s
+// on-hw test in pf-encode, and `cfg(test)` is false for a crate built as that
+// crate's dependency. Public in a public module, so never dead code.
+#[cfg(any(target_os = "linux", windows))]
 pub fn clear_split_verdicts() {
     split_verdicts().lock().unwrap().clear();
 }

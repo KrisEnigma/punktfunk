@@ -26,6 +26,11 @@ mod vsync;
 use async_loop::run_async;
 pub(crate) use setup::{codec_label, codec_mime};
 use sync_loop::run_sync;
+// Shared with the PyroWave lane, which exists only where the codec is built (see `crate::pyro`).
+#[cfg(target_pointer_width = "64")]
+pub(crate) use latency::now_realtime_ns;
+#[cfg(target_pointer_width = "64")]
+pub(crate) use setup::boost_thread_priority;
 
 use ndk::native_window::NativeWindow;
 use punktfunk_core::client::NativeClient;
@@ -87,7 +92,7 @@ const NO_OUTPUT_PATIENCE: std::time::Duration = std::time::Duration::from_millis
 /// never saw. When the host is sending nothing at all, the request changes nothing — but the log line
 /// beside it is what separates that from "we received AUs and lost them", which no previous black
 /// screen report could tell us.
-const NO_VIDEO_PATIENCE: std::time::Duration = std::time::Duration::from_millis(1500);
+pub(crate) const NO_VIDEO_PATIENCE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Re-ask cadence once [`NO_VIDEO_PATIENCE`] has elapsed with still nothing received. Slow, because
 /// this state is either self-healing on the first ask or not ours to heal — and each pass logs.
@@ -148,8 +153,12 @@ pub(crate) struct DecodeOptions {
     pub surface_size: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// The decode entry point on the `pf-decode` thread: dispatches to the async or synchronous loop.
-/// Both run until `shutdown` is set or the session closes.
+/// The decode entry point on the `pf-decode` thread: dispatches to the codec's loop. All of
+/// them run until `shutdown` is set or the session closes.
+///
+/// PyroWave leaves before any of this: it is GPU compute with its own Vulkan present path
+/// ([`crate::pyro`]), sharing no MediaCodec machinery — not the codec object, not the
+/// surface handling, not the presenters. Everything below is the MediaCodec pipeline.
 pub fn run(
     client: Arc<NativeClient>,
     window: NativeWindow,
@@ -157,6 +166,10 @@ pub fn run(
     stats: Arc<crate::stats::VideoStats>,
     opts: DecodeOptions,
 ) {
+    if client.codec == punktfunk_core::quic::CODEC_PYROWAVE {
+        crate::pyro::run(client, window, shutdown, stats, opts);
+        return;
+    }
     if opts.low_latency_mode && USE_ASYNC_DECODE {
         run_async(client, window, shutdown, stats, opts);
     } else {

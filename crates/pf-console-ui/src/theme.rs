@@ -23,14 +23,14 @@ use std::collections::HashMap;
 
 /// Anti-aliased fill. Skia's `Paint::new` defaults `fAntiAlias` off, so a
 /// bare constructor hard-steps every round-rect and glyph.
-pub(crate) fn fill(color: Color4f) -> Paint {
+pub fn fill(color: Color4f) -> Paint {
     let mut p = Paint::new(color, None);
     p.set_anti_alias(true);
     p
 }
 
 /// Stroke of `width` device pixels. Callers that scale by `k` pass `width * k`.
-pub(crate) fn stroke(color: Color4f, width: f32) -> Paint {
+pub fn stroke(color: Color4f, width: f32) -> Paint {
     let mut p = fill(color);
     p.set_style(skia_safe::PaintStyle::Stroke);
     p.set_stroke_width(width);
@@ -39,12 +39,12 @@ pub(crate) fn stroke(color: Color4f, width: f32) -> Paint {
 
 /// Shader paint, opaque by construction. Skia multiplies shader output by
 /// the paint's alpha, so an alpha-0 placeholder draws nothing.
-pub(crate) fn shaded() -> Paint {
+pub fn shaded() -> Paint {
     fill(Color4f::new(0.0, 0.0, 0.0, 1.0))
 }
 
 /// [`shaded`] as a stroke. Opaque, or Skia scales the gradient's alpha away.
-pub(crate) fn shaded_stroke(width: f32) -> Paint {
+pub fn shaded_stroke(width: f32) -> Paint {
     let mut p = shaded();
     p.set_style(skia_safe::PaintStyle::Stroke);
     p.set_stroke_width(width);
@@ -53,7 +53,7 @@ pub(crate) fn shaded_stroke(width: f32) -> Paint {
 
 /// Radial shade under the in-stream ring so the discs lift off the picture.
 /// `alpha` tracks the ring's opening.
-pub(crate) fn ring_scrim(cx: f32, cy: f32, r: f32, alpha: f32) -> Paint {
+pub fn ring_scrim(cx: f32, cy: f32, r: f32, alpha: f32) -> Paint {
     let mut p = shaded();
     let colors = [
         Color4f::new(0.0, 0.0, 0.0, 0.36 * alpha),
@@ -71,21 +71,21 @@ pub(crate) fn ring_scrim(cx: f32, cy: f32, r: f32, alpha: f32) -> Paint {
 }
 
 /// Blurred black under a disc or card. Lifts translucent glass off a moving picture.
-pub(crate) fn soft_shadow(alpha: f32, sigma: f32) -> Paint {
+pub fn soft_shadow(alpha: f32, sigma: f32) -> Paint {
     let mut p = fill(Color4f::new(0.0, 0.0, 0.0, alpha));
     p.set_mask_filter(MaskFilter::blur(skia_safe::BlurStyle::Normal, sigma, None));
     p
 }
 
 /// Blurred white stroke. Drawn under the crisp ring so the glow bleeds past the edge.
-pub(crate) fn glow_ring(alpha: f32, width: f32, sigma: f32) -> Paint {
+pub fn glow_ring(alpha: f32, width: f32, sigma: f32) -> Paint {
     let mut p = stroke(Color4f::new(1.0, 1.0, 1.0, alpha), width);
     p.set_mask_filter(MaskFilter::blur(skia_safe::BlurStyle::Normal, sigma, None));
     p
 }
 
 /// Top-edge hairline. The stream cannot backdrop-blur, so this is the glass edge.
-pub(crate) fn rim_light(top: f32, bottom: f32, alpha: f32, width: f32) -> Paint {
+pub fn rim_light(top: f32, bottom: f32, alpha: f32, width: f32) -> Paint {
     let mut p = shaded_stroke(width);
     let colors = [
         Color4f::new(1.0, 1.0, 1.0, alpha),
@@ -104,30 +104,30 @@ pub(crate) fn rim_light(top: f32, bottom: f32, alpha: f32, width: f32) -> Paint 
 
 /// `save_layer` paint: filters only, no geometry, so AA is a no-op. Own constructor
 /// so the AA guard can tell a compositing paint from a drawing one.
-pub(crate) fn layer() -> Paint {
+pub fn layer() -> Paint {
     Paint::default()
 }
 
 /// Linear + linear mipmap. `draw_image_rect` defaults to nearest with no mipmaps;
 /// a poster shrunk into a cell then drops whole source rows.
-pub(crate) fn art_sampling() -> skia_safe::SamplingOptions {
+pub fn art_sampling() -> skia_safe::SamplingOptions {
     skia_safe::SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::Linear)
 }
 
 /// Status red (GTK `#ff938a`). A warning must not follow the wallpaper.
-pub(crate) const ERROR: Color4f = Color4f::new(1.0, 0.576, 0.541, 1.0);
-pub(crate) const ONLINE_GREEN: Color4f = Color4f::new(0.20, 0.84, 0.29, 1.0);
+pub const ERROR: Color4f = Color4f::new(1.0, 0.576, 0.541, 1.0);
+pub const ONLINE_GREEN: Color4f = Color4f::new(0.20, 0.84, 0.29, 1.0);
 
 /// Palette-derived fg, accent, glass, and scrim. Pale fields need dark text;
 /// a brand-violet wash on a copper field clashes.
 #[derive(Clone, Copy)]
-pub(crate) struct Ink {
+pub struct Ink {
     fg: Color4f,
     accent: Color4f,
     glass: Color4f,
     /// Ground the vignette leans toward (black on dark, white on pale) and how
     /// hard (`a`). Mixing toward white at dark-field strength bleaches chroma.
-    pub(crate) scrim: Color4f,
+    pub scrim: Color4f,
 }
 
 /// Shipped dark look, and the fallback before any palette is applied.
@@ -142,7 +142,7 @@ const DARK_INK: Ink = Ink {
 impl Ink {
     /// Palette ink. Pale fields get near-black fg tinted toward the ground (a
     /// foreign grey reads as a second palette) and white-frost glass.
-    pub(crate) fn of(p: &crate::library::Palette) -> Ink {
+    pub fn of(p: &crate::library::Palette) -> Ink {
         let accent = Color4f::new(p.accent.0 as f32, p.accent.1 as f32, p.accent.2 as f32, 1.0);
         if !p.light {
             return Ink { accent, ..DARK_INK };
@@ -164,7 +164,7 @@ impl Ink {
 
     /// OS-theme ink. The accent is already lifted by [`crate::os_theme::readable_accent`];
     /// an arbitrary OS colour is not contrast-safe as focus. Fg is the theme's own.
-    pub(crate) fn of_os(t: &crate::os_theme::OsTheme) -> Ink {
+    pub fn of_os(t: &crate::os_theme::OsTheme) -> Ink {
         let c = |(r, g, b): (f64, f64, f64), a: f32| Color4f::new(r as f32, g as f32, b as f32, a);
         let accent = c(crate::os_theme::readable_accent(t), 1.0);
         if !t.light {
@@ -195,37 +195,37 @@ thread_local! {
     static REDUCE_MOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub(crate) fn set_ink(ink: Ink) {
+pub fn set_ink(ink: Ink) {
     INK.with(|i| i.set(ink));
 }
 
-pub(crate) fn ink() -> Ink {
+pub fn ink() -> Ink {
     INK.with(std::cell::Cell::get)
 }
 
-pub(crate) fn set_reduce_motion(on: bool) {
+pub fn set_reduce_motion(on: bool) {
     REDUCE_MOTION.with(|r| r.set(on));
 }
 
 /// Travel suppressed this frame. Callers keep the state change and drop the glide.
 /// Never used to skip a haptic: the pulse replaces the motion.
-pub(crate) fn reduce_motion() -> bool {
+pub fn reduce_motion() -> bool {
     REDUCE_MOTION.with(std::cell::Cell::get)
 }
 
-pub(crate) fn fg(alpha: f32) -> Color4f {
+pub fn fg(alpha: f32) -> Color4f {
     let c = ink().fg;
     Color4f::new(c.r, c.g, c.b, alpha)
 }
 
-pub(crate) fn accent(alpha: f32) -> Color4f {
+pub fn accent(alpha: f32) -> Color4f {
     let c = ink().accent;
     Color4f::new(c.r, c.g, c.b, alpha)
 }
 
 /// Text wash. `alpha` is dark-field strength; multiplied by [`Ink::scrim`].a so a
 /// pale field does not bleach.
-pub(crate) fn shade(alpha: f32) -> Color4f {
+pub fn shade(alpha: f32) -> Color4f {
     let s = ink().scrim;
     Color4f::new(s.r, s.g, s.b, alpha * s.a)
 }
@@ -233,7 +233,7 @@ pub(crate) fn shade(alpha: f32) -> Color4f {
 /// Opaque coverless-card face, `tint` of the way from the field's ground toward accent.
 /// Coverflow sides overlap, so glass would show the neighbour. Face and [`fg`] move
 /// opposite ways with the palette; a fixed near-black face under pale `fg` fails contrast.
-pub(crate) fn card_face(tint: f32) -> Color4f {
+pub fn card_face(tint: f32) -> Color4f {
     let a = ink().accent;
     let base = if ink().scrim.r > 0.5 { 1.0 } else { 0.0 };
     let mix = |c: f32| c * tint + base * (1.0 - tint);
@@ -242,7 +242,7 @@ pub(crate) fn card_face(tint: f32) -> Color4f {
 
 /// Black or white on the accent, by luminance not `light`: an accent is picked
 /// against the glass, not the field.
-pub(crate) fn on_accent() -> Color4f {
+pub fn on_accent() -> Color4f {
     let a = ink().accent;
     let luma = 0.2126 * a.r + 0.7152 * a.g + 0.0722 * a.b;
     if luma > 0.55 {
@@ -252,7 +252,7 @@ pub(crate) fn on_accent() -> Color4f {
     }
 }
 
-pub(crate) enum PanelStroke {
+pub enum PanelStroke {
     /// Hairline at this alpha (rows, pills).
     Plain(f32),
     /// Fg 0.22 → 0.04 top→bottom.
@@ -264,7 +264,7 @@ pub(crate) enum PanelStroke {
 }
 
 /// Glass panel. `corner` and the dash pattern are design units; the caller's `k` scales them.
-pub(crate) fn panel(
+pub fn panel(
     canvas: &Canvas,
     rect: Rect,
     corner: f32,
@@ -310,7 +310,7 @@ pub(crate) fn panel(
 /// 4×5 row-major colour matrix: neighbours lose saturation and brightness with
 /// `d` (0 = focused, 1 = fully receded). Rec. 709 sat mix, then lerp toward the
 /// ground: `out = (1 − b)·sat_mix(c) + ground·b`.
-pub(crate) fn recede_matrix(d: f64) -> [f32; 20] {
+pub fn recede_matrix(d: f64) -> [f32; 20] {
     let d = d.clamp(0.0, 1.0);
     let sat = (1.0 - RECEDE_SATURATION * d) as f32;
     // Toward the ground, not darker. A darkened tile on a pale field gains contrast.
@@ -357,7 +357,7 @@ const RECEDE_BRIGHTNESS: f64 = 0.20;
 
 /// Inner 1 px top-edge highlight over the top 40 % of the panel. Separate from
 /// [`panel`] so resting rows skip the extra stroke.
-pub(crate) fn panel_highlight(canvas: &Canvas, rect: Rect, corner: f32, k: f32) {
+pub fn panel_highlight(canvas: &Canvas, rect: Rect, corner: f32, k: f32) {
     let inset = rect.with_inset((0.5 * k, 0.5 * k));
     let mut p = shaded_stroke(k.max(1.0));
     let colors = [fg(0.10), fg(0.0)];
@@ -381,7 +381,7 @@ pub(crate) fn panel_highlight(canvas: &Canvas, rect: Rect, corner: f32, k: f32) 
 const HALO_OUTSET: f32 = 4.0;
 
 /// Accent glow under the focused card. Drawn behind [`drop_shadow`].
-pub(crate) fn focus_halo(canvas: &Canvas, rect: Rect, corner: f32, k: f32, f: f32) {
+pub fn focus_halo(canvas: &Canvas, rect: Rect, corner: f32, k: f32, f: f32) {
     if f <= 0.01 {
         return;
     }
@@ -415,7 +415,7 @@ pub(crate) fn focus_halo(canvas: &Canvas, rect: Rect, corner: f32, k: f32, f: f3
     canvas.draw_rrect(RRect::new_rect_xy(spread, r, r), &p);
 }
 
-pub(crate) fn drop_shadow(canvas: &Canvas, rect: Rect, corner: f32, k: f32, alpha: f32) {
+pub fn drop_shadow(canvas: &Canvas, rect: Rect, corner: f32, k: f32, alpha: f32) {
     // Scale 0.40 at the pale pole so the caller's alpha stays dark-field strength.
     let alpha = if ink().scrim.r > 0.5 {
         alpha * 0.40
@@ -433,7 +433,7 @@ pub(crate) fn drop_shadow(canvas: &Canvas, rect: Rect, corner: f32, k: f32, alph
 }
 
 /// Loading spinner. `t` is the shell clock.
-pub(crate) fn spinner(canvas: &Canvas, cx: f64, cy: f64, r: f64, t: f64) {
+pub fn spinner(canvas: &Canvas, cx: f64, cy: f64, r: f64, t: f64) {
     let start = (t * 300.0) % 360.0;
     let mut paint = stroke(fg(0.85), (r / 5.0) as f32);
     paint.set_stroke_cap(skia_safe::PaintCap::Round);
@@ -454,11 +454,11 @@ pub(crate) fn spinner(canvas: &Canvas, cx: f64, cy: f64, r: f64, t: f64) {
 /// Chrome inset from the screen edge, design units. 24 matches Apple `.horizontal, 24`
 /// and Android `ConsoleEdgeInset`. Not the legend's 18 (a pill edge). Screen inset,
 /// not content margin: rows and coverflow are centred columns.
-pub(crate) const EDGE_INSET: f64 = 24.0;
+pub const EDGE_INSET: f64 = 24.0;
 
 /// Geist weights, matching the Apple client's `.geist(size, weight)`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum W {
+pub enum W {
     Regular,
     Medium,
     SemiBold,
@@ -467,7 +467,7 @@ pub(crate) enum W {
 
 /// Embedded Geist plus a paragraph collection with system fallback. Titles can be
 /// CJK, and `draw_str` cannot shape those.
-pub(crate) struct Fonts {
+pub struct Fonts {
     regular: Typeface,
     medium: Typeface,
     semibold: Typeface,
@@ -567,7 +567,7 @@ const GEIST_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Geist-Medium.otf");
 const GEIST_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Geist-SemiBold.otf");
 const GEIST_BOLD: &[u8] = include_bytes!("../assets/fonts/Geist-Bold.otf");
 
-pub(crate) fn build_fonts() -> Result<Fonts> {
+pub fn build_fonts() -> Result<Fonts> {
     let mgr = FontMgr::new();
     let load = |bytes: &[u8], which: &str| {
         mgr.new_from_data(bytes, None)
@@ -599,7 +599,7 @@ pub(crate) fn build_fonts() -> Result<Fonts> {
 }
 
 impl Fonts {
-    pub(crate) fn font(&self, w: W, size: f64) -> Font {
+    pub fn font(&self, w: W, size: f64) -> Font {
         let tf = match w {
             W::Regular => &self.regular,
             W::Medium => &self.medium,
@@ -611,13 +611,13 @@ impl Fonts {
         f
     }
 
-    pub(crate) fn measure(&self, text: &str, w: W, size: f64) -> f32 {
+    pub fn measure(&self, text: &str, w: W, size: f64) -> f32 {
         self.font(w, size).measure_str(text, None).0
     }
 
     /// `draw_str` at a baseline, not a top edge. Returns the advance so callers can chain runs.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw(
+    pub fn draw(
         &self,
         canvas: &Canvas,
         text: &str,
@@ -639,7 +639,7 @@ impl Fonts {
 
     /// Letter-spaced run. Skia's `draw_str` has no tracking, so each char is placed.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw_tracked(
+    pub fn draw_tracked(
         &self,
         canvas: &Canvas,
         text: &str,
@@ -663,7 +663,7 @@ impl Fonts {
 
     /// Bump the paragraph-cache clock. Entries not drawn this frame or the last
     /// are eviction candidates. The shell calls this once per `render_in`.
-    pub(crate) fn begin_frame(&self) {
+    pub fn begin_frame(&self) {
         self.frame.set(self.frame.get().wrapping_add(1));
     }
 
@@ -710,7 +710,7 @@ impl Fonts {
 
     /// Centered wrapping paragraph; `y` is the top edge (CJK fallback).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn centered(
+    pub fn centered(
         &self,
         canvas: &Canvas,
         text: &str,
@@ -728,7 +728,7 @@ impl Fonts {
     /// Left-aligned twin of [`centered`](Self::centered). Same paragraph path (CJK
     /// fallback); chrome cannot use `draw`/`draw_clipped` instead.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn leading(
+    pub fn leading(
         &self,
         canvas: &Canvas,
         text: &str,
@@ -746,7 +746,7 @@ impl Fonts {
     /// Left-aligned heading at `(x, y)`, one ellipsized line at `max_w`. A wrap would
     /// run under the controller chip and push a second line into the content.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn heading(
+    pub fn heading(
         &self,
         canvas: &Canvas,
         text: &str,
@@ -763,7 +763,7 @@ impl Fonts {
 
     /// One line, ellipsized to `max_w`, at a baseline. For titles that exceed their tile.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw_clipped(
+    pub fn draw_clipped(
         &self,
         canvas: &Canvas,
         text: &str,
@@ -802,11 +802,7 @@ impl Fonts {
 /// First family that matches. Linux fontconfig resolves generic aliases
 /// ("sans-serif"); Windows DirectWrite does not, so the list includes concrete names.
 #[cfg(feature = "vulkan-overlay")]
-pub(crate) fn match_first_family(
-    mgr: &FontMgr,
-    families: &[&str],
-    style: FontStyle,
-) -> Option<Typeface> {
+pub fn match_first_family(mgr: &FontMgr, families: &[&str], style: FontStyle) -> Option<Typeface> {
     families
         .iter()
         .find_map(|f| mgr.match_family_style(f, style))

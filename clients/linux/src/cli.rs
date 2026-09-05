@@ -820,6 +820,9 @@ fn mock_library() -> (
         title: title.to_string(),
         art: crate::library::Artwork::default(),
         platform: None,
+        developer: None,
+        release_year: None,
+        genres: Vec::new(),
         role: None,
         icon: None,
     };

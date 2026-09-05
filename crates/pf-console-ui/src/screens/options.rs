@@ -26,13 +26,18 @@ enum Action {
     /// render a label the host sent that we have never heard of.
     Host(usize),
     SendLogs,
+    /// Stream the host itself, launching nothing — "Resume <title>" when it has a
+    /// game up. A shelf's A launches the focused TITLE, so this is the only way
+    /// back into a game the host started on its own: an untracked launch has no
+    /// catalog entry to press A on.
+    Connect,
     /// Same gate as the carousel's Y (saved and paired). Here because a TV
     /// remote has no Y.
     Library,
     CopyLink,
     Edit,
-    /// [`Screen::BindProfile`] for the primary tile. Not on a pin: the pin is
-    /// the profile.
+    /// [`Screen::BindProfile`] for the primary tile, or for a library title. Not on
+    /// a pin: the pin is the profile.
     BindProfile,
     /// Per-host [`KnownHost::clipboard_sync`]. Lives on the host, not Settings:
     /// the other end of the pipe is this machine.
@@ -103,6 +108,22 @@ impl OptionsScreen {
         }
     }
 
+    /// What the connecting takeover names for [`Action::Connect`]: the game being
+    /// resumed if there is one, else the host — with a pinned card's profile, the
+    /// same `host · profile` shape its tile wears.
+    fn title_for_connect(&self) -> String {
+        let host = self.host();
+        let subject = if host.running.is_empty() {
+            &host.name
+        } else {
+            &host.running
+        };
+        match &host.pin {
+            Some(p) => format!("{subject} \u{b7} {}", p.name),
+            None => subject.clone(),
+        }
+    }
+
     /// Pinned-card keys append the profile id past a NUL (service row builder).
     /// Commands address the host half.
     fn host_key(&self) -> &str {
@@ -114,8 +135,18 @@ impl OptionsScreen {
     fn actions(&self, _platform: crate::platform::Platform) -> Vec<Action> {
         let host = match &self.subject {
             Subject::Host(h) => h,
-            // Not Play: the tile's A already launches. Copy link first: cursor starts at 0.
-            Subject::Game { .. } => return vec![Action::CopyLink, Action::Cancel],
+            // Not Play: the tile's A already launches THIS title. Connect is the other
+            // press — it starts nothing — and leads because on a shelf with a game up it
+            // is the row you came for. Settings profile is the one place a per-title
+            // override can be set, so it ships even with an empty catalog.
+            Subject::Game { .. } => {
+                return vec![
+                    Action::Connect,
+                    Action::CopyLink,
+                    Action::BindProfile,
+                    Action::Cancel,
+                ]
+            }
         };
         if host.pin.is_some() {
             return vec![Action::Unpin, Action::CopyLink, Action::Cancel];
@@ -158,10 +189,19 @@ impl OptionsScreen {
                 None => String::new(),
             },
             Action::SendLogs => "Send logs to host".into(),
+            // Names the title when there is one: "Resume" alone would leave the
+            // player guessing which game the host means.
+            Action::Connect => match self.host().running.as_str() {
+                "" => format!("Connect to {}", self.host().name),
+                title => format!("Resume {title}"),
+            },
             Action::Library => "Library".into(),
             Action::CopyLink => "Copy link".into(),
             Action::Edit => "Edit\u{2026}".into(),
-            Action::BindProfile => "Default profile\u{2026}".into(),
+            Action::BindProfile => match self.subject {
+                Subject::Game { .. } => "Settings profile\u{2026}".into(),
+                Subject::Host(_) => "Default profile\u{2026}".into(),
+            },
             Action::Clipboard => format!(
                 "Shared clipboard: {}",
                 if self.host().clipboard_sync {
@@ -288,6 +328,22 @@ impl OptionsScreen {
                 }
                 fx.pop();
             }
+            // No launch id: the host is already showing whatever is up, and asking
+            // it to launch the game it is running is how a second copy starts. Pop,
+            // so ending the session lands back on the shelf this was raised from.
+            Action::Connect => {
+                let host = self.host();
+                fx.connect = Some(super::ConnectIntent {
+                    addr: host.addr.clone(),
+                    port: host.port,
+                    fp_hex: host.fp_hex.clone(),
+                    launch: None,
+                    title: self.title_for_connect(),
+                    request_access: false,
+                    profile: host.pin.as_ref().map(|p| p.id.clone()),
+                });
+                fx.pop();
+            }
             // Fetch, then open on the epoch taken *before* the command drains
             // so this fetch's titles are distinct from ones already in the
             // model. Replace, not push: Back from the shelf is the carousel.
@@ -307,13 +363,29 @@ impl OptionsScreen {
             Action::Edit => fx.replace(Screen::AddHost(super::add_host::AddHostScreen::edit(
                 self.host(),
             ))),
-            Action::BindProfile => fx.replace(Screen::BindProfile(
-                super::bind_profile::BindProfileScreen::new(
-                    key,
-                    self.host().name.clone(),
-                    store.profiles(),
-                ),
-            )),
+            // Same screen either way; the subject decides which binding it writes.
+            Action::BindProfile => {
+                let host_name = self.host().name.clone();
+                let screen = match &self.subject {
+                    Subject::Game { id, title, .. } => {
+                        super::bind_profile::BindProfileScreen::for_game(
+                            key,
+                            host_name,
+                            super::bind_profile::GameSubject {
+                                id: id.clone(),
+                                title: title.clone(),
+                            },
+                            store.profiles(),
+                        )
+                    }
+                    Subject::Host(_) => super::bind_profile::BindProfileScreen::new(
+                        key,
+                        host_name,
+                        store.profiles(),
+                    ),
+                };
+                fx.replace(Screen::BindProfile(screen));
+            }
             Action::Clipboard => {
                 let host = self.host();
                 let on = !host.clipboard_sync;
@@ -493,6 +565,8 @@ mod tests {
             actions: Vec::new(),
             pin: None,
             bound_profile: None,
+            running: String::new(),
+            game_profiles: Default::default(),
         }
     }
 
@@ -538,6 +612,9 @@ mod tests {
             launcher: false,
             icon: "steam".into(),
             platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
             running: false,
         }
     }
@@ -809,14 +886,24 @@ mod tests {
         );
     }
 
+    /// Still nothing the cover already does — the shelf's A launches this title, and no row
+    /// here repeats it. Connect is the other press: it starts nothing.
     #[test]
-    fn a_title_offers_the_link_and_nothing_its_cover_already_does() {
+    fn a_title_offers_the_link_its_profile_and_nothing_its_cover_already_does() {
         let s = OptionsScreen::for_game(&host(), &game());
+        // No Play row: the cover's own A launches. Connect and the profile row are the
+        // verbs a title owns that nothing else on the shelf offers.
         assert_eq!(
             s.actions(crate::platform::Platform::Desktop),
-            vec![Action::CopyLink, Action::Cancel]
+            vec![
+                Action::Connect,
+                Action::CopyLink,
+                Action::BindProfile,
+                Action::Cancel
+            ]
         );
-        // Cursor starts at 0: Copy link is already under confirm.
+        assert_eq!(s.label(Action::BindProfile), "Settings profile\u{2026}");
+        // Cursor starts at 0: the row that gets you onto the host is under confirm.
         assert_eq!(s.list.cursor, 0);
         assert_eq!(s.title(), "Hollow Knight");
     }
@@ -864,5 +951,58 @@ mod tests {
             assert!(matches!(fx.nav, Some(Nav::Pop)));
             assert!(fx.toast.is_some());
         }
+    }
+
+    /// The shelf's A launches the focused TITLE; this row is the other press — get me
+    /// into whatever the host already has up, or onto the desktop when it has nothing.
+    #[test]
+    fn a_titles_menu_leads_with_resume_when_the_host_has_a_game_up() {
+        let idle = OptionsScreen::for_game(&host(), &game());
+        assert_eq!(
+            idle.actions(crate::platform::Platform::Desktop).first(),
+            Some(&Action::Connect)
+        );
+        assert_eq!(idle.label(Action::Connect), "Connect to Desk");
+
+        let up = OptionsScreen::for_game(
+            &HostRow {
+                running: "Elden Ring".into(),
+                ..host()
+            },
+            &game(),
+        );
+        assert_eq!(
+            up.label(Action::Connect),
+            "Resume Elden Ring",
+            "naming the title is the whole point of the row"
+        );
+    }
+
+    /// No launch id: the host is already showing it, and asking it to launch the game it
+    /// is running starts a second copy. Pop, so the session ends back on this shelf.
+    #[test]
+    fn resume_streams_the_host_without_launching_anything() {
+        let mut s = OptionsScreen::for_game(
+            &HostRow {
+                running: "Elden Ring".into(),
+                ..pinned()
+            },
+            &game(),
+        );
+        let mut fx = Outbox::default();
+        run_action(&mut s, Action::Connect, &mut fx);
+        let intent = fx.connect.expect("a connect intent");
+        assert_eq!(intent.launch, None, "resume must not re-launch the title");
+        assert_eq!(intent.addr, "10.0.0.5");
+        assert_eq!(
+            intent.profile.as_deref(),
+            Some("prof-1"),
+            "a pinned card's shelf resumes with that card's profile"
+        );
+        assert_eq!(
+            intent.title, "Elden Ring \u{b7} 4K",
+            "the takeover names the game, not the host"
+        );
+        assert!(matches!(fx.nav, Some(Nav::Pop)));
     }
 }

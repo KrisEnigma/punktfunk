@@ -13,7 +13,7 @@ use punktfunk_core::config::GamepadPref;
 use skia_safe::{Canvas, PathBuilder, Point, RRect, Rect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum GlyphStyle {
+pub enum GlyphStyle {
     /// Xbox / Steam Deck / generic.
     Letters,
     /// DualSense / DualShock 4.
@@ -30,7 +30,7 @@ pub(crate) enum GlyphStyle {
 impl GlyphStyle {
     /// Pad family from [`PadInfo::pref`](pf_client_core::menu_nav::PadInfo).
     /// `None` is Keyboard. Keyboard vs Remote is the shell (platform).
-    pub(crate) fn from_pref(pref: Option<GamepadPref>) -> GlyphStyle {
+    pub fn from_pref(pref: Option<GamepadPref>) -> GlyphStyle {
         match pref {
             Some(GamepadPref::DualSense | GamepadPref::DualSenseEdge | GamepadPref::DualShock4) => {
                 GlyphStyle::Shapes
@@ -43,7 +43,7 @@ impl GlyphStyle {
 }
 
 /// Keyboard and Remote are outlined; pads are filled.
-pub(crate) fn pad_mark(
+pub fn pad_mark(
     canvas: &Canvas,
     style: GlyphStyle,
     x: f64,
@@ -104,7 +104,7 @@ pub(crate) fn pad_mark(
 /// Charging uses accent and outranks the low warning (4 % on the cable is
 /// not 4 % off it). Under 20 % is a fixed red, not accent: on `moss`/`mint`
 /// the accent means "fine".
-pub(crate) fn battery_pip(
+pub fn battery_pip(
     canvas: &Canvas,
     x: f64,
     cy: f64,
@@ -160,7 +160,7 @@ pub(crate) fn battery_pip(
 
 /// `Key` is a literal keycap in any style (Deck "Steam + X").
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HintKey {
+pub enum HintKey {
     Confirm,
     Back,
     Secondary,
@@ -176,13 +176,13 @@ pub(crate) enum HintKey {
     Key(&'static str),
 }
 
-pub(crate) struct Hint {
+pub struct Hint {
     pub key: HintKey,
     pub label: String,
 }
 
 impl Hint {
-    pub(crate) fn new(key: HintKey, label: impl Into<String>) -> Hint {
+    pub fn new(key: HintKey, label: impl Into<String>) -> Hint {
         Hint {
             key,
             label: label.into(),
@@ -193,14 +193,14 @@ impl Hint {
 const LABEL_SIZE: f64 = 14.0;
 const BADGE_D: f64 = 22.0; // dp
 
-pub(crate) struct HintBar {
+pub struct HintBar {
     pub size: (f64, f64),
     /// Pointers have no face buttons, so this is the button bar.
     pub rects: Vec<(HintKey, Rect)>,
 }
 
 /// Anchored at its bottom-left.
-pub(crate) fn hint_bar(
+pub fn hint_bar(
     canvas: &Canvas,
     fonts: &Fonts,
     hints: &[Hint],

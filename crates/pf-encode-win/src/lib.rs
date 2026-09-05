@@ -30,6 +30,12 @@ pub mod nvenc;
 #[cfg(all(target_os = "windows", feature = "qsv"))]
 #[path = "windows/qsv.rs"]
 pub mod qsv;
+// Media Foundation: the vendor-agnostic rung below the native SDKs, and the only
+// hardware encoder on Adreno. `mfplat.dll` is an OS component, so no feature — a hand
+// build cannot lose it. See `design/media-foundation-encoder.md`.
+#[cfg(target_os = "windows")]
+#[path = "windows/mf.rs"]
+pub mod mf;
 // `NVENCSTATUS` → cause for both direct-NVENC backends. Splits the two
 // opposite failures the driver reports as the same `INVALID_VERSION`.
 #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "nvenc"))]

@@ -178,6 +178,97 @@ got = asyncio.run(main._cli_json(["discover", "--json"]))
 check("json: old client surfaces as client-outdated", got["error"] == "client-outdated")
 check("json: detail carries the CLI's own last line", "unknown command" in got["detail"])
 
+# ---- Plugin.library: the argv shape, and a ref that would read as a flag ------------------
+#
+# The game page's Stream button keys off this call, one per paired host per scan. The ref is
+# a positional argument to the CLI, so one starting with `-` must never leave this backend.
+captured: dict = {}
+
+
+async def _capture_cli(args, timeout=20.0, stdin_text=None):
+    captured["args"] = args
+    return 0, '{"games": [{"id": "steam:570", "store": "steam", "title": "Dota 2"}]}', ""
+
+
+main._run_cli = _capture_cli
+got = asyncio.run(main.Plugin().library("2f1c-desk"))
+check("library: argv is `library <ref> --json`", captured.get("args") == ["library", "2f1c-desk", "--json"])
+check("library: games merged under ok", got["ok"] is True and got["games"][0]["id"] == "steam:570")
+captured.clear()
+got = asyncio.run(main.Plugin().library("--exec"))
+check("library: a flag-shaped ref never reaches the CLI", "args" not in captured)
+check("library: ...and is reported as unresolved", got == {
+    "ok": False, "error": "unresolved", "detail": "bad host reference",
+})
+captured.clear()
+got = asyncio.run(main.Plugin().library("   "))
+check("library: an empty ref is refused the same way", "args" not in captured and got["ok"] is False)
+
+# ---- game_art: the inputs that become a URL and a file name are validated ----------------
+#
+# `appid` and `icon_hash` come from Steam's overview through the frontend; a bad one must fail
+# closed rather than fetch an arbitrary path or write an arbitrary file name.
+main._read_art = lambda appid, name: None  # no cache, no network in a unit check
+shutil.rmtree("/tmp/pf-test-plugin", ignore_errors=True)  # no leftover fallback icon from a past run
+check("art: a non-numeric appid is refused", asyncio.run(main.Plugin().game_art("x")) == {
+    "ok": False, "error": "bad-appid",
+})
+check("art: zero is refused", asyncio.run(main.Plugin().game_art(0))["ok"] is False)
+got = asyncio.run(main.Plugin().game_art(570, "../../etc/passwd"))
+check("art: a hash that is not 40 hex chars fetches no icon", got == {"ok": True, "icon_path": ""})
+check("art: local cache is asked per-app dir first, flat file second", [
+    p.name for p in main._librarycache_candidates(570, "library_hero.jpg")
+] == ["library_hero.jpg", "570_library_hero.jpg"])
+check("art: the per-app dir is keyed by appid",
+      main._librarycache_candidates(570, "logo.png")[0].parent.name == "570")
+# The icon: without a hash nothing is fetched, but the Punktfunk icon stands in so the overlay
+# never shows a gray box — and with no plugin assets at all, icon_path is honestly empty.
+got = asyncio.run(main.Plugin().game_art(570, ""))
+check("art: no hash, no assets => no icon path", got["icon_path"] == "")
+Path("/tmp/pf-test-plugin/assets").mkdir(parents=True, exist_ok=True)
+Path("/tmp/pf-test-plugin/assets/icon.png").write_bytes(b"png")
+got = asyncio.run(main.Plugin().game_art(570, ""))
+check("art: no hash => the Punktfunk icon stands in", got["icon_path"].endswith("assets/icon.png") and got["icon_type"] == "png" and got["icon"] == "cG5n")
+# save_icon: only a real PNG for a real appid is written, into the settings dir, as .png
+decky.DECKY_PLUGIN_SETTINGS_DIR = "/tmp/pf-test-settings"
+shutil.rmtree("/tmp/pf-test-settings", ignore_errors=True)
+import base64 as _b64  # noqa: E402
+check("icon: non-png bytes are refused", asyncio.run(main.Plugin().save_icon(570, _b64.b64encode(b"\xff\xd8jpeg").decode()))["ok"] is False)
+check("icon: junk base64 is refused", asyncio.run(main.Plugin().save_icon(570, "***"))["ok"] is False)
+got = asyncio.run(main.Plugin().save_icon(570, _b64.b64encode(b"\x89PNG\r\n\x1a\n....").decode()))
+check("icon: a png lands as <appid>.png in the settings dir", got["ok"] and got["path"] == "/tmp/pf-test-settings/icons/570.png" and Path(got["path"]).is_file())
+check("art: Steam's current icon CDN is asked first", "shared.steamstatic.com" in main._ICON_CDNS[0])
+
+
+# ---- _fetch_bytes: a body over the cap is refused rather than truncated -------------------
+#
+# A short read would hand a half-decoded image to the shortcut; raising lets the caller fall
+# through to the next CDN instead.
+class _FakeResp:
+    def __init__(self, data):
+        self._data = data
+
+    def read(self, n=-1):
+        return self._data[:n] if n and n > 0 else self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+_body = b""
+main.urllib.request.urlopen = lambda req, timeout=None, context=None: _FakeResp(_body)
+_body = b"\xff\xd8small"
+check("fetch: a body under the cap comes back whole", main._fetch_bytes("https://x/a.jpg") == b"\xff\xd8small")
+_body = b"x" * (main._MAX_ART_BYTES + 1)
+try:
+    main._fetch_bytes("https://x/a.jpg")
+    check("fetch: a body over the cap raises", False)
+except ValueError:
+    check("fetch: a body over the cap raises", True)
+
 # ---- _field_from (flatpak info parsing, drives the client update check) ------------------
 info = "        ID: io.unom.Punktfunk\n    Origin: punktfunk-origin\n    Commit: abc123def\n"
 check("field: commit", main._field_from(info, "Commit") == "abc123def")

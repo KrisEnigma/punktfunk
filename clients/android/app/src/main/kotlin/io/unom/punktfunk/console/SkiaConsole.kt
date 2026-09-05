@@ -29,6 +29,7 @@ import io.unom.punktfunk.kit.discovery.HostDiscovery
 import io.unom.punktfunk.kit.library.LibraryCache
 import io.unom.punktfunk.kit.library.LibraryClient
 import io.unom.punktfunk.kit.library.LibraryResult
+import io.unom.punktfunk.kit.library.RunningGame
 import io.unom.punktfunk.kit.security.ClientIdentity
 import io.unom.punktfunk.kit.security.IdentityStore
 import io.unom.punktfunk.kit.security.KnownHost
@@ -105,8 +106,25 @@ object SkiaConsole {
     private val hostActions = mutableMapOf<String, List<HostActions.Action>>()
     private val hostActionsAt = mutableMapOf<String, Long>()
 
+    /** What each paired host has UP, by fingerprint, and when we last asked — the same shape
+     *  on a much shorter fuse (`pf_client_core::library::RUNNING_TTL`). Main-thread only. */
+    private val nowPlaying = mutableMapOf<String, String>()
+    private val nowPlayingAt = mutableMapOf<String, Long>()
+
     // What the composable hands us while it is on screen.
     private var onConnected: ((ActiveSession) -> Unit)? = null
+
+    /**
+     * The connected session the console's launch hold is still standing in front of.
+     *
+     * Handed to the app on `ShowStream`, dropped on a cancel. Null whenever the console is not
+     * holding one — a desktop-session connect, or a launch the shell decided not to hold (a
+     * launcher tile, which the host never tracks).
+     */
+    private var pendingSession: ActiveSession? = null
+
+    /** Whether the launch just dialled is one the shell will hold: a game, not a launcher. */
+    private var holdsLaunch = false
     private var onSettingsChange: ((Settings) -> Unit)? = null
     private var onQuit: (() -> Unit)? = null
     private var onPlatformScreen: ((String) -> Unit)? = null
@@ -238,7 +256,10 @@ object SkiaConsole {
         }
         discovery = d
         d.start()
-        // The reachability sweep: saved hosts not on mDNS, every ~12 s (the desktop's cadence).
+        // The reachability sweep — the whole of presence, every ~12 s (the desktop's cadence).
+        // Every saved host, including the ones on mDNS: an advert is a cache entry with a
+        // 75-minute TTL that a suspending host sends no goodbye for, so trusting it left a
+        // sleeping machine reading Online and, since Wake is gated on `!online`, unwakeable.
         main.post(object : Runnable {
             override fun run() {
                 if (handle == 0L) return
@@ -250,10 +271,15 @@ object SkiaConsole {
                     main.postDelayed(this, 12_000)
                     return
                 }
-                val targets = knownHostStore.all().filter { kh -> discovered.none { kh.matches(it) } }
+                // Probed at the address its live advert claims (a cold boot can land on a new
+                // DHCP lease), keyed by the saved one, which is what every caller looks up.
+                val targets = knownHostStore.all().map { kh ->
+                    val live = discovered.firstOrNull { kh.matches(it) }
+                    Triple("${kh.address}:${kh.port}", live?.host ?: kh.address, live?.port ?: kh.port)
+                }
                 ioPool.execute {
-                    val up = targets.filter { NativeBridge.nativeProbe(it.address, it.port, 3_000) }
-                        .map { "${it.address}:${it.port}" }.toSet()
+                    val up = targets.filter { NativeBridge.nativeProbe(it.second, it.third, 3_000) }
+                        .map { it.first }.toSet()
                     main.post { if (up != reachable) { reachable = up; pushHosts() } }
                 }
                 main.postDelayed(this, 12_000)
@@ -423,37 +449,44 @@ object SkiaConsole {
 
     private fun pushHosts() {
         if (handle == 0L) return
-        refreshHostActions()
+        refreshHostState()
         NativeBridge.nativeConsoleSetHosts(
             handle,
             ConsoleJson.hostRows(
                 knownHostStore.all(), discovered, reachable, profileStore.all(), hostActions,
+                nowPlaying,
             ),
         )
     }
 
     /**
-     * Keep each paired, reachable host's advertised actions fresh (`design/host-actions.md` §7),
-     * mirroring the desktop's `pf_client_core::host_actions::refresh`.
+     * Keep each paired, reachable host's advertised actions and running title fresh, mirroring
+     * the desktop's `Service::refresh_host_state`.
      *
-     * On a slow TTL and never when a menu opens: the row list has to be SETTLED before the menu
-     * draws, or rows would appear under a cursor already moving toward something else — and two
-     * of those rows shut a machine down.
+     * Actions run on a slow TTL and never when a menu opens: the row list has to be SETTLED
+     * before the menu draws, or rows would appear under a cursor already moving toward
+     * something else — and two of those rows shut a machine down. What a host has UP changes
+     * between two visits to the carousel, so it gets its own, far shorter one.
      */
-    private fun refreshHostActions() {
+    private fun refreshHostState() {
         val id = identity ?: return
         val now = android.os.SystemClock.elapsedRealtime()
         for (h in knownHostStore.all()) {
             if (!h.paired || h.fpHex.isEmpty()) continue
-            val online = discovered.any {
-                it.fingerprint.equals(h.fpHex, ignoreCase = true) ||
-                    (it.host == h.address && it.port == h.port)
-            } || "${h.address}:${h.port}" in reachable
-            if (!online) continue
-            // Stamp BEFORE the request, so a slow host cannot make every push spawn another.
-            if (now - (hostActionsAt[h.fpHex] ?: 0L) < HOST_ACTIONS_TTL_MS) continue
-            hostActionsAt[h.fpHex] = now
+            // Reachable means it answered the probe — an advert would say yes for a host that
+            // is asleep, and this asks it a question only a live host can answer.
+            if ("${h.address}:${h.port}" !in reachable) continue
             val (addr, mgmt, fp) = Triple(h.address, h.effectiveMgmtPort, h.fpHex)
+            // Stamp BEFORE the request, so a slow host cannot make every push spawn another.
+            if (now - (nowPlayingAt[fp] ?: 0L) >= NOW_PLAYING_TTL_MS) {
+                nowPlayingAt[fp] = now
+                ioPool.execute {
+                    val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
+                    main.post { recordNowPlaying(fp, up) }
+                }
+            }
+            if (now - (hostActionsAt[fp] ?: 0L) < HOST_ACTIONS_TTL_MS) continue
+            hostActionsAt[fp] = now
             ioPool.execute {
                 val found = HostActions.list(id, addr, mgmt, fp)
                 main.post {
@@ -462,6 +495,18 @@ object SkiaConsole {
                 }
             }
         }
+    }
+
+    /**
+     * Adopt a `/status` answer as the carousel's "▶ <title>" line: the first entry that is up
+     * and has a title to show, else nothing. Main thread; re-pushes only on a real change, so a
+     * host answering every 20 s does not churn the snapshot generation.
+     */
+    private fun recordNowPlaying(fpHex: String, games: List<RunningGame>) {
+        val title = games.firstOrNull { it.isUp && it.title.isNotEmpty() }?.title.orEmpty()
+        if (nowPlaying[fpHex] == title) return
+        nowPlaying[fpHex] = title
+        pushHosts()
     }
 
     private fun pushKnownHosts() {
@@ -507,7 +552,16 @@ object SkiaConsole {
                 "CancelConnect" -> {
                     dial?.cancelled?.set(true)
                     dial = null
+                    // A cancel after the dial landed still has a session to let go of.
+                    pendingSession?.let { s -> ioPool.execute { NativeBridge.nativeClose(s.handle) } }
+                    pendingSession = null
                     discovery?.restart()
+                }
+                // The console's launch hold is done — the game is up, or the player asked to
+                // see. Only now does the stream view replace it.
+                "ShowStream" -> pendingSession?.let { s ->
+                    pendingSession = null
+                    onConnected?.invoke(s)
                 }
             }
             is JSONObject -> {
@@ -540,7 +594,13 @@ object SkiaConsole {
             return
         }
         val kh = knownHostStore.get(addr, port)
-        val profile: StreamProfile? = profileStore.resolveFor(kh, profileId)
+        // The shell raises its hold for a GAME launch off a shelf; a desktop connect and a
+        // launcher tile go straight through, so the session is handed over at once. Mirrors
+        // `Shell::launch_hold`, and reads the same cached catalog the shelf was drawn from.
+        holdsLaunch = launchId != null &&
+            LibraryCache.standard(app.cacheDir).load(kh?.id ?: fp)?.games
+                ?.firstOrNull { it.id == launchId }?.isLauncher == false
+        val profile: StreamProfile? = profileStore.resolveFor(kh, profileId, launchId)
         val effective = settings.effectiveFor(profile)
         val d = Dial()
         dial = d
@@ -576,18 +636,25 @@ object SkiaConsole {
                             knownHostStore.learnMgmtPort(record.address, record.port, it)
                         }
                     }
-                    NativeBridge.nativeConsoleSessionPhase(handle, 1, "")
-                    onConnected?.invoke(
-                        ActiveSession(
-                            h,
-                            effective,
-                            clipboardSync = record?.clipboardSync ?: false,
-                            profileName = profile?.name,
-                            hostId = record?.id,
-                            launchedFromLibrary = launchId != null,
-                            libraryProfileId = profileId,
-                        ),
+                    val session = ActiveSession(
+                        h,
+                        effective,
+                        clipboardSync = record?.clipboardSync ?: false,
+                        profileName = profile?.name,
+                        hostId = record?.id,
+                        launchedFromLibrary = launchId != null,
+                        libraryProfileId = profileId,
                     )
+                    // The console learns the dial landed and keeps the screen: its launch hold
+                    // is still waiting on the game. Handing the session over here instead would
+                    // swap the console for the stream view mid-wait, which is the seam this
+                    // whole screen exists to remove. `ShowStream` releases it.
+                    NativeBridge.nativeConsoleSessionPhase(handle, 1, "")
+                    if (holdsLaunch) {
+                        pendingSession = session
+                    } else {
+                        onConnected?.invoke(session)
+                    }
                 } else {
                     val token = NativeBridge.nativeTakeLastError()
                     NativeBridge.nativeConsoleSessionPhase(
@@ -662,12 +729,25 @@ object SkiaConsole {
         pushHosts(); pushKnownHosts()
     }
 
-    /** `ConsoleCmd::BindProfile` — the host's default binding (`KnownHost.profileId`); null clears. */
+    /**
+     * `ConsoleCmd::BindProfile` — the host's default binding (`KnownHost.profileId`), or with
+     * `game`, one title's ([KnownHost.gameProfiles]). A null `profile_id` clears either.
+     */
     private fun bindProfile(c: JSONObject) {
         val kh = hostForKey(c.optString("key")) ?: return
         val pid = c.optString("profile_id")
             .takeIf { c.has("profile_id") && !c.isNull("profile_id") && it.isNotEmpty() }
-        knownHostStore.save(kh.copy(profileId = pid))
+        val game = c.optString("game")
+            .takeIf { c.has("game") && !c.isNull("game") && it.isNotEmpty() }
+        val next = when (game) {
+            // Cleared bindings leave no key behind, so an unbound host stores an empty map.
+            null -> kh.copy(profileId = pid)
+            else -> kh.copy(
+                gameProfiles = kh.gameProfiles.toMutableMap()
+                    .apply { if (pid == null) remove(game) else put(game, pid) },
+            )
+        }
+        knownHostStore.save(next)
         pushHosts(); pushKnownHosts()
     }
 
@@ -799,9 +879,15 @@ object SkiaConsole {
         if (refreshOnly) {
             if (id == null) return
             ioPool.execute {
-                val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
-                    .filter { it.isUp }.mapNotNull { it.appId }
-                main.post { if (handle != 0L) NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.stringArray(up)) }
+                val games = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
+                main.post {
+                    if (handle == 0L) return@post
+                    NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.runningGames(games))
+                    // The carousel behind the shelf shows the same fact from its own map; this
+                    // answer is fresher than anything its TTL would fetch.
+                    nowPlayingAt[fp] = android.os.SystemClock.elapsedRealtime()
+                    recordNowPlaying(fp, games)
+                }
             }
             return
         }
@@ -837,12 +923,11 @@ object SkiaConsole {
                     val games = r.games
                     cache.store(cacheKey, games)
                     val up = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
-                        .filter { it.isUp }.mapNotNull { it.appId }
                     main.post {
                         if (gen != fetchGen.get()) return@post
                         NativeBridge.nativeConsoleLibraryGames(handle, ConsoleJson.libraryGames(games), false)
                         NativeBridge.nativeConsoleLibraryStale(handle, 0)
-                        NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.stringArray(up))
+                        NativeBridge.nativeConsoleLibraryRunning(handle, ConsoleJson.runningGames(up))
                     }
                     for (g in games) {
                         val candidates = g.art.posterCandidates
@@ -892,4 +977,8 @@ object SkiaConsole {
      *  `pf_client_core::host_actions::TTL`. Long on purpose: what it governs changes when an
      *  operator edits access, not minute to minute, and each refresh is a TLS handshake. */
     private const val HOST_ACTIONS_TTL_MS = 300_000L
+
+    /** How long a host's running title stays fresh — `pf_client_core::library::RUNNING_TTL`.
+     *  Short: this is the one host fact that changes while somebody is looking at the tile. */
+    private const val NOW_PLAYING_TTL_MS = 20_000L
 }

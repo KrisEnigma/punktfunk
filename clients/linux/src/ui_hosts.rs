@@ -635,8 +635,8 @@ impl relm4::factory::FactoryComponent for HostCard {
                 }
                 overlay.add_controller(right_click);
 
-                // Auto-wake: not advertising + a known MAC routes to WakeConnect, which
-                // dials first (a routed/Tailscale host is mDNS-blind, not asleep) and only
+                // Auto-wake: the probe did not reach it + a known MAC routes to WakeConnect,
+                // which dials first (a routed/Tailscale host is mDNS-blind, not asleep) and only
                 // falls into the wake-and-wait when the dial fails.
                 let wake_first = !online && !req.mac.is_empty();
                 let sender = sender.clone();
@@ -662,9 +662,9 @@ impl relm4::factory::FactoryComponent for HostCard {
 
 // --- The page component ---------------------------------------------------------------------
 
-/// How long each saved-host reachability probe waits, and how often the sweep runs. The pip
-/// reads `advertising OR probed-reachable`, so a host reached only over a routed network
-/// (Tailscale/VPN) — which never appears on mDNS — still shows Online.
+/// How long each saved-host reachability probe waits, and how often the sweep runs. The pip reads
+/// this sweep and nothing else, so a host reached only over a routed network (Tailscale/VPN) —
+/// which never appears on mDNS — shows Online, and a sleeping one shows Offline within a cycle.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12);
 
@@ -997,11 +997,11 @@ impl SimpleComponent for HostsPage {
             });
         }
 
-        // Periodic reachability sweep: a saved host reached only over a routed network
-        // (Tailscale/VPN) never advertises on mDNS, so presence can't come from the advert map
-        // alone. Each cycle probes every saved host off the main thread (bounded, trust-agnostic
-        // QUIC handshake — the display-side companion to dial-first) and feeds results back as
-        // `Probed`; the first sweep runs immediately, then every `PROBE_INTERVAL`.
+        // Periodic reachability sweep — the ONLY thing presence is made of, since an advert
+        // outlives the machine it describes. Each cycle probes every saved host off the main
+        // thread (bounded, trust-agnostic QUIC handshake — the display-side companion to
+        // dial-first) and feeds results back as `Probed`; the first sweep runs immediately, then
+        // every `PROBE_INTERVAL`.
         {
             let sender = sender.clone();
             glib::spawn_future_local(async move {
@@ -1203,14 +1203,17 @@ impl HostsPage {
             let mut saved = self.saved.guard();
             saved.clear();
             for k in &known.hosts {
-                // Online = advertising on mDNS OR proven reachable by the last probe sweep.
-                let online = self.adverts.values().any(|a| matches(k, a))
-                    || self.probed.get(&saved_key(k)).copied().unwrap_or(false);
-                // Learn what this host's live advert teaches while it's online: its wake MAC(s),
-                // its OS chain (so the icon survives it going offline), and its management port
-                // — the last one not cosmetic, since a host that moved off 47990 loses its
-                // library the moment mDNS is unavailable and the advert is the only place the
-                // real port ever lived.
+                // Online = the last probe sweep reached it, and nothing else. An advert is NOT
+                // presence: it is a cache entry with a 75-minute PTR TTL that a suspending host
+                // sends no goodbye for, so counting it kept a sleeping machine's pip green — and
+                // the wake gate reads `!online`, which is how Wake-on-LAN stayed silent for
+                // exactly the host it was meant to wake.
+                let online = self.probed.get(&saved_key(k)).copied().unwrap_or(false);
+                // Learn what this host's live advert teaches: its wake MAC(s), its OS chain (so
+                // the icon survives it going offline), its management port — not cosmetic, since
+                // a host that moved off 47990 loses its library the moment mDNS is unavailable
+                // and the advert is the only place the real port ever lived — and the address
+                // itself, so a host back on a new lease is dialed and probed where it now lives.
                 let advert = self.adverts.values().find(|a| matches(k, a));
                 if let Some(a) = advert {
                     crate::trust::learn_from_advert(
@@ -1221,6 +1224,7 @@ impl HostsPage {
                         &a.os,
                         a.mgmt_port,
                     );
+                    crate::trust::rekey_addr(&k.fp_hex, &a.addr, a.port);
                 }
                 // Keep this host's advertised actions warm, so the card's menu is built from a
                 // settled answer rather than one that arrives while the menu is open. Gated on

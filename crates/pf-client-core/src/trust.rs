@@ -279,6 +279,12 @@ pub struct KnownHost {
     /// the default (`profile_id`). Duplicates and dangling ids are dropped at resolve.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned_profiles: Vec<String>,
+    /// Library title id → profile id: what a launch of that title streams with, beating
+    /// `profile_id`. Keyed here rather than in the catalog for the §4.1 reason the host
+    /// binding is — the catalog owns no host keys, and a title id is only unique per host.
+    /// Dangling ids resolve to nothing, exactly like a dangling `profile_id`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub game_profiles: BTreeMap<String, String>,
     /// Stable record id, minted lazily, never rewritten. Survives rename and DHCP.
     /// No lookup here is keyed by it — `fp_hex` / `addr:port` stay the keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -303,6 +309,7 @@ impl Default for KnownHost {
             clipboard_sync: false,
             profile_id: None,
             pinned_profiles: Vec::new(),
+            game_profiles: BTreeMap::new(),
             id: Some(crate::profiles::new_record_uuid()),
         }
     }
@@ -328,6 +335,25 @@ impl KnownHost {
             }
         }
         out
+    }
+
+    /// This title's binding, if it has one. Not resolved against the catalog here —
+    /// [`resolve_profile`] drops a dangling id, the same way it does for `profile_id`.
+    pub fn profile_for_game(&self, game_id: &str) -> Option<&str> {
+        self.game_profiles.get(game_id).map(String::as_str)
+    }
+
+    /// Bind (or with `None`, clear) a title's profile. Idempotent, and a clear removes
+    /// the key rather than storing an empty one — the map is skipped when serialising,
+    /// so an unbound host keeps writing no `game_profiles` at all.
+    pub fn bind_game_profile(&mut self, game_id: &str, profile_id: Option<&str>) {
+        match profile_id {
+            Some(id) => drop(
+                self.game_profiles
+                    .insert(game_id.to_string(), id.to_string()),
+            ),
+            None => drop(self.game_profiles.remove(game_id)),
+        }
     }
 }
 
@@ -449,8 +475,8 @@ impl KnownHosts {
             if entry.mgmt_port.is_some() {
                 h.mgmt_port = entry.mgmt_port;
             }
-            // User-set fields a refresh never carries: clipboard, profile, pins, id.
-            // Only an upsert that actually carries a value moves one of them.
+            // User-set fields a refresh never carries: clipboard, profile, pins,
+            // per-game bindings, id. Only an upsert carrying a value moves one.
             if entry.clipboard_sync {
                 h.clipboard_sync = true;
             }
@@ -459,6 +485,9 @@ impl KnownHosts {
             }
             if !entry.pinned_profiles.is_empty() {
                 h.pinned_profiles = entry.pinned_profiles;
+            }
+            if !entry.game_profiles.is_empty() {
+                h.game_profiles = entry.game_profiles;
             }
             if h.id.as_deref().is_none_or(str::is_empty) {
                 h.id = entry.id;
@@ -517,6 +546,9 @@ impl KnownHosts {
             }
             if h.pinned_profiles.is_empty() {
                 h.pinned_profiles = old.pinned_profiles;
+            }
+            if h.game_profiles.is_empty() {
+                h.game_profiles = old.game_profiles;
             }
             if h.last_used.is_none() {
                 h.last_used = old.last_used;
@@ -1312,35 +1344,44 @@ impl Settings {
 ///
 /// ```text
 /// effective = overlay(profile).apply(global)
-/// profile   = one-off override  ??  host binding  ??  none
+/// profile   = one-off override  ??  title binding  ??  host binding  ??  none
 /// ```
 ///
 /// `one_off` is Connect-with / `--profile` / `profile=`; `Some("")` forces globals
-/// on a bound host and never rebinds. Unknown one-off → defaults (not the host
-/// binding). Lookup is `addr:port`, same as the per-host clipboard decision.
+/// on a bound host and never rebinds. Unknown one-off → defaults (not a binding).
+/// `launch` is the library title id, `None` for the desktop. Lookup is `addr:port`,
+/// same as the per-host clipboard decision.
 pub fn effective_settings(
     addr: &str,
     port: u16,
     one_off: Option<&str>,
+    launch: Option<&str>,
 ) -> (Settings, Option<StreamProfile>) {
     let base = Settings::load();
     let catalog = ProfilesFile::load();
     let known = KnownHosts::load();
-    let bound = known
-        .find_by_addr(addr, port)
-        .and_then(|h| h.profile_id.clone());
+    let host = known.find_by_addr(addr, port);
+    let bound = host.and_then(|h| h.profile_id.clone());
+    let per_game = launch
+        .and_then(|game| host.and_then(|h| h.profile_for_game(game)))
+        .map(str::to_string);
 
-    match resolve_profile(&catalog, bound.as_deref(), one_off) {
+    match resolve_profile(&catalog, bound.as_deref(), per_game.as_deref(), one_off) {
         Some(p) => (p.overrides.apply(&base), Some(p)),
         None => (base, None),
     }
 }
 
 /// Profile half of [`effective_settings`], split so the precedence rules are testable
-/// without touching the config directory: one-off ?? host binding ?? none.
-fn resolve_profile(
+/// without touching the config directory: one-off ?? title ?? host ?? none.
+///
+/// A title binding beats the host's default because it is the more specific answer to
+/// the same question — the host default is what a title with no opinion inherits. Public
+/// for the clients that keep their own document (webOS) and must launch with this order.
+pub fn resolve_profile(
     catalog: &ProfilesFile,
     bound: Option<&str>,
+    per_game: Option<&str>,
     one_off: Option<&str>,
 ) -> Option<StreamProfile> {
     match one_off {
@@ -1357,8 +1398,13 @@ fn resolve_profile(
                 None
             }
         },
-        // Binding is an id, never a name — a rename must not hijack it. Dangling → defaults.
-        None => bound.and_then(|id| catalog.find_by_id(id).cloned()),
+        // Bindings are ids, never names — a rename must not hijack one. A dangling id
+        // falls through to the next-most-general answer, the way a dangling pin just
+        // disappears: the title's deleted profile leaves the host's default standing.
+        None => {
+            let find = |id: &str| catalog.find_by_id(id).cloned();
+            per_game.and_then(find).or_else(|| bound.and_then(find))
+        }
     }
 }
 
@@ -1604,11 +1650,13 @@ mod tests {
         let h = &k.hosts[0];
         assert_eq!(h.profile_id, None);
         assert!(h.pinned_profiles.is_empty());
+        assert!(h.game_profiles.is_empty());
         assert_eq!(h.id, None);
         assert!(h.clipboard_sync);
         let text = serde_json::to_string(&k).unwrap();
         assert!(!text.contains("profile_id"));
         assert!(!text.contains("pinned_profiles"));
+        assert!(!text.contains("game_profiles"));
         assert!(!text.contains("\"id\""));
 
         // Second pass reports nothing to persist and leaves the minted id alone.
@@ -1642,6 +1690,7 @@ mod tests {
                 clipboard_sync: true,
                 profile_id: Some("aaaaaaaaaaaa".into()),
                 pinned_profiles: vec!["bbbbbbbbbbbb".into()],
+                game_profiles: [("halo".to_string(), "cccccccccccc".to_string())].into(),
                 id: Some("11111111-2222-4333-8444-555555555555".into()),
             }],
         };
@@ -1666,6 +1715,7 @@ mod tests {
         assert!(h.clipboard_sync);
         assert_eq!(h.profile_id.as_deref(), Some("aaaaaaaaaaaa"));
         assert_eq!(h.pinned_profiles, vec!["bbbbbbbbbbbb".to_string()]);
+        assert_eq!(h.profile_for_game("halo"), Some("cccccccccccc"));
         assert_eq!(
             h.id.as_deref(),
             Some("11111111-2222-4333-8444-555555555555")
@@ -1680,6 +1730,16 @@ mod tests {
         });
         assert_eq!(k.hosts[0].profile_id.as_deref(), Some("cccccccccccc"));
         assert_eq!(k.hosts[0].pinned_profiles, vec!["dddddddddddd".to_string()]);
+
+        // Same for the per-game map: only a payload that carries one replaces it.
+        k.hosts[0].bind_game_profile("halo", Some("dddddddddddd"));
+        k.upsert(KnownHost {
+            fp_hex: fp.into(),
+            ..Default::default()
+        });
+        assert_eq!(k.hosts[0].profile_for_game("halo"), Some("dddddddddddd"));
+        k.hosts[0].bind_game_profile("halo", None);
+        assert!(k.hosts[0].game_profiles.is_empty());
     }
 
     /// A store written before `mgmt_port` loads, resolves to 47990, then takes and
@@ -1742,6 +1802,7 @@ mod tests {
                 clipboard_sync: true,
                 profile_id: Some("aaaaaaaaaaaa".into()),
                 pinned_profiles: vec!["bbbbbbbbbbbb".into()],
+                game_profiles: [("halo".to_string(), "cccccccccccc".to_string())].into(),
                 id: Some("11111111-2222-4333-8444-555555555555".into()),
             }],
         };
@@ -1765,6 +1826,7 @@ mod tests {
         assert_eq!(h.mgmt_port, Some(47991));
         assert_eq!(h.profile_id.as_deref(), Some("aaaaaaaaaaaa"));
         assert_eq!(h.pinned_profiles, vec!["bbbbbbbbbbbb".to_string()]);
+        assert_eq!(h.profile_for_game("halo"), Some("cccccccccccc"));
         assert_eq!(h.last_used, Some(1000));
         assert!(!h.clipboard_sync);
         assert_ne!(
@@ -2031,38 +2093,93 @@ mod tests {
         };
         let name_of = |p: Option<StreamProfile>| p.map(|p| p.name);
 
-        assert_eq!(resolve_profile(&catalog, None, None), None);
+        assert_eq!(resolve_profile(&catalog, None, None, None), None);
         assert_eq!(
-            name_of(resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None)),
+            name_of(resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None, None)),
             Some("Game".into())
         );
         assert_eq!(
             name_of(resolve_profile(
                 &catalog,
                 Some("aaaaaaaaaaaa"),
+                None,
                 Some("bbbbbbbbbbbb")
             )),
             Some("Work".into())
         );
         assert_eq!(
-            name_of(resolve_profile(&catalog, None, Some("GAME"))),
+            name_of(resolve_profile(&catalog, None, None, Some("GAME"))),
             Some("Game".into())
         );
         assert_eq!(
-            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), Some("")),
-            None
-        );
-        assert_eq!(resolve_profile(&catalog, Some("deleted00000"), None), None);
-        assert_eq!(
-            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), Some("nope")),
+            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None, Some("")),
             None
         );
         assert_eq!(
-            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), Some("work")),
+            resolve_profile(&catalog, Some("deleted00000"), None, None),
+            None
+        );
+        assert_eq!(
+            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None, Some("nope")),
+            None
+        );
+        assert_eq!(
+            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None, Some("work")),
             None
         );
         // Binding is by id only — a profile named like the bound id must not hijack it.
-        assert_eq!(resolve_profile(&catalog, Some("Game"), None), None);
+        assert_eq!(resolve_profile(&catalog, Some("Game"), None, None), None);
+    }
+
+    /// A title's binding sits between the one-off and the host's default: more specific
+    /// than the host, still overridable for a single launch. A dangling one falls through
+    /// to the host rather than to the defaults.
+    #[test]
+    fn a_title_binding_outranks_the_host_and_yields_to_a_one_off() {
+        use crate::profiles::{ProfilesFile, StreamProfile};
+        let catalog = ProfilesFile {
+            version: 1,
+            profiles: vec![
+                StreamProfile {
+                    id: "aaaaaaaaaaaa".into(),
+                    name: "Game".into(),
+                    ..StreamProfile::new("")
+                },
+                StreamProfile {
+                    id: "bbbbbbbbbbbb".into(),
+                    name: "Work".into(),
+                    ..StreamProfile::new("")
+                },
+            ],
+        };
+        let name_of = |p: Option<StreamProfile>| p.map(|p| p.name);
+        let (host, game) = (Some("aaaaaaaaaaaa"), Some("bbbbbbbbbbbb"));
+
+        assert_eq!(
+            name_of(resolve_profile(&catalog, host, game, None)),
+            Some("Work".into())
+        );
+        // No binding on the title: the host's default is what it inherits.
+        assert_eq!(
+            name_of(resolve_profile(&catalog, host, None, None)),
+            Some("Game".into())
+        );
+        // A pinned card's one-off still wins over both.
+        assert_eq!(
+            name_of(resolve_profile(&catalog, host, game, Some("Game"))),
+            Some("Game".into())
+        );
+        // `--profile ""` forces the globals past a title binding too.
+        assert_eq!(resolve_profile(&catalog, host, game, Some("")), None);
+        // Deleted title profile: the host's default stands, not the defaults.
+        assert_eq!(
+            name_of(resolve_profile(&catalog, host, Some("deleted00000"), None)),
+            Some("Game".into())
+        );
+        assert_eq!(
+            resolve_profile(&catalog, None, Some("deleted00000"), None),
+            None
+        );
     }
 
     /// Atomic write replaces the target in one step and leaves no temp behind.

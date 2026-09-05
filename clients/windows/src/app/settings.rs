@@ -1433,9 +1433,9 @@ pub(crate) fn settings_page(
                         set_rev: set_rev.clone(),
                     },
                 ),
-                "The ring a two-finger twist or Select+A opens in a stream: what its six buttons \
-                 hold, and the shortcut chords they can send. A profile that changes it owns the \
-                 whole ring.",
+                "The dial Ctrl+Alt+Shift+O, a two-finger twist or Select+A opens in a stream: what \
+                 its six buttons hold, and the shortcut chords they can send. A profile that \
+                 changes it owns the whole dial.",
             )],
         ),
         "controllers" => (

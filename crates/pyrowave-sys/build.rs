@@ -1,10 +1,17 @@
 //! Build the vendored PyroWave codec (C++/Vulkan compute) as static archives via
 //! CMake and generate bindings over its C API (`pyrowave.h`).
 //!
-//! Linux + Windows only — the platforms whose hosts/clients run the Vulkan codec
-//! path (design/pyrowave-codec-plan.md §5). Other targets get an empty bindings
-//! file so the workspace builds everywhere (the Apple client is a native Metal
-//! port, §4.7 — it never links this crate).
+//! Linux, Windows, and 64-bit Android — the targets whose hosts/clients run the
+//! Vulkan codec path (design/pyrowave-codec-plan.md §5). Other targets get an empty
+//! bindings file so the workspace builds everywhere (the Apple client is a native
+//! Metal port, §4.7 — it never links this crate).
+//!
+//! 32-bit Android is stubbed with them. The C++ builds fine there, but Vulkan's
+//! armv7 calling convention (`__attribute__((pcs("aapcs-vfp")))` on every VKAPI
+//! entry point) has no bindgen representation, and it panics rather than skipping
+//! it. Nothing is lost: armeabi-v7a is the 32-bit TV-stick ABI, and those boxes
+//! have neither the link nor the Vulkan 1.3 device this codec needs. The gate is
+//! mirrored by `target_pointer_width` cfgs in src/lib.rs and pf-client-core.
 //!
 //! Everything compiles from the committed vendor tree: no network, no system
 //! pyrowave, no pkg-config — CI, MSVC, and the offline flatpak builder all get
@@ -23,10 +30,13 @@ fn main() {
     let bindings_path = out.join("bindings.rs");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os != "linux" && target_os != "windows" {
+    let bits64 = env::var("CARGO_CFG_TARGET_POINTER_WIDTH").unwrap_or_default() == "64";
+    let build_here =
+        target_os == "linux" || target_os == "windows" || (target_os == "android" && bits64);
+    if !build_here {
         std::fs::write(
             &bindings_path,
-            "// pyrowave-sys: Linux/Windows-only, empty on this target\n",
+            "// pyrowave-sys: Linux/Windows/64-bit-Android only, empty on this target\n",
         )
         .unwrap();
         return;
@@ -87,6 +97,14 @@ fn main() {
         // volk loads the Vulkan loader at runtime.
         println!("cargo:rustc-link-lib=dylib=dl");
         println!("cargo:rustc-link-lib=dylib=pthread");
+    }
+    if target_os == "android" {
+        // STATIC libc++ so the client `.so` stays self-contained, and unprefixed (not
+        // `static=`) because the archives live in the NDK sysroot, which rustc does not
+        // search — the name is passed through for the NDK's clang. Same spelling
+        // skia-bindings uses for this `.so`, which keeps ONE C++ runtime in it.
+        println!("cargo:rustc-link-lib=c++_static");
+        println!("cargo:rustc-link-lib=c++abi");
     }
     if target_os == "windows" {
         // Granite's breadcrumbs tracker raises a MessageBoxA on device hang.

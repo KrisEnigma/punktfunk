@@ -61,6 +61,9 @@ struct LibraryView: View {
     /// through). `nil` ⇒ browse-only (cards aren't tappable). The PROFILE a launch runs with is the
     /// caller's to apply: it holds `target` and connects with `target.profile`.
     var onLaunch: ((String) -> Void)? = nil
+    /// Stream this shelf's host without launching anything — "Resume <title>" while it has a
+    /// game up. nil ⇒ browse-only, the same gate `onLaunch` uses.
+    var onConnect: (() -> Void)? = nil
     /// How the gamepad shell (GamepadLibraryScreen) closes this screen; nil — every sheet/cover
     /// presentation — falls back to the environment dismiss.
     var onClose: (() -> Void)? = nil
@@ -81,6 +84,9 @@ struct LibraryView: View {
     @Environment(\.dismiss) private var dismiss
     /// Resolves a pinned shelf's profile NAME for the title (the target carries only its id).
     @ObservedObject private var profiles = ProfileStore.shared
+    /// The shared "what is up on this host" answer, which this screen both READS (the menu's
+    /// Resume row) and FEEDS: its own `/status` fetch below is the freshest one anybody has.
+    @ObservedObject private var nowPlayingStore = NowPlayingStore.shared
 
     /// The host this shelf belongs to — every fetch, every poster URL and the launch itself address
     /// it, and a pinned shelf is the same host seen through one of its cards.
@@ -228,10 +234,12 @@ struct LibraryView: View {
                     // quit → browse lands where the player left rather than at the first cover.
                     initialSelection: LibraryScrollMemory.last(forHost: host.id.uuidString),
                     onDismiss: { (onClose ?? { dismiss() })() },
-                    // Nil where there is nothing to copy into (tvOS), which is what drops the
-                    // Options row and its hint rather than leaving a menu with nothing in it.
+                    // Nil where there is nothing to copy into (tvOS): the menu simply drops that
+                    // row there, and the Connect row below is what keeps it worth opening.
                     onCopyLink: LinkClipboard.isAvailable ? { copyLink($0) } : nil,
                     hostName: host.displayName,
+                    nowPlaying: nowPlayingStore.title(for: host),
+                    onConnect: onConnect,
                     controllerActive: controllerActive,
                     onCollectionChanged: { label in
                         collectionLabel = label
@@ -642,6 +650,10 @@ struct LibraryView: View {
             // Two sessions can have the same title up (the host admits concurrent sessions); for a
             // Resume badge either one is the same answer.
             uniquingKeysWith: { first, _ in first })
+        // The host cards read the same fact from the store; hand it this answer rather than
+        // letting their TTL ask the host a second time for what we just fetched. It also carries
+        // the entries no badge can: a launch the host cannot track has no id to key on.
+        nowPlayingStore.adopt(live, for: current)
         loading = false
     }
 
@@ -675,6 +687,7 @@ struct LibraryView: View {
         guard let onLaunch else { return nil }
         return { id in
             LibraryScrollMemory.remember(id, forHost: host.id.uuidString)
+            LaunchedEntry.remember(games.first { $0.id == id }, from: TileFrames.rect(id))
             onLaunch(id)
         }
     }
@@ -779,7 +792,7 @@ private struct GameCard: View {
         VStack(alignment: .leading, spacing: 6) {
             PosterImage(
                 candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
-                icon: game.iconToken)
+                icon: game.iconToken, frameID: game.id)
                 .aspectRatio(2.0 / 3.0, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))

@@ -221,6 +221,16 @@ impl HomeScreen {
                 self.step(if up { -1 } else { 1 }, len, false);
                 true
             }
+            // Hover focuses, so the press that follows is the one that OPENS the card rather
+            // than the one that reaches it. The move-then-press fallback below stays for a
+            // pointer that cannot hover: a touchscreen sends Press with no Move before it.
+            PointerKind::Move => match p.pick(&self.geom).filter(|i| *i < len) {
+                Some(i) if i != self.cursor as usize => {
+                    self.cursor = i as i32;
+                    true
+                }
+                _ => false,
+            },
             // Geometry is a frame old: discovery can shorten the strip between draw
             // and press, and an index past `len` would land on Add Host.
             PointerKind::Press => match p.pick(&self.geom).filter(|i| *i < len) {
@@ -262,6 +272,11 @@ impl HomeScreen {
             Slot::Host(h) if !h.paired => hints.push(Hint::new(HintKey::Confirm, "Pair…")),
             Slot::Host(h) if !h.online && h.can_wake => {
                 hints.push(Hint::new(HintKey::Confirm, "Wake & Connect"))
+            }
+            // Same press, honest word: a host with a game up is one you get back INTO,
+            // and the tile is already naming the title above it.
+            Slot::Host(h) if !h.running.is_empty() => {
+                hints.push(Hint::new(HintKey::Confirm, "Resume"))
             }
             Slot::Host(_) => hints.push(Hint::new(HintKey::Confirm, "Connect")),
         }
@@ -534,6 +549,21 @@ fn draw_host_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, rect: Rect, k: f6
         fg(1.0),
         max_w,
     );
+    // What the host has up, above its name — the one thing you would otherwise have to
+    // connect to find out. Green, like the shelf's RESUME pill and the online pip: on
+    // this screen that colour already means "live over there".
+    if !h.running.is_empty() {
+        fonts.draw_clipped(
+            canvas,
+            &format!("\u{25b6} {}", h.running),
+            l,
+            sub_base - 48.0 * k,
+            W::SemiBold,
+            13.0 * k,
+            ONLINE_GREEN,
+            max_w,
+        );
+    }
 }
 
 /// `#RRGGBB` accent, or the palette accent. A malformed value falls back.
@@ -777,6 +807,8 @@ mod tests {
             actions: Vec::new(),
             pin: None,
             bound_profile: None,
+            running: String::new(),
+            game_profiles: Default::default(),
         }
     }
 
@@ -957,5 +989,44 @@ mod tests {
         assert!(
             matches!(fx.nav, Some(crate::screens::Nav::Push(b)) if matches!(*b, Screen::AddHost(_)))
         );
+    }
+
+    /// A host with a game up is one you get back INTO, and the tile says which game.
+    /// Same press either way — only the word changes.
+    #[test]
+    fn a_running_host_relabels_connect_as_resume() {
+        let mut settings = ctx_settings();
+        let idle = host("idle", true, true, false);
+        let busy = HostRow {
+            running: "Elden Ring".into(),
+            ..host("busy", true, true, false)
+        };
+        let hosts = [idle, busy];
+        let pads: Vec<pf_client_core::menu_nav::PadInfo> = Vec::new();
+        let library = crate::library::LibraryShared::default();
+        let ctx = Ctx {
+            hosts: &hosts,
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::Desktop,
+            pads: &pads,
+            deck: false,
+            fallback_ui: false,
+            device_name: "test",
+            t: 0.0,
+        };
+        let confirm = |s: &HomeScreen| {
+            s.hints(&ctx)
+                .into_iter()
+                .find(|h| h.key == HintKey::Confirm)
+                .map(|h| h.label)
+                .unwrap_or_default()
+        };
+        let mut s = HomeScreen::new();
+        s.reconcile(&hosts);
+        assert_eq!(confirm(&s), "Connect");
+        s.cursor = 1;
+        assert_eq!(confirm(&s), "Resume");
     }
 }

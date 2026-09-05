@@ -280,6 +280,20 @@ object NativeBridge {
     external fun nativeVideoCodecLabel(handle: Long): String
 
     /**
+     * Whether this device's GPU can decode PyroWave (the wired-LAN wavelet codec): a Vulkan 1.3
+     * device with the compute feature set its kernels need. Session-independent — it asks the
+     * driver, not a host — and folded into [VideoDecoders.decodableCodecBits] so the host never
+     * emits a codec nothing here can decode.
+     *
+     * Unlike every other codec on this client, PyroWave is not a `MediaCodec`: it decodes as
+     * Vulkan compute and presents through its own swapchain on the same `SurfaceView`. Always
+     * false on the 32-bit ABI, where the codec is not built. The first call creates and destroys
+     * a Vulkan instance and native caches the answer for the process — do that one off the main
+     * thread; later calls are free.
+     */
+    external fun nativePyrowaveCapable(): Boolean
+
+    /**
      * Start the decode thread rendering onto [surface] (a SurfaceView's surface). Decode runs
      * entirely in Rust (NDK AMediaCodec → ANativeWindow) — no per-frame JNI. [decoderName] is the
      * decoder Kotlin ranked from `MediaCodecList` (`""` = let the platform resolve the default for
@@ -810,7 +824,7 @@ object NativeBridge {
     /** One title's poster, encoded (JPEG/PNG bytes). */
     external fun nativeConsoleLibraryArt(handle: Long, id: String, bytes: ByteArray)
 
-    /** The ids the host has up: `["steam:570", …]`. */
+    /** The host's `/status` games: `[{"app_id": "steam:570", "state": "running"}, …]`. */
     external fun nativeConsoleLibraryRunning(handle: Long, json: String)
 
     /** 0 fresh, 1 waking, 2 offline — the cached shelf's staleness note. */

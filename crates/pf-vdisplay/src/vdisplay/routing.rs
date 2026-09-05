@@ -240,8 +240,8 @@ pub fn launch_is_nested(compositor: Compositor, route: Option<&GamescopeRoute>) 
 /// Launch `cmd` into a live managed/attach session. Spawn nests instead
 /// ([`launch_is_nested`]).
 #[cfg(target_os = "linux")]
-pub fn launch_into_gamescope_session(cmd: &str) -> Result<std::process::Child> {
-    gamescope::launch_into_session(cmd)
+pub fn launch_into_gamescope_session(cmd: &str, seat: Option<&str>) -> Result<std::process::Child> {
+    gamescope::launch_into_session(cmd, seat)
 }
 
 /// Put compositor focus on streamed head `name` so a window mapping now lands
@@ -283,8 +283,8 @@ pub fn focus_streamed_output(compositor: Compositor, name: &str) -> bool {
 /// Gamescope can run several; the pointer is on the focused one. Empty when
 /// none are exposed — the host then leaves gamescope cursorless.
 #[cfg(target_os = "linux")]
-pub fn gamescope_xwayland_cursor_targets() -> Vec<(String, Option<String>)> {
-    gamescope::xwayland_cursor_targets()
+pub fn gamescope_xwayland_cursor_targets(seat: Option<&str>) -> Vec<(String, Option<String>)> {
+    gamescope::xwayland_cursor_targets(seat)
 }
 
 /// Dedicated game gone: `node_id` does not reappear shortly after capture loss.
@@ -315,9 +315,13 @@ pub fn steam_appid_from_launch(cmd: &str) -> Option<u32> {
 /// never started within the startup grace (leave the session up). Runs on
 /// the per-session watch thread; `cancel` is the session stop flag.
 #[cfg(target_os = "linux")]
-pub fn watch_steam_game_exit(appid: u32, cancel: &std::sync::atomic::AtomicBool) -> bool {
+pub fn watch_steam_game_exit(
+    appid: u32,
+    seat: Option<&str>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> bool {
     matches!(
-        gamescope::wait_for_steam_game_exit(appid, cancel),
+        gamescope::wait_for_steam_game_exit(appid, seat, cancel),
         gamescope::SteamGameWatch::Exited
     )
 }

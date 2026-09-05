@@ -29,7 +29,7 @@ use crate::direct_3d_device::Direct3DDevice;
 use crate::monitor::Monitor;
 use crate::worker::{Mmcss, Worker};
 
-const BACKEND_NAMES: [&str; 4] = ["nvenc", "amf", "qsv", "pyrowave"];
+pub(crate) const BACKEND_NAMES: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
 
 /// A failed `SET_ENCODE` as the wire reply: `status` from the driver's domain, the stage tag
 /// in `name`.
@@ -243,7 +243,7 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
 /// Everything one backend `open` takes, in the backends' own vocabulary.
 #[derive(Clone, Copy, Debug)]
 pub struct OpenSpec {
-    /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave.
+    /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave, 5 Media Foundation.
     pub backend: u32,
     pub codec: Codec,
     pub kind: InputKind,
@@ -268,13 +268,16 @@ pub fn codec_from_wire(codec: u32) -> Option<Codec> {
 
 /// Implicit Vulkan layers (overlays, our pf-vkhdr-layer) hang in session 0, and the encoder's
 /// private instance wants none of them. The loader-wide knob needs a 1.3.234+ loader; each
-/// manifest's own `disable_environment` works on any. Once per process.
+/// manifest's own `disable_environment` works on any.
+///
+/// Call from `driver_entry` only. Mutating the environment is unsound once other threads run,
+/// and the encode thread is exactly the wrong place for it; at load there is no other thread.
 pub fn disable_implicit_vulkan_layers() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // SAFETY: WUDFHost is this driver's own process (`ProcessSharingDisabled`); Windows'
-        // SetEnvironmentVariable is thread-safe and nothing here parses the environment
-        // concurrently.
+        // SAFETY: called from `driver_entry`, before this driver has started a thread, so no
+        // reader can race the write. WUDFHost is our own process (`ProcessSharingDisabled`), so
+        // the variables reach nobody else.
         unsafe {
             for (k, v) in [
                 ("VK_LOADER_LAYERS_DISABLE", "~implicit~"),
@@ -297,7 +300,10 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
     let (depth, chroma) = (spec.bit_depth, spec.chroma);
     let format = pixel_format(spec.kind);
     let luid = Some(adapter.luid62());
+    // NVENC, QSV and PyroWave are x86-64 only (see Cargo.toml); an ARM64 driver refuses their
+    // ids here and the host falls through to Media Foundation.
     let opened: anyhow::Result<Box<dyn Encoder>> = match spec.backend {
+        #[cfg(target_arch = "x86_64")]
         1 => pf_encode_win::nvenc::NvencD3d11Encoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, 1, luid,
         )
@@ -306,12 +312,14 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
         .map(|e| Box::new(e) as Box<dyn Encoder>),
+        #[cfg(target_arch = "x86_64")]
         3 => pf_encode_win::qsv::QsvEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
         .map(|e| Box::new(e) as Box<dyn Encoder>),
+        #[cfg(target_arch = "x86_64")]
         4 => {
-            disable_implicit_vulkan_layers();
+            // Layers were disabled at `driver_entry`; doing it here would race the live threads.
             pf_encode_win::pyrowave::PyroWaveEncoder::open(
                 w,
                 h,
@@ -324,6 +332,10 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
             )
             .map(|e| Box::new(e) as Box<dyn Encoder>)
         }
+        5 => pf_encode_win::mf::MfEncoder::open(
+            spec.codec, format, w, h, fps, bps, depth, chroma, luid,
+        )
+        .map(|e| Box::new(e) as Box<dyn Encoder>),
         _ => return Err((-1, "backend")),
     };
     opened.map_err(|e| {

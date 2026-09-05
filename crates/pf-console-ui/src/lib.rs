@@ -14,6 +14,11 @@
 //! Everything but `skia_overlay.rs` is platform-free: screens draw to
 //! `&Canvas`, settings through [`store::SettingsStore`], keys as
 //! [`input::Key`], platform rows as [`platform::Platform`].
+//!
+//! The drawing kit — [`theme`], [`widgets`], [`icons`], [`glyphs`], [`anim`],
+//! [`pointer`], the mark tables — is `pub` for one consumer: the webOS
+//! pointer UI (`webos-pointer-ui-overhaul.md` D3). No stability promise; a
+//! kit change there is a re-pin plus a compile fix, by design.
 
 #[cfg(any(
     target_os = "linux",
@@ -21,7 +26,14 @@
     target_os = "android",
     target_family = "wasm"
 ))]
-mod anim;
+pub mod anim;
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
+pub mod art_stats;
 #[cfg(any(
     target_os = "linux",
     windows,
@@ -42,14 +54,14 @@ pub mod console;
     target_os = "android",
     target_family = "wasm"
 ))]
-mod glyphs;
+pub mod glyphs;
 #[cfg(any(
     target_os = "linux",
     windows,
     target_os = "android",
     target_family = "wasm"
 ))]
-mod icons;
+pub mod icons;
 #[cfg(any(
     target_os = "linux",
     windows,
@@ -63,7 +75,7 @@ pub mod input;
     target_os = "android",
     target_family = "wasm"
 ))]
-mod launcher_icons;
+pub mod launcher_icons;
 #[cfg(any(
     target_os = "linux",
     windows,
@@ -84,7 +96,7 @@ pub mod model;
     target_os = "android",
     target_family = "wasm"
 ))]
-mod os_marks;
+pub mod os_marks;
 #[cfg(any(
     target_os = "linux",
     windows,
@@ -105,7 +117,7 @@ pub mod platform;
     target_os = "android",
     target_family = "wasm"
 ))]
-mod pointer;
+pub mod pointer;
 // In-stream ring is the desktop shell's (Android has Compose). Android
 // draws this module only as the settings editor; the host-action cache
 // is desktop-gated and is not consulted there.
@@ -132,6 +144,19 @@ mod screens;
 mod shell;
 #[cfg(all(any(target_os = "linux", windows), feature = "vulkan-overlay"))]
 mod skia_overlay;
+/// The settings rows' engine — ids, platform gate, spec, step — for a shell that lays the
+/// same rows out its own way (the webOS pointer UI's page map). Same kit terms as
+/// [`widgets`]: one consumer, no stability promise.
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
+pub mod settings_rows {
+    pub use crate::screens::settings::{adjust, detail, row_applies, row_on, row_spec, RowId};
+    pub use crate::screens::Ctx;
+}
 #[cfg(any(
     target_os = "linux",
     windows,
@@ -145,15 +170,22 @@ pub mod store;
     target_os = "android",
     target_family = "wasm"
 ))]
-mod theme;
+pub mod theme;
 #[cfg(any(
     target_os = "linux",
     windows,
     target_os = "android",
     target_family = "wasm"
 ))]
-mod widgets;
+pub mod widgets;
 
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
+pub use art_stats::{art_stats, ArtStats};
 #[cfg(any(
     target_os = "linux",
     windows,
@@ -174,7 +206,14 @@ pub use input::Key;
     target_os = "android",
     target_family = "wasm"
 ))]
-pub use library::{LibraryGame, LibraryPhase, LibraryShared, Stale};
+pub use library::decode_poster_off_thread;
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
+pub use library::{DecodedPoster, LibraryGame, LibraryPhase, LibraryShared, Stale};
 #[cfg(any(
     target_os = "linux",
     windows,

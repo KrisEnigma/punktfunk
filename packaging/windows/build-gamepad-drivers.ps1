@@ -29,7 +29,8 @@ param(
     [string]$CertPassword = $env:DRIVER_CERT_PASSWORD,
     # 'auto' (default) = required iff this is a v* tag build; 'true'/'false' to force. See below.
     [ValidateSet('auto', 'true', 'false')][string]$RequireSignedCert = 'auto',
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64'    # the drivers' target; the tools stay the runner's
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -74,15 +75,18 @@ if (-not $env:LIBCLANG_PATH -and (Test-Path 'C:\Program Files\LLVM\bin\libclang.
 }
 # Build into the DEFAULT workspace target dir (not an external CARGO_TARGET_DIR) - wdk-build walks up
 # from OUT_DIR for a Cargo.lock and doesn't support out-of-tree target dirs. See build-pf-vdisplay.ps1.
-$rel = Join-Path $DriversDir 'target\x86_64-pc-windows-msvc\release'
+$triple = if ($Arch -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+$stampArch = if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64' }
+$catOs = if ($Arch -eq 'arm64') { '10_NI_ARM64' } else { '10_X64' }   # both floor at 22H2 (22621)
+$rel = Join-Path $DriversDir "target\$triple\release"
 
 # --- 1. build (release) - one build covers the whole workspace --------------------------------
 if (-not $SkipBuild) {
-    Write-Host "==> cargo build --release (drivers workspace) in $DriversDir"
+    Write-Host "==> cargo build --release --target $triple (drivers workspace) in $DriversDir"
     $prevTarget = $env:CARGO_TARGET_DIR
     Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
     Push-Location $DriversDir
-    & cargo build --release
+    & cargo build --release --target $triple
     $rc = $LASTEXITCODE
     Pop-Location
     if ($prevTarget) { $env:CARGO_TARGET_DIR = $prevTarget } else { Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
@@ -148,11 +152,11 @@ foreach ($d in $drivers) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $clear -Path $sDll | Out-Null
     & $signtool sign /fd SHA256 @signArgs $sDll | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "signtool sign ($($d.dll)) failed ($LASTEXITCODE)" }
-    & $stampinf -f $sInf -d '*' -a 'amd64' -u '2.15.0' -v $DriverVer | Out-Null
+    & $stampinf -f $sInf -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
 }
 
 # --- 5. Inf2Cat both catalogs (one pass over -Out), then sign each -----------------------------
-& $inf2cat /driver:$Out /os:10_X64 /uselocaltime | Out-Null
+& $inf2cat /driver:$Out /os:$catOs /uselocaltime | Out-Null
 foreach ($d in $drivers) {
     $sCat = Join-Path $Out $d.cat
     if (-not (Test-Path $sCat)) { throw "Inf2Cat did not produce $sCat" }

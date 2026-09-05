@@ -11,13 +11,13 @@
 
 use crate::library::spring_advance;
 
-pub(crate) fn ease_out_cubic(t: f64) -> f64 {
+pub fn ease_out_cubic(t: f64) -> f64 {
     let u = 1.0 - t.clamp(0.0, 1.0);
     1.0 - u * u * u
 }
 
 /// `tau` is seconds. The exponential is frame-rate independent and never overshoots.
-pub(crate) fn approach(current: f64, target: f64, dt: f64, tau: f64) -> f64 {
+pub fn approach(current: f64, target: f64, dt: f64, tau: f64) -> f64 {
     current + (target - current) * (1.0 - (-dt / tau).exp())
 }
 
@@ -25,7 +25,7 @@ pub(crate) fn approach(current: f64, target: f64, dt: f64, tau: f64) -> f64 {
 /// [`SpringSpec::kc`] converts to the integrator's `k`/`c` the same way SwiftUI's
 /// `.spring(response:dampingFraction:)` does.
 #[derive(Clone, Copy)]
-pub(crate) struct SpringSpec {
+pub struct SpringSpec {
     pub response: f64,
     pub damping: f64,
 }
@@ -33,7 +33,7 @@ pub(crate) struct SpringSpec {
 impl SpringSpec {
     /// `k = ω²`, `c = 2ζω` with `ω = 2π/response`. Written with `ω` not `2ζ√k`:
     /// `√k` is `ω`, and `f64::sqrt` is not `const`.
-    pub(crate) const fn kc(self) -> (f64, f64) {
+    pub const fn kc(self) -> (f64, f64) {
         let w = std::f64::consts::TAU / self.response;
         (w * w, 2.0 * self.damping * w)
     }
@@ -42,63 +42,70 @@ impl SpringSpec {
 /// Shell springs. Carousel pairs (`library::SPRING_K/C`, `BUMP_K/C`) stay raw:
 /// they are shared with the GTK launcher, and wrapping them as specs invites a
 /// tidy-up that retunes coverflow on both surfaces.
-pub(crate) mod springs {
+pub mod springs {
     use super::SpringSpec;
 
     /// Screen push/pop. Damping 0.88 is just under critical: a full-screen bounce
     /// reads as broken. A spring, not a tween, so a mid-push Back retargets to 0
     /// and the screen turns around where it is.
-    pub(crate) const NAV: SpringSpec = SpringSpec {
+    pub const NAV: SpringSpec = SpringSpec {
         response: 0.42,
         damping: 0.88,
     };
     /// Row and tile focus. Damping 0.80 leaves a whisker of overshoot; that is the pop.
-    pub(crate) const FOCUS: SpringSpec = SpringSpec {
+    pub const FOCUS: SpringSpec = SpringSpec {
         response: 0.30,
         damping: 0.80,
     };
     /// Tab pill and keyboard tray: the [`TRAY_K`]/[`TRAY_C`] pair, pinned by
     /// `spring_spec_matches_the_tray_constants`.
-    pub(crate) const INDICATOR: SpringSpec = SpringSpec {
+    pub const INDICATOR: SpringSpec = SpringSpec {
         response: 0.32,
         damping: 0.86,
     };
     /// Confirm dip. Response 0.18 and damping 0.65 so a press reads as a press, not a fade.
-    pub(crate) const PRESS: SpringSpec = SpringSpec {
+    pub const PRESS: SpringSpec = SpringSpec {
         response: 0.18,
         damping: 0.65,
     };
     /// Quick-action ring. Looser than [`FOCUS`]: without a whisker past the seats
     /// the twist reads as stopping dead at the commit.
-    pub(crate) const RING: SpringSpec = SpringSpec {
+    pub const RING: SpringSpec = SpringSpec {
         response: 0.38,
+        damping: 0.72,
+    };
+    /// The launch hold's cover leaving its shelf tile. Long and loose next to the
+    /// rest: it crosses the whole screen and turns once on the way, and a tighter
+    /// spring finishes both before the eye has followed either.
+    pub const LAUNCH: SpringSpec = SpringSpec {
+        response: 0.75,
         damping: 0.72,
     };
 }
 
 /// `k`/`c` live in [`crate::library`] and [`TRAY_K`]/[`TRAY_C`].
 #[derive(Clone, Copy)]
-pub(crate) struct Spring {
+pub struct Spring {
     pub pos: f64,
     pub vel: f64,
 }
 
 impl Spring {
-    pub(crate) fn rest(pos: f64) -> Spring {
+    pub fn rest(pos: f64) -> Spring {
         Spring { pos, vel: 0.0 }
     }
 
-    pub(crate) fn step(&mut self, target: f64, k: f64, c: f64, dt: f64) {
+    pub fn step(&mut self, target: f64, k: f64, c: f64, dt: f64) {
         (self.pos, self.vel) = spring_advance(self.pos, self.vel, target, k, c, dt);
     }
 
-    pub(crate) fn step_spec(&mut self, target: f64, spec: SpringSpec, dt: f64) {
+    pub fn step_spec(&mut self, target: f64, spec: SpringSpec, dt: f64) {
         let (k, c) = spec.kc();
         self.step(target, k, c, dt);
     }
 
     /// Snap onto `target` once motion is imperceptible, so the frame loop stops dirtying.
-    pub(crate) fn settle(&mut self, target: f64, eps_pos: f64, eps_vel: f64) {
+    pub fn settle(&mut self, target: f64, eps_pos: f64, eps_vel: f64) {
         if (target - self.pos).abs() < eps_pos && self.vel.abs() < eps_vel {
             self.pos = target;
             self.vel = 0.0;
@@ -108,12 +115,12 @@ impl Spring {
 
 /// Tray slide: `.spring(response: 0.32, dampingFraction: 0.86)`, rounded
 /// (exact is 385.53 / 33.77). Pinned by `spring_spec_matches_the_tray_constants`.
-pub(crate) const TRAY_K: f64 = 385.0;
-pub(crate) const TRAY_C: f64 = 33.7;
+pub const TRAY_K: f64 = 385.0;
+pub const TRAY_C: f64 = 33.7;
 
 /// Overshoots 1.0 then settles, so a card reads as thrown. `C1` is 1.2, not the CSS
 /// 1.70158: full strength reads as a bounce.
-pub(crate) fn ease_out_back(t: f64) -> f64 {
+pub fn ease_out_back(t: f64) -> f64 {
     const C1: f64 = 1.2;
     const C3: f64 = C1 + 1.0;
     let u = t.clamp(0.0, 1.0) - 1.0;
@@ -124,7 +131,7 @@ pub(crate) fn ease_out_back(t: f64) -> f64 {
 const FADE_SHARE: f64 = 0.34;
 
 #[derive(Clone, Copy)]
-pub(crate) struct EntranceSpec {
+pub struct EntranceSpec {
     /// Seconds for one item to arrive.
     pub window: f64,
     /// Seconds of delay per step from the anchor.
@@ -134,20 +141,20 @@ pub(crate) struct EntranceSpec {
     pub cap: f64,
 }
 
-pub(crate) mod entrances {
+pub mod entrances {
     use super::EntranceSpec;
 
     /// Carousel and coverflow. Stagger 0.12 is judged against the ~0.2 s of
     /// readable action (`FADE_SHARE` of 0.6), not the full window: ease-out-back
     /// is already at 0.89 by then, and every surface culls to a handful of items.
-    pub(crate) const CARDS: EntranceSpec = EntranceSpec {
+    pub const CARDS: EntranceSpec = EntranceSpec {
         window: 0.6,
         stagger: 0.12,
         cap: 0.6,
     };
     /// Menu rows. Shorter than [`CARDS`], not zero: under about three frames
     /// apart the rows read as one arrival rather than a ripple.
-    pub(crate) const ROWS: EntranceSpec = EntranceSpec {
+    pub const ROWS: EntranceSpec = EntranceSpec {
         window: 0.42,
         stagger: 0.055,
         cap: 0.33,
@@ -155,14 +162,14 @@ pub(crate) mod entrances {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct EntranceAt {
+pub struct EntranceAt {
     /// Progress on [`ease_out_back`] (overshoots 1.0). The screen picks what moves.
     pub travel: f64,
     pub fade: f64,
 }
 
 impl EntranceAt {
-    pub(crate) const SETTLED: EntranceAt = EntranceAt {
+    pub const SETTLED: EntranceAt = EntranceAt {
         travel: 1.0,
         fade: 1.0,
     };
@@ -171,7 +178,7 @@ impl EntranceAt {
 /// Pure function of the shell clock. A screen holds one and asks it per item;
 /// there is no per-card state. Arm once per mount, not per frame.
 #[derive(Clone, Copy)]
-pub(crate) struct Entrance {
+pub struct Entrance {
     spec: EntranceSpec,
     anchor: usize,
     t0: f64,
@@ -182,7 +189,7 @@ pub(crate) struct Entrance {
 impl Entrance {
     /// Arm at `t0`. Callers pass the cursor as `anchor` so a restored selection
     /// assembles around the eye, not from a corner.
-    pub(crate) fn new(spec: EntranceSpec, anchor: usize, t0: f64) -> Entrance {
+    pub fn new(spec: EntranceSpec, anchor: usize, t0: f64) -> Entrance {
         Entrance {
             spec,
             anchor,
@@ -191,7 +198,7 @@ impl Entrance {
         }
     }
 
-    pub(crate) fn at(&self, i: usize, t: f64) -> EntranceAt {
+    pub fn at(&self, i: usize, t: f64) -> EntranceAt {
         let elapsed = t - self.t0;
         if self.reduced {
             return EntranceAt {
@@ -209,7 +216,7 @@ impl Entrance {
 
     /// Over at `cap + window` regardless of `len`, so callers can drop the entrance
     /// without counting items.
-    pub(crate) fn done(&self, t: f64) -> bool {
+    pub fn done(&self, t: f64) -> bool {
         t - self.t0 >= self.spec.cap + self.spec.window
     }
 }

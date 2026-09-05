@@ -56,6 +56,22 @@ public struct GameEntry: Codable, Hashable, Identifiable, Sendable {
     /// under "Unknown" (see `LibraryCollation.bucket`). Also on the detail band as
     /// `STORE · PLATFORM`.
     public var platform: String?
+    /// The rest of the host's `GameMeta`, as far as anything here shows it. The host has sent
+    /// these since the library API existed and no client ever read them; the launch hold is the
+    /// first screen with room to say more than a title, so it decodes what it can use.
+    ///
+    /// Optional rather than defaulted: a synthesized `Decodable` throws on a missing key for a
+    /// non-optional property, and the host omits every one of these when it has nothing.
+    public var developer: String?
+    public var publisher: String?
+    public var releaseYear: Int?
+    public var genres: [String]?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, store, title, art, launch, role, icon, platform
+        case developer, publisher, genres
+        case releaseYear = "release_year"
+    }
 
     public var isCustom: Bool { store == "custom" }
 
