@@ -400,6 +400,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   now install the host's unhandled-exception filter, so `client.log` records the exception code,
   fault address and faulting DLL, and the "Couldn't connect" banner calls an access violation one
   instead of printing `-1073741819`. Send the log as before; the crash line is what to look for.
+- **The Windows client ships its own VC++ runtime.** Every client artifact now carries the
+  toolset's `msvcp140*.dll` and `vcruntime140*.dll` beside the exe, so a machine whose
+  redistributable predates 14.40 no longer kills the session in `MSVCP140.dll` on the first
+  text layout. Nothing to do; a system redist update is no longer required.
 
 ### Fixed
 
