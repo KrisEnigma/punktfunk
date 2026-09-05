@@ -645,6 +645,9 @@ pub struct NvencCudaEncoder {
     split_mode: u32,
     /// Last invalidated range — dedupes repeated RFI for one loss.
     last_rfi_range: Option<(i64, i64)>,
+    /// `distrust_references` latched: a resident reference may predict from a hole the
+    /// client decoded against, so RFI declines until an IDR flushes the DPB.
+    distrusted: bool,
     /// Vulkan SPIR-V cursor blend (`vkslot.rs`). `None` = bring-up failed, ring is plain CUDA,
     /// no cursor. `cursor_tried` is one-shot; `cursor_serial` is the uploaded bitmap.
     vk_blend: Option<VkSlotBlend>,
@@ -775,6 +778,7 @@ impl NvencCudaEncoder {
             custom_vbv: false,
             split_mode: nv::NV_ENC_SPLIT_ENCODE_MODE::NV_ENC_SPLIT_DISABLE_MODE as u32,
             last_rfi_range: None,
+            distrusted: false,
             async_rt: None,
             want_async: false,
             want_sync: false,
@@ -888,9 +892,11 @@ impl NvencCudaEncoder {
         self.encoder = ptr::null_mut();
         self.inited = false;
         self.next = 0;
-        // New session starts IDR / empty DPB — prior RFI range and pending anchor are stale.
+        // New session starts IDR / empty DPB — prior RFI range, pending anchor and distrust
+        // are stale.
         self.last_rfi_range = None;
         self.pending_anchor = false;
+        self.distrusted = false;
     }
 
     /// One `NV_ENC_CAPS` value; 0 on error (unqueryable = unsupported).
@@ -1849,6 +1855,8 @@ impl Encoder for NvencCudaEncoder {
             let pts = self.frame_idx as u64;
             self.frame_idx += 1;
             let flags = if std::mem::take(&mut self.force_kf) {
+                // The IDR flushes the DPB: every later reference is clean again.
+                self.distrusted = false;
                 nv::NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR as u32
                     | nv::NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS as u32
             } else {
@@ -2002,10 +2010,14 @@ impl Encoder for NvencCudaEncoder {
         self.hdr_meta = meta;
     }
 
+    fn distrust_references(&mut self) {
+        self.distrusted = true;
+    }
+
     fn invalidate_ref_frames(&mut self, first: i64, last: i64) -> bool {
         // Range policy is `nvenc_core::plan_range_recovery`. This backend: session gate +
-        // driver loop.
-        if self.encoder.is_null() || !self.rfi_supported {
+        // distrust latch + driver loop.
+        if self.encoder.is_null() || !self.rfi_supported || self.distrusted {
             return false;
         }
         match plan_range_recovery(first, last, self.frame_idx, self.last_rfi_range) {

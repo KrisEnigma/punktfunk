@@ -2303,6 +2303,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             want_kf = false;
             rfi_range = None;
         }
+        // An RFI the encoder declined is proof that recovery needs an IDR — the anchor
+        // itself was lost, or every surviving reference is tainted. Not an echo.
+        let mut rfi_declined = false;
         if !want_kf {
             if let Some((first, last)) = rfi_range {
                 let width = last.wrapping_sub(first);
@@ -2315,18 +2318,20 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     last_rfi = Some(std::time::Instant::now());
                 } else {
                     want_kf = true;
+                    rfi_declined = true;
                 }
             }
         }
         if want_kf {
-            // One forced IDR per cooldown. Intra-refresh heals over ~0.5 s (2 s window); full-IDR
-            // needs a shorter window — swallow the round-trip echo, re-issue a lost IDR promptly.
+            // One forced IDR per cooldown. A stream whose recovery marks the client can lift on
+            // heals over ~0.5 s (2 s window); every other stream's only repair is the IDR, so
+            // the window is short — swallow the round-trip echo, re-issue a lost IDR promptly.
             const IDR_COOLDOWN_INTRA: std::time::Duration = std::time::Duration::from_secs(2);
             const IDR_COOLDOWN_FULL: std::time::Duration = std::time::Duration::from_millis(750);
             const RFI_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
             const RFI_ECHO_MAX_SWALLOWED: u32 = 2;
             const KF_EPISODE_RESET: std::time::Duration = std::time::Duration::from_secs(1);
-            let window = if enc.caps().intra_refresh {
+            let window = if enc.caps().intra_refresh_recovery {
                 IDR_COOLDOWN_INTRA
             } else {
                 IDR_COOLDOWN_FULL
@@ -2337,7 +2342,8 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
             last_kf_request = Some(now);
             let idr_recent = last_forced_idr.is_some_and(|t| t.elapsed() < window);
-            let rfi_echo = last_rfi.is_some_and(|t| t.elapsed() < RFI_ECHO_WINDOW)
+            let rfi_echo = !rfi_declined
+                && last_rfi.is_some_and(|t| t.elapsed() < RFI_ECHO_WINDOW)
                 && rfi_echo_swallowed < RFI_ECHO_MAX_SWALLOWED;
             if idr_recent {
                 // In-flight IDR has not repaired the client yet — do not RFI-anchor over that damage.
