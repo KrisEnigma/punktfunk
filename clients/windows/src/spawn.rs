@@ -113,9 +113,14 @@ pub(crate) fn silent_exit_banner(code: i32) -> Option<String> {
         let log = crate::logfile::path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "the client log".into());
-        format!(
-            "The session didn't start (punktfunk-session exited with code {code}). Check {log}."
-        )
+        // NTSTATUS codes arrive as negative i32s; the hex form matches the crash filter's
+        // log line and the Event Log record, so the two can be tied together.
+        let how = match code as u32 {
+            0xC000_0005 => "crashed with an access violation (0xC0000005)".to_string(),
+            c if code < 0 => format!("died with exception 0x{c:08X}"),
+            _ => format!("exited with code {code}"),
+        };
+        format!("The session didn't start (punktfunk-session {how}). Check {log}.")
     })
 }
 
@@ -343,5 +348,10 @@ mod tests {
         let banner = silent_exit_banner(2).expect("failing exit must say something");
         assert!(banner.contains('2'), "{banner}");
         assert!(silent_exit_banner(101).is_some());
+        // An NTSTATUS names the crash in hex, the form the Event Log and the crash filter use.
+        let av = silent_exit_banner(-1073741819).unwrap();
+        assert!(av.contains("access violation (0xC0000005)"), "{av}");
+        let other = silent_exit_banner(0xC000_0409u32 as i32).unwrap();
+        assert!(other.contains("0xC0000409"), "{other}");
     }
 }

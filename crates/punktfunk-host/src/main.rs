@@ -28,9 +28,6 @@ mod discovery;
 #[forbid(unsafe_code)]
 mod wol;
 // `#[path]` keeps `crate::*` names flat while files live under `src/linux/` / `src/windows/`.
-#[cfg(target_os = "windows")]
-#[path = "windows/crash.rs"]
-mod crash;
 #[cfg(target_os = "linux")]
 #[path = "linux/drm_sync.rs"]
 mod drm_sync;
@@ -206,7 +203,7 @@ fn main() {
     }));
     // SEH last-resort: a GPU-runtime AV otherwise kills the process with no ring entry.
     #[cfg(target_os = "windows")]
-    crash::install();
+    punktfunk_core::crash::install();
 
     if let Err(e) = real_main() {
         tracing::error!("{e:#}");

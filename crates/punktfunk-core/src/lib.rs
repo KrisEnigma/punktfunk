@@ -34,6 +34,10 @@ pub mod client;
 #[cfg(feature = "quic")]
 pub mod clipboard;
 pub mod config;
+/// The unhandled-SEH filter every Windows process installs after logging init.
+#[cfg(windows)]
+#[path = "crash_windows.rs"]
+pub mod crash;
 pub mod crypto;
 pub mod discovery;
 pub mod error;
