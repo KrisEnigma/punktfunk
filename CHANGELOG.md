@@ -270,6 +270,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   audio buffer bouncing between 15 and 115 ms with a/v at +40 or more. The client now asks
   for 10 ms whether or not the mic is on, logs what it asked for and what it got at connect,
   and warns when iOS gives it far more. Nothing to do.
+- **iPad audio with the mic on no longer drops out every half minute.** Each engine start's own
+  route change was read as a stopped engine, so the client rebuilt its audio engine after every
+  rebuild for the whole session. Nothing to do.
 - **A re-run upgrades a box that already has every package.** The install phase skipped the
   packages entirely when the host, console and plugin runner were all present, so a box carrying
   a broken build could only be cleared by uninstalling first — nothing to do.
