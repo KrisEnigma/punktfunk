@@ -13,7 +13,9 @@
   secret OR a fresh self-signed). Steps: cargo build (the wdk-sys/windows-drivers-rs driver workspace) ->
   CLEAR the FORCE_INTEGRITY PE bit (wdk-build links /INTEGRITYCHECK, which a non-EV cert can't satisfy) ->
   sign the .dll -> stampinf a strictly-increasing DriverVer into the INF -> Inf2Cat the catalog -> sign the
-  catalog -> export the public .cer. Output (-Out): pf_vdisplay.{dll,inf,cat} + punktfunk-driver.cer.
+  catalog -> export the public .cer. Output (-Out): pf_vdisplay.{dll,inf,cat} + punktfunk-driver.cer,
+  plus pf_vdisplay_seats.{inf,cat} — the same driver claiming the seat display ids, which the seats
+  add-on installs INSTEAD of nothing and which nobody else should install (see below).
 
   Requires the WDK build env: cargo + the x64 MSVC toolset (its ARM64 cross compiler for -Arch arm64), an LLVM compatible with the driver's bindgen
   (>= 0.72 supports current clang), LIBCLANG_PATH, and the Windows 10/11 WDK (the runner has these). Sets
@@ -138,6 +140,26 @@ $sCer = Join-Path $Out 'punktfunk-driver.cer'
 Copy-Item $dll $sDll -Force
 Copy-Item $inx $sInf -Force   # stampinf rewrites this copy in place
 
+# The SEATS variant, built from the same .inx and signed with the same key. It exists because
+# claiming `RdpIdd_IndirectDisplay` takes over EVERY RDP session on the machine, so it cannot ride
+# the package everyone installs — but the seats add-on cannot mint it either, having neither the
+# DLL nor the signing key. Two packages, one build, and the installer chooses.
+# It claims ONLY the seat ids, so it never competes for the console `Root\pf_vdisplay` node.
+$sInfSeats = Join-Path $Out 'pf_vdisplay_seats.inf'
+$sCatSeats = Join-Path $Out 'pf_vdisplay_seats.cat'
+$seatsText = (Get-Content $inx -Raw).
+    Replace('CatalogFile=pf_vdisplay.cat', 'CatalogFile=pf_vdisplay_seats.cat').
+    Replace('%DeviceName%=pf_vdisplay_Install, Root\pf_vdisplay', '; console node: see pf_vdisplay.inf').
+    Replace(';   %DeviceName%=pf_vdisplay_Seat_Install, RdpIdd_IndirectDisplay',
+            '%DeviceName%=pf_vdisplay_Seat_Install, RdpIdd_IndirectDisplay')
+if ($seatsText -notmatch '(?m)^%DeviceName%=pf_vdisplay_Seat_Install, RdpIdd_IndirectDisplay') {
+    throw 'seats INF: the RdpIdd claim did not get uncommented - the .inx comment shape changed'
+}
+if ($seatsText -match '(?m)^%DeviceName%=pf_vdisplay_Install, Root\\pf_vdisplay') {
+    throw 'seats INF: still claims the console node - it must claim only the seat ids'
+}
+Set-Content -Path $sInfSeats -Value $seatsText -NoNewline
+
 # Clear FORCE_INTEGRITY BEFORE signing (it edits the PE, invalidating any signature).
 & powershell -NoProfile -ExecutionPolicy Bypass -File $clear -Path $sDll | Out-Null
 
@@ -146,10 +168,17 @@ if (-not $DriverVer) { $now = Get-Date; $DriverVer = '9.9.{0}.{1}' -f $now.ToStr
 & $signtool sign /fd SHA256 @signArgs $sDll | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "signtool sign (dll) failed ($LASTEXITCODE)" }
 & $stampinf -f $sInf -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
+# Same DriverVer on both: the date is what wins `RdpIdd_IndirectDisplay` against the inbox driver,
+# whose rank is identical to ours and whose date is frozen at 06/21/2006. A seats package stamped
+# older than inbox loses the id silently (`windows-seat-display-tier.md` §5d).
+& $stampinf -f $sInfSeats -d '*' -a $stampArch -u '2.15.0' -v $DriverVer | Out-Null
 & $inf2cat /driver:$Out /os:$catOs /uselocaltime | Out-Null
 if (-not (Test-Path $sCat)) { throw "Inf2Cat did not produce $sCat" }
+if (-not (Test-Path $sCatSeats)) { throw "Inf2Cat did not produce $sCatSeats" }
 & $signtool sign /fd SHA256 @signArgs $sCat | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "signtool sign (cat) failed ($LASTEXITCODE)" }
+& $signtool sign /fd SHA256 @signArgs $sCatSeats | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "signtool sign (seats cat) failed ($LASTEXITCODE)" }
 Export-Certificate -Cert $pubForCer -FilePath $sCer | Out-Null
 if ($cleanupCert) { Remove-Item "Cert:\CurrentUser\My\$($cleanupCert.Thumbprint)" -Force -ErrorAction SilentlyContinue }
 Remove-SigningPfx
@@ -159,7 +188,7 @@ Remove-SigningPfx
 # itself can't always OPEN a catalog signed by a not-yet-trusted cert (it throws UnableToOpenCatalogFile),
 # so treat ITS failure as inconclusive (warn) - but a real coverage miss still fails the build.
 $cat = $null
-try { $cat = Test-FileCatalog -CatalogFilePath $sCat -Path $Out -FilesToSkip 'pf_vdisplay.cat', 'punktfunk-driver.cer' -Detailed }
+try { $cat = Test-FileCatalog -CatalogFilePath $sCat -Path $Out -FilesToSkip 'pf_vdisplay.cat', 'pf_vdisplay_seats.cat', 'pf_vdisplay_seats.inf', 'punktfunk-driver.cer' -Detailed }
 catch { Write-Warning "catalog coverage guard inconclusive (Test-FileCatalog: $($_.Exception.Message))" }
 if ($cat) {
     $covered = @($cat.CatalogItems.Keys)
