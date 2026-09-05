@@ -59,6 +59,14 @@ mod screens;
 mod shell;
 #[cfg(all(any(target_os = "linux", windows), feature = "vulkan-overlay"))]
 mod skia_overlay;
+/// The settings rows' engine — ids, platform gate, spec, step — for a shell that lays the
+/// same rows out its own way (the webOS pointer UI's page map). Same kit terms as
+/// [`widgets`]: one consumer, no stability promise.
+#[cfg(any(target_os = "linux", windows, target_os = "android"))]
+pub mod settings_rows {
+    pub use crate::screens::settings::{adjust, detail, row_applies, row_on, row_spec, RowId};
+    pub use crate::screens::Ctx;
+}
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]
 pub mod store;
 #[cfg(any(target_os = "linux", windows, target_os = "android"))]

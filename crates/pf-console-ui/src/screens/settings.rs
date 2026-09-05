@@ -24,7 +24,7 @@ use skia_safe::{Canvas, Rect};
 /// Dispatch key for adjust/activate. The pad list under "Use controller" can
 /// churn between frames, so an index would act on the wrong row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowId {
+pub enum RowId {
     /// Index into [`SettingsScreen::profiles`]. Activate opens pin-to-hosts;
     /// the console never edits a profile.
     Profile(usize),
@@ -907,7 +907,7 @@ impl SettingsScreen {
 ///
 /// [`TABS`] is the union so a setting sits under the same word on every client.
 /// A concept the platform does not have is absent, never a no-op control.
-fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
+pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
     use crate::platform::Platform;
     // Rows name the platforms that OFFER them. "Everything except the other one's rows" is
     // well defined for two platforms and ambiguous for three: a new host would inherit every
@@ -951,7 +951,7 @@ fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
 /// visible. Smoothness buffer is a knob on one of two intents — under Lowest
 /// latency the quantity does not exist, so the row is dropped. It sits directly
 /// below the intent row so the cursor is never on a row that vanishes.
-fn row_applies(id: RowId, ctx: &Ctx) -> bool {
+pub fn row_applies(id: RowId, ctx: &Ctx) -> bool {
     match id {
         RowId::SmoothBuffer => ctx.settings.present_priority == "smooth",
         // Needs `fallback_ui`; otherwise off strands the user with no UI.
@@ -969,7 +969,7 @@ fn row_applies(id: RowId, ctx: &Ctx) -> bool {
     }
 }
 
-fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
+pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
     // Pin count from live host rows, matching the carousel.
     match id {
         RowId::Profile(i) => {
@@ -1283,7 +1283,7 @@ fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
 }
 
 /// One-line explainer. Platform so Android is not taught desktop-only chords.
-fn detail(id: RowId, ctx: &Ctx) -> &'static str {
+pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
     use crate::platform::Platform;
     let platform = ctx.platform;
     match id {
@@ -1561,7 +1561,7 @@ fn audio_format_label(value: &str) -> &'static str {
 
 /// Step (`wrap=false`, clamp; `None` = boundary) or cycle (`wrap=true`).
 /// Toggles: left = off, right = on. A no-op is a boundary.
-fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
+pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
     let platform = ctx.platform;
     let s = &mut *ctx.settings;
     match id {
