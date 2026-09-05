@@ -321,6 +321,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The Windows host is per-monitor DPI aware from launch.** Windows hands a DPI-unaware process
+  the cursor bitmap for the DPI it was started at, so a host started on a 300 % desktop kept
+  forwarding a 96 px pointer onto the 96 DPI virtual display, three times too large on every
+  client; the embedded manifest now declares PerMonitorV2, so the forwarded pointer and the GDI
+  metrics follow the display's live scale. Nothing to do beyond the update's own host restart.
 - **Trackpad scrolling no longer runs away.** A client priced 10 px of finger travel as one
   wheel detent and every host then expanded that detent into a full scroll step (~3 lines) —
   roughly five times too far, on Windows as well as Linux, and worst on macOS where all
