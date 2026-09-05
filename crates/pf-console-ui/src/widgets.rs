@@ -260,6 +260,8 @@ pub struct MenuList {
     geom: Vec<Rect>,
     /// Last-drawn trailing button rects per row, same indexing.
     buttons_geom: Vec<Vec<Rect>>,
+    /// Last-drawn slider tracks by row; empty for rows without one.
+    tracks_geom: Vec<Rect>,
     /// True once nothing is still moving. `false` until the first render so a
     /// fresh list always asks for a frame.
     settled: bool,
@@ -291,6 +293,7 @@ impl MenuList {
             snap: true,
             geom: Vec::new(),
             buttons_geom: Vec::new(),
+            tracks_geom: Vec::new(),
             settled: false,
         }
     }
@@ -346,6 +349,31 @@ impl MenuList {
             .iter()
             .enumerate()
             .find_map(|(i, rects)| p.pick(rects).map(|j| (i, j)))
+    }
+
+    /// Where along row `i`'s slider track the pointer's `x` falls, 0..=1, if the row drew
+    /// one. A press on the row that lands within the track's row band is a seek; the
+    /// screen turns the fraction into a value and keeps dragging with it.
+    pub fn track_frac(&self, i: usize, x: f64) -> Option<f32> {
+        let track = self.tracks_geom.get(i).copied().filter(|r| !r.is_empty())?;
+        Some(((x as f32 - track.left) / track.width().max(1.0)).clamp(0.0, 1.0))
+    }
+
+    /// Whether the pointer is on row `i`'s slider track, widened to the row's height so a
+    /// 6 dp line is not the target.
+    pub fn on_track(&self, i: usize, p: Pointer) -> bool {
+        let Some(track) = self.tracks_geom.get(i).copied().filter(|r| !r.is_empty()) else {
+            return false;
+        };
+        let Some(row) = self.geom.get(i) else {
+            return false;
+        };
+        p.hits(Rect::from_ltrb(
+            track.left - 8.0,
+            row.top,
+            track.right + 8.0,
+            row.bottom,
+        ))
     }
 
     /// Last-drawn row rect; tests assert what a press can reach.
@@ -582,6 +610,8 @@ impl MenuList {
         self.geom.resize(rows.len(), Rect::new_empty());
         self.buttons_geom.clear();
         self.buttons_geom.resize(rows.len(), Vec::new());
+        self.tracks_geom.clear();
+        self.tracks_geom.resize(rows.len(), Rect::new_empty());
         for (i, row) in rows.iter().enumerate() {
             let f = self.focus[i];
             let top = f64::from(rect.top) + tops[i] * k - self.scroll + self.bump.pos * k;
@@ -843,6 +873,7 @@ impl MenuList {
                         track_w as f32,
                         th as f32,
                     );
+                    self.tracks_geom[i] = track;
                     canvas.draw_rrect(
                         RRect::new_rect_xy(track, th as f32 / 2.0, th as f32 / 2.0),
                         &fill(fg(0.18)),
@@ -1872,6 +1903,7 @@ mod tests {
         assert_eq!(list.button_at(at(pencil)), Some((0, 0)));
         assert_eq!(list.button_at(at(trash)), Some((0, 1)));
         assert_eq!(list.button_at(at(list.row_rect(1).unwrap())), None);
+        assert!(list.track_frac(0, 0.0).is_none(), "no track on a value row");
         // The lit button is accent (blue-heavy in BGRA), the other is not.
         let buf = read_back(&mut surface, w, h);
         let px = |r: Rect| {
@@ -1890,6 +1922,36 @@ mod tests {
             px(pencil),
             px(trash)
         );
+    }
+
+    /// A slider row records its track: the pointer's x maps to 0..=1 along it and a point
+    /// in the row band over the track counts as on it.
+    #[test]
+    fn slider_tracks_are_seekable_by_the_pointer() {
+        crate::theme::set_ink(crate::theme::Ink::of(crate::library::palette("violet")));
+        let fonts = crate::theme::build_fonts().unwrap();
+        let (w, h) = (900, 300);
+        let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+        let rect = Rect::from_xywh(0.0, 0.0, w as f32, h as f32);
+        let rows = vec![RowSpec::slider("Bitrate", "40 Mb/s", 0.5)];
+        let mut list = MenuList::new();
+        for _ in 0..30 {
+            list.render(surface.canvas(), rect, &rows, &fonts, 1.0, 1.0 / 60.0, true);
+        }
+        let track = list.tracks_geom[0];
+        assert!(track.width() > 100.0);
+        let at = |x: f32, y: f32| Pointer {
+            x: f64::from(x),
+            y: f64::from(y),
+            kind: PointerKind::Press,
+        };
+        assert!(list.on_track(0, at(track.center_x(), track.top - 12.0)));
+        assert!(!list.on_track(0, at(track.left - 40.0, track.center_y())));
+        let f = list
+            .track_frac(0, f64::from(track.left + track.width() * 0.25))
+            .unwrap();
+        assert!((f - 0.25).abs() < 0.02, "{f}");
+        assert_eq!(list.track_frac(0, -10.0), Some(0.0));
     }
 
     /// The pointer shells' controls: a switch's knob crosses its track when the row flips
