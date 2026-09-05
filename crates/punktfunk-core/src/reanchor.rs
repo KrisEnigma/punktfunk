@@ -160,6 +160,10 @@ pub struct ReanchorGate {
     /// decode-order watermark on each move: a DPB flush can return pictures decoded *before*
     /// the loss, and wall-clock pairing cannot tell. Other clients ignore it.
     arms: u64,
+    /// The current lift came from an intra-refresh heal (wire marks or a local recovery
+    /// point). The wave heals content by overwrite, which a reference-chain ledger cannot
+    /// see, so damaged evidence is not held against frames until the next arm.
+    mark_lift: bool,
     /// `frames_dropped` climb still expected from gap-armed losses. [`poll`](Self::poll)
     /// consumes this before treating a climb as a new loss ([`DROP_CREDIT_WINDOW`]).
     drop_credit: u64,
@@ -178,6 +182,7 @@ impl ReanchorGate {
             last_dropped: frames_dropped,
             local_sei_since_arm: false,
             arms: 0,
+            mark_lift: false,
             drop_credit: 0,
             drop_credit_expiry: None,
         }
@@ -199,6 +204,7 @@ impl ReanchorGate {
         // A wave already in flight still references the picture just lost. Only an SEI seen
         // from here on may be trusted.
         self.local_sei_since_arm = false;
+        self.mark_lift = false;
         self.deadline = Some(now + REANCHOR_FREEZE_MAX);
     }
 
@@ -228,6 +234,8 @@ impl ReanchorGate {
         self.awaiting = false;
         self.deadline = None;
         self.marks = 0;
+        // A wave heal: the reference chain stays marked damaged, so suspend that rule.
+        self.mark_lift = true;
         // Spent: the next heal needs its own SEI, or one wave would lift a later loss.
         self.local_sei_since_arm = false;
         true
@@ -252,14 +260,18 @@ impl ReanchorGate {
         )
     }
 
-    /// [`on_decoded`](Self::on_decoded) when the client can check the host's re-anchor claim.
-    /// [`AnchorEvidence::ReferencesDamaged`] withholds an
-    /// [`USER_FLAG_RECOVERY_ANCHOR`](crate::packet::USER_FLAG_RECOVERY_ANCHOR) lift and nothing
-    /// else: a real IDR still lifts (it predicts from nothing; refusing it is a permanent freeze),
-    /// and the two-mark [`USER_FLAG_RECOVERY_POINT`](crate::packet::USER_FLAG_RECOVERY_POINT) rule
-    /// plus [`RECOVERY_MARK_PATIENCE`] stay untouched (a wave heals by overwrite, not by one
-    /// named reference). A refusal leaves the backstop on the arm's original deadline so
-    /// [`poll`](Self::poll) still escalates to an IDR.
+    /// [`on_decoded`](Self::on_decoded) when the client's own parser knows whether this
+    /// picture predicts from a complete reference chain.
+    /// [`AnchorEvidence::ReferencesDamaged`] does two things. It withholds an
+    /// [`USER_FLAG_RECOVERY_ANCHOR`](crate::packet::USER_FLAG_RECOVERY_ANCHOR) lift, and it
+    /// holds the frame itself, arming the freeze if nothing else had: a picture predicted
+    /// from a concealed one is the artifact whatever the wire says, and it reaches an
+    /// unfrozen gate whenever a lift landed before the damaged chain drained (a reordered
+    /// straggler decoded after its successors, an encoder still referencing the corrupt
+    /// window after its recovery frame). Without the arm nothing would ever ask for the IDR.
+    /// A real IDR predicts from nothing, so its evidence is never damaged and it still lifts.
+    /// A lift by [`USER_FLAG_RECOVERY_POINT`](crate::packet::USER_FLAG_RECOVERY_POINT) marks
+    /// suspends the rule until the next arm: the wave healed content the chain cannot show.
     pub fn on_decoded_corroborated(
         &mut self,
         wire_flags: u32,
@@ -280,6 +292,13 @@ impl ReanchorGate {
         if lift {
             self.awaiting = false;
             self.deadline = None;
+            self.mark_lift = !is_keyframe && !has_anchor;
+        }
+        if evidence == AnchorEvidence::ReferencesDamaged && !self.mark_lift {
+            if !self.awaiting {
+                self.arm(now);
+            }
+            return GateVerdict::Hold;
         }
         if self.awaiting {
             GateVerdict::Hold
@@ -772,10 +791,11 @@ mod tests {
             g.on_decoded_corroborated(ANCHOR, false, ReferencesDamaged, now),
             GateVerdict::Hold
         );
+        // An IDR predicts from nothing, so the parser reports it clean.
         assert_eq!(
-            g.on_decoded_corroborated(0, true, ReferencesDamaged, now),
+            g.on_decoded_corroborated(0, true, ReferencesClean, now),
             GateVerdict::Present,
-            "the IDR re-anchors regardless of what the anchor evidence says"
+            "the IDR re-anchors after any number of refused anchors"
         );
         assert!(!g.is_holding());
 
@@ -783,7 +803,7 @@ mod tests {
         let mut g = ReanchorGate::new(0);
         g.arm(now);
         assert_eq!(
-            g.on_decoded_corroborated(SOF, false, ReferencesDamaged, now),
+            g.on_decoded_corroborated(SOF, false, ReferencesClean, now),
             GateVerdict::Present
         );
         assert!(!g.is_holding());
@@ -884,18 +904,88 @@ mod tests {
             "mark #2 lifts exactly as it does on the wire path"
         );
         assert!(!g.is_holding());
-    }
-
-    #[test]
-    fn damaged_evidence_alone_neither_holds_nor_arms_an_unfrozen_gate() {
-        let mut g = ReanchorGate::new(0);
-        let now = t0();
+        // The chain stays marked damaged after a wave heal; the mark lift stands until a
+        // fresh loss arms again.
         assert_eq!(
             g.on_decoded_corroborated(0, false, ReferencesDamaged, now),
-            GateVerdict::Present,
-            "an unfrozen gate presents; the evidence is about anchors, not about frames"
+            GateVerdict::Present
+        );
+        g.arm(now);
+        assert_eq!(
+            g.on_decoded_corroborated(0, false, ReferencesDamaged, now),
+            GateVerdict::Hold
+        );
+    }
+
+    /// A reordered straggler: its successors decoded against a hole and sit in the DPB
+    /// damaged, then a real IDR lifts the freeze before they drain. The next damaged frame
+    /// must hold and re-arm, or the grey plate stays up until an unrelated loss.
+    #[test]
+    fn a_damaged_frame_on_an_unfrozen_gate_holds_and_arms() {
+        let mut g = ReanchorGate::new(0);
+        let now = t0();
+        let arms = g.arms();
+        assert_eq!(
+            g.on_decoded_corroborated(0, false, ReferencesDamaged, now),
+            GateVerdict::Hold
+        );
+        assert!(g.is_holding());
+        assert_eq!(
+            g.arms(),
+            arms + 1,
+            "a fresh arm, so the backstop asks for the IDR"
+        );
+        // Still damaged while frozen: hold, no second arm (marks and SEI credit survive).
+        g.on_decoded_corroborated(0, false, ReferencesDamaged, now);
+        assert_eq!(g.arms(), arms + 1);
+        assert!(g.poll(0, now + REANCHOR_FREEZE_MAX), "overdue: re-ask");
+        // The IDR heals the chain and lifts; a clean successor presents.
+        assert_eq!(
+            g.on_decoded_corroborated(SOF, true, ReferencesClean, now),
+            GateVerdict::Present
+        );
+        assert_eq!(
+            g.on_decoded_corroborated(0, false, ReferencesClean, now),
+            GateVerdict::Present
         );
         assert!(!g.is_holding());
-        assert!(!g.poll(0, now));
+    }
+
+    /// A recovery-point SEI lift is a wave heal too: the chain stays marked, the picture
+    /// is clean, so damaged evidence must not re-freeze it.
+    #[test]
+    fn a_local_recovery_lift_suspends_the_damaged_rule() {
+        let mut g = ReanchorGate::new(0);
+        let now = t0();
+        g.arm(now);
+        assert!(g.on_local_recovery(local(true, true)));
+        assert_eq!(
+            g.on_decoded_corroborated(0, false, ReferencesDamaged, now),
+            GateVerdict::Present
+        );
+        assert!(!g.is_holding());
+    }
+
+    /// A clean anchor lifts, then the encoder references the corrupt window again. The
+    /// wire says nothing; the parser does.
+    #[test]
+    fn a_damaged_frame_after_an_honoured_anchor_refreezes() {
+        let mut g = ReanchorGate::new(0);
+        let now = t0();
+        g.arm(now);
+        assert_eq!(
+            g.on_decoded_corroborated(ANCHOR, false, ReferencesClean, now),
+            GateVerdict::Present
+        );
+        assert_eq!(
+            g.on_decoded_corroborated(0, false, ReferencesDamaged, now),
+            GateVerdict::Hold
+        );
+        assert!(g.is_holding());
+        assert_eq!(
+            g.on_decoded_corroborated(0, false, ReferencesClean, now),
+            GateVerdict::Hold,
+            "a clean frame is not a re-anchor; only IDR, anchor or marks lift"
+        );
     }
 }
