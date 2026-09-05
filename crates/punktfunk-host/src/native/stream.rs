@@ -1657,10 +1657,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 return;
             }
             tracing::info!("the launched game exited — ending the session cleanly (APP_EXITED)");
-            conn.close(
-                punktfunk_core::quic::APP_EXITED_CLOSE_CODE.into(),
-                b"game exited",
-            );
+            conn.close(punktfunk_core::quic::APP_EXITED_CLOSE_CODE, b"game exited");
             quit.store(true, Ordering::SeqCst);
             stop.store(true, Ordering::SeqCst);
         }
