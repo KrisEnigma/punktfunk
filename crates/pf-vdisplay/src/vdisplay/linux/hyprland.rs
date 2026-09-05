@@ -307,6 +307,7 @@ impl VirtualDisplay for HyprlandDisplay {
             // input has to be aimed at it by name. `hyprctl`'s monitor name is
             // `wl_output.name`, which the injector matches.
             output_name: Some(name),
+            seat: None,
         })
     }
 }

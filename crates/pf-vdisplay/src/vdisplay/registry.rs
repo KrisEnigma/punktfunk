@@ -193,6 +193,16 @@ pub fn retire(generation: u64) {
     let _ = generation;
 }
 
+/// Seat key of the pooled display with this `pool_gen` ([`crate::VirtualOutput::seat`]).
+///
+/// The session already carries its pool generation, so this hands the seat to the launch, the
+/// exit watch and the cursor source without threading it through the pipeline. `None` for a
+/// non-poolable output — discovery then falls back to unscoped, as it was before seats.
+#[cfg(target_os = "linux")]
+pub fn seat_for(pool_gen: u64) -> Option<String> {
+    linux::seat_for(pool_gen)
+}
+
 /// Reap every kept display of `backend` whose compositor is gone
 /// (`design/gamemode-and-dedicated-sessions.md`). Called from the session-switch
 /// watcher. No-op off Linux.
@@ -270,6 +280,10 @@ mod pool {
         /// Cursor mode at create (metadata-pointer vs compositor-embedded).
         /// Reuse requires an exact match or the pointer is missing or unforwardable.
         pub(super) hw_cursor: bool,
+        /// Seat key at create ([`crate::VirtualOutput::seat`]). Kept across reuse: the reuse path
+        /// is exactly the one that launches into a live compositor, so losing it there is what
+        /// would deliver a launch to another seat.
+        pub(super) seat: Option<String>,
         /// Colourimetry at create (HDR vs SDR). Reuse requires an exact match:
         /// a kept SDR gamescope has no `--hdr-enabled`, and the reverse would
         /// negotiate 8-bit off a PQ composite.
@@ -536,6 +550,7 @@ mod pool {
                 identity_slot: None,
                 topology_restore: restore,
                 isolation: None,
+                seat: None,
                 epoch: 0,
                 generation,
                 hw_cursor: false,
@@ -643,6 +658,18 @@ mod pool {
                 pool[0].topology_restore.is_none(),
                 "restore must not cross into another backend's group"
             );
+        }
+
+        /// The reuse path is the one that launches into a live compositor, so a kept entry that
+        /// forgot its seat would deliver the launch to whichever gamescope `/proc` listed first.
+        #[test]
+        fn a_kept_entry_remembers_its_seat() {
+            let mut e = test_entry("gamescope", 1, None);
+            e.seat = Some("gamescope-1".into());
+            e.life = lifecycle::State::Pinned;
+            let pool = vec![e];
+            assert_eq!(pool[0].seat.as_deref(), Some("gamescope-1"));
+            assert_eq!(kept_to_retire(&pool, "gamescope", &None), vec![1]);
         }
 
         /// S1: a kept spawn is retired so the acquire that follows never runs a second one.
@@ -996,10 +1023,12 @@ mod linux {
 
     /// Session-facing output: kept node + generation-stamped lease. Only
     /// poolable (`remote_fd == None`) backends reach here, so `remote_fd` is None.
+    #[allow(clippy::too_many_arguments)]
     fn output_for(
         node_id: u32,
         preferred_mode: Option<(u32, u32, u32)>,
         output_name: Option<String>,
+        seat: Option<String>,
         generation: u64,
         quit: Arc<AtomicBool>,
         reused: bool,
@@ -1011,6 +1040,8 @@ mod linux {
         );
         // Same head as at create, so it answers with the same name.
         out.output_name = output_name;
+        // Same compositor as at create, so its launches and watches stay on this seat.
+        out.seat = seat;
         // First-frame failure on reuse can `mark_failed` instead of re-wedging.
         out.reused_gen = reused.then_some(generation);
         // Mode-switch rebuild `retire`s the entry this output's successor supersedes.
@@ -1083,15 +1114,18 @@ mod linux {
                             es[idx].generation = generation;
                             let preferred_mode = es[idx].preferred_mode;
                             let output_name = es[idx].output_name.clone();
+                            let seat = es[idx].seat.clone();
                             tracing::info!(
                                 backend,
                                 node_id,
+                                seat = seat.as_deref().unwrap_or("-"),
                                 "virtual display reused (keep-alive reconnect)"
                             );
                             ReuseOutcome::Reused(output_for(
                                 node_id,
                                 preferred_mode,
                                 output_name,
+                                seat,
                                 generation,
                                 quit.clone(),
                                 true,
@@ -1189,6 +1223,7 @@ mod linux {
             identity_slot,
             topology_restore,
             isolation: isolation.clone(),
+            seat: real.seat.clone(),
             epoch: cur_epoch,
             generation,
             hw_cursor: vd.hw_cursor(),
@@ -1237,6 +1272,7 @@ mod linux {
             node_id,
             preferred_mode,
             output_name,
+            real.seat.clone(),
             generation,
             quit,
             false,
@@ -1377,6 +1413,14 @@ mod linux {
     /// Tear down every kept display of `backend` sharing `isolation`, so a sole-instance
     /// backend never runs two. Active entries are left alone (`force_release` refuses them):
     /// a live session keeps its own compositor, and this acquire creates alongside it.
+    pub(super) fn seat_for(pool_gen: u64) -> Option<String> {
+        let r = REG.get()?;
+        let es = r.entries.lock().unwrap();
+        es.iter()
+            .find(|e| e.generation == pool_gen)
+            .and_then(|e| e.seat.clone())
+    }
+
     pub(super) fn retire_incompatible(backend: &'static str, isolation: &Option<String>) {
         let Some(r) = REG.get() else { return };
         let doomed = {

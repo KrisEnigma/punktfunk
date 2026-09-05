@@ -902,6 +902,7 @@ pub struct SpawnedLaunch {
 pub fn launch_session_command(
     compositor: crate::vdisplay::Compositor,
     cmd: &str,
+    seat: Option<&str>,
 ) -> Result<SpawnedLaunch> {
     use std::os::unix::process::CommandExt;
     let cmd = cmd.trim();
@@ -914,9 +915,10 @@ pub fn launch_session_command(
         }
     }
     let (child, group_leader) = match compositor {
-        crate::vdisplay::Compositor::Gamescope => {
-            (crate::vdisplay::launch_into_gamescope_session(cmd)?, false)
-        }
+        crate::vdisplay::Compositor::Gamescope => (
+            crate::vdisplay::launch_into_gamescope_session(cmd, seat)?,
+            false,
+        ),
         _ => (
             std::process::Command::new("sh")
                 .arg("-c")

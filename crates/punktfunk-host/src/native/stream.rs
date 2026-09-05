@@ -1510,6 +1510,10 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
         }
     }
+    // This session's compositor, by pool generation: a concurrent seat's gamescope is equally
+    // discoverable in `/proc`, so an unscoped launch or watch lands on somebody else's screen.
+    #[cfg(target_os = "linux")]
+    let seat: Option<String> = cur_display_gen.and_then(crate::vdisplay::registry::seat_for);
     #[cfg(target_os = "linux")]
     let spawned_launch = match launch.as_deref() {
         Some(cmd) if adopt_launch => {
@@ -1531,7 +1535,8 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             spawned_now = true;
             None
         }
-        Some(cmd) => match crate::library::launch_session_command(compositor, cmd) {
+        Some(cmd) => match crate::library::launch_session_command(compositor, cmd, seat.as_deref())
+        {
             Ok(spawned) => {
                 spawned_now = true;
                 Some(spawned)
@@ -1593,10 +1598,11 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     let steam_exit_watch = steam_exit_appid.map(|appid| {
         let stop = stop.clone();
         let end = end_on_game_exit.clone();
+        let seat = seat.clone();
         std::thread::Builder::new()
             .name("pf1-steamexit".into())
             .spawn(move || {
-                if crate::vdisplay::watch_steam_game_exit(appid, &stop) {
+                if crate::vdisplay::watch_steam_game_exit(appid, seat.as_deref(), &stop) {
                     end();
                 }
             })
@@ -3872,6 +3878,8 @@ fn build_pipeline(
     #[cfg(not(target_os = "linux"))]
     let pool_gen = None;
     let node_id = vout.node_id;
+    #[cfg(target_os = "linux")]
+    let cursor_seat = vout.seat.clone();
     let achieved_hz = vout
         .preferred_mode
         .map(|(_, _, hz)| hz)
@@ -3903,9 +3911,9 @@ fn build_pipeline(
     .context("capture virtual output")?;
     #[cfg(target_os = "linux")]
     if plan.gamescope_cursor {
-        capturer.attach_gamescope_cursor(std::sync::Arc::new(
-            pf_vdisplay::gamescope_xwayland_cursor_targets,
-        ));
+        capturer.attach_gamescope_cursor(std::sync::Arc::new(move || {
+            pf_vdisplay::gamescope_xwayland_cursor_targets(cursor_seat.as_deref())
+        }));
     }
     if let Some(t) = trace {
         t.mark("capture_attached");

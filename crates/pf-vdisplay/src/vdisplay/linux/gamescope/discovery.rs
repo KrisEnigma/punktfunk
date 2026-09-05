@@ -61,6 +61,7 @@ pub(crate) fn steam_appid_from_launch(cmd: &str) -> Option<u32> {
 /// game and reads its exit as the game exiting.
 pub(crate) fn wait_for_steam_game_exit(
     appid: u32,
+    seat: Option<&str>,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> SteamGameWatch {
     use std::sync::atomic::Ordering;
@@ -72,11 +73,11 @@ pub(crate) fn wait_for_steam_game_exit(
     const EXIT_CONFIRM: Duration = Duration::from_secs(3);
 
     let start_deadline = Instant::now() + START_GRACE;
-    // Coming up is `GAMESCOPE_FOCUSED_APP`, and it also picks the display: a dead session's
-    // clients keep their DISPLAY in the environment, so several answer at once and only the
-    // session actually running this appid ever focuses it.
+    // Coming up is `GAMESCOPE_FOCUSED_APP`, which also picks the display: a seat runs its own
+    // gamescope with its own Xwayland, and only the one actually running this appid focuses it.
+    // (`seat` has already narrowed it; this stays correct if the key is ever unavailable.)
     let dpy = loop {
-        if let Some(d) = display_presenting(appid) {
+        if let Some(d) = display_presenting(appid, seat) {
             break d;
         }
         if cancel.load(Ordering::Relaxed) || Instant::now() >= start_deadline {
@@ -102,9 +103,9 @@ pub(crate) fn wait_for_steam_game_exit(
     }
 }
 
-/// The gamescope Xwayland presenting `appid`, when one is.
-fn display_presenting(appid: u32) -> Option<String> {
-    xwayland_cursor_targets()
+/// The gamescope Xwayland presenting `appid` on this seat, when one is.
+fn display_presenting(appid: u32, seat: Option<&str>) -> Option<String> {
+    xwayland_cursor_targets(seat)
         .into_iter()
         .map(|(d, _xauth)| d)
         .find(|d| focused_app(d) == Some(appid))
@@ -223,6 +224,29 @@ fn node_from_log(log: &std::path::Path) -> Option<u32> {
             let digits: String = tail.chars().filter(|c| c.is_ascii_digit()).collect();
             if let Ok(id) = digits.parse() {
                 return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// This instance's `GAMESCOPE_WAYLAND_DISPLAY` name, from `Running compositor on wayland
+/// display 'gamescope-N'`. It is the seat key: every discovery below filters on it, because a
+/// concurrent seat's gamescope is equally discoverable and taking the first match delivers one
+/// seat's launch (and cursor) to another's screen.
+pub(super) fn wayland_name_from_log(log: &std::path::Path) -> Option<String> {
+    const MARK: &str = "Running compositor on wayland display ";
+    let text = std::fs::read_to_string(log).ok()?;
+    for line in text.lines().rev() {
+        if let Some(pos) = line.find(MARK) {
+            let tail = &line[pos + MARK.len()..];
+            let name: String = tail
+                .trim_start_matches(['\'', '"'])
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
             }
         }
     }
@@ -582,7 +606,7 @@ mod live_probe {
     #[test]
     #[ignore]
     fn steam_atoms_are_readable() {
-        let targets = super::xwayland_cursor_targets();
+        let targets = super::xwayland_cursor_targets(None);
         assert!(!targets.is_empty(), "no gamescope Xwayland found");
         for (dpy, _) in &targets {
             println!(
@@ -595,6 +619,24 @@ mod live_probe {
             targets.iter().any(|(d, _)| super::focused_app(d).is_some()),
             "no display answered GAMESCOPE_FOCUSED_APP — the empty-token connect failed"
         );
+    }
+
+    /// With two gamescopes up, the seat key must select exactly one. Ignored: needs both.
+    /// `PF_SEAT_A=gamescope-0 PF_SEAT_B=gamescope-1 cargo test -p pf-vdisplay -- --ignored seat_key --nocapture`
+    #[test]
+    #[ignore]
+    fn seat_key_selects_one_gamescope() {
+        let all = super::xwayland_cursor_targets(None);
+        println!("unscoped: {all:?}");
+        assert!(all.len() >= 2, "need two live gamescopes for this probe");
+        for var in ["PF_SEAT_A", "PF_SEAT_B"] {
+            let Ok(seat) = std::env::var(var) else {
+                continue;
+            };
+            let scoped = super::xwayland_cursor_targets(Some(&seat));
+            println!("{var}={seat}: {scoped:?}");
+            assert_eq!(scoped.len(), 1, "{seat} did not select exactly one display");
+        }
     }
 }
 
@@ -626,6 +668,28 @@ mod tests {
         assert_eq!(parse_patch_level("3.16.25+pfhdr (gcc)"), 0);
         // The version triple must never be mistaken for the level.
         assert_eq!(parse_patch_level("gamescope version 3.16.25"), 0);
+    }
+
+    /// The seat key comes off the spawn log gamescope already writes, ANSI colouring and all.
+    #[test]
+    fn reads_the_seat_key_from_the_spawn_log() {
+        let dir = std::env::temp_dir().join(format!("pf-seat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("gs.log");
+        std::fs::write(
+            &log,
+            "[gs] \u{1b}[0;34mInfo\u{1b}[0m wlserver: [wayland] unable to lock lockfile\n\
+             [gs] Info  wlserver: Running compositor on wayland display 'gamescope-1'\n\
+             [gs] Info  wlserver: Starting Xwayland on :3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::wayland_name_from_log(&log).as_deref(),
+            Some("gamescope-1")
+        );
+        std::fs::write(&log, "no such line here\n").unwrap();
+        assert_eq!(super::wayland_name_from_log(&log), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

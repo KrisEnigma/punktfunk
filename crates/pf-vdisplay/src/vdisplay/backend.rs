@@ -103,6 +103,11 @@ pub struct VirtualOutput {
     /// the seat). Carried only: this crate must not depend on pf-inject.
     #[cfg(target_os = "linux")]
     pub output_name: Option<String>,
+    /// This gamescope instance's `GAMESCOPE_WAYLAND_DISPLAY` (`gamescope-N`) — the seat key every
+    /// `/proc` discovery filters on, so a launch, an exit watch and a cursor source stay on the
+    /// seat that owns them. Kept across reuse. `None` for every other backend.
+    #[cfg(target_os = "linux")]
+    pub seat: Option<String>,
 }
 
 impl VirtualOutput {
@@ -129,6 +134,8 @@ impl VirtualOutput {
             expect_exact_dims: false,
             #[cfg(target_os = "linux")]
             output_name: None,
+            #[cfg(target_os = "linux")]
+            seat: None,
         }
     }
 }
