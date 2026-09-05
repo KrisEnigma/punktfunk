@@ -35,7 +35,10 @@ const OPEN_BOUND: Duration = Duration::from_secs(5);
 
 /// Backend names in the order the addresses below pin them, for the load-time log.
 pub fn backends_linked() -> &'static [&'static str] {
-    &["nvenc", "amf", "qsv", "pyrowave", "mf", "convert"]
+    #[cfg(target_arch = "x86_64")]
+    return &["nvenc", "amf", "qsv", "pyrowave", "mf", "convert"];
+    #[cfg(not(target_arch = "x86_64"))]
+    return &["amf", "mf", "convert"];
 }
 
 /// `IOCTL_SET_ENCODE`: open an encoder for `owner`'s monitor with `req.target_id` on the AU
