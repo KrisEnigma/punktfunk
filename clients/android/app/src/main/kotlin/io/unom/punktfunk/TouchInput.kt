@@ -373,13 +373,13 @@ internal suspend fun PointerInputScope.streamTouchInput(
                     val sy = ((prevCy - cy) / SCROLL_DIV).toInt() // finger up → wheel up
                     val sx = ((cx - prevCx) / SCROLL_DIV).toInt()
                     if (sy != 0) {
-                        NativeBridge.nativeSendScroll(handle, 0, sy * 120 * scrollDir)
+                        NativeBridge.nativeSendScroll(handle, 0, sy * 120 * scrollDir, false)
                         prevCy = cy
                         moved = true
                         scrollEmitted = true
                     }
                     if (sx != 0) {
-                        NativeBridge.nativeSendScroll(handle, 1, sx * 120 * scrollDir)
+                        NativeBridge.nativeSendScroll(handle, 1, sx * 120 * scrollDir, false)
                         prevCx = cx
                         moved = true
                         scrollEmitted = true

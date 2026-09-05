@@ -10,7 +10,7 @@ use jni::errors::LogErrorAndDefault;
 use jni::objects::{JByteBuffer, JFloatArray, JObject, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::EnvUnowned;
-use punktfunk_core::input::{InputEvent, InputKind};
+use punktfunk_core::input::{InputEvent, InputKind, SCROLL_FLAG_PRECISE};
 use punktfunk_core::quic::{
     PenSample, PenTool, RichInput, HID_REPORT_MAX, HOST_CAP2_TOUCH, HOST_CAP_PEN,
     HOST_CAP_TEXT_INPUT, PEN_ANGLE_UNKNOWN, PEN_BATCH_MAX, PEN_DISTANCE_UNKNOWN, PEN_TILT_UNKNOWN,
@@ -83,8 +83,10 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendPointer
     send_event(handle, kind, button as u32, 0, 0, 0);
 }
 
-/// `NativeBridge.nativeSendScroll(handle, axis, delta)` — one scroll step. `axis`: 0=vertical,
-/// 1=horizontal. `delta`: signed, WHEEL_DELTA(120)-scaled, +=up/right.
+/// `NativeBridge.nativeSendScroll(handle, axis, delta, precise)` — one scroll step. `axis`:
+/// 0=vertical, 1=horizontal. `delta`: signed, WHEEL_DELTA(120)-scaled, +=up/right. `precise`:
+/// the delta was MEASURED off a trackpad, so the host travels that distance instead of pricing
+/// each detent as a wheel click ([`SCROLL_FLAG_PRECISE`]).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendScroll(
     _env: EnvUnowned,
@@ -92,8 +94,10 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendScroll(
     handle: jlong,
     axis: jint,
     delta: jint,
+    precise: jboolean,
 ) {
-    send_event(handle, InputKind::MouseScroll, axis as u32, delta, 0, 0);
+    let flags = if precise { SCROLL_FLAG_PRECISE } else { 0 };
+    send_event(handle, InputKind::MouseScroll, axis as u32, delta, 0, flags);
 }
 
 /// `NativeBridge.nativeSendTouch(handle, id, kind, x, y, surfaceWidth, surfaceHeight)` — one REAL

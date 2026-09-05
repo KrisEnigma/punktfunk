@@ -19,7 +19,7 @@ use crate::keymap_sdl;
 use crate::touch::{Abs, Act, Gestures};
 use pf_client_core::trust::{MouseMode, TouchMode};
 use punktfunk_core::client::NativeClient;
-use punktfunk_core::input::{InputEvent, InputKind};
+use punktfunk_core::input::{InputEvent, InputKind, SCROLL_FLAG_PRECISE};
 use punktfunk_core::quic::{classify, GRANT_KEYBOARD, GRANT_POINTER};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -73,6 +73,11 @@ pub struct Capture {
     /// Fractional remainder per axis in 120-unit WHEEL_DELTA space — precision
     /// surfaces deliver sub-unit deltas; truncating each event drops the tail.
     scroll_acc: (f64, f64),
+    /// This mouse has reported a sub-detent delta, so it MEASURES distance (trackpad, high-res
+    /// wheel) rather than counting clicks. SDL exposes no scroll source and a notched wheel
+    /// reports exactly ±1.0, so the fraction is the only tell. Latched: one exact 1.0 mid-gesture
+    /// would otherwise inject a whole detent and jump the page.
+    precise_wheel: bool,
     /// SDL finger id → compact host slot (`TouchDown`). SDL ids are opaque and
     /// large; slots reuse after up, flush on release. [`TouchMode::Touch`] only.
     touch_slots: HashMap<u64, u32>,
@@ -130,6 +135,7 @@ impl Capture {
             desktop: abs_ok && mouse_mode == MouseMode::Desktop,
             abs_ok,
             scroll_acc: (0.0, 0.0),
+            precise_wheel: false,
             touch_slots: HashMap::new(),
             touch_mode,
             invert_scroll,
@@ -416,11 +422,19 @@ impl Capture {
     }
 
     /// Wire units are WHEEL_DELTA (120), positive = up / right — same as SDL3.
-    /// Fractional remainder per axis; truncating each event drops the tail.
+    /// Fractional remainder per axis; truncating each event drops the tail. A sub-detent delta
+    /// latches `precise_wheel`, telling the host to scroll the measured distance rather than
+    /// pricing every 10 px as a wheel click.
     pub fn on_wheel(&mut self, dx: f32, dy: f32) {
         if !self.captured {
             return;
         }
+        self.precise_wheel |= dx.fract() != 0.0 || dy.fract() != 0.0;
+        let flags = if self.precise_wheel {
+            SCROLL_FLAG_PRECISE
+        } else {
+            0
+        };
         self.flush_motion(); // scroll happens at the latest cursor position
         let sign = if self.invert_scroll { -1.0 } else { 1.0 };
         let (mut ax, mut ay) = self.scroll_acc;
@@ -436,7 +450,7 @@ impl Capture {
                 0,
                 vy,
                 0,
-                0,
+                flags,
             );
         }
         let vx = ax.trunc() as i32;
@@ -449,7 +463,7 @@ impl Capture {
                 1,
                 vx,
                 0,
-                0,
+                flags,
             );
         }
         self.scroll_acc = (ax, ay);

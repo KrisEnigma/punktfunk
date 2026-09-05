@@ -11,7 +11,7 @@
 //! is not the user's — a German host would y↔z / ü-on-ö scramble.
 
 use anyhow::Result;
-use punktfunk_core::input::{InputEvent, InputKind};
+use punktfunk_core::input::{InputEvent, InputKind, PRECISE_PX_PER_DETENT, SCROLL_FLAG_PRECISE};
 use std::mem::size_of;
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
@@ -25,7 +25,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
     MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, VIRTUAL_KEY,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId, SystemParametersInfoW, SPI_GETWHEELSCROLLLINES,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+};
 
 use super::InputInjector;
 
@@ -39,6 +42,11 @@ pub struct SendInputInjector {
     /// create (pre-1809) — touch then stays a no-op.
     touch: Option<crate::pen::SyntheticTouch>,
     touch_failed: bool,
+    /// What one wheel detent scrolls here, from the user's own wheel setting. Precise deltas are
+    /// repriced against it; a wheel delta passes through untouched.
+    wheel_px: i32,
+    /// Sub-unit remainder of that repricing, (horizontal, vertical).
+    precise_rem: (i32, i32),
 }
 
 // SAFETY: the only non-`Send` field is `Option<HDESK>` (`SyntheticTouch` is `Send`
@@ -47,12 +55,49 @@ pub struct SendInputInjector {
 // any thread; `SetThreadDesktop` rebinds the current thread).
 unsafe impl Send for SendInputInjector {}
 
+/// Pixels one wheel detent scrolls on this desktop — the user's own `SPI_GETWHEELSCROLLLINES`
+/// at a typical text line. Honouring that setting is the point: it is the same scroll-speed knob
+/// a precise delta has to be priced against.
+fn wheel_px_per_detent() -> i32 {
+    const PX_PER_LINE: u32 = 20;
+    let mut lines: u32 = 3;
+    // SAFETY: `SPI_GETWHEELSCROLLLINES` writes exactly one `u32` through `pvParam`; `lines` is a
+    // live local of that size and alignment, borrowed only for this call. No update/notify flag,
+    // so nothing is broadcast or persisted.
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            Some(std::ptr::from_mut(&mut lines).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok();
+    if !ok {
+        lines = 3;
+    }
+    // 0 disables wheel scrolling, WHEEL_PAGESCROLL (u32::MAX) means a page per detent; clamp so
+    // neither turns the divisor into nonsense.
+    (lines.clamp(1, 20) * PX_PER_LINE) as i32
+}
+
+/// Reprice a precise delta from the wire's detent to this desktop's, carrying the remainder so a
+/// slow gesture accumulates instead of flooring to nothing on every event.
+fn scale_precise(rem: &mut i32, delta: i32, wheel_px: i32) -> i32 {
+    *rem = rem.saturating_add(delta.saturating_mul(PRECISE_PX_PER_DETENT as i32));
+    let out = *rem / wheel_px; // truncates toward zero, so either sign unwinds the store
+    *rem -= out * wheel_px;
+    out
+}
+
 impl SendInputInjector {
     pub fn open() -> Result<Self> {
         let mut me = Self {
             desktop: None,
             touch: None,
             touch_failed: false,
+            wheel_px: wheel_px_per_detent(),
+            precise_rem: (0, 0),
         };
         me.reattach_input_desktop(); // best-effort
         tracing::info!("SendInput injector ready (Win32 KeyboardAndMouse)");
@@ -221,13 +266,29 @@ impl InputInjector for SendInputInjector {
                 self.send(&[mouse(mi)])
             }
             InputKind::MouseScroll => {
-                // GameStream WHEEL_DELTA(120) units. Windows WHEEL positive=up (matches
-                // GameStream — no flip, unlike Wayland); HWHEEL positive=right. x is already 120-scaled.
+                // WHEEL_DELTA(120) units. Windows WHEEL positive=up (matches the wire — no flip,
+                // unlike Wayland); HWHEEL positive=right.
                 let horizontal = event.code == 1;
+                let mut delta = event.x;
+                if event.flags & SCROLL_FLAG_PRECISE != 0 {
+                    // A measured distance. Windows has no pixel-scroll call, so the only lever is
+                    // what a detent is WORTH: the wire prices one at PRECISE_PX_PER_DETENT and
+                    // this desktop at `wheel_px`, and the ratio is the correction. Without it a
+                    // 10 px flick buys a whole click — the ~5x overshoot.
+                    let rem = if horizontal {
+                        &mut self.precise_rem.0
+                    } else {
+                        &mut self.precise_rem.1
+                    };
+                    delta = scale_precise(rem, delta, self.wheel_px);
+                    if delta == 0 {
+                        return Ok(()); // too small to turn the wheel yet; held in `rem`
+                    }
+                }
                 let mi = MOUSEINPUT {
                     dx: 0,
                     dy: 0,
-                    mouseData: event.x as u32, // signed wheel delta reinterpreted as DWORD
+                    mouseData: delta as u32, // signed wheel delta reinterpreted as DWORD
                     dwFlags: if horizontal {
                         MOUSEEVENTF_HWHEEL
                     } else {
