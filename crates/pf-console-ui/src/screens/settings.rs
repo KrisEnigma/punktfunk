@@ -326,6 +326,15 @@ const CODECS: [(&str, &str); 5] = [
     // 100–400 Mbps class, 8-bit SDR. Host must support it; else HEVC.
     ("pyrowave", "PyroWave (wired LAN)"),
 ];
+
+/// The codecs this platform decodes. The TV's NDL pipeline takes H.264 and HEVC only:
+/// no AV1 (never presented a picture) and no PyroWave (no Vulkan presentation).
+fn codecs(platform: crate::platform::Platform) -> &'static [(&'static str, &'static str)] {
+    match platform {
+        crate::platform::Platform::WebOS => &CODECS[..3],
+        _ => &CODECS,
+    }
+}
 // Per-OS hardware rungs. Windows has no VAAPI (`Decoder::new` has no branch).
 // Stored values are `native-*`; `migrate_decoder_pref` rewrites a legacy store
 // on read, but until the user re-picks it will not match a preset here.
@@ -1071,7 +1080,11 @@ pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec 
             "Compositor",
             label_for(&COMPOSITORS, &s.compositor).into(),
         ),
-        RowId::Codec => (None, "Video codec", label_for(&CODECS, &s.codec).into()),
+        RowId::Codec => (
+            None,
+            "Video codec",
+            label_for(codecs(ctx.platform), &s.codec).into(),
+        ),
         // Migrate before lookup or a legacy store (`vulkan`/`vaapi`) shows "—".
         RowId::Decoder => (
             None,
@@ -1615,7 +1628,7 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             stepped.map(|i| s.bitrate_kbps = rungs[i])
         }
         RowId::Compositor => step_str(&COMPOSITORS, &mut s.compositor, delta, wrap),
-        RowId::Codec => step_str(&CODECS, &mut s.codec, delta, wrap),
+        RowId::Codec => step_str(codecs(platform), &mut s.codec, delta, wrap),
         RowId::Decoder => {
             // Migrate first or a legacy value jumps to first/last instead of its neighbour.
             s.decoder = pf_client_core::decoder_pref::migrate_decoder_pref(&s.decoder);
@@ -2141,6 +2154,32 @@ pub(crate) mod tests {
         assert!(!ctx.settings.echo_cancel);
         assert!(adjust(RowId::EchoCancel, 1, true, &mut ctx));
         assert!(ctx.settings.echo_cancel);
+    }
+
+    /// The TV's codec row wraps from H.264 back to Automatic: no AV1, no PyroWave.
+    #[test]
+    fn webos_offers_only_the_codecs_ndl_decodes() {
+        let (mut settings, pads) = ctx_parts();
+        settings.codec = "h264".into();
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::WebOS,
+            pads: &pads,
+            deck: false,
+            fallback_ui: true,
+            device_name: "t",
+            t: 0.0,
+        };
+        assert!(adjust(RowId::Codec, 1, true, &mut ctx));
+        assert_eq!(ctx.settings.codec, "auto");
+        ctx.platform = crate::platform::Platform::Desktop;
+        ctx.settings.codec = "h264".into();
+        assert!(adjust(RowId::Codec, 1, true, &mut ctx));
+        assert_eq!(ctx.settings.codec, "av1");
     }
 
     #[test]
