@@ -257,6 +257,17 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A frame whose reference chain the decoder concealed is never shown.** The Vulkan lanes
+  only used their per-picture clean bit to refuse a host recovery anchor, so a damaged picture
+  reaching an unfrozen gate (a reordered straggler decoded after its successors, an encoder
+  still referencing the corrupt window) was presented and nothing re-armed — the grey smear
+  that lasted until a scene change. Such a frame now holds, arms the freeze and asks for a
+  keyframe; nothing to do.
+- **NVENC reference invalidation runs to the encode head.** It invalidated only the frames the
+  client named as lost, so the recovery frame predicted from a frame the client had decoded
+  against the hole and the client either refused the anchor and waited for an IDR or showed
+  the damage. The range now covers every frame encoded since the loss and declines when no
+  older reference survives; nothing to do.
 - **A dedicated game session runs on its own gamescope.** A second launch either started nothing
   or spawned a rival compositor that Steam's single instance immediately killed, and the session
   ended on a process scan that mistook Steam's install-script step for the game — so the stream

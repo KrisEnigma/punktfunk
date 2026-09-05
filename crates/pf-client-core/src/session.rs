@@ -1158,9 +1158,11 @@ fn pump(
                                 "re-anchored on the stream's own recovery point SEI — no IDR needed"
                             );
                         }
-                        // Shared freeze gate, corroborated: refuse a host RECOVERY_ANCHOR
-                        // when this AU predicts from a picture this decoder concealed.
-                        // Hold the last good picture until the backstop forces a real IDR.
+                        // Shared freeze gate, corroborated: a frame predicting from a picture
+                        // this decoder concealed is held whatever the wire says, and refuses a
+                        // host RECOVERY_ANCHOR. If that arms an unfrozen gate (a lift landed
+                        // before the damaged chain drained), ask for the IDR now rather than
+                        // at the 500 ms backstop.
                         let evidence = image.anchor_evidence();
                         if evidence == punktfunk_core::reanchor::AnchorEvidence::ReferencesDamaged
                             && frame.flags & punktfunk_core::packet::USER_FLAG_RECOVERY_ANCHOR != 0
@@ -1170,12 +1172,26 @@ fn pump(
                                  this decoder had to conceal — holding for a real IDR"
                             );
                         }
+                        let now = Instant::now();
+                        let was_holding = gate.is_holding();
                         let present = gate.on_decoded_corroborated(
                             frame.flags,
                             image.is_keyframe(),
                             evidence,
-                            Instant::now(),
+                            now,
                         ) == GateVerdict::Present;
+                        if !present && !was_holding {
+                            tracing::debug!(
+                                "damaged reference chain reached an unfrozen gate — holding, \
+                                 requesting keyframe"
+                            );
+                            if last_kf_req
+                                .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(100))
+                            {
+                                last_kf_req = Some(now);
+                                let _ = connector.request_keyframe();
+                            }
+                        }
                         total_frames += 1;
                         // `stats:` decode-path tag is a machine interface — additive
                         // only. Surviving tags keep their exact spelling.
