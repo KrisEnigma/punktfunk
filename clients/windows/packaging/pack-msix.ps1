@@ -105,6 +105,27 @@ function Find-AzureDlib([string]$Explicit) {
     }
     $hit.FullName
 }
+# The toolset's redistributable CRT for one arch (...\VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC143.CRT).
+# VCToolsRedistDir is what vcvars exports; without it, ask vswhere for every VS/Build Tools install
+# and take the newest redist found. The DLLs must be at least as new as the STL that built Skia.
+function Find-VcRedistCrt([string]$arch) {
+    $roots = @()
+    if ($env:VCToolsRedistDir) { $roots += $env:VCToolsRedistDir }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path $vswhere) {
+        $roots += & $vswhere -products * -prerelease -property installationPath |
+            ForEach-Object { Join-Path $_ 'VC\Redist\MSVC' }
+    }
+    $hit = $roots | Where-Object { Test-Path $_ } |
+        ForEach-Object { Get-ChildItem -Path $_ -Recurse -Directory -Filter 'Microsoft.VC143.CRT' -ErrorAction SilentlyContinue } |
+        Where-Object { $_.FullName -match "\\$arch\\Microsoft\.VC143\.CRT$" } |
+        # Newest version wins; at equal version the desktop set beats onecore\<arch> (Build Tools
+        # ships arm64 only under onecore, so that one stays as the fallback).
+        Sort-Object { [version]([regex]::Match($_.FullName, '\\(\d+\.\d+\.\d+)\\').Groups[1].Value) }, { $_.FullName -notmatch '\\onecore\\' } |
+        Select-Object -Last 1
+    if (-not $hit) { throw "Microsoft.VC143.CRT for $arch not found under $($roots -join '; ') - install the MSVC v143 toolset." }
+    $hit.FullName
+}
 $makeappx = Find-SdkTool 'makeappx.exe'
 $signtool = Find-SdkTool 'signtool.exe'
 Write-Host "makeappx: $makeappx"
@@ -118,14 +139,24 @@ New-Item -ItemType Directory -Force -Path (Join-Path $layout 'Assets') | Out-Nul
 # binaries + auto-staged runtime bits (reactor stages the App SDK bootstrap DLL + resources.pri,
 # the sdl3 crate stages SDL3.dll — see crate build output). punktfunk-session.exe is the Vulkan
 # session client the shell spawns for every stream (sibling resolution — see clients/windows/
-# src/spawn.rs); Skia links statically and vulkan-1.dll is a GPU-driver component, so the session
-# adds no DLLs of its own.
+# src/spawn.rs); Skia links statically and vulkan-1.dll is a GPU-driver component.
 $required = @('punktfunk-client.exe', 'punktfunk-session.exe', 'punktfunk-console.exe', 'punktfunk.exe', 'Microsoft.WindowsAppRuntime.Bootstrap.dll', 'SDL3.dll', 'resources.pri')
 foreach ($f in $required) {
     $src = Join-Path $TargetDir $f
     if (-not (Test-Path $src)) { throw "missing build artifact '$f' in $TargetDir (did 'cargo build --release' run?)" }
     Copy-Item $src (Join-Path $layout $f) -Force
 }
+
+# The VC++ runtime, app-local. Everything here links the DYNAMIC CRT (/MD): the Rust exes,
+# SDL3.dll, and Skia — whose bundled HarfBuzz locks a std::mutex on every text shape. A
+# msvcp140.dll older than 14.40 (VS 17.10's constexpr std::mutex) reads a null vtable on that
+# lock, and the session dies with 0xC0000005 in MSVCP140.dll one second in. Shipping the
+# toolset's own DLLs beside the exe wins the loader search over System32 on every machine.
+$crt = Find-VcRedistCrt $Arch
+$crtDlls = Get-ChildItem -Path $crt -File | Where-Object { $_.Name -match '^(msvcp140|vcruntime140)[^\\]*\.dll$' }
+if ($crtDlls.Count -lt 3) { throw "expected msvcp140*.dll + vcruntime140*.dll in $crt, found $($crtDlls.Count)" }
+foreach ($d in $crtDlls) { Copy-Item $d.FullName (Join-Path $layout $d.Name) -Force }
+Write-Host "VC++ runtime from $crt : $(($crtDlls | ForEach-Object Name) -join ', ')"
 
 # license/attribution payload (MSIX has no installer EULA page, so ship them as files): the
 # project's own MIT/Apache texts plus the generated third-party notices, which is where every
