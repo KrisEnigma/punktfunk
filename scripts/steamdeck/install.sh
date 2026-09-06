@@ -157,6 +157,14 @@ export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR'
 cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/vulkan-encode
 "
 [ -x "$BIN" ] || die "build did not produce $BIN"
+# ldd out here on SteamOS, never inside the box, where every soname resolves by construction. The
+# container matches SteamOS's libraries by convention only; when that drifts the build succeeds
+# and leaves a binary the OS cannot load.
+MISSING="$({ ldd "$BIN" 2>/dev/null || true; } | awk '/not found/ {print $1}' | sort -u | tr '\n' ' ')"
+[ -z "$MISSING" ] || die "the host built, but SteamOS cannot load it. Missing: $MISSING
+     The build container ($BOX_IMAGE) no longer matches this SteamOS, so nothing was installed.
+     Please report it with the output of 'pacman -Q ffmpeg' and 'cat /etc/os-release':
+     https://git.unom.io/unom/punktfunk/issues"
 ok "host binary: $BIN"
 # Not fatal if it is missing — an absent worker just means the in-process encoder at default GPU
 # priority, which is what every 0.26.x Deck already runs.

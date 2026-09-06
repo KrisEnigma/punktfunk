@@ -61,6 +61,10 @@ log "Rebuilding host (release)"
 # rides along: host and worker version-check each other over their socket and fall back to the
 # in-process encoder on any mismatch, so an update must never move one without the other.
 distrobox enter "$BOX" -- bash -lc "set -e; export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR'; cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/vulkan-encode"
+MISSING="$({ ldd "$BIN" 2>/dev/null || true; } | awk '/not found/ {print $1}' | sort -u | tr '\n' ' ')"
+[ -z "$MISSING" ] || die "the host rebuilt, but SteamOS still cannot load it. Missing: $MISSING
+     Another rebuild will not help — the build container no longer matches this SteamOS. The
+     services were left as they are. Report it: https://git.unom.io/unom/punktfunk/issues"
 ok "host rebuilt"
 if [ "$WEB" = 1 ]; then
     log "Rebuilding web console"
