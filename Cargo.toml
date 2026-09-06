@@ -34,6 +34,7 @@ members = [
     "crates/pf-vdisplay",
     "crates/pf-vkdecode",
     "crates/pf-dxvadec",
+    "crates/pf-libva",
     "crates/pf-vaapi",
     "crates/pyrowave-sys",
     "crates/libvpl-sys",
