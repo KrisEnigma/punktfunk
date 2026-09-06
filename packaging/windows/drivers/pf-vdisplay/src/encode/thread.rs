@@ -86,9 +86,9 @@ fn caps_wire(c: EncoderCaps) -> EncoderCapsWire {
 }
 
 /// Walk the request's backend list in order; the first that opens wins. `Err` is the last
-/// failure as the wire reply — no silent fallback past the list. Opening runs
-/// `prepare_d3d11`, so `reply.caps` describes the live session rather than the backend's
-/// defaults — the host reads those caps once and never asks again.
+/// failure as the wire reply — no silent fallback past the list. `open_backend` returns a
+/// backend whose session already exists, so `reply.caps` describes the live encoder rather
+/// than its defaults — the host reads those caps once and never asks again.
 fn open_listed(
     req: &SetEncodeRequest,
     adapter: &AdapterId,
@@ -103,20 +103,13 @@ fn open_listed(
                 continue;
             }
         };
-        match open_backend(&spec, adapter) {
+        match open_backend(&spec, adapter, device) {
             Ok(mut enc) => {
                 if req.wire_chunk_bytes != 0 {
                     enc.set_wire_chunking(req.wire_chunk_bytes as usize);
                 }
                 if req.hdr == 1 {
                     enc.set_hdr_meta(Some(hdr_meta(&req.hdr_meta)));
-                }
-                if let Err(e) =
-                    enc.prepare_d3d11(device, pixel_format(spec.kind), spec.width, spec.height)
-                {
-                    dbglog!("[pf-vd] encode: backend {backend} prepare FAILED: {e:#}");
-                    last = (-1, "prepare");
-                    continue;
                 }
                 let applied = enc.applied_bitrate_bps().unwrap_or(spec.bitrate_bps);
                 let mut reply = fail_reply(
@@ -309,7 +302,13 @@ pub fn disable_implicit_vulkan_layers() {
 }
 
 /// One backend open on `adapter`. `Err` carries the stage tag; the backend's message is logged.
-pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Encoder>, Fail> {
+/// `device` is the one the pool's frames carry: NVENC opens its session against it here so the
+/// caller's caps read describes the hardware.
+pub fn open_backend(
+    spec: &OpenSpec,
+    adapter: &AdapterId,
+    device: &windows62::Win32::Graphics::Direct3D11::ID3D11Device,
+) -> Result<Box<dyn Encoder>, Fail> {
     let (w, h, fps, bps) = (spec.width, spec.height, spec.fps, spec.bitrate_bps);
     let (depth, chroma) = (spec.bit_depth, spec.chroma);
     let format = pixel_format(spec.kind);
@@ -321,7 +320,12 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
         1 => pf_encode_win::nvenc::NvencD3d11Encoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, 1, luid,
         )
-        .map(|e| Box::new(e) as Box<dyn Encoder>),
+        .and_then(|mut e| {
+            // NVENC alone defers its session to the first frame, and the host reads the caps in
+            // our reply once per session: open it here or it caches the defaults.
+            e.prepare_d3d11(device, format, w, h)?;
+            Ok(Box::new(e) as Box<dyn Encoder>)
+        }),
         2 => pf_encode_win::amf::AmfEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )

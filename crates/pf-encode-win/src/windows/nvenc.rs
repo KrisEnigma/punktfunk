@@ -1392,10 +1392,17 @@ impl NvencD3d11Encoder {
             });
         Ok(())
     }
-}
 
-impl Encoder for NvencD3d11Encoder {
-    fn prepare_d3d11(
+    /// Build the encode session now, so [`caps`](Encoder::caps) describes the hardware.
+    ///
+    /// [`submit`](Encoder::submit) calls this on its own, but a caller that reads caps before
+    /// the first frame would otherwise get the struct defaults — `supports_rfi: false` on a
+    /// card that does support reference-picture invalidation, which costs every later loss a
+    /// full IDR. `device` must be the one the frames will arrive on, or the first submit
+    /// rebuilds the session.
+    ///
+    /// Idempotent: a repeat call with the same device, format and size keeps the session.
+    pub fn prepare_d3d11(
         &mut self,
         device: &ID3D11Device,
         format: PixelFormat,
@@ -1469,7 +1476,9 @@ impl Encoder for NvencD3d11Encoder {
         }
         Ok(())
     }
+}
 
+impl Encoder for NvencD3d11Encoder {
     fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
         let frame = match &captured.payload {
             FramePayload::D3d11(f) => f,
