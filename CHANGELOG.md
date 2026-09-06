@@ -478,6 +478,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   toolset's `msvcp140*.dll` and `vcruntime140*.dll` beside the exe, so a machine whose
   redistributable predates 14.40 no longer kills the session in `MSVCP140.dll` on the first
   text layout. Nothing to do; a system redist update is no longer required.
+- **A clamped Windows refresh logs at warn.** A mode set that lands on a lower refresh than the
+  client asked for now warns with the rates the OS listed, where it used to be an info line.
+  Nothing to do; grep `host.log` for `not advertised` when a client streams below the rate it
+  asked for.
 
 ### Fixed
 
