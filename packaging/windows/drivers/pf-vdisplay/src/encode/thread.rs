@@ -309,6 +309,9 @@ pub fn open_backend(
     adapter: &AdapterId,
     device: &windows62::Win32::Graphics::Direct3D11::ID3D11Device,
 ) -> Result<Box<dyn Encoder>, Fail> {
+    // NVENC is the only arm that opens against the device, and it is x86-64 only.
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = device;
     let (w, h, fps, bps) = (spec.width, spec.height, spec.fps, spec.bitrate_bps);
     let (depth, chroma) = (spec.bit_depth, spec.chroma);
     let format = pixel_format(spec.kind);
