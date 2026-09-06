@@ -287,6 +287,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **AMD and Intel Linux hosts encode H.264 and HEVC through the native VAAPI session.** It
+  replaces the libavcodec path on radeonsi and iHD: a packet loss is answered on a P picture
+  instead of a full IDR, a bitrate step lands in place, and HEVC Main 10 carries its HDR10
+  metadata. Nothing to do; `PUNKTFUNK_VAAPI_NATIVE=0` returns a host to the libav path, and a
+  native open that fails falls back to it on its own.
 - **The SteamOS host carries its own FFmpeg.** The on-device build now compiles the pinned LGPL
   FFmpeg the .deb already bundles into `target-steamos/ffmpeg` and links it behind an absolute
   rpath, because SteamOS's FFmpeg moves independently of any Debian release and a host linked

@@ -427,9 +427,11 @@ fn open_video_backend_linux(
             }
         }
         // The native session takes every capture shape, NV12 dmabufs included, and
-        // is the only VAAPI arm with reference invalidation. Pinned, for now.
-        if pref == "vaapi-native" {
-            return vaapi_native::NativeVaapiEncoder::open(
+        // is the only VAAPI arm with reference invalidation. H.264/HEVC open it
+        // first; a failed open falls back to libav, the pin does not.
+        let pinned = pref == "vaapi-native";
+        if pinned || (vaapi_native_enabled() && matches!(codec, Codec::H264 | Codec::H265)) {
+            match vaapi_native::NativeVaapiEncoder::open(
                 codec,
                 width,
                 height,
@@ -437,10 +439,16 @@ fn open_video_backend_linux(
                 bitrate_bps,
                 bit_depth,
                 chroma,
-            )
-            .map(|e| (Box::new(e) as Box<dyn Encoder>, "vaapi-native"));
+            ) {
+                Ok(e) => return Ok((Box::new(e) as Box<dyn Encoder>, "vaapi-native")),
+                Err(e) if pinned => return Err(e),
+                Err(e) => tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "native VAAPI encode open failed — falling back to libav VAAPI"
+                ),
+            }
         }
-        // VAAPI also cannot ingest native NV12 (Vulkan ineligible).
+        // libav VAAPI cannot ingest native NV12 (Vulkan ineligible).
         if format == PixelFormat::Nv12 {
             anyhow::bail!(
                 "native NV12 capture requires the Vulkan Video encoder (HEVC/AV1 \
@@ -789,6 +797,16 @@ fn nvenc_direct_enabled() -> bool {
 #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
 fn vulkan_encode_enabled() -> bool {
     std::env::var("PUNKTFUNK_VULKAN_ENCODE")
+        .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
+}
+
+/// The native VAAPI session on AMD/Intel. Default on. `PUNKTFUNK_VAAPI_NATIVE=0`
+/// (`false`/`no`/`off`) is the libav-VAAPI hatch, the A/B oracle. A failed open
+/// falls back to libav; `PUNKTFUNK_ENCODER=vaapi-native` forces it instead.
+#[cfg(target_os = "linux")]
+fn vaapi_native_enabled() -> bool {
+    std::env::var("PUNKTFUNK_VAAPI_NATIVE")
         .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
         .unwrap_or(true)
 }
@@ -1636,7 +1654,8 @@ pub fn open_software_h264(
 #[path = "enc/linux/vaapi.rs"]
 mod vaapi;
 // Native VAAPI, no libavcodec: reference invalidation, in-place retarget, HEVC
-// Main 10 with HDR10. `PUNKTFUNK_ENCODER=vaapi-native`; `design/native-vaapi-encoder.md`.
+// Main 10 with HDR10. The default VAAPI arm; `PUNKTFUNK_VAAPI_NATIVE=0` is the
+// libav hatch. `design/native-vaapi-encoder.md`.
 #[cfg(target_os = "linux")]
 #[path = "enc/linux/vaapi_native.rs"]
 mod vaapi_native;
@@ -2014,5 +2033,34 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.to_string().contains("H.264"), "{err:#}");
+    }
+    /// `auto` on an AMD/Intel box opens the native session, or libav under the
+    /// `PUNKTFUNK_VAAPI_NATIVE=0` hatch — whichever the shell asked for.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs a real VAAPI device"]
+    fn auto_opens_the_native_vaapi_session() {
+        let want = if vaapi_native_enabled() {
+            "vaapi-native"
+        } else {
+            "vaapi"
+        };
+        let (enc, backend) = open_video_backend_linux(
+            "auto",
+            Codec::H264,
+            PixelFormat::Bgra,
+            320,
+            240,
+            60,
+            2_000_000,
+            false,
+            8,
+            ChromaFormat::Yuv420,
+            false,
+            32,
+        )
+        .expect("open");
+        assert_eq!(backend, want);
+        assert_eq!(enc.caps().supports_rfi, want == "vaapi-native");
     }
 }

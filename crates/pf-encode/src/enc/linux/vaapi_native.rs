@@ -6,8 +6,8 @@
 //! HDR10 SEI. Synchronous: `submit` encodes and `poll` hands the AU straight
 //! back, as the libav path does at `async_depth=1`.
 //!
-//! `PUNKTFUNK_ENCODER=vaapi-native` opens it; libav VAAPI stays the default and
-//! the A/B oracle until this has been measured against it.
+//! The default VAAPI arm for H.264 and HEVC; libav VAAPI is the fallback when an
+//! open fails, and the A/B oracle under `PUNKTFUNK_VAAPI_NATIVE=0`.
 
 use std::os::fd::AsRawFd as _;
 
