@@ -335,6 +335,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   whole to whichever writable characteristic it discovered first — so lizard mode never went off,
   at most one actuator could be reached, and Steam's gyro-enable was swallowed. The link now also
   re-acquires a pad that powers off mid-session; nothing to do beyond the update.
+- **A DualSense's haptics and speaker stream from its own pad.** The capture source — the
+  Windows endpoint, the usbip card, the minted PipeWire sink — is named by the pad's OS slot,
+  which the streamer was opening by the client's pad number instead: with two pads it could
+  carry the other player's audio, and a host serving two sessions the other session's. Nothing
+  to do.
 - **Two controllers no longer swap raw reports and rumble.** The host claims an OS pad slot on a
   pad's first frame — the pad that moves first takes the lowest slot, whatever the client
   numbered it — and the rich plane (touchpad, motion, a passed-through Steam Controller 2's raw
