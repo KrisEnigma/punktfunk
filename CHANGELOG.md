@@ -349,6 +349,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **AV1 tile starts reach the decoder in superblocks.** `pMiColStarts`/`pMiRowStarts` carried 4x4
+  units, so a client whose Vulkan driver reads those arrays instead of recomputing them — AMD on
+  Windows — painted everything below the first tile row green on the multi-tile AV1 a host emits
+  at 4K120. Update the client; nothing to configure.
 - **The virtual DualSense reports its adaptive-trigger status.** A game that arms a Weapon
   effect fires on the trigger's status nibble, not on the axis, so with adaptive triggers on
   in-game R2 did nothing — the host left those two report bytes zero. The host now derives the

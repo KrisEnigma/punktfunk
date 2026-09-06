@@ -285,8 +285,25 @@ fn picture_info(
     sequence: &pf_bitstream::av1::ParsedSequenceHeader,
 ) -> Result<OwnedStdAv1PictureInfo, PlanToVkAv1Error> {
     let tile = &p.tile_info;
-    let mi_col_starts: Box<[u16]> = tile.mi_col_starts.iter().map(|v| *v as u16).collect();
-    let mi_row_starts: Box<[u16]> = tile.mi_row_starts.iter().map(|v| *v as u16).collect();
+    // `pMiColStarts`/`pMiRowStarts` take SUPERBLOCK starts, not the 4x4 units their
+    // names read as; libavcodec writes `tile_start_col_sb`/`tile_start_row_sb` there.
+    // The parser holds MI, so shift. Only entry 0 is common to both readings, which
+    // is why a one-tile frame survives either way and a tiled one does not.
+    let sb_shift = if sequence.use_128x128_superblock {
+        5
+    } else {
+        4
+    };
+    let mi_col_starts: Box<[u16]> = tile
+        .mi_col_starts
+        .iter()
+        .map(|v| (*v >> sb_shift) as u16)
+        .collect();
+    let mi_row_starts: Box<[u16]> = tile
+        .mi_row_starts
+        .iter()
+        .map(|v| (*v >> sb_shift) as u16)
+        .collect();
     let width_in_sbs: Box<[u16]> = tile
         .width_in_sbs_minus_1
         .iter()
@@ -1212,5 +1229,50 @@ mod tests {
         let pic = picture_info(&header, &sequence).expect("converts");
         assert!(pic.std().pFilmGrain.is_null());
         assert_eq!(pic.std().flags.apply_grain(), 0);
+    }
+
+    /// The tile starts reach the driver in superblocks.
+    ///
+    /// Geometry of the 4K two-tile host stream: the parser codes MI units
+    /// (`[0, 272]`) and the driver must read `[0, 17]`. Entry 0 is the same
+    /// number either way, so only a tiled frame — on a driver that reads the
+    /// array rather than recomputing it — can tell the two apart.
+    #[test]
+    fn the_tile_starts_reach_the_driver_in_superblocks_not_mi_units() {
+        let mut sequence = pf_bitstream::av1::ParsedSequenceHeader::default();
+        let mut header = pf_bitstream::av1::ParsedFrameHeader::default();
+        let tile = &mut header.tile_info;
+        tile.tile_cols = 1;
+        tile.tile_rows = 2;
+        tile.mi_col_starts[1] = 960;
+        tile.mi_row_starts[1] = 272;
+        tile.mi_row_starts[2] = 540;
+
+        let starts = |pic: &OwnedStdAv1PictureInfo| {
+            // SAFETY: both point at boxed arrays `pic` owns, alive for this call;
+            // the row array is `MAX_TILE_ROWS + 1` long, the column one one shorter.
+            unsafe {
+                let info = &*pic.std().pTileInfo;
+                (
+                    std::slice::from_raw_parts(info.pMiRowStarts, 3).to_vec(),
+                    std::slice::from_raw_parts(info.pMiColStarts, 2).to_vec(),
+                )
+            }
+        };
+
+        let pic = picture_info(&header, &sequence).expect("converts");
+        assert_eq!(
+            starts(&pic),
+            (vec![0, 17, 33], vec![0, 60]),
+            "64-px superblocks: 272 MI is superblock row 17, and 960 MI is column 60"
+        );
+
+        sequence.use_128x128_superblock = true;
+        let pic = picture_info(&header, &sequence).expect("converts");
+        assert_eq!(
+            starts(&pic),
+            (vec![0, 8, 16], vec![0, 30]),
+            "the unit is the sequence's superblock, so 128-px halves every start"
+        );
     }
 }
