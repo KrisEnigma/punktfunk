@@ -65,12 +65,12 @@ jobs:
   # SECURITY: builds PULL-REQUEST code on the host-mode, persistent `windows-amd64` runner shared with
   # the release-signing jobs (windows-host.yml / windows-client.yml). See windows-client.yml for the full
   # rationale. Definitive fix is server-side (Gitea outside-collaborator approval + isolated PR
-  # runners); the `if:` is a fail-open backstop that never blocks internal PR CI.
+  # runners); the `if:` is a fail-closed backstop — only a PR whose head repo IS this repo runs.
   probe-and-proto:
     runs-on: windows-amd64
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.fork != true
+      github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 30
     defaults:
       run:
@@ -149,7 +149,7 @@ jobs:
     runs-on: windows-amd64
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.fork != true
+      github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 45
     defaults:
       run:
