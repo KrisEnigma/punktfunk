@@ -329,6 +329,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Two controllers no longer swap raw reports and rumble.** The host claims an OS pad slot on a
+  pad's first frame — the pad that moves first takes the lowest slot, whatever the client
+  numbered it — and the rich plane (touchpad, motion, a passed-through Steam Controller 2's raw
+  HID reports) was the one index never translated into that space: each pad drove the other's
+  virtual device, and the game's rumble came back on the wrong controller. Nothing to do.
 - **The forwarded pointer is native-sized on a scaled Wayland client.** SDL hands the compositor
   a custom cursor's pixel size as a viewport destination — surface-local units, so the display
   scale is applied there — while the client folded that same scale into the bitmap it built,

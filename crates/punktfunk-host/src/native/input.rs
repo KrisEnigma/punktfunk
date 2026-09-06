@@ -316,6 +316,21 @@ impl Pads {
         }
     }
 
+    /// [`Self::re_index`] for the rich plane (touchpad, motion, raw HID reports).
+    /// `None` when this wire pad holds no slot: rich never creates a device.
+    ///
+    /// A client numbers its first pad 0 and the slot is claimed on that pad's first
+    /// frame, so the pad that moves first takes slot 0 whatever its wire index. Skip
+    /// this and two pads swap devices — every SC2 raw report, and the rumble Steam
+    /// answers it with, lands on the other player's controller.
+    fn rich_in_slot_space(
+        &self,
+        mut rich: punktfunk_core::quic::RichInput,
+    ) -> Option<punktfunk_core::quic::RichInput> {
+        rich.set_pad(self.slots.slot_of(rich.pad() as usize)?);
+        Some(rich)
+    }
+
     fn route_handle(&mut self, kind: GamepadPref, ev: &punktfunk_core::input::GamepadEvent) {
         match kind {
             #[cfg(target_os = "linux")]
@@ -430,12 +445,12 @@ impl Pads {
 
     /// Touchpad / motion for the pad's manager. No device yet → no-op. Xbox has no rich plane.
     fn apply_rich(&mut self, rich: punktfunk_core::quic::RichInput) {
-        use punktfunk_core::quic::RichInput;
-        let idx = match rich {
-            RichInput::Touchpad { pad, .. }
-            | RichInput::Motion { pad, .. }
-            | RichInput::TouchpadEx { pad, .. }
-            | RichInput::HidReport { pad, .. } => pad as usize,
+        let idx = rich.pad() as usize;
+        // Same wire→OS-slot rewrite `re_index` does for events: the managers index their
+        // slot table in OS space. No slot = no device for this pad, and rich never
+        // creates one.
+        let Some(rich) = self.rich_in_slot_space(rich) else {
+            return;
         };
         // Owner, else declared kind (pre-first-frame). After a kind change, rich must not
         // land on the wrong backend.
@@ -1309,6 +1324,35 @@ mod tests {
         route.send(ev).unwrap();
         assert!(shared_rx.try_recv().is_err(), "old target no longer fed");
         assert_eq!(pinned_rx.try_recv().unwrap().y, 2);
+    }
+
+    /// Two pads whose OS slots were claimed out of wire order — the pad that moves
+    /// first takes the lower slot whatever the client numbered it. Untranslated, one
+    /// pad's raw reports drive the other's device and Steam answers the touch with
+    /// rumble on the wrong controller.
+    #[test]
+    fn rich_input_is_re_addressed_into_slot_space() {
+        use punktfunk_core::quic::{RichInput, HID_REPORT_MAX};
+        let mut pads = Pads::new(GamepadPref::Xbox360);
+        let slot1 = pads.slots.claim_for(1).expect("a free OS slot");
+        let slot0 = pads.slots.claim_for(0).expect("a free OS slot");
+        assert_ne!(slot0, slot1, "two wire pads share an OS slot");
+
+        let report = |pad| RichInput::HidReport {
+            pad,
+            len: 1,
+            data: [0x42; HID_REPORT_MAX],
+        };
+        assert_eq!(
+            pads.rich_in_slot_space(report(1)).map(|r| r.pad()),
+            Some(slot1)
+        );
+        assert_eq!(
+            pads.rich_in_slot_space(report(0)).map(|r| r.pad()),
+            Some(slot0)
+        );
+        // No slot = no device. Dropped, never folded onto slot 0.
+        assert!(pads.rich_in_slot_space(report(2)).is_none());
     }
 
     #[test]

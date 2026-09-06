@@ -317,6 +317,30 @@ pub enum RichInput {
 }
 
 impl RichInput {
+    /// The pad this input addresses. Every variant carries a `u8`, so one pattern
+    /// serves the read and [`Self::set_pad`].
+    pub fn pad(&self) -> u8 {
+        match self {
+            RichInput::Touchpad { pad, .. }
+            | RichInput::Motion { pad, .. }
+            | RichInput::TouchpadEx { pad, .. }
+            | RichInput::HidReport { pad, .. } => *pad,
+        }
+    }
+
+    /// Re-address to the host's OS slot — the inverse of [`HidOutput::with_pad`].
+    /// A client numbers its first pad 0 and `pf_inject::pad_pool` hands out slots in
+    /// claim order, so the two spaces differ whenever a session's pads arrive out of
+    /// wire order. Miss this and one pad's reports drive another pad's device.
+    pub fn set_pad(&mut self, slot: u8) {
+        match self {
+            RichInput::Touchpad { pad, .. }
+            | RichInput::Motion { pad, .. }
+            | RichInput::TouchpadEx { pad, .. }
+            | RichInput::HidReport { pad, .. } => *pad = slot,
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut out = vec![RICH_INPUT_MAGIC];
         match *self {
@@ -1649,6 +1673,49 @@ mod tests {
             let moved = ev.with_pad(9);
             assert_eq!(moved.pad(), 9, "{before:?} did not re-address");
             assert_eq!(moved.with_pad(0), before, "{before:?} lost a field");
+        }
+    }
+
+    /// The up direction of the same rewrite: a variant that ignored `set_pad` would
+    /// drive another pad's device with this one's reports.
+    #[test]
+    fn set_pad_re_addresses_every_rich_input_variant() {
+        let every = [
+            RichInput::Touchpad {
+                pad: 0,
+                finger: 1,
+                active: true,
+                x: 100,
+                y: 200,
+            },
+            RichInput::Motion {
+                pad: 0,
+                gyro: [1, 2, 3],
+                accel: [4, 5, 6],
+            },
+            RichInput::TouchpadEx {
+                pad: 0,
+                surface: 1,
+                finger: 2,
+                touch: true,
+                click: false,
+                x: -3,
+                y: 4,
+                pressure: 5,
+            },
+            RichInput::HidReport {
+                pad: 0,
+                len: 2,
+                data: [0xAB; HID_REPORT_MAX],
+            },
+        ];
+
+        for rich in every {
+            let mut moved = rich;
+            moved.set_pad(9);
+            assert_eq!(moved.pad(), 9, "{rich:?} did not re-address");
+            moved.set_pad(0);
+            assert_eq!(moved, rich, "{rich:?} lost a field");
         }
     }
 }
