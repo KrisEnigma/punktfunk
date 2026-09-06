@@ -367,6 +367,20 @@ impl Display {
         )
     }
 
+    /// The node the caller chose — the host's `pf_gpu::linux_render_node()` — and
+    /// no other.
+    pub fn open_path(va: Libva, path: &str) -> Result<Display> {
+        let (display, node, version) =
+            Display::probe(&va, path).with_context(|| path.to_string())?;
+        Ok(Display {
+            va,
+            display,
+            node: Some(node),
+            path: path.to_string(),
+            version,
+        })
+    }
+
     /// One node, borrowing the already-loaded library.
     pub fn probe(va: &Libva, path: &str) -> Result<(VaDisplay, OwnedFd, (c_int, c_int))> {
         let node = OwnedFd::from(

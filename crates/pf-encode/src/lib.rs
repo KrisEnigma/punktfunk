@@ -420,6 +420,20 @@ fn open_video_backend_linux(
                 ),
             }
         }
+        // The native session takes every capture shape, NV12 dmabufs included, and
+        // is the only VAAPI arm with reference invalidation. Pinned, for now.
+        if pref == "vaapi-native" {
+            return vaapi_native::NativeVaapiEncoder::open(
+                codec,
+                width,
+                height,
+                fps,
+                bitrate_bps,
+                bit_depth,
+                chroma,
+            )
+            .map(|e| (Box::new(e) as Box<dyn Encoder>, "vaapi-native"));
+        }
         // VAAPI also cannot ingest native NV12 (Vulkan ineligible).
         if format == PixelFormat::Nv12 {
             anyhow::bail!(
@@ -996,7 +1010,7 @@ fn resolve_linux_backend(
 ) -> Option<LinuxBackend> {
     Some(match pref {
         "nvenc" | "nvidia" | "cuda" => LinuxBackend::Nvenc,
-        "vaapi" | "amd" | "intel" => LinuxBackend::AmdIntel,
+        "vaapi" | "amd" | "intel" | "vaapi-native" => LinuxBackend::AmdIntel,
         "vulkan" | "vulkan-video" => LinuxBackend::Vulkan,
         "pyrowave" => LinuxBackend::Pyrowave,
         "software" | "sw" | "openh264" => LinuxBackend::Software,
@@ -1615,6 +1629,11 @@ pub fn open_software_h264(
 #[cfg(target_os = "linux")]
 #[path = "enc/linux/vaapi.rs"]
 mod vaapi;
+// Native VAAPI, no libavcodec: reference invalidation, in-place retarget, HEVC
+// Main 10 with HDR10. `PUNKTFUNK_ENCODER=vaapi-native`; `design/native-vaapi-encoder.md`.
+#[cfg(target_os = "linux")]
+#[path = "enc/linux/vaapi_native.rs"]
+mod vaapi_native;
 // Vulkan Video on Linux (AMD/Intel). App-owned DPB (real RFI); on-GPU RGB→NV12
 // CSC. Needs `--features vulkan-encode`. See `design/linux-vulkan-video-encode.md`.
 #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]

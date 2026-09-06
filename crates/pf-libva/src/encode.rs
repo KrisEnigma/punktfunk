@@ -351,6 +351,11 @@ impl Encoder {
         })
     }
 
+    /// The `wire` the next picture will carry.
+    pub fn next_wire(&self) -> i64 {
+        self.wire
+    }
+
     /// The trusted references, as `(slot, wire)` — what `rfi::plan_slot_recovery`
     /// takes.
     pub fn slots(&self) -> Vec<(usize, i64)> {
