@@ -124,7 +124,7 @@ struct LibraryView: View {
         GamepadUIEnvironment.modeWhenConnected
     private var gamepadUIActive: Bool {
         GamepadUIEnvironment.isActive(
-            gamepadConnected: gamepadManager.active != nil, enabledSetting: gamepadUIEnabled,
+            gamepadConnected: gamepadManager.uiPadConnected, enabledSetting: gamepadUIEnabled,
             mode: gamepadUIMode)
     }
     /// True when the iOS shell already draws one persistent field behind its layers — mounting a

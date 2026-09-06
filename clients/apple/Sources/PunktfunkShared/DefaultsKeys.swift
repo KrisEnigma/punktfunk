@@ -54,12 +54,14 @@ public enum DefaultsKey {
     /// The cross-client `sc2_capture` key — same gate as Android's `settings.sc2Capture`, read at
     /// connect beside `gamepadForwarding`: both must be on for `SessionModel` to build an
     /// `Sc2Capture`. iOS/macOS only (tvOS has neither capture path; the code is `#if`-gated
-    /// out there).
+    /// out there). On iOS it is ALSO read app-lifetime, by `GamepadManager`: the same pad
+    /// navigates the gamepad UI through `Sc2MenuPad` (`gamepadUIEnabled` gates that half).
     ///
     /// ⚠ The DEFAULT deliberately differs from Android's, which is ON: engaging this on Apple
-    /// can raise a CoreBluetooth permission prompt, so a default-on toggle would ask every user
-    /// for the radio whether or not they own an SC2. Android's capture needs no prompt for an
-    /// already-attached pad, so it can default on and cost nothing when none is present. Do not
+    /// can raise a CoreBluetooth permission prompt — on iOS at launch, now that the menu pad
+    /// acquires there — so a default-on toggle would ask every user for the radio whether or not
+    /// they own an SC2. Android's capture needs no prompt for an already-attached pad, so it can
+    /// default on and cost nothing when none is present. Do not
     /// "align" the two without moving the prompt. (The macOS USB path prompts too — Input
     /// Monitoring, because the controller interface carries the lizard keyboard collection — so
     /// BOTH Apple transports cost a permission question the toggle must stay opt-in for.)

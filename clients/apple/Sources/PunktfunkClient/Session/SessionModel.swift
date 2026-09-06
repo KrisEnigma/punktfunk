@@ -369,6 +369,10 @@ final class SessionModel: ObservableObject {
     func setRingOpen(_ open: Bool) {
         gamepadCapture?.ringOpen = open
         virtualPad?.masked = open
+        #if os(iOS) || os(macOS)
+        // A captured SC2 never enters GamepadCapture, so it hands the ring its pad itself.
+        sc2Capture?.ringOpen = open
+        #endif
         #if os(tvOS)
         remotePointer?.ringOpen = open
         #endif
@@ -1305,6 +1309,9 @@ final class SessionModel: ObservableObject {
             // The same escape-chord contract as GamepadCapture — a captured SC2's raw feed
             // bypasses GC entirely, so it brings its own way out of the stream.
             sc2.onDisconnectRequest = { [weak self] in self?.disconnect() }
+            // The ring's pad path, the same two hooks GamepadCapture gets above.
+            sc2.onRingChord = { [weak self] in self?.onRingChord?() }
+            sc2.onRingNav = { [weak self] nav in self?.onRingNav?(nav) }
             // Claim/release → the bottom-stack badge (the capture's only UI surface).
             sc2.onPhaseChange = { [weak self] phase in self?.noteSc2Phase(phase) }
             feedback.setHidRawSink(sc2.onHidRaw)

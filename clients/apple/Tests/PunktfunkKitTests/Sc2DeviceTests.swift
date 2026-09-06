@@ -238,6 +238,56 @@ final class Sc2DeviceTests: XCTestCase {
         XCTAssertEqual(Sc2Device.wireButtons(~allSc2), 0)
         XCTAssertEqual(Sc2Device.wireButtons(0), 0)
     }
+
+    func testSc2ButtonsInvertsTheWireMap() {
+        // A chord is written in wire bits; the raw report and the parsed state speak the
+        // device's layout, so the ring's swallow needs the map read backwards.
+        XCTAssertEqual(
+            Sc2Device.sc2Buttons(forWire: GamepadWire.back | GamepadWire.a),
+            Sc2Device.btnView | Sc2Device.btnA)
+        XCTAssertEqual(Sc2Device.sc2Buttons(forWire: 0), 0)
+        // Round-trip: every mapped wire bit comes back as itself.
+        for (sc2, wire) in Sc2Device.wireMap {
+            XCTAssertEqual(Sc2Device.sc2Buttons(forWire: wire), sc2)
+            XCTAssertEqual(Sc2Device.wireButtons(Sc2Device.sc2Buttons(forWire: wire)), wire)
+        }
+    }
+
+    func testMaskInputsClearsOnlyWhatTheRingConsumes() {
+        var report = stateReport(
+            buttons: Sc2Device.btnA | Sc2Device.btnView | Sc2Device.btnY,
+            lt: 200, lsX: 32767, rsY: -4000)
+        report[30] = 0xAB // an IMU byte: the gate above this one owns that block, not this
+        Sc2Device.maskInputs(&report, clear: Sc2Device.btnA | Sc2Device.btnView, zeroAxes: false)
+        var out = Sc2Device.State()
+        XCTAssertTrue(Sc2Device.parseState(report, into: &out))
+        XCTAssertEqual(out.buttons, Sc2Device.btnY) // the chord's two are gone, the third stays
+        XCTAssertEqual(out.lsX, 32767) // axes untouched while the ring is closed
+        XCTAssertEqual(out.rsY, -4000)
+        XCTAssertEqual(report[0], Sc2Device.idStateBLE) // still a well-formed state report
+        XCTAssertEqual(report[30], 0xAB)
+
+        // Ring open: every stick and trigger reads neutral, at the same cadence.
+        Sc2Device.maskInputs(&report, clear: Sc2Device.btnY, zeroAxes: true)
+        XCTAssertTrue(Sc2Device.parseState(report, into: &out))
+        XCTAssertEqual(out.buttons, 0)
+        XCTAssertEqual(out.lsX, 0)
+        XCTAssertEqual(out.rsY, 0)
+        XCTAssertEqual(out.lt, 0)
+        XCTAssertEqual(report[30], 0xAB)
+
+        // Non-state and short reports are left exactly as they are.
+        var battery: [UInt8] = [Sc2Device.idBattery, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                                10, 11, 12, 13, 14, 15, 16, 17, 18]
+        let untouched = battery
+        Sc2Device.maskInputs(&battery, clear: .max, zeroAxes: true)
+        XCTAssertEqual(battery, untouched)
+        var short = stateReport(buttons: Sc2Device.btnA)
+        short.removeSubrange(17...)
+        let shortUntouched = short
+        Sc2Device.maskInputs(&short, clear: .max, zeroAxes: true)
+        XCTAssertEqual(short, shortUntouched)
+    }
 }
 
 #if os(iOS) || os(macOS)
@@ -255,6 +305,23 @@ final class Sc2EscapeChordMirrorTests: XCTestCase {
         // pf-client-core's DISCONNECT_HOLD — 1.5 s on every client (GamepadCapture's own copy
         // is private; the value is the cross-client contract being pinned).
         XCTAssertEqual(Sc2Capture.disconnectHold, 1.5)
+    }
+
+    func testStatsChordMirrorsGamepadCapture() {
+        XCTAssertEqual(Sc2RingGate.statsChord, GamepadCapture.statsChord)
+    }
+
+    /// The three chords must stay reachable independently: no way of holding one passes through
+    /// another on the way, or the dial would open while someone reaches for the exit.
+    func testChordsDoNotContainOneAnother() {
+        XCTAssertEqual(Sc2RingGate.ringChord, GamepadWire.back | GamepadWire.a)
+        let chords = [Sc2RingGate.ringChord, Sc2RingGate.statsChord, Sc2Capture.escapeChord]
+        for (i, one) in chords.enumerated() {
+            for other in chords[(i + 1)...] {
+                XCTAssertNotEqual(one & other, one)
+                XCTAssertNotEqual(one & other, other)
+            }
+        }
     }
 }
 #endif
