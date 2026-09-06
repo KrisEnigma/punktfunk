@@ -83,6 +83,7 @@ mod linux {
             pyrowave_modifiers: Vec::new(),
             hdr_cuda_ok: false,
         };
+        let kwin = compositor == pf_vdisplay::Compositor::Kwin;
         let mut cap = pf_capture::open_virtual_output(
             vout.remote_fd,
             vout.node_id,
@@ -93,7 +94,12 @@ mod linux {
             false,
             policy,
             vout.expect_exact_dims,
-            compositor == pf_vdisplay::Compositor::Kwin,
+            kwin,
+            if kwin {
+                pf_capture::KWIN_POOL_MIN
+            } else {
+                pf_capture::POOL_MIN
+            },
         )
         .context("attach the PipeWire capturer")?;
         cap.set_active(true);
