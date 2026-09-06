@@ -287,6 +287,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **The Windows driver's diagnostics reach `host.log`.** The encoder runs inside WUDFHost, so its
+  backend rejections, bitrate retargets and wedges used to need `PFVD_DEBUG_LOG` and a file in
+  LocalService's temp directory; the host now drains them over `IOCTL_DRAIN_LOG` at the keepalive
+  cadence and once after every encoder open. Nothing to do — the knob still adds the driver's own
+  file and debug-string tee on top of it.
 - **The SteamOS host carries its own FFmpeg.** The on-device build now compiles the pinned LGPL
   FFmpeg the .deb already bundles into `target-steamos/ffmpeg` and links it behind an absolute
   rpath, because SteamOS's FFmpeg moves independently of any Debian release and a host linked
