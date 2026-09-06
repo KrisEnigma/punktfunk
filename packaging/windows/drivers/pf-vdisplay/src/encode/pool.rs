@@ -331,7 +331,11 @@ impl Pool {
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
         let seq = self.source_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        dbglog!("[pf-vd] cursor: re-encode on pointer move (no compose) slot={slot} seq={seq}");
+        // The one per-frame `dbglog!`: an idle desktop under a moving pointer fires this at the
+        // cursor poll rate, which would swamp the host's drain ring and `host.log` with it.
+        if crate::log::file_log_enabled() {
+            dbglog!("[pf-vd] cursor: re-encode on pointer move (no compose) slot={slot} seq={seq}");
+        }
         Some((slot, qpc_now(), seq))
     }
 
