@@ -43,6 +43,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`GameEntry.stats` carries a title's play stats.** Every library entry a host has launched
+  gains `last_played_unix_ms`, `play_time_ms`, `last_run_ms` and `launch_count`, kept in
+  `library-stats.json` beside the hide list and absent until the first launch. A client that
+  sorts by recency or shows play time reads them off the entry; nothing to negotiate.
 - **`GamepadType.steamController2Puck` (pref `10`) is declared by an Apple client.** The macOS
   SC2 passthrough now captures over USB — a cabled pad or a Puck dongle, each collection its own
   wire pad — and a Puck slot declares kind 10 where a wired or BLE pad still declares 9. Nothing

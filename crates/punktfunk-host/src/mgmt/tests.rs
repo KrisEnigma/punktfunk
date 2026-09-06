@@ -2947,6 +2947,110 @@ async fn hide_route_matches_ids_containing_colons() {
     }
 }
 
+/// Stats ride on the entry: absent until the first launch, then the four numbers as recorded.
+/// The env override must cover the whole body (`paired_clients_list_and_unpair`).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn library_stats_ride_on_the_entry() {
+    let _tmp = ConfigDirOverride::new();
+    let app = test_app(test_state(), None);
+    let added = crate::library::add_custom(crate::library::CustomInput {
+        title: "Chrono Trigger".into(),
+        art: Default::default(),
+        launch: None,
+        prep: Vec::new(),
+        role: Default::default(),
+        icon: None,
+        detect: Default::default(),
+        meta: Default::default(),
+    })
+    .expect("seed one custom title");
+    let id = crate::library::library_id_for(&added);
+
+    let (s, json) = send(&app, get_req("/api/v1/library")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(json[0]["id"], id.as_str());
+    assert!(
+        json[0].get("stats").is_none(),
+        "a never-launched title carries no stats key: {json}"
+    );
+
+    crate::library::record_launch(&id);
+    crate::library::record_run_time(&id, std::time::Duration::from_millis(1_500));
+    crate::library::record_run_time(&id, std::time::Duration::from_millis(500));
+    // A run credited to an id with no entry is kept but never surfaces.
+    crate::library::record_run_time("steam:404", std::time::Duration::from_secs(1));
+
+    let (s, json) = send(&app, get_req("/api/v1/library")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(json.as_array().map(Vec::len), Some(1), "{json}");
+    let stats = &json[0]["stats"];
+    assert_eq!(stats["launch_count"], 1, "{json}");
+    assert_eq!(stats["play_time_ms"], 2_000);
+    assert_eq!(stats["last_run_ms"], 2_000);
+    assert!(stats["last_played_unix_ms"]
+        .as_u64()
+        .is_some_and(|ms| ms > 0));
+}
+
+/// The lease watcher credits a recorded launch's run: seen running, then gone, lands on disk.
+/// Launches are counted by the planes, never by the lease — the count stays zero here.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "drives a real process for ~12s (shim window + exit confirmation)"]
+fn a_recorded_launch_credits_its_run_to_the_library_stats() {
+    use std::os::unix::process::CommandExt;
+    let tmp = ConfigDirOverride::new();
+    let script = tmp.path().join("game.sh");
+    std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    let launch_stamp = crate::gamelease::launch_clock();
+    let child = std::process::Command::new("/bin/sh")
+        .arg(&script)
+        .process_group(0)
+        .spawn()
+        .expect("spawn the fake game");
+
+    let lease = crate::gamelease::open(
+        crate::gamelease::LeaseRequest {
+            game: crate::gamelease::GameRef {
+                id: Some("custom:stats-run".into()),
+                store: Some("custom".into()),
+                title: "Stats Run".into(),
+            },
+            client: "test".into(),
+            plane: crate::events::Plane::Native,
+            spec: crate::library::DetectSpec::dir(tmp.path()),
+            nested: false,
+            launcher: false,
+            child: Some((child, true)),
+            spawned: None,
+            launch_stamp,
+            // Recorded: this is what makes the run count.
+            procs: Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))),
+        },
+        Box::new(|| {}),
+    );
+    let shared = lease.shared();
+    let wait_for = |state: crate::gamelease::GameState, secs: u64| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline && shared.state() != state {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        assert_eq!(shared.state(), state);
+    };
+    // Past the shim window the child is the game.
+    wait_for(crate::gamelease::GameState::Running, 15);
+    crate::gamelease::terminate(shared.clone(), "test asked");
+    wait_for(crate::gamelease::GameState::Exited, 30);
+
+    let stats = crate::library::game_stats();
+    let s = stats.get("custom:stats-run").expect("the run was credited");
+    assert!(s.play_time_ms >= 500, "seen running for a while: {s:?}");
+    assert_eq!(s.last_run_ms, s.play_time_ms, "one run: {s:?}");
+    assert_eq!(s.launch_count, 0, "the lease never counts launches: {s:?}");
+    assert_eq!(s.last_played_unix_ms, 0);
+}
+
 // ------------------------------------------------------------------ library providers
 
 /// Validation only; a successful PUT would touch the real catalog (`library::custom` covers writes).

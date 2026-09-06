@@ -1627,6 +1627,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     if let Some(c) = launch_claim.as_ref() {
         if spawned_now {
             c.launched();
+            if let Some(id) = c.credits() {
+                crate::library::record_launch(id);
+            }
         } else if c.must_spawn() {
             c.abandon();
         }

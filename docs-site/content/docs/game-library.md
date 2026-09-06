@@ -187,6 +187,21 @@ Where the game *lands* — your live desktop, an existing gamescope session, or 
 one — is display policy, covered in
 [Dedicated game sessions](/docs/virtual-displays#dedicated-game-sessions).
 
+## Play stats
+
+Every launch stamps the title with a last-played time and adds one to its launch count. While the
+launched game is seen running, its play time grows, and the same clock keeps the most recent run
+on its own. Clients get the four numbers on each library entry; a title never launched from
+Punktfunk carries none.
+
+Play time is time the host can see the game: from the game running to its exit, while a session
+is attached to it. A game kept running after its session ends is not counted until a client comes
+back for it. A launcher tile, or a title the host cannot recognize as a process, keeps a
+last-played time and launch count but no play time.
+
+The numbers live in `library-stats.json`, next to `library-scanners.json`. Delete a title's line
+to reset it.
+
 ## When a game or the session ends
 
 The host tracks the game it launched, so quitting the game can end the session and stopping the
