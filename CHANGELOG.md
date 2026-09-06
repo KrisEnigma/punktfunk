@@ -333,6 +333,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A KWin virtual output negotiates a 4-buffer capture pool.** KWin's default of 3 left the
+  zero-copy hold one buffer short, so every other frame went back to the compositor while the
+  encoder still read it and could tear under load; nothing to do, and `PUNKTFUNK_FORCE_SHM=1`
+  stays the escape should a future KWin refuse the ask.
 - **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
   Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
   command to `100F6C34`, id byte stripped in both cases, where the link had written every frame

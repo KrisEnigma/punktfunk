@@ -1235,6 +1235,7 @@ pub fn pipewire_thread(
         want_hdr,
         expect_exact_dims,
         cursor_id0_hides,
+        pool_min,
         ..
     } = opts;
     crate::pwinit::ensure_init();
@@ -1898,7 +1899,7 @@ pub fn pipewire_thread(
     let buffers_values = if want_hdr || want_dmabuf {
         // Dmabuf-only. HDR: Mutter's SHM path paints 8-bit ARGB32 regardless of format, so a
         // MemFd buffer under a 10-bit format would carry mislabeled bytes.
-        Some(build_dmabuf_buffers()?)
+        Some(build_dmabuf_buffers(pool_min)?)
     } else if force_shm {
         // Exclude DmaBuf so Mutter must download (glReadPixels orders against render).
         Some(build_shm_only_buffers()?)

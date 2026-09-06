@@ -53,6 +53,9 @@ struct CaptureOpts {
     /// `SPA_META_Cursor` every buffer. `false` (Mutter): buffers recycle
     /// the region. See [`pw_cursor::CursorState::id0_hides`].
     cursor_id0_hides: bool,
+    /// Least dmabuf pool depth to ask for: [`crate::POOL_MIN`], or
+    /// [`crate::KWIN_POOL_MIN`] so KWin's default of 3 cannot win.
+    pool_min: i32,
 }
 
 #[derive(Clone)]
@@ -232,6 +235,7 @@ impl PortalCapturer {
                 // portal capture would rewrite per buffer; nothing routes
                 // one here yet (`from_virtual_output` carries the real flag).
                 cursor_id0_hides: false,
+                pool_min: crate::POOL_MIN,
             },
             policy,
         )?
@@ -255,6 +259,7 @@ impl PortalCapturer {
         policy: ZeroCopyPolicy,
         expect_exact_dims: bool,
         cursor_id0_hides: bool,
+        pool_min: i32,
     ) -> Result<PortalCapturer> {
         tracing::info!(
             node_id,
@@ -263,6 +268,7 @@ impl PortalCapturer {
             want_hdr,
             expect_exact_dims,
             cursor_id0_hides,
+            pool_min,
             "connecting PipeWire to virtual output"
         );
         // Virtual outputs are SDR-only except a gamescope node from our
@@ -278,6 +284,7 @@ impl PortalCapturer {
                 want_hdr,
                 expect_exact_dims,
                 cursor_id0_hides,
+                pool_min,
             },
             policy,
         )?

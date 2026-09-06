@@ -281,14 +281,14 @@ pub(super) fn build_shm_only_buffers() -> Result<Vec<u8>> {
 /// afford empties the Buffers intersection and the link stalls in
 /// `negotiating` (same trap as `build_cursor_meta_param`'s size).
 ///
-/// `min` 2 matches what already works. `default` 8 is ~133 ms at 60 Hz /
-/// ~33 ms at 240 Hz, past capture→fence latency with a second frame in
-/// flight. `max` 16 caps compositor RAM (~25 MB per 4K 4:4:4 buffer).
-const POOL_MIN: i32 = 2;
+/// `pool_min` is [`crate::POOL_MIN`], or [`crate::KWIN_POOL_MIN`] for KWin.
+/// `default` 8 is ~133 ms at 60 Hz / ~33 ms at 240 Hz, past capture→fence
+/// latency with a second frame in flight. `max` 16 caps compositor RAM
+/// (~25 MB per 4K 4:4:4 buffer).
 const POOL_DEFAULT: i32 = 8;
 const POOL_MAX: i32 = 16;
 
-pub(super) fn build_dmabuf_buffers() -> Result<Vec<u8>> {
+pub(super) fn build_dmabuf_buffers(pool_min: i32) -> Result<Vec<u8>> {
     serialize_pod(pw::spa::pod::Object {
         type_: pw::spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
         id: pw::spa::param::ParamType::Buffers.as_raw(),
@@ -306,7 +306,7 @@ pub(super) fn build_dmabuf_buffers() -> Result<Vec<u8>> {
                         pw::spa::utils::ChoiceFlags::empty(),
                         pw::spa::utils::ChoiceEnum::Range {
                             default: POOL_DEFAULT,
-                            min: POOL_MIN,
+                            min: pool_min,
                             max: POOL_MAX,
                         },
                     ),
@@ -398,7 +398,7 @@ mod tests {
             "PUNKTFUNK_FORCE_SHM must exclude DmaBuf"
         );
         assert_eq!(
-            buffers_data_type(&build_dmabuf_buffers().unwrap()),
+            buffers_data_type(&build_dmabuf_buffers(crate::POOL_MIN).unwrap()),
             DMABUF,
             "the zero-copy/HDR path must exclude SHM"
         );
@@ -410,7 +410,14 @@ mod tests {
         let mut pods: Vec<(&str, Vec<u8>)> = vec![
             ("mappable buffers", build_mappable_buffers().unwrap()),
             ("shm-only buffers", build_shm_only_buffers().unwrap()),
-            ("dmabuf buffers", build_dmabuf_buffers().unwrap()),
+            (
+                "dmabuf buffers",
+                build_dmabuf_buffers(crate::POOL_MIN).unwrap(),
+            ),
+            (
+                "kwin dmabuf buffers",
+                build_dmabuf_buffers(crate::KWIN_POOL_MIN).unwrap(),
+            ),
             ("cursor meta", build_cursor_meta_param().unwrap()),
             (
                 "default format",
@@ -507,38 +514,44 @@ mod tests {
     /// empties the Buffers intersection and stalls the link with no error.
     #[test]
     fn the_dmabuf_pool_request_is_a_range_not_a_fixed_count() {
-        let pod = build_dmabuf_buffers().unwrap();
-        let key = spa::sys::SPA_PARAM_BUFFERS_buffers.to_ne_bytes();
-        let at = pod
-            .windows(4)
-            .position(|w| w == key)
-            .expect("the dmabuf Buffers pod must carry a buffers count");
-        let word = |off: usize| u32::from_ne_bytes(pod[off..off + 4].try_into().unwrap());
-        // Property = { key, flags, value_pod }; value_pod = { size, type, body }.
-        // Choice body = { type, flags, child_size, child_type, values… }.
-        assert_eq!(
-            word(at + 12),
-            spa::sys::SPA_TYPE_Choice,
-            "the buffers count must be a Choice, not a bare Int — a fixed count can fail \
-             negotiation outright"
-        );
-        assert_eq!(
-            word(at + 16),
-            spa::sys::SPA_CHOICE_Range,
-            "the Choice must be a Range (default, min, max)"
-        );
-        assert_eq!(word(at + 24), 4, "Choice child pods are 4-byte Ints");
-        assert_eq!(word(at + 28), spa::sys::SPA_TYPE_Int, "…of type Int");
-        let vals: Vec<i32> = (0..3)
-            .map(|i| i32::from_ne_bytes(pod[at + 32 + i * 4..at + 36 + i * 4].try_into().unwrap()))
-            .collect();
-        assert_eq!(
-            vals,
-            vec![POOL_DEFAULT, POOL_MIN, POOL_MAX],
-            "Range values are serialized default-first"
-        );
+        for pool_min in [crate::POOL_MIN, crate::KWIN_POOL_MIN] {
+            let pod = build_dmabuf_buffers(pool_min).unwrap();
+            let key = spa::sys::SPA_PARAM_BUFFERS_buffers.to_ne_bytes();
+            let at = pod
+                .windows(4)
+                .position(|w| w == key)
+                .expect("the dmabuf Buffers pod must carry a buffers count");
+            let word = |off: usize| u32::from_ne_bytes(pod[off..off + 4].try_into().unwrap());
+            // Property = { key, flags, value_pod }; value_pod = { size, type, body }.
+            // Choice body = { type, flags, child_size, child_type, values… }.
+            assert_eq!(
+                word(at + 12),
+                spa::sys::SPA_TYPE_Choice,
+                "the buffers count must be a Choice, not a bare Int — a fixed count can fail \
+                 negotiation outright"
+            );
+            assert_eq!(
+                word(at + 16),
+                spa::sys::SPA_CHOICE_Range,
+                "the Choice must be a Range (default, min, max)"
+            );
+            assert_eq!(word(at + 24), 4, "Choice child pods are 4-byte Ints");
+            assert_eq!(word(at + 28), spa::sys::SPA_TYPE_Int, "…of type Int");
+            let vals: Vec<i32> = (0..3)
+                .map(|i| {
+                    i32::from_ne_bytes(pod[at + 32 + i * 4..at + 36 + i * 4].try_into().unwrap())
+                })
+                .collect();
+            assert_eq!(
+                vals,
+                vec![POOL_DEFAULT, pool_min, POOL_MAX],
+                "Range values are serialized default-first"
+            );
+        }
         // The minimum must not exceed what producers already serve, or the ask becomes a demand.
-        const { assert!(POOL_MIN <= 2) };
+        const { assert!(crate::POOL_MIN <= 2) };
+        // KWin ≥ 6.2 caps its pool at 4; a higher minimum fails negotiation outright.
+        const { assert!(crate::KWIN_POOL_MIN <= 4) };
     }
 
     #[test]
