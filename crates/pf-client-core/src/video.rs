@@ -48,7 +48,7 @@ pub use crate::video_d3d11::D3d11Frame;
 pub enum DecodedImage {
     /// Tightly-packed 8-bit I420 for the presenter's planar CSC upload.
     Cpu(CpuPlanarFrame),
-    /// Native VAAPI DRM-PRIME export (`pf-vaadec`). The variant name is the
+    /// Native VAAPI DRM-PRIME export (`pf-vaapi`). The variant name is the
     /// `stats:` decode-path tag; renaming it would rename that.
     #[cfg(target_os = "linux")]
     NativeDmabuf(DmabufFrame),
@@ -457,7 +457,7 @@ pub struct DmabufPlane {
 pub struct DrmFrameGuard(
     /// Unread: the type is its `Drop` (close PRIME fds, return the surface).
     /// Removing the field releases the surface at construction; an alias would
-    /// leak a pf-vaadec name the presenter must treat as opaque.
+    /// leak a pf-vaapi name the presenter must treat as opaque.
     #[allow(dead_code)]
     pub(crate) crate::video_vaapi_native::VaFrameGuard,
 );
@@ -466,7 +466,7 @@ enum Backend {
     /// pf-vkdecode on the presenter's device. Auto's top rung; pinnable as
     /// `native-vulkan`. Codec is chosen once at construction. Boxed: the decoder is large.
     NativeVulkan(Box<NativeVulkanDecoder>),
-    /// Native VAAPI (`pf-vaadec`). Pinnable as `native-vaapi`; `auto` reaches it
+    /// Native VAAPI (`pf-vaapi`). Pinnable as `native-vaapi`; `auto` reaches it
     /// in vendor order. Unverified ([`native_evidence`]), so `auto` yields to
     /// proven Vulkan ([`native_rung_admitted`]). Boxed: two planners + pools.
     #[cfg(target_os = "linux")]
@@ -623,11 +623,11 @@ fn native_d3d11_codec(wire: u8) -> Option<pf_dxvadec::Codec> {
 /// Native VAAPI decoder for a wire codec, or `None`. No caps bit: VAAPI
 /// advertises a profile/entrypoint pair, which [`crate::video_vaapi_native::NativeVaapiDecoder::new`] queries.
 #[cfg(target_os = "linux")]
-fn native_vaapi_codec(wire: u8) -> Option<pf_vaadec::Codec> {
+fn native_vaapi_codec(wire: u8) -> Option<pf_vaapi::Codec> {
     match wire {
-        punktfunk_core::quic::CODEC_H264 => Some(pf_vaadec::Codec::H264),
-        punktfunk_core::quic::CODEC_HEVC => Some(pf_vaadec::Codec::H265),
-        punktfunk_core::quic::CODEC_AV1 => Some(pf_vaadec::Codec::Av1),
+        punktfunk_core::quic::CODEC_H264 => Some(pf_vaapi::Codec::H264),
+        punktfunk_core::quic::CODEC_HEVC => Some(pf_vaapi::Codec::H265),
+        punktfunk_core::quic::CODEC_AV1 => Some(pf_vaapi::Codec::Av1),
         _ => None,
     }
 }
@@ -640,7 +640,7 @@ pub enum NativeRung {
     Vulkan,
     /// pf-dxvadec driving `ID3D11VideoDecoder` (`video_d3d11_native`, Windows).
     D3d11va,
-    /// pf-vaadec driving a dlopen'd libva (`video_vaapi_native`, Linux).
+    /// pf-vaapi driving a dlopen'd libva (`video_vaapi_native`, Linux).
     Vaapi,
     /// openh264 + rav1d (`video_software`).
     Software,
@@ -1145,7 +1145,7 @@ impl Decoder {
                             tracing::info!(
                                 codec = codec_name,
                                 decoder = d.name(),
-                                "native VAAPI hardware decode active (pf-vaadec, zero-copy dmabuf)"
+                                "native VAAPI hardware decode active (pf-vaapi, zero-copy dmabuf)"
                             );
                             return done(Backend::NativeVaapi(Box::new(d)));
                         }
@@ -1211,7 +1211,7 @@ impl Decoder {
                         tracing::info!(
                             codec = codec_name,
                             decoder = d.name(),
-                            "native VAAPI hardware decode active (pf-vaadec, zero-copy dmabuf)"
+                            "native VAAPI hardware decode active (pf-vaapi, zero-copy dmabuf)"
                         );
                         return Ok(Some(Backend::NativeVaapi(Box::new(d))));
                     }

@@ -250,7 +250,7 @@ in
 
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ wrapGAppsHook4 ];
 
-      # No ffmpeg: the client decodes natively since M10 (pf-vkdecode / pf-vaadec — libva is
+      # No ffmpeg: the client decodes natively since M10 (pf-vkdecode / pf-vaapi — libva is
       # dlopen'd, never linked — / openh264 + rav1d, both built from vendored source). The HOST
       # derivation above still has it.
       buildInputs = [

@@ -170,7 +170,7 @@ crates/
   pf-bitstream/     H.264 / H.265 / AV1 bitstream parsing + per-AU decode plans — the one parser every native rung submits from
   pf-vkdecode/      native Vulkan Video decode (H.264 / H.265 / AV1) on the presenter's own device
   pf-dxvadec/       native DXVA buffer layouts + AuPlan → picparams conversion (the Windows D3D11VA rung)
-  pf-vaadec/        native libva buffer layouts + AuPlan → picparams conversion (the Linux VAAPI rung)
+  pf-vaapi/        native libva buffer layouts + AuPlan → picparams conversion (the Linux VAAPI rung)
   pf-driver-proto/  host ↔ pf-vdisplay driver contract: control IOCTLs + IDD-push frame transport (no_std)
   punktfunk-tray/   host tray icon (Windows notification area / Linux StatusNotifierItem)
 clients/

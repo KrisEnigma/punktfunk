@@ -50,7 +50,7 @@ pub use pf_bitstream::av1::PlanError as PlanErrorAv1;
 pub use pf_bitstream::av1::PlanWarning as PlanWarningAv1;
 pub use pf_bitstream::av1::NUM_REF_SLOTS;
 /// H.264/H.265 planners, re-exported so the Linux layer names them through
-/// `pf_vaadec` and does not grow a pf-bitstream dependency of its own.
+/// `pf_vaapi` and does not grow a pf-bitstream dependency of its own.
 pub use pf_bitstream::h264::AuPlan;
 pub use pf_bitstream::h264::ColourDescription;
 pub use pf_bitstream::h264::DisplayCrop;

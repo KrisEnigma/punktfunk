@@ -75,7 +75,7 @@ policy.
 ## Decode rungs (M10: native only)
 
 **This binary contains no FFmpeg.** `auto` walks native rungs — pf-vkdecode over Vulkan
-Video, then the platform's own (pf-dxvadec on Windows, pf-vaadec on Linux), then the CPU
+Video, then the platform's own (pf-dxvadec on Windows, pf-vaapi on Linux), then the CPU
 rung (openh264/rav1d). The libavcodec rungs that used to sit under each of them are
 deleted, along with `pf-ffvk` and the `ffmpeg-next` dependency.
 

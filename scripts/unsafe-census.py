@@ -46,7 +46,7 @@ HOST_ROOTS = [
 
 CLIENT_ONLY_ROOTS = [
     "crates/pf-client-core", "crates/pf-presenter", "crates/pf-vkdecode",
-    "crates/pf-dxvadec", "crates/pf-vaadec", "crates/pf-console-ui",
+    "crates/pf-dxvadec", "crates/pf-vaapi", "crates/pf-console-ui",
     "crates/pf-bitstream", "clients",
 ]
 

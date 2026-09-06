@@ -116,7 +116,7 @@ in the future."
    the two agree there — a conformant stream is never refused. This is also what keeps
    punktfunk's own `sps.max_num_reorder_pics[max_sub_layers_minus1]` and
    `sps.max_dec_pic_buffering_minus1[max_sub_layers_minus1]` reads in bounds
-   (`pf-bitstream` h265.rs, and the `pf-vaadec` / `pf-dxvadec` / `pf-vkdecode` picture
+   (`pf-bitstream` h265.rs, and the `pf-vaapi` / `pf-dxvadec` / `pf-vkdecode` picture
    builders downstream of it) — they all take their `Sps` from this parser, so the
    parse-time check is the single choke point and none of them needs its own guard.
    Regression-tested in `pf-bitstream`
@@ -218,7 +218,7 @@ in the future."
     leaves `overflow-checks` off, which is why the parser's other unchecked accumulations
     merely wrap), and it aborts whichever thread is decoding.
 
-    Blast radius is every native AV1 rung: `pf-vkdecode`, `pf-dxvadec` and `pf-vaadec` are all
+    Blast radius is every native AV1 rung: `pf-vkdecode`, `pf-dxvadec` and `pf-vaapi` are all
     re-exports of `pf_bitstream::av1::Av1Planner`, whose `plan_au` hands raw access-unit bytes
     straight to this function. Reachable from the project's own `PUNKTFUNK_AU_FAULT=truncate`
     injector — whose `FaultMode::Truncate` docs reason only about Annex-B, where a NALU carries
