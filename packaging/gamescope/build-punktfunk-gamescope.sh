@@ -59,6 +59,9 @@ done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PATCHES=("$HERE"/patches/*.patch)
 [ -e "${PATCHES[0]}" ] || { echo "no patches found in $HERE/patches" >&2; exit 1; }
+VERSION_TAG="$(sed -n 's/^+\(version_tag = vcs_tag .*\)/\1/p' "${PATCHES[@]}" | tail -n1)"
+PFHDR="$(printf '%s\n' "$VERSION_TAG" | sed -nE "s/^version_tag = vcs_tag \+ '(\+pfhdr[0-9]+)' \+.*/\1/p")"
+[ -n "$PFHDR" ] || { echo "patches contain no capability version stamp" >&2; exit 1; }
 
 WORK=""
 if [ -z "$SRCDIR" ]; then
@@ -70,17 +73,19 @@ if [ -z "$SRCDIR" ]; then
   git -C "$SRCDIR" checkout --recurse-submodules "$REV"
 fi
 
-# `git am` needs an identity and a clean tree; both are ours to provide in a throwaway checkout.
-# Idempotent: a checkout that already carries the marker is left alone, so a re-run of this script
-# against --srcdir does not fail on an already-applied patch.
+# Reusing --srcdir requires the current stamp, not just any punktfunk marker.
 if grep -q '+pfhdr' "$SRCDIR/src/meson.build"; then
-  echo "==> patches already applied in $SRCDIR"
+  echo "==> checking existing punktfunk patch level in $SRCDIR"
 else
   echo "==> applying punktfunk patches"
   git -C "$SRCDIR" \
     -c user.name=punktfunk -c user.email=packages@unom.io \
     am "${PATCHES[@]}"
 fi
+grep -Fxq "$VERSION_TAG" "$SRCDIR/src/meson.build" || {
+  echo "source does not carry the current $PFHDR stamp; use a fresh gamescope checkout" >&2
+  exit 1
+}
 
 BUILD="$SRCDIR/build-punktfunk"
 echo "==> configuring"
@@ -148,6 +153,15 @@ ninja -C "$BUILD" ${JOBS:+-j "$JOBS"}
 # distro's gamescope package — and we need none of them: the host only ever execs the compositor.
 BIN="$BUILD/src/gamescope"
 [ -x "$BIN" ] || { echo "build produced no $BIN" >&2; exit 1; }
+BANNER="$("$BIN" --version 2>&1)" || {
+  echo "built gamescope cannot report its version: $BANNER" >&2
+  exit 1
+}
+BANNER_RE=" version [^[:space:]]+\\${PFHDR} \\("
+[[ "$BANNER" =~ $BANNER_RE ]] || {
+  echo "built gamescope must carry exactly $PFHDR: $BANNER" >&2
+  exit 1
+}
 # The static C++ runtime above is invisible in a successful build and only shows up as a binary
 # that will not start on an older distro — so assert it here, where a mistake is a build failure
 # instead of a package that dies at `--version` on SteamOS. No `libstdc++.so.6` in NEEDED is the
@@ -200,5 +214,5 @@ if [ "$SETCAP" = 1 ] && command -v setcap >/dev/null; then
     || echo "note: could not setcap CAP_SYS_NICE on $DEST (run as root, or let the package do it)"
 fi
 
-echo "==> done: $("$DEST" --version 2>&1 | head -1)"
-echo "    the banner above must contain +pfhdr — that marker is how the host detects HDR support"
+echo "==> done: ${BANNER%%$'\n'*}"
+echo "    verified exact $PFHDR capability marker"
