@@ -1513,6 +1513,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 plan,
                 &quit,
                 &stop,
+                None,
                 8,
                 Some(bringup.as_ref()),
                 0,
@@ -1957,6 +1958,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                             plan,
                             &quit,
                             &stop,
+                            None,
                             8,
                             None,
                             au_seq,
@@ -2676,6 +2678,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         plan,
                         &quit,
                         &stop,
+                        cur_display_gen,
                         1,
                         None,
                         au_seq,
@@ -2704,6 +2707,10 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 frame = new_frame;
                 interval = new_interval;
                 cur_node_id = new_node_id;
+                // Lease drop looks like a disconnect to keep-alive; retire or linger accumulates.
+                if let Some(g) = cur_display_gen.filter(|g| new_display_gen != Some(*g)) {
+                    crate::vdisplay::registry::retire(g);
+                }
                 cur_display_gen = new_display_gen;
                 enc_src = (frame.format, frame.width, frame.height);
                 #[cfg(target_os = "linux")]
@@ -3682,6 +3689,7 @@ pub(super) fn prepare_display(
         plan,
         quit,
         stop,
+        None,
         8,
         Some(trace),
         0,
@@ -3690,7 +3698,9 @@ pub(super) fn prepare_display(
 }
 
 /// Retry transient first-frame races. Permanent errors short-circuit; each failed attempt drops
-/// its capturer so the next create is clean.
+/// its capturer so the next create is clean. `supersedes` is the lease this build replaces
+/// (create-before-drop): without it the registry counts the old lease as a live sibling and
+/// the new display extends the group instead of heading it.
 #[allow(clippy::too_many_arguments)]
 fn build_pipeline_with_retry(
     vd: &mut Box<dyn crate::vdisplay::VirtualDisplay>,
@@ -3702,6 +3712,7 @@ fn build_pipeline_with_retry(
     plan: crate::session_plan::SessionPlan,
     quit: &Arc<AtomicBool>,
     stop: &Arc<AtomicBool>,
+    supersedes: Option<u64>,
     max_attempts: u32,
     trace: Option<&crate::bringup::Trace>,
     wire_seq_base: u32,
@@ -3735,7 +3746,7 @@ fn build_pipeline_with_retry(
             enc_of,
             plan,
             quit,
-            None,
+            supersedes,
             first_frame_budget,
             trace,
             wire_seq_base,
