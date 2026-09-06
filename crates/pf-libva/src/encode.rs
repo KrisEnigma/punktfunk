@@ -221,6 +221,10 @@ impl Encoder {
                 kind: vahevc::VA_CONFIG_ATTRIB_ENC_HEVC_BLOCK_SIZES,
                 value: 0,
             },
+            VaConfigAttrib {
+                kind: vahevc::VA_CONFIG_ATTRIB_PREDICTION_DIRECTION,
+                value: 0,
+            },
         ];
         // SAFETY: `probe` is a live array of exactly `probe.len()` entries the call
         // fills in place; profile and entrypoint are libva enum values.
@@ -247,13 +251,16 @@ impl Encoder {
             CodecParams::H264 => Codec::H264,
             CodecParams::Hevc { ten_bit, colour } => {
                 let (features, blocks) = (probe[3].value, probe[4].value);
-                let features = if features == vahevc::VA_ATTRIB_NOT_SUPPORTED
+                let mut features = if features == vahevc::VA_ATTRIB_NOT_SUPPORTED
                     || blocks == vahevc::VA_ATTRIB_NOT_SUPPORTED
                 {
                     HevcFeatures::guessed()
                 } else {
                     HevcFeatures::from_attributes(features, blocks)
                 };
+                let direction = probe[5].value;
+                features.gpb = direction != vahevc::VA_ATTRIB_NOT_SUPPORTED
+                    && direction & vahevc::VA_PREDICTION_DIRECTION_BI_NOT_EMPTY != 0;
                 Codec::Hevc(HevcParams {
                     common: params,
                     ten_bit,
@@ -265,9 +272,8 @@ impl Encoder {
         // Both kinds are required: the session writes every header itself, and
         // radeonsi drops the packed SPS and PPS of a picture that brings no slice
         // header.
-        let want_packed = vah::VA_ENC_PACKED_HEADER_FLAG_SEQUENCE
-            | vah::VA_ENC_PACKED_HEADER_FLAG_PICTURE
-            | vah::VA_ENC_PACKED_HEADER_FLAG_SLICE;
+        let want_packed =
+            vah::VA_ENC_PACKED_HEADER_FLAG_SEQUENCE | vah::VA_ENC_PACKED_HEADER_FLAG_SLICE;
         let packed = supported_packed & want_packed;
         if packed & vah::VA_ENC_PACKED_HEADER_FLAG_SEQUENCE == 0 {
             bail!("this driver will not take a packed sequence header ({supported_packed:#x})");
@@ -842,14 +848,24 @@ impl Encoder {
         }
         self.render(owned, vah::VA_ENC_PICTURE_PARAMETER_BUFFER_TYPE, &pic)?;
 
+        let b_slice = !is_idr && hevc.features.gpb;
         let mut va_slice = vahevc::VaEncSliceParameterBufferHEVC {
             num_ctu_in_slice: hevc.ctus_per_picture(),
-            slice_type: if is_idr { 2 } else { 1 },
+            slice_type: if is_idr {
+                2
+            } else if b_slice {
+                0
+            } else {
+                1
+            },
             slice_fields: vahevc::slice_fields(is_idr, &hevc.features),
             ..Default::default()
         };
         if let Some(entry) = reference_entry {
             va_slice.ref_pic_list0[0] = entry;
+            if b_slice {
+                va_slice.ref_pic_list1[0] = entry;
+            }
         } else if !is_idr {
             bail!("reference slot {:?} is not held", slice.reference_slot);
         }
