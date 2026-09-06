@@ -1034,7 +1034,7 @@ async fn make_virtual_primary(
         // Exclusive: virtual alone. Primary: virtual at (0,0) plus
         // physicals as secondaries. Headless, the two are identical.
         let config = if exclusive {
-            build_exclusive_config(vconn, &vmode, scale)
+            build_exclusive_config(state, vconn, &vmode, mode.width as i32, scale)
         } else {
             build_primary_keeping_physicals(pre, state, vconn, &vmode, mode.width as i32, scale)
         };
@@ -1203,15 +1203,66 @@ async fn persist_scale_change(dc: &zbus::Proxy<'_>, vconn: &str, scale_key: &str
 /// Exclusive: the virtual output as the sole primary. Physicals omitted
 /// so Mutter disables them. A kept physical as secondary lets relative
 /// pointer motion wander onto it (cursor vanishes on the client).
-fn build_exclusive_config(vconn: &str, vmode: &str, scale: f64) -> Vec<ApplyLogical> {
-    vec![(
+///
+/// Every other virtual monitor stays listed, to the right. A resize
+/// creates the next monitor while the old one still streams, and a
+/// config that leaves a live virtual monitor unassigned SIGSEGVs Mutter
+/// 50 (`meta_virtual_monitor_get_crtc_mode`, GNOME/mutter#5007).
+fn build_exclusive_config(
+    state: &CurrentState,
+    vconn: &str,
+    vmode: &str,
+    virt_width: i32,
+    scale: f64,
+) -> Vec<ApplyLogical> {
+    let mut logicals: Vec<ApplyLogical> = vec![(
         0,
         0,
         scale,
         0,
         true,
         vec![(vconn.to_string(), vmode.to_string(), HashMap::new())],
-    )]
+    )];
+    let physical_layout = matches!(
+        state.3.get("layout-mode").map(|v| &**v),
+        Some(&Value::U32(2))
+    );
+    let footprint = |w: i32, s: f64| {
+        if physical_layout {
+            w.max(0)
+        } else {
+            ((w as f64 / s).round() as i32).max(0)
+        }
+    };
+    let mut x = footprint(virt_width, scale);
+    for mon in &state.1 {
+        let conn = &mon.0 .0;
+        if conn == vconn || !is_virtual_connector(conn) {
+            continue;
+        }
+        let Some((mode_id, w, _)) = current_mode(state, conn) else {
+            continue;
+        };
+        let s = logical_scale(state, conn)
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(1.0);
+        logicals.push((
+            x,
+            0,
+            s,
+            0,
+            false,
+            vec![(conn.clone(), mode_id, HashMap::new())],
+        ));
+        x += footprint(w, s);
+    }
+    logicals
+}
+
+/// Mutter names `RecordVirtual` connectors `Meta-N`; a physical head
+/// carries its DRM connector name.
+fn is_virtual_connector(conn: &str) -> bool {
+    conn.starts_with("Meta-")
 }
 
 /// Primary: virtual at `(0, 0)`, every physical the operator had enabled
@@ -1449,6 +1500,28 @@ mod tests {
         height: 1080,
         refresh_hz: 60,
     };
+
+    /// A resize promotes the new virtual monitor while the old one still
+    /// streams: it stays listed (secondary, to the right), physicals do not.
+    #[test]
+    fn an_exclusive_config_keeps_a_sibling_virtual_monitor_assigned() {
+        let state = (
+            1u32,
+            vec![
+                mon("Meta-0", &[(5120, 1440)]),
+                mon("Meta-1", &[(1246, 1124)]),
+                mon("eDP-1", &[(1920, 1080)]),
+            ],
+            vec![],
+            HashMap::new(),
+        );
+        let cfg = super::build_exclusive_config(&state, "Meta-1", "1246x1124", 1246, 1.0);
+        assert_eq!(cfg.len(), 2, "{cfg:?}");
+        assert!(cfg[0].4 && cfg[0].0 == 0 && cfg[0].5[0].0 == "Meta-1");
+        assert!(!cfg[1].4 && cfg[1].0 == 1246 && cfg[1].5[0].0 == "Meta-0");
+        assert_eq!(cfg[1].5[0].1, "5120x1440");
+        assert!(cfg.iter().all(|l| l.5.iter().all(|m| m.0 != "eDP-1")));
+    }
 
     /// One new connector is ours whether or not the size matches (older
     /// Mutter may not advertise it).
