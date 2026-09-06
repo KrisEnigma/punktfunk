@@ -28,10 +28,10 @@ pub const VA_SURFACE_ATTRIB_EXTERNAL_BUFFER_DESCRIPTOR: i32 = 7;
 pub const VA_GENERIC_VALUE_TYPE_POINTER: i32 = 3;
 pub const VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2: u32 = 0x4000_0000;
 
-/// `VAProcColorStandardType`.
-pub const VA_PROC_COLOR_STANDARD_BT709: u32 = 2;
-pub const VA_PROC_COLOR_STANDARD_SRGB: u32 = 8;
-pub const VA_PROC_COLOR_STANDARD_BT2020: u32 = 12;
+/// `VAProcColorStandardExplicit`: the colour is in the properties, both sides.
+/// Mesa derives a *named* output standard from the input's, so a named BT.2020
+/// output is quietly BT.709; explicit is the only shape both drivers honour.
+pub const VA_PROC_COLOR_STANDARD_EXPLICIT: u32 = 13;
 /// `VAProcColorProperties::color_range`.
 pub const VA_SOURCE_RANGE_REDUCED: u8 = 1;
 pub const VA_SOURCE_RANGE_FULL: u8 = 2;
@@ -153,26 +153,23 @@ pub struct VaProcPipelineParameterBuffer {
 
 impl VaProcPipelineParameterBuffer {
     /// Whole-picture conversion of `source`, with the colour facts `swscale` used to
-    /// be told: RGB is full-range sRGB in and limited-range BT.709 out (BT.2020 at
-    /// ten bits); NV12 in is already that, and is copied.
+    /// be told: RGB is full range in and limited range out, BT.709 at eight bits and
+    /// BT.2020 PQ at ten — the same primaries and transfer on both sides, so the
+    /// only arithmetic is the matrix. A YUV source is copied.
     pub fn convert(source: u32, source_is_rgb: bool, ten_bit: bool) -> Self {
-        let out_standard = if ten_bit {
-            VA_PROC_COLOR_STANDARD_BT2020
+        let (primaries, transfer, matrix) = if ten_bit { (9, 16, 9) } else { (1, 1, 1) };
+        let (in_range, in_matrix) = if source_is_rgb {
+            (VA_SOURCE_RANGE_FULL, 0)
         } else {
-            VA_PROC_COLOR_STANDARD_BT709
-        };
-        let (in_standard, in_range) = if source_is_rgb {
-            (VA_PROC_COLOR_STANDARD_SRGB, VA_SOURCE_RANGE_FULL)
-        } else {
-            (out_standard, VA_SOURCE_RANGE_REDUCED)
+            (VA_SOURCE_RANGE_REDUCED, matrix)
         };
         Self {
             surface: source,
             surface_region: std::ptr::null(),
-            surface_color_standard: in_standard,
+            surface_color_standard: VA_PROC_COLOR_STANDARD_EXPLICIT,
             output_region: std::ptr::null(),
             output_background_color: 0xff00_0000,
-            output_color_standard: out_standard,
+            output_color_standard: VA_PROC_COLOR_STANDARD_EXPLICIT,
             pipeline_flags: 0,
             filter_flags: 0,
             filters: std::ptr::null_mut(),
@@ -190,10 +187,16 @@ impl VaProcPipelineParameterBuffer {
             output_surface_flag: 0,
             input_color_properties: VaProcColorProperties {
                 color_range: in_range,
+                colour_primaries: primaries,
+                transfer_characteristics: transfer,
+                matrix_coefficients: in_matrix,
                 ..Default::default()
             },
             output_color_properties: VaProcColorProperties {
                 color_range: VA_SOURCE_RANGE_REDUCED,
+                colour_primaries: primaries,
+                transfer_characteristics: transfer,
+                matrix_coefficients: matrix,
                 ..Default::default()
             },
             processing_mode: 0,
@@ -258,26 +261,48 @@ mod tests {
         assert_eq!(DRM_FORMAT_NV12, crate::drm::VA_FOURCC_NV12);
     }
 
-    /// RGB in is full range; the encoder's NV12 is limited BT.709. Getting either
-    /// wrong is a picture that decodes fine and looks washed out or crushed.
+    /// RGB in is full range; the encoder's NV12 is limited BT.709, P010 limited
+    /// BT.2020 — stated explicitly on both sides. Getting a side wrong is a picture
+    /// that decodes fine and is the wrong red.
     #[test]
-    fn rgb_ingest_states_full_range_in_and_limited_bt709_out() {
+    fn rgb_ingest_states_both_sides_explicitly() {
         let p = VaProcPipelineParameterBuffer::convert(7, true, false);
         assert_eq!(p.surface, 7);
-        assert_eq!(p.surface_color_standard, VA_PROC_COLOR_STANDARD_SRGB);
-        assert_eq!(p.input_color_properties.color_range, VA_SOURCE_RANGE_FULL);
-        assert_eq!(p.output_color_standard, VA_PROC_COLOR_STANDARD_BT709);
+        assert_eq!(p.surface_color_standard, VA_PROC_COLOR_STANDARD_EXPLICIT);
+        assert_eq!(p.output_color_standard, VA_PROC_COLOR_STANDARD_EXPLICIT);
+        let (i, o) = (&p.input_color_properties, &p.output_color_properties);
+        assert_eq!(i.color_range, VA_SOURCE_RANGE_FULL);
+        assert_eq!(o.color_range, VA_SOURCE_RANGE_REDUCED);
+        assert_eq!((i.colour_primaries, i.transfer_characteristics), (1, 1));
         assert_eq!(
-            p.output_color_properties.color_range,
-            VA_SOURCE_RANGE_REDUCED
+            (
+                o.colour_primaries,
+                o.transfer_characteristics,
+                o.matrix_coefficients
+            ),
+            (1, 1, 1)
         );
+        assert_eq!(i.matrix_coefficients, 0, "RGB source: identity");
         assert!(p.surface_region.is_null() && p.filters.is_null());
 
         let p = VaProcPipelineParameterBuffer::convert(7, false, true);
-        assert_eq!(p.surface_color_standard, VA_PROC_COLOR_STANDARD_BT2020);
+        let (i, o) = (&p.input_color_properties, &p.output_color_properties);
+        assert_eq!(i.color_range, VA_SOURCE_RANGE_REDUCED);
         assert_eq!(
-            p.input_color_properties.color_range,
-            VA_SOURCE_RANGE_REDUCED
+            (
+                i.colour_primaries,
+                i.transfer_characteristics,
+                i.matrix_coefficients
+            ),
+            (9, 16, 9)
+        );
+        assert_eq!(
+            (
+                o.colour_primaries,
+                o.transfer_characteristics,
+                o.matrix_coefficients
+            ),
+            (9, 16, 9)
         );
     }
 }
