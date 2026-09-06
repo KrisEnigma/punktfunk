@@ -435,12 +435,25 @@ pub fn serialize_state(r: &mut [u8; DS_INPUT_REPORT_LEN], st: &DsState, seq: u8,
 /// shot while adaptive triggers are on. Only the official modes move the nibble; the firmware
 /// derives it from the armed effect and the trigger position, and so does this.
 ///
+/// Contract, from Nielk1's `TriggerEffectGenerator` (the effect factories' own documentation):
+/// Feedback and Vibration "report 0 before the effect and 1 when in the effect"; Weapon reports
+/// "0 before the effect and 1 when in the effect, and 2 after until again before the start
+/// position". The 2 is positional and latched by position alone — arming an effect under an
+/// already-held trigger reports 2 at once, which looks like a missing edge check and is not.
+/// The LOW nibble is the one part no source documents; it is modelled here, not verified.
+///
 /// Lives on the pad, not [`DsState`]: [`parse_ds_output`] and [`serialize_state`] meet there.
 #[derive(Clone, Copy, Default)]
 pub struct DsTriggers([TriggerFb; 2]);
 
-/// Official effect modes. Every other mode (simple, limited, unofficial) leaves the status
-/// nibble at zero on real firmware.
+/// Official effect modes. `Off` (`0x05`) belongs here too and reports zero, which is what an
+/// unmatched mode already produces.
+///
+/// Every other mode leaves the nibble at zero on real firmware, so a game driving one of them
+/// reads zero from a real DualSense as well — widening this set would report a status the
+/// hardware never gives. That includes the simple (`0x01`/`0x02`/`0x06`) and limited
+/// (`0x11`/`0x12`) leftovers, which run the same effects under a different parameter layout,
+/// and the unofficial Bow/Galloping/Machine (`0x22`/`0x23`/`0x27`).
 mod trig_mode {
     pub const FEEDBACK: u8 = 0x21;
     pub const WEAPON: u8 = 0x25;
@@ -878,6 +891,33 @@ mod tests {
         }]);
         trig.stamp(&mut r, 0xFF, 0);
         assert_eq!(r[43], 0, "simple modes never move it");
+    }
+
+    /// Arming a Weapon effect under a trigger that is ALREADY past the stop reports the shot at
+    /// once. The firmware's rule is positional — "2 after until again before the start position"
+    /// — so there is no edge to wait for, and adding one would swallow the first shot of every
+    /// game that arms its effect while the player is holding the trigger down.
+    #[test]
+    fn a_weapon_effect_armed_under_a_held_trigger_reports_the_shot() {
+        let mut data = vec![0u8; 48];
+        data[0] = 0x02;
+        data[1] = 0x04; // valid_flag0: R2 block
+        data[11] = 0x25;
+        data[12..14].copy_from_slice(&((1u16 << 2) | (1 << 8)).to_le_bytes());
+        let mut fb = DsFeedback::default();
+        parse_ds_output(0, &data, &mut fb);
+        let mut trig = DsTriggers::default();
+        trig.observe(&fb.hidout);
+
+        let byte = |t: &mut DsTriggers, r2| {
+            let mut r = [0u8; DS_INPUT_REPORT_LEN];
+            serialize_state(&mut r, &DsState::neutral(), 0, 0);
+            t.stamp(&mut r, 0, r2);
+            r[42]
+        };
+        assert_eq!(byte(&mut trig, 0xFF), 0x28, "armed under a held trigger");
+        assert_eq!(byte(&mut trig, 0x10), 0x08, "released past the start zone");
+        assert_eq!(byte(&mut trig, 0xFF), 0x28, "and it fires again");
     }
 
     /// Valid-flags gate: rumble-only must not emit hidout; LED-only must not surface rumble.
