@@ -366,6 +366,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The guided installer starts the web console it installs.** It enabled `punktfunk-web` only
+  when the unit existed before the install ran, so a fresh box got a console that never answered
+  on 47992 and a warning that it was "not installed". Nothing to do; a re-run enables it.
+- **A box with no desktop installed gets `PUNKTFUNK_COMPOSITOR=gamescope`.** The installer knew
+  there was no graphical session but left the host to fail its first connect with "no usable
+  compositor"; it now pins the one backend that stands a session up, and the packaged host unit
+  pulls PipeWire in so a lingering headless manager has capture and audio. Nothing to do.
 - **`open_video` and `reconfigure_bitrate` floor the bitrate at 500 kbps.** A zero from a bad
   ABR step used to fail an AMF rebuild and bisect NVENC down to 10 Mbps; every backend now sees
   at least the floor. Nothing to do.

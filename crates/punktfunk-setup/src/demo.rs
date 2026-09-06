@@ -58,6 +58,7 @@ fn box_of(id: &str, pretty: &str, version: &str, family: Family, docs: &str) -> 
         has_flatpak_client: false,
         couch_box: id == "bazzite" || id == "nobara",
         graphical_seat: true,
+        desktop_sessions: true,
         sunshine_active: false,
         current_channel: None,
         installed_pf: vec![],

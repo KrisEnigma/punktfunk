@@ -31,7 +31,8 @@ defaults_case() {
     shift 5
     case "$seat" in
         desktop)  _env="DISPLAY=:0 WAYLAND_DISPLAY= XDG_SESSION_TYPE=x11" ;;
-        headless) _env="DISPLAY= WAYLAND_DISPLAY= XDG_SESSION_TYPE=" ;;
+        # An empty root as /: no session files, so the box reads as desktop-less too.
+        headless) _env="DISPLAY= WAYLAND_DISPLAY= XDG_SESSION_TYPE= PUNKTFUNK_INSTALL_ETC=$osr" ;;
         *) echo "::error::defaults_case $name: seat must be desktop or headless, got '$seat'"; fail=1; return ;;
     esac
     # $_env is expanded on purpose: the seat pins must override a graphical session on the
@@ -106,6 +107,8 @@ defaults_case bazzite-flag "$BAZ" desktop '' 'Full controller (joins the punktfu
 # No graphical seat (SSH, CI, a pipe) → linger even on a generic distro.
 defaults_case debian-ssh  "$DEB" headless '' 'Start at boot with nobody logged in: yes  (no graphical session)'
 defaults_case debian-ssh2 "$DEB" headless '' 'Full controller (joins the punktfunk group — grants usbip attach): yes'
+# No desktop installed either → the host is pinned to gamescope, the backend that brings its own session.
+defaults_case debian-ssh3 "$DEB" headless '' 'would set PUNKTFUNK_COMPOSITOR=gamescope'
 
 # Active Sunshine-family host (detect-conflicts exit 1) → Moonlight compat defaults on.
 # A dormant leftover is not enough — that is the same split detect-conflicts uses.

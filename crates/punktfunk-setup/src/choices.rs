@@ -142,7 +142,8 @@ impl Choices {
             omarchy_toasts: pins.omarchy_toasts.unwrap_or(omarchy_setup),
             omarchy_idle: pins.omarchy_idle.unwrap_or(omarchy_setup),
             omarchy_theme: pins.omarchy_theme.unwrap_or(omarchy_setup),
-            console_cert: pins.console_cert.unwrap_or(true),
+            // The trust lands in this box's browser store; a box with no desktop has none.
+            console_cert: pins.console_cert.unwrap_or(facts.desktop_sessions),
             group_why: punktfunk_group.then_some(group_why).flatten(),
             gamestream_why: (gamestream && facts.sunshine_active)
                 .then(|| "Sunshine/Apollo already on this box".to_string()),
@@ -185,6 +186,7 @@ mod tests {
             floor: None,
             couch_box: id == "bazzite" || id == "nobara",
             graphical_seat: true,
+            desktop_sessions: true,
             sunshine_active: false,
             current_channel: None,
             installed_pf: vec![],
