@@ -47,6 +47,9 @@ object NativeBridge {
         compositorPref: Int,
         gamepadPref: Int,
         hdrEnabled: Boolean,
+        /** Ask for 10-bit WITHOUT HDR — Main10 at BT.709, for banding-free gradients on an
+         *  ordinary panel. Ignored while [hdrEnabled] is set, which already implies 10-bit. */
+        tenBitSdr: Boolean,
         /** Every decoder this device would use tolerates multi-slice AUs
          *  ([VideoDecoders.multiSliceTolerant]) — advertises `VIDEO_CAP_MULTI_SLICE`; false keeps
          *  the host at single-slice frames (the safe pre-0.17 wire shape). */

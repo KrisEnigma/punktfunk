@@ -26,8 +26,8 @@ mod cli {
         self, ConnectPlan, PlanOutcome, SessionEvent, WakeOutcome, WakeWait,
     };
     use pf_client_core::profiles::ProfilesFile;
-    use pf_client_core::trust::{self, KnownHost, KnownHosts};
-    use pf_client_core::{library, wol};
+    use pf_client_core::trust::{self, KnownHost, KnownHosts, Settings};
+    use pf_client_core::{library, start, wol};
     use std::time::Duration;
 
     pub const OK: u8 = 0;
@@ -54,10 +54,11 @@ punktfunk — the Punktfunk client, headless
   punktfunk hosts list [--probe] [--json]
   punktfunk hosts add <host[:port]> [--name LABEL] [--fp HEX]
   punktfunk hosts forget <host-ref>
+  punktfunk default-host [<host-ref>] [--clear]
   punktfunk wake <host-ref> [--wait]
-  punktfunk library <host-ref> [--json]
-  punktfunk launch <host-ref> [--game ID] [--profile REF] [--request-access]
-                              [--exec] [--fullscreen]
+  punktfunk library [<host-ref>] [--json]
+  punktfunk launch [<host-ref>] [--game ID] [--profile REF] [--request-access]
+                                [--exec] [--fullscreen]
   punktfunk open <punktfunk://…> [--yes]
   punktfunk reachable <host-ref>
   punktfunk speed-test <host-ref>
@@ -65,8 +66,8 @@ punktfunk — the Punktfunk client, headless
   punktfunk reset
 
 A <host-ref> is a saved host's id, its name, or an address — the same reference a
-punktfunk:// link takes. Exit codes: 0 ok, 2 connect, 3 trust, 4 renderer, 5 not found,
-6 needs a person.
+punktfunk:// link takes. Where it is optional, leaving it out means the default host.
+Exit codes: 0 ok, 2 connect, 3 trust, 4 renderer, 5 not found, 6 needs a person.
 
 \"punktfunk help <command>\" (or any command with --help) explains that command.";
 
@@ -132,6 +133,23 @@ punktfunk hosts — the saved-hosts store (shared with the desktop client)
       Remove a saved host, its pinned fingerprint included. A later connect
       must pair or trust it again."
             }
+            "default-host" => {
+                "\
+punktfunk default-host [<host-ref>] [--clear] — the host a bare launch opens on
+
+Prints `name TAB addr:port TAB explicit|derived`, or `none`. With a <host-ref> it
+points the setting at that host and prints the record it wrote; with --clear it
+unsets it.
+
+The pointer is only half the answer: with exactly one paired host saved, that host
+is the default with nothing written here, which is what `derived` means. Naming one
+explicitly matters once a second host is paired — a derived default is dropped then,
+an explicit one survives. An unpaired host is refused (exit 6): a launch cannot pair,
+so the setting would never resolve.
+
+Every client reads this: `punktfunk launch` and `library` with no <host-ref>, and the
+console, desktop and mobile shells at startup, subject to their Start in setting."
+            }
             "wake" => {
                 "\
 punktfunk wake <host-ref> [--wait] — Wake-on-LAN
@@ -143,20 +161,24 @@ answers — the same cadence every graphical shell uses."
             }
             "library" => {
                 "\
-punktfunk library <host-ref> [--json] — the host's game library
+punktfunk library [<host-ref>] [--json] — the host's game library
 
 TSV on stdout by default (id TAB store TAB title), one game per line; --json
 emits {\"games\":[…]} for tools — the Playnite importer shells to exactly
-this. Needs a paired host (exit 6 otherwise)."
+this. Needs a paired host (exit 6 otherwise).
+
+With no <host-ref> it asks the default host (`punktfunk default-host`), and
+exits 5 when there is none."
             }
             "launch" => {
                 "\
-punktfunk launch <host-ref> [--game ID] [--profile REF] [--request-access]
-                            [--exec] [--fullscreen]
+punktfunk launch [<host-ref>] [--game ID] [--profile REF] [--request-access]
+                              [--exec] [--fullscreen]
 
 Start a stream — waking the host first if it is asleep and its MAC is known.
 The stream runs in the punktfunk-session renderer; this command supervises it
-and relays its lifecycle to stderr.
+and relays its lifecycle to stderr. With no <host-ref> it streams the default
+host (`punktfunk default-host`), and exits 5 when there is none.
 
   --game ID      ask the host to launch this library title into the stream
   --profile REF  use a settings profile (id or name) for this connect only;
@@ -309,6 +331,68 @@ from the config directory for a true factory reset."
         }
     }
 
+    /// The host a verb acts on: the `<host-ref>` it was given, else the default host.
+    /// Omitting the reference is how a script on a one-host box stops naming which box.
+    fn resolve_or_default(args: &[String], usage: &str) -> Result<(KnownHosts, usize), u8> {
+        if let Some(reference) = positional(args, 0) {
+            return resolve(&reference);
+        }
+        let known = KnownHosts::load();
+        match start::default_host(&Settings::load(), &known) {
+            Some(i) => Ok((known, i)),
+            None => {
+                eprintln!("usage: {usage}");
+                eprintln!("no default host is set — see `punktfunk default-host`");
+                Err(UNRESOLVED)
+            }
+        }
+    }
+
+    /// Read, set, or clear `Settings::default_host` — the pointer every client's bare
+    /// launch resolves through. A headless box (a Deck over ssh) has no other door to it.
+    fn default_host_cmd(args: &[String]) -> u8 {
+        let mut settings = Settings::load();
+        if has(args, "--clear") {
+            settings.default_host = None;
+            settings.save();
+            println!("cleared");
+            return OK;
+        }
+        if let Some(reference) = positional(args, 0) {
+            let (known, i) = match resolve(&reference) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            let host = &known.hosts[i];
+            // The resolver ignores an unpaired record, so writing one here would set a
+            // pointer that never resolves — refuse rather than lie about it.
+            if !host.paired || host.fp_hex.is_empty() {
+                eprintln!("{} isn't paired — pair it first", host.name);
+                return NEEDS_INTERACTION;
+            }
+            let Some(id) = host.id.clone() else {
+                eprintln!("{} has no record id — re-save it", host.name);
+                return UNRESOLVED;
+            };
+            settings.default_host = Some(id);
+            settings.save();
+            println!("{}\t{}:{}", host.name, host.addr, host.port);
+            return OK;
+        }
+        let known = KnownHosts::load();
+        match start::default_host_with_source(&settings, &known) {
+            (Some(i), source) => {
+                let h = &known.hosts[i];
+                println!("{}\t{}:{}\t{}", h.name, h.addr, h.port, source.as_str());
+                OK
+            }
+            (None, _) => {
+                println!("none");
+                OK
+            }
+        }
+    }
+
     pub fn run(args: Vec<String>) -> u8 {
         let Some(verb) = args.first().cloned() else {
             println!("{USAGE}");
@@ -325,6 +409,7 @@ from the config directory for a true factory reset."
             "discover" => discover(&rest),
             "pair" => pair(&rest),
             "hosts" => hosts(&rest),
+            "default-host" => default_host_cmd(&rest),
             "wake" => wake(&rest),
             "library" => library_cmd(&rest),
             "launch" => launch(&rest),
@@ -794,11 +879,7 @@ from the config directory for a true factory reset."
     /// Decky's existing consumer parses; `--json` is the door for tools (the Playnite importer
     /// shells to exactly this).
     fn library_cmd(args: &[String]) -> u8 {
-        let Some(reference) = positional(args, 0) else {
-            eprintln!("usage: punktfunk library <host-ref> [--json]");
-            return UNRESOLVED;
-        };
-        let (known, i) = match resolve(&reference) {
+        let (known, i) = match resolve_or_default(args, "punktfunk library [<host-ref>] [--json]") {
             Ok(v) => v,
             Err(code) => return code,
         };
@@ -849,10 +930,6 @@ from the config directory for a true factory reset."
     /// `--exec` becomes the session process instead of supervising it: under a gamescope wrapper
     /// the launched process must BE the streaming one for focus and lifecycle to work.
     fn launch(args: &[String]) -> u8 {
-        let Some(reference) = positional(args, 0) else {
-            eprintln!("usage: punktfunk launch <host-ref> [--game ID] [--profile REF] [--exec]");
-            return UNRESOLVED;
-        };
         let exec = has(args, "--exec");
         let request_access = has(args, "--request-access");
         // Refused rather than silently downgraded: under `--exec` this process BECOMES the
@@ -866,7 +943,8 @@ from the config directory for a true factory reset."
             );
             return UNRESOLVED;
         }
-        let (known, i) = match resolve(&reference) {
+        let usage = "punktfunk launch [<host-ref>] [--game ID] [--profile REF] [--exec]";
+        let (known, i) = match resolve_or_default(args, usage) {
             Ok(v) => v,
             Err(code) => return code,
         };
@@ -1329,6 +1407,7 @@ from the config directory for a true factory reset."
                 "discover",
                 "pair",
                 "hosts",
+                "default-host",
                 "wake",
                 "library",
                 "launch",

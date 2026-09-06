@@ -60,13 +60,18 @@ struct CreateOptions {
 struct EntryJson {
     #[serde(default)]
     library: Option<HostRow>,
+    /// The same row, plus a connect to its desktop before the first frame. `library`
+    /// wins if a caller sends both — a shelf is the safe half of the pair.
+    #[serde(default)]
+    stream: Option<HostRow>,
 }
 
 impl EntryJson {
     fn into_entry(self) -> ConsoleEntry {
-        match self.library {
-            Some(h) => ConsoleEntry::Library(Box::new(h)),
-            None => ConsoleEntry::Home,
+        match (self.library, self.stream) {
+            (Some(h), _) => ConsoleEntry::Library(Box::new(h)),
+            (None, Some(h)) => ConsoleEntry::Stream(Box::new(h)),
+            (None, None) => ConsoleEntry::Home,
         }
     }
 }

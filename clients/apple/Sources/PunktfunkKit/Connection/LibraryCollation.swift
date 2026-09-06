@@ -123,6 +123,20 @@ public struct LibraryGroup: Hashable, Sendable {
 }
 
 public enum LibraryCollation {
+    /// The desktop tile's id — the synthetic entry every shelf leads with, so Library is never a
+    /// dead end for the desktop-only user and a plugin-less host is still one press from
+    /// streaming. The `\0` prefix is the desktop console's (`pf-console-ui`'s `DESKTOP_ID`): a
+    /// host title id is a store reference, and none of them can start with a NUL.
+    ///
+    /// Presentation only. It is never persisted, never fetched, and never grouped.
+    public static let desktopID = "\u{0}desktop"
+
+    /// The synthetic tile itself. `nil` art and an empty store: the shelf draws its monogram,
+    /// and nothing tries to fetch a poster for it.
+    public static func desktopEntry(title: String = "Desktop") -> GameEntry {
+        GameEntry(id: desktopID, store: "", title: title, art: Artwork())
+    }
+
     /// Fold a title down to something sortable: lowercase, diacritics relaxed to their base
     /// letter, punctuation dropped, and a leading article removed.
     ///
@@ -205,6 +219,10 @@ public enum LibraryCollation {
         // first mentions them and two runs over the same library agree.
         var buckets: [(key: LibraryGroupKey, indices: [Int])] = []
         for (i, game) in games.enumerated() {
+            // The desktop tile is not a title: grouping it would put a "Desktop" platform in
+            // Collections and make a one-store library look browsable. `filtered` puts it back
+            // at the head of an unfiltered shelf, which is the only place it belongs.
+            if game.id == LibraryCollation.desktopID { continue }
             if game.isLauncher {
                 launchers.append(i)
                 continue
@@ -280,7 +298,11 @@ public enum LibraryCollation {
         case .launchers, .none: by = nil
         }
         let groups = collate(games, sort: sort, groupBy: by)
-        guard let want = filter else { return groups.flatMap(\.indices) }
+        guard let want = filter else {
+            // Ahead of the launchers, and ahead of every sort: it is the host itself.
+            let desktop = games.firstIndex { $0.id == LibraryCollation.desktopID }
+            return (desktop.map { [$0] } ?? []) + groups.flatMap(\.indices)
+        }
         // A filter naming a group that no longer exists yields NOTHING, never everything.
         return groups.first { $0.key == want }?.indices ?? []
     }
@@ -312,8 +334,15 @@ public enum LibraryCollation {
 public enum LibraryOrder {
     public static func display(_ games: [GameEntry], running: Set<String>) -> [GameEntry] {
         games.enumerated().sorted { a, b in
-            let ka = (a.element.isLauncher ? 0 : 1, running.contains(a.element.id) ? 0 : 1)
-            let kb = (b.element.isLauncher ? 0 : 1, running.contains(b.element.id) ? 0 : 1)
+            // The desktop tile leads every band: it is the host, not one of its titles.
+            let ka = (
+                a.element.id == LibraryCollation.desktopID ? 0 : 1,
+                a.element.isLauncher ? 0 : 1, running.contains(a.element.id) ? 0 : 1
+            )
+            let kb = (
+                b.element.id == LibraryCollation.desktopID ? 0 : 1,
+                b.element.isLauncher ? 0 : 1, running.contains(b.element.id) ? 0 : 1
+            )
             if ka != kb { return ka < kb }
             return a.offset < b.offset
         }.map(\.element)

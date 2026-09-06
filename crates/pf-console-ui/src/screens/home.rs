@@ -792,6 +792,7 @@ mod tests {
     fn host(key: &str, paired: bool, online: bool, can_wake: bool) -> HostRow {
         HostRow {
             key: key.into(),
+            id: None,
             name: key.into(),
             addr: "10.0.0.9".into(),
             port: 9777,

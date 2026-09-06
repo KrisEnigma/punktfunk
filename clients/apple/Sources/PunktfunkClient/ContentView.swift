@@ -144,6 +144,17 @@ struct ContentView: View {
     /// fires Wake-on-LAN up front and falls into the "Waking…" wait if the dial fails. Off: connects
     /// go straight through with no wake. The explicit "Wake Host" action is unaffected either way.
     @AppStorage(DefaultsKey.autoWake) private var autoWakeEnabled = true
+    /// Where a bare launch opens (Settings → Library). Library (the default) opens the default
+    /// host's shelf; Stream also dials its desktop. Resolved once per process by
+    /// `applyStartScreen`, never on foregrounding — see `startApplied`.
+    @AppStorage(DefaultsKey.startIn) private var startInRaw = StartIn.library.stored
+    /// Which host that is, when several are paired. Empty until somebody picks one; with exactly
+    /// one paired host the default is derived and this stays empty.
+    @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
+    /// The start screen is a once-per-process decision. Set by `applyStartScreen` and by
+    /// `handleDeepLink`, so whichever of the two fires first on a cold start wins and the other
+    /// stands down.
+    @State private var startApplied = false
     /// Background keep-alive (Settings → General, iOS-only). Default OFF (today's freeze-on-background
     /// is the default). When on, backgrounding a live session keeps audio + the connection alive and
     /// drops video, auto-disconnecting after `backgroundTimeoutMinutes`.
@@ -319,6 +330,7 @@ struct ContentView: View {
         .onAppear {
             seedDefaultModeIfNeeded()
             autoConnectIfAsked()
+            applyStartScreen()
             #if os(iOS)
             SessionActivityController.sweepOrphans() // end any Activity a prior killed launch left
             #endif
@@ -781,6 +793,11 @@ struct ContentView: View {
     /// background tap), and carries only references — a profile it can't honor refuses with a
     /// notice rather than streaming with the wrong settings.
     private func handleDeepLink(_ url: URL) {
+        // Explicit intent beats the start-screen policy, and the two race on a cold start:
+        // `.onOpenURL` and `.onAppear` have no guaranteed order. Claiming the once-per-process
+        // slot here is symmetric with `applyStartScreen`, so either order is benign — if the
+        // start already opened a shelf, the link's own rules take over from there.
+        startApplied = true
         let link: DeepLink
         do {
             link = try DeepLink(url: url)
@@ -1734,6 +1751,26 @@ struct ContentView: View {
     /// DEBUG-ONLY, and compiled out of a release build: it streams to whatever host an
     /// environment variable names with the trust prompt auto-confirmed, which is a dev lever
     /// (`swift run`, the shot harness), never something a shipped app should answer to.
+    /// Open where the Start in setting says, once per process. Library shows the default host's
+    /// shelf; Stream also dials its desktop, one attempt, with the shelf underneath to cancel
+    /// onto. Never on foregrounding and never after a session ends — a policy that reconnected
+    /// every time a stream stopped would loop on a host that keeps ending them.
+    ///
+    /// Silent when anything else already owns the launch: a deep link (`startApplied`), the DEBUG
+    /// auto-connect or any live session (`phase`), a library already open, or a confirmation
+    /// waiting for an answer.
+    private func applyStartScreen() {
+        guard !startApplied, model.phase == .idle, libraryTarget == nil, deepLinkConfirm == nil
+        else { return }
+        startApplied = true
+        let start = StartScreen.resolve(
+            startIn: startInRaw, defaultHost: defaultHostID, hosts: store.hosts)
+        guard let host = start.host else { return }
+        libraryTarget = LibraryTarget(host: host)
+        // The connect overlay rides over home, so cancelling leaves the shelf underneath.
+        if case .stream = start { connect(host) }
+    }
+
     private func autoConnectIfAsked() {
         #if DEBUG
         guard let target = ProcessInfo.processInfo.environment["PUNKTFUNK_AUTOCONNECT"],

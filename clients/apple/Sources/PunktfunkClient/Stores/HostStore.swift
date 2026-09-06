@@ -100,6 +100,7 @@ final class HostStore: ObservableObject {
 
     func remove(_ host: StoredHost) {
         hosts.removeAll { $0.id == host.id }
+        clearDefaultHostIfItNames(host)
     }
 
     /// Replace a saved host in place (the edit sheet) — matched by id, so identity/pin/last-connected
@@ -230,6 +231,16 @@ final class HostStore: ObservableObject {
     func forgetIdentity(_ host: StoredHost) {
         guard let i = hosts.firstIndex(where: { $0.id == host.id }) else { return }
         hosts[i].pinnedSHA256 = nil
+        clearDefaultHostIfItNames(host)
+    }
+
+    /// Drop the start-screen pointer when it names a host that just stopped being a landing.
+    /// `StartScreen.resolve` already ignores a dangling or unpaired id, so this is hygiene: it
+    /// stops a later re-pair of a different box inheriting somebody's old choice.
+    private func clearDefaultHostIfItNames(_ host: StoredHost) {
+        let stored = UserDefaults.standard.string(forKey: DefaultsKey.defaultHost) ?? ""
+        guard stored.lowercased() == host.id.uuidString.lowercased() else { return }
+        UserDefaults.standard.removeObject(forKey: DefaultsKey.defaultHost)
     }
 
 

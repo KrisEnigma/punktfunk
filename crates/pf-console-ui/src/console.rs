@@ -33,6 +33,10 @@ pub enum ConsoleEntry {
     /// Home with this host's library pushed (`--browse host`). B pops to Home.
     /// `Box` because `HostRow` is larger than the other variant.
     Library(Box<HostRow>),
+    /// [`Self::Library`] plus one connect to the host's desktop, raised before the first
+    /// frame (`start_in = stream`). Cancel or a refusal lands on the shelf underneath,
+    /// and nothing retries.
+    Stream(Box<HostRow>),
 }
 
 /// Host-side models and the command bus. Built before [`Console`]: handles are `Clone` +
@@ -94,14 +98,18 @@ impl Console {
         entry: ConsoleEntry,
         handles: &ConsoleHandles,
     ) -> Result<Console> {
+        let stream = stream_intent(&entry);
         let stack = entry_stack(entry, &handles.library);
-        let shell = Shell::new(
+        let mut shell = Shell::new(
             handles.console.clone(),
             handles.library.clone(),
             handles.bus.clone(),
             opts,
             stack,
         )?;
+        if let Some(intent) = stream {
+            shell.start_connect(intent);
+        }
         let fonts = crate::theme::build_fonts()?;
         Ok(Console { shell, fonts })
     }
@@ -159,8 +167,12 @@ impl Console {
 
     /// Replace the stack with `entry` (deep link, or return to the shelf a game launched from).
     pub fn navigate(&mut self, entry: ConsoleEntry) {
+        let stream = stream_intent(&entry);
         let stack = entry_stack(entry, self.shell.library());
         self.shell.replace_stack(stack);
+        if let Some(intent) = stream {
+            self.shell.start_connect(intent);
+        }
     }
 
     /// Skia resource-cache budget for the host `DirectContext`. The shell only carries it.
@@ -176,10 +188,28 @@ impl Console {
     }
 }
 
+/// The desktop connect a [`ConsoleEntry::Stream`] carries. Built from the entry's own
+/// row, never from `Shell::hosts` — that list is empty until the first `sync()`. Same
+/// shape as the Options screen's "Connect to X": no launch, no profile override.
+fn stream_intent(entry: &ConsoleEntry) -> Option<crate::screens::ConnectIntent> {
+    let ConsoleEntry::Stream(host) = entry else {
+        return None;
+    };
+    Some(crate::screens::ConnectIntent {
+        addr: host.addr.clone(),
+        port: host.port,
+        fp_hex: host.fp_hex.clone(),
+        launch: None,
+        title: host.name.clone(),
+        request_access: false,
+        profile: None,
+    })
+}
+
 fn entry_stack(entry: ConsoleEntry, library: &crate::library::LibraryShared) -> Vec<Screen> {
     match entry {
         ConsoleEntry::Home => vec![Screen::Home(crate::screens::home::HomeScreen::new())],
-        ConsoleEntry::Library(host) => vec![
+        ConsoleEntry::Library(host) | ConsoleEntry::Stream(host) => vec![
             Screen::Home(crate::screens::home::HomeScreen::new()),
             // Snapshot the model's fetch epoch so the host's following `FetchLibrary`
             // is the first raise; that is how the shelf knows the result is its own.
@@ -188,5 +218,67 @@ fn entry_stack(entry: ConsoleEntry, library: &crate::library::LibraryShared) -> 
                 library.fetch_epoch(),
             )),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row() -> HostRow {
+        HostRow {
+            key: "aa".into(),
+            id: Some("rec-1".into()),
+            name: "Desk".into(),
+            addr: "10.0.0.5".into(),
+            port: 9777,
+            fp_hex: "aa".into(),
+            paired: true,
+            saved: true,
+            online: true,
+            mgmt_port: 47990,
+            can_wake: false,
+            clipboard_sync: false,
+            last_used: None,
+            os: String::new(),
+            actions: Vec::new(),
+            pin: None,
+            bound_profile: None,
+            running: String::new(),
+            game_profiles: Default::default(),
+        }
+    }
+
+    /// Stream is the Library stack plus a desktop connect. Nothing else raises one,
+    /// and the connect launches no title and overrides no profile.
+    #[test]
+    fn only_a_stream_entry_carries_a_connect() {
+        assert!(stream_intent(&ConsoleEntry::Home).is_none());
+        assert!(stream_intent(&ConsoleEntry::Library(Box::new(row()))).is_none());
+
+        let intent =
+            stream_intent(&ConsoleEntry::Stream(Box::new(row()))).expect("a desktop connect");
+        assert_eq!(intent.addr, "10.0.0.5");
+        assert_eq!(intent.launch, None);
+        assert_eq!(intent.profile, None);
+        assert!(!intent.request_access);
+        assert_eq!(intent.title, "Desk");
+    }
+
+    /// Both host entries land on the same two screens, so B leaves a cancelled stream
+    /// on the shelf rather than on the host list.
+    #[test]
+    fn a_stream_entry_opens_the_same_stack_as_library() {
+        let library = crate::library::LibraryShared::default();
+        for entry in [
+            ConsoleEntry::Library(Box::new(row())),
+            ConsoleEntry::Stream(Box::new(row())),
+        ] {
+            let stack = entry_stack(entry, &library);
+            assert!(matches!(
+                stack.as_slice(),
+                [Screen::Home(_), Screen::Library(_)]
+            ));
+        }
     }
 }

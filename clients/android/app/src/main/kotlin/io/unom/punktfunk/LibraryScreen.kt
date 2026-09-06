@@ -152,11 +152,23 @@ private sealed class LibState {
          * survives inside each of the four resulting bands.
          */
         val ordered: List<GameEntry>
-            get() = if (running.isEmpty()) {
-                games
-            } else {
-                games.sortedBy { (if (it.isLauncher) 0 else 2) + (if (running[it.id] != null) 0 else 1) }
+            get() {
+                // …and the desktop tile leads all of it, so streaming the host itself is one tap
+                // rather than a menu — and a host with no plugins still has something to tap.
+                // Model state only: it is never fetched and never cached.
+                val all = listOf(desktopTile) + games
+                if (running.isEmpty()) return all
+                return all.sortedBy {
+                    if (it.isDesktop) -1
+                    else (if (it.isLauncher) 0 else 2) + (if (running[it.id] != null) 0 else 1)
+                }
             }
+
+        /** Names what the tap does, so it does not read "Desktop" while tapping it resumes. */
+        private val desktopTile: GameEntry
+            get() = GameEntry.desktop(
+                running.values.firstOrNull()?.let { "Resume ${it.title}" } ?: "Desktop",
+            )
     }
 
     data class Message(val text: String) : LibState() // unauthorized / empty / error
@@ -190,6 +202,12 @@ fun LibraryScreen(
      * [ProfileStore.resolveFor] applies to every other connect.
      */
     pinnedProfileId: String? = null,
+    /**
+     * Stream this host's desktop as soon as the shelf can dial (`start_in = stream`). One attempt,
+     * once per screen: a refusal leaves the shelf on screen and nothing retries. Goes through the
+     * same [launch] every tap does, so the auto-start and a tap on the Desktop tile cannot drift.
+     */
+    autoStream: Boolean = false,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -339,15 +357,21 @@ fun LibraryScreen(
     fun launch(identity: ClientIdentity, game: GameEntry) {
         if (launching) return
         launching = true
-        // The player's place in this shelf, remembered as the TITLE rather than an index or a
-        // scroll offset — the only moment they are definitely leaving the grid for one. Recorded
-        // before the dial rather than after it succeeds: a failed launch still means "this is the
-        // one I was going for", and coming back to it is right either way.
-        LibraryPosition.remember(context, host.id, game.id)
+        // The desktop tile is the host, not one of its titles: it streams with no launch id, and
+        // there is no place to remember for something that is not in the catalog. Asking a host
+        // to launch what it is already showing is how a second copy starts.
+        if (!game.isDesktop) {
+            // The player's place in this shelf, remembered as the TITLE rather than an index or a
+            // scroll offset — the only moment they are definitely leaving the grid for one.
+            // Recorded before the dial rather than after it succeeds: a failed launch still means
+            // "this is the one I was going for", and coming back to it is right either way.
+            LibraryPosition.remember(context, host.id, game.id)
+        }
         scope.launch {
             val handle = connectToHost(
                 context, streamSettings, identity,
-                host.address, host.port, host.fpHex, launch = game.id,
+                host.address, host.port, host.fpHex,
+                launch = game.id.takeUnless { game.isDesktop },
             )
             launching = false
             if (handle != 0L) {
@@ -362,8 +386,9 @@ fun LibraryScreen(
                         // not the host's default one.
                         launchedFromLibrary = true,
                         libraryProfileId = pinnedProfileId,
-                        // The host never tracks a launcher tile, so there is nothing to wait for.
-                        launchHold = game.takeUnless { it.isLauncher }?.let {
+                        // The host never tracks a launcher tile or the desktop, so there is
+                        // nothing to wait for.
+                        launchHold = game.takeUnless { it.isLauncher || it.isDesktop }?.let {
                             LaunchHold(
                                 it, host.address, host.effectiveMgmtPort, host.fpHex,
                                 sourceRect = TileFrames.rect(it.id),
@@ -379,6 +404,14 @@ fun LibraryScreen(
                 ).show()
             }
         }
+    }
+
+    // `start_in = stream`: the shelf is on screen, so dial the desktop over it. Keyed on the
+    // identity rather than `Unit` because the dial needs one, and it arrives with the fetch —
+    // `launching` guards the second pass a state change would otherwise cause.
+    val ready = (state as? LibState.Ready)?.identity
+    LaunchedEffect(autoStream, ready) {
+        if (autoStream && ready != null) launch(ready, GameEntry.desktop())
     }
 
     // "Copy link" for one TITLE — the self-emitted form a host card already hands out (design/

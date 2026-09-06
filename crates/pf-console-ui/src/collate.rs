@@ -150,6 +150,12 @@ pub(crate) fn collate(
     let mut buckets: Vec<(GroupKey, Vec<usize>)> = Vec::new();
 
     for (i, g) in games.iter().enumerate() {
+        // The desktop tile is not a title: grouping it would put a "Desktop" platform in
+        // Collections and make a one-store library look browsable. [`filtered`] puts it
+        // back at the head of an unfiltered shelf, which is the only place it belongs.
+        if g.id == crate::library::DESKTOP_ID {
+            continue;
+        }
         if g.launcher {
             launchers.push(i);
             continue;
@@ -225,7 +231,13 @@ pub(crate) fn filtered(
     };
     let groups = collate(games, sort, by);
     match filter {
-        None => groups.into_iter().flat_map(|g| g.games).collect(),
+        // Ahead of the launchers, and ahead of every sort: it is the host itself.
+        None => games
+            .iter()
+            .position(|g| g.id == crate::library::DESKTOP_ID)
+            .into_iter()
+            .chain(groups.into_iter().flat_map(|g| g.games))
+            .collect(),
         Some(want) => groups
             .into_iter()
             .find(|g| &g.key == want)

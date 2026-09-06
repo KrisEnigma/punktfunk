@@ -18,7 +18,7 @@ use crate::session_main::{
     arg_flag, arg_value, fullscreen_mode, parse_host_port, session_params, stats_tier, window_pos,
 };
 use pf_client_core::gamepad::is_steam_deck;
-use pf_client_core::{discovery, library, trust, wol};
+use pf_client_core::{discovery, library, start, trust, wol};
 use pf_console_ui::{
     ConsoleCmd, ConsoleEntry, ConsoleHandles, ConsoleOptions, ConsoleShared, HostRow, LibraryGame,
     LibraryPhase, LibraryShared, PairPhase, SkiaOverlay, WakeStatus,
@@ -68,9 +68,10 @@ pub fn run(target: Option<&str>) -> u8 {
         }
     };
 
-    // Resolve the entry point: a paired target opens straight into its library; an
-    // unpaired/unknown one lands on Home with the target seeded into the list (one A
-    // from pairing). The fake-library hook fabricates a paired host with no network.
+    // Resolve the entry point. An explicit target wins: paired, it opens straight into its
+    // library; unpaired or unknown, it lands on Home seeded into the list (one A from
+    // pairing). A bare launch asks the start-screen policy instead. The fake-library hook
+    // fabricates a paired host with no network, and beats the policy too.
     let fake = std::env::var_os("PUNKTFUNK_FAKE_LIBRARY").is_some();
     let known = trust::KnownHosts::load();
     let mut seed: Option<HostRow> = None;
@@ -81,37 +82,8 @@ pub fn run(target: Option<&str>) -> u8 {
                 .hosts
                 .iter()
                 .find(|h| h.addr == addr && h.port == port);
-            let row = HostRow {
-                key: k
-                    .filter(|h| !h.fp_hex.is_empty())
-                    .map_or_else(|| format!("{addr}:{port}"), |h| h.fp_hex.clone()),
-                name: k
-                    .map(|h| host_display_name(&h.name, &h.addr))
-                    .unwrap_or_else(|| addr.clone()),
-                addr: addr.clone(),
-                port,
-                fp_hex: k.map(|h| h.fp_hex.clone()).unwrap_or_default(),
-                paired: k.is_some_and(|h| h.paired) || fake,
-                saved: k.is_some(),
-                online: false,
-                // Explicit --mgmt wins; else the port this host's advert taught us and we saved;
-                // else 47990. The middle rung is what survives mDNS being unavailable later.
-                mgmt_port: arg_value("--mgmt")
-                    .and_then(|p| p.parse().ok())
-                    .or_else(|| k.and_then(|h| h.mgmt_port))
-                    .unwrap_or(library::DEFAULT_MGMT_PORT),
-                can_wake: false,
-                clipboard_sync: k.is_some_and(|h| h.clipboard_sync),
-                last_used: k.and_then(|h| h.last_used),
-                os: k.map(|h| h.os.clone()).unwrap_or_default(),
-                // A seed row is a host nobody has reached yet; the refresh tick fills this in
-                // once it is paired and answering.
-                actions: Vec::new(),
-                pin: None,
-                bound_profile: None,
-                running: String::new(),
-                game_profiles: Default::default(),
-            };
+            let mut row = seed_row(k, &addr, port);
+            row.paired |= fake;
             let label = row.name.clone();
             if k.is_none() {
                 seed = Some(row.clone());
@@ -126,10 +98,28 @@ pub fn run(target: Option<&str>) -> u8 {
             let row = fake_host_row();
             (ConsoleEntry::Library(Box::new(row)), None)
         }
-        None => (ConsoleEntry::Home, None),
+        None => {
+            let settings = trust::Settings::load();
+            let (default, source) = start::default_host_with_source(&settings, &known);
+            tracing::info!(
+                start_in = start::StartIn::parse(&settings.start_in).as_str(),
+                default = default.map_or("none", |i| known.hosts[i].name.as_str()),
+                source = source.as_str(),
+                "console start"
+            );
+            let row = |i: usize| {
+                let k = &known.hosts[i];
+                Box::new(seed_row(Some(k), &k.addr, k.port))
+            };
+            match start::start_screen(&settings, &known) {
+                start::Start::Hosts => (ConsoleEntry::Home, None),
+                start::Start::Library(i) => (ConsoleEntry::Library(row(i)), None),
+                start::Start::Stream(i) => (ConsoleEntry::Stream(row(i)), None),
+            }
+        }
     };
     let initial_fetch = match &entry {
-        ConsoleEntry::Library(h) => Some(ConsoleCmd::FetchLibrary {
+        ConsoleEntry::Library(h) | ConsoleEntry::Stream(h) => Some(ConsoleCmd::FetchLibrary {
             addr: h.addr.clone(),
             mgmt: h.mgmt_port,
             fp_hex: h.fp_hex.clone(),
@@ -357,9 +347,46 @@ fn host_display_name(name: &str, addr: &str) -> String {
     }
 }
 
+/// A carousel row for the host the console is opening on: a store record when we have one,
+/// else a bare `addr:port` nobody has reached yet. Offline and action-less by construction —
+/// the refresh tick fills both in once the host answers.
+fn seed_row(k: Option<&trust::KnownHost>, addr: &str, port: u16) -> HostRow {
+    HostRow {
+        key: k
+            .filter(|h| !h.fp_hex.is_empty())
+            .map_or_else(|| format!("{addr}:{port}"), |h| h.fp_hex.clone()),
+        id: k.and_then(|h| h.id.clone()),
+        name: k
+            .map(|h| host_display_name(&h.name, &h.addr))
+            .unwrap_or_else(|| addr.to_string()),
+        addr: addr.to_string(),
+        port,
+        fp_hex: k.map(|h| h.fp_hex.clone()).unwrap_or_default(),
+        paired: k.is_some_and(|h| h.paired),
+        saved: k.is_some(),
+        online: false,
+        // Explicit --mgmt wins; else the port this host's advert taught us and we saved;
+        // else 47990. The middle rung is what survives mDNS being unavailable later.
+        mgmt_port: arg_value("--mgmt")
+            .and_then(|p| p.parse().ok())
+            .or_else(|| k.and_then(|h| h.mgmt_port))
+            .unwrap_or(library::DEFAULT_MGMT_PORT),
+        can_wake: false,
+        clipboard_sync: k.is_some_and(|h| h.clipboard_sync),
+        last_used: k.and_then(|h| h.last_used),
+        os: k.map(|h| h.os.clone()).unwrap_or_default(),
+        actions: Vec::new(),
+        pin: None,
+        bound_profile: None,
+        running: String::new(),
+        game_profiles: Default::default(),
+    }
+}
+
 fn fake_host_row() -> HostRow {
     HostRow {
         key: "fake".into(),
+        id: None,
         name: "Demo Host".into(),
         addr: "127.0.0.1".into(),
         port: 9777,
@@ -696,6 +723,12 @@ impl ServiceState {
                 // catalog cache is keyed on the fingerprint, so this is the only moment that
                 // key is still known.
                 pf_client_core::library_cache::forget(&gone.fp_hex);
+                // The resolver already refuses a dangling id, so this is hygiene: without
+                // it, pairing a different box that reuses the id would inherit the choice.
+                let mut settings = trust::Settings::load();
+                if start::clear_default(&mut settings, gone.id.as_deref()) {
+                    settings.save();
+                }
                 tracing::info!(name = %gone.name, addr = %gone.addr, "host forgotten");
                 // It may still be advertising, in which case it comes straight back as a
                 // DISCOVERED row — unsaved and unpaired, which is the honest state.
@@ -913,6 +946,7 @@ impl ServiceState {
                 }
                 let row = HostRow {
                     key: key.clone(),
+                    id: h.id.clone(),
                     name: host_display_name(&h.name, &h.addr),
                     addr: h.addr.clone(),
                     port: h.port,
@@ -999,6 +1033,8 @@ impl ServiceState {
                 } else {
                     d.fp_hex.clone()
                 },
+                // Discovered, not saved: no store record, so no id to point at.
+                id: None,
                 name: host_display_name(&d.name, &d.addr),
                 addr: d.addr.clone(),
                 port: d.port,

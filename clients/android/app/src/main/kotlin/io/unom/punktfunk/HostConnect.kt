@@ -39,6 +39,10 @@ suspend fun connectToHost(
         baseW, baseH, settings.renderScale, RenderScale.maxDimension(settings.codec)
     )
     val hdrEnabled = settings.hdrEnabled && displaySupportsHdr(context)
+    // 10-bit on its own asks nothing of the PANEL: Main10 at BT.709 decodes and presents on an
+    // ordinary display, and the compositor dithers what it cannot show. So this is the user's
+    // setting alone, with no display probe — unlike HDR directly above it.
+    val tenBitSdr = settings.tenBitSdr
     // "Automatic" resolves to a concrete pad type from the connected controller's VID/PID.
     val gamepadPref = Gamepad.resolvePref(settings.gamepad)
     // The requested audio format as the two Hello fields — `0`/`0` when the user chose Standard,
@@ -82,7 +86,7 @@ suspend fun connectToHost(
             host, port, w, h, hz,
             identity.certPem, identity.privateKeyPem, pinHex,
             settings.bitrateKbps, settings.compositor, gamepadPref,
-            hdrEnabled, multiSlice,
+            hdrEnabled, tenBitSdr, multiSlice,
             frameParts,
             settings.audioChannels,
             // The audio format this session asks for. Only ever a request: the host's own gate
