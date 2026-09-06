@@ -359,9 +359,8 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 - **The Windows driver reports NVENC's real capabilities.** NVENC builds its session on the
   first frame, so the driver answered the host's one capability read with defaults and pinned
-  every session to `supports_rfi: false`, turning each lost frame into a full IDR — at 4K120 HDR
-  that burst caused the loss that asked for the next one. Update host and driver together;
-  nothing to configure.
+  every session to `supports_rfi: false`, which turned every lost frame into a full IDR instead
+  of one re-referenced P frame. Update host and driver together; nothing to configure.
 - **A display that re-lights itself mid-stream is parked for the session.** A standby TV on a
   Windows host re-lit 35–100 s after every exclusive isolate and each eviction cost the stream a
   0.2–1.8 s rebuild, so after the first re-assert the host PnP-disables that panel — journaled,
