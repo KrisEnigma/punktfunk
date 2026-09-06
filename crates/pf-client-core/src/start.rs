@@ -66,6 +66,16 @@ pub enum Start {
     Stream(usize),
 }
 
+impl Start {
+    /// The host this landing opens on, as an index into [`KnownHosts::hosts`].
+    pub fn host_index(self) -> Option<usize> {
+        match self {
+            Start::Hosts => None,
+            Start::Library(i) | Start::Stream(i) => Some(i),
+        }
+    }
+}
+
 /// Where the default came from, for the one log line a launch prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {

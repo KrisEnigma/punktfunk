@@ -7,8 +7,9 @@ use super::lucide;
 use super::speed::SpeedState;
 use super::style::*;
 use super::{Screen, Svc, Target};
-use crate::trust::KnownHosts;
+use crate::trust::{KnownHosts, Settings};
 use pf_client_core::discovery::DiscoveredHost;
+use pf_client_core::start;
 use std::collections::HashMap;
 use windows_reactor::*;
 
@@ -58,6 +59,10 @@ const MENU_SHORTCUT: &str = "Create shortcut\u{2026}";
 const MENU_PIN: &str = "Pin tile: ";
 const MENU_UNPIN: &str = "Unpin tile: ";
 const MENU_FORGET: &str = "Forget\u{2026}";
+/// Point `Settings::default_host` at this host, or clear it. Two strings rather than a
+/// checkmark toggle: the flyout reports the leaf TEXT, so the two states must not share one.
+const MENU_DEFAULT: &str = "Make default host";
+const MENU_DEFAULT_SET: &str = "Default host \u{2713}";
 
 /// Whether the console (gamepad) UI is available in this build: the session binary ships
 /// its Skia `ui` feature on x64 only (no skia prebuilts for aarch64 yet) — the entry
@@ -509,6 +514,25 @@ fn edit_editor(
     ))
 }
 
+/// A saved host's plain dial: its fingerprint is already pinned, so this is the silent connect
+/// a tile's click makes. `profile: None` honours the host's own binding.
+///
+/// Free rather than inline in the tile loop so the shell's start screen can build one before
+/// any tile exists.
+pub(crate) fn saved_target(k: &pf_client_core::trust::KnownHost) -> Target {
+    Target {
+        name: k.name.clone(),
+        addr: k.addr.clone(),
+        port: k.port,
+        fp_hex: Some(k.fp_hex.clone()),
+        pair_optional: false,
+        mac: k.mac.clone(),
+        mgmt_port: k.mgmt_port,
+        profile: None,
+        launch: None,
+    }
+}
+
 pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
     let ctx = &props.svc.ctx;
     let hosts = props.hosts.as_slice();
@@ -701,18 +725,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 .into_iter()
                 .map(|p| (p.id, p.name, p.accent))
                 .collect();
+        // …and one settings read, for the checkmark on whichever tile the pointer names.
+        let settings_default = Settings::load().default_host;
         for k in &known.hosts {
-            let target = Target {
-                name: k.name.clone(),
-                addr: k.addr.clone(),
-                port: k.port,
-                fp_hex: Some(k.fp_hex.clone()),
-                pair_optional: false,
-                mac: k.mac.clone(),
-                mgmt_port: k.mgmt_port,
-                profile: None,
-                launch: None,
-            };
+            let target = saved_target(k);
             // Online = the last probe sweep reached it, and nothing else. An advert is NOT
             // presence: it is a cache entry with a 75-minute TTL that a suspending host sends no
             // goodbye for, so counting it kept a sleeping machine's pip green — and every wake
@@ -762,6 +778,8 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 let (hosts_rev, set_hosts_rev) = (props.hosts_rev, props.set_hosts_rev.clone());
                 let (link_host, link_profile) = (k.clone(), None::<String>);
                 let shortcut_host = k.clone();
+                let record_id = k.id.clone();
+                let is_default = record_id.is_some() && settings_default == record_id;
                 button("")
                     .icon(lucide::icon("ellipsis"))
                     .subtle()
@@ -830,6 +848,17 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                         }
 
                         items.push(menu_separator());
+                        // Which host the app opens on. Needs a pairing to point at — the start
+                        // screen skips an unpaired host, so writing one would set a pointer
+                        // that never resolves. Unchecked is not "not the default": a lone
+                        // paired host is the default with nothing written.
+                        if k.paired {
+                            items.push(menu_item(if is_default {
+                                MENU_DEFAULT_SET
+                            } else {
+                                MENU_DEFAULT
+                            }));
+                        }
                         items.push(menu_item(MENU_EDIT));
                         items.push(menu_item(MENU_FORGET));
                         items
@@ -1011,6 +1040,16 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                         }
                         MENU_EDIT => sr.call(Some((fp.clone(), name.clone()))),
                         MENU_FORGET => sf.call(Some((fp.clone(), name.clone()))),
+                        // Whole-file writer: rebase on the store before mutating, or a setting
+                        // another surface just wrote is reverted.
+                        MENU_DEFAULT | MENU_DEFAULT_SET => {
+                            let mut settings = Settings::load();
+                            let on = settings.default_host != record_id;
+                            settings.default_host = on.then(|| record_id.clone()).flatten();
+                            settings.save();
+                            svc.set_status.call(String::new());
+                            set_hosts_rev.call(hosts_rev + 1);
+                        }
                         // "Connect with"'s submenu leaves: a bare profile name, or
                         // SUB_WITH_DEFAULT. `Some("")` — not `None` — so Default settings
                         // really does override a bound host for this one connect.
@@ -1253,8 +1292,19 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                     && let Some((fp, _)) = &pending
                 {
                     let mut known = KnownHosts::load();
+                    let gone = known
+                        .hosts
+                        .iter()
+                        .find(|h| h.fp_hex == *fp)
+                        .and_then(|h| h.id.clone());
                     known.remove_by_fp(fp);
                     let _ = known.save();
+                    // The resolver already ignores a dangling pointer, so this is hygiene:
+                    // without it a re-pair of a different box inherits an old choice.
+                    let mut settings = Settings::load();
+                    if start::clear_default(&mut settings, gone.as_deref()) {
+                        settings.save();
+                    }
                 }
                 sf.call(None); // re-renders the page; the row is gone on the next load
             })

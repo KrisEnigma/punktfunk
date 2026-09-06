@@ -315,17 +315,20 @@ fn render(state: &Rc<State>, games: &[GameEntry]) {
     // `partition` is stable, so each group keeps that order.
     let (launchers, titles): (Vec<&GameEntry>, Vec<&GameEntry>) =
         games.iter().partition(|g| g.is_launcher());
+    // The desktop leads the launcher band: both open something rather than play a title, and
+    // a host with no launchers gets that band for the tile alone.
+    let desktop = desktop_entry();
+    state.launcher_flow.append(&game_card(state, &desktop));
     for game in &launchers {
         state.launcher_flow.append(&game_card(state, game));
     }
     for game in &titles {
         state.flow.append(&game_card(state, game));
     }
-    // A library with no launcher entries looks exactly as it did before this existed.
-    state.launchers_group.set_visible(!launchers.is_empty());
-    state
-        .games_heading
-        .set_visible(!launchers.is_empty() && !titles.is_empty());
+    // The band always has the desktop tile in it now, so it is always shown; the GAMES heading
+    // still only appears when there is something on both sides of it.
+    state.launchers_group.set_visible(true);
+    state.games_heading.set_visible(!titles.is_empty());
 }
 
 /// The launcher-tile brand marks this shell ships symbolic art for
@@ -470,9 +473,33 @@ fn game_card(state: &Rc<State>, game: &GameEntry) -> gtk::FlowBoxChild {
     child.add_controller(right_click);
     let sender = state.sender.clone();
     let mut req = state.req.clone();
-    req.launch = Some((game.id.clone(), game.title.clone()));
+    // The desktop tile is the host, not one of its titles: it streams with no launch id.
+    // Asking a host to launch what it is already showing is how a second copy starts.
+    if !is_desktop(game) {
+        req.launch = Some((game.id.clone(), game.title.clone()));
+    }
     child.connect_activate(move |_| sender.input(AppMsg::Connect(req.clone())));
     child
+}
+
+/// The synthetic tile every shelf leads with — the host's own desktop. Shares its id with the
+/// console's (`pf-console-ui`'s `DESKTOP_ID`), which is a NUL nothing on the wire can carry.
+const DESKTOP_ID: &str = "\0desktop";
+
+fn is_desktop(game: &GameEntry) -> bool {
+    game.id == DESKTOP_ID
+}
+
+/// Streaming the desktop was the host card's click, two pages back from a shelf. This puts it
+/// on the shelf, so the library is never a dead end for the desktop-only user and a host with
+/// no plugins still has one card to press. Never fetched, never cached: built here.
+fn desktop_entry() -> GameEntry {
+    GameEntry {
+        id: DESKTOP_ID.into(),
+        store: String::new(),
+        title: "Desktop".into(),
+        ..Default::default()
+    }
 }
 
 /// Fetch poster art for every uncached entry on a small worker pool, walking each
