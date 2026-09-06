@@ -477,6 +477,14 @@ impl Attached {
                 if let Some(s) = session
                     && !s.stale.swap(true, Ordering::AcqRel)
                 {
+                    // Say so in the header too. Only a fresh SET_ENCODE rebuilds the pool, and
+                    // the host cannot ask for one it never learns it needs: every surface is
+                    // dropped here while its telemetry still reads a healthy open encoder, so the
+                    // stream goes black until an unrelated timeout happens to rebuild it.
+                    s.section.store_u32(
+                        offset_of!(AuHeader, encoder_state),
+                        pf_driver_proto::encode::au::ENCODER_WEDGED,
+                    );
                     dbglog!(
                         "[pf-vd] encode: pool cannot take the surface - got {}x{} fmt {}, pool wants {}x{} fmt {} (epoch {} vs {}) - session stale until the next SET_ENCODE",
                         got.0,
