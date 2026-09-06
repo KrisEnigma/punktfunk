@@ -461,7 +461,7 @@ impl Attached {
         dbglog!(
             "[pf-vd] pool attach: gen {} -> pool {:?} session {}",
             generation,
-            self.pool.as_ref().map(|p| Arc::as_ptr(p)),
+            self.pool.as_ref().map(Arc::as_ptr),
             self.session.is_some()
         );
     }

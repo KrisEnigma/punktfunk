@@ -46,6 +46,7 @@ fn fresh(id: &str, family: Family) -> Facts {
         floor: None,
         couch_box: id == "bazzite" || id == "nobara",
         graphical_seat: true,
+        desktop_sessions: true,
         sunshine_active: false,
         current_channel: None,
         installed_pf: vec![],
@@ -62,7 +63,8 @@ fn fresh(id: &str, family: Family) -> Facts {
         firewall: Firewall::None,
         systemd_pid1: true,
         user_manager: true,
-        web_unit_present: true,
+        // Nothing installed, so no unit: the start phase has to reason from the install.
+        web_unit_present: false,
         scripting_unit_disabled: false,
         ip: Some("192.168.1.10".into()),
         user: "pf".into(),
@@ -81,6 +83,7 @@ fn installed(id: &str, family: Family, channel: Channel) -> Facts {
         current_channel: Some(channel),
         host_version: Some("punktfunk-host 0.34.0".into()),
         has_web_server: true,
+        web_unit_present: true,
         in_input_group: true,
         ..fresh(id, family)
     }
@@ -275,14 +278,26 @@ fn a_re_run_on_a_complete_box_updates_in_place() {
     );
 }
 
+/// The install line carries the console, so the start phase enables it even though the
+/// pre-install probe found no unit.
 #[test]
-fn a_box_without_the_console_is_told_so_instead_of_given_a_url() {
+fn a_box_without_the_console_gets_it_installed_and_started() {
     let mut facts = installed("debian", Family::Apt, Channel::Stable);
     facts.has_web_server = false;
     facts.web_unit_present = false;
     facts.missing = vec!["web-console".into()];
     facts.installed_pf = vec!["punktfunk-host".into(), "punktfunk-scripting".into()];
     check("debian-noweb", &facts, &pins());
+}
+
+/// A server with no desktop installed: the console still starts, no certutil for a browser
+/// it will never run, and the host is pinned to the one backend that stands a session up.
+#[test]
+fn a_desktopless_box_pins_gamescope_and_starts_the_console() {
+    let mut facts = fresh("ubuntu", Family::Apt);
+    facts.graphical_seat = false;
+    facts.desktop_sessions = false;
+    check("ubuntu-headless", &facts, &pins());
 }
 
 #[test]
