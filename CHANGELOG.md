@@ -366,6 +366,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **An odd-width stream from an Intel host is no longer sheared.** A linear dmabuf whose pitch is
+  not a multiple of 64 bytes (Mutter pads only for scanout; a 1084-wide window is 4336) went
+  straight into iHD, which reads it at a rounded pitch, so every row drifted and the picture
+  wrapped. Such frames now take the CPU de-pad path. Nothing to do.
 - **A GNOME host on Mutter 50 survives a mid-stream resize.** The exclusive monitor config the
   host applies for the new virtual monitor omitted the outgoing one, whose screencast was still
   live, and Mutter 50 dereferences that unassigned CRTC (GNOME/mutter#5007) — gnome-shell died
