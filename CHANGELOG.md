@@ -366,6 +366,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A SteamOS host links its own carried FFmpeg, not the build box's.** The Debian-trixie build box
+  no longer installs `libav*-dev` and `build-ffmpeg.sh` purges it off an older box, because with it
+  present the linker resolved `-lavcodec` to the box's copy and left the host needing a soname its
+  rpath did not carry — an unloadable binary that failed `update.sh`'s ldd gate after the preview
+  channel moved FFmpeg ahead of trixie. Nothing to do; the next update relinks against the carried libraries.
 - **The guided installer starts the web console it installs.** It enabled `punktfunk-web` only
   when the unit existed before the install ran, so a fresh box got a console that never answered
   on 47992 and a warning that it was "not installed". Nothing to do; a re-run enables it.

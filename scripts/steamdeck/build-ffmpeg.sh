@@ -21,6 +21,26 @@ SRC="${PUNKTFUNK_SRC:-$HOME/punktfunk}"
 BOX="${PUNKTFUNK_BOX:-pf2}"
 PREFIX="${PUNKTFUNK_FFMPEG_PREFIX:-$SRC/target-steamos/ffmpeg}"
 
+# The host links its own carried FFmpeg, so the build box must not also ship libav*-dev: with both
+# present the linker resolves -lavcodec to the box's /usr copy before the carried one, leaving the
+# host needing that soname while its rpath holds only the carried lib — unloadable. install.sh no
+# longer installs it; purge it off a box from an older install, and drop ffmpeg-sys-next's cache so
+# the next cargo build relinks against the carried libraries.
+CARGO_TD="$(dirname "$PREFIX")"
+bust_ffmpeg_sys() {
+    for _p in release debug; do
+        _d="$CARGO_TD/$_p"
+        [ -d "$_d" ] || continue
+        rm -rf "$_d"/build/ffmpeg-sys-next-* "$_d"/.fingerprint/ffmpeg-sys-next-*
+        rm -f  "$_d"/deps/libffmpeg_sys_next-* "$_d"/deps/ffmpeg_sys_next-*
+    done
+}
+if distrobox enter "$BOX" -- bash -lc 'dpkg -l libavcodec-dev 2>/dev/null | grep -q "^ii"'; then
+    log "Purging the box's libav*-dev — the host links its own carried FFmpeg"
+    distrobox enter "$BOX" -- bash -lc 'sudo apt-get purge -y libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libswscale-dev libavdevice-dev >/dev/null 2>&1' || true
+    bust_ffmpeg_sys
+fi
+
 # One pin for the Deck and the .deb. Read it, never copy it: two numbers that must match and can
 # drift apart is how the encode stack ends up behaving differently on one platform.
 PINS="$SRC/ci/rust-ci-noble.Dockerfile"
@@ -67,3 +87,7 @@ rm -rf /tmp/pf-ffmpeg /tmp/pf-nvhdr
 [ -e "$PREFIX/lib/libavcodec.so" ] || die "the FFmpeg build produced no libavcodec in $PREFIX/lib"
 printf '%s\n' "$FFMPEG_TAG" > "$PREFIX/.pf-tag"
 ok "FFmpeg $FFMPEG_TAG: $PREFIX/lib ($(du -sh "$PREFIX/lib" | cut -f1))"
+
+# The carried FFmpeg's soname just moved under an unchanged prefix; cargo keys ffmpeg-sys-next's
+# link on the PKG_CONFIG_PATH string, not the .pc contents, so relink it against the new libraries.
+bust_ffmpeg_sys
