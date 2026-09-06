@@ -1860,6 +1860,24 @@ impl VirtualDisplayManager {
                     verified = settled,
                     "re-arrival topology settle (verified-state wait)"
                 );
+                // The re-arrival's topology commit can leave DWM not presenting to the new
+                // monitor: the path is active and the mode verifies, yet nothing composes. The
+                // capture health ladder already fixes that with a CDS_RESET, but only after its
+                // 15 s stall floor, which is a black stream for as long again. Pull the same lever
+                // here, where the commit that causes it just happened.
+                if crate::identity::is_seat_session_marker(
+                    std::env::var_os("PUNKTFUNK_SEAT_SESSION").as_deref(),
+                ) {
+                    if let Some(gdi) = pf_win_display::win_display::resolve_gdi_name(added_key) {
+                        let reset = pf_win_display::win_display::force_mode_reset(&gdi);
+                        tracing::info!(
+                            target = %added_key,
+                            gdi_name = %gdi,
+                            applied = reset,
+                            "re-arrival: re-asserting presentation (CDS_RESET at the committed mode)"
+                        );
+                    }
+                }
                 // Store what COMMITTED, not what was asked for — the settle above verifies the
                 // resolution only, so it is no evidence about the refresh (see
                 // [`committed_mode_or`]). Doing this here rather than at the `Monitor` construction
