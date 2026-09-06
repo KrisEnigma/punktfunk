@@ -77,7 +77,7 @@ impl SessionParams {
     /// reorder bound, so a client outputs on it instead of holding pictures until
     /// the DPB fills. AMF and Media Foundation have no API for this at all.
     pub fn sps(&self) -> Rc<Sps> {
-        SpsBuilder::new()
+        let mut sps = SpsBuilder::new()
             .seq_parameter_set_id(0)
             .profile_idc(Profile::High)
             .level_idc(self.h264_level())
@@ -98,7 +98,21 @@ impl SessionParams {
             .resolution(self.width, self.height)
             .timing_info(self.fps_den, self.fps_num * 2, true)
             .bitstream_restriction(self.max_num_reorder_frames)
-            .build()
+            .build();
+        // The colour a decoder sizes its matrix from: BT.709, limited range. Left
+        // untagged, ffmpeg reads a small stream as 601, and a client that trusts
+        // the SPS would too. The builder has no setter; the Rc is still ours.
+        let vui = &mut Rc::get_mut(&mut sps)
+            .expect("fresh from build, unshared")
+            .vui_parameters;
+        vui.video_signal_type_present_flag = true;
+        vui.video_format = 5;
+        vui.video_full_range_flag = false;
+        vui.colour_description_present_flag = true;
+        vui.colour_primaries = 1;
+        vui.transfer_characteristics = 1;
+        vui.matrix_coefficients = 1;
+        sps
     }
 
     /// The smallest level from 4.1 up whose frame size and macroblock rate hold
@@ -493,6 +507,22 @@ mod tests {
         );
         assert!(sps.vui_parameters.bitstream_restriction_flag);
         assert_eq!(sps.vui_parameters.max_num_reorder_frames, 0);
+        // And the colour: a parser reading it back sees BT.709, limited range.
+        let (packed_sps, _) = packed_parameter_sets(&sps, &p.pps(Rc::clone(&sps)));
+        let mut parser = Parser::default();
+        let nalu = Nalu::next(&mut Cursor::new(&packed_sps[..])).unwrap();
+        let parsed = parser.parse_sps(&nalu).unwrap();
+        let vui = &parsed.vui_parameters;
+        assert!(vui.video_signal_type_present_flag && vui.colour_description_present_flag);
+        assert!(!vui.video_full_range_flag);
+        assert_eq!(
+            (
+                vui.colour_primaries,
+                vui.transfer_characteristics,
+                vui.matrix_coefficients
+            ),
+            (1, 1, 1)
+        );
         // E.2.1: never below max_num_ref_frames, or a conforming decoder livelocks
         // waiting for a DPB that can never drain (the sweep's S-77).
         assert!(
