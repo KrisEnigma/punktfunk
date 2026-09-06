@@ -9,6 +9,7 @@ use std::os::fd::FromRawFd as _;
 use std::os::fd::OwnedFd;
 
 use pf_libva::encode::open;
+use pf_libva::encode::CodecParams;
 use pf_libva::vpp::Vpp;
 use pf_libva::Display;
 use pf_libva::DmabufSource;
@@ -19,12 +20,16 @@ use pf_vaapi::drm::VaDrmPrimeSurfaceDescriptor;
 use pf_vaapi::drm::VA_EXPORT_SURFACE_READ_ONLY;
 use pf_vaapi::drm::VA_EXPORT_SURFACE_SEPARATE_LAYERS;
 use pf_vaapi::drm::VA_FOURCC_NV12;
+use pf_vaapi::drm::VA_FOURCC_P010;
 use pf_vaapi::enc_params::SessionParams;
 use pf_vaapi::vpp::DRM_FORMAT_ARGB8888;
 use pf_vaapi::vpp::DRM_FORMAT_XRGB8888;
 use pf_vaapi::vpp::VA_FOURCC_BGRA;
+use pf_vaapi::vpp::VA_FOURCC_X2R10G10B10;
 use pf_vaapi::vpp::VA_RT_FORMAT_RGB32;
+use pf_vaapi::vpp::VA_RT_FORMAT_RGB32_10;
 use pf_vaapi::vpp::VA_RT_FORMAT_YUV420;
+use pf_vaapi::vpp::VA_RT_FORMAT_YUV420_10;
 use pf_vaapi::vpp::VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
 
 const W: u32 = 320;
@@ -152,13 +157,70 @@ fn rgb_becomes_limited_range_bt709_nv12() {
     vpp.destroy(&display);
 }
 
+/// Y, Cb, Cr at the picture centre of a P010 surface: ten bits in the top of each
+/// sixteen.
+fn centre_yuv10(display: &Display, p010: VaSurfaceId) -> (u16, u16, u16) {
+    display
+        .map_image(p010, |image, ptr| {
+            let (x, y) = (W as usize / 2, H as usize / 2);
+            // SAFETY: inside the mapped image, by the driver's own pitches and offsets;
+            // samples are 16-bit words, read unaligned to be safe.
+            unsafe {
+                let luma = ptr
+                    .add(image.offsets[0] as usize + y * image.pitches[0] as usize + x * 2)
+                    .cast::<u16>()
+                    .read_unaligned();
+                let uv = ptr.add(
+                    image.offsets[1] as usize + (y / 2) * image.pitches[1] as usize + (x / 2) * 4,
+                );
+                let cb = uv.cast::<u16>().read_unaligned();
+                let cr = uv.add(2).cast::<u16>().read_unaligned();
+                Ok((luma >> 6, cb >> 6, cr >> 6))
+            }
+        })
+        .expect("read the P010 back")
+}
+
+/// Ten bits: BT.2020 limited range puts red at Y 294 / Cb 387 / Cr 960. BT.709
+/// coefficients in a stream tagged BT.2020 would show as Y 250 — a picture that
+/// decodes fine and is the wrong red.
+#[test]
+#[ignore = "needs a VAAPI device"]
+fn ten_bit_rgb_becomes_limited_range_bt2020_p010() {
+    let display = display();
+    let vpp = Vpp::new(&display, W, H).expect("VideoProc");
+    let src = display
+        .create_surface(VA_RT_FORMAT_RGB32_10, Some(VA_FOURCC_X2R10G10B10), W, H)
+        .expect("an XR30 surface");
+    let dst = display
+        .create_surface(VA_RT_FORMAT_YUV420_10, Some(VA_FOURCC_P010), W, H)
+        .expect("a P010 surface");
+    let red: Vec<u8> = (1023u32 << 20).to_le_bytes().repeat((W * H) as usize);
+    display
+        .write_packed(src, &red, W as usize * 4)
+        .expect("upload red");
+    vpp.convert(&display, src, true, true, dst)
+        .expect("convert red");
+    let (y, cb, cr) = centre_yuv10(&display, dst);
+    println!("ten-bit red: Y {y} Cb {cb} Cr {cr}");
+    for (got, want, name) in [(y, 294u16, "Y"), (cb, 387, "Cb"), (cr, 960, "Cr")] {
+        assert!(
+            (i32::from(got) - i32::from(want)).abs() <= 8,
+            "red: {name} = {got}, want {want} (BT.2020 limited)"
+        );
+    }
+    display.destroy_surface(src);
+    display.destroy_surface(dst);
+    vpp.destroy(&display);
+}
+
 /// The whole path through the session's own ingest: RGB in, H.264 out.
 /// `PF_ENC_OUT` writes the stream; frame 0 is pure red, so a decoder's first pixel
 /// is the second opinion on the colour.
 #[test]
 #[ignore = "needs a VAAPI encode device"]
 fn the_session_encodes_what_ingest_gives_it() {
-    let mut enc = open(SessionParams {
+    let params = SessionParams {
         width: W,
         height: H,
         fps_num: 60,
@@ -168,8 +230,8 @@ fn the_session_encodes_what_ingest_gives_it() {
         max_num_reorder_frames: 0,
         initial_qp: 26,
         vbv_frames: 1.0,
-    })
-    .expect("an encoder");
+    };
+    let mut enc = open(params, CodecParams::H264).expect("an encoder");
     let mut stream = Vec::new();
     for i in 0..10u8 {
         // A colour that moves every frame, so the P frames carry something.

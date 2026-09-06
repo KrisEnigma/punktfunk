@@ -12,6 +12,7 @@
 //! that shares no code with either.
 
 use pf_libva::encode::open;
+use pf_libva::encode::CodecParams;
 use pf_vaapi::enc_params::SessionParams;
 
 /// 320x240 keeps the surfaces small and is still off the macroblock grid in neither
@@ -51,7 +52,7 @@ fn frame(width: usize, height: usize, phase: usize) -> (Vec<u8>, Vec<u8>) {
 #[ignore = "needs a VAAPI encode device"]
 fn the_encoder_emits_a_decodable_stream() {
     let p = params();
-    let mut enc = match open(p) {
+    let mut enc = match open(p, CodecParams::H264) {
         Ok(e) => e,
         Err(e) => panic!("no VAAPI encoder here: {e:#}"),
     };
@@ -118,10 +119,10 @@ fn a_loss_recovers_on_an_anchored_p_not_an_idr() {
         slots: 4,
         ..params()
     };
-    let mut enc = open(p).expect("an encoder");
+    let mut enc = open(p, CodecParams::H264).expect("an encoder");
     let (w, h) = (p.width as usize, p.height as usize);
     let mut aus = Vec::new();
-    let encode = |enc: &mut pf_libva::encode::H264Encoder, i: usize, anchor: Option<usize>| {
+    let encode = |enc: &mut pf_libva::encode::Encoder, i: usize, anchor: Option<usize>| {
         let (y, uv) = frame(w, h, i);
         enc.write_nv12(&y, &uv).expect("fill");
         let pic = match anchor {
@@ -203,7 +204,7 @@ fn a_bitrate_step_lands_without_an_idr() {
         bitrate_bps: 8_000_000,
         ..params()
     };
-    let mut enc = open(p).expect("an encoder");
+    let mut enc = open(p, CodecParams::H264).expect("an encoder");
     let (w, h) = (p.width as usize, p.height as usize);
     let mut seed = 0x2545_f491u32;
     let mut sizes = Vec::new();

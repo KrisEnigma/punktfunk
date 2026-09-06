@@ -27,8 +27,12 @@ pub mod config;
 pub mod drm;
 /// H.264 encode parameter buffers — the encode mirror of [`va`].
 pub mod enc_h264;
+/// HEVC encode parameter buffers and the driver feature words.
+pub mod enc_h265;
 /// One description of the stream, feeding both the packed headers and the VA buffer.
 pub mod enc_params;
+/// HEVC parameter sets, slice headers and HDR10 SEI, written from one description.
+pub mod hevc;
 pub mod pic;
 pub mod pic_av1;
 pub mod pic_h265;

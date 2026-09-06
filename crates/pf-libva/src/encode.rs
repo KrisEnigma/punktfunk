@@ -1,15 +1,17 @@
-//! An H.264 encode session over libva: config, context, surfaces, and one frame in
-//! one frame out.
+//! An encode session over libva: config, context, surfaces, and one frame in one
+//! frame out — H.264 or HEVC, chosen at open.
 //!
-//! The unsafe half of the native VAAPI encoder. What a picture *is* — the SPS, the
-//! PPS, the parameter buffers — comes from [`pf_vaapi`], which is pure and tested
+//! The unsafe half of the native VAAPI encoder. What a picture *is* — the parameter
+//! sets, the parameter buffers — comes from [`pf_vaapi`], which is pure and tested
 //! anywhere; this drives libva with it.
 //!
-//! Deliberately narrow for now: H.264, CBR, one slice per picture, one reference
-//! per picture. One is not a simplification we chose — `VAConfigAttribEncMaxRefFrames`
-//! is `l0=1` on radeonsi, so a second list entry would be advertised and ignored.
-//! Which one is the point: every reference lives in a long-term slot, and a loss
-//! is answered by predicting from a slot the client still has, not by an IDR.
+//! Deliberately narrow: CBR, one slice per picture, one reference per picture. One
+//! is not a simplification we chose — `VAConfigAttribEncMaxRefFrames` is `l0=1` on
+//! radeonsi, so a second list entry would be advertised and ignored. Which one is
+//! the point: every reference lives in a slot, and a loss is answered by predicting
+//! from a slot the client still has, not by an IDR. H.264 keeps the slots as
+//! long-term pictures; HEVC lists them in every slice header's reference picture
+//! set.
 
 use std::os::raw::c_int;
 use std::os::raw::c_void;
@@ -19,13 +21,20 @@ use anyhow::bail;
 use anyhow::Context as _;
 use anyhow::Result;
 use pf_vaapi::enc_h264 as vah;
+use pf_vaapi::enc_h265 as vahevc;
+use pf_vaapi::enc_h265::HevcFeatures;
 use pf_vaapi::enc_params::packed_slice_header;
 use pf_vaapi::enc_params::va_pic_fields;
 use pf_vaapi::enc_params::PictureSlice;
 use pf_vaapi::enc_params::SessionParams;
+use pf_vaapi::hevc::HdrStatic;
+use pf_vaapi::hevc::HevcParams;
+use pf_vaapi::hevc::HevcSlice;
 use pf_vaapi::vpp::rt_format_for;
 use pf_vaapi::vpp::VA_RT_FORMAT_RGB32;
+use pf_vaapi::vpp::VA_RT_FORMAT_RGB32_10;
 use pf_vaapi::vpp::VA_RT_FORMAT_YUV420;
+use pf_vaapi::vpp::VA_RT_FORMAT_YUV420_10;
 
 use crate::vpp::Vpp;
 use crate::Display;
@@ -49,6 +58,24 @@ struct VaConfigAttrib {
     value: u32,
 }
 
+/// Which codec a session opens, and the facts only that codec needs.
+#[derive(Clone, Copy, Debug)]
+pub enum CodecParams {
+    H264,
+    /// Main, or Main 10 with P010 surfaces; `colour` is the VUI's H.273 triple.
+    Hevc {
+        ten_bit: bool,
+        colour: [u8; 3],
+    },
+}
+
+/// The codec as opened: HEVC carries what the driver said it can do.
+#[derive(Clone, Copy, Debug)]
+enum Codec {
+    H264,
+    Hevc(HevcParams),
+}
+
 /// What one encoded picture came out as.
 #[derive(Debug)]
 pub struct EncodedPicture {
@@ -61,11 +88,13 @@ pub struct EncodedPicture {
     pub wire: i64,
 }
 
-/// One long-term reference the session still holds.
+/// One reference the session still holds.
 #[derive(Clone, Copy, Debug)]
 struct Slot {
     surface: VaSurfaceId,
     wire: i64,
+    /// HEVC's picture order count, what its reference picture set names it by.
+    poc: i32,
     /// Cleared by [`H264Encoder::distrust`]; an untrusted slot is never predicted
     /// from again, and is replaced in its turn.
     trusted: bool,
@@ -73,8 +102,13 @@ struct Slot {
 
 /// A live encode session. Owns its config, context, surfaces and coded buffer, and
 /// releases them in the order libva requires.
-pub struct H264Encoder {
+pub struct Encoder {
     display: Display,
+    codec: Codec,
+    /// HDR10 static metadata, written as an SEI with every HEVC IDR.
+    hdr: Option<HdrStatic>,
+    /// HEVC picture order count of the next picture; 0 after an IDR.
+    poc: i32,
     config: u32,
     context: VaContextId,
     /// Pictures the caller fills and `vaBeginPicture` reads.
@@ -105,15 +139,24 @@ pub struct H264Encoder {
     next_surface: usize,
 }
 
-impl H264Encoder {
+impl Encoder {
     /// Surfaces: one being encoded, one holding the reference, one spare so the
     /// next submit does not wait on the driver releasing the last.
     const SURFACES: usize = 3;
 
     /// Open a session on `display`.
-    pub fn new(display: Display, params: SessionParams) -> Result<Self> {
+    pub fn new(display: Display, params: SessionParams, codec: CodecParams) -> Result<Self> {
         let coded_w = i32::from(params.width_in_mbs()) * 16;
         let coded_h = i32::from(params.height_in_mbs()) * 16;
+        let (profile, rt_format) = match codec {
+            CodecParams::H264 => (VA_PROFILE_H264_HIGH, VA_RT_FORMAT_YUV420),
+            CodecParams::Hevc { ten_bit: false, .. } => {
+                (vahevc::VA_PROFILE_HEVC_MAIN, VA_RT_FORMAT_YUV420)
+            }
+            CodecParams::Hevc { ten_bit: true, .. } => {
+                (vahevc::VA_PROFILE_HEVC_MAIN10, VA_RT_FORMAT_YUV420_10)
+            }
+        };
 
         // Ask the driver what it supports before telling it what we want.
         // `vaCreateConfig` does not reject an attribute it dislikes — it drops it and
@@ -133,13 +176,21 @@ impl H264Encoder {
                 kind: VA_CONFIG_ATTRIB_ENC_PACKED_HEADERS,
                 value: 0,
             },
+            VaConfigAttrib {
+                kind: vahevc::VA_CONFIG_ATTRIB_ENC_HEVC_FEATURES,
+                value: 0,
+            },
+            VaConfigAttrib {
+                kind: vahevc::VA_CONFIG_ATTRIB_ENC_HEVC_BLOCK_SIZES,
+                value: 0,
+            },
         ];
         // SAFETY: `probe` is a live array of exactly `probe.len()` entries the call
         // fills in place; profile and entrypoint are libva enum values.
         let status = unsafe {
             (display.va.get_config_attributes)(
                 display.display,
-                VA_PROFILE_H264_HIGH,
+                profile,
                 vah::VA_ENTRYPOINT_ENC_SLICE,
                 probe.as_mut_ptr().cast::<c_void>(),
                 probe.len() as c_int,
@@ -150,8 +201,30 @@ impl H264Encoder {
         let supported_rc = probe[1].value;
         let supported_packed = probe[2].value;
         if supported_rc & vah::VA_RC_CBR == 0 {
-            bail!("this driver offers no CBR rate control for H.264 encode");
+            bail!("this driver offers no CBR rate control for profile {profile}");
         }
+        // The driver dictates HEVC's block sizes and which tools it has; the SPS is
+        // written from its word, as ffmpeg does, and a silent driver gets ffmpeg's
+        // guess.
+        let codec = match codec {
+            CodecParams::H264 => Codec::H264,
+            CodecParams::Hevc { ten_bit, colour } => {
+                let (features, blocks) = (probe[3].value, probe[4].value);
+                let features = if features == vahevc::VA_ATTRIB_NOT_SUPPORTED
+                    || blocks == vahevc::VA_ATTRIB_NOT_SUPPORTED
+                {
+                    HevcFeatures::guessed()
+                } else {
+                    HevcFeatures::from_attributes(features, blocks)
+                };
+                Codec::Hevc(HevcParams {
+                    common: params,
+                    ten_bit,
+                    colour,
+                    features,
+                })
+            }
+        };
         // Both kinds are required: the session writes every header itself, and
         // radeonsi drops the packed SPS and PPS of a picture that brings no slice
         // header.
@@ -169,7 +242,7 @@ impl H264Encoder {
         let attribs = [
             VaConfigAttrib {
                 kind: VA_CONFIG_ATTRIB_RT_FORMAT,
-                value: VA_RT_FORMAT_YUV420,
+                value: rt_format,
             },
             VaConfigAttrib {
                 kind: VA_CONFIG_ATTRIB_RATE_CONTROL,
@@ -188,7 +261,7 @@ impl H264Encoder {
         let status = unsafe {
             (display.va.create_config)(
                 display.display,
-                VA_PROFILE_H264_HIGH,
+                profile,
                 vah::VA_ENTRYPOINT_ENC_SLICE,
                 attribs.as_ptr() as *mut c_void,
                 attribs.len() as c_int,
@@ -205,7 +278,7 @@ impl H264Encoder {
         let status = unsafe {
             (display.va.create_surfaces)(
                 display.display,
-                VA_RT_FORMAT_YUV420,
+                rt_format,
                 coded_w as u32,
                 coded_h as u32,
                 surfaces.as_mut_ptr(),
@@ -258,6 +331,9 @@ impl H264Encoder {
         let recon = surfaces.split_off(Self::SURFACES);
         Ok(Self {
             display,
+            codec,
+            hdr: None,
+            poc: 0,
             config,
             context,
             input: surfaces,
@@ -317,6 +393,16 @@ impl H264Encoder {
         self.params.bitrate_bps
     }
 
+    /// HDR10 static metadata to carry as an SEI on every HEVC IDR; `None` stops.
+    pub fn set_hdr(&mut self, hdr: Option<HdrStatic>) {
+        self.hdr = hdr;
+    }
+
+    /// Whether the session encodes ten-bit pictures, and so converts into P010.
+    fn ten_bit(&self) -> bool {
+        matches!(self.codec, Codec::Hevc(h) if h.ten_bit)
+    }
+
     /// Fill the next input surface with NV12 from `y` and `uv`, for tests. Capture
     /// goes through [`Self::submit_packed`] or [`Self::submit_dmabuf`].
     pub fn write_nv12(&self, y: &[u8], uv: &[u8]) -> Result<()> {
@@ -348,12 +434,14 @@ impl H264Encoder {
         })
     }
 
-    /// Ingest packed 32-bit RGB from the CPU: uploaded to a staging surface of
-    /// `fourcc`, converted on the GPU into the next input surface.
+    /// Ingest packed RGB from the CPU — eight-bit or ten-bit, by `fourcc` —
+    /// uploaded to a staging surface and converted on the GPU into the next input
+    /// surface at the session's depth.
     pub fn submit_packed(&mut self, bytes: &[u8], fourcc: u32, row_bytes: usize) -> Result<()> {
-        if rt_format_for(fourcc) != Some(VA_RT_FORMAT_RGB32) {
-            bail!("no eight-bit RGB ingest for fourcc {fourcc:#x}");
-        }
+        let rt_format = match rt_format_for(fourcc) {
+            Some(rt @ (VA_RT_FORMAT_RGB32 | VA_RT_FORMAT_RGB32_10)) => rt,
+            _ => bail!("no packed RGB ingest for fourcc {fourcc:#x}"),
+        };
         let staging = match self.staging {
             Some((surface, f)) if f == fourcc => surface,
             _ => {
@@ -361,7 +449,7 @@ impl H264Encoder {
                     self.display.destroy_surface(old);
                 }
                 let surface = self.display.create_surface(
-                    VA_RT_FORMAT_RGB32,
+                    rt_format,
                     Some(fourcc),
                     self.params.width,
                     self.params.height,
@@ -371,26 +459,29 @@ impl H264Encoder {
             }
         };
         self.display.write_packed(staging, bytes, row_bytes)?;
-        self.vpp
-            .convert(&self.display, staging, true, false, self.input_surface())
+        self.vpp.convert(
+            &self.display,
+            staging,
+            true,
+            self.ten_bit(),
+            self.input_surface(),
+        )
     }
 
     /// Ingest a capture dmabuf: imported for this picture, converted into the next
-    /// input surface, released. Eight-bit only until the HEVC session exists.
+    /// input surface at the session's depth, released.
     pub fn submit_dmabuf(&mut self, source: &DmabufSource) -> Result<()> {
         let rt_format = pf_vaapi::vpp::import_format(source.drm_fourcc)
             .map(|(_, rt)| rt)
             .ok_or_else(|| anyhow!("no ingest for DRM fourcc {:#x}", source.drm_fourcc))?;
-        if rt_format != VA_RT_FORMAT_RGB32 && rt_format != VA_RT_FORMAT_YUV420 {
-            bail!("ten-bit ingest needs the HEVC session");
-        }
+        let is_rgb = rt_format == VA_RT_FORMAT_RGB32 || rt_format == VA_RT_FORMAT_RGB32_10;
         // Imported once per picture; a cache keyed on the fd would save the ioctl.
         let surface = self.display.import_dmabuf(source)?;
         let converted = self.vpp.convert(
             &self.display,
             surface,
-            rt_format == VA_RT_FORMAT_RGB32,
-            false,
+            is_rgb,
+            self.ten_bit(),
             self.input_surface(),
         );
         self.display.destroy_surface(surface);
@@ -424,6 +515,17 @@ impl H264Encoder {
     fn encode_with(&mut self, reference: Option<usize>, anchor: bool) -> Result<EncodedPicture> {
         let is_idr = reference.is_none();
         let slot_count = self.slots.len();
+        // HEVC names the kept pictures in every slice header, so a distrusted
+        // picture is dropped by both sides now. H.264's long-term indices stay in
+        // step by replacement instead.
+        if matches!(self.codec, Codec::Hevc(_)) {
+            for slot in self.slots.iter_mut() {
+                if slot.is_some_and(|s| !s.trusted) {
+                    self.free.push(slot.take().expect("checked").surface);
+                }
+            }
+        }
+        let poc = if is_idr { 0 } else { self.poc };
         let slice = PictureSlice {
             is_idr,
             // An IDR restarts frame_num at 0, wherever the count stood.
@@ -452,9 +554,11 @@ impl H264Encoder {
         self.display.va.check("vaBeginPicture", status)?;
 
         let mut owned: Vec<VaBufferId> = Vec::new();
-        let result = self
-            .render_picture(&mut owned, &sps, &pps, recon, slice)
-            .and_then(|()| self.render_ids(&mut owned.clone()));
+        let result = match self.codec {
+            Codec::H264 => self.render_picture(&mut owned, &sps, &pps, recon, slice),
+            Codec::Hevc(hevc) => self.render_picture_hevc(&mut owned, &hevc, recon, poc, slice),
+        }
+        .and_then(|()| self.render_ids(&mut owned.clone()));
         if result.is_err() {
             self.free.push(recon);
         }
@@ -500,6 +604,7 @@ impl H264Encoder {
         let held = Slot {
             surface: recon,
             wire: self.wire,
+            poc,
             trusted: true,
         };
         if let Some(old) = self.slots[usize::from(slice.slot)].replace(held) {
@@ -507,6 +612,7 @@ impl H264Encoder {
         }
         let wire = self.wire;
         self.wire += 1;
+        self.poc = poc + 1;
         self.next_surface = (self.next_surface + 1) % Self::SURFACES;
         let max_frame_num = 1u16 << (sps.log2_max_frame_num_minus4 + 4);
         self.frame_num = (slice.frame_num + 1) % max_frame_num;
@@ -603,6 +709,110 @@ impl H264Encoder {
         // Neither driver writes a slice header of its own: radeonsi templates its
         // from this one, iHD copies it.
         let (header, bits) = packed_slice_header(sps, pps, slice);
+        self.render_packed(owned, vah::VA_ENC_PACKED_HEADER_TYPE_SLICE, &header, bits)
+    }
+
+    /// The HEVC picture: sequence, rate control, the packed VPS/SPS/PPS (and HDR SEI)
+    /// on an IDR, then picture, slice and the packed slice header whose reference
+    /// picture set is every trusted slot, closest first, the reference marked used.
+    fn render_picture_hevc(
+        &self,
+        owned: &mut Vec<VaBufferId>,
+        hevc: &HevcParams,
+        recon: VaSurfaceId,
+        poc: i32,
+        slice: PictureSlice,
+    ) -> Result<()> {
+        let is_idr = slice.is_idr;
+        let seq = hevc.va_sequence();
+        self.render(owned, vah::VA_ENC_SEQUENCE_PARAMETER_BUFFER_TYPE, &seq)?;
+        let (rc, hrd, frame_rate) = self.params.rate_control();
+        self.render_misc(owned, vah::VA_ENC_MISC_PARAMETER_TYPE_RATE_CONTROL, &rc)?;
+        self.render_misc(owned, vah::VA_ENC_MISC_PARAMETER_TYPE_HRD, &hrd)?;
+        self.render_misc(
+            owned,
+            vah::VA_ENC_MISC_PARAMETER_TYPE_FRAME_RATE,
+            &frame_rate,
+        )?;
+
+        if is_idr {
+            let mut sets = hevc.vps();
+            sets.extend(hevc.sps());
+            sets.extend(hevc.pps());
+            if let Some(hdr) = &self.hdr {
+                sets.extend(hevc.hdr_sei(hdr));
+            }
+            let bits = (sets.len() * 8) as u32;
+            self.render_packed(owned, vah::VA_ENC_PACKED_HEADER_TYPE_SEQUENCE, &sets, bits)?;
+        }
+
+        // The DPB the decoder keeps, closest first; only trusted slots survive to
+        // here (see `encode_with`).
+        let mut kept: Vec<(u8, VaSurfaceId, i32)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.map(|s| (i as u8, s.surface, s.poc)))
+            .collect();
+        kept.sort_by_key(|&(_, _, p)| std::cmp::Reverse(p));
+        if is_idr {
+            kept.clear();
+        }
+        let entry = |surface: VaSurfaceId, poc: i32, used: bool| vahevc::VaPictureHEVC {
+            picture_id: surface,
+            pic_order_cnt: poc,
+            flags: if used {
+                vahevc::VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE
+            } else {
+                0
+            },
+            va_reserved: [0; 4],
+        };
+        let mut pic = vahevc::VaEncPictureParameterBufferHEVC {
+            decoded_curr_pic: entry(recon, poc, false),
+            coded_buf: self.coded_buf,
+            collocated_ref_pic_index: if hevc.features.temporal_mvp { 0 } else { 0xff },
+            pic_init_qp: self.params.initial_qp,
+            diff_cu_qp_delta_depth: hevc.diff_cu_qp_delta_depth(),
+            nal_unit_type: if is_idr {
+                vahevc::NAL_IDR_W_RADL
+            } else {
+                vahevc::NAL_TRAIL_R
+            },
+            pic_fields: vahevc::pic_fields(is_idr, &hevc.features),
+            ..Default::default()
+        };
+        let mut rps = Vec::with_capacity(kept.len());
+        let mut reference_entry = None;
+        for (n, &(slot, surface, kept_poc)) in kept.iter().enumerate() {
+            let used = Some(slot) == slice.reference_slot;
+            pic.reference_frames[n] = entry(surface, kept_poc, used);
+            if used {
+                reference_entry = Some(pic.reference_frames[n]);
+            }
+            rps.push((kept_poc, used));
+        }
+        self.render(owned, vah::VA_ENC_PICTURE_PARAMETER_BUFFER_TYPE, &pic)?;
+
+        let mut va_slice = vahevc::VaEncSliceParameterBufferHEVC {
+            num_ctu_in_slice: hevc.ctus_per_picture(),
+            slice_type: if is_idr { 2 } else { 1 },
+            slice_fields: vahevc::slice_fields(is_idr, &hevc.features),
+            ..Default::default()
+        };
+        if let Some(entry) = reference_entry {
+            va_slice.ref_pic_list0[0] = entry;
+        } else if !is_idr {
+            bail!("reference slot {:?} is not held", slice.reference_slot);
+        }
+        self.render(owned, vah::VA_ENC_SLICE_PARAMETER_BUFFER_TYPE, &va_slice)?;
+
+        let header = hevc.slice_header(HevcSlice {
+            is_idr,
+            poc,
+            rps: &rps,
+        });
+        let bits = (header.len() * 8) as u32;
         self.render_packed(owned, vah::VA_ENC_PACKED_HEADER_TYPE_SLICE, &header, bits)
     }
 
@@ -763,7 +973,7 @@ impl H264Encoder {
     }
 }
 
-impl Drop for H264Encoder {
+impl Drop for Encoder {
     /// libva's teardown order: buffers, then context, then surfaces, then config.
     /// The display is dropped last, by its own `Drop`.
     fn drop(&mut self) {
@@ -792,8 +1002,8 @@ impl Drop for H264Encoder {
 }
 
 /// Open a display and an encoder on it, for callers with no display of their own.
-pub fn open(params: SessionParams) -> Result<H264Encoder> {
+pub fn open(params: SessionParams, codec: CodecParams) -> Result<Encoder> {
     let va = crate::Libva::load().context("libva")?;
     let display = Display::open(va).context("no VAAPI display")?;
-    H264Encoder::new(display, params).map_err(|e| anyhow!("{e:#}"))
+    Encoder::new(display, params, codec).map_err(|e| anyhow!("{e:#}"))
 }
