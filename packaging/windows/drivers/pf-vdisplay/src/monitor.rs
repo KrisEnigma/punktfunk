@@ -114,8 +114,6 @@ pub struct Monitor {
     /// Bumped (Release) by every session install or removal, and by every pool change. The
     /// drain loop compares it with its last-seen value and re-reads the slots only then.
     pub encode_gen: AtomicU32,
-    /// Publish-token generations handed out so far ([`Self::next_encode_generation`]).
-    encode_generation: AtomicU32,
     /// The render LUID of the last swap-chain assignment, packed; `0` = none yet. The pool
     /// and the encoder open on this device, the one the drain worker acquires from.
     render_luid: std::sync::atomic::AtomicI64,
@@ -156,7 +154,6 @@ impl Monitor {
             encode: Mutex::new(None),
             pool: Mutex::new(None),
             encode_gen: AtomicU32::new(0),
-            encode_generation: AtomicU32::new(0),
             render_luid: std::sync::atomic::AtomicI64::new(0),
             gone: AtomicBool::new(false),
         }
@@ -188,11 +185,13 @@ impl Monitor {
         lock(&self.cursor).cell.clone()
     }
 
-    /// The next publish-token generation: one per `SET_ENCODE` on this monitor, never 0. The
-    /// host checks it against the section a session mapped, so it only needs to be unique
-    /// within one monitor's life.
+    /// The next publish-token generation: one per `SET_ENCODE`, never 0, and unique for the
+    /// driver's life. Per monitor is not enough — a re-arrival keeps the target id and starts a
+    /// fresh monitor at zero, so the replacement session took the same token as the one it
+    /// replaced and a stale close matched it exactly.
     pub fn next_encode_generation(&self) -> u32 {
-        self.encode_generation.fetch_add(1, Ordering::Relaxed) + 1
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Install an encode session and wake the drain worker so an idle display picks it up
