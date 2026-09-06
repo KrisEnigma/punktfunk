@@ -355,8 +355,12 @@ pf-driver-proto = { path = "../pf-driver-proto" }
 # GameStream ships in every default build too (still runtime-OPT-IN via --gamestream /
 # PUNKTFUNK_GAMESTREAM); building with `--no-default-features --features pyrowave` produces the
 # hardened NATIVE-ONLY host — no Moonlight-compat planes, no `rusty_enet` (transpiled C), no
-# `rsa` (rust-safety WP19). `serve --gamestream` on such a binary refuses to start, loudly.
-default = ["pyrowave", "gamestream"]
+# `rsa` (rust-safety WP19), no FFmpeg. `serve --gamestream` on such a binary refuses to start, loudly.
+default = ["pyrowave", "gamestream", "libav-fallback"]
+# The libavcodec encode backends on Linux: NVENC for CPU frames, VAAPI as the native session's
+# fallback and its `PUNKTFUNK_VAAPI_NATIVE=0` oracle. ON by default; leaving it off links no
+# FFmpeg (design/native-vaapi-encoder.md, WP9).
+libav-fallback = ["pf-encode/libav-fallback"]
 # The GameStream/Moonlight-compat planes (nvhttp pairing, RTSP, ENet control, `_nvstream` mDNS)
 # at COMPILE time — see the `default` note above for what leaving it off buys.
 gamestream = ["dep:rusty_enet", "dep:rsa"]
