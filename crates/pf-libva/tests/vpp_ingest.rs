@@ -1,7 +1,8 @@
 //! Does ingest produce the NV12 the encoder expects? RGB in, BT.709 limited range
 //! out, read straight back from the surface — no encoder, no decoder, just the
 //! numbers. Then the same through a dmabuf, exported and re-imported on this
-//! display: a capture buffer with no compositor in the way.
+//! display: a capture buffer with no compositor in the way. And a source twice
+//! the size, scaled on the same pass: what a mirrored 4K head becomes.
 //!
 //! Ignored: needs a VAAPI device. `.25` and `.50` both have one.
 
@@ -46,9 +47,13 @@ fn bgra(b: u8, g: u8, r: u8) -> Vec<u8> {
 
 /// Y, Cb, Cr at the picture centre.
 fn centre_yuv(display: &Display, nv12: VaSurfaceId) -> (u8, u8, u8) {
+    yuv_at(display, nv12, W as usize / 2, H as usize / 2)
+}
+
+/// Y, Cb, Cr at (`x`, `y`) of an NV12 surface.
+fn yuv_at(display: &Display, nv12: VaSurfaceId, x: usize, y: usize) -> (u8, u8, u8) {
     display
         .map_image(nv12, |image, ptr| {
-            let (x, y) = (W as usize / 2, H as usize / 2);
             // SAFETY: inside the mapped image, by the driver's own pitches and offsets.
             unsafe {
                 let luma = *ptr.add(image.offsets[0] as usize + y * image.pitches[0] as usize + x);
@@ -93,14 +98,14 @@ fn rgb_becomes_limited_range_bt709_nv12() {
     display
         .write_packed(src, &bgra(0, 0, 255), row)
         .expect("upload red");
-    vpp.convert(&display, src, true, false, dst)
+    vpp.convert(&display, src, (W, H), true, false, dst)
         .expect("convert red");
     near(centre_yuv(&display, dst), (63, 102, 240), "red");
 
     display
         .write_packed(src, &bgra(255, 255, 255), row)
         .expect("upload white");
-    vpp.convert(&display, src, true, false, dst)
+    vpp.convert(&display, src, (W, H), true, false, dst)
         .expect("convert white");
     near(centre_yuv(&display, dst), (235, 128, 128), "white");
 
@@ -146,7 +151,7 @@ fn rgb_becomes_limited_range_bt709_nv12() {
             planes: &exported.planes,
         };
         let imported = display.import_dmabuf(&source).expect("import the dmabuf");
-        vpp.convert(&display, imported, true, false, dst)
+        vpp.convert(&display, imported, (W, H), true, false, dst)
             .expect("convert the import");
         near(centre_yuv(&display, dst), (63, 102, 240), "red via dmabuf");
         display.destroy_surface(imported);
@@ -181,6 +186,46 @@ fn centre_yuv10(display: &Display, p010: VaSurfaceId) -> (u16, u16, u16) {
         .expect("read the P010 back")
 }
 
+/// A source twice the session's size, red on the left and white on the right, comes
+/// out at the session's size with the seam still in the middle: the VideoProc pass
+/// scales when the two regions differ, and the colours survive it.
+#[test]
+#[ignore = "needs a VAAPI device"]
+fn a_larger_source_is_scaled_into_the_picture() {
+    let display = display();
+    let vpp = Vpp::new(&display, W, H).expect("VideoProc");
+    let (sw, sh) = (W * 2, H * 2);
+    let src = display
+        .create_surface(VA_RT_FORMAT_RGB32, Some(VA_FOURCC_BGRA), sw, sh)
+        .expect("a BGRA surface");
+    let dst = display
+        .create_surface(VA_RT_FORMAT_YUV420, Some(VA_FOURCC_NV12), W, H)
+        .expect("an NV12 surface");
+    let mut picture = Vec::with_capacity((sw * sh * 4) as usize);
+    for _ in 0..sh {
+        picture.extend([0, 0, 255, 255].repeat(sw as usize / 2));
+        picture.extend([255, 255, 255, 255].repeat(sw as usize / 2));
+    }
+    display
+        .write_packed(src, &picture, sw as usize * 4)
+        .expect("upload the split picture");
+    vpp.convert(&display, src, (sw, sh), true, false, dst)
+        .expect("scale and convert");
+    near(
+        yuv_at(&display, dst, W as usize / 4, H as usize / 2),
+        (63, 102, 240),
+        "left, red",
+    );
+    near(
+        yuv_at(&display, dst, W as usize * 3 / 4, H as usize / 2),
+        (235, 128, 128),
+        "right, white",
+    );
+    display.destroy_surface(src);
+    display.destroy_surface(dst);
+    vpp.destroy(&display);
+}
+
 /// Ten bits: BT.2020 limited range puts red at Y 294 / Cb 387 / Cr 960. BT.709
 /// coefficients in a stream tagged BT.2020 would show as Y 250 — a picture that
 /// decodes fine and is the wrong red.
@@ -199,7 +244,7 @@ fn ten_bit_rgb_becomes_limited_range_bt2020_p010() {
     display
         .write_packed(src, &red, W as usize * 4)
         .expect("upload red");
-    vpp.convert(&display, src, true, true, dst)
+    vpp.convert(&display, src, (W, H), true, true, dst)
         .expect("convert red");
     let (y, cb, cr) = centre_yuv10(&display, dst);
     println!("ten-bit red: Y {y} Cb {cb} Cr {cr}");
@@ -238,6 +283,8 @@ fn the_session_encodes_what_ingest_gives_it() {
         enc.submit_packed(
             &bgra(i * 20, 0, 255 - i * 20),
             VA_FOURCC_BGRA,
+            W,
+            H,
             W as usize * 4,
         )
         .expect("ingest");
@@ -250,4 +297,36 @@ fn the_session_encodes_what_ingest_gives_it() {
         println!("wrote {path}");
     }
     assert!(stream.len() > 100, "{} bytes for ten frames", stream.len());
+}
+
+/// A session fed pictures twice its size — a mirrored 4K head into a client-sized
+/// encoder — scales them on ingest and encodes as usual.
+#[test]
+#[ignore = "needs a VAAPI encode device"]
+fn a_larger_picture_encodes_at_the_session_size() {
+    let params = SessionParams {
+        width: W,
+        height: H,
+        fps_num: 60,
+        fps_den: 1,
+        bitrate_bps: 4_000_000,
+        slots: 1,
+        max_num_reorder_frames: 0,
+        initial_qp: 26,
+        vbv_frames: 1.0,
+    };
+    let mut enc = open(params, CodecParams::H264).expect("an encoder");
+    let (sw, sh) = (W * 2, H * 2);
+    for i in 0..3u8 {
+        let picture = [i * 40, 0, 255 - i * 40, 255].repeat((sw * sh) as usize);
+        enc.submit_packed(&picture, VA_FOURCC_BGRA, sw, sh, sw as usize * 4)
+            .expect("scaled ingest");
+        let pic = enc.encode(i == 0).expect("encode");
+        assert_eq!(pic.is_idr, i == 0);
+        assert!(
+            pic.bytes.len() > 10,
+            "{} bytes for frame {i}",
+            pic.bytes.len()
+        );
+    }
 }

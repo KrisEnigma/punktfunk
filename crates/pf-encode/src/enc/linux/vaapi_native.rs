@@ -159,10 +159,15 @@ pub fn probe_can_encode(codec: Codec, ten_bit: bool) -> bool {
 }
 
 impl Encoder for NativeVaapiEncoder {
+    /// A mirrored head arrives larger and is scaled on ingest; the shape must match
+    /// within the even-floor's two pixels. Smaller, or another shape, is a host
+    /// size fault: fail here, not with a garbage picture.
     fn submit(&mut self, frame: &CapturedFrame) -> Result<()> {
+        let (fw, fh) = (u64::from(frame.width), u64::from(frame.height));
+        let (ew, eh) = (u64::from(self.params.width), u64::from(self.params.height));
         ensure!(
-            frame.width == self.params.width && frame.height == self.params.height,
-            "captured frame {}x{} != encoder {}x{}",
+            fw >= ew && fh >= eh && (fw * eh).abs_diff(fh * ew) < 2 * fw.max(fh),
+            "captured frame {}x{} does not fit encoder {}x{}",
             frame.width,
             frame.height,
             self.params.width,
@@ -175,7 +180,13 @@ impl Encoder for NativeVaapiEncoder {
         match &frame.payload {
             FramePayload::Cpu(bytes) => {
                 let (fourcc, bytes) = packed_rgb(frame.format, bytes, &mut self.repack)?;
-                session.submit_packed(bytes, fourcc, frame.width as usize * 4)?;
+                session.submit_packed(
+                    bytes,
+                    fourcc,
+                    frame.width,
+                    frame.height,
+                    frame.width as usize * 4,
+                )?;
             }
             FramePayload::Dmabuf(d) => {
                 let fd = d.fd.as_raw_fd();
@@ -236,6 +247,7 @@ impl Encoder for NativeVaapiEncoder {
     fn caps(&self) -> EncoderCaps {
         EncoderCaps {
             supports_rfi: true,
+            downscales_input: true,
             ..Default::default()
         }
     }

@@ -2279,12 +2279,13 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     &plan,
                     &*capturer,
                     &frame,
+                    (mode.width, mode.height),
                     hz,
-                    ed.enc_kbps(new_kbps) as u64 * 1000,
+                    |_, _| ed.enc_kbps(new_kbps) as u64 * 1000,
                     bit_depth,
                     au_seq,
                 ) {
-                    Ok(new_enc) => {
+                    Ok((new_enc, _)) => {
                         let applied_kbps = new_enc
                             .applied_bitrate_bps()
                             .map(|b| (b / 1000) as u32)
@@ -2942,8 +2943,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 &plan,
                 &*capturer,
                 &frame,
+                (mode.width, mode.height),
                 actual.refresh_hz,
-                src_kbps as u64 * 1000,
+                |_, _| src_kbps as u64 * 1000,
                 bit_depth,
                 au_seq,
             )
@@ -2955,7 +2957,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 )
             });
             let new_enc = match opened {
-                Ok(e) => e,
+                Ok((e, _)) => e,
                 Err(e) => {
                     encoder_resets += 1;
                     if encoder_resets > MAX_ENCODER_RESETS {
@@ -3668,12 +3670,13 @@ fn try_inplace_resize(
             &plan,
             &**capturer,
             &new_frame,
+            (new_mode.width, new_mode.height),
             effective_hz,
-            enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+            |_, _| enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
             bit_depth,
             wire_seq_base,
         ) {
-            Ok(e) => e,
+            Ok((e, _)) => e,
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"),
                     "resize: encoder open failed after the in-place mode set - full rebuild");
@@ -3937,19 +3940,22 @@ fn announce_pipeline_gap(gap: &tokio::sync::mpsc::UnboundedSender<u32>, gap_ms: 
     let _ = gap.send(gap_ms);
 }
 
-/// Open the session's encoder at `frame`'s geometry with the plan's chunking and the
-/// capturer's ring depth applied. An IDD-push source gets the driver's encoder instead, its
-/// wire-index domain continuing at `wire_seq_base` (the loop's `au_seq`).
+/// Open the session's encoder for `frame` — at the client's `negotiated` size when a larger
+/// head is mirrored (`session_plan::open_encoder_fitted`) — with the plan's chunking and the
+/// capturer's ring depth applied, and return the size it opened at. `bitrate_bps` is asked
+/// for that size. An IDD-push source gets the driver's encoder instead, its wire-index domain
+/// continuing at `wire_seq_base` (the loop's `au_seq`).
 #[allow(clippy::too_many_arguments)]
 fn open_session_encoder(
     plan: &crate::session_plan::SessionPlan,
     capturer: &dyn crate::capture::Capturer,
     frame: &crate::capture::CapturedFrame,
+    negotiated: (u32, u32),
     hz: u32,
-    bitrate_bps: u64,
+    bitrate_bps: impl Fn(u32, u32) -> u64,
     bit_depth: u8,
     wire_seq_base: u32,
-) -> Result<Box<dyn crate::encode::Encoder>> {
+) -> Result<(Box<dyn crate::encode::Encoder>, (u32, u32))> {
     #[cfg(target_os = "windows")]
     if plan.capture == crate::session_plan::CaptureBackend::IddPush {
         return crate::capture::open_driver_encoder(
@@ -3957,30 +3963,34 @@ fn open_session_encoder(
             capturer,
             (frame.width, frame.height),
             hz,
-            bitrate_bps,
+            bitrate_bps(frame.width, frame.height),
             bit_depth,
             wire_seq_base,
-        );
+        )
+        .map(|e| (e, (frame.width, frame.height)));
     }
     let _ = wire_seq_base;
-    let mut enc = crate::encode::open_video(
-        plan.codec,
-        frame.format,
-        frame.width,
-        frame.height,
-        hz,
-        bitrate_bps,
-        frame.is_cuda(),
-        bit_depth,
-        plan.chroma,
-        plan.cursor_blend,
-        plan.max_slices,
-    )?;
+    let (mut enc, size) =
+        crate::session_plan::open_encoder_fitted(frame, negotiated, |width, height| {
+            crate::encode::open_video(
+                plan.codec,
+                frame.format,
+                width,
+                height,
+                hz,
+                bitrate_bps(width, height),
+                frame.is_cuda(),
+                bit_depth,
+                plan.chroma,
+                plan.cursor_blend,
+                plan.max_slices,
+            )
+        })?;
     if let Some(c) = plan.wire_chunk {
         enc.set_wire_chunking(c);
     }
     enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
-    Ok(enc)
+    Ok((enc, size))
 }
 
 /// Rebuild the encoder in place and drop owed in-flight AUs. `false` = no in-place reset.
@@ -4129,37 +4139,44 @@ fn build_pipeline(
     if let Some(t) = trace {
         t.mark("first_frame");
     }
-    let bitrate_kbps = if bitrate_auto && (frame.width, frame.height) != (mode.width, mode.height) {
-        let delivered = punktfunk_core::Mode {
-            width: frame.width,
-            height: frame.height,
-            ..mode
-        };
-        let re = resolve_bitrate_kbps_for(plan.codec, 0, &delivered, plan.chroma, bit_depth);
-        if re != bitrate_kbps {
-            tracing::info!(
-                negotiated = %format!("{}x{}", mode.width, mode.height),
-                delivered = %format!("{}x{}", frame.width, frame.height),
-                from_kbps = bitrate_kbps,
-                to_kbps = re,
-                "the source delivers a different size than the session negotiated — re-resolved the \
-                 Automatic bitrate for the pixels actually being encoded"
-            );
+    let negotiated = (mode.width, mode.height);
+    // Automatic bitrate follows the pixels actually encoded: a mirrored head's fit, or
+    // whatever a virtual display delivered.
+    let kbps_for = |w: u32, h: u32| {
+        if bitrate_auto && (w, h) != negotiated {
+            let encoded = punktfunk_core::Mode {
+                width: w,
+                height: h,
+                ..mode
+            };
+            resolve_bitrate_kbps_for(plan.codec, 0, &encoded, plan.chroma, bit_depth)
+        } else {
+            bitrate_kbps
         }
-        re
-    } else {
-        bitrate_kbps
     };
-    let enc = open_session_encoder(
+    let (enc, encoded) = open_session_encoder(
         &plan,
         &*capturer,
         &frame,
+        negotiated,
         effective_hz,
-        enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+        |w, h| enc_of.enc_kbps(kbps_for(w, h)) as u64 * 1000,
         bit_depth,
         wire_seq_base,
     )
     .context("open video encoder")?;
+    let re = kbps_for(encoded.0, encoded.1);
+    if re != bitrate_kbps {
+        tracing::info!(
+            negotiated = %format!("{}x{}", mode.width, mode.height),
+            encoded = %format!("{}x{}", encoded.0, encoded.1),
+            from_kbps = bitrate_kbps,
+            to_kbps = re,
+            "the encoder opened at a size other than the session negotiated — re-resolved the \
+             Automatic bitrate for the pixels actually being encoded"
+        );
+    }
+    let bitrate_kbps = re;
     if let Some(t) = trace {
         t.mark("encoder_open");
     }

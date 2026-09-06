@@ -293,6 +293,59 @@ fn resolve_encoder() -> EncoderBackend {
     }
 }
 
+/// Whether this host streams a pinned physical head instead of a virtual display.
+pub(crate) fn mirrored() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::vdisplay::capture_monitor().is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Open the encoder for `frame` through `open(width, height)` and return the size it opened
+/// at. A mirrored head larger than the client's `negotiated` picture opens at the fit inside
+/// it and scales on ingest; a backend that cannot scale is reopened at the head's own size.
+pub(crate) fn open_encoder_fitted(
+    frame: &crate::capture::CapturedFrame,
+    negotiated: (u32, u32),
+    mut open: impl FnMut(u32, u32) -> anyhow::Result<Box<dyn crate::encode::Encoder>>,
+) -> anyhow::Result<(Box<dyn crate::encode::Encoder>, (u32, u32))> {
+    let captured = (frame.width, frame.height);
+    let fitted = if mirrored() {
+        punktfunk_core::render_scale::fit_inside(
+            frame.width,
+            frame.height,
+            negotiated.0,
+            negotiated.1,
+        )
+    } else {
+        captured
+    };
+    if fitted == captured {
+        return Ok((open(captured.0, captured.1)?, captured));
+    }
+    let enc = open(fitted.0, fitted.1)?;
+    if enc.caps().downscales_input {
+        tracing::info!(
+            ?captured,
+            encoder = ?fitted,
+            ?negotiated,
+            "mirror: the encoder opens at the client's size and scales on ingest"
+        );
+        return Ok((enc, fitted));
+    }
+    tracing::warn!(
+        ?captured,
+        wanted = ?fitted,
+        "mirror downscale is unavailable on this encode backend — encoding the head at its own size"
+    );
+    drop(enc);
+    Ok((open(captured.0, captured.1)?, captured))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

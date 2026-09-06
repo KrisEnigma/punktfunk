@@ -98,6 +98,8 @@ fn caps_from_wire(w: &encode::EncoderCapsWire) -> EncoderCaps {
         intra_refresh_recovery: w.intra_refresh_recovery != 0,
         intra_refresh_period: w.intra_refresh_period,
         blends_cursor: w.blends_cursor != 0,
+        // The driver encodes what DWM composes at the monitor's own size.
+        downscales_input: false,
     }
 }
 

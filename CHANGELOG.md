@@ -373,6 +373,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   there was no graphical session but left the host to fail its first connect with "no usable
   compositor"; it now pins the one backend that stands a session up, and the packaged host unit
   pulls PipeWire in so a lingering headless manager has capture and audio. Nothing to do.
+- **A mirrored head streams at the client's size on Linux.** The native VAAPI encoder opens
+  at the fit inside the negotiated picture and scales on ingest, so a 4K monitor mirrored to
+  a Steam Deck encodes 1280×720 instead of 4K; NVENC, Vulkan Video and PyroWave still encode
+  the head's own size and say so in the host log. Nothing to do.
 - **`open_video` and `reconfigure_bitrate` floor the bitrate at 500 kbps.** A zero from a bad
   ABR step used to fail an AMF rebuild and bisect NVENC down to 10 Mbps; every backend now sees
   at least the floor. Nothing to do.
