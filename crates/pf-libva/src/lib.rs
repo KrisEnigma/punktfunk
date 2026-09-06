@@ -135,6 +135,10 @@ pub struct Libva {
     pub sync_surface: unsafe extern "C" fn(VaDisplay, VaSurfaceId) -> VaStatus,
     pub export_surface_handle:
         unsafe extern "C" fn(VaDisplay, VaSurfaceId, c_uint, c_uint, *mut c_void) -> VaStatus,
+    /// Encode reads its bitstream back through a mapped coded buffer; decode has no
+    /// use for either, so both arrived with the encoder.
+    pub map_buffer: unsafe extern "C" fn(VaDisplay, VaBufferId, *mut *mut c_void) -> VaStatus,
+    pub unmap_buffer: unsafe extern "C" fn(VaDisplay, VaBufferId) -> VaStatus,
 }
 
 impl Libva {
@@ -177,6 +181,8 @@ impl Libva {
             let end_picture = get!(va, "vaEndPicture");
             let sync_surface = get!(va, "vaSyncSurface");
             let export_surface_handle = get!(va, "vaExportSurfaceHandle");
+            let map_buffer = get!(va, "vaMapBuffer");
+            let unmap_buffer = get!(va, "vaUnmapBuffer");
             Ok(Libva {
                 get_display_drm,
                 initialize,
@@ -197,6 +203,8 @@ impl Libva {
                 end_picture,
                 sync_surface,
                 export_surface_handle,
+                map_buffer,
+                unmap_buffer,
                 _va: va,
                 _drm: drm,
             })
