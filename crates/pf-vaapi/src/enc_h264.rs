@@ -62,6 +62,10 @@ const _: () = {
 
 /// `VAEntrypointEncSlice` — the slice-level encode entrypoint both drivers expose.
 pub const VA_ENTRYPOINT_ENC_SLICE: i32 = 6;
+/// `VAEntrypointEncSliceLP` — Intel's VDEnc, the fixed-function path; AMD has none.
+/// Measured on the UHD 750: `EncSlice` needs 17 ms for a 1080p HEVC picture, past
+/// the 60 fps budget, and this one is the way under it.
+pub const VA_ENTRYPOINT_ENC_SLICE_LP: i32 = 8;
 
 /// Rate-control modes, as `VAConfigAttribRateControl` values. CBR is the only one
 /// both radeonsi and iHD advertise for every profile we open, so it is the default.

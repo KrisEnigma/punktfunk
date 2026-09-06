@@ -417,6 +417,15 @@ impl Display {
     /// Asked before `vaCreateConfig` so an unsupported profile is a named refusal,
     /// not a driver status code.
     pub fn require_entrypoint(&self, profile: c_int) -> Result<()> {
+        let vld = pf_vaapi::VA_ENTRYPOINT_VLD as c_int;
+        if !self.entrypoints(profile)?.contains(&vld) {
+            bail!("this device has no VLD decode entrypoint for VAProfile {profile}");
+        }
+        Ok(())
+    }
+
+    /// Every entrypoint the driver offers for `profile`.
+    pub fn entrypoints(&self, profile: c_int) -> Result<Vec<c_int>> {
         // SAFETY: `vaMaxNumEntrypoints` returns the array size this display needs;
         // the vector is allocated to exactly that and `count` is a local written
         // through by the call.
@@ -436,12 +445,9 @@ impl Display {
                     &mut count,
                 ),
             )?;
-            let vld = pf_vaapi::VA_ENTRYPOINT_VLD as c_int;
-            if !entrypoints[..count.clamp(0, max) as usize].contains(&vld) {
-                bail!("this device has no VLD decode entrypoint for VAProfile {profile}");
-            }
+            entrypoints.truncate(count.clamp(0, max) as usize);
+            Ok(entrypoints)
         }
-        Ok(())
     }
 
     /// libva copies a non-null `data` before returning, so the caller's structs may

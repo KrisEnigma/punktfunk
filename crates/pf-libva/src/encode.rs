@@ -105,6 +105,9 @@ struct Slot {
 pub struct Encoder {
     display: Display,
     codec: Codec,
+    /// `VAEntrypointEncSliceLP` where the driver has it: Intel's fixed-function
+    /// VDEnc, the only path under the frame budget there. AMD has only `EncSlice`.
+    entrypoint: c_int,
     /// HDR10 static metadata, written as an SEI with every HEVC IDR.
     hdr: Option<HdrStatic>,
     /// HEVC picture order count of the next picture; 0 after an IDR.
@@ -157,6 +160,40 @@ impl Encoder {
                 (vahevc::VA_PROFILE_HEVC_MAIN10, VA_RT_FORMAT_YUV420_10)
             }
         };
+        // Low power where it exists and rate-controls, unless
+        // `PUNKTFUNK_VAAPI_LOW_POWER=0` — the libav path's knob, kept so an A/B pins
+        // the same entrypoint on both. VDEnc's bitrate control is HuC firmware; a
+        // box without it (the passthrough VM) offers CQP only there.
+        let entrypoints = display.entrypoints(profile)?;
+        let allow_lp = std::env::var("PUNKTFUNK_VAAPI_LOW_POWER")
+            .ok()
+            .is_none_or(|v| v != "0");
+        let lp_has_cbr = || {
+            let mut rc = [VaConfigAttrib {
+                kind: VA_CONFIG_ATTRIB_RATE_CONTROL,
+                value: 0,
+            }];
+            // SAFETY: `rc` is a live array of one entry the call fills in place.
+            let status = unsafe {
+                (display.va.get_config_attributes)(
+                    display.display,
+                    profile,
+                    vah::VA_ENTRYPOINT_ENC_SLICE_LP,
+                    rc.as_mut_ptr().cast::<c_void>(),
+                    1,
+                )
+            };
+            status == crate::VA_STATUS_SUCCESS && rc[0].value & vah::VA_RC_CBR != 0
+        };
+        let entrypoint =
+            if allow_lp && entrypoints.contains(&vah::VA_ENTRYPOINT_ENC_SLICE_LP) && lp_has_cbr() {
+                vah::VA_ENTRYPOINT_ENC_SLICE_LP
+            } else if entrypoints.contains(&vah::VA_ENTRYPOINT_ENC_SLICE) {
+                vah::VA_ENTRYPOINT_ENC_SLICE
+            } else {
+                bail!("no encode entrypoint for profile {profile} ({entrypoints:?})");
+            };
+        tracing::info!(profile, entrypoint, "VAAPI encode entrypoint");
 
         // Ask the driver what it supports before telling it what we want.
         // `vaCreateConfig` does not reject an attribute it dislikes — it drops it and
@@ -191,7 +228,7 @@ impl Encoder {
             (display.va.get_config_attributes)(
                 display.display,
                 profile,
-                vah::VA_ENTRYPOINT_ENC_SLICE,
+                entrypoint,
                 probe.as_mut_ptr().cast::<c_void>(),
                 probe.len() as c_int,
             )
@@ -262,7 +299,7 @@ impl Encoder {
             (display.va.create_config)(
                 display.display,
                 profile,
-                vah::VA_ENTRYPOINT_ENC_SLICE,
+                entrypoint,
                 attribs.as_ptr() as *mut c_void,
                 attribs.len() as c_int,
                 &mut config,
@@ -332,6 +369,7 @@ impl Encoder {
         Ok(Self {
             display,
             codec,
+            entrypoint,
             hdr: None,
             poc: 0,
             config,
@@ -354,6 +392,11 @@ impl Encoder {
     /// The `wire` the next picture will carry.
     pub fn next_wire(&self) -> i64 {
         self.wire
+    }
+
+    /// Whether the session runs on the driver's low-power entrypoint.
+    pub fn low_power(&self) -> bool {
+        self.entrypoint == vah::VA_ENTRYPOINT_ENC_SLICE_LP
     }
 
     /// The trusted references, as `(slot, wire)` — what `rfi::plan_slot_recovery`
