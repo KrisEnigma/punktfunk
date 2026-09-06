@@ -1145,4 +1145,32 @@ mod tests {
             "no truncated unit was rejected - the test proves nothing"
         );
     }
+
+    /// The two OBU header bits a host controls and this parser used to assert on.
+    /// `parse_obu_header` runs before any type dispatch, so both are reachable on the
+    /// first byte of any unit; an abort there takes the decoding thread with it.
+    /// Bit 0 is `obu_reserved_1bit`, bit 1 `obu_has_size_field`.
+    #[test]
+    fn a_reserved_obu_header_bit_is_an_error_not_a_panic() {
+        let first = IvfIterator::new(AV1_25FPS).next().expect("a first packet");
+
+        for (label, byte) in [
+            ("obu_reserved_1bit set", first[0] | 0x01),
+            ("obu_has_size_field cleared", first[0] & !0x02),
+        ] {
+            let mut au = first.to_vec();
+            au[0] = byte;
+            let mut planner = Av1Planner::new();
+            assert!(
+                planner.plan_au(&au).is_err(),
+                "{label} must be a plan error, not a panic"
+            );
+        }
+
+        // The unmodified unit still plans, or the two cases above prove nothing.
+        assert!(
+            Av1Planner::new().plan_au(first).is_ok(),
+            "the pristine first packet must still plan"
+        );
+    }
 }

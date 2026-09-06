@@ -14,7 +14,7 @@
 
 use std::collections::VecDeque;
 use std::mem::offset_of;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pf_driver_proto::encode as wire;
@@ -432,6 +432,8 @@ pub struct Attached {
     session: Option<Arc<EncodeSession>>,
     seen_gen: u32,
     cadence: Cadence,
+    /// One line per worker, not one per discarded surface.
+    warned_no_pool: AtomicBool,
 }
 
 impl Attached {
@@ -441,6 +443,7 @@ impl Attached {
             session: None,
             seen_gen: u32::MAX,
             cadence: Cadence::new(),
+            warned_no_pool: AtomicBool::new(false),
         }
     }
 
@@ -453,6 +456,14 @@ impl Attached {
         self.seen_gen = generation;
         self.pool = monitor.pool();
         self.session = monitor.encode();
+        // Which pool this worker now fills, so it can be matched against the one the encode
+        // thread drains: a worker filling a pool nobody drains starves the encoder silently.
+        dbglog!(
+            "[pf-vd] pool attach: gen {} -> pool {:?} session {}",
+            generation,
+            self.pool.as_ref().map(Arc::as_ptr),
+            self.session.is_some()
+        );
     }
 
     /// The hook, per acquired surface (see [`Pool::offer`]). A pool on another device epoch
@@ -461,6 +472,12 @@ impl Attached {
     /// `FinishedProcessingFrame`.
     pub fn offer(&self, device: &Direct3DDevice, tex: &ID3D11Texture2D, display_qpc: u64) -> bool {
         let Some(pool) = &self.pool else {
+            // No pool attached: every acquired surface goes nowhere, with nothing else logging it.
+            if !self.warned_no_pool.swap(true, Ordering::AcqRel) {
+                dbglog!(
+                    "[pf-vd] pool attach: NO pool for this worker - surfaces are being discarded"
+                );
+            }
             return false;
         };
         let session = self.session.as_deref();
@@ -469,6 +486,13 @@ impl Attached {
             Offer::Dropped(n) => {
                 if let Some(s) = session {
                     s.section.store_u64(offset_of!(AuHeader, dropped_total), n);
+                }
+                // A pool with no free slot means the encode thread is not releasing them. Rate
+                // limited: this fires per frame once the encoder stops draining.
+                if n == 1 || n % 512 == 0 {
+                    dbglog!(
+                        "[pf-vd] pool: no free slot - dropped {n} surfaces (encoder not draining)"
+                    );
                 }
             }
             Offer::Taken(seq) => {
@@ -481,6 +505,14 @@ impl Attached {
                 if let Some(s) = session
                     && !s.stale.swap(true, Ordering::AcqRel)
                 {
+                    // Say so in the header too. Only a fresh SET_ENCODE rebuilds the pool, and
+                    // the host cannot ask for one it never learns it needs: every surface is
+                    // dropped here while its telemetry still reads a healthy open encoder, so the
+                    // stream goes black until an unrelated timeout happens to rebuild it.
+                    s.section.store_u32(
+                        offset_of!(AuHeader, encoder_state),
+                        pf_driver_proto::encode::au::ENCODER_WEDGED,
+                    );
                     dbglog!(
                         "[pf-vd] encode: pool cannot take the surface - got {}x{} fmt {}, pool wants {}x{} fmt {} (epoch {} vs {}) - session stale until the next SET_ENCODE",
                         got.0,

@@ -114,8 +114,6 @@ pub struct Monitor {
     /// Bumped (Release) by every session install or removal, and by every pool change. The
     /// drain loop compares it with its last-seen value and re-reads the slots only then.
     pub encode_gen: AtomicU32,
-    /// Publish-token generations handed out so far ([`Self::next_encode_generation`]).
-    encode_generation: AtomicU32,
     /// The render LUID of the last swap-chain assignment, packed; `0` = none yet. The pool
     /// and the encoder open on this device, the one the drain worker acquires from.
     render_luid: std::sync::atomic::AtomicI64,
@@ -156,10 +154,15 @@ impl Monitor {
             encode: Mutex::new(None),
             pool: Mutex::new(None),
             encode_gen: AtomicU32::new(0),
-            encode_generation: AtomicU32::new(0),
             render_luid: std::sync::atomic::AtomicI64::new(0),
             gone: AtomicBool::new(false),
         }
+    }
+
+    /// Whether [`teardown`](Self::teardown) has run; a waiter stops rather than block on a
+    /// monitor that is going away.
+    pub fn gone(&self) -> bool {
+        self.gone.load(Ordering::Acquire)
     }
 
     /// Record the render adapter a swap-chain was just assigned on.
@@ -182,11 +185,13 @@ impl Monitor {
         lock(&self.cursor).cell.clone()
     }
 
-    /// The next publish-token generation: one per `SET_ENCODE` on this monitor, never 0. The
-    /// host checks it against the section a session mapped, so it only needs to be unique
-    /// within one monitor's life.
+    /// The next publish-token generation: one per `SET_ENCODE`, never 0, and unique for the
+    /// driver's life. Per monitor is not enough — a re-arrival keeps the target id and starts a
+    /// fresh monitor at zero, so the replacement session took the same token as the one it
+    /// replaced and a stale close matched it exactly.
     pub fn next_encode_generation(&self) -> u32 {
-        self.encode_generation.fetch_add(1, Ordering::Relaxed) + 1
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Install an encode session and wake the drain worker so an idle display picks it up
@@ -215,6 +220,24 @@ impl Monitor {
     /// Remove the live session, for the caller to stop with no lock held.
     pub fn take_encode(&self) -> Option<Arc<EncodeSession>> {
         let session = take(&self.encode);
+        if session.is_some() {
+            self.bump_encode_gen();
+        }
+        session
+    }
+
+    /// Remove the live session only if it IS `generation`, matched under the lock. A proxy
+    /// closing the session it owns must never take the one that replaced it: a mid-stream resize
+    /// installs the replacement first, so an unconditional take leaves the monitor encoding
+    /// nothing while the drain worker keeps filling its pool.
+    pub fn take_encode_if(&self, generation: u32) -> Option<Arc<EncodeSession>> {
+        let session = {
+            let mut slot = lock(&self.encode);
+            match slot.as_ref() {
+                Some(live) if live.generation == generation => slot.take(),
+                _ => None,
+            }
+        };
         if session.is_some() {
             self.bump_encode_gen();
         }
@@ -603,6 +626,24 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
     true
 }
 
+/// The modes a monitor advertises. A seat rides a remote-session adapter, which IddCx obliges to
+/// declare `USE_SMALLEST_MODE`, and the OS then drives the monitor at the SMALLEST mode on the
+/// list — so a seat offers exactly what the client asked for and nothing else. Adding the usual
+/// fallbacks there pins every seat to the smallest of those instead of the client's resolution.
+fn advertised_modes(requested: Mode) -> Vec<Mode> {
+    let mut modes = vec![requested];
+    if !crate::adapter::is_seat_role() {
+        modes.extend(vdisplay::default_modes());
+    }
+    modes
+}
+
+/// The seat placeholder's owner and session. Pid 0 is never a requestor, so the pair cannot
+/// collide with a host's. It stays for the session's life: it holds the only display path the
+/// remoting stack commits, and a monitor arriving into an empty topology gets none of its own.
+pub const SEAT_PLACEHOLDER_OWNER: u32 = 0;
+pub const SEAT_PLACEHOLDER_SESSION: u64 = 0;
+
 /// `IOCTL_ADD`: create + arrive `owner`'s virtual monitor at the requested mode, named by
 /// `req.preferred_monitor_id` (the host's per-client stable id; `0` = lowest free) and
 /// advertising the client display's luminance volume in its EDID (all-zero = the built-in
@@ -639,12 +680,11 @@ pub fn create_monitor(
         );
         remove_monitor(owner, session_id);
     }
-    let mut modes = vec![Mode {
+    let modes = advertised_modes(Mode {
         width,
         height,
         refresh_rates: vec![refresh],
-    }];
-    modes.extend(vdisplay::default_modes());
+    });
     let monitor = registry::insert(owner, session_id, hw_cursor, preferred_id, modes);
     let id = monitor.id;
 
@@ -746,12 +786,14 @@ pub fn update_monitor_modes(
     };
     let (old_modes, new_modes) = {
         let mut modes = lock(&m.modes);
-        let mut new_modes = vec![Mode {
+        let mut new_modes = advertised_modes(Mode {
             width,
             height,
             refresh_rates: vec![refresh],
-        }];
-        vdisplay::union_modes(&mut new_modes, &modes);
+        });
+        if !crate::adapter::is_seat_role() {
+            vdisplay::union_modes(&mut new_modes, &modes);
+        }
         (
             core::mem::replace(&mut *modes, new_modes.clone()),
             new_modes,

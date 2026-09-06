@@ -6,7 +6,9 @@
 use super::shared::*;
 use std::sync::atomic::Ordering;
 
-/// Deliberate stop: skip keep-alive linger and apply `game_on_session_end`.
+/// Stop the session
+///
+/// A deliberate stop: skip keep-alive linger and apply `game_on_session_end`.
 #[utoipa::path(
     delete,
     path = "/session",
@@ -30,7 +32,9 @@ pub(crate) async fn stop_session(State(st): State<Arc<MgmtState>>) -> StatusCode
     StatusCode::NO_CONTENT
 }
 
-/// End games waiting out the reconnect window. Does not touch a live session
+/// End waiting games
+///
+/// Ends games waiting out the reconnect window. Does not touch a live session
 /// (`DELETE /session` plus `game_on_session_end`).
 #[utoipa::path(
     post,
@@ -98,7 +102,9 @@ pub(crate) async fn get_session_settings() -> Json<SessionSettingsState> {
     Json(session_settings_state())
 }
 
-/// Persist (clamped). Takes effect on the next decision, including a session
+/// Set the session policy
+///
+/// Persisted clamped. Takes effect on the next decision, including a session
 /// already streaming — policy is read at session end, not start.
 #[utoipa::path(
     put,

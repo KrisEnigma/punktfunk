@@ -47,6 +47,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`libav-fallback` feature on `pf-encode`, on by default in `punktfunk-host`.** The libavcodec
+  NVENC and VAAPI backends sit behind it on Linux, so a `--no-default-features` host links no
+  FFmpeg and the native VAAPI session answers the codec probes itself. Packagers change nothing;
+  the default build links the FFmpeg it did.
 - **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
   and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
   rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.
@@ -282,6 +286,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **AMD and Intel Linux hosts encode H.264 and HEVC through the native VAAPI session.** It
+  replaces the libavcodec path on radeonsi and iHD: a packet loss is answered on a P picture
+  instead of a full IDR, a bitrate step lands in place, and HEVC Main 10 carries its HDR10
+  metadata. Nothing to do; `PUNKTFUNK_VAAPI_NATIVE=0` returns a host to the libav path, and a
+  native open that fails falls back to it on its own.
 - **The Windows driver's diagnostics reach `host.log`.** The encoder runs inside WUDFHost, so its
   backend rejections, bitrate retargets and wedges used to need `PFVD_DEBUG_LOG` and a file in
   LocalService's temp directory; the host now drains them over `IOCTL_DRAIN_LOG` at the keepalive
@@ -361,6 +370,20 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   first frame, so the driver answered the host's one capability read with defaults and pinned
   every session to `supports_rfi: false`, which turned every lost frame into a full IDR instead
   of one re-referenced P frame. Update host and driver together; nothing to configure.
+- **The guided installer starts the web console it installs.** It enabled `punktfunk-web` only
+  when the unit existed before the install ran, so a fresh box got a console that never answered
+  on 47992 and a warning that it was "not installed". Nothing to do; a re-run enables it.
+- **A box with no desktop installed gets `PUNKTFUNK_COMPOSITOR=gamescope`.** The installer knew
+  there was no graphical session but left the host to fail its first connect with "no usable
+  compositor"; it now pins the one backend that stands a session up, and the packaged host unit
+  pulls PipeWire in so a lingering headless manager has capture and audio. Nothing to do.
+- **A mirrored head streams at the client's size on Linux.** The native VAAPI encoder opens
+  at the fit inside the negotiated picture and scales on ingest, so a 4K monitor mirrored to
+  a Steam Deck encodes 1280×720 instead of 4K; NVENC, Vulkan Video and PyroWave still encode
+  the head's own size and say so in the host log. Nothing to do.
+- **`open_video` and `reconfigure_bitrate` floor the bitrate at 500 kbps.** A zero from a bad
+  ABR step used to fail an AMF rebuild and bisect NVENC down to 10 Mbps; every backend now sees
+  at least the floor. Nothing to do.
 - **A display that re-lights itself mid-stream is parked for the session.** A standby TV on a
   Windows host re-lit 35–100 s after every exclusive isolate and each eviction cost the stream a
   0.2–1.8 s rebuild, so after the first re-assert the host PnP-disables that panel — journaled,
@@ -413,6 +436,29 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   dark — left the only lit screen at a non-zero origin, an arrangement no display KCM produces
   and one Plasma places popups off: the launcher pinned to the right edge, the desktop context
   menu to the left. Nothing to do beyond the update.
+- **A seat captures its own session's audio, not the machine's.** A seat host leaves the box's
+  default playback device alone, and the loopback capture read that as "capture whatever the
+  default is" — so seats on one box shared an endpoint, or found none at all and retried forever;
+  a remote session also has no audio endpoint whatsoever until its RDP client asks for playback
+  redirection. The seats keeper asks for it and each seat captures the endpoint its own session
+  owns, which is what keeps one seat's audio out of another's — Valve's Remote Play streaming
+  drivers stay a console-host prerequisite, not a seat one.
+- **A seat's display survives its host taking over.** The placeholder monitor a seat adapter
+  presents at init holds the only display path the remoting stack ever commits, so departing it
+  emptied the session's display config and the host's own monitor arrived where no path, no mode
+  commit and no swap chain could follow. It stays for the session's life now, and a seat isolates
+  its topology as a console host does — display config is per session, so it never reaches a
+  neighbour.
+- **A virtual Xbox pad enumerates on Windows Server.** Its install section attaches Microsoft's
+  `xinputhid` filter, which Server does not ship, and PnP treats a filter service it cannot
+  resolve as fatal — the devnode sat at `CM_PROB_REGISTRY` with no driver serving it. The host
+  probes for the service once and falls back to an unfiltered model line, so the pad works there;
+  classic XInput needs that service either way and is unaffected.
+- **A seat mints its own virtual pointer.** The resident HID mouse took pad index 0 on every
+  host, so the second seat on a box was refused the bootstrap mailbox `Global\pfmouse-boot-0`
+  and streamed a cursor-less desktop with no HID display-wake kick. A seat host now names the
+  mouse after the display connector it owns, so nothing is shared; the console host keeps index
+  0 and is unchanged.
 - **The Windows host is per-monitor DPI aware from launch.** Windows hands a DPI-unaware process
   the cursor bitmap for the DPI it was started at, so a host started on a 300 % desktop kept
   forwarding a 96 px pointer onto the 96 DPI virtual display, three times too large on every
@@ -528,6 +574,16 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **The device-auth nonce cap evicts one challenge, not all of them.** An unauthenticated caller
   could flush every outstanding nonce with 256 requests to `POST /api/v1/auth/device/challenge`,
   cancelling a real browser's exchange in flight. Nothing to do.
+- **A reserved AV1 OBU header bit is a parse error, not an abort.** `parse_obu_header` asserted on
+  two wire bits in release and runs before any type dispatch, so one byte from a host ended the
+  client's decoding thread — and any corruption surviving FEC did the same. Nothing to do.
+- **`Welcome` audio fields are bounded before they size a buffer.** An `audio_rate_hz` off the
+  supported set now folds to 48 kHz and a non-zero `audio_frame_us` floors at 1 ms, where a hostile
+  or corrupt value reached a multi-gigabyte allocation. Nothing to do; 44 100 still arrives verbatim.
+- **The CI fork gate fails closed.** Six jobs on the persistent signing runners ran a pull request
+  whose head-repo fork flag Gitea left unset, and now require the head repo to be this repo. Turn on
+  Gitea's outside-collaborator approval as well; a skipped job on an internal PR means the context
+  field is absent.
 
 ---
 

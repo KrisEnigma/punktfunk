@@ -616,7 +616,8 @@
         "tags": [
           "host"
         ],
-        "summary": "Compositor backends the host can drive, with availability and the `Auto` default.\nClients pass `id` to `--compositor` or `PUNKTFUNK_COMPOSITOR_*`.",
+        "summary": "List compositor backends",
+        "description": "Each row carries availability and whether `Auto` resolves to it. Clients pass\n`id` to `--compositor` or `PUNKTFUNK_COMPOSITOR_*`.",
         "operationId": "listCompositors",
         "responses": {
           "200": {
@@ -650,7 +651,8 @@
         "tags": [
           "diagnostics"
         ],
-        "summary": "Last cached health report. Probes run at startup and on `POST /diagnostics/refresh`.",
+        "summary": "Last cached health report",
+        "description": "Probes run at startup and on `POST /diagnostics/refresh`.",
         "operationId": "getDiagnostics",
         "responses": {
           "200": {
@@ -681,7 +683,8 @@
         "tags": [
           "diagnostics"
         ],
-        "summary": "Re-run every probe and return the new report. Poll GET; membership and udev\nrules only change after the operator changes them.",
+        "summary": "Re-run every probe",
+        "description": "Returns the new report. Poll GET; membership and udev rules only change\nafter the operator changes them.",
         "operationId": "refreshDiagnostics",
         "responses": {
           "200": {
@@ -1271,7 +1274,8 @@
         "tags": [
           "session"
         ],
-        "summary": "End games waiting out the reconnect window. Does not touch a live session\n(`DELETE /session` plus `game_on_session_end`).",
+        "summary": "End waiting games",
+        "description": "Ends games waiting out the reconnect window. Does not touch a live session\n(`DELETE /session` plus `game_on_session_end`).",
         "operationId": "endGame",
         "requestBody": {
           "content": {
@@ -1416,7 +1420,8 @@
         "tags": [
           "host"
         ],
-        "summary": "Liveness probe. Unauthenticated (`require_auth` exempts it).",
+        "summary": "Liveness probe",
+        "description": "Unauthenticated: `require_auth` exempts it.",
         "operationId": "getHealth",
         "responses": {
           "200": {
@@ -1676,7 +1681,8 @@
         "tags": [
           "library"
         ],
-        "summary": "Create a user-curated title. The host assigns a stable id, returned in the body.",
+        "summary": "Create a custom title",
+        "description": "A user-curated entry. The host assigns a stable id, returned in the body.",
         "operationId": "createCustomGame",
         "requestBody": {
           "content": {
@@ -1943,7 +1949,7 @@
         "tags": [
           "library"
         ],
-        "summary": "Replace a provider's library entries (declarative reconcile).",
+        "summary": "Replace a provider's entries",
         "description": "The payload is the desired set, keyed by `external_id`. The host diffs, keeps surviving\nhost ids stable, and drops orphans. Empty array removes everything this provider owns.\nEmits `library.changed` with the provider as `source`.\n\n`?store=` claims that store: entries surface as `<store>:<external_id>` with the store\nbadge. One provider per store; a second claimant gets 409. Release the claim with\n`DELETE`, not an empty reconcile — a store can have zero installed titles.",
         "operationId": "reconcileProviderEntries",
         "parameters": [
@@ -2039,7 +2045,8 @@
         "tags": [
           "library"
         ],
-        "summary": "Delete every entry owned by `{provider}` (plugin uninstall). Emits `library.changed`\nwhen anything was removed.",
+        "summary": "Delete a provider's entries",
+        "description": "Everything owned by `{provider}`, for plugin uninstall. Emits `library.changed`\nwhen anything was removed.",
         "operationId": "deleteProviderEntries",
         "parameters": [
           {
@@ -2164,8 +2171,8 @@
         "tags": [
           "library"
         ],
-        "summary": "List every game source on this host with its enable state.",
-        "description": "One row per installed library plugin. Sources default to enabled; disabling hides titles\nfrom the next read. The custom store is not a source and is always on. Every row is\n`origin: \"plugin\"`.",
+        "summary": "List library sources",
+        "description": "One row per installed library plugin, with its enable state. Sources default to\nenabled; disabling hides titles from the next read. The custom store is not a\nsource and is always on. Every row is\n`origin: \"plugin\"`.",
         "operationId": "listLibraryScanners",
         "responses": {
           "200": {
@@ -2275,7 +2282,8 @@
         "tags": [
           "host"
         ],
-        "summary": "Loopback tray summary. Unauthenticated; `require_auth` admits loopback only.",
+        "summary": "Loopback tray summary",
+        "description": "Unauthenticated; `require_auth` admits loopback only.",
         "operationId": "getLocalSummary",
         "responses": {
           "200": {
@@ -2309,8 +2317,8 @@
         "tags": [
           "logs"
         ],
-        "summary": "In-memory ring at DEBUG and above, independent of `RUST_LOG`.",
-        "description": "Poll with `after` = last `next`. `dropped: true` means the ring wrapped\nbetween polls and entries were evicted.",
+        "summary": "Read the log ring",
+        "description": "In-memory, DEBUG and above, independent of `RUST_LOG`. Poll with `after` = last\n`next`. `dropped: true` means the ring wrapped between polls and entries were\nevicted.",
         "operationId": "logsGet",
         "parameters": [
           {
@@ -3239,7 +3247,8 @@
         "tags": [
           "session"
         ],
-        "summary": "Deliberate stop: skip keep-alive linger and apply `game_on_session_end`.",
+        "summary": "Stop the session",
+        "description": "A deliberate stop: skip keep-alive linger and apply `game_on_session_end`.",
         "operationId": "stopSession",
         "responses": {
           "204": {
@@ -3324,7 +3333,8 @@
         "tags": [
           "session"
         ],
-        "summary": "Persist (clamped). Takes effect on the next decision, including a session\nalready streaming — policy is read at session end, not start.",
+        "summary": "Set the session policy",
+        "description": "Persisted clamped. Takes effect on the next decision, including a session\nalready streaming — policy is read at session end, not start.",
         "operationId": "setSessionSettings",
         "requestBody": {
           "content": {
@@ -3531,7 +3541,8 @@
         "tags": [
           "stats"
         ],
-        "summary": "Saved capture summaries (`meta` only, no sample body), newest first.",
+        "summary": "List saved captures",
+        "description": "Summaries only (`meta`, no sample body), newest first.",
         "operationId": "statsRecordingsList",
         "responses": {
           "200": {
@@ -4343,8 +4354,8 @@
         "tags": [
           "update"
         ],
-        "summary": "Start one-click apply for install kinds that support it.",
-        "description": "No version or URL in the body — the host installs the verified manifest.\nPoll `GET /update/status` (`job`); after restart, the outcome is `last_result`.",
+        "summary": "Start a one-click update",
+        "description": "Only for install kinds that support it. No version or URL in the body — the host\ninstalls the verified manifest. Poll `GET /update/status` (`job`); after restart,\nthe outcome is `last_result`.",
         "operationId": "applyUpdate",
         "requestBody": {
           "content": {

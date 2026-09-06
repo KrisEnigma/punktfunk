@@ -178,9 +178,26 @@ pub(crate) fn log_at(level: u8, s: &str) {
     if let Some(m) = file_appender()
         && let Ok(mut f) = m.lock()
     {
-        let _ = writeln!(f, "{s}");
+        let _ = writeln!(f, "{} {s}", utc_hms_millis());
         let _ = f.flush();
     }
+}
+
+/// `HH:MM:SS.mmm` UTC for the file line. The host logs RFC3339 UTC, and without a shared clock
+/// on both sides a driver line cannot be placed against the host event it explains — which is
+/// the whole question when frames stop. Date-free: same-day alignment is what a session needs.
+fn utc_hms_millis() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60,
+        now.subsec_millis()
+    )
 }
 
 // Always formats: the line is the host's only view of this process. One `String` per event costs

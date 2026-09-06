@@ -129,10 +129,12 @@ pub struct Encoder {
     /// Pictures encoded so far; the next one's `wire`.
     wire: i64,
     coded_buf: VaBufferId,
-    /// Ingest: every capture shape is converted into the input surface here.
+    /// Ingest: every capture shape is converted — a larger one scaled — into the
+    /// input surface here.
     vpp: Vpp,
-    /// Where CPU RGB lands before conversion, and the fourcc it was made for.
-    staging: Option<(VaSurfaceId, u32)>,
+    /// Where CPU RGB lands before conversion, and the (fourcc, width, height) it
+    /// was made for.
+    staging: Option<(VaSurfaceId, (u32, u32, u32))>,
     params: SessionParams,
     /// Frames encoded since the last IDR; `frame_num` in the slice header.
     frame_num: u16,
@@ -488,27 +490,33 @@ impl Encoder {
         })
     }
 
-    /// Ingest packed RGB from the CPU — eight-bit or ten-bit, by `fourcc` —
-    /// uploaded to a staging surface and converted on the GPU into the next input
-    /// surface at the session's depth.
-    pub fn submit_packed(&mut self, bytes: &[u8], fourcc: u32, row_bytes: usize) -> Result<()> {
+    /// Ingest a `width`×`height` packed RGB picture from the CPU — eight-bit or
+    /// ten-bit, by `fourcc` — uploaded to a staging surface and converted on the
+    /// GPU into the next input surface at the session's depth. A picture larger
+    /// than the session is scaled down on the way.
+    pub fn submit_packed(
+        &mut self,
+        bytes: &[u8],
+        fourcc: u32,
+        width: u32,
+        height: u32,
+        row_bytes: usize,
+    ) -> Result<()> {
         let rt_format = match rt_format_for(fourcc) {
             Some(rt @ (VA_RT_FORMAT_RGB32 | VA_RT_FORMAT_RGB32_10)) => rt,
             _ => bail!("no packed RGB ingest for fourcc {fourcc:#x}"),
         };
+        let shape = (fourcc, width, height);
         let staging = match self.staging {
-            Some((surface, f)) if f == fourcc => surface,
+            Some((surface, s)) if s == shape => surface,
             _ => {
                 if let Some((old, _)) = self.staging.take() {
                     self.display.destroy_surface(old);
                 }
-                let surface = self.display.create_surface(
-                    rt_format,
-                    Some(fourcc),
-                    self.params.width,
-                    self.params.height,
-                )?;
-                self.staging = Some((surface, fourcc));
+                let surface =
+                    self.display
+                        .create_surface(rt_format, Some(fourcc), width, height)?;
+                self.staging = Some((surface, shape));
                 surface
             }
         };
@@ -516,14 +524,16 @@ impl Encoder {
         self.vpp.convert(
             &self.display,
             staging,
+            (width, height),
             true,
             self.ten_bit(),
             self.input_surface(),
         )
     }
 
-    /// Ingest a capture dmabuf: imported for this picture, converted into the next
-    /// input surface at the session's depth, released.
+    /// Ingest a capture dmabuf: imported for this picture, converted — and scaled
+    /// down when larger — into the next input surface at the session's depth,
+    /// released.
     pub fn submit_dmabuf(&mut self, source: &DmabufSource) -> Result<()> {
         let rt_format = pf_vaapi::vpp::import_format(source.drm_fourcc)
             .map(|(_, rt)| rt)
@@ -534,6 +544,7 @@ impl Encoder {
         let converted = self.vpp.convert(
             &self.display,
             surface,
+            (source.width, source.height),
             is_rgb,
             self.ten_bit(),
             self.input_surface(),

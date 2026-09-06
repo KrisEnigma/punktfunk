@@ -6,8 +6,8 @@
 //! HDR10 SEI. Synchronous: `submit` encodes and `poll` hands the AU straight
 //! back, as the libav path does at `async_depth=1`.
 //!
-//! `PUNKTFUNK_ENCODER=vaapi-native` opens it; libav VAAPI stays the default and
-//! the A/B oracle until this has been measured against it.
+//! The default VAAPI arm for H.264 and HEVC; libav VAAPI is the fallback when an
+//! open fails, and the A/B oracle under `PUNKTFUNK_VAAPI_NATIVE=0`.
 
 use std::os::fd::AsRawFd as _;
 
@@ -128,11 +128,46 @@ impl NativeVaapiEncoder {
     }
 }
 
+/// Whether the host's render node offers an encode entrypoint for `codec`
+/// at this depth — what a native open needs. AV1 is not a native path.
+#[cfg(not(feature = "libav-fallback"))]
+pub fn probe_can_encode(codec: Codec, ten_bit: bool) -> bool {
+    use pf_vaapi::config::{VA_PROFILE_H264_HIGH, VA_PROFILE_HEVC_MAIN, VA_PROFILE_HEVC_MAIN10};
+    use pf_vaapi::enc_h264::{VA_ENTRYPOINT_ENC_SLICE, VA_ENTRYPOINT_ENC_SLICE_LP};
+    let profile = match (codec, ten_bit) {
+        (Codec::H264, false) => VA_PROFILE_H264_HIGH,
+        (Codec::H265, false) => VA_PROFILE_HEVC_MAIN,
+        (Codec::H265, true) => VA_PROFILE_HEVC_MAIN10,
+        _ => return false,
+    };
+    let node = pf_gpu::linux_render_node();
+    let display = match Libva::load().and_then(|va| Display::open_path(va, &node.to_string_lossy()))
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::info!(error = %format!("{e:#}"), "no VAAPI display to probe");
+            return false;
+        }
+    };
+    display
+        .entrypoints(profile)
+        .map(|e| {
+            e.iter()
+                .any(|&p| p == VA_ENTRYPOINT_ENC_SLICE || p == VA_ENTRYPOINT_ENC_SLICE_LP)
+        })
+        .unwrap_or(false)
+}
+
 impl Encoder for NativeVaapiEncoder {
+    /// A mirrored head arrives larger and is scaled on ingest; the shape must match
+    /// within the even-floor's two pixels. Smaller, or another shape, is a host
+    /// size fault: fail here, not with a garbage picture.
     fn submit(&mut self, frame: &CapturedFrame) -> Result<()> {
+        let (fw, fh) = (u64::from(frame.width), u64::from(frame.height));
+        let (ew, eh) = (u64::from(self.params.width), u64::from(self.params.height));
         ensure!(
-            frame.width == self.params.width && frame.height == self.params.height,
-            "captured frame {}x{} != encoder {}x{}",
+            fw >= ew && fh >= eh && (fw * eh).abs_diff(fh * ew) < 2 * fw.max(fh),
+            "captured frame {}x{} does not fit encoder {}x{}",
             frame.width,
             frame.height,
             self.params.width,
@@ -145,7 +180,13 @@ impl Encoder for NativeVaapiEncoder {
         match &frame.payload {
             FramePayload::Cpu(bytes) => {
                 let (fourcc, bytes) = packed_rgb(frame.format, bytes, &mut self.repack)?;
-                session.submit_packed(bytes, fourcc, frame.width as usize * 4)?;
+                session.submit_packed(
+                    bytes,
+                    fourcc,
+                    frame.width,
+                    frame.height,
+                    frame.width as usize * 4,
+                )?;
             }
             FramePayload::Dmabuf(d) => {
                 let fd = d.fd.as_raw_fd();
@@ -206,6 +247,7 @@ impl Encoder for NativeVaapiEncoder {
     fn caps(&self) -> EncoderCaps {
         EncoderCaps {
             supports_rfi: true,
+            downscales_input: true,
             ..Default::default()
         }
     }
@@ -390,5 +432,17 @@ mod tests {
             enc.poll().unwrap().unwrap().keyframe,
             "a rebuild starts with an IDR"
         );
+    }
+    /// The probe agrees with an open: H.264 and both HEVC depths yes, AV1 and
+    /// ten-bit H.264 no.
+    #[cfg(not(feature = "libav-fallback"))]
+    #[test]
+    #[ignore = "needs a real VAAPI device"]
+    fn native_probe_matches_open() {
+        assert!(probe_can_encode(Codec::H264, false));
+        assert!(probe_can_encode(Codec::H265, false));
+        assert!(probe_can_encode(Codec::H265, true));
+        assert!(!probe_can_encode(Codec::Av1, false));
+        assert!(!probe_can_encode(Codec::H264, true));
     }
 }

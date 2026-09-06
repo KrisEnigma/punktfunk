@@ -1700,6 +1700,7 @@ impl Encoder for AmfEncoder {
             // AMF emits no recovery-point SEI; host keeps the IDR path.
             intra_refresh_recovery: false,
             intra_refresh_period: 0,
+            downscales_input: false,
         }
     }
 

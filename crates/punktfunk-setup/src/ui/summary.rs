@@ -339,6 +339,7 @@ mod tests {
             floor: None,
             couch_box: false,
             graphical_seat: true,
+            desktop_sessions: true,
             sunshine_active: false,
             current_channel: None,
             installed_pf: vec![],
