@@ -402,7 +402,9 @@ pub(crate) struct LocalSummary {
     games: Vec<String>,
 }
 
-/// Liveness probe. Unauthenticated (`require_auth` exempts it).
+/// Liveness probe
+///
+/// Unauthenticated: `require_auth` exempts it.
 #[utoipa::path(
     get,
     path = "/health",
@@ -483,8 +485,10 @@ pub(crate) struct AvailableCompositor {
     default: bool,
 }
 
-/// Compositor backends the host can drive, with availability and the `Auto` default.
-/// Clients pass `id` to `--compositor` or `PUNKTFUNK_COMPOSITOR_*`.
+/// List compositor backends
+///
+/// Each row carries availability and whether `Auto` resolves to it. Clients pass
+/// `id` to `--compositor` or `PUNKTFUNK_COMPOSITOR_*`.
 #[utoipa::path(
     get,
     path = "/compositors",
@@ -617,7 +621,9 @@ pub(crate) async fn get_status(State(st): State<Arc<MgmtState>>) -> Json<Runtime
     })
 }
 
-/// Loopback tray summary. Unauthenticated; `require_auth` admits loopback only.
+/// Loopback tray summary
+///
+/// Unauthenticated; `require_auth` admits loopback only.
 #[utoipa::path(
     get,
     path = "/local/summary",

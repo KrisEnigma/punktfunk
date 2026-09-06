@@ -211,10 +211,11 @@ pub(crate) struct ScannerToggle {
     enabled: bool,
 }
 
-/// List every game source on this host with its enable state.
+/// List library sources
 ///
-/// One row per installed library plugin. Sources default to enabled; disabling hides titles
-/// from the next read. The custom store is not a source and is always on. Every row is
+/// One row per installed library plugin, with its enable state. Sources default to
+/// enabled; disabling hides titles from the next read. The custom store is not a
+/// source and is always on. Every row is
 /// `origin: "plugin"`.
 #[utoipa::path(
     get,
@@ -266,7 +267,9 @@ pub(crate) async fn set_library_scanner(
     }
 }
 
-/// Create a user-curated title. The host assigns a stable id, returned in the body.
+/// Create a custom title
+///
+/// A user-curated entry. The host assigns a stable id, returned in the body.
 #[utoipa::path(
     post,
     path = "/library/custom",
@@ -399,7 +402,7 @@ pub(crate) struct ReconcileQuery {
     store: Option<String>,
 }
 
-/// Replace a provider's library entries (declarative reconcile).
+/// Replace a provider's entries
 ///
 /// The payload is the desired set, keyed by `external_id`. The host diffs, keeps surviving
 /// host ids stable, and drops orphans. Empty array removes everything this provider owns.
@@ -515,7 +518,9 @@ pub(crate) async fn reconcile_provider_entries(
     }
 }
 
-/// Delete every entry owned by `{provider}` (plugin uninstall). Emits `library.changed`
+/// Delete a provider's entries
+///
+/// Everything owned by `{provider}`, for plugin uninstall. Emits `library.changed`
 /// when anything was removed.
 #[utoipa::path(
     delete,

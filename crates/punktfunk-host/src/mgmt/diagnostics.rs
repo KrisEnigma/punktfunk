@@ -7,7 +7,9 @@
 use super::shared::*;
 use crate::diagnostics::{CheckSource, DiagnosticsReport};
 
-/// Last cached health report. Probes run at startup and on `POST /diagnostics/refresh`.
+/// Last cached health report
+///
+/// Probes run at startup and on `POST /diagnostics/refresh`.
 #[utoipa::path(
     get,
     path = "/diagnostics",
@@ -22,8 +24,10 @@ pub(crate) async fn get_diagnostics() -> Json<DiagnosticsReport> {
     Json(crate::diagnostics::registry().report())
 }
 
-/// Re-run every probe and return the new report. Poll GET; membership and udev
-/// rules only change after the operator changes them.
+/// Re-run every probe
+///
+/// Returns the new report. Poll GET; membership and udev rules only change
+/// after the operator changes them.
 #[utoipa::path(
     post,
     path = "/diagnostics/refresh",
