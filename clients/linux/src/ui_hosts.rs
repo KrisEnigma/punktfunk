@@ -648,8 +648,8 @@ impl relm4::factory::FactoryComponent for HostCard {
                     // never resolves. Unchecked is not "not the default": a lone paired host
                     // is the default with nothing written.
                     if k.paired {
-                        // ponytail: one settings read per card build, not per frame — cards are
-                        // rebuilt on store changes only. Hoist if the list ever grows large.
+                        // One settings read per card build. Cards rebuild on store changes,
+                        // not per frame, so this is a file read per host per change.
                         let named = k.id.is_some()
                             && Settings::load().default_host.as_deref() == k.id.as_deref();
                         manage.append(
