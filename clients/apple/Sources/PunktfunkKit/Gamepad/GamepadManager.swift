@@ -105,6 +105,19 @@ public final class GamepadManager: ObservableObject {
     /// already observe this object for `active`.
     @Published public private(set) var lastKnownKind: PunktfunkConnection.GamepadType
 
+    /// A Steam Controller 2 is delivering state reports to `Sc2MenuPad` — iOS only, where
+    /// GameController surfaces no such device and `active` therefore stays nil with the pad in
+    /// the user's hands. Published because it is half of `uiPadConnected`; the pad's BUTTONS are
+    /// deliberately not published (`sc2MenuState` is polled instead — a 66 Hz @Published would
+    /// re-render every observing screen for every report).
+    @Published public private(set) var sc2MenuAttached = false
+
+    /// A controller the gamepad UI can be driven by: an extended GameController pad, or an SC2
+    /// only `Sc2MenuPad` can see. What `GamepadUIEnvironment.isActive` wants for
+    /// `gamepadConnected` — `active` alone would leave an iOS SC2 owner on the touch UI with a
+    /// controller attached, and `GamepadMenuInput` reads the same two sources.
+    public var uiPadConnected: Bool { active != nil || sc2MenuAttached }
+
     /// The user's pinned controller fingerprint ("" = automatic). Persisted; updating it
     /// reselects immediately, so a Settings Picker can bind straight to this.
     @Published public var preferredID: String {
@@ -143,6 +156,16 @@ public final class GamepadManager: ObservableObject {
         })
         for c in GCController.controllers() { connectOrder.append(ObjectIdentifier(c)) }
         rebuild()
+        #if os(iOS)
+        // Both switches behind the menu pad live in UserDefaults and only this app writes them,
+        // so one notification covers a Settings toggle of either without a call site to forget.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncSc2Menu() }
+        })
+        syncSc2Menu()
+        #endif
     }
 
     /// Re-read battery levels etc. (the notifications only fire on connect/disconnect) —
@@ -309,6 +332,61 @@ public final class GamepadManager: ObservableObject {
     public func releaseExternalPadIndex(_ index: UInt8) {
         externalIndices.remove(index)
     }
+
+    // MARK: - Steam Controller 2 (menu)
+
+    #if os(iOS)
+    /// The app-lifetime SC2 reader — see `Sc2MenuPad`. Nil whenever the switches below say
+    /// nothing could use it, so the radio and its permission prompt cost nothing by default.
+    private var sc2Menu: Sc2MenuPad?
+    /// A streaming `Sc2Capture` holds the physical pad (`holdSc2Hardware`).
+    private var sc2HardwareHeld = false
+    #endif
+
+    /// The live SC2 menu state for `GamepadMenuInput`'s poll — nil off iOS, and whenever no pad
+    /// is delivering. Polled rather than published: see `sc2MenuAttached`.
+    var sc2MenuState: Sc2Device.State? {
+        #if os(iOS)
+        return sc2Menu?.snapshot
+        #else
+        return nil
+        #endif
+    }
+
+    /// A streaming `Sc2Capture` is taking the pad (`true`) or handing it back. Two centrals
+    /// subscribed to one peripheral would double-feed it, so the menu pad stands down for the
+    /// stream and re-acquires after it. Only iOS has a menu pad to move.
+    func holdSc2Hardware(_ held: Bool) {
+        #if os(iOS)
+        guard held != sc2HardwareHeld else { return }
+        sc2HardwareHeld = held
+        syncSc2Menu()
+        #endif
+    }
+
+    #if os(iOS)
+    /// Start or stop the menu pad from the two switches that decide whether anything could use
+    /// it — the SC2 passthrough opt-in, which is what pays for the Bluetooth prompt, and the
+    /// gamepad UI switch — plus `holdSc2Hardware`. Runs on every defaults write, so it stays an
+    /// idempotent compare.
+    private func syncSc2Menu() {
+        let defaults = UserDefaults.standard
+        // `gamepadUIEnabled` defaults to ON, which `bool(forKey:)` alone cannot express.
+        let uiEnabled = (defaults.object(forKey: DefaultsKey.gamepadUIEnabled) as? Bool) ?? true
+        let wanted = defaults.bool(forKey: DefaultsKey.sc2Capture) && uiEnabled && !sc2HardwareHeld
+        guard wanted != (sc2Menu != nil) else { return }
+        guard wanted else {
+            sc2Menu?.stop()
+            sc2Menu = nil
+            sc2MenuAttached = false
+            return
+        }
+        let pad = Sc2MenuPad()
+        pad.onAttachChange = { [weak self] attached in self?.sc2MenuAttached = attached }
+        pad.start()
+        sc2Menu = pad
+    }
+    #endif
 
     /// The lowest wire pad index not already taken, or nil when all `GamepadWire.maxPads` are in
     /// use (pf-client-core's `lowest_free_index`).

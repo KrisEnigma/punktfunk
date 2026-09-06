@@ -171,7 +171,7 @@ struct ContentView: View {
     }
     private var gamepadUIActive: Bool {
         GamepadUIEnvironment.isActive(
-            gamepadConnected: gamepadManager.active != nil, enabledSetting: gamepadUIEnabled,
+            gamepadConnected: gamepadManager.uiPadConnected, enabledSetting: gamepadUIEnabled,
             mode: gamepadUIMode)
     }
 

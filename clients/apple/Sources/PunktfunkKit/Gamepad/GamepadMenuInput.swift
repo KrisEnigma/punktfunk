@@ -17,6 +17,10 @@
 // action, X a tertiary one, and the shoulders (L1/R1) are optional fast "jump" steps. Directional
 // moves auto-repeat on a held stick/dpad after an initial delay; every button is edge-triggered
 // (fires once per press).
+//
+// A poll reads whichever source has a pad — GameController first, else the Steam Controller 2
+// `Sc2MenuPad` reads directly on iOS, where GameController surfaces no such device. Both arrive
+// as a `Snapshot`, so the dead zone, hysteresis and repeat rules below are written once.
 
 import Foundation
 import GameController
@@ -25,6 +29,59 @@ import GameController
 public final class GamepadMenuInput {
     public enum Direction: Equatable, Sendable {
         case up, down, left, right
+    }
+
+    /// One poll's worth of pad, from either source. Only what a menu navigates with: the left
+    /// stick, the dpad, and the six buttons the screens bind.
+    struct Snapshot: Equatable {
+        var confirm = false // A
+        var back = false // B
+        var secondary = false // Y
+        var tertiary = false // X
+        var leftShoulder = false
+        var rightShoulder = false
+        /// Left stick, −1…1, +y up (GameController's convention, and the SC2's).
+        var x: Float = 0
+        var y: Float = 0
+        var up = false
+        var down = false
+        var left = false
+        var right = false
+
+        init(_ gamepad: GCExtendedGamepad) {
+            confirm = gamepad.buttonA.isPressed
+            back = gamepad.buttonB.isPressed
+            secondary = gamepad.buttonY.isPressed
+            tertiary = gamepad.buttonX.isPressed
+            leftShoulder = gamepad.leftShoulder.isPressed
+            rightShoulder = gamepad.rightShoulder.isPressed
+            x = gamepad.leftThumbstick.xAxis.value
+            y = gamepad.leftThumbstick.yAxis.value
+            // Discrete `.isPressed`, never the dpad's combined axis — the first version of this
+            // class read the axis and silently never registered a press on-device.
+            up = gamepad.dpad.up.isPressed
+            down = gamepad.dpad.down.isPressed
+            left = gamepad.dpad.left.isPressed
+            right = gamepad.dpad.right.isPressed
+        }
+
+        /// A parsed SC2 state report. The sticks are the device's raw i16, scaled to the same
+        /// −1…1 the GameController path delivers.
+        init(sc2 state: Sc2Device.State) {
+            func held(_ bit: UInt32) -> Bool { state.buttons & bit != 0 }
+            confirm = held(Sc2Device.btnA)
+            back = held(Sc2Device.btnB)
+            secondary = held(Sc2Device.btnY)
+            tertiary = held(Sc2Device.btnX)
+            leftShoulder = held(Sc2Device.btnLB)
+            rightShoulder = held(Sc2Device.btnRB)
+            x = Float(state.lsX) / 32767
+            y = Float(state.lsY) / 32767
+            up = held(Sc2Device.btnDpadUp)
+            down = held(Sc2Device.btnDpadDown)
+            left = held(Sc2Device.btnDpadLeft)
+            right = held(Sc2Device.btnDpadRight)
+        }
     }
 
     private let manager: GamepadManager
@@ -97,34 +154,43 @@ public final class GamepadMenuInput {
         wasRightShoulderPressed = false
     }
 
-    /// Reads `manager.active` fresh every tick (no persistent binding to a specific controller
+    /// Reads the live pad fresh every tick (no persistent binding to a specific controller
     /// needed) — a disconnect/reconnect or a controller switch is just picked up on the next poll.
     private func poll() {
-        guard isActive, let gamepad = manager.active?.controller.extendedGamepad else { return }
+        guard isActive, let pad = livePad() else { return }
 
         if needsSnapshot {
             // Adopt whatever is held right now without firing (see `needsSnapshot`): a button
             // must be RELEASED after a handoff before it can act here, and a held direction only
             // keeps moving once it changes or re-engages.
             needsSnapshot = false
-            wasConfirmPressed = gamepad.buttonA.isPressed
-            wasSecondaryPressed = gamepad.buttonY.isPressed
-            wasTertiaryPressed = gamepad.buttonX.isPressed
-            wasBackPressed = gamepad.buttonB.isPressed
-            wasLeftShoulderPressed = gamepad.leftShoulder.isPressed
-            wasRightShoulderPressed = gamepad.rightShoulder.isPressed
-            currentDirection = directionFrom(gamepad)
+            wasConfirmPressed = pad.confirm
+            wasSecondaryPressed = pad.secondary
+            wasTertiaryPressed = pad.tertiary
+            wasBackPressed = pad.back
+            wasLeftShoulderPressed = pad.leftShoulder
+            wasRightShoulderPressed = pad.rightShoulder
+            currentDirection = directionFrom(pad)
             return
         }
 
-        edge(gamepad.buttonA.isPressed, &wasConfirmPressed) { onConfirm?() }
-        edge(gamepad.buttonY.isPressed, &wasSecondaryPressed) { onSecondary?() }
-        edge(gamepad.buttonX.isPressed, &wasTertiaryPressed) { onTertiary?() }
-        edge(gamepad.buttonB.isPressed, &wasBackPressed) { onBack?() }
-        edge(gamepad.leftShoulder.isPressed, &wasLeftShoulderPressed) { onShoulder?(false) }
-        edge(gamepad.rightShoulder.isPressed, &wasRightShoulderPressed) { onShoulder?(true) }
+        edge(pad.confirm, &wasConfirmPressed) { onConfirm?() }
+        edge(pad.secondary, &wasSecondaryPressed) { onSecondary?() }
+        edge(pad.tertiary, &wasTertiaryPressed) { onTertiary?() }
+        edge(pad.back, &wasBackPressed) { onBack?() }
+        edge(pad.leftShoulder, &wasLeftShoulderPressed) { onShoulder?(false) }
+        edge(pad.rightShoulder, &wasRightShoulderPressed) { onShoulder?(true) }
 
-        updateDirection(directionFrom(gamepad))
+        updateDirection(directionFrom(pad))
+    }
+
+    /// The pad this tick, or nil when none is attached. A GameController one wins: on macOS an
+    /// SC2 is one of those, and everywhere else the fallback is the pad GameController cannot
+    /// see at all, so the two sources can never be the same device twice.
+    private func livePad() -> Snapshot? {
+        if let gamepad = manager.active?.controller.extendedGamepad { return Snapshot(gamepad) }
+        if let sc2 = manager.sc2MenuState { return Snapshot(sc2: sc2) }
+        return nil
     }
 
     /// Fire `action` on the rising edge of `pressed`, tracking the last state in `was`.
@@ -133,14 +199,11 @@ public final class GamepadMenuInput {
         was = pressed
     }
 
-    /// The current requested direction: the left stick is the primary/natural input; the dpad is an
-    /// alternative. Read via discrete `.isPressed` / analog `.value` (never the dpad's combined axis
-    /// — the first version of this class did that and it silently never registered a press on-device).
-    private func directionFrom(_ gamepad: GCExtendedGamepad) -> Direction? {
-        let stick = gamepad.leftThumbstick
-        let x = stick.xAxis.value
-        let y = stick.yAxis.value
-        let dpad = gamepad.dpad
+    /// The current requested direction: the left stick is the primary/natural input; the dpad is
+    /// an alternative.
+    private func directionFrom(_ pad: Snapshot) -> Direction? {
+        let x = pad.x
+        let y = pad.y
         // HYSTERESIS: an engaged direction stays engaged until ITS OWN input releases, even if the
         // other axis is momentarily larger. Without this a single flick to the right passed through
         // samples where |y| > |x| on the way out of the dead zone and read as UP, then RIGHT — two
@@ -149,10 +212,10 @@ public final class GamepadMenuInput {
         if let current = currentDirection {
             let held: Bool
             switch current {
-            case .left: held = (x < -deadzone && abs(x) >= abs(y) * 0.5) || dpad.left.isPressed
-            case .right: held = (x > deadzone && abs(x) >= abs(y) * 0.5) || dpad.right.isPressed
-            case .up: held = (y > deadzone && abs(y) >= abs(x) * 0.5) || dpad.up.isPressed
-            case .down: held = (y < -deadzone && abs(y) >= abs(x) * 0.5) || dpad.down.isPressed
+            case .left: held = (x < -deadzone && abs(x) >= abs(y) * 0.5) || pad.left
+            case .right: held = (x > deadzone && abs(x) >= abs(y) * 0.5) || pad.right
+            case .up: held = (y > deadzone && abs(y) >= abs(x) * 0.5) || pad.up
+            case .down: held = (y < -deadzone && abs(y) >= abs(x) * 0.5) || pad.down
             }
             if held { return current }
         }
@@ -163,10 +226,10 @@ public final class GamepadMenuInput {
         } else if abs(y) > deadzone {
             return y > 0 ? .up : .down
         }
-        if dpad.left.isPressed { return .left }
-        if dpad.right.isPressed { return .right }
-        if dpad.up.isPressed { return .up }
-        if dpad.down.isPressed { return .down }
+        if pad.left { return .left }
+        if pad.right { return .right }
+        if pad.up { return .up }
+        if pad.down { return .down }
         return nil
     }
 
