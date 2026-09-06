@@ -51,7 +51,6 @@ use pf_libva::VaContextId;
 use pf_libva::VaGenericValue;
 use pf_libva::VaSurfaceAttrib;
 use pf_libva::VaSurfaceId;
-use pf_libva::VA_GENERIC_VALUE_TYPE_INTEGER;
 use pf_libva::VA_INVALID_ID;
 use pf_libva::VA_PROGRESSIVE;
 use pf_libva::VA_SURFACE_ATTRIB_PIXEL_FORMAT;
@@ -249,13 +248,8 @@ impl Session {
             let mut pixel = VaSurfaceAttrib {
                 kind: VA_SURFACE_ATTRIB_PIXEL_FORMAT,
                 flags: VA_SURFACE_ATTRIB_SETTABLE,
-                value: VaGenericValue {
-                    kind: VA_GENERIC_VALUE_TYPE_INTEGER,
-                    _pad: 0,
-                    // Integer arm is i32; every fourcc here has the top bit clear.
-                    i: fourcc as i32,
-                    _rest: 0,
-                },
+                // Integer arm is i32; every fourcc here has the top bit clear.
+                value: VaGenericValue::integer(fourcc as i32),
             };
             // Coded size: a display-sized pool is short by granule padding and smears rows.
             // SAFETY: live display; the surface array and the attribute outlive the

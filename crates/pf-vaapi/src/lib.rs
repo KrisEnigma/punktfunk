@@ -35,6 +35,8 @@ pub mod pic_h265;
 pub mod va;
 pub mod va_av1;
 pub mod va_h265;
+/// VideoProc: the ingest colour conversion and the dmabuf import attributes.
+pub mod vpp;
 
 /// DPB slot ledger, re-exported from [`pf_vkdecode`] (crate docs).
 pub use pf_vkdecode::SlotError;

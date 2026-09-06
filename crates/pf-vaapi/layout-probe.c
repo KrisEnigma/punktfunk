@@ -19,7 +19,10 @@
  * exists because C bit-field allocation order is ABI-defined, not standardised:
  * it PROVES least-significant-bit-first on this ABI rather than assuming it.
  *
- * Last run against libva 2.23.0-1ubuntu1, x86_64-linux-gnu.
+ * Or on a box with libva-dev (`.50`): `gcc -w -O0 layout-probe.c -o probe && ./probe`.
+ *
+ * Last run against libva 2.23.0-1ubuntu1, x86_64-linux-gnu; the VideoProc section
+ * (`src/vpp.rs`) against libva 2.22 on `.50`.
  */
 #include <stdio.h>
 #include <stddef.h>
@@ -27,6 +30,7 @@
 #include <va/va_dec_hevc.h>
 #include <va/va_dec_av1.h>
 #include <va/va_drmcommon.h>
+#include <va/va_vpp.h>
 
 #define S(t)        printf("size %-34s %zu align %zu\n", #t, sizeof(t), _Alignof(t))
 #define O(t, f)     printf("off  %-20s %-28s %zu\n", #t, #f, offsetof(t, f))
@@ -553,5 +557,71 @@ int main(void) {
            sizeof(((VAImage *)0)->component_order));
     printf("enum VA_LSB_FIRST                           %d\n", VA_LSB_FIRST);
     printf("enum VA_MSB_FIRST                           %d\n", VA_MSB_FIRST);
+
+    /* VideoProc: the ingest CSC (`src/vpp.rs`) and the dmabuf import attributes. */
+    S(VARectangle);
+    O(VARectangle, x);
+    O(VARectangle, y);
+    O(VARectangle, width);
+    O(VARectangle, height);
+    S(VAProcColorProperties);
+    O(VAProcColorProperties, chroma_sample_location);
+    O(VAProcColorProperties, color_range);
+    O(VAProcColorProperties, colour_primaries);
+    O(VAProcColorProperties, transfer_characteristics);
+    O(VAProcColorProperties, matrix_coefficients);
+    O(VAProcColorProperties, reserved);
+    S(VAProcPipelineParameterBuffer);
+    O(VAProcPipelineParameterBuffer, surface);
+    O(VAProcPipelineParameterBuffer, surface_region);
+    O(VAProcPipelineParameterBuffer, surface_color_standard);
+    O(VAProcPipelineParameterBuffer, output_region);
+    O(VAProcPipelineParameterBuffer, output_background_color);
+    O(VAProcPipelineParameterBuffer, output_color_standard);
+    O(VAProcPipelineParameterBuffer, pipeline_flags);
+    O(VAProcPipelineParameterBuffer, filter_flags);
+    O(VAProcPipelineParameterBuffer, filters);
+    O(VAProcPipelineParameterBuffer, num_filters);
+    O(VAProcPipelineParameterBuffer, forward_references);
+    O(VAProcPipelineParameterBuffer, num_forward_references);
+    O(VAProcPipelineParameterBuffer, backward_references);
+    O(VAProcPipelineParameterBuffer, num_backward_references);
+    O(VAProcPipelineParameterBuffer, rotation_state);
+    O(VAProcPipelineParameterBuffer, blend_state);
+    O(VAProcPipelineParameterBuffer, mirror_state);
+    O(VAProcPipelineParameterBuffer, additional_outputs);
+    O(VAProcPipelineParameterBuffer, num_additional_outputs);
+    O(VAProcPipelineParameterBuffer, input_surface_flag);
+    O(VAProcPipelineParameterBuffer, output_surface_flag);
+    O(VAProcPipelineParameterBuffer, input_color_properties);
+    O(VAProcPipelineParameterBuffer, output_color_properties);
+    O(VAProcPipelineParameterBuffer, processing_mode);
+    O(VAProcPipelineParameterBuffer, output_hdr_metadata);
+    O(VAProcPipelineParameterBuffer, va_reserved);
+    printf("count VAProcPipelineParameterBuffer va_reserved %zu\n",
+           sizeof(((VAProcPipelineParameterBuffer *)0)->va_reserved) / sizeof(uint32_t));
+    printf("enum VAProfileNone                          %d\n", VAProfileNone);
+    printf("enum VAEntrypointVideoProc                  %d\n", VAEntrypointVideoProc);
+    printf("enum VAProcPipelineParameterBufferType      %d\n", VAProcPipelineParameterBufferType);
+    printf("enum VASurfaceAttribMemoryType              %d\n", VASurfaceAttribMemoryType);
+    printf("enum VASurfaceAttribExternalBufferDescriptor %d\n", VASurfaceAttribExternalBufferDescriptor);
+    printf("enum VAGenericValueTypePointer              %d\n", VAGenericValueTypePointer);
+    printf("hex  VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 %#x\n", VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
+    printf("hex  VA_RT_FORMAT_RGB32                     %#x\n", VA_RT_FORMAT_RGB32);
+    printf("hex  VA_RT_FORMAT_RGB32_10                  %#x\n", VA_RT_FORMAT_RGB32_10);
+    printf("hex  VA_RT_FORMAT_YUV420_10                 %#x\n", VA_RT_FORMAT_YUV420_10);
+    printf("enum VAProcColorStandardNone                %d\n", VAProcColorStandardNone);
+    printf("enum VAProcColorStandardBT709               %d\n", VAProcColorStandardBT709);
+    printf("enum VAProcColorStandardBT2020              %d\n", VAProcColorStandardBT2020);
+    printf("enum VAProcColorStandardSRGB                %d\n", VAProcColorStandardSRGB);
+    printf("enum VAProcColorStandardExplicit            %d\n", VAProcColorStandardExplicit);
+    printf("enum VA_SOURCE_RANGE_FULL                   %d\n", VA_SOURCE_RANGE_FULL);
+    printf("enum VA_SOURCE_RANGE_REDUCED                %d\n", VA_SOURCE_RANGE_REDUCED);
+    printf("hex  VA_FOURCC_BGRX %#x RGBX %#x BGRA %#x RGBA %#x\n", VA_FOURCC_BGRX, VA_FOURCC_RGBX, VA_FOURCC_BGRA, VA_FOURCC_RGBA);
+    printf("hex  VA_FOURCC_XRGB %#x XBGR %#x ARGB %#x ABGR %#x\n", VA_FOURCC_XRGB, VA_FOURCC_XBGR, VA_FOURCC_ARGB, VA_FOURCC_ABGR);
+    printf("hex  VA_FOURCC_X2R10G10B10 %#x X2B10G10R10 %#x A2R10G10B10 %#x A2B10G10R10 %#x\n",
+           VA_FOURCC_X2R10G10B10, VA_FOURCC_X2B10G10R10, VA_FOURCC_A2R10G10B10, VA_FOURCC_A2B10G10R10);
+    printf("hex  VA_FOURCC_NV12 %#x P010 %#x\n", VA_FOURCC_NV12, VA_FOURCC_P010);
+    printf("hex  VA_EXPORT_SURFACE_READ_WRITE %#x WRITE_ONLY %#x\n", VA_EXPORT_SURFACE_READ_WRITE, VA_EXPORT_SURFACE_WRITE_ONLY);
     return 0;
 }

@@ -14,6 +14,8 @@
 use std::os::fd::AsRawFd as _;
 /// An H.264 encode session driven with `pf-vaapi`'s parameter buffers.
 pub mod encode;
+/// The VideoProc context that turns capture pictures into encoder input.
+pub mod vpp;
 
 use std::os::fd::OwnedFd;
 use std::os::raw::c_char;
@@ -25,6 +27,16 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context as _;
 use anyhow::Result;
+use pf_vaapi::drm::ExportedPlane;
+use pf_vaapi::drm::VaDrmPrimeObject;
+use pf_vaapi::drm::VaDrmPrimeSurfaceDescriptor;
+use pf_vaapi::drm::MAX_OBJECTS;
+use pf_vaapi::drm::MAX_PLANES_PER_LAYER;
+use pf_vaapi::va::VaImage;
+use pf_vaapi::vpp::VA_GENERIC_VALUE_TYPE_POINTER;
+use pf_vaapi::vpp::VA_SURFACE_ATTRIB_EXTERNAL_BUFFER_DESCRIPTOR;
+use pf_vaapi::vpp::VA_SURFACE_ATTRIB_MEMORY_TYPE;
+use pf_vaapi::vpp::VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
 
 pub type VaDisplay = *mut c_void;
 pub type VaStatus = c_int;
@@ -42,18 +54,35 @@ pub const VA_PROGRESSIVE: c_uint = 0x0001;
 /// `VAGenericValue`: 16 bytes, value at offset 8, align 8 (`pf-vaapi/layout-probe.c`).
 ///
 /// The C `value` is a union that includes a pointer, so it is eight-byte aligned —
-/// four bytes of padding after `kind`, 16 bytes total not 12. A Rust union written
-/// through the `i32` arm leaves the other four bytes uninitialised, and those are
-/// the bytes a driver reading the pointer arm would see. `_rest` is always zero so
-/// every byte crossing the FFI was written here.
+/// four bytes of padding after `kind`, 16 bytes total not 12. The union is kept as
+/// the one word it is, so every byte crossing the FFI was written here; the
+/// integer arm is its low half on the little-endian targets this runs on.
 #[repr(C, align(8))]
 #[derive(Clone, Copy)]
 pub struct VaGenericValue {
     pub kind: c_int,
     pub _pad: u32,
-    pub i: i32,
-    /// Always zero: the unused half of the C union.
-    pub _rest: u32,
+    bits: u64,
+}
+
+impl VaGenericValue {
+    /// The `int` arm: a fourcc, a memory type.
+    pub fn integer(i: i32) -> Self {
+        Self {
+            kind: VA_GENERIC_VALUE_TYPE_INTEGER,
+            _pad: 0,
+            bits: u64::from(i as u32),
+        }
+    }
+
+    /// The pointer arm: an external buffer descriptor the call reads, not keeps.
+    pub fn pointer(p: *mut c_void) -> Self {
+        Self {
+            kind: VA_GENERIC_VALUE_TYPE_POINTER,
+            _pad: 0,
+            bits: p as usize as u64,
+        }
+    }
 }
 
 #[repr(C)]
@@ -72,7 +101,7 @@ pub const VA_SURFACE_ATTRIB_SETTABLE: c_uint = 0x0002;
 // Layouts passed by value, measured (`pf-vaapi/layout-probe.c`).
 const _: () = {
     assert!(size_of::<VaGenericValue>() == 16);
-    assert!(std::mem::offset_of!(VaGenericValue, i) == 8);
+    assert!(std::mem::offset_of!(VaGenericValue, bits) == 8);
     assert!(size_of::<VaSurfaceAttrib>() == 24);
     assert!(std::mem::offset_of!(VaSurfaceAttrib, flags) == 4);
     assert!(std::mem::offset_of!(VaSurfaceAttrib, value) == 8);
@@ -443,6 +472,205 @@ impl Display {
             unsafe { (self.va.destroy_buffer)(self.display, b) };
         }
     }
+
+    /// One surface of `fourcc` in an `rt_format` pool; `None` lets the driver pick.
+    pub fn create_surface(
+        &self,
+        rt_format: u32,
+        fourcc: Option<u32>,
+        width: u32,
+        height: u32,
+    ) -> Result<VaSurfaceId> {
+        let mut attrs = Vec::new();
+        if let Some(fourcc) = fourcc {
+            attrs.push(VaSurfaceAttrib {
+                kind: VA_SURFACE_ATTRIB_PIXEL_FORMAT,
+                flags: VA_SURFACE_ATTRIB_SETTABLE,
+                // Integer arm is i32; every fourcc here has the top bit clear.
+                value: VaGenericValue::integer(fourcc as i32),
+            });
+        }
+        self.create_surface_with(rt_format, width, height, &mut attrs)
+    }
+
+    fn create_surface_with(
+        &self,
+        rt_format: u32,
+        width: u32,
+        height: u32,
+        attrs: &mut [VaSurfaceAttrib],
+    ) -> Result<VaSurfaceId> {
+        let mut id = VA_INVALID_ID;
+        // SAFETY: live display; `attrs` outlives the call and the count is its
+        // length; `id` is a local written through.
+        self.va.check("vaCreateSurfaces", unsafe {
+            (self.va.create_surfaces)(
+                self.display,
+                rt_format,
+                width,
+                height,
+                &mut id,
+                1,
+                attrs.as_mut_ptr(),
+                attrs.len() as c_uint,
+            )
+        })?;
+        Ok(id)
+    }
+
+    pub fn destroy_surface(&self, surface: VaSurfaceId) {
+        let mut ids = [surface];
+        // SAFETY: created on this display, destroyed once.
+        unsafe { (self.va.destroy_surfaces)(self.display, ids.as_mut_ptr(), 1) };
+    }
+
+    /// Wrap a capture dmabuf as a surface. libva takes its own reference on each
+    /// fd, so the caller's stay theirs; destroy the surface like any other.
+    pub fn import_dmabuf(&self, source: &DmabufSource) -> Result<VaSurfaceId> {
+        let (fourcc, rt_format) = pf_vaapi::vpp::import_format(source.drm_fourcc)
+            .ok_or_else(|| anyhow!("no ingest for DRM fourcc {:#x}", source.drm_fourcc))?;
+        let mut desc = VaDrmPrimeSurfaceDescriptor::zeroed();
+        desc.fourcc = fourcc;
+        desc.width = source.width;
+        desc.height = source.height;
+        // One object per distinct fd, in first-seen order; every plane indexes one.
+        let mut layer = desc.layers[0];
+        layer.drm_format = source.drm_fourcc;
+        for (i, plane) in source.planes.iter().enumerate() {
+            if i >= MAX_PLANES_PER_LAYER {
+                bail!("a dmabuf of {} planes", source.planes.len());
+            }
+            let objects = &mut desc.objects[..];
+            let n = desc.num_objects as usize;
+            let object = match objects[..n].iter().position(|o| o.fd == plane.fd) {
+                Some(o) => o,
+                None if n < MAX_OBJECTS => {
+                    objects[n] = VaDrmPrimeObject {
+                        fd: plane.fd,
+                        size: dmabuf_size(plane.fd)?,
+                        drm_format_modifier: source.modifier,
+                    };
+                    desc.num_objects += 1;
+                    n
+                }
+                None => bail!("a dmabuf over more than {MAX_OBJECTS} fds"),
+            };
+            layer.object_index[i] = object as u32;
+            layer.offset[i] = plane.offset;
+            layer.pitch[i] = plane.stride;
+            layer.num_planes += 1;
+        }
+        desc.layers[0] = layer;
+        desc.num_layers = 1;
+
+        let mut attrs = [
+            VaSurfaceAttrib {
+                kind: VA_SURFACE_ATTRIB_MEMORY_TYPE,
+                flags: VA_SURFACE_ATTRIB_SETTABLE,
+                value: VaGenericValue::integer(VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 as i32),
+            },
+            VaSurfaceAttrib {
+                kind: VA_SURFACE_ATTRIB_EXTERNAL_BUFFER_DESCRIPTOR,
+                flags: VA_SURFACE_ATTRIB_SETTABLE,
+                value: VaGenericValue::pointer((&raw mut desc).cast::<c_void>()),
+            },
+        ];
+        // `desc` outlives the call inside `create_surface_with`; libva reads it there.
+        self.create_surface_with(rt_format, source.width, source.height, &mut attrs)
+    }
+
+    /// Derive an image over `surface`, map it, hand `f` the layout and the pointer,
+    /// then unmap and destroy on every path.
+    pub fn map_image<T>(
+        &self,
+        surface: VaSurfaceId,
+        f: impl FnOnce(&VaImage, *mut u8) -> Result<T>,
+    ) -> Result<T> {
+        // SAFETY: `VaImage` is all-integer `repr(C)` with no niche, so an all-zero
+        // value is valid; `vaDeriveImage` overwrites every field it defines.
+        let mut image: VaImage = unsafe { std::mem::zeroed() };
+        // SAFETY: `image` is a local the call fills; `surface` is on this display.
+        self.va.check("vaDeriveImage", unsafe {
+            (self.va.derive_image)(self.display, surface, (&raw mut image).cast::<c_void>())
+        })?;
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `image.buf` is the derived image's buffer on this display and
+        // `ptr` is written through. Unmapped below on every path.
+        let mapped = self.va.check("vaMapBuffer(image)", unsafe {
+            (self.va.map_buffer)(self.display, image.buf, &mut ptr)
+        });
+        let result = mapped.and_then(|()| {
+            if ptr.is_null() {
+                bail!("vaMapBuffer returned success with a null pointer");
+            }
+            let value = f(&image, ptr.cast::<u8>());
+            // SAFETY: the buffer that was mapped, unmapped once.
+            let unmap = unsafe { (self.va.unmap_buffer)(self.display, image.buf) };
+            let value = value?;
+            self.va.check("vaUnmapBuffer(image)", unmap)?;
+            Ok(value)
+        });
+        // SAFETY: `image_id` came from the `vaDeriveImage` above and is destroyed
+        // exactly once, after the mapping is gone.
+        let destroy = unsafe { (self.va.destroy_image)(self.display, image.image_id) };
+        let value = result?;
+        self.va.check("vaDestroyImage", destroy)?;
+        Ok(value)
+    }
+
+    /// Copy one packed plane into `surface`, row by row, at the driver's pitch.
+    pub fn write_packed(&self, surface: VaSurfaceId, bytes: &[u8], row_bytes: usize) -> Result<()> {
+        self.map_image(surface, |image, ptr| {
+            let rows = usize::from(image.height);
+            let pitch = image.pitches[0] as usize;
+            if bytes.len() < rows * row_bytes {
+                bail!(
+                    "{} source bytes for {rows} rows of {row_bytes}",
+                    bytes.len()
+                );
+            }
+            if row_bytes > pitch {
+                bail!("rows of {row_bytes} bytes do not fit the surface pitch {pitch}");
+            }
+            for row in 0..rows {
+                // SAFETY: the mapped image is at least `data_size` bytes and the
+                // driver's own pitch and offset bound every row written; the source
+                // was length-checked above and `row_bytes <= pitch`.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr().add(row * row_bytes),
+                        ptr.add(image.offsets[0] as usize + row * pitch),
+                        row_bytes,
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// One capture dmabuf: DRM fourcc, tiling modifier, and each plane's fd, offset and
+/// stride. The fds are borrowed for the call.
+#[derive(Clone, Copy, Debug)]
+pub struct DmabufSource<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub drm_fourcc: u32,
+    pub modifier: u64,
+    pub planes: &'a [ExportedPlane],
+}
+
+/// A dma-buf reports its size as its file size.
+fn dmabuf_size(fd: c_int) -> Result<u32> {
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: `fd` is the caller's live dmabuf; `ManuallyDrop` keeps this from
+    // closing it.
+    let file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    let len = file
+        .metadata()
+        .with_context(|| format!("fstat dmabuf fd {fd}"))?
+        .len();
+    u32::try_from(len).context("a dmabuf over 4 GiB")
 }
 
 impl Drop for Display {

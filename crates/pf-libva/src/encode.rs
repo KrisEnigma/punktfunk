@@ -21,9 +21,13 @@ use pf_vaapi::enc_params::packed_slice_header;
 use pf_vaapi::enc_params::va_pic_fields;
 use pf_vaapi::enc_params::PictureSlice;
 use pf_vaapi::enc_params::SessionParams;
-use pf_vaapi::va::VaImage;
+use pf_vaapi::vpp::rt_format_for;
+use pf_vaapi::vpp::VA_RT_FORMAT_RGB32;
+use pf_vaapi::vpp::VA_RT_FORMAT_YUV420;
 
+use crate::vpp::Vpp;
 use crate::Display;
+use crate::DmabufSource;
 use crate::VaBufferId;
 use crate::VaContextId;
 use crate::VaSurfaceId;
@@ -34,7 +38,6 @@ const VA_PROFILE_H264_HIGH: c_int = 7;
 const VA_CONFIG_ATTRIB_RT_FORMAT: u32 = 0;
 const VA_CONFIG_ATTRIB_RATE_CONTROL: u32 = 5;
 const VA_CONFIG_ATTRIB_ENC_PACKED_HEADERS: u32 = 10;
-const VA_RT_FORMAT_YUV420: u32 = 0x0000_0001;
 
 /// `VAConfigAttrib`: a type/value pair, and the shape `vaCreateConfig` takes.
 #[repr(C)]
@@ -65,6 +68,10 @@ pub struct H264Encoder {
     /// writes these while it is still reading that, and a surface cannot be both.
     recon: Vec<VaSurfaceId>,
     coded_buf: VaBufferId,
+    /// Ingest: every capture shape is converted into the input surface here.
+    vpp: Vpp,
+    /// Where CPU RGB lands before conversion, and the fourcc it was made for.
+    staging: Option<(VaSurfaceId, u32)>,
     params: SessionParams,
     /// Frames encoded since the last IDR; `frame_num` in the slice header.
     frame_num: u16,
@@ -222,6 +229,8 @@ impl H264Encoder {
         };
         display.va.check("vaCreateBuffer(coded)", status)?;
 
+        let vpp = Vpp::new(&display, params.width, params.height)?;
+
         let recon = surfaces.split_off(Self::SURFACES);
         Ok(Self {
             display,
@@ -230,6 +239,8 @@ impl H264Encoder {
             input: surfaces,
             recon,
             coded_buf,
+            vpp,
+            staging: None,
             params,
             frame_num: 0,
             idr_pic_id: 0,
@@ -243,83 +254,84 @@ impl H264Encoder {
         self.input[self.next_surface]
     }
 
-    /// Fill the next input surface with NV12 from `y` and `uv`, for tests and for
-    /// any ingest that has no dmabuf. Real capture imports instead of copying.
+    /// Fill the next input surface with NV12 from `y` and `uv`, for tests. Capture
+    /// goes through [`Self::submit_packed`] or [`Self::submit_dmabuf`].
     pub fn write_nv12(&self, y: &[u8], uv: &[u8]) -> Result<()> {
-        let surface = self.input_surface();
-        // SAFETY: `VaImage` is all-integer `repr(C)` with no niche, so an all-zero
-        // value is valid; `vaDeriveImage` overwrites every field it defines.
-        let mut image: VaImage = unsafe { std::mem::zeroed() };
-        // SAFETY: `image` is a local the call fills; `surface` belongs to this
-        // display. Any driver that cannot derive answers with a status, not a write.
-        let status = unsafe {
-            (self.display.va.derive_image)(
-                self.display.display,
-                surface,
-                (&raw mut image).cast::<c_void>(),
-            )
-        };
-        self.display.va.check("vaDeriveImage", status)?;
-
-        let result = self.fill_derived(&image, y, uv);
-        // SAFETY: `image.image_id` came from the `vaDeriveImage` above and is
-        // destroyed exactly once, after the fill has finished with its buffer.
-        let destroy =
-            unsafe { (self.display.va.destroy_image)(self.display.display, image.image_id) };
-        result?;
-        self.display.va.check("vaDestroyImage", destroy)
-    }
-
-    fn fill_derived(&self, image: &VaImage, y: &[u8], uv: &[u8]) -> Result<()> {
-        let mut ptr: *mut c_void = std::ptr::null_mut();
-        // SAFETY: `image.buf` is the derived image's buffer on this display, and
-        // `ptr` is a local written through. Unmapped below on every path.
-        let status =
-            unsafe { (self.display.va.map_buffer)(self.display.display, image.buf, &mut ptr) };
-        self.display.va.check("vaMapBuffer(image)", status)?;
-        if ptr.is_null() {
-            bail!("vaMapBuffer returned success with a null pointer");
-        }
-
-        let copy = (|| -> Result<()> {
+        self.display.map_image(self.input_surface(), |image, ptr| {
             if image.num_planes < 2 {
                 bail!("expected NV12 (2 planes), got {}", image.num_planes);
             }
             let rows = usize::from(image.height);
             let cols = usize::from(image.width);
-            let y_pitch = image.pitches[0] as usize;
-            let uv_pitch = image.pitches[1] as usize;
             if y.len() < rows * cols || uv.len() < rows / 2 * cols {
                 bail!("source planes are smaller than the surface");
             }
-            for row in 0..rows {
-                // SAFETY: the mapped image is at least `data_size` bytes and the
-                // driver's own pitches and offsets bound every row written here;
-                // the source slice was length-checked above.
-                unsafe {
-                    let dst = ptr
-                        .cast::<u8>()
-                        .add(image.offsets[0] as usize + row * y_pitch);
-                    std::ptr::copy_nonoverlapping(y.as_ptr().add(row * cols), dst, cols);
-                }
-            }
-            for row in 0..rows / 2 {
-                // SAFETY: as above, over the interleaved chroma plane, which has
-                // half the rows and the same width in bytes.
-                unsafe {
-                    let dst = ptr
-                        .cast::<u8>()
-                        .add(image.offsets[1] as usize + row * uv_pitch);
-                    std::ptr::copy_nonoverlapping(uv.as_ptr().add(row * cols), dst, cols);
+            for (plane, src, plane_rows) in [(0, y, rows), (1, uv, rows / 2)] {
+                let pitch = image.pitches[plane] as usize;
+                for row in 0..plane_rows {
+                    // SAFETY: the mapped image is at least `data_size` bytes and
+                    // the driver's own pitches and offsets bound every row written;
+                    // the sources were length-checked above.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src.as_ptr().add(row * cols),
+                            ptr.add(image.offsets[plane] as usize + row * pitch),
+                            cols,
+                        );
+                    }
                 }
             }
             Ok(())
-        })();
+        })
+    }
 
-        // SAFETY: the same buffer that was mapped, unmapped once.
-        let unmap = unsafe { (self.display.va.unmap_buffer)(self.display.display, image.buf) };
-        copy?;
-        self.display.va.check("vaUnmapBuffer(image)", unmap)
+    /// Ingest packed 32-bit RGB from the CPU: uploaded to a staging surface of
+    /// `fourcc`, converted on the GPU into the next input surface.
+    pub fn submit_packed(&mut self, bytes: &[u8], fourcc: u32, row_bytes: usize) -> Result<()> {
+        if rt_format_for(fourcc) != Some(VA_RT_FORMAT_RGB32) {
+            bail!("no eight-bit RGB ingest for fourcc {fourcc:#x}");
+        }
+        let staging = match self.staging {
+            Some((surface, f)) if f == fourcc => surface,
+            _ => {
+                if let Some((old, _)) = self.staging.take() {
+                    self.display.destroy_surface(old);
+                }
+                let surface = self.display.create_surface(
+                    VA_RT_FORMAT_RGB32,
+                    Some(fourcc),
+                    self.params.width,
+                    self.params.height,
+                )?;
+                self.staging = Some((surface, fourcc));
+                surface
+            }
+        };
+        self.display.write_packed(staging, bytes, row_bytes)?;
+        self.vpp
+            .convert(&self.display, staging, true, false, self.input_surface())
+    }
+
+    /// Ingest a capture dmabuf: imported for this picture, converted into the next
+    /// input surface, released. Eight-bit only until the HEVC session exists.
+    pub fn submit_dmabuf(&mut self, source: &DmabufSource) -> Result<()> {
+        let rt_format = pf_vaapi::vpp::import_format(source.drm_fourcc)
+            .map(|(_, rt)| rt)
+            .ok_or_else(|| anyhow!("no ingest for DRM fourcc {:#x}", source.drm_fourcc))?;
+        if rt_format != VA_RT_FORMAT_RGB32 && rt_format != VA_RT_FORMAT_YUV420 {
+            bail!("ten-bit ingest needs the HEVC session");
+        }
+        // Imported once per picture; a cache keyed on the fd would save the ioctl.
+        let surface = self.display.import_dmabuf(source)?;
+        let converted = self.vpp.convert(
+            &self.display,
+            surface,
+            rt_format == VA_RT_FORMAT_RGB32,
+            false,
+            self.input_surface(),
+        );
+        self.display.destroy_surface(surface);
+        converted
     }
 
     /// Encode the picture currently in [`Self::input_surface`].
@@ -583,6 +595,10 @@ impl Drop for H264Encoder {
     /// libva's teardown order: buffers, then context, then surfaces, then config.
     /// The display is dropped last, by its own `Drop`.
     fn drop(&mut self) {
+        self.vpp.destroy(&self.display);
+        if let Some((staging, _)) = self.staging.take() {
+            self.display.destroy_surface(staging);
+        }
         // SAFETY: every id was created on this display and is destroyed once. Drop
         // runs after the last encode, and `sync_surface` has completed each one.
         unsafe {
