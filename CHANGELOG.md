@@ -333,6 +333,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The "audio format but not CLIENT_CAP_AUDIO_HIRES" warning fires only for a real
+  contradiction.** Hello decodes an absent format as 48 kHz/16-bit, so every ordinary session
+  logged it; nothing to do.
 - **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
   Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
   command to `100F6C34`, id byte stripped in both cases, where the link had written every frame

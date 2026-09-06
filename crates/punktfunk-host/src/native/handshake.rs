@@ -854,6 +854,13 @@ async fn negotiate_video_format(
     Ok((bit_depth, session_hdr, chroma))
 }
 
+/// Whether Hello carried a format at all. Decode maps an absent one to 48 kHz/16-bit, so
+/// that pair (or a bare zero) is "nothing asked" — the rule `Hello::encode` applies.
+fn audio_format_asked(rate_hz: u32, bits: u8) -> bool {
+    use punktfunk_core::audio::{pcm, SAMPLE_RATE_HZ};
+    (rate_hz != 0 && rate_hz != SAMPLE_RATE_HZ) || (bits != 0 && bits != pcm::BITS_16)
+}
+
 /// Audio plane for Welcome: Opus, or lossless PCM when client, operator, and the
 /// capture-rate probe all allow it. Async for that blocking probe.
 async fn negotiate_audio_plane(
@@ -867,9 +874,9 @@ async fn negotiate_audio_plane(
     // conservative initial MTU is the safe direction: a frame that fits now keeps fitting as
     // MTU grows; a frame sized for a discovered MTU that then fails would not be sent.
     let hires_asked = hello.client_caps & punktfunk_core::quic::CLIENT_CAP_AUDIO_HIRES != 0;
-    // Format without `CLIENT_CAP_AUDIO_HIRES` is contradictory (toggle vs resolved rate).
+    // A format without `CLIENT_CAP_AUDIO_HIRES` is contradictory (toggle vs resolved rate).
     // Ordinary "no capability" is silent; this one is logged because something asked.
-    if !hires_asked && (hello.audio_rate_hz != 0 || hello.audio_bits != 0) {
+    if !hires_asked && audio_format_asked(hello.audio_rate_hz, hello.audio_bits) {
         tracing::warn!(
             requested_rate_hz = hello.audio_rate_hz,
             requested_bits = hello.audio_bits,
@@ -915,6 +922,15 @@ mod tests {
     const HUGE_LINK_KBPS: u32 = 200_000;
     /// Host-declared capture (Linux stream-sink). Condition-4 tests vary this; others hold it here.
     const HONEST_CAPTURE: crate::audio::CaptureRate = crate::audio::CaptureRate::Declared;
+
+    /// Decode maps an absent format to 48 kHz/16-bit; that pair must not read as an ask.
+    #[test]
+    fn default_or_zero_format_is_not_an_ask() {
+        assert!(!audio_format_asked(0, 0));
+        assert!(!audio_format_asked(48_000, pcm::BITS_16));
+        assert!(audio_format_asked(96_000, pcm::BITS_16));
+        assert!(audio_format_asked(48_000, pcm::BITS_24));
+    }
 
     /// Happy path; every decline test below is a difference from this.
     #[test]
