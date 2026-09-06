@@ -17,513 +17,162 @@ as they are. See `docs/writing.md` §2.
 
 ---
 
-## Unreleased
+## v0.35.0
 
-The guided Linux installer is now a binary. Wire and C ABI unchanged.
+877 commits since v0.34.0. Wire stays 2, C ABI stays 28. **The Windows driver protocol moves 6 → 8
+and its floor with it** — read **Breaking**. Detail: `design/windows-video-plane-overhaul.md`.
+
+### Versions
+
+| | v0.34.0 | v0.35.0 | Notes |
+|---|---|---|---|
+| Wire protocol | 2 | **2** | Additive: `PairRequest.device_key`, `AuthChallenge` (`0x14`), `AuthResponse` (`0x15`), `SCROLL_FLAG_PRECISE` |
+| C ABI | 28 | **28** | Absent on `wasm32`; unchanged on every target that has one |
+| Rust edition | 2024 | **2024** | |
+| MSRV (`rust-version`) | 1.85 | **1.85** | |
+| Workspace crate dirs | 27 | **31** | Adds `pf-encode-win`, `pf-libva`, `pf-vaapi`, `punktfunk-setup`, `punktfunk-setup-win`; `pf-vaadec` renamed |
+| Virtual-display driver protocol | 6 | **8** | v7 replaced the video transport, v8 scoped every object to its owner. Floor is 8 — Breaking |
+| Windows virtual-gamepad channel | 3 | **3** | |
+| Plugin index schema | 1 | **1** | |
+| Host event schema | 1 | **1** | Additive: one `event: live` frame closes the replay |
+| `api/openapi.json` | 0.34.0 | **0.35.0** | Adds the device-auth and WebTransport routes; no path moved |
+| gamescope patch level (`+pfhdrN`) | 8 | **10** | Additive: headless adaptive-sync paint, and the CLI framerate limit persists |
+| `@punktfunk/host` (SDK) | 0.1.6 | **0.2.0** | Browser entry `@punktfunk/host/core` and the `Credential` seam |
+| `@punktfunk/plugin-kit` | 0.4.4 | **0.4.6** | Additive: `launch` resolver, `Access` helpers |
 
 ### Breaking
 
-- **The game-library toggle is gone from Apple and Android too.** `DefaultsKey.libraryEnabled`
-  and the Kotlin `Settings.libraryEnabled` follow the Rust `library_enabled` retired in 0.31:
-  pairing is the only gate on every client now. A stored value is left where it is and never
-  read again, so nothing migrates and a downgrade still finds it.
-- **The Windows driver protocol floor is 8.** The pf-vdisplay driver encodes what DWM composes
-  and answers only to the host process that created each monitor, so a host and a driver from
-  different releases share neither a video transport nor an ownership rule. Install the
-  matching pair — they ship in one installer, and a mismatch ends the session with a "driver
-  outdated" error naming both versions.
+- **The Windows driver protocol floor is 8.** A host and a driver from different releases share
+  neither a video transport nor an ownership rule; install the pair, which ships in one installer.
 - **A Windows driver update restarts the display device.** The encoder lives inside
-  `pf_vdisplay.dll` now, so applying one flaps the virtual display where a host-only update did
-  not. Schedule it like a driver update: expect a brief black screen on the release that carries
-  a new driver.
-- **`--yes` joins the `punktfunk` group on every box.** It used to do that only on Bazzite and
-  Nobara. The group grants usbip attach, so a fleet script that installs unattended on desktops
-  now grants it there too — pass `--no-punktfunk-group`, or set
-  `PUNKTFUNK_INSTALL_PUNKTFUNK_GROUP=0`, to keep the old behaviour.
-- **`scripts/install.sh` is a download stub.** It checks the architecture, fetches
-  `punktfunk-setup` from the generic package registry, verifies its sha256 and execs it; the
-  installer logic lives in `crates/punktfunk-setup`. Anything that vendored or sourced the old
-  789-line body must call the published binary instead.
+  `pf_vdisplay.dll`, so applying one flaps the virtual display. Schedule it like a driver update.
+- **The Android JNI entry points changed signature.** `nativeConnect` gained a `tenBitSdr` `Boolean`
+  after `hdrEnabled` and `nativeSendScroll` a trailing `precise` `Boolean`. Rebuild the kit.
+- **Android clipboard sharing defaults off.** `KnownHost.clipboardSync` falls back to `false`, so
+  device text no longer reaches a newly paired or TOFU host until someone opts in.
+- **The game-library toggle is gone from Apple and Android.** `DefaultsKey.libraryEnabled` and the
+  Kotlin `Settings.libraryEnabled` follow the Rust `library_enabled` retired in 0.31.
+- **`scripts/install.sh` is a download stub.** It verifies and execs `punktfunk-setup` from the
+  package registry; anything that vendored the old body must call the published binary.
+- **`--yes` joins the `punktfunk` group on every box**, not only Bazzite and Nobara. Pass
+  `--no-punktfunk-group`, or set `PUNKTFUNK_INSTALL_PUNKTFUNK_GROUP=0`, to keep the old behaviour.
+- **`capture_health.stall_class` names the driver's own classes.** `worker` / `encoder` /
+  `presentation` / `driver` replace `transport` and `conversion`; a dashboard needs the new strings.
 
 ### Added
 
-- **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
-  and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
-  rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.
-- **`NativeBridge.nativeConnect` takes a `tenBitSdr` flag.** The Android JNI entry point gained a
-  `Boolean` after `hdrEnabled`, splitting `VIDEO_CAP_10BIT` from `VIDEO_CAP_HDR` so the client can
-  ask for Main10 under SDR. Rebuild the kit against the matching native library; an unchanged
-  caller will not link.
-- **`start_in` and `default_host` are cross-client settings keys.** The client settings record
-  gained where a bare launch opens (`"hosts"`, `"library"`, `"stream"`; unknown reads as library)
-  and which saved-host id it opens on. Resolve them through `pf_client_core::start`, never by
-  reading either alone: with one paired host the default is derived and `default_host` is empty.
-  The Swift and Kotlin ports are held to it by `clients/shared/start-screen-vectors.json`.
-- **`HostRow.id` on the Android console bridge JSON.** The console's host row carries the store
-  record's id, which is what its "Make default host" row points at. `serde(default)`, so a bridge
-  that does not send it still parses — but that bridge's rows cannot offer the row.
-- **`GameEntry.stats` carries a title's play stats.** Every library entry a host has launched
-  gains `last_played_unix_ms`, `play_time_ms`, `last_run_ms` and `launch_count`, kept in
-  `library-stats.json` beside the hide list and absent until the first launch. A client that
-  sorts by recency or shows play time reads them off the entry; nothing to negotiate.
-- **`GamepadType.steamController2Puck` (pref `10`) is declared by an Apple client.** The macOS
-  SC2 passthrough now captures over USB — a cabled pad or a Puck dongle, each collection its own
-  wire pad — and a Puck slot declares kind 10 where a wired or BLE pad still declares 9. Nothing
-  to negotiate: the host has resolved pref 10 since the Linux virtual Puck landed.
-- **High-resolution scrolling.** `InputKind::MouseScroll` gained a `flags` bit,
-  `SCROLL_FLAG_PRECISE`, marking a delta measured off a trackpad instead of counted off a
-  notched wheel; every client sets it and every injector scrolls that distance rather than
-  pricing each 10 px as a wheel click. Nothing to negotiate — a host that predates the bit
-  ignores it — but a client sending it to an older host still over-scrolls, so update both.
-- **`NativeBridge.nativeSendScroll` takes a `precise` flag.** The Android JNI entry point gained
-  a trailing `Boolean`. Rebuild the kit against the matching native library; an unchanged caller
-  will not link.
-- **A browser client, in its own repo.** `pf-console-ui` compiled to `wasm32-unknown-emscripten`
-  draws the console on a WebGL2 canvas, and video streams to it over WebTransport — handshake,
-  FEC, decrypt, reassembly and pairing are this crate's, unchanged. It lives at
-  [punktfunk/client-web](https://github.com/punktfunk/client-web) and takes `punktfunk-core`,
-  `pf-console-ui` and `pf-client-core` as pinned git dependencies, the way client-webos does.
-- **A WebTransport plane on the host, off by default.** `--webtransport` /
-  `PUNKTFUNK_WEBTRANSPORT` serves browsers on UDP 9778 with its own short-lived P-256 certificate,
-  published at `GET /api/v1/webtransport`. Narrow it with `PUNKTFUNK_WEBTRANSPORT_BIND` and
-  `PUNKTFUNK_WEBTRANSPORT_ORIGINS` — a browser applies no same-origin rule to WebTransport, so
-  without the second any page the user has open can reach the port.
-- **`GET /api/v1/webtransport` attests the browser plane's certificate.** `cert_hash_sig` and
-  `host_cert_der` carry the host's long-lived identity signing that plane's throwaway certificate
-  hash, so a browser that paired earlier can chain the two before it dials. Both are absent on a
-  host still serving the legacy RSA identity.
-- **Browsers pair with a device key, and prove it once per session.** `PairRequest` gains an
-  optional trailing `device_key` (P-256 SPKI) whose SHA-256 becomes the SPAKE2 identity and the
-  stored fingerprint; two new control messages, `AuthChallenge` (0x14) and `AuthResponse` (0x15),
-  carry a host nonce and the client's signature over it bound to the transport certificate. A
-  client with a certificate sends neither and its bytes on the wire are unchanged.
-- **A browser can authenticate to the management API.** `POST /api/v1/auth/device/challenge`
-  returns a nonce, `POST /api/v1/auth/device/token` exchanges a signature by a paired device key
-  for a short-lived bearer token. That token reaches exactly the paired-certificate route set and
-  nothing more, so a browser can read the library it could not reach before.
-- **The management API answers cross-origin requests, where a host serves browsers.** The headers
-  appear only once the plane is running or `PUNKTFUNK_WEBTRANSPORT_ORIGINS` names the pages that
-  may call, and `Access-Control-Allow-Credentials` is never sent because the API has no cookies.
-  Set the origins list when you serve the browser client from a fixed page; an empty list still
-  means any origin, but now only on a host that enabled the plane.
-- **`@punktfunk/host` 0.2.0 runs in a browser.** `@punktfunk/host/core` is the SDK with nothing
-  Node in it — the generated client, the service, the errors, the event decoder — and a
-  `Credential` seam with `staticBearer` (every credential it had) and `deviceKey` (a paired
-  browser's nonce exchange, re-earned on 401). Tag `sdk-v0.2.0` after merge to publish; the
-  generated client is now drift-gated against `api/openapi.json` in CI.
-- **The browser plane honours `require_pairing`.** A browser sends that signature before its
-  `Hello`, and a host that requires pairing refuses one that does not. Run `serve --open` to keep
-  an unpaired browser streaming, as it already does for native clients.
-- **`Platform::Web` in `pf-console-ui`.** The browser takes the desktop's glyphs and ring but the
-  no-live-chord settings wording, since a page binds none. An embedder switching on `Platform`
-  gains an arm to handle.
-- **An ARM64 Windows host installer**, `canary/punktfunk-host-setup_arm64.exe`, cross-built for
-  Snapdragon X with Media Foundation as its only encoder. It has not run on hardware yet and
-  streams video only: Steam ships no arm64 streaming-audio driver, so expect no game audio or
-  microphone until that substrate exists.
-- **`punktfunk-host plugins grant <dir>`.** The Windows runner is `LocalService` and cannot read
-  your user profile, so a launcher installed there reads as "not installed"; grant the runner
-  read on that one directory instead of hand-writing an icacls SID.
-- **`Access`, `fileAccess`, `dirAccess` and `grantCommand` in `@punktfunk/plugin-kit/library`.**
-  `isFile`/`isDir` answered `false` for both an absent path and one this account may not read, so
-  every scanner reported a permission problem as a missing install. Plugins that scan per-user
-  locations should report `denied` with its `grantCommand` rather than skipping the path.
-- **A launch hold on every client.** A title picked from a library sends its cover out of the
-  shelf tile, turning once as it crosses to the middle of the screen, and holds there — through
-  the dial and then over the stream — until the host's `games[].state` on `GET /api/v1/status`
-  leaves `launching`. It gives up after 15 s if the host never lists the title and 120 s if it
-  stays `launching`, any press shows the stream early, and launcher tiles never hold.
-- **A settings profile can be bound to one library title.** `KnownHost.game_profiles` maps a
-  title id to a profile id, and resolution now runs one-off ▸ title ▸ host ▸ globals — raise
-  Options on a cover and pick "Settings profile…". Nothing changes until you bind one; a
-  deleted profile drops the title back to the host's default rather than to raw globals.
-- **The controller-UI switch reaches webOS.** "Controller-optimized UI" and "Show it" are
-  offered wherever a client has a second interface to fall back to, which now includes the TV
-  client's cursor UI. The two stored keys lost their `android.` prefix (`gamepad_ui_enabled`,
-  `gamepad_ui_mode`); nothing persisted under the old names, so there is nothing to migrate.
-- **`guide` and `qam` quick-action slots.** The `overlay_actions` blob takes two more built-in
-  ids, each a one-shot tap of a system button on the host's pad (`BTN_GUIDE`, `BTN_MISC1`) —
-  the same verb the session control socket's `guide`/`qam` already exposed. An older client
-  reads them as empty slots, so a profile still syncs both ways.
-- **Multi-seat contract for the opt-in seats add-on.** With `HKLM\SOFTWARE\Punktfunk\Seats`
-  present, display connectors 12 through 15 are reserved, and a host given
-  `PUNKTFUNK_SEAT_SESSION`, `PUNKTFUNK_SEAT_ID` and `PUNKTFUNK_SEAT_DISPLAY_SLOT` owns one of
-  them, launches into its own Windows session and mints its own audio endpoints. Nothing
-  changes without the marker, and the new Multi-seat contract page is the reference.
-- **Decky: Punktfunk hosts in Steam's "Play from" menu.** The plugin patches
-  `/library/app/:appid`, lists hosts whose library carries `steam:<appid>` in the Play button's
-  ▾ menu, re-dresses Steam's Play button as Stream while one is chosen, and streams under a
-  hidden per-game shortcut with the game's name, art and icon. Anyone wrapping
-  `bin/punktfunkrun.sh` gains `PF_GAME=steam:<appid>` (passed as `punktfunk launch --game`), and
-  the backend gains `library(ref)`, `game_art(appid, icon_hash)` and `save_icon(appid, png)`.
-- **`HostRow.running` and `library::now_playing`.** Every client that shows host tiles now names
-  the game a paired host has up, read from `GET /api/v1/status` on a 20 s TTL beside the existing
-  host-actions cache. Producers fill the new `HostRow` field (`serde(default)`, never persisted);
-  a console that does not is simply a carousel with no such line.
-- **A shelf can connect without launching.** The library's Options menu (X on the console, the
-  title menu on Apple) gains a first row — "Resume <title>" while the host has a game up, else
-  "Connect to <host>" — that streams the host with no launch id, which is the only way back into
-  a game the host started on its own. On Apple a session begun that way returns to its shelf when
-  it ends, the way a launched title already did.
-- **The Android client splits at a foldable's hinge.** A book foldable half-opened on a table
-  gives the picture the upright half and the on-screen controller the flat one, so a thumb never
-  sits on the game; a hinge that folds the screen left or right is left alone. Nothing to set:
-  the split is the posture plus the controller being shown, and flattening the device restores
-  the full picture.
-- **The Android client decodes PyroWave.** A Vulkan 1.3 device with the codec's compute feature
-  set now advertises `CODEC_PYROWAVE` and decodes it as GPU compute into its own swapchain,
-  beside the MediaCodec path rather than through it. Nothing to do: the codec stays opt-in per
-  session, and a device without that feature set never offers the row.
-- **A Media Foundation encoder backend on Windows.** Every x64 vendor ships an H.264/HEVC MFT,
-  so the driver now falls back to it when the native SDK open fails instead of ending the
-  session; `PUNKTFUNK_ENCODER=mf` pins it. It encodes 8-bit 4:2:0 only, so an HDR or 4:4:4
-  session keeps whichever native backend it resolved to.
-- **Capture health on the Status page and in `GET /api/v1/status`.** A native Windows session's
-  `session.capture` block carries the live capture-health class (`healthy`, `idle`, `suspect`,
-  `stalled` with its class, `recovering`, `rebuilding`, `secure_desktop`), the evidence behind
-  it, the driver encoder's own state and the backend it opened, the stage running now, and the
-  last staged-recovery episode (stall class, recovered or not, each rung's outcome and time,
-  cooldown). A host-wide `display` block reports the topology generation, the last
-  topology transaction and the outstanding monitor-devnode leases. The console's session card
-  shows the class and the last recovery line, so a freeze is read there instead of grepped
-  out of the logs.
-- **`session.capture` reports the driver's encoder.** The block carries `encoder_state`
-  (`closed` / `open` / `encoding` / `wedged`), the `backend_opened` and the `detached` thread
-  count, all read from the driver's access-unit header, in place of the removed `ring_state` and
-  `fence_ring`. Nothing to do unless a dashboard read those two fields.
-- **Windows connector and PnP mutations are leases.** Every monitor devnode the stream disables
-  is journaled before the mutation as a lease naming the node, its prior state, which selector
-  picked it (the default standby-sink treatment stays limited to displays that were dark before
-  the acquire; the opt-in path over displays the isolate switched off is tagged apart) and the
-  topology generation of the acquire transaction that owns it; a node the operator had already
-  disabled is never touched. The AMD EDID lock records the connectors it pinned and unlocks only
-  those, leaving a pre-existing emulation pin alone. The acquire isolate itself now runs as a
-  topology transaction. Older journals from a previous host still recover.
-- **Three Windows launch kinds: `uplay`, `amazon` and `battlenet`.** A library plugin publishes
-  a validated store id and the host builds the launch itself: `explorer.exe "uplay://launch/<id>/0"`,
-  `explorer.exe "amazon-games://play/<id>"`, and `Battle.net.exe --exec="launch <code>"`. All three
-  are open to the plugin lane; nothing to do unless you write a plugin. A cold Battle.net client
-  only opens itself on the first launch, so keep it running or pick the tile twice.
-- **`defineLibraryPlugin` takes a `launch` resolver** (`@punktfunk/plugin-kit` 0.4.5). A library
-  plugin can publish `kind: "plugin"` tiles and answer the host's launch-time ask without composing
-  its own UI server; plugins on 0.4.4 are unaffected.
-- **Six new library sources ship as plugins**: Ubisoft Connect, Amazon Games and Battle.net on
-  Windows; desktop entries and Flatpak, Bottles and itch.io on Linux, itch.io on Windows too.
-  Install them from the console's Game sources once they reach the catalog.
-- **Topology writes are transactions with an observed outcome.** `topology_churn::begin` /
-  `finish` name a mutation, hold descriptor-following for its deadline, and bump a topology
-  generation only when the verification read saw a change; `isolate_displays_ccd_checked`
-  reports Verified / NothingActive / Unverified instead of a snapshot that hides a failed isolate.
-  The exclusive re-assert watchdog bumps the stream's recovery generation only on an observed
-  change, and after four consecutive fights concedes the fixed cadence (2 s doubling to 60 s).
-  Descriptor samples name the generation they were taken under, so two strikes straddling a
-  transaction never pass the debounce, and a same-mode presentation restart refuses a target with
-  no active display path.
-- **`pf_frame::recovery` sequences staged recovery.** A pure coordinator opens one episode per
-  `Stalled` verdict and walks the ladder EncoderReset, SwapChainReset, PresentationReset,
-  DriverCycle from the class's first actuator, running each stage once under a
-  deadline; a stage that applied still has to prove itself with three new source sequences
-  (republishes and cursor regens never count). Four episodes per ten minutes, a doubling cooldown
-  after failed ones (10 s to 5 min), one summary per episode, and `owns_episode` so passive
-  descriptor reactions stand down. Actuators wire in with WP6/WP7/WP14.
-- **The recovery rungs act.** An `encoder_reset` restarts the wedged encode thread over
-  `ENCODE_CTL`, and a `driver_cycle` reaps the WUDFHost and reloads the adapter when two resets
-  did not hold or the host is gone. The status `stage` enum drops `monitor_cycle`,
-  `capture_fallback` and `ring_reset`, and a `driver` stall class joins the four.
-- **`pf_win_display` has a display actor with a cached snapshot.** The display-events pump now
-  owns the CCD inventory read for hot paths: every `WM_DISPLAYCHANGE` / device broadcast schedules
-  one coalesced refresh (150 ms) instead of querying inside the window procedure, a 15 s safety
-  timer covers a missed broadcast, and a failed query keeps the last-known-good snapshot labelled
-  with its age and backs off (1 s doubling to 15 s). `display_events::{snapshot, request_refresh,
-  wait_for_change, refresh_and_wait}` are the API; `TargetInventory` gains `hdr`, `source_id` and
-  `source_adapter_luid`, and `CcdTargetKey` / `TargetInventory` move to the platform-neutral
-  `snapshot` module (re-exported from `win_display`).
-- **Hot display readers take the snapshot, not the display-config lock.** The descriptor poller
-  (HDR flag + active mode), the cursor poller's target rect, the compose kick's geometry, the
-  absolute-input stream rect, the scanline probe's retarget, the exclusive re-assert watchdog and
-  the management monitor listing all read `display_events::snapshot`; the watchdog wakes on a
-  topology generation instead of polling. At rest a session makes zero CCD reads beyond the
-  actor's 15 s safety refresh. The host starts the actor at `serve`, and a not-yet-started actor
-  falls back to one direct read (`snapshot_or_query`).
-- **The pf-vdisplay D3D device pool is per adapter, with epochs.** A bounded per-adapter map
-  hands every swap-chain worker the same device, stamps a new epoch on each creation (a TDR
-  recreate mints one; LUID equality is never device-compatibility proof) and carries a removal
-  flag every worker honours. Nothing to do.
-- **`pf_frame::health` classifies a capture gap by evidence.** A pure state machine over the
-  independent progress clocks (worker heartbeat, source frame, encoded AU) names a gap
-  Healthy / Idle / Suspect / Stalled(Worker | Transport | Conversion |
-  Presentation) / Recovering, with the 15 s stall floor the interim watchdog already uses. Cursor
-  or input evidence alone only raises suspicion and asks for a composition canary; presents or a
-  failed canary carry a gap into a recovery verdict. No I/O and no actuator: the recovery
-  coordinator consumes the verdict.
-- **`--host` / `--client` choose what to install.** `--client` installs `punktfunk-client` from
-  the family repo, or a user-scope flatpak where the family has none, so a distro with no
-  punktfunk repo can run the client.
-- **SteamOS installs from the guided installer.** It is a family now rather than a refusal:
-  the install clones the source and runs `scripts/steamdeck/install.sh`, which owns groups,
-  linger and the service start, so the run hands over and stops there.
-- **`--demo <preset>` walks the whole flow against a canned machine.** It changes nothing —
-  the plan is handed a runner that cannot spawn and a throwaway filesystem root.
-- **`PUNKTFUNK_INSTALL_OMARCHY_SETUP`** is the env twin for the Omarchy hand-off, which
-  previously could only be answered interactively. `PUNKTFUNK_SETUP_BIN` overrides the stub's
-  download with a local binary.
-- **Every host install trusts the console's certificate** in the user's NSS store, so Chromium
-  opens `https://localhost:47992` with no warning; it was Omarchy-only and a question. It needs
-  `certutil` (`nss`, `libnss3-tools`, `nss-tools`) and warns when that is missing —
-  `--no-console-cert` / `PUNKTFUNK_INSTALL_CONSOLE_CERT=0` opts out.
-- **`overlay_actions.pad` grows per-control layout overrides.** `pad.controls` (and
-  `pad.controls_narrow` for a narrow layer) maps control ids — `ls`, `rs`, `dpad`, `face`,
-  `lb`, `rb`, `lt`, `rt`, `select`, `guide`, `start` — to `{x, y, scale, hidden}`; absent
-  fields keep the preset, unknown ids survive a rewrite, and a parser that predates the maps
-  ignores them, so nothing to do.
-- **Gamescope adaptive sync** paints on game commits while preserving the game-rate limit
-  across compositor refresh updates. Install `punktfunk-gamescope` `+pfhdr10` or newer;
-  `PUNKTFUNK_GAMESCOPE_VRR=0` opts out.
+- **A browser client, in its own repo**, at
+  [punktfunk/client-web](https://github.com/punktfunk/client-web): `pf-console-ui` on
+  `wasm32-unknown-emscripten`, drawing the console on WebGL2 and streaming over WebTransport.
+- **`Platform::Web` and `Platform::WebOS` are new arms an embedder must handle.** Theme, widgets,
+  icons, glyphs, anim and pointer are now `pub` in `pf-console-ui`, as an unstable drawing kit.
+- **A WebTransport plane on the host, off by default.** `--webtransport` / `PUNKTFUNK_WEBTRANSPORT`
+  serves UDP 9778 behind a short-lived P-256 certificate that `GET /api/v1/webtransport` attests.
+- **Browsers pair with a device key and prove it per session.** `PairRequest` gains an optional
+  trailing `device_key` (P-256 SPKI); `AuthChallenge` (`0x14`) / `AuthResponse` (`0x15`) the nonce.
+- **A browser can authenticate to the management API.** `POST /api/v1/auth/device/challenge` and
+  `/token` trade a device-key signature for a short-lived bearer; CORS needs the origins list set.
+- **`@punktfunk/host` 0.2.0 runs in a browser.** `@punktfunk/host/core` is the SDK with nothing Node
+  in it, plus a `Credential` seam with `staticBearer` and `deviceKey`. CI drift-gates the client.
+- **`punktfunk_core::quic`'s messages build without the `quic` feature**, so a client speaking
+  punktfunk/1 over another transport can name `Hello` without quinn. SPAKE2 moves behind `pake`.
+- **High-resolution scrolling.** `InputKind::MouseScroll` gained `SCROLL_FLAG_PRECISE`, marking a
+  trackpad delta every injector scrolls verbatim. A client sending it to an older host over-scrolls.
+- **`GameEntry.stats` carries a title's play stats.** `last_played_unix_ms`, `play_time_ms`,
+  `last_run_ms` and `launch_count` live in `library-stats.json`, absent until the first launch.
+- **`start_in`, `default_host`, `HostRow.id` and `HostRow.running`.** Resolve the first two through
+  `pf_client_core::start`, never alone; `library::now_playing` names a host's live game on a 20 s TTL.
+- **New `ctl` verbs: `summary`, `stats`, `display` and `default-host`.** `launch` and `library` may
+  omit the host once a default exists, and exit `5` when none does.
+- **Multi-seat contract for the opt-in seats add-on.** With `HKLM\SOFTWARE\Punktfunk\Seats` present,
+  connectors 12–15 are reserved and three `PUNKTFUNK_SEAT_*` variables give a host one.
+- **Decky: Punktfunk hosts in Steam's "Play from" menu.** Anyone wrapping `bin/punktfunkrun.sh` gains
+  `PF_GAME=steam:<appid>`; the backend gains `library`, `game_art` and `save_icon`.
+- **The library plugin lane opens.** `defineLibraryPlugin` takes a `launch` resolver, `Access` /
+  `grantCommand` report `denied` rather than missing, and `plugins grant <dir>` feeds LocalService.
+- **Six library sources ship as plugins**, with `uplay`, `amazon` and `battlenet` as host launch
+  kinds: Ubisoft Connect, Amazon Games, Battle.net, desktop entries and Flatpak, Bottles, itch.io.
+- **Two more encoder backends.** `PUNKTFUNK_ENCODER=mf` is the Windows Media Foundation fallback when
+  the native SDK open fails; `PUNKTFUNK_ENCODER=vaapi-native` opens a libva H.264/HEVC session.
+- **Concurrent Linux sessions get their own input, audio and mic.** An isolated gamescope spawn
+  takes a pinned injector and a named sink; `PUNKTFUNK_GAMESCOPE_ISOLATE=0` is the escape hatch.
+- **Capture health in `GET /api/v1/status`.** `session.capture` carries the health class, its
+  evidence and `encoder_state`; the document also names `host_protocol` and `driver_protocol`.
+- **Staged capture recovery on Windows.** `pf_frame::health` classifies a gap and
+  `pf_frame::recovery` walks four rungs; `PUNKTFUNK_IDD_DIAG` replaces `PUNKTFUNK_STALL_PROBES`.
+- **Windows display reads come off a cached snapshot, and topology writes are transactions.**
+  `display_events::snapshot` coalesces broadcasts; every connector mutation is a journaled lease.
+- **An ARM64 Windows host installer**, `canary/punktfunk-host-setup_arm64.exe`, with Media Foundation
+  as its only encoder. It streams video only: Steam ships no arm64 audio driver.
+- **The guided installer chooses what to install.** `--host` / `--client` pick the side, SteamOS is a
+  family rather than a refusal, and `--demo <preset>` walks the flow against a canned machine.
 
 ### Changed
 
-- **The Windows driver's diagnostics reach `host.log`.** The encoder runs inside WUDFHost, so its
-  backend rejections, bitrate retargets and wedges used to need `PFVD_DEBUG_LOG` and a file in
-  LocalService's temp directory; the host now drains them over `IOCTL_DRAIN_LOG` at the keepalive
-  cadence and once after every encoder open. Nothing to do — the knob still adds the driver's own
-  file and debug-string tee on top of it.
-- **The SteamOS host carries its own FFmpeg.** The on-device build now compiles the pinned LGPL
-  FFmpeg the .deb already bundles into `target-steamos/ffmpeg` and links it behind an absolute
-  rpath, because SteamOS's FFmpeg moves independently of any Debian release and a host linked
-  against the box's copy stops loading when it does. A first install takes about four minutes
-  longer and `update.sh` reuses the build until the pin moves; nothing else changes.
-- **A Windows host serves pref `10` as the wired Triton pad.** It used to degrade to the Xbox 360
-  pad, because 28DE:1304 has no Windows synthesis; it now folds onto the same 28DE:1302 virtual
-  pad a cabled SC2 mints, which Steam treats as the canonical controller. Nothing to do — a Puck
-  session that reached Windows as an Xbox pad now arrives with native Steam Input.
-- **A pinned data port no longer skips the hole-punch.** `--data-port` / `PUNKTFUNK_DATA_PORT`
-  used to stream to the port the client reported, which a NAT or a port proxy on the client's
-  side remaps; the host now answers the source it heard the punch from on every port. Nothing to
-  do, unless a fleet script relied on the flag to suppress the "no hole-punch reached" warning —
-  that warning now also fires on a pinned port whose inbound UDP is blocked.
-- **`pf-client-core` and `pf-console-ui` build for `wasm32-unknown-emscripten`.** Their portable
-  module gates name `target_family = "wasm"` beside android, and `punktfunk-core` now takes
-  `if-addrs` off wasm only, keeps its Apple `recv_batch` off it, and `trust`'s identity, pair,
-  probe and `preferred_codec` entry points are absent there — a browser has no quinn. No other
-  target changes.
-- **`punktfunk_core::quic`'s messages no longer need the `quic` feature.** Only `endpoint`, `io`,
-  `clipstream`, `pake` and `clock_sync` do; the codecs build on every target, so a client that
-  speaks punktfunk/1 over another transport can name `Hello` without pulling quinn. Every existing
-  path is unchanged. SPAKE2 moves behind a new `pake` feature that `quic` turns on.
-- **`punktfunk_core`'s C ABI is absent on wasm.** Nothing in a browser embeds this crate over the
-  C ABI, and its `#[no_mangle]` roots made the cdylib cargo builds regardless unlinkable there. An
-  embedder is unaffected on every target that has one.
-- **`capture_health` reports the classes the driver's clocks support.** `stall_class` is now
-  `worker` / `encoder` / `presentation` / `driver` (`transport` and `conversion` are gone),
-  `evidence` is `input` / `canary`, and the object gains `present_to_arrival_ms` plus a
-  `late_frames` flag for frames that arrive late rather than not at all. A dashboard matching the
-  old strings needs the new ones.
-- **`PUNKTFUNK_IDD_DIAG` replaces `PUNKTFUNK_STALL_PROBES`.** One gate now turns on the Windows
-  capture micro-probes, the DxgKrnl ETW session and a raw access-unit dump, none of which run in
-  a normal session. Set it to `1` when diagnosing a box, or to a directory to put the dump there.
-- **`VIDEO_CAP_*` negotiation is unchanged on Windows.** The driver allocates its encode-pool
-  slots in whatever format the opened backend asked for, so HDR, 10-bit and 4:4:4 resolve
-  exactly as they did when the host converted. Nothing to do.
-- **The Windows installers are punktfunk's own.** `punktfunk-host-setup-<version>.exe` and
-  `punktfunk-client-setup-<version>_<arch>.exe` are now built by `punktfunk-setup-win`, the
-  engine behind the Linux installer, with a self-contained WinUI 3 wizard (Recommended or
-  Custom, a stepper, the web-console password shown once behind a reveal, next steps on the
-  finish page) instead of Inno Setup. Nothing a script or a fielded box relies on changes: the
-  same silent flags (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG= /MERGETASKS`), the
-  same Add/Remove entry and `unins000.exe`, the same install dir, the same Authenticode
-  signer. A host installed by the old installer upgrades in place and its Inno uninstaller data
-  is retired on that first upgrade. winget: the host manifest's `InstallerType` is `exe` from
-  this version; `winget upgrade` keeps tracking the same `ProductCode`. The wizard needs
-  Windows 11; a silent install runs anywhere the host does.
-- **The streaming overlay sizes itself on Android TV.** The stats HUD and the quick-action ring
-  draw 1.75x larger there, where `dp` normalises pixel density but not the viewing distance a
-  living-room set adds — the Apple TV client already sizes its own chrome for the couch. Nothing
-  to set: it follows the device.
-- **The install commands are generated from `data/platforms.json`.** They were copied beside it
-  and kept in step by a CI substring check; the binary embeds the file, so the docs and the
-  installer cannot drift. Nothing to do.
-- **The package manager no longer asks its own "proceed?"** — every install line carries
-  `-y` / `--noconfirm`, since running the installer is the consent. While the progress line is
-  up a step's output is captured and its last lines are shown only when it fails; `-v` keeps the
-  full transcript.
-- **REALTIME GPU scheduling priority is the Windows default again**, in the host process
-  (`PUNKTFUNK_GPU_PRIORITY_CLASS`, the `auto` gated-upgrade mode is gone) and the vdisplay
-  swap-chain raise (the `PFVD_RT_GPU` opt-in ladder is gone). A box that needs the old posture
-  sets `PUNKTFUNK_GPU_PRIORITY_CLASS=high` and `setx /M PFVD_NO_RT_GPU 1`.
-- **The Windows capture micro-probes default off.** `PUNKTFUNK_STALL_PROBES=1` opts a box under
-  diagnosis in (it was on by default with `=0` as the opt-out). The standing probe threads alter
-  the path they diagnose; stall reports still carry driver telemetry and the ETW discriminator,
-  and each session logs its probe posture.
+- **The Windows installers are punktfunk's own.** `punktfunk-setup-win` builds both with a WinUI 3
+  wizard instead of Inno Setup, keeping the silent flags, Add/Remove entry, install dir and signer.
+- **winget sees the host as `InstallerType: exe`** from this version, on the same `ProductCode`.
+  The wizard needs Windows 11; a silent install runs anywhere the host does.
+- **The Windows driver's diagnostics reach `host.log`.** The host drains them over
+  `IOCTL_DRAIN_LOG` at the keepalive cadence, where they used to need `PFVD_DEBUG_LOG`.
+- **The SteamOS host carries its own FFmpeg.** The on-device build compiles the pinned LGPL FFmpeg
+  behind an absolute rpath, because SteamOS's own copy moves independently. First install is slower.
+- **`pf-client-core` and `pf-console-ui` build for `wasm32-unknown-emscripten`.** `punktfunk-core`
+  drops `if-addrs` there, and `trust`'s identity, pair, probe and `preferred_codec` are absent.
+- **REALTIME GPU scheduling priority is the Windows default again**, in the host and the vdisplay
+  raise. Set `PUNKTFUNK_GPU_PRIORITY_CLASS=high` and `setx /M PFVD_NO_RT_GPU 1` for the old posture.
+- **A pinned data port no longer skips the hole-punch.** `--data-port` answers the source it heard
+  the punch from, and the "no hole-punch reached" warning now fires on a pinned port too.
+- **The install commands are generated from `data/platforms.json`**, which the binary embeds, so the
+  docs and the installer cannot drift. Every package line carries `-y` / `--noconfirm`.
+- **Pairing events replay once, then go live.** The event stream closes its ring replay with one
+  `event: live` frame; a `ctl watch` consumer that wants the replay passes `--since 0`.
 
 ### Fixed
 
-- **A display that re-lights itself mid-stream is parked for the session.** A standby TV on a
-  Windows host re-lit 35–100 s after every exclusive isolate and each eviction cost the stream a
-  0.2–1.8 s rebuild, so after the first re-assert the host PnP-disables that panel — journaled,
-  re-enabled at teardown. Nothing to do; `PUNKTFUNK_STANDBY_SINK_KEEP` still opts out.
-- **A game's own display mode survives a topology re-assert.** The session kept the client's
-  original mode after the encoder had followed a mid-session mode change, so the next re-assert
-  or rebuild set the display back to it. Nothing to do.
-- **AV1 tile starts reach the decoder in superblocks.** `pMiColStarts`/`pMiRowStarts` carried 4x4
-  units, so a client whose Vulkan driver reads those arrays instead of recomputing them — AMD on
-  Windows — painted everything below the first tile row green on the multi-tile AV1 a host emits
-  at 4K120. Update the client; nothing to configure.
-- **The virtual DualSense reports its adaptive-trigger status.** A game that arms a Weapon
-  effect fires on the trigger's status nibble, not on the axis, so with adaptive triggers on
-  in-game R2 did nothing — the host left those two report bytes zero. The host now derives the
-  status from the armed effect and the trigger position, on every backend; nothing to do.
-- **The "audio format but not CLIENT_CAP_AUDIO_HIRES" warning fires only for a real
-  contradiction.** Hello decodes an absent format as 48 kHz/16-bit, so every ordinary session
-  logged it; nothing to do.
-- **A capture-loss rebuild replaces the stalled display instead of extending its group.** On
-  Mutter the rebuilt stream used to land on a fresh secondary monitor showing an empty desktop
-  while the stalled one lingered; the rebuild now supersedes and retires it, as a mode switch
-  does. Nothing to do.
-- **A KWin virtual output negotiates a 4-buffer capture pool.** KWin's default of 3 left the
-  zero-copy hold one buffer short, so every other frame went back to the compositor while the
-  encoder still read it and could tear under load; nothing to do, and `PUNKTFUNK_FORCE_SHM=1`
-  stays the escape should a future KWin refuse the ask.
-- **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
-  Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
-  command to `100F6C34`, id byte stripped in both cases, where the link had written every frame
-  whole to whichever writable characteristic it discovered first — so lizard mode never went off,
-  at most one actuator could be reached, and Steam's gyro-enable was swallowed. The link now also
-  re-acquires a pad that powers off mid-session; nothing to do beyond the update.
-- **A DualSense's haptics and speaker stream from its own pad.** The capture source — the
-  Windows endpoint, the usbip card, the minted PipeWire sink — is named by the pad's OS slot,
-  which the streamer was opening by the client's pad number instead: with two pads it could
-  carry the other player's audio, and a host serving two sessions the other session's. Nothing
-  to do.
-- **Two controllers no longer swap raw reports and rumble.** The host claims an OS pad slot on a
-  pad's first frame — the pad that moves first takes the lowest slot, whatever the client
-  numbered it — and the rich plane (touchpad, motion, a passed-through Steam Controller 2's raw
-  HID reports) was the one index never translated into that space: each pad drove the other's
-  virtual device, and the game's rumble came back on the wrong controller. Nothing to do.
-- **The forwarded pointer is native-sized on a scaled Wayland client.** SDL hands the compositor
-  a custom cursor's pixel size as a viewport destination — surface-local units, so the display
-  scale is applied there — while the client folded that same scale into the bitmap it built,
-  drawing the pointer scale-squared too large (2.25× at 150 %). The fold now happens only on the
-  backends that present a cursor surface at 1:1 physical pixels; nothing to do.
-- **A KDE session's streamed display sits at the desktop origin.** KWin appends a new output to
-  the right of the row it joins and never re-normalizes, so an exclusive session — every physical
-  dark — left the only lit screen at a non-zero origin, an arrangement no display KCM produces
-  and one Plasma places popups off: the launcher pinned to the right edge, the desktop context
-  menu to the left. Nothing to do beyond the update.
-- **The Windows host is per-monitor DPI aware from launch.** Windows hands a DPI-unaware process
-  the cursor bitmap for the DPI it was started at, so a host started on a 300 % desktop kept
-  forwarding a 96 px pointer onto the 96 DPI virtual display, three times too large on every
-  client; the embedded manifest now declares PerMonitorV2, so the forwarded pointer and the GDI
-  metrics follow the display's live scale. Nothing to do beyond the update's own host restart.
-- **Trackpad scrolling no longer runs away.** A client priced 10 px of finger travel as one
-  wheel detent and every host then expanded that detent into a full scroll step (~3 lines) —
-  roughly five times too far, on Windows as well as Linux, and worst on macOS where all
-  scrolling is precise. wlroots now emits a finger-source axis for a precise delta and a
-  coupled `axis_discrete` for a real wheel, and Windows reprices against the user's own
-  `SPI_GETWHEELSCROLLLINES`; nothing to do.
-- **A frame whose reference chain the decoder concealed is never shown.** The Vulkan lanes
-  only used their per-picture clean bit to refuse a host recovery anchor, so a damaged picture
-  reaching an unfrozen gate (a reordered straggler decoded after its successors, an encoder
-  still referencing the corrupt window) was presented and nothing re-armed — the grey smear
-  that lasted until a scene change. Such a frame now holds, arms the freeze and asks for a
-  keyframe; nothing to do.
-- **NVENC reference invalidation runs to the encode head.** It invalidated only the frames the
-  client named as lost, so the recovery frame predicted from a frame the client had decoded
-  against the hole and the client either refused the anchor and waited for an IDR or showed
-  the damage. The range now covers every frame encoded since the loss and declines when no
-  older reference survives; nothing to do.
-- **A dedicated game session runs on its own gamescope.** A second launch either started nothing
-  or spawned a rival compositor that Steam's single instance immediately killed, and the session
-  ended on a process scan that mistook Steam's install-script step for the game — so the stream
-  dropped seconds before it started. The seat's one live spawn now serves every title, and the
-  session ends on gamescope's own atoms; nothing to do.
-- **A sleeping host now reads Offline, and auto-wake fires for it.** Every client took a live mDNS
-  advert as proof of life, but a suspending host sends no goodbye and its record lingers for up to
-  75 minutes — so the pip stayed green and Wake-on-LAN, gated on "not advertising", never fired.
-  Presence is now the reachability probe alone on all six surfaces; nothing to do.
-- **The quick-action dial follows the left stick on Apple and Android.** Both clients read the
-  stick as a four-way step, so reaching a slot walked the whole dial one disc at a time; they now
-  aim at the sector the thumb points at, as the desktop clients already did. Nothing to do — the
-  D-pad still steps.
-- **A Windows launch starts in its executable's own folder.** It inherited the host service's
-  working directory instead, which sits under `C:\Program Files` — Ryujinx refuses to run there,
-  and a title loading assets relative to the working directory read the host's folder; nothing
-  to do.
-- **`spike --source virtual` encodes again on Windows.** It fed the driver's now-empty CPU
-  frame to an in-process encoder and still exited 0; it uses the in-driver encoder now and
-  fails when no access unit comes out. The source is renamed from `kwin-virtual`, which stays
-  as an alias, and `--hdr` replaces the portal-only environment variable.
-- **HDR plus 4:4:4 carries full chroma again on Windows.** The in-driver encoder took P010 for
-  every HDR session, so NVENC emitted 4:2:0 while the `SET_ENCODE` reply still promised 4:4:4.
-  Nothing to do: such a session now opens on the packed 10-bit RGB input.
-- **iPad and Apple TV audio no longer sits 40–90 ms behind the picture with the mic off.** On
-  some devices, in some states, iOS handed the app an 85 ms audio buffer because the mic-off
-  session never asked for one; the client then had to hold that much audio before every
-  speaker callback, so lip sync was off by that amount on any network, and the HUD showed the
-  audio buffer bouncing between 15 and 115 ms with a/v at +40 or more. The client now asks
-  for 10 ms whether or not the mic is on, logs what it asked for and what it got at connect,
-  and warns when iOS gives it far more. Nothing to do.
-- **iPad audio with the mic on no longer drops out every half minute.** Each engine start's own
-  route change was read as a stopped engine, so the client rebuilt its audio engine after every
-  rebuild for the whole session. Nothing to do.
-- **A re-run upgrades a box that already has every package.** The install phase skipped the
-  packages entirely when the host, console and plugin runner were all present, so a box carrying
-  a broken build could only be cleared by uninstalling first — nothing to do.
-- **`inhibit_shortcuts` applies under the desktop mouse model on the Apple client.** It gated the
-  ⌘-chord passthrough and the system-shortcut tap on the capture model only, unlike the SDL
-  clients; turn the setting off to keep the chords local.
-- **Pairing toasts fire once, on a live knock only.** The event stream closes its ring replay
-  with one `event: live` frame, the console and `ctl watch` stay quiet before it, and the Omarchy
-  panel leaves the toast to the `pairing-pending` hook. A `ctl watch` consumer that wants the
-  replay passes `--since 0`.
-- **Menu backs out of every tvOS screen: the Shortcuts page, the connect takeover and a drilled
-  library shelf, and the quick-action ring shows one highlight.** Nothing to do; the Siri Remote
-  now drives the ring too (swipe steps, click fires, Play/Pause recentres, Back closes).
-- **The Siri Remote pointer no longer jumps toward wherever the surface is touched.** Contact
-  and lift now come from the surface's touch report and the first 60 ms after contact are
-  dropped, so only a swipe moves the host cursor; nothing to do.
-- **Every connected controller drives the desktop launcher, not just the newest one.** Menu mode
-  held one pad open, so a second controller was dead until a session attached and stayed dark
-  after the disconnect chord; it now holds them all and folds their input into one sample, and
-  the in-stream ring reads whichever pad opened it. Nothing to do — a pinned pad still forwards
-  alone.
-- **A Deck in Game Mode forwards every controller Steam Input wraps, not only the newest.** When
-  each connected pad is a Steam virtual gamepad none of them shadows a real one, so all are
-  forwarded instead of just the last. Nothing to do.
-- **A native crash in the Windows client names its module.** `punktfunk-session` and the shell
-  now install the host's unhandled-exception filter, so `client.log` records the exception code,
-  fault address and faulting DLL, and the "Couldn't connect" banner calls an access violation one
-  instead of printing `-1073741819`. Send the log as before; the crash line is what to look for.
-- **The Windows client ships its own VC++ runtime.** Every client artifact now carries the
-  toolset's `msvcp140*.dll` and `vcruntime140*.dll` beside the exe, so a machine whose
-  redistributable predates 14.40 no longer kills the session in `MSVCP140.dll` on the first
-  text layout. Nothing to do; a system redist update is no longer required.
-- **A clamped Windows refresh logs at warn.** A mode set that lands on a lower refresh than the
-  client asked for now warns with the rates the OS listed, where it used to be an info line.
-  Nothing to do; grep `host.log` for `not advertised` when a client streams below the rate it
-  asked for.
-
-### Fixed
-
-- **`AVSampleBufferVideoRenderer` is the tvOS 17.4+ default for 4:2:0 streams, removing Metal's
-  two-refresh reservation.** Older tvOS,
-  4:4:4, PyroWave and Smoothness retain Metal; users need no setting changes.
-- **AMF runtime floor is 1.4.30.** The native AMD encoder rejected anything below 1.4.34, which
-  the Polaris/Vega driver branch (frozen at 1.4.31) never reaches, so RX 400/500 and Vega hosts
-  failed every session. Nothing to do; such a host now encodes on the core path and the newer
-  optional properties degrade individually.
+- **AV1 tile starts reach the decoder in superblocks.** `pMiColStarts` / `pMiRowStarts` carried 4x4
+  units, so a client reading them — AMD on Windows — painted below the first tile row green.
+- **The presenter clears the swapchain before the blit, not after.** The write-after-write race drew
+  bouncing black bars down one edge on AMD clients, under every codec.
+- **Trackpad scrolling no longer runs away.** wlroots emits a finger-source axis for a precise delta
+  and a coupled `axis_discrete` for a wheel; Windows reprices against `SPI_GETWHEELSCROLLLINES`.
+- **A frame whose reference chain the decoder concealed is never shown.** A damaged picture reaching
+  an unfrozen gate was presented; such a frame now holds, arms the freeze and asks for a keyframe.
+- **NVENC reference invalidation runs to the encode head.** It invalidated only the frames the client
+  named as lost, so a recovery frame could predict from one decoded against the hole.
+- **The Windows driver re-encodes its stash when the composited cursor moves.** A pointer move is not
+  DWM damage, so the captured cursor froze until something else on the desktop changed.
+- **UAC, lock and logon render mid-stream.** The secure desktop used to hold the last normal-desktop
+  frame until a client resize; a `CDS_RESET` commit and `EVENT_SYSTEM_DESKTOPSWITCH` replace a poll.
+- **`PUNKTFUNK_VDISPLAY_HZ_MULT` no longer kills bring-up.** The display is created at the multiplied
+  rate up front, where the mode churn afterwards was rejected `BADMODE` and ended every session.
+- **The Windows host is per-monitor DPI aware from launch.** A host started on a 300 % desktop
+  forwarded a 96 px pointer; the embedded manifest now declares PerMonitorV2.
+- **The Windows client ships its own VC++ runtime and its icon font.** `msvcp140*.dll` and
+  `vcruntime140*.dll` ride along, so a redistributable older than 14.40 no longer kills the layout.
+- **Two controllers no longer swap raw reports, rumble or pad audio.** The rich plane was the one
+  index never translated into the host's OS-slot space, and haptics opened the client's pad number.
+- **KWin gets a 4-buffer capture pool, and its streamed output sits at the desktop origin.** The
+  default of 3 left the zero-copy hold short; `PUNKTFUNK_FORCE_SHM=1` stays the escape.
+- **A standby display that re-lights mid-stream is parked for the session**, PnP-disabled and
+  journaled for teardown, and a game's own mode now survives a topology re-assert.
+- **HDR plus 4:4:4 carries full chroma again on Windows**, and the AMF runtime floor is 1.4.30 so
+  Polaris and Vega hosts encode instead of failing every session.
+- **Packaging fixes.** Host and client coexist on one Arch box, a channel switch keeps and removes
+  the right packages, and a SteamOS box stops rebuilding the host on every boot.
 
 ### Security
 
-- **`GET /api/v1/local/summary` is never answered cross-origin.** It is admitted by loopback with
-  no credential, so the same-origin policy was the only thing keeping a page off it, and the CORS
-  layer now exempts every route authorised by network position. Nothing to do: a host that never
-  enabled the browser plane no longer sends CORS headers at all.
+- **Trust is enforced across the optional surfaces.** Pairing PINs leave process arguments, the
+  USB/IP importer authenticates, and local administration binds to explicit identities.
+- **Native memory boundaries are hardened.** GameStream header timers and connection lifetimes are
+  bounded, PipeWire slices are bounded, and temporary specs are written `0600`.
+- **`GET /api/v1/local/summary` is never answered cross-origin.** It is admitted by loopback with no
+  credential, so CORS now exempts every route authorised by network position.
 - **`serve --open` with the browser plane refuses to start.** `--open` waives the device signature
-  and an empty origin list admits any page, which together let any website the user visits stream
-  and inject input. Set `PUNKTFUNK_WEBTRANSPORT_ORIGINS`, or drop `--open`.
+  and an empty origin list admits any page. Set `PUNKTFUNK_WEBTRANSPORT_ORIGINS`, or drop `--open`.
 - **The device-auth nonce cap evicts one challenge, not all of them.** An unauthenticated caller
-  could flush every outstanding nonce with 256 requests to `POST /api/v1/auth/device/challenge`,
-  cancelling a real browser's exchange in flight. Nothing to do.
+  could flush every outstanding nonce with 256 requests to the challenge route.
 
 ---
 

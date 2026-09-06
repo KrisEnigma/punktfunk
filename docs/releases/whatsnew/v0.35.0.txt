@@ -1,0 +1,5 @@
+• Half-open a foldable on a table and the game takes the upright screen while the controller takes the flat one.
+• Rearrange the on-screen controller: move, resize or hide any stick, pad, shoulder or trigger.
+• Your library now shows play time and what you played last, and each game can keep its own settings.
+• Clipboard sharing starts off for hosts you pair from now on. Turn it on per host.
+• Sharper, lower-latency video on newer phones.
