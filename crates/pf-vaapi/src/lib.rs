@@ -25,6 +25,8 @@
 
 pub mod config;
 pub mod drm;
+/// H.264 encode parameter buffers — the encode mirror of [`va`].
+pub mod enc_h264;
 pub mod pic;
 pub mod pic_av1;
 pub mod pic_h265;
