@@ -342,12 +342,12 @@ fn committed_mode_or(key: CcdTargetKey, requested: Mode) -> Mode {
         return requested;
     }
     if refresh_hz != requested.refresh_hz {
-        tracing::info!(
+        tracing::warn!(
             target = %key,
             requested_hz = requested.refresh_hz,
             committed_hz = refresh_hz,
-            "the OS committed a different refresh than requested (the driver does not advertise \
-             it) — recording what the display actually runs"
+            "the OS committed a different refresh than requested — recording what the display \
+             actually runs; the client streams below the rate it asked for"
         );
     }
     Mode {
