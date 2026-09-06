@@ -3,6 +3,7 @@ package io.unom.punktfunk.kit
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -152,5 +153,123 @@ class Sc2DeviceTest {
         // Both are pure padding past the command — a stray byte would be sent to the firmware.
         assertTrue(Sc2Device.DISABLE_LIZARD.drop(6).all { it == 0.toByte() })
         assertTrue(Sc2Device.NORMALIZE_JOYSTICKS.drop(6).all { it == 0.toByte() })
+    }
+
+    // ---- BLE framing: the rules Valve's vendor service actually applies, mirrored pair for
+    // pair with the Apple client's `Sc2FramingTests.swift`. ----
+
+    @Test
+    fun `a state-sized payload gets the 0x45 prepend`() {
+        // The live shape: a 45-byte characteristic value becomes a 46-byte id-first frame.
+        val payload = ByteArray(45).also { it[0] = 0xE5.toByte() } // seq, not a report id
+        val framed = Sc2Device.frameIncoming(payload)
+        assertEquals(46, framed.size)
+        assertEquals(Sc2Device.ID_STATE_BLE.toByte(), framed[0])
+        assertArrayEquals(payload, framed.copyOfRange(1, framed.size))
+        // The rule's floor: exactly 40 bytes still counts as state-sized.
+        assertEquals(41, Sc2Device.frameIncoming(ByteArray(40)).size)
+    }
+
+    @Test
+    fun `a short payload passes through unmodified`() {
+        // Battery and status keep whatever framing the firmware gave them. No 0x45 to 0x42
+        // rewrite and no zero-pad — those belong to a synthetic-USB queue contract, not ours.
+        val battery = byteArrayOf(Sc2Device.ID_BATTERY.toByte(), 0x64, 0x01)
+        assertArrayEquals(battery, Sc2Device.frameIncoming(battery))
+        assertEquals(39, Sc2Device.frameIncoming(ByteArray(39)).size)
+    }
+
+    @Test
+    fun `an output write strips the id and trims to its declared length`() {
+        // A native-length 0x80 grip rumble (10 B wire = 1 id + 9 payload) rides B5 with 9 bytes.
+        val rumble = byteArrayOf(0x80.toByte(), 0, 1, 2, 3, 4, 5, 6, 7, 8)
+        val write = Sc2Device.outputWrite(rumble)!!
+        assertEquals("100f6cb5-1735-4313-b402-38567131e5f3", write.charUuid)
+        assertArrayEquals(rumble.copyOfRange(1, rumble.size), write.payload)
+        // 0x82, Steam's ping/test buzz, rides B7. This is the mis-route that made every actuator
+        // but one silent: the link used to send every id to the first writable characteristic.
+        val buzz = byteArrayOf(0x82.toByte(), 0x03, 0x01, 0xFF.toByte())
+        val buzzWrite = Sc2Device.outputWrite(buzz)!!
+        assertEquals("100f6cb7-1735-4313-b402-38567131e5f3", buzzWrite.charUuid)
+        assertArrayEquals(byteArrayOf(0x03, 0x01, 0xFF.toByte()), buzzWrite.payload)
+    }
+
+    @Test
+    fun `an output write drops an old host's 64-byte padding`() {
+        // Current hosts pre-trim each frame; an older one pads to 64 B. The write must carry
+        // exactly the declared stripped length either way.
+        val padded = ByteArray(64)
+        padded[0] = 0x80.toByte()
+        for (i in 1..9) padded[i] = i.toByte()
+        padded[10] = 0xEE.toByte() // past the declared length — must not reach the firmware
+        assertArrayEquals(
+            byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9),
+            Sc2Device.outputWrite(padded)!!.payload,
+        )
+    }
+
+    @Test
+    fun `an output write clamps to what arrived`() {
+        val short = byteArrayOf(0x80.toByte(), 1, 2)
+        assertArrayEquals(byteArrayOf(1, 2), Sc2Device.outputWrite(short)!!.payload)
+        assertNull(Sc2Device.outputWrite(byteArrayOf(0x80.toByte()))) // no payload to write
+        assertNull(Sc2Device.outputWrite(ByteArray(0)))
+    }
+
+    @Test
+    fun `an unknown output id keeps its whole payload`() {
+        // Strip the id, keep the rest, never guess-trim. The characteristic still follows the
+        // firmware's id-plus-0x35 scheme, whatever the id.
+        val unknown = byteArrayOf(0x90.toByte(), 1, 2, 3, 4, 5)
+        val write = Sc2Device.outputWrite(unknown)!!
+        assertEquals("100f6cc5-1735-4313-b402-38567131e5f3", write.charUuid)
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5), write.payload)
+    }
+
+    @Test
+    fun `a feature write strips the channel id and keeps the padding`() {
+        // Feature frames arrive whole from the host: drop the 0x01, keep everything else. The
+        // firmware accepts the zero-padded form.
+        val payload = Sc2Device.featurePayload(Sc2Device.DISABLE_LIZARD)!!
+        assertEquals(63, payload.size)
+        assertArrayEquals(byteArrayOf(0x87.toByte(), 0x03, 0x09, 0x00, 0x00), payload.copyOf(5))
+        assertNull(Sc2Device.featurePayload(byteArrayOf(0x01))) // no command to write
+        assertNull(Sc2Device.featurePayload(ByteArray(0)))
+    }
+
+    @Test
+    fun `the lizard-off keepalive leads with the settings command`() {
+        // The characteristic value carries no 0x01 channel byte, so the firmware reads byte 0 as
+        // the command id: unstripped, the frame parses as command 0x01 and lizard mode never
+        // goes off. That was the Bluetooth defect — the pad kept emulating a keyboard and mouse
+        // on the phone, and Steam's forwarded gyro-enable was swallowed the same way.
+        val payload = Sc2Device.featurePayload(Sc2Device.DISABLE_LIZARD)!!
+        assertEquals(0x87.toByte(), payload[0]) // ID_SET_SETTINGS_VALUES, never the channel id
+        assertArrayEquals(Sc2Device.DISABLE_LIZARD.copyOfRange(1, 64), payload)
+    }
+
+    @Test
+    fun `the feature characteristic is outside the per-report block`() {
+        // The regression that made every feature write land on a rumble actuator: resolving
+        // writes by scanning the output block alone can never reach the feature characteristic.
+        val outputs = (0x80..0x89).map { Sc2Device.bleOutputChar(it) }
+        assertFalse(Sc2Device.BLE_FEATURE_CHAR in outputs)
+        assertEquals("100f6c34-1735-4313-b402-38567131e5f3", Sc2Device.BLE_FEATURE_CHAR)
+    }
+
+    @Test
+    fun `output lengths mirror the host's id-included table`() {
+        // Transcribed from `pf_driver_proto::triton::out_report_len`, which holds the same table
+        // with the id byte counted in. Editing either side alone goes red here.
+        val hostLen = mapOf(
+            0x80 to 10, 0x81 to 8, 0x82 to 4, 0x83 to 10, 0x84 to 9,
+            0x85 to 4, 0x86 to 4, 0x87 to 64, 0x88 to 64, 0x89 to 64,
+        )
+        for ((id, len) in hostLen) {
+            assertEquals("id 0x%02x".format(id), len, Sc2Device.strippedOutputLen(id)!! + 1)
+        }
+        // Undeclared ids stay whole on both sides: the host does not trim, we do not guess.
+        assertNull(Sc2Device.strippedOutputLen(0x8A))
+        assertNull(Sc2Device.strippedOutputLen(0x00))
     }
 }

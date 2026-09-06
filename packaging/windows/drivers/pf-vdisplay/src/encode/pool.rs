@@ -223,10 +223,13 @@ impl Pool {
             st.full.clear();
             0
         } else {
-            let recycled = (!st.live)
-                .then(|| st.full.pop_front().map(|f| f.0))
-                .flatten();
-            let Some(i) = st.free.pop().or(recycled) else {
+            // Recycle the oldest queued slot only when no free one is left: a slot popped and
+            // then not used is in none of the three lists, and nothing would put it back.
+            let mut i = st.free.pop();
+            if i.is_none() && !st.live {
+                i = st.full.pop_front().map(|f| f.0);
+            }
+            let Some(i) = i else {
                 return self.drop_one();
             };
             let blend = self.cursor.blends();
@@ -289,15 +292,20 @@ impl Pool {
     ///
     /// Yields nothing unless the slot is idle and no composed frame is queued
     /// ([`wire::republish_slot`]), and moves it out of `free` so no drain pass can overwrite
-    /// the pixels the encoder is about to read.
+    /// the pixels the encoder is about to read. A blended pointer is re-drawn by `frame`, so
+    /// the slot is re-filled from the clean plate first or the old pointer stays under the new
+    /// one. QPC 0: the drive stamps the re-encode with now, not the stale present time.
     pub fn republish(&self) -> Option<(usize, u64, u64)> {
         let mut st = lock(&self.state);
-        let (slot, qpc, seq) = st.stash?;
+        let (slot, _, seq) = st.stash?;
         let queued = st.full.len();
         wire::republish_slot(Some(slot), queued, &st.free)?;
+        if self.cursor.blends() {
+            st.targets.refill_from_plate(slot).ok()?;
+        }
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
-        Some((slot, qpc, seq))
+        Some((slot, 0, seq))
     }
 
     /// A blended pointer moved since the encode thread last looked — a peek that leaves the
@@ -318,9 +326,7 @@ impl Pool {
         }
         let mut st = lock(&self.state);
         let (slot, ..) = st.stash?;
-        if wire::republish_slot(Some(slot), st.full.len(), &st.free).is_none() {
-            return None;
-        }
+        wire::republish_slot(Some(slot), st.full.len(), &st.free)?;
         st.targets.refill_from_plate(slot).ok()?;
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);

@@ -358,6 +358,9 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
                     session,
                     "failed to launch host into the active console session: {e:#}"
                 );
+                // A host that never starts is the boot loop the rollback exists for.
+                restarts += 1;
+                maybe_boot_loop_rollback(restarts, &mut rollback_attempted);
                 if web.wait(&[stop], 3000).is_some() {
                     break;
                 }
@@ -370,9 +373,25 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
         // closes them on drop (end of iteration / continue / break).
         let proc_h = HANDLE(child.process.as_raw_handle());
 
-        let reason = web.wait(&[stop, session_ev, proc_h], INFINITE);
+        // A notification for a session that is still ours (any logon signals the event) keeps
+        // the child and the same wait set: dropping `session_ev` here would miss the console
+        // switch that follows.
+        let reason = loop {
+            let r = web.wait(&[stop, session_ev, proc_h], INFINITE);
+            if r != Some(1) {
+                break (r, session);
+            }
+            // SAFETY: `session_ev` borrows SESSION_EVENT for the process lifetime; ResetEvent
+            // only clears the signalled state, no Rust memory.
+            unsafe { ResetEvent(session_ev) }.ok();
+            // SAFETY: takes no arguments; returns the session id by value.
+            let now = unsafe { WTSGetActiveConsoleSessionId() };
+            if now != session {
+                break (r, now);
+            }
+        };
         match reason {
-            Some(0) => {
+            (Some(0), _) => {
                 // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (not dropped
                 // until end of iteration). TerminateProcess only signals by handle; no Rust memory.
                 unsafe {
@@ -380,37 +399,19 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
                 }
                 break;
             }
-            Some(1) => {
-                // SAFETY: `session_ev` borrows SESSION_EVENT for the process lifetime; ResetEvent
-                // only clears the signalled state, no Rust memory.
-                unsafe { ResetEvent(session_ev) }.ok();
-                // SAFETY: takes no arguments; returns the session id by value.
-                let now = unsafe { WTSGetActiveConsoleSessionId() };
-                if now != session {
-                    tracing::info!(
-                        old = session,
-                        new = now,
-                        "console session changed — relaunching host"
-                    );
-                    // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (dropped
-                    // only at end of iteration). TerminateProcess only signals by handle.
-                    unsafe {
-                        let _ = TerminateProcess(proc_h, 0);
-                    }
-                    restarts = 0;
-                    continue;
-                }
-                // Same session (stray notification) — keep the child.
-                let r = web.wait(&[stop, proc_h], INFINITE);
-                // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (dropped only
-                // at end of iteration). TerminateProcess only signals by handle.
+            (Some(1), now) => {
+                tracing::info!(
+                    old = session,
+                    new = now,
+                    "console session changed — relaunching host"
+                );
+                // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (dropped
+                // only at end of iteration). TerminateProcess only signals by handle.
                 unsafe {
                     let _ = TerminateProcess(proc_h, 0);
                 }
-                if r == Some(0) {
-                    break;
-                }
-                // Child exited — fall through to relaunch.
+                restarts = 0;
+                continue;
             }
             _ => {
                 tracing::warn!(
@@ -523,6 +524,9 @@ unsafe fn spawn_host(
     // SAFETY: `proc_token` is live and owned here, closed exactly once and not used after.
     let _ = unsafe { CloseHandle(proc_token) };
     dup.context("DuplicateTokenEx(TokenPrimary)")?;
+    // SAFETY: `primary` is the owned handle `DuplicateTokenEx` just filled in; owning it here
+    // closes it on every early return below, not only the success path.
+    let _primary = unsafe { OwnedHandle::from_raw_handle(primary.0) };
 
     // SAFETY: `primary` is the live duplicated token; the value pointer is a local `u32` matching
     // what `TokenSessionId` expects, and the length argument is exactly its `size_of`.
@@ -591,11 +595,10 @@ unsafe fn spawn_host(
         )
     };
 
-    // SAFETY: both are live and owned here, each closed exactly once and not used after — the child
-    // holds its own inherited copy of `log`.
+    // SAFETY: `log` is live and owned here, closed exactly once and not used after — the child
+    // holds its own inherited copy. `primary` closes with `_primary`.
     unsafe {
         let _ = CloseHandle(log);
-        let _ = CloseHandle(primary);
     }
     created.context("CreateProcessAsUserW(host)")?;
 
@@ -1157,7 +1160,7 @@ fn install(args: &[String]) -> Result<()> {
 /// Stop, wait until Stopped, then start. A bare `sc stop && sc start` races: START fails with
 /// "instance already running" while the old process winds down.
 fn restart() -> Result<()> {
-    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
@@ -1170,33 +1173,45 @@ fn restart() -> Result<()> {
         .context("open service (run elevated)")?;
     // ERROR_SERVICE_NOT_ACTIVE means restart == start.
     let _ = svc.stop();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let state = svc.query_status().context("query service status")?;
-        if state.current_state == ServiceState::Stopped {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!("service did not stop within 30 s");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
+    wait_stopped(&svc)?;
     svc.start(&[] as &[&std::ffi::OsStr])
         .context("start service")?;
     println!("Restarted service '{SERVICE_NAME}'.");
     Ok(())
 }
 
+/// Poll until the SCM reports the service stopped, 30 s at most. A stop is asynchronous: a
+/// delete or a start issued before this lands races the still-running host.
+fn wait_stopped(svc: &windows_service::service::Service) -> Result<()> {
+    use windows_service::service::ServiceState;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let state = svc.query_status().context("query service status")?;
+        if state.current_state == ServiceState::Stopped {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("service did not stop within 30 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 fn uninstall() -> Result<()> {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-    let _ = sc(&["stop", SERVICE_NAME]); // best-effort stop first
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("open Service Control Manager (run elevated)")?;
     let svc = manager
-        .open_service(SERVICE_NAME, ServiceAccess::DELETE)
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::STOP | ServiceAccess::QUERY_STATUS | ServiceAccess::DELETE,
+        )
         .context("open service for delete")?;
+    // ERROR_SERVICE_NOT_ACTIVE means there is nothing to wait for.
+    let _ = svc.stop();
+    wait_stopped(&svc)?;
     svc.delete().context("delete service")?;
     remove_firewall_rules();
     println!("Removed service '{SERVICE_NAME}' and its firewall rules.");
@@ -1243,14 +1258,12 @@ fn ensure_default_host_env() -> Result<()> {
         #   punktfunk-host service stop && punktfunk-host service start\n\
         \n\
         # Encode backend: auto (default) detects the GPU vendor — NVIDIA->nvenc, AMD->amf, Intel->qsv.\n\
-        # Force one with nvenc | amf | qsv | mf | sw (software H.264). amf/qsv need an FFmpeg-built\n\
+        # Force one with nvenc | amf | qsv | mf (no software encoder: the driver encodes). amf/qsv need an FFmpeg-built\n\
         # host; mf is Media Foundation, any vendor's hardware encoder, 8-bit 4:2:0 only.\n\
         PUNKTFUNK_ENCODER=auto\n\
         PUNKTFUNK_VIDEO_SOURCE=virtual\n\
-        # Virtual display = the bundled pf-vdisplay driver; capture is IDD-push from its shared ring\n\
-        # (the sole capture path — zero-copy; DDA/WGC were removed). The secure desktop (UAC / lock /\n\
-        # login) is always captured — there is no setting for it.\n\
-        PUNKTFUNK_VDISPLAY=pf\n\
+        # The virtual display is the bundled pf-vdisplay driver, which also encodes; there is no\n\
+        # other capture path, and the secure desktop (UAC / lock / login) is always captured.\n\
         RUST_LOG=info\n\
         \n\
         # The host subcommand the service launches (default: serve --gamestream = native + Moonlight\n\

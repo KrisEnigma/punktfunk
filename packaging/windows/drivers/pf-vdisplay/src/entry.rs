@@ -27,6 +27,7 @@ pub unsafe extern "system" fn driver_entry(
     // Before any thread of ours exists: mutating the environment is unsound once they do, and
     // PyroWave's Vulkan instance hangs in session 0 without these.
     crate::encode::thread::disable_implicit_vulkan_layers();
+    crate::log::install_tracing_bridge();
     let mut config = pod_init!(WDF_DRIVER_CONFIG);
     config.Size = core::mem::size_of::<WDF_DRIVER_CONFIG>() as ULONG;
     config.EvtDriverDeviceAdd = Some(driver_add);

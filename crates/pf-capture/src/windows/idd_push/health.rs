@@ -25,6 +25,13 @@ impl IddPushCapturer {
     /// parallel-displays host may be a sibling display's motion — that direction only ever
     /// upholds today's CONTENT-SILENCE labeling, never worsens it.
     pub(super) fn sample_cursor_witness(&mut self) {
+        // The compose kick parks the pointer itself (~70 ms on the HID path): its travel is not
+        // user input, and counting it would escalate an idle desktop into a reset.
+        if self.last_kick.elapsed() < Duration::from_millis(200) {
+            self.cursor_last = None;
+            self.cursor_pending_px = 0;
+            return;
+        }
         self.cursor_gap_px = self.cursor_gap_px.saturating_add(self.cursor_pending_px);
         self.cursor_pending_px = 0;
         if self.cursor_sampled_at.elapsed() < Self::CURSOR_WITNESS_INTERVAL {
@@ -100,6 +107,7 @@ impl IddPushCapturer {
                         target = %self.ccd,
                         "IDD push: source suspect on weak evidence — presenting the compose canary"
                     );
+                    self.last_kick = Instant::now();
                     kick_dwm_compose(self.ccd);
                     return Ok(());
                 }

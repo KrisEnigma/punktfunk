@@ -77,7 +77,22 @@ pub fn remove(pred: impl Fn(&Monitor) -> bool) -> Vec<Arc<Monitor>> {
     let mut reg = registry();
     let (gone, keep): (Vec<_>, Vec<_>) = reg.monitors.drain(..).partition(|m| pred(m));
     reg.monitors = keep;
+    // A reap or CLEAR_ALL loses the id's history otherwise, and the next resize back to a
+    // mode it once advertised is a re-arrival instead of an in-place update.
+    for m in &gone {
+        record_modes(&mut reg, m);
+    }
     gone
+}
+
+/// Remember `monitor`'s advertised list as its id's mode history.
+fn record_modes(reg: &mut Registry, monitor: &Monitor) {
+    let modes = monitor.modes();
+    if let Some(slot) = reg.mode_history.iter_mut().find(|(i, _)| *i == monitor.id) {
+        slot.1 = modes;
+    } else {
+        reg.mode_history.push((monitor.id, modes));
+    }
 }
 
 /// Unlink `owner`'s monitor for `session_id`, recording its advertised list as the id's mode
@@ -89,12 +104,7 @@ pub fn remove_session(owner: u32, session_id: u64) -> Option<Arc<Monitor>> {
         .iter()
         .position(|m| m.owner == owner && m.session_id == session_id)?;
     let monitor = reg.monitors.remove(pos);
-    let modes = monitor.modes();
-    if let Some(slot) = reg.mode_history.iter_mut().find(|(i, _)| *i == monitor.id) {
-        slot.1 = modes;
-    } else {
-        reg.mode_history.push((monitor.id, modes));
-    }
+    record_modes(&mut reg, &monitor);
     Some(monitor)
 }
 

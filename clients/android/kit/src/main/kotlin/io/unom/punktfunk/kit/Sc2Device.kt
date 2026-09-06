@@ -27,6 +27,87 @@ object Sc2Device {
     /** Dongle interface range that carries controllers (SDL: "interfaces 2..5, currently"). */
     val DONGLE_IFACES = 2..5
 
+    // ---- GATT topology + framing (Valve vendor service; cf. Apple's `Sc2Device.swift`) ----
+
+    /** The custom Valve vendor service every SC2 exposes over BLE. */
+    const val BLE_SERVICE = "100f6c32-1735-4313-b402-38567131e5f3"
+
+    /**
+     * Feature characteristic: where lizard-off and Steam's gyro-enable land. It sits OUTSIDE the
+     * per-report output block, so a link that resolves writes by scanning that block alone never
+     * finds it and every feature write drives a rumble actuator instead.
+     */
+    const val BLE_FEATURE_CHAR = "100f6c34-1735-4313-b402-38567131e5f3"
+
+    /**
+     * Per-OUTPUT-report characteristic: Valve routes report id `0xNN` to `100F6C<NN+0x35>`, and
+     * the id only SELECTS the characteristic — it is stripped from the payload written there.
+     * Verified per-actuator on hardware: the 0x82 test buzz is silent when mis-routed to 0x80's.
+     */
+    fun bleOutputChar(id: Int): String =
+        "100f6c%02x-1735-4313-b402-38567131e5f3".format((id + 0x35) and 0xFF)
+
+    /**
+     * Declared STRIPPED payload length per output report id (wire length = stripped + 1), or null
+     * for an id with no declared length: clamp to what arrived, never guess-trim past it.
+     *
+     * The host's `pf_driver_proto::triton::out_report_len` holds the same table id-INCLUDED, and
+     * the two are hand-mirrored. [Sc2DeviceTest] pins `stripped + 1` against a transcription of
+     * those values, so it catches a drift made here but not one made on the Rust side. Editing
+     * either table means editing both.
+     */
+    fun strippedOutputLen(id: Int): Int? = when (id) {
+        0x80 -> 9 // grip rumble    -> 100F6CB5
+        0x81 -> 7 // trackpad pulse -> 100F6CB6
+        0x82 -> 3 // haptic command -> 100F6CB7 (Steam's ping/test buzz)
+        0x83 -> 9 // LFO tone       -> 100F6CB8
+        0x84 -> 8 // log sweep      -> 100F6CB9
+        0x85 -> 3 // script         -> 100F6CBA
+        0x86 -> 3 // vendor         -> 100F6CBB
+        0x87, 0x88, 0x89 -> 63 // vendor big -> 100F6CBC/BD/BE
+        else -> null
+    }
+
+    /**
+     * Incoming: a GATT characteristic value is the bare payload with no HID report-id byte, so
+     * re-prepend [ID_STATE_BLE] on state-sized (40 B and up) payloads — the wire then carries the
+     * same id-first framing as USB. Short payloads (battery/status) pass through unmodified.
+     */
+    fun frameIncoming(payload: ByteArray): ByteArray =
+        if (payload.size < 40) {
+            payload
+        } else {
+            ByteArray(payload.size + 1).also {
+                it[0] = ID_STATE_BLE.toByte()
+                payload.copyInto(it, 1)
+            }
+        }
+
+    /** One resolved OUTPUT write: the per-report characteristic, and the bare payload for it. */
+    class OutputWrite(val charUuid: String, val payload: ByteArray)
+
+    /**
+     * Outgoing OUTPUT (`kind` 0): the frame arrives id-first, the id selects the characteristic
+     * and is stripped, and the payload is trimmed to [strippedOutputLen] clamped to what arrived.
+     * The clamp earns its keep — an older host pads every frame to 64 B, and the write must carry
+     * exactly the declared length either way. Null for a frame too short to carry a payload.
+     */
+    fun outputWrite(frame: ByteArray): OutputWrite? {
+        if (frame.size < 2) return null
+        val id = frame[0].toInt() and 0xFF
+        val n = (strippedOutputLen(id) ?: (frame.size - 1)).coerceAtMost(frame.size - 1)
+        return OutputWrite(bleOutputChar(id), frame.copyOfRange(1, 1 + n))
+    }
+
+    /**
+     * Outgoing FEATURE (`kind` 1): strip the leading `0x01` channel report-id and write the rest
+     * to [BLE_FEATURE_CHAR] whole, zero padding included. The characteristic value carries no
+     * channel byte, so the firmware reads byte 0 as the command id: unstripped it parses as
+     * command `0x01` and lizard-off fails silently. Null for a frame with no command.
+     */
+    fun featurePayload(frame: ByteArray): ByteArray? =
+        if (frame.size < 2) null else frame.copyOfRange(1, frame.size)
+
     // Input report ids (`ETritonReportIDTypes`). State layouts share every offset the client
     // reads (seq/buttons/triggers/sticks); 0x47 only diverges from byte 18 (trackpad timestamp).
     const val ID_STATE = 0x42

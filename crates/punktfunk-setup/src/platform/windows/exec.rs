@@ -33,8 +33,10 @@ pub struct Subst {
     pub desktop: String,
 }
 
+/// `Ok` carries the files a running process kept mapped, queued to be replaced at the next
+/// boot instead of failing the tree.
 pub trait PayloadSource {
-    fn deploy(&self, dest: &Path) -> Result<(), String>;
+    fn deploy(&self, dest: &Path) -> Result<Vec<std::path::PathBuf>, String>;
 }
 
 /// Records the destinations and touches nothing.
@@ -44,9 +46,9 @@ pub struct FakePayload {
 }
 
 impl PayloadSource for FakePayload {
-    fn deploy(&self, dest: &Path) -> Result<(), String> {
+    fn deploy(&self, dest: &Path) -> Result<Vec<std::path::PathBuf>, String> {
         self.deployed.borrow_mut().push(dest.display().to_string());
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -90,10 +92,23 @@ impl WinExecutor<'_> {
         for phase in &plan.phases {
             self.ui.say(&phase.title);
             for step in &phase.steps {
-                self.step(step)?;
+                if let Err(e) = self.step(step) {
+                    self.restore_after_failure(plan);
+                    return Err(e);
+                }
             }
         }
         Ok(())
+    }
+
+    /// A failed upgrade owes back the tasks its stop disabled: run the plan's `RestoreTasks`
+    /// wherever it sits, so the plugin runner is not silently off afterwards.
+    fn restore_after_failure(&self, plan: &WinPlan) {
+        for step in plan.phases.iter().flat_map(|p| &p.steps) {
+            if matches!(step, WinAction::RestoreTasks { .. }) {
+                let _ = self.step(step);
+            }
+        }
     }
 
     fn sub(&self, s: &str) -> String {
@@ -118,7 +133,14 @@ impl WinExecutor<'_> {
         }
         let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
         match self.run.probe(&argv[0], &args) {
-            Some(out) if out.ok() || lenient => Ok(()),
+            Some(out) if out.ok() || lenient => {
+                // The host degrades a failed driver leg to a `warning:` on stderr and exits 0;
+                // the transcript is the only place that warning can reach the operator.
+                if let Some(line) = out.stderr.lines().rev().find(|l| !l.trim().is_empty()) {
+                    self.ui.warn(line.trim());
+                }
+                Ok(())
+            }
             Some(out) => Err(Failed(format!(
                 "'{}' exited {} — {}",
                 argv[0],
@@ -167,10 +189,24 @@ impl WinExecutor<'_> {
                     self.ui.ok(&format!("would unpack the payload into {dest}"));
                     return Ok(());
                 }
-                self.payload
+                let deferred = self
+                    .payload
                     .deploy(Path::new(&self.sub(dest)))
                     .map_err(Failed)?;
-                self.ui.ok(&format!("payload unpacked into {dest}"));
+                if deferred.is_empty() {
+                    self.ui.ok(&format!("payload unpacked into {dest}"));
+                } else {
+                    self.ui.warn(&format!(
+                        "payload unpacked into {dest}; {} in-use file(s) ({}) are replaced at the \
+                         next restart",
+                        deferred.len(),
+                        deferred
+                            .iter()
+                            .map(|p| p.file_name().unwrap_or_default().to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
                 Ok(())
             }
             WinAction::DeleteFiles { paths } => {
@@ -270,7 +306,7 @@ impl WinExecutor<'_> {
                 }
                 Ok(())
             }
-            WinAction::StopHostRuntime => self.stop_host_runtime(),
+            WinAction::StopHostRuntime { app_dir } => self.stop_host_runtime(app_dir),
             WinAction::RestoreTasks {
                 web_enabled,
                 scripting_enabled,
@@ -426,7 +462,7 @@ impl WinExecutor<'_> {
         Ok(())
     }
 
-    fn stop_host_runtime(&self) -> Result<(), Failed> {
+    fn stop_host_runtime(&self, app_dir: &str) -> Result<(), Failed> {
         if self.dry {
             self.ui
                 .ok("would stop the service, every tray, and the console/plugin tasks");
@@ -442,7 +478,32 @@ impl WinExecutor<'_> {
         }
         self.ui
             .ok("stopped the service, trays and console/plugin tasks");
-        self.kill_port_listeners(&[47992, 47993, 3000])
+        // The runner's bun binds no port and outlives its task's End, so it is killed by image
+        // path; and a kill returns before the image unmaps, so re-probe until a pass finds
+        // nothing — the copy that follows fails on anything still mapped.
+        let under = format!("{}\\", self.sub(app_dir).trim_end_matches('\\'))
+            .to_lowercase()
+            .replace('\'', "''");
+        let kill = format!(
+            "Get-Process bun -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -and \
+             $_.Path.ToLower().StartsWith('{under}') }} | ForEach-Object {{ Stop-Process -Force \
+             -InputObject $_; $_.Id }}"
+        );
+        for _ in 0..40 {
+            self.kill_port_listeners(&[47992, 47993, 3000])?;
+            let killed = self
+                .run
+                .probe(
+                    "powershell",
+                    &["-NoProfile", "-NonInteractive", "-Command", &kill],
+                )
+                .is_some_and(|o| !o.stdout.trim().is_empty());
+            if !killed {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        Ok(())
     }
 
     fn web_setup(&self, app_dir: &str, fresh_password: bool) -> Result<(), Failed> {

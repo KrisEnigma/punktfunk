@@ -38,6 +38,34 @@ pub fn delete_on_reboot(_path: &std::path::Path) -> bool {
     false
 }
 
+/// Queue `new` to replace `dest` at the next boot: Inno's `restartreplace` for an image
+/// still mapped by a process the pre-copy stop could not reach.
+#[cfg(windows)]
+pub fn replace_on_reboot(new: &std::path::Path, dest: &std::path::Path) -> bool {
+    use ::windows::core::HSTRING;
+    use ::windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT, MOVEFILE_REPLACE_EXISTING,
+    };
+    let (from, to) = (
+        HSTRING::from(new.as_os_str()),
+        HSTRING::from(dest.as_os_str()),
+    );
+    // SAFETY: both strings outlive the call; the flag pair is the documented replace form.
+    unsafe {
+        MoveFileExW(
+            &from,
+            &to,
+            MOVEFILE_DELAY_UNTIL_REBOOT | MOVEFILE_REPLACE_EXISTING,
+        )
+        .is_ok()
+    }
+}
+
+#[cfg(not(windows))]
+pub fn replace_on_reboot(_new: &std::path::Path, _dest: &std::path::Path) -> bool {
+    false
+}
+
 #[cfg(windows)]
 pub fn stop_service_wait(name: &str) -> Result<(), String> {
     use ::windows::core::HSTRING;

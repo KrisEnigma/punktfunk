@@ -355,10 +355,17 @@ fn ensure_role(
                 None => {
                     let inst =
                         pe::create_media_devnode(identity.role_desc(role), &hwid, |set, did| {
-                            // The role remains the ownership marker even if the seat write fails.
+                            // The role remains the ownership marker even if the seat write fails —
+                            // and the node is already registered, so failing here would orphan
+                            // one nothing can find again per retry.
                             pe::write_devparam_dword(set, did, ROLE_MARKER, role.value())?;
-                            if let Some(marker) = identity.seat_marker() {
-                                pe::write_devparam_dword(set, did, SEAT_MARKER, marker)?;
+                            if let Some(marker) = identity.seat_marker()
+                                && let Err(e) =
+                                    pe::write_devparam_dword(set, did, SEAT_MARKER, marker)
+                            {
+                                tracing::warn!(error = %format!("{e:#}"),
+                                    "audio devnode: seat marker not written — the node binds \
+                                     now; a later host start re-mints it");
                             }
                             Ok(())
                         })?;

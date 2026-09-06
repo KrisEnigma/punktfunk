@@ -178,12 +178,14 @@ enum AdapterCycle {
 /// `pnputil /restart-device` reloads a device in use. Failure paths re-enable so a half cycle
 /// cannot leave the adapter disabled. Best-effort, ~6 s inside the script.
 fn reload_vdisplay_adapter() -> AdapterCycle {
-    // Prefer live nodes (`Present` or `Status -ne 'Unknown'`): `-First 1` can pick a phantom whose
-    // disable and restart both fail. `-ErrorAction Stop` inside `try` — reporting PnP Status after
-    // a refused disable looks like `OK`. `$LASTEXITCODE=1` before pnputil so "never ran" ≠ 0.
-    // REFUSED carries counts, Status, problem code, restart exit (3010 = needs reboot).
+    // `$pin` (prepended below) is the devnode this process last opened: a seats box has several
+    // same-named adapters, and the name match — only when nothing was ever opened — would cycle
+    // a sibling's live one. Live nodes first: `-First 1` can pick a phantom whose disable and
+    // restart both fail. `-ErrorAction Stop` inside `try`, since PnP Status reads `OK` after a
+    // refused disable. `$LASTEXITCODE=1` before pnputil so "never ran" ≠ 0 (3010 = needs reboot).
     const CYCLE_PS: &str = "$ErrorActionPreference='SilentlyContinue'; \
-        $all = @(Get-PnpDevice -Class Display | Where-Object { $_.FriendlyName -match 'punktfunk Virtual Display' }); \
+        $all = @(); if ($pin) { $all = @(Get-PnpDevice -InstanceId $pin | Where-Object { $_ }) }; \
+        if ($all.Count -eq 0) { $all = @(Get-PnpDevice -Class Display | Where-Object { $_.FriendlyName -match 'punktfunk Virtual Display' }) }; \
         if ($all.Count -eq 0) { Write-Output 'ABSENT'; exit }; \
         $live = @($all | Where-Object { $_.Present -or $_.Status -ne 'Unknown' } | Sort-Object { $_.Status -ne 'OK' }); \
         if ($live.Count -eq 0) { Write-Output ('REFUSED only phantom (not-present) adapter devnodes remain (' + $all.Count + ') - the device node itself is gone and no reload can revive it; reinstalling the host re-creates it'); exit }; \
@@ -205,6 +207,12 @@ fn reload_vdisplay_adapter() -> AdapterCycle {
     let ps = std::env::var("SystemRoot")
         .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
         .unwrap_or_else(|_| "powershell.exe".to_string());
+    let pin = LAST_INSTANCE_ID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
+    let script = format!("$pin='{}'; {CYCLE_PS}", pin.replace('\'', "''"));
     let out = match std::process::Command::new(&ps)
         .args([
             "-NoProfile",
@@ -212,7 +220,7 @@ fn reload_vdisplay_adapter() -> AdapterCycle {
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            CYCLE_PS,
+            &script,
         ])
         .output()
     {
@@ -380,10 +388,11 @@ pub unsafe fn send_set_encode(
     }
     .context("pf-vdisplay SET_ENCODE")?;
     if (n as usize) < size_of::<encode::SetEncodeReply>() {
-        anyhow::bail!(
-            "pf-vdisplay SET_ENCODE: short reply ({n} of {} bytes) — driver predates proto v7",
-            size_of::<encode::SetEncodeReply>()
-        );
+        // Typed: the IOCTL completed, so the driver owns the handles the caller duplicated.
+        return Err(anyhow::Error::new(encode::ReplyTooShort {
+            got: n as usize,
+            want: size_of::<encode::SetEncodeReply>(),
+        }));
     }
     Ok(reply)
 }
@@ -471,6 +480,20 @@ fn open_device() -> Result<OwnedHandle> {
 }
 
 /// [`open_device`], reporting what was found rather than only success.
+/// The instance id of the devnode this process last opened a control interface on. A seats box
+/// carries several same-named adapters, so a reload must name ours, not the first healthy one.
+static LAST_INSTANCE_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// `\\?\ROOT#DISPLAY#0000#{guid}` → `ROOT\DISPLAY\0000`: the interface symbolic link carries the
+/// instance id with its separators swapped, ahead of the interface class.
+fn instance_id_from_path(path: &str) -> Option<String> {
+    let rest = path
+        .strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix(r"\\.\"))?;
+    let (id, _) = rest.split_once("#{")?;
+    Some(id.replace('#', "\\"))
+}
+
 fn probe_device() -> Probe {
     let mut probe = Probe {
         handle: None,
@@ -556,6 +579,14 @@ fn probe_device() -> Probe {
         };
         match opened {
             Ok(h) => {
+                // The devnode behind this interface, for a later reload while it is hostless
+                // and has no interface left to ask. SAFETY: `detail` still aliases `buf`, and
+                // `DevicePath` is the NUL-terminated path the call above filled in.
+                let path =
+                    unsafe { PCWSTR((&raw const (*detail).DevicePath).cast::<u16>()).to_string() };
+                if let Some(id) = path.ok().and_then(|p| instance_id_from_path(&p)) {
+                    *LAST_INSTANCE_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
+                }
                 // SAFETY: `h` is the handle `CreateFileW` just returned to this call and nothing
                 // else holds it; `OwnedHandle` is the single owner that closes it on drop.
                 probe.handle = Some(unsafe { OwnedHandle::from_raw_handle(h.0 as _) });

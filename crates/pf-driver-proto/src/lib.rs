@@ -1051,6 +1051,30 @@ pub mod encode {
     pub const ENCODE_CTL_RESET: u32 = 6;
     /// Push the encoder's in-flight AUs into the section.
     pub const ENCODE_CTL_FLUSH: u32 = 7;
+    /// Stop the session whose `generation` is `arg0` — the host's proxy going away. A
+    /// generation that is not the live one is a stale proxy and a no-op, so a dropped
+    /// predecessor never stops its successor.
+    pub const ENCODE_CTL_CLOSE: u32 = 8;
+
+    /// `SET_ENCODE` completed with fewer reply bytes than [`SetEncodeReply`]. The IOCTL itself
+    /// succeeded, so the driver adopted the host's handles: the host must not close them too.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ReplyTooShort {
+        pub got: usize,
+        pub want: usize,
+    }
+
+    impl core::fmt::Display for ReplyTooShort {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(
+                f,
+                "SET_ENCODE: short reply ({} of {} bytes) — driver predates proto v7",
+                self.got, self.want
+            )
+        }
+    }
+
+    impl core::error::Error for ReplyTooShort {}
 
     /// Which pool slot a keyframe request re-encodes when the desktop composed nothing:
     /// `stash`, the newest slot the encode thread took, but only while `queued` is 0 — a
@@ -3261,9 +3285,10 @@ mod tests {
             ENCODE_CTL_SET_HDR_META,
             ENCODE_CTL_RESET,
             ENCODE_CTL_FLUSH,
+            ENCODE_CTL_CLOSE,
         ];
         println!("ENCODE_CTL ops: {ops:?}");
-        assert_eq!(ops, [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(ops, [1, 2, 3, 4, 5, 6, 7, 8]);
         // `0` stays unassigned: a zeroed request is not a silent keyframe.
         assert!(!ops.contains(&0));
     }

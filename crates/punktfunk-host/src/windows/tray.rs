@@ -67,12 +67,25 @@ pub fn tray_exe() -> Option<PathBuf> {
         .filter(|p| p.exists())
 }
 
-/// Any session. Best-effort: a failed snapshot reads as not running — a hint, never proof for a kill.
+/// THIS session: the tray holds a `Local\` mutex, which resolves per logon session — a process
+/// scan would see another user's tray and suppress the console one. Best-effort: a failed open
+/// reads as not running — a hint, never proof for a kill.
 pub fn is_running() -> bool {
-    let stem = TRAY_EXE.trim_end_matches(".exe");
-    crate::detect::running_process_names()
-        .iter()
-        .any(|n| n == stem)
+    use windows::core::w;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_ACCESS_RIGHTS};
+    // SYNCHRONIZE: the least access an open needs; existence is all that is asked.
+    const SYNCHRONIZE: SYNCHRONIZATION_ACCESS_RIGHTS = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
+    // SAFETY: a static NUL-terminated name; the handle, when one comes back, is closed here.
+    unsafe {
+        match OpenMutexW(SYNCHRONIZE, false, w!("Local\\PunktfunkTray")) {
+            Ok(h) => {
+                let _ = CloseHandle(h);
+                true
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 /// Two misses restart the tray, so this is half the grace window.
@@ -138,8 +151,13 @@ pub fn start() -> Result<(Option<u32>, &'static str)> {
     }
     // Quoting preserves an operator-chosen install path that contains spaces.
     let quoted = format!("\"{}\"", exe.display());
-    if let Ok(pid) = crate::interactive::spawn_as_current_session_user(&quoted, None) {
-        return Ok((Some(pid), "as this session's user"));
+    match crate::interactive::spawn_as_current_session_user(&quoted, None) {
+        Ok(pid) => return Ok((Some(pid), "as this session's user")),
+        // The fallback below runs the tray under THIS token; say why, or a SYSTEM-owned tray
+        // reads as healthy in the log.
+        Err(e) => {
+            tracing::debug!(error = %format!("{e:#}"), "status tray: user-token spawn declined — falling back to this token")
+        }
     }
     // WTSQueryUserToken is privileged; an interactive caller's plain spawn preserves its seat.
     let child = std::process::Command::new(&exe)

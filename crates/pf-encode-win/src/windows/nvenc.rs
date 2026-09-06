@@ -1128,7 +1128,10 @@ impl NvencD3d11Encoder {
             // Sub-frame defaults ON where the GPU advertises SUBFRAME_READBACK.
             // `PUNKTFUNK_NVENC_SUBFRAME` is the tri-state override. `subframe_broken`
             // wins over the operator force so a failed prefix check does not re-arm.
-            let subframe_req = resolve_subframe(self.subframe_cap) && !self.subframe_broken;
+            // Sub-frame readback needs slices to read ahead of; at one slice it only costs the
+            // second engine on HEVC.
+            let subframe_req =
+                self.slices >= 2 && resolve_subframe(self.subframe_cap) && !self.subframe_broken;
             let (split_mode, subframe_req) =
                 resolve_split_subframe(self.codec, split_mode, subframe_req, subframe_env_forced());
             // Highest bitrate the codec LEVEL accepts. If a forced split is the only problem,
@@ -1609,9 +1612,11 @@ impl Encoder for NvencD3d11Encoder {
                     }
                 }
             }
-            (api().encode_picture)(self.encoder, &mut pic)
-                .nv_ok()
-                .map_err(|e| nvenc_status::call_err("encode_picture", e))?;
+            if let Err(e) = (api().encode_picture)(self.encoder, &mut pic).nv_ok() {
+                // Nothing owns the mapping yet; left mapped, the slot's next map fails too.
+                let _ = (api().unmap_input_resource)(self.encoder, mp.mappedResource);
+                return Err(nvenc_status::call_err("encode_picture", e));
+            }
             self.pending.push_back((
                 self.bitstreams[slot],
                 mp.mappedResource,

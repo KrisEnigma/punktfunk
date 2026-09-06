@@ -278,9 +278,12 @@ pub fn open_driver_encoder(
     let reply = match set_encode(&req) {
         Ok(r) => r,
         Err(e) => {
-            // A failed IOCTL adopted nothing: the duplicates are ours to reap.
-            broker.close_remote(section_v);
-            broker.close_remote(event_v);
+            // A failed IOCTL adopted nothing: the duplicates are ours to reap. One that
+            // completed with a short reply did adopt them, and closing would double-close.
+            if e.downcast_ref::<encode::ReplyTooShort>().is_none() {
+                broker.close_remote(section_v);
+                broker.close_remote(event_v);
+            }
             return Err(e.context("deliver the AU section to the driver (SET_ENCODE)"));
         }
     };
@@ -360,6 +363,22 @@ pub struct EncoderProxy {
 // SAFETY: `!Send` only through the mapping's raw pointers. Built on the prep thread, used on
 // the stream thread, one owner at a time; the driver's writes arrive through atomics.
 unsafe impl Send for EncoderProxy {}
+
+impl Drop for EncoderProxy {
+    /// Stop the driver's session: without this a lingering display keeps a hardware encoder
+    /// busy on a section nobody drains. Scoped to this proxy's generation, so a predecessor
+    /// dropped after its replacement opened never stops the live one.
+    fn drop(&mut self) {
+        let generation = self.snapshot().generation;
+        if let Err(e) = self.ctl(encode::ENCODE_CTL_CLOSE, generation, 0, [0; 28]) {
+            tracing::debug!(
+                target_id = self.target_id,
+                error = %format!("{e:#}"),
+                "driver encode: close not taken (older driver, or the WUDFHost is gone)"
+            );
+        }
+    }
+}
 
 impl EncoderProxy {
     /// A slice never takes this long; past it the access unit is truncated and the loop's
@@ -574,7 +593,12 @@ impl Encoder for EncoderProxy {
 
     fn reset(&mut self) -> bool {
         // The domain restarts where this reader stands, so the loop's `au_seq` keeps matching.
-        let base = self.reader.next_wire_seq();
+        // A half-read AU already spent its index on the wire: the loop closes that frame at
+        // the next FIRST, so the domain restarts past it.
+        let base = self
+            .reader
+            .next_wire_seq()
+            .wrapping_add(u32::from(self.reader.mid_au()));
         if !self.ctl_logged("reset", encode::ENCODE_CTL_RESET, base, 0) {
             return false;
         }

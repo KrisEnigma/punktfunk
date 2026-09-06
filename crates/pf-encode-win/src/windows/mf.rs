@@ -440,6 +440,10 @@ impl Inner {
 /// Drain one `METransformHaveOutput`: `ProcessOutput`, copy the bitstream out, pair it with
 /// the oldest submitted frame.
 fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
+    // The MFT has handed this frame over, so its entry is spent whatever the payload turns
+    // out to be — a failed ProcessOutput included. Popping only on the success path would pair
+    // every later AU with the wrong frame's timestamp for the rest of the session.
+    let meta = inner.pending.pop_front();
     // SAFETY: the MFT is live on this thread and owes exactly one output per HaveOutput
     // event. `MFT_OUTPUT_DATA_BUFFER`'s `ManuallyDrop` members are reclaimed with
     // `ManuallyDrop::take` on every path, so the sample and the event collection the MFT
@@ -458,10 +462,6 @@ fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
         call.context("IMFTransform::ProcessOutput")?;
         sample.ok_or_else(|| anyhow!("MFT signalled HaveOutput with no sample"))?
     };
-    // The MFT has handed this frame over, so its entry is spent whatever the payload turns
-    // out to be. Popping only on the success path would pair every later AU with the wrong
-    // frame's timestamp for the rest of the session.
-    let meta = inner.pending.pop_front();
     // SAFETY: `sample` is owned here. The `Lock`ed pointer is read only for the length the
     // same call reported, and the buffer is unlocked before it drops.
     let (data, keyframe) = unsafe {
@@ -679,105 +679,121 @@ impl MfEncoder {
                 )
             })?;
         let name = friendly_name(&activate);
-        // SAFETY: the whole bring-up runs on this encode thread. Every interface is an
-        // owned windows-rs wrapper released on drop; `device.as_raw()` and the device
-        // manager's raw pointer are borrowed for the duration of the synchronous calls
-        // that consume them (the MFT AddRefs the manager it is handed), and the ring
-        // textures are created on and used from this one device.
-        let (mft, events, codec_api, manager, dctx, ring, force_idr_ok) = unsafe {
-            let mft: IMFTransform = activate
-                .ActivateObject()
-                .context("IMFActivate::ActivateObject(IMFTransform)")?;
-            let attrs = mft.GetAttributes().context("IMFTransform::GetAttributes")?;
-            if attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 1 {
-                bail!("{name} is not an async MFT — this backend drives the event model only");
+        let brought = || -> Result<_> {
+            // SAFETY: the whole bring-up runs on this encode thread. Every interface is an
+            // owned windows-rs wrapper released on drop; `device.as_raw()` and the device
+            // manager's raw pointer are borrowed for the duration of the synchronous calls
+            // that consume them (the MFT AddRefs the manager it is handed), and the ring
+            // textures are created on and used from this one device.
+            unsafe {
+                let mft: IMFTransform = activate
+                    .ActivateObject()
+                    .context("IMFActivate::ActivateObject(IMFTransform)")?;
+                let attrs = mft.GetAttributes().context("IMFTransform::GetAttributes")?;
+                if attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 1 {
+                    bail!("{name} is not an async MFT — this backend drives the event model only");
+                }
+                attrs
+                    .SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
+                    .context("MF_TRANSFORM_ASYNC_UNLOCK")?;
+                let dctx = device
+                    .GetImmediateContext()
+                    .context("ID3D11Device immediate context")?;
+                // MFT worker threads touch the device: protection must be on before the
+                // manager reset, or the reset takes a device nobody else may use (QSV's
+                // on-glass lesson, `qsv.rs`).
+                if let Ok(mt) = dctx.cast::<ID3D11Multithread>() {
+                    let _ = mt.SetMultithreadProtected(true);
+                }
+                let manager = if attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) != 0 {
+                    let mut token = 0u32;
+                    let mut mgr: Option<IMFDXGIDeviceManager> = None;
+                    MFCreateDXGIDeviceManager(&mut token, &mut mgr)
+                        .context("MFCreateDXGIDeviceManager")?;
+                    let mgr =
+                        mgr.ok_or_else(|| anyhow!("MFCreateDXGIDeviceManager returned none"))?;
+                    mgr.ResetDevice(device, token)
+                        .context("IMFDXGIDeviceManager::ResetDevice")?;
+                    mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, mgr.as_raw() as usize)
+                        .context("MFT_MESSAGE_SET_D3D_MANAGER")?;
+                    Some(mgr)
+                } else {
+                    // Without D3D awareness the MFT would want system-memory input, which the
+                    // zero-copy contract has no path to produce.
+                    bail!("{name} is not MF_SA_D3D11_AWARE — no D3D11 texture input path");
+                };
+                let codec_api: Option<ICodecAPI> = mft.cast().ok();
+                let force_idr_ok = codec_api
+                    .as_ref()
+                    .is_some_and(|api| is_supported(api, &CODECAPI_AVEncVideoForceKeyFrame));
+                if let Some(api) = codec_api.as_ref() {
+                    apply_static_properties(api, &cfg, force_idr_ok);
+                }
+                mft.SetOutputType(0, &output_type(&cfg)?, 0)
+                    .context("IMFTransform::SetOutputType")?;
+                mft.SetInputType(0, &input_type(&cfg)?, 0)
+                    .context("IMFTransform::SetInputType")?;
+                // `process_output` always asks the MFT for its own sample. One that wants the
+                // caller to allocate would fail every ProcessOutput instead, so refuse here and
+                // let the driver's preference list move on to the next backend.
+                let out_info = mft
+                    .GetOutputStreamInfo(0)
+                    .context("IMFTransform::GetOutputStreamInfo")?;
+                let provides = (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0
+                    | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
+                    as u32;
+                if out_info.dwFlags & provides == 0 {
+                    bail!("{name} wants the caller to allocate output samples — unsupported here");
+                }
+                if let Some(api) = codec_api.as_ref() {
+                    // Rate is dynamic: re-apply after the types so the MFT's own derivation
+                    // from MF_MT_AVG_BITRATE cannot win.
+                    apply_bitrate(api, &cfg);
+                }
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: self.width,
+                    Height: self.height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_NV12,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let mut ring = Vec::with_capacity(RING);
+                for _ in 0..RING {
+                    let mut t: Option<ID3D11Texture2D> = None;
+                    device
+                        .CreateTexture2D(&desc, None, Some(&mut t))
+                        .context("CreateTexture2D (MF input ring)")?;
+                    ring.push(t.context("MF input ring texture")?);
+                }
+                let events: IMFMediaEventGenerator = mft
+                    .cast()
+                    .context("MFT exposes no IMFMediaEventGenerator")?;
+                mft.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                    .context("MFT_MESSAGE_NOTIFY_BEGIN_STREAMING")?;
+                mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                    .context("MFT_MESSAGE_NOTIFY_START_OF_STREAM")?;
+                Ok((mft, events, codec_api, manager, dctx, ring, force_idr_ok))
             }
-            attrs
-                .SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
-                .context("MF_TRANSFORM_ASYNC_UNLOCK")?;
-            let dctx = device
-                .GetImmediateContext()
-                .context("ID3D11Device immediate context")?;
-            // MFT worker threads touch the device: protection must be on before the
-            // manager reset, or the reset takes a device nobody else may use (QSV's
-            // on-glass lesson, `qsv.rs`).
-            if let Ok(mt) = dctx.cast::<ID3D11Multithread>() {
-                let _ = mt.SetMultithreadProtected(true);
+        };
+        let (mft, events, codec_api, manager, dctx, ring, force_idr_ok) = match brought() {
+            Ok(t) => t,
+            Err(e) => {
+                // An activated MFT released without its shutdown leaks the vendor's worker
+                // threads and GPU allocations for the process's life (see `Inner::drop`).
+                // SAFETY: the activation object is live; this is its last use on this path.
+                unsafe {
+                    let _ = activate.ShutdownObject();
+                }
+                return Err(e);
             }
-            let manager = if attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) != 0 {
-                let mut token = 0u32;
-                let mut mgr: Option<IMFDXGIDeviceManager> = None;
-                MFCreateDXGIDeviceManager(&mut token, &mut mgr)
-                    .context("MFCreateDXGIDeviceManager")?;
-                let mgr = mgr.ok_or_else(|| anyhow!("MFCreateDXGIDeviceManager returned none"))?;
-                mgr.ResetDevice(device, token)
-                    .context("IMFDXGIDeviceManager::ResetDevice")?;
-                mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, mgr.as_raw() as usize)
-                    .context("MFT_MESSAGE_SET_D3D_MANAGER")?;
-                Some(mgr)
-            } else {
-                // Without D3D awareness the MFT would want system-memory input, which the
-                // zero-copy contract has no path to produce.
-                bail!("{name} is not MF_SA_D3D11_AWARE — no D3D11 texture input path");
-            };
-            let codec_api: Option<ICodecAPI> = mft.cast().ok();
-            let force_idr_ok = codec_api
-                .as_ref()
-                .is_some_and(|api| is_supported(api, &CODECAPI_AVEncVideoForceKeyFrame));
-            if let Some(api) = codec_api.as_ref() {
-                apply_static_properties(api, &cfg, force_idr_ok);
-            }
-            mft.SetOutputType(0, &output_type(&cfg)?, 0)
-                .context("IMFTransform::SetOutputType")?;
-            mft.SetInputType(0, &input_type(&cfg)?, 0)
-                .context("IMFTransform::SetInputType")?;
-            // `process_output` always asks the MFT for its own sample. One that wants the
-            // caller to allocate would fail every ProcessOutput instead, so refuse here and
-            // let the driver's preference list move on to the next backend.
-            let out_info = mft
-                .GetOutputStreamInfo(0)
-                .context("IMFTransform::GetOutputStreamInfo")?;
-            let provides = (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0
-                | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0) as u32;
-            if out_info.dwFlags & provides == 0 {
-                bail!("{name} wants the caller to allocate output samples — unsupported here");
-            }
-            if let Some(api) = codec_api.as_ref() {
-                // Rate is dynamic: re-apply after the types so the MFT's own derivation
-                // from MF_MT_AVG_BITRATE cannot win.
-                apply_bitrate(api, &cfg);
-            }
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: self.width,
-                Height: self.height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_NV12,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            };
-            let mut ring = Vec::with_capacity(RING);
-            for _ in 0..RING {
-                let mut t: Option<ID3D11Texture2D> = None;
-                device
-                    .CreateTexture2D(&desc, None, Some(&mut t))
-                    .context("CreateTexture2D (MF input ring)")?;
-                ring.push(t.context("MF input ring texture")?);
-            }
-            let events: IMFMediaEventGenerator = mft
-                .cast()
-                .context("MFT exposes no IMFMediaEventGenerator")?;
-            mft.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-                .context("MFT_MESSAGE_NOTIFY_BEGIN_STREAMING")?;
-            mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-                .context("MFT_MESSAGE_NOTIFY_START_OF_STREAM")?;
-            (mft, events, codec_api, manager, dctx, ring, force_idr_ok)
         };
         self.force_idr_ok = force_idr_ok;
         if !force_idr_ok {

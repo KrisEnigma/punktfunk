@@ -5889,9 +5889,25 @@
         "description": "Host-wide Windows display health: the topology transaction log and the leases the stream holds.",
         "required": [
           "topology_generation",
-          "pnp_leases"
+          "pnp_leases",
+          "host_protocol"
         ],
         "properties": {
+          "driver_protocol": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Protocol the installed pf-vdisplay driver answered at the last handshake; absent until a session ran one.",
+            "minimum": 0
+          },
+          "host_protocol": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Protocol this host drives; a driver answering less fails every session.",
+            "minimum": 0
+          },
           "last_transaction": {
             "oneOf": [
               {

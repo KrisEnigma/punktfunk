@@ -247,6 +247,12 @@ impl AuReader {
     fn free_unread(&mut self, i: usize) {
         if self.transition(i, au::PUBLISHED, au::FREE) {
             self.freed_unread += 1;
+            tracing::warn!(
+                slot = i,
+                freed_unread = self.freed_unread,
+                "driver encode: a published access unit was freed unread (behind the domain, \
+                 or a chunk without its FIRST)"
+            );
         }
     }
 
@@ -312,6 +318,12 @@ impl AuReader {
                 return Ok(None);
             }
             self.gaps += 1;
+            tracing::warn!(
+                expected = self.next_wire_seq,
+                got = s.wire_seq,
+                gaps = self.gaps,
+                "driver encode: access unit(s) skipped — adopting the next FIRST"
+            );
             self.open_au = None;
             self.next_wire_seq = s.wire_seq;
             chosen = Some((i, s));

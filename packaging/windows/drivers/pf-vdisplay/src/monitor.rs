@@ -218,6 +218,15 @@ impl Monitor {
         lock(&self.encode).clone()
     }
 
+    /// Remove the live session, for the caller to stop with no lock held.
+    pub fn take_encode(&self) -> Option<Arc<EncodeSession>> {
+        let session = take(&self.encode);
+        if session.is_some() {
+            self.bump_encode_gen();
+        }
+        session
+    }
+
     /// The encode pool, if one was ever built.
     pub fn pool(&self) -> Option<Arc<crate::encode::pool::Pool>> {
         lock(&self.pool).clone()

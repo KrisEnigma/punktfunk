@@ -32,6 +32,10 @@ const SEAT_ID_LEN: usize = 32;
 /// The error is a rejected id, which callers surface rather than ignore.
 pub(crate) fn seat_id() -> Result<Option<String>, &'static str> {
     let Some(raw) = std::env::var_os("PUNKTFUNK_SEAT_ID") else {
+        // A seat without an id would mint audio devnodes the console host also matches.
+        if is_seat_host() {
+            return Err("PUNKTFUNK_SEAT_SESSION=1 without a PUNKTFUNK_SEAT_ID");
+        }
         return Ok(None);
     };
     let text = raw
