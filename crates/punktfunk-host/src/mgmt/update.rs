@@ -206,10 +206,11 @@ pub(crate) struct ApplyRequest {
     pub force: bool,
 }
 
-/// Start one-click apply for install kinds that support it.
+/// Start a one-click update
 ///
-/// No version or URL in the body — the host installs the verified manifest.
-/// Poll `GET /update/status` (`job`); after restart, the outcome is `last_result`.
+/// Only for install kinds that support it. No version or URL in the body — the host
+/// installs the verified manifest. Poll `GET /update/status` (`job`); after restart,
+/// the outcome is `last_result`.
 #[utoipa::path(
     post,
     path = "/update/apply",

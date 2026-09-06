@@ -91,7 +91,9 @@ pub(crate) async fn stats_capture_live(State(st): State<Arc<MgmtState>>) -> Resp
     }
 }
 
-/// Saved capture summaries (`meta` only, no sample body), newest first.
+/// List saved captures
+///
+/// Summaries only (`meta`, no sample body), newest first.
 #[utoipa::path(
     get,
     path = "/stats/recordings",
@@ -176,10 +178,11 @@ pub(crate) struct LogsQuery {
     limit: Option<u32>,
 }
 
-/// In-memory ring at DEBUG and above, independent of `RUST_LOG`.
+/// Read the log ring
 ///
-/// Poll with `after` = last `next`. `dropped: true` means the ring wrapped
-/// between polls and entries were evicted.
+/// In-memory, DEBUG and above, independent of `RUST_LOG`. Poll with `after` = last
+/// `next`. `dropped: true` means the ring wrapped between polls and entries were
+/// evicted.
 #[utoipa::path(
     get,
     path = "/logs",
