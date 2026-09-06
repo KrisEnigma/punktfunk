@@ -195,6 +195,7 @@ mod tests {
     fn host(key: &str, saved: bool, pin: Option<&str>) -> HostRow {
         HostRow {
             key: key.into(),
+            id: None,
             name: key.into(),
             addr: "10.0.0.9".into(),
             port: 9777,

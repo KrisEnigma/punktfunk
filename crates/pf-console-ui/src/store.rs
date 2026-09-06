@@ -19,8 +19,8 @@ pub trait SettingsStore: Send + Sync {
     /// in memory and shows it as done.
     fn save(&self, settings: &Settings);
     fn profiles(&self) -> Vec<(String, String)>;
-    /// Copy-link only. `DeepLink::for_host` needs the record's stable id, which
-    /// a `HostRow` does not carry.
+    /// The store behind the carousel: copy-link reads a record's id from it, and the
+    /// start-screen policy needs `paired` on every record, not only the drawn ones.
     fn known_hosts(&self) -> KnownHosts;
 }
 

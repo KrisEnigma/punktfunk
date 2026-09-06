@@ -79,6 +79,7 @@ use crate::screens::settings::tests::fake_home;
 fn hosts() -> Vec<HostRow> {
     let base = HostRow {
         key: String::new(),
+        id: None,
         name: String::new(),
         addr: "10.0.0.20".into(),
         port: 9777,
@@ -100,6 +101,7 @@ fn hosts() -> Vec<HostRow> {
     vec![
         HostRow {
             key: "aa11".into(),
+            id: None,
             name: "Living Room PC".into(),
             fp_hex: "aa11".into(),
             paired: true,
@@ -109,6 +111,7 @@ fn hosts() -> Vec<HostRow> {
         },
         HostRow {
             key: "bb22".into(),
+            id: None,
             name: "Office Tower".into(),
             addr: "10.0.0.21".into(),
             fp_hex: "bb22".into(),
@@ -118,6 +121,7 @@ fn hosts() -> Vec<HostRow> {
         },
         HostRow {
             key: "10.0.0.30:9777".into(),
+            id: None,
             name: "steambox".into(),
             addr: "10.0.0.30".into(),
             saved: false,
@@ -264,6 +268,8 @@ fn a_pinned_cards_library_launches_with_its_profile() {
         genres: Vec::new(),
         running: false,
     }]);
+    // Past the desktop tile, which leads every shelf and launches nothing.
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
     s.handle_menu(MenuEvent::Confirm);
     match s.take_action() {
         Some(OverlayAction::Launch {
@@ -886,7 +892,11 @@ fn collections_drill_in_reaches_one_platform_and_backs_out() {
     let Some(Screen::Library(shelf)) = s.stack.last() else {
         panic!("back to the library");
     };
-    assert_eq!(shelf.len_for_test(), 6, "the whole library again");
+    assert_eq!(
+        shelf.len_for_test(),
+        7,
+        "the whole library again, led by the desktop tile"
+    );
 }
 
 /// A library with nothing to collect must not offer the button, and must not answer it.

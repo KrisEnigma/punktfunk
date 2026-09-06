@@ -1114,6 +1114,15 @@ pub struct Settings {
     /// Default off so an existing install's deep-link landing screen does not move.
     #[serde(default)]
     pub library_collections: bool,
+    /// Where a bare launch opens: `"hosts"`, `"library"` (default), or `"stream"`.
+    /// `""`/unknown = library, the `library_view` convention. Resolve through
+    /// [`crate::start::start_screen`] — no default host degrades every value to the list.
+    #[serde(default)]
+    pub start_in: String,
+    /// The host a bare launch opens on, a [`KnownHost::id`]. `None` = derive it: the sole
+    /// paired record, else none. A dangling id falls through to that rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_host: Option<String>,
     /// Wake-on-LAN before connecting and wait for boot. Default on. Off for VPN
     /// hosts, where broadcast never reaches and the wait only adds delay.
     #[serde(default = "default_true")]
@@ -1297,6 +1306,8 @@ impl Default for Settings {
             library_sort: String::new(),
             library_view: String::new(),
             library_collections: false,
+            start_in: String::new(),
+            default_host: None,
             auto_wake: true,
             invert_scroll: false,
             overlay_actions: String::new(),

@@ -17,11 +17,16 @@ use crate::screens::{Ctx, Outbox, Screen};
 use crate::theme::{fg, Fonts, EDGE_INSET, W};
 use crate::widgets::{ListMsg, MenuList, RowSpec, ROW_MAX_W};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
+use pf_client_core::start;
 use skia_safe::{Canvas, Rect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Action {
     Wake,
+    /// Point `Settings::default_host` at this record, or clear it when it already
+    /// does. With one paired host it changes nothing today and everything on the
+    /// day a second one pairs: an explicit default survives, a derived one drops.
+    MakeDefault,
     /// Indexed into [`HostRow::actions`]. Not a variant per id: this build must
     /// render a label the host sent that we have never heard of.
     Host(usize),
@@ -156,6 +161,10 @@ impl OptionsScreen {
         if host.can_wake && !host.online {
             a.push(Action::Wake);
         }
+        // Needs a store record to point at; a discovered row has no id.
+        if host.paired && host.id.is_some() {
+            a.push(Action::MakeDefault);
+        }
         a.extend((0..host.actions.len()).map(Action::Host));
         // Upload authenticates with the streaming cert and needs a live host;
         // anything else would only toast an error.
@@ -178,9 +187,18 @@ impl OptionsScreen {
         a
     }
 
-    fn label(&self, a: Action) -> String {
+    /// `default` (`Settings::default_host`) names this row. A derived default reads as
+    /// unset: pressing the row is what freezes it, and a frozen one has nothing to add.
+    fn is_default(&self, default: Option<&str>) -> bool {
+        let id = self.host().id.as_deref();
+        id.is_some() && default == id
+    }
+
+    fn label(&self, a: Action, default: Option<&str>) -> String {
         match a {
             Action::Wake => "Wake host".into(),
+            Action::MakeDefault if self.is_default(default) => "Default host \u{2713}".into(),
+            Action::MakeDefault => "Make default host".into(),
             Action::Host(i) => match self.host().actions.get(i) {
                 Some(act) if self.armed == Some(a) => {
                     format!("{} \u{2014} press again", act.label)
@@ -295,7 +313,7 @@ impl OptionsScreen {
         }
     }
 
-    fn run(&mut self, action: Action, ctx: &Ctx, fx: &mut Outbox) {
+    fn run(&mut self, action: Action, ctx: &mut Ctx, fx: &mut Outbox) {
         let store = ctx.store;
         let key = self.host_key().to_string();
         match action {
@@ -303,6 +321,23 @@ impl OptionsScreen {
                 fx.cmds.push(ConsoleCmd::Wake {
                     key,
                     then_connect: false,
+                });
+                fx.pop();
+            }
+            // Whole-file writer: rebase on the store before mutating, or a setting
+            // another screen just wrote is reverted.
+            Action::MakeDefault => {
+                let on = !self.is_default(ctx.settings.default_host.as_deref());
+                let name = self.host().name.clone();
+                let id = self.host().id.clone();
+                *ctx.settings = ctx.store.load();
+                ctx.settings.default_host = on.then_some(id).flatten();
+                ctx.store.save(ctx.settings);
+                let opens = start::StartIn::parse(&ctx.settings.start_in) != start::StartIn::Hosts;
+                fx.toast = Some(match (on, opens) {
+                    (true, true) => format!("{name} opens on launch"),
+                    (true, false) => format!("{name} is the default host"),
+                    (false, _) => format!("{name} is no longer the default host"),
                 });
                 fx.pop();
             }
@@ -504,7 +539,12 @@ impl OptionsScreen {
         let rows: Vec<RowSpec> = self
             .actions(ctx.platform)
             .into_iter()
-            .map(|a| RowSpec::action(self.label(a), self.enabled(a)))
+            .map(|a| {
+                RowSpec::action(
+                    self.label(a, ctx.settings.default_host.as_deref()),
+                    self.enabled(a),
+                )
+            })
             .collect();
         self.list
             .render(canvas, list_rect, &rows, fonts, k, dt, true);
@@ -525,14 +565,16 @@ impl OptionsScreen {
 mod tests {
     use super::*;
     use crate::model::ProfileChip;
+    use crate::screens::settings::tests::fake_home;
     use crate::screens::Nav;
 
-    /// Drive `run` with a throwaway `Ctx`. Only the store and, for Library, the
-    /// fetch epoch are read.
+    /// Drive `run` with a throwaway `Ctx` over a scratch config dir. Settings come
+    /// from the store, not `Default`, so a row that writes one reads its own last write.
     fn run_action(s: &mut OptionsScreen, action: Action, fx: &mut Outbox) {
-        let mut settings = pf_client_core::trust::Settings::default();
+        fake_home();
+        let mut settings = crate::store::file_store().load();
         let library = crate::library::LibraryShared::default();
-        let ctx = Ctx {
+        let mut ctx = Ctx {
             hosts: &[],
             library: &library,
             settings: &mut settings,
@@ -544,12 +586,13 @@ mod tests {
             device_name: "test",
             t: 0.0,
         };
-        s.run(action, &ctx, fx);
+        s.run(action, &mut ctx, fx);
     }
 
     fn host() -> HostRow {
         HostRow {
             key: "aa".into(),
+            id: None,
             name: "Desk".into(),
             addr: "10.0.0.5".into(),
             port: 9777,
@@ -677,7 +720,7 @@ mod tests {
             rows.iter().filter(|a| matches!(a, Action::Host(_))).count(),
             3
         );
-        assert_eq!(s.label(Action::Host(0)), "Sleep host");
+        assert_eq!(s.label(Action::Host(0), None), "Sleep host");
         // Unknown id still renders: the host sent the label.
         let future = OptionsScreen::for_host(&HostRow {
             actions: vec![crate::model::HostAction {
@@ -689,7 +732,7 @@ mod tests {
             }],
             ..host()
         });
-        assert_eq!(future.label(Action::Host(0)), "Toggle the VPN");
+        assert_eq!(future.label(Action::Host(0), None), "Toggle the VPN");
     }
 
     /// Sleep fires on one press. Restart/shut down arm. Arming one must not
@@ -709,10 +752,10 @@ mod tests {
         run_action(&mut s, Action::Host(2), &mut fx);
         assert!(fx.cmds.is_empty(), "the first press only arms");
         assert_eq!(
-            s.label(Action::Host(2)),
+            s.label(Action::Host(2), None),
             "Shut down host \u{2014} press again"
         );
-        assert_eq!(s.label(Action::Host(1)), "Restart host");
+        assert_eq!(s.label(Action::Host(1), None), "Restart host");
         let mut fx = Outbox::default();
         run_action(&mut s, Action::Host(1), &mut fx);
         assert!(
@@ -812,7 +855,7 @@ mod tests {
     #[test]
     fn the_clipboard_toggle_flips_the_stored_state() {
         let mut s = OptionsScreen::for_host(&host());
-        assert!(s.label(Action::Clipboard).ends_with("Off"));
+        assert!(s.label(Action::Clipboard, None).ends_with("Off"));
         let mut fx = Outbox::default();
         run_action(&mut s, Action::Clipboard, &mut fx);
         assert_eq!(
@@ -826,7 +869,7 @@ mod tests {
             clipboard_sync: true,
             ..host()
         });
-        assert!(s.label(Action::Clipboard).ends_with("On"));
+        assert!(s.label(Action::Clipboard, None).ends_with("On"));
         let mut fx = Outbox::default();
         run_action(&mut s, Action::Clipboard, &mut fx);
         assert_eq!(
@@ -849,7 +892,7 @@ mod tests {
         run_action(&mut s, Action::Forget, &mut fx);
         assert!(fx.cmds.is_empty(), "the first press only arms");
         assert_eq!(s.armed, Some(Action::Forget));
-        assert!(s.label(Action::Forget).contains("press again"));
+        assert!(s.label(Action::Forget, None).contains("press again"));
 
         run_action(&mut s, Action::Forget, &mut fx);
         assert_eq!(
@@ -902,7 +945,10 @@ mod tests {
                 Action::Cancel
             ]
         );
-        assert_eq!(s.label(Action::BindProfile), "Settings profile\u{2026}");
+        assert_eq!(
+            s.label(Action::BindProfile, None),
+            "Settings profile\u{2026}"
+        );
         // Cursor starts at 0: the row that gets you onto the host is under confirm.
         assert_eq!(s.list.cursor, 0);
         assert_eq!(s.title(), "Hollow Knight");
@@ -962,7 +1008,7 @@ mod tests {
             idle.actions(crate::platform::Platform::Desktop).first(),
             Some(&Action::Connect)
         );
-        assert_eq!(idle.label(Action::Connect), "Connect to Desk");
+        assert_eq!(idle.label(Action::Connect, None), "Connect to Desk");
 
         let up = OptionsScreen::for_game(
             &HostRow {
@@ -972,7 +1018,7 @@ mod tests {
             &game(),
         );
         assert_eq!(
-            up.label(Action::Connect),
+            up.label(Action::Connect, None),
             "Resume Elden Ring",
             "naming the title is the whole point of the row"
         );
@@ -1004,5 +1050,85 @@ mod tests {
             "the takeover names the game, not the host"
         );
         assert!(matches!(fx.nav, Some(Nav::Pop)));
+    }
+
+    /// The row points `default_host` at a store record, so it needs one: an unpaired
+    /// or merely discovered tile has no id to write, and a pinned card is a shortcut.
+    #[test]
+    fn make_default_needs_a_paired_record_with_an_id() {
+        let desktop = crate::platform::Platform::Desktop;
+        let saved = HostRow {
+            id: Some("rec-1".into()),
+            ..host()
+        };
+        assert!(OptionsScreen::for_host(&saved)
+            .actions(desktop)
+            .contains(&Action::MakeDefault));
+
+        for row in [
+            HostRow {
+                id: None,
+                ..saved.clone()
+            },
+            HostRow {
+                paired: false,
+                ..saved.clone()
+            },
+            HostRow {
+                pin: Some(ProfileChip {
+                    id: "prof-1".into(),
+                    name: "4K".into(),
+                    accent: None,
+                }),
+                ..saved.clone()
+            },
+        ] {
+            assert!(
+                !OptionsScreen::for_host(&row)
+                    .actions(desktop)
+                    .contains(&Action::MakeDefault),
+                "offered to a row that cannot be pointed at"
+            );
+        }
+    }
+
+    /// The label reads back the explicit pointer, and pressing the row a second time
+    /// clears it — the same press both ways.
+    #[test]
+    fn make_default_sets_then_clears_the_pointer() {
+        let saved = HostRow {
+            id: Some("rec-1".into()),
+            ..host()
+        };
+        let s = OptionsScreen::for_host(&saved);
+        assert_eq!(s.label(Action::MakeDefault, None), "Make default host");
+        assert_eq!(
+            s.label(Action::MakeDefault, Some("rec-1")),
+            "Default host \u{2713}"
+        );
+        assert_eq!(
+            s.label(Action::MakeDefault, Some("rec-2")),
+            "Make default host",
+            "another host's pointer is not this row's checkmark"
+        );
+
+        let mut s = OptionsScreen::for_host(&saved);
+        let mut fx = Outbox::default();
+        run_action(&mut s, Action::MakeDefault, &mut fx);
+        assert_eq!(
+            pf_client_core::trust::Settings::load()
+                .default_host
+                .as_deref(),
+            Some("rec-1")
+        );
+        assert!(matches!(fx.nav, Some(Nav::Pop)));
+
+        let mut fx = Outbox::default();
+        run_action(&mut s, Action::MakeDefault, &mut fx);
+        assert_eq!(
+            pf_client_core::trust::Settings::load().default_host,
+            None,
+            "the second press clears it"
+        );
     }
 }

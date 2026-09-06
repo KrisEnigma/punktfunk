@@ -18,6 +18,7 @@ use crate::widgets::{
 };
 use pf_client_core::audio_format::{AUDIO_FORMATS, AUDIO_FORMAT_OPUS};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
+use pf_client_core::start;
 use pf_client_core::trust::{MouseMode, StatsVerbosity, TouchMode};
 use skia_safe::{Canvas, Rect};
 
@@ -81,6 +82,8 @@ pub enum RowId {
     LibraryView,
     /// `trust::Settings::library_collections`. Couch path besides the shelf's Y.
     LibraryCollections,
+    /// `trust::Settings::start_in`. The value line names where a launch will land.
+    StartIn,
     // Android-only. Values live in `trust::Settings::extra` under `android.*`
     // so the typed struct stays shared; [`row_on`] keeps them off desktop.
     /// Slice-progressive decode plus DSCP. Android-only.
@@ -249,6 +252,7 @@ const TABS: [(&str, &[RowId]); 7] = [
             RowId::ReduceUiResolution,
             RowId::LibraryView,
             RowId::LibraryCollections,
+            RowId::StartIn,
             RowId::Stats,
             RowId::Fullscreen,
             RowId::AutoWake,
@@ -978,6 +982,18 @@ pub fn row_applies(id: RowId, ctx: &Ctx) -> bool {
     }
 }
 
+/// Where a launch will actually land, named. Not the stored value: with no default host
+/// every setting resolves to the list, and the row says so rather than promising a shelf.
+fn start_in_value(ctx: &Ctx) -> String {
+    let known = ctx.store.known_hosts();
+    let want = start::StartIn::parse(&ctx.settings.start_in);
+    match start::default_host(ctx.settings, &known) {
+        _ if want == start::StartIn::Hosts => "Host list".into(),
+        Some(i) => format!("{} · {}", want.label(), known.hosts[i].name),
+        None => "Host list (no default host)".into(),
+    }
+}
+
 pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
     // Pin count from live host rows, matching the carousel.
     match id {
@@ -1210,6 +1226,7 @@ pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec 
             "Start in collections",
             on_off(s.library_collections).into(),
         ),
+        RowId::StartIn => (None, "Start in", start_in_value(ctx)),
         RowId::Stats => (
             None,
             "Statistics overlay",
@@ -1447,6 +1464,12 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
             "Opening a host's library goes straight to its collections — platforms and \
              stores as tiles — instead of the whole shelf. A library with only one \
              collection opens on the shelf as usual."
+        }
+        RowId::StartIn => {
+            "Where this app opens. Library lands on your host's shelf, Stream goes \
+             straight to its desktop, and Back leaves either one on the host list. \
+             With one paired host that host is the default; with several, pick one \
+             from its Options menu."
         }
         RowId::Stats => match platform {
             Platform::Desktop => {
@@ -1763,6 +1786,13 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             step_option(at, all.len(), delta, wrap).map(|i| s.library_view = all[i].id().into())
         }
         RowId::LibraryCollections => toggle(&mut s.library_collections, delta, wrap),
+        RowId::StartIn => {
+            let all = &start::StartIn::ALL;
+            let at = all
+                .iter()
+                .position(|v| *v == start::StartIn::parse(&s.start_in));
+            step_option(at, all.len(), delta, wrap).map(|i| s.start_in = all[i].as_str().into())
+        }
         RowId::Fullscreen => toggle(&mut s.fullscreen_on_stream, delta, wrap),
         RowId::AutoWake => toggle(&mut s.auto_wake, delta, wrap),
         RowId::LowLatency => toggle_extra(s, android_keys::LOW_LATENCY, true, delta, wrap),
@@ -2468,6 +2498,7 @@ pub(crate) mod tests {
         let library = crate::library::LibraryShared::default();
         let mut pinned = crate::model::HostRow {
             key: "aa\0p1".into(),
+            id: None,
             name: "Tower".into(),
             addr: "10.0.0.9".into(),
             port: 9777,
@@ -2748,7 +2779,8 @@ pub(crate) mod tests {
                 seen.push(*id);
             }
         }
-        assert_eq!(seen.len(), 51, "{seen:?}");
+        assert_eq!(seen.len(), 52, "{seen:?}");
+        assert!(seen.contains(&RowId::StartIn));
         assert!(seen.contains(&RowId::FollowOsTheme));
         assert!(seen.contains(&RowId::Palette));
         assert!(seen.contains(&RowId::ReduceMotion));
@@ -3035,6 +3067,64 @@ pub(crate) mod tests {
             row_spec(RowId::Palette, &ctx, &[]).value.as_deref(),
             Some("Violet"),
             "an unknown palette reads as the default it actually draws"
+        );
+    }
+
+    /// The value names where a launch will land, not what the key holds: with no
+    /// default host every setting resolves to the list, and the row must say so.
+    #[test]
+    fn the_start_in_row_cycles_and_names_the_host() {
+        use pf_client_core::trust::{KnownHost, KnownHosts};
+
+        let store = std::sync::Arc::new(crate::store::SnapshotStore::new(
+            Settings::default(),
+            Vec::new(),
+        ));
+        let (mut settings, pads) = ctx_parts();
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings: &mut settings,
+            store: store.as_ref(),
+            platform: crate::platform::Platform::Desktop,
+            pads: &pads,
+            deck: false,
+            fallback_ui: false,
+            device_name: "t",
+            t: 0.0,
+        };
+        let value = |ctx: &Ctx| row_spec(RowId::StartIn, ctx, &[]).value.unwrap();
+
+        assert_eq!(value(&ctx), "Host list (no default host)");
+        store.set_known_hosts(KnownHosts {
+            hosts: vec![KnownHost {
+                name: "Desk".into(),
+                addr: "10.0.0.5".into(),
+                fp_hex: "aa".repeat(32),
+                paired: true,
+                ..Default::default()
+            }],
+        });
+        assert_eq!(
+            value(&ctx),
+            "Library \u{b7} Desk",
+            "one paired host derives"
+        );
+
+        assert!(adjust(RowId::StartIn, 1, false, &mut ctx));
+        assert_eq!(ctx.settings.start_in, "stream");
+        assert_eq!(value(&ctx), "Stream \u{b7} Desk");
+        assert!(
+            !adjust(RowId::StartIn, 1, false, &mut ctx),
+            "the last value = thud"
+        );
+        assert!(adjust(RowId::StartIn, 1, true, &mut ctx));
+        assert_eq!(ctx.settings.start_in, "hosts");
+        assert_eq!(
+            value(&ctx),
+            "Host list",
+            "the list by choice reads differently from the list by default"
         );
     }
 }

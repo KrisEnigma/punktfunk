@@ -96,6 +96,14 @@ pub mod logring;
     target_family = "wasm"
 ))]
 pub mod deeplink;
+// Where a bare launch opens (`design/default-host.md`). One resolver, held to the Swift/Kotlin ports by a shared vector file.
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
+pub mod start;
 // Connect, the wake state machine, and the session spawn + stdout contract (`design/client-architecture-split.md`).
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod orchestrate;
