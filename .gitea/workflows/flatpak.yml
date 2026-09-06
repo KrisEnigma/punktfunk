@@ -47,7 +47,7 @@ on:
       - 'crates/pf-console-ui/**'
       - 'crates/pf-bitstream/**'
       - 'crates/pf-vkdecode/**'
-      - 'crates/pf-vaadec/**'
+      - 'crates/pf-vaapi/**'
       - 'packaging/flatpak/**'
       - 'Cargo.lock'
       # Both halves of this job's correctness, not of the bundle's content: a change to either

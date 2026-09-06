@@ -1,13 +1,13 @@
-//! Native VAAPI decode: `pf-vaadec` plans one `AuPlan`; this module owns the libva
+//! Native VAAPI decode: `pf-vaapi` plans one `AuPlan`; this module owns the libva
 //! display, config, context, surface pool, submission, and DRM-PRIME export. Output
 //! is [`DecodedImage::NativeDmabuf`]. H.264, H.265, and AV1 Profile 0 in NV12 or P010.
 //! `libva.so.2` and `libva-drm.so.2` are dlopen'd — no build-time libva — and a missing
 //! runtime refuses at [`NativeVaapiDecoder::new`] so the ladder in [`crate::video`]
 //! can fall through.
 //!
-//! A VAAPI slot is not a surface. [`pf_vaadec::SlotMap::assign`] reuses the lowest
+//! A VAAPI slot is not a surface. [`pf_vaapi::SlotMap::assign`] reuses the lowest
 //! free slot, so binding by slot index would decode into the picture the presenter
-//! still holds. Surfaces outnumber slots by [`pf_vaadec::config::PRESENTER_HEADROOM`];
+//! still holds. Surfaces outnumber slots by [`pf_vaapi::config::PRESENTER_HEADROOM`];
 //! a surface is free when no picture is bound to it AND no consumer holds it.
 //! [`Session::acquire_target`] returns the decode target and the reference table from
 //! one snapshot so the target cannot be a named reference.
@@ -57,7 +57,7 @@ const VA_INVALID_ID: c_uint = 0xffff_ffff;
 /// The only picture structure this rung's envelope contains.
 const VA_PROGRESSIVE: c_uint = 0x0001;
 
-/// `VAGenericValue`: 16 bytes, value at offset 8, align 8 (`pf-vaadec/layout-probe.c`).
+/// `VAGenericValue`: 16 bytes, value at offset 8, align 8 (`pf-vaapi/layout-probe.c`).
 ///
 /// The C `value` is a union that includes a pointer, so it is eight-byte aligned —
 /// four bytes of padding after `kind`, 16 bytes total not 12. A Rust union written
@@ -82,12 +82,12 @@ struct VaSurfaceAttrib {
     value: VaGenericValue,
 }
 
-/// Measured by `pf-vaadec/layout-probe.c`.
+/// Measured by `pf-vaapi/layout-probe.c`.
 const VA_SURFACE_ATTRIB_PIXEL_FORMAT: c_int = 1;
 const VA_GENERIC_VALUE_TYPE_INTEGER: c_int = 1;
 const VA_SURFACE_ATTRIB_SETTABLE: c_uint = 0x0002;
 
-// Layouts passed by value, measured (`pf-vaadec/layout-probe.c`).
+// Layouts passed by value, measured (`pf-vaapi/layout-probe.c`).
 const _: () = {
     assert!(size_of::<VaGenericValue>() == 16);
     assert!(std::mem::offset_of!(VaGenericValue, i) == 8);
@@ -381,7 +381,7 @@ impl Display {
                     &mut count,
                 ),
             )?;
-            let vld = pf_vaadec::VA_ENTRYPOINT_VLD as c_int;
+            let vld = pf_vaapi::VA_ENTRYPOINT_VLD as c_int;
             if !entrypoints[..count.clamp(0, max) as usize].contains(&vld) {
                 bail!("this device has no VLD decode entrypoint for VAProfile {profile}");
             }
@@ -459,9 +459,9 @@ struct StreamShape {
 }
 
 enum Planner {
-    H264(Box<pf_vaadec::H264Planner>),
-    H265(Box<pf_vaadec::H265Planner>),
-    Av1(Box<pf_vaadec::Av1Planner>),
+    H264(Box<pf_vaapi::H264Planner>),
+    H265(Box<pf_vaapi::H265Planner>),
+    Av1(Box<pf_vaapi::Av1Planner>),
 }
 
 impl Planner {
@@ -529,7 +529,7 @@ struct Session {
     /// Separate from the slot binding: a non-reference picture leaves the DPB
     /// immediately but still owes an output.
     pending: Vec<PendingPicture>,
-    slots: pf_vaadec::SlotMap,
+    slots: pf_vaapi::SlotMap,
     fourcc: u32,
     /// Bumped on every rebuild; stamped into release tokens.
     generation: u64,
@@ -596,14 +596,14 @@ impl Session {
         }
     }
 
-    fn build(d: &Display, codec: pf_vaadec::Codec, shape: StreamShape) -> Result<Session> {
-        let profile = pf_vaadec::profile_for(codec, shape.chroma_format_idc, shape.bit_depth)
+    fn build(d: &Display, codec: pf_vaapi::Codec, shape: StreamShape) -> Result<Session> {
+        let profile = pf_vaapi::profile_for(codec, shape.chroma_format_idc, shape.bit_depth)
             .map_err(|e| anyhow!("{e}"))?;
-        let rt_format = pf_vaadec::rt_format(shape.chroma_format_idc, shape.bit_depth)
+        let rt_format = pf_vaapi::rt_format(shape.chroma_format_idc, shape.bit_depth)
             .map_err(|e| anyhow!("{e}"))?;
         let fourcc = match shape.bit_depth {
-            8 => pf_vaadec::VA_FOURCC_NV12,
-            10 => pf_vaadec::VA_FOURCC_P010,
+            8 => pf_vaapi::VA_FOURCC_NV12,
+            10 => pf_vaapi::VA_FOURCC_P010,
             other => bail!("no VAAPI surface format for {other}-bit output"),
         };
         d.require_entrypoint(profile.value)?;
@@ -621,7 +621,7 @@ impl Session {
             (d.va.create_config)(
                 d.display,
                 profile.value,
-                pf_vaadec::VA_ENTRYPOINT_VLD as c_int,
+                pf_vaapi::VA_ENTRYPOINT_VLD as c_int,
                 (&mut attrib as *mut VaConfigAttrib).cast::<c_void>(),
                 1,
                 &mut config,
@@ -630,7 +630,7 @@ impl Session {
 
         // Every early return must destroy what was created; one closure, one unwind.
         let built = (|| -> Result<Session> {
-            let count = pf_vaadec::surface_count(shape.max_dpb_frames);
+            let count = pf_vaapi::surface_count(shape.max_dpb_frames);
             let mut surfaces: Vec<VaSurfaceId> = vec![VA_INVALID_ID; count];
             let mut pixel = VaSurfaceAttrib {
                 kind: VA_SURFACE_ATTRIB_PIXEL_FORMAT,
@@ -687,7 +687,7 @@ impl Session {
                 return Err(e);
             }
 
-            let slots = pf_vaadec::SlotMap::new(shape.max_dpb_frames);
+            let slots = pf_vaapi::SlotMap::new(shape.max_dpb_frames);
             let slot_count = slots.capacity();
             tracing::info!(
                 node = %d.path,
@@ -722,7 +722,7 @@ impl Session {
     }
 }
 
-/// 8 bytes, `{type, value}` at 0 and 4 (`pf-vaadec/layout-probe.c`).
+/// 8 bytes, `{type, value}` at 0 and 4 (`pf-vaapi/layout-probe.c`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VaConfigAttrib {
@@ -733,7 +733,7 @@ struct VaConfigAttrib {
 /// Measured. 0 is a real enumerator, not "left unset".
 const VA_CONFIG_ATTRIB_RT_FORMAT: c_int = 0;
 
-/// Yields [`pf_vaadec::VaDrmPrimeSurfaceDescriptor`]. The older `DRM_PRIME`
+/// Yields [`pf_vaapi::VaDrmPrimeSurfaceDescriptor`]. The older `DRM_PRIME`
 /// (0x2000_0000) hands back a different, smaller structure.
 const VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2: c_uint = 0x4000_0000;
 
@@ -797,17 +797,17 @@ pub(crate) struct NativeVaapiDecoder {
 impl NativeVaapiDecoder {
     /// Probe [`StreamFormat`] here. A first-AU refusal is a decode error, burns the
     /// demotion streak, and skips the ladder's fall-through.
-    pub(crate) fn new(codec: pf_vaadec::Codec, stream: StreamFormat) -> Result<NativeVaapiDecoder> {
+    pub(crate) fn new(codec: pf_vaapi::Codec, stream: StreamFormat) -> Result<NativeVaapiDecoder> {
         let depth = stream.bit_depth;
-        pf_vaadec::profile_for(codec, stream.chroma_format_idc, depth)
+        pf_vaapi::profile_for(codec, stream.chroma_format_idc, depth)
             .map_err(|e| anyhow!("{e}"))
             .context("the negotiated stream shape has no VAAPI decode profile")?;
         let va = Libva::load().context("libva")?;
         let display = Display::open(va)?;
         let planner = match codec {
-            pf_vaadec::Codec::H264 => Planner::H264(Box::new(pf_vaadec::H264Planner::new())),
-            pf_vaadec::Codec::H265 => Planner::H265(Box::new(pf_vaadec::H265Planner::new())),
-            pf_vaadec::Codec::Av1 => Planner::Av1(Box::new(pf_vaadec::Av1Planner::new())),
+            pf_vaapi::Codec::H264 => Planner::H264(Box::new(pf_vaapi::H264Planner::new())),
+            pf_vaapi::Codec::H265 => Planner::H265(Box::new(pf_vaapi::H265Planner::new())),
+            pf_vaapi::Codec::Av1 => Planner::Av1(Box::new(pf_vaapi::Av1Planner::new())),
         };
         let (release_tx, release_rx) = mpsc::channel();
         Ok(NativeVaapiDecoder {
@@ -965,7 +965,7 @@ impl NativeVaapiDecoder {
             plan.picture.chroma_format_idc,
             8 + plan.picture.bit_depth_luma_minus8,
         )?;
-        let damaged = plan.warnings.iter().any(pf_vaadec::is_integrity_warning);
+        let damaged = plan.warnings.iter().any(pf_vaapi::is_integrity_warning);
         if !plan.warnings.is_empty() {
             tracing::debug!(warnings = ?plan.warnings, damaged, "native VAAPI plan warnings");
         }
@@ -976,14 +976,14 @@ impl NativeVaapiDecoder {
         let s = ensure_session(
             display,
             session,
-            pf_vaadec::Codec::H264,
+            pf_vaapi::Codec::H264,
             shape,
             &mut self.generation,
         )?;
         let (free, target, table) = s
             .acquire_target()
             .ok_or_else(|| anyhow!("surface pool exhausted ({} surfaces)", s.surfaces.len()))?;
-        let converted = pf_vaadec::plan_to_va(&plan, au, &mut s.slots, &table, target)
+        let converted = pf_vaapi::plan_to_va(&plan, au, &mut s.slots, &table, target)
             .map_err(|e| anyhow!("{e}"))?;
 
         // This picture's facts, not the later display AU's ([`PictureFacts`]).
@@ -1023,9 +1023,7 @@ impl NativeVaapiDecoder {
             Planner::H265(p) => match p.plan_au(au) {
                 Ok(plan) => plan,
                 // Spec 8.1.3 NOTE: skipped RASL is Ok, never a re-anchor.
-                Err(pf_vaadec::PlanErrorH265::RaslSkipped { .. }) => {
-                    return Ok((Vec::new(), false))
-                }
+                Err(pf_vaapi::PlanErrorH265::RaslSkipped { .. }) => return Ok((Vec::new(), false)),
                 Err(e) => return Err(anyhow!("{e:?}")),
             },
             _ => unreachable!("dispatched on the planner's own arm"),
@@ -1041,7 +1039,7 @@ impl NativeVaapiDecoder {
         let damaged = plan
             .warnings
             .iter()
-            .any(pf_vaadec::is_integrity_warning_h265);
+            .any(pf_vaapi::is_integrity_warning_h265);
         if !plan.warnings.is_empty() {
             tracing::debug!(warnings = ?plan.warnings, damaged, "native VAAPI plan warnings");
         }
@@ -1052,14 +1050,14 @@ impl NativeVaapiDecoder {
         let s = ensure_session(
             display,
             session,
-            pf_vaadec::Codec::H265,
+            pf_vaapi::Codec::H265,
             shape,
             &mut self.generation,
         )?;
         let (free, target, table) = s
             .acquire_target()
             .ok_or_else(|| anyhow!("surface pool exhausted ({} surfaces)", s.surfaces.len()))?;
-        let converted = pf_vaadec::plan_to_va_h265(&plan, au, &mut s.slots, &table, target)
+        let converted = pf_vaapi::plan_to_va_h265(&plan, au, &mut s.slots, &table, target)
             .map_err(|e| anyhow!("{e}"))?;
 
         let facts = PictureFacts {
@@ -1109,10 +1107,7 @@ impl NativeVaapiDecoder {
         let mut shown: Vec<DmabufFrame> = Vec::new();
         let mut damaged_unit = false;
         for plan in &plans {
-            let damaged = plan
-                .warnings
-                .iter()
-                .any(pf_vaadec::is_integrity_warning_av1);
+            let damaged = plan.warnings.iter().any(pf_vaapi::is_integrity_warning_av1);
             damaged_unit |= damaged;
             if !plan.warnings.is_empty() {
                 tracing::debug!(warnings = ?plan.warnings, damaged, "native VAAPI AV1 plan warnings");
@@ -1133,7 +1128,7 @@ impl NativeVaapiDecoder {
     fn frame_av1(
         &mut self,
         au: &[u8],
-        plan: &pf_vaadec::AuPlanAv1,
+        plan: &pf_vaapi::AuPlanAv1,
         damaged: bool,
     ) -> Result<Vec<DmabufFrame>> {
         // Re-display a picture an earlier hidden frame left in a reference slot.
@@ -1147,7 +1142,7 @@ impl NativeVaapiDecoder {
         let s = ensure_session(
             display,
             session,
-            pf_vaadec::Codec::Av1,
+            pf_vaapi::Codec::Av1,
             shape,
             &mut self.generation,
         )?;
@@ -1165,7 +1160,7 @@ impl NativeVaapiDecoder {
         let (free, target, table) = s
             .acquire_target()
             .ok_or_else(|| anyhow!("surface pool exhausted ({} surfaces)", s.surfaces.len()))?;
-        let converted = match pf_vaadec::plan_to_va_av1(plan, au, &mut s.slots, &table, target) {
+        let converted = match pf_vaapi::plan_to_va_av1(plan, au, &mut s.slots, &table, target) {
             Ok(converted) => converted,
             Err(e) => {
                 // Conversion assigns the setup slot before the tile walk; bind
@@ -1207,7 +1202,7 @@ impl NativeVaapiDecoder {
         for group in &converted.tile_groups {
             slices.push(SlicePair {
                 params: group.tiles.as_ptr().cast::<c_void>(),
-                record_size: size_of::<pf_vaadec::va_av1::VaSliceParameterBufferAV1>(),
+                record_size: size_of::<pf_vaapi::va_av1::VaSliceParameterBufferAV1>(),
                 // Several records in one buffer; H.264/H.265 always pass 1.
                 records: group.tiles.len(),
                 data: group.data.clone(),
@@ -1245,7 +1240,7 @@ impl NativeVaapiDecoder {
     /// were recorded at decode; the vendored vector never hits this path.
     fn show_existing_av1(
         &mut self,
-        plan: &pf_vaadec::AuPlanAv1,
+        plan: &pf_vaapi::AuPlanAv1,
         damaged: bool,
     ) -> Result<Vec<DmabufFrame>> {
         let Self {
@@ -1324,7 +1319,7 @@ fn as_ptr<T>(value: &T) -> (*const c_void, usize) {
 }
 
 /// Active SPS/VUI, per frame, never latched: HDR can flip in-band at unchanged size.
-fn colour_of(c: &pf_vaadec::ColourDescription) -> ColorDesc {
+fn colour_of(c: &pf_vaapi::ColourDescription) -> ColorDesc {
     ColorDesc {
         primaries: c.colour_primaries,
         transfer: c.transfer_characteristics,
@@ -1336,7 +1331,7 @@ fn colour_of(c: &pf_vaadec::ColourDescription) -> ColorDesc {
 fn shape_of(
     coded_width: u32,
     coded_height: u32,
-    crop: pf_vaadec::DisplayCrop,
+    crop: pf_vaapi::DisplayCrop,
     max_dpb_frames: usize,
     chroma_format_idc: u8,
     bit_depth: u8,
@@ -1365,7 +1360,7 @@ fn shape_of(
 /// Pool from the sequence maximum, not this frame: a mid-GOP resize must not
 /// rebuild and drop every reference. Display fields are that maximum too; the
 /// presenter gets [`finish`]'s per-frame region. DPB depth is `NUM_REF_FRAMES`.
-fn shape_of_av1(plan: &pf_vaadec::AuPlanAv1) -> StreamShape {
+fn shape_of_av1(plan: &pf_vaapi::AuPlanAv1) -> StreamShape {
     let coded_width = u32::from(plan.sequence.max_frame_width_minus_1) + 1;
     let coded_height = u32::from(plan.sequence.max_frame_height_minus_1) + 1;
     StreamShape {
@@ -1373,7 +1368,7 @@ fn shape_of_av1(plan: &pf_vaadec::AuPlanAv1) -> StreamShape {
         coded_height,
         display_width: coded_width,
         display_height: coded_height,
-        max_dpb_frames: pf_vaadec::AV1_MAX_DPB_FRAMES,
+        max_dpb_frames: pf_vaapi::AV1_MAX_DPB_FRAMES,
         chroma_format_idc: plan.picture.chroma_format_idc,
         bit_depth: plan.picture.bit_depth,
     }
@@ -1382,7 +1377,7 @@ fn shape_of_av1(plan: &pf_vaadec::AuPlanAv1) -> StreamShape {
 fn ensure_session<'a>(
     d: &Display,
     slot: &'a mut Option<Session>,
-    codec: pf_vaadec::Codec,
+    codec: pf_vaapi::Codec,
     shape: StreamShape,
     generation: &mut u64,
 ) -> Result<&'a mut Session> {
@@ -1477,7 +1472,7 @@ fn submit(
         params.push(
             d.create_buffer(
                 s.context,
-                pf_vaadec::va::VA_PICTURE_PARAMETER_BUFFER_TYPE,
+                pf_vaapi::va::VA_PICTURE_PARAMETER_BUFFER_TYPE,
                 pic.1,
                 1,
                 pic.0,
@@ -1488,7 +1483,7 @@ fn submit(
             params.push(
                 d.create_buffer(
                     s.context,
-                    pf_vaadec::va::VA_IQ_MATRIX_BUFFER_TYPE,
+                    pf_vaapi::va::VA_IQ_MATRIX_BUFFER_TYPE,
                     size,
                     1,
                     ptr,
@@ -1510,7 +1505,7 @@ fn submit(
             slice_buffers.push(
                 d.create_buffer(
                     s.context,
-                    pf_vaadec::va::VA_SLICE_PARAMETER_BUFFER_TYPE,
+                    pf_vaapi::va::VA_SLICE_PARAMETER_BUFFER_TYPE,
                     pair.record_size,
                     pair.records,
                     pair.params,
@@ -1520,7 +1515,7 @@ fn submit(
             slice_buffers.push(
                 d.create_buffer(
                     s.context,
-                    pf_vaadec::va::VA_SLICE_DATA_BUFFER_TYPE,
+                    pf_vaapi::va::VA_SLICE_DATA_BUFFER_TYPE,
                     data.len(),
                     1,
                     data.as_ptr().cast::<c_void>(),
@@ -1674,27 +1669,27 @@ fn finish(
 /// Sync then export. VAAPI has no fence for the importer; without the wait the
 /// presenter would sample a surface still being written. Fds are owned from success
 /// so later refusals close them. One fd per object, even when planes share it.
-fn export(d: &Display, surface: VaSurfaceId) -> Result<(pf_vaadec::ExportedSurface, Vec<OwnedFd>)> {
+fn export(d: &Display, surface: VaSurfaceId) -> Result<(pf_vaapi::ExportedSurface, Vec<OwnedFd>)> {
     // SAFETY: a live display and a surface from its own pool.
     d.va.check("vaSyncSurface", unsafe {
         (d.va.sync_surface)(d.display, surface)
     })?;
 
-    let mut desc = pf_vaadec::VaDrmPrimeSurfaceDescriptor::zeroed();
+    let mut desc = pf_vaapi::VaDrmPrimeSurfaceDescriptor::zeroed();
     // SAFETY: a live display and surface; `desc` is a local of exactly the layout
     // `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` writes (measured by
-    // `pf-vaadec/layout-probe.c` and compile-asserted), and it outlives the call.
+    // `pf-vaapi/layout-probe.c` and compile-asserted), and it outlives the call.
     d.va.check("vaExportSurfaceHandle", unsafe {
         (d.va.export_surface_handle)(
             d.display,
             surface,
             VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-            pf_vaadec::VA_EXPORT_SURFACE_SEPARATE_LAYERS | pf_vaadec::VA_EXPORT_SURFACE_READ_ONLY,
-            (&mut desc as *mut pf_vaadec::VaDrmPrimeSurfaceDescriptor).cast::<c_void>(),
+            pf_vaapi::VA_EXPORT_SURFACE_SEPARATE_LAYERS | pf_vaapi::VA_EXPORT_SURFACE_READ_ONLY,
+            (&mut desc as *mut pf_vaapi::VaDrmPrimeSurfaceDescriptor).cast::<c_void>(),
         )
     })?;
 
-    match pf_vaadec::flatten(&desc) {
+    match pf_vaapi::flatten(&desc) {
         Ok(exported) => {
             let fds = exported
                 .object_fds
@@ -1743,8 +1738,8 @@ mod tests {
             held: vec![false; surfaces],
             slot_surface: vec![None; slots],
             pending: Vec::new(),
-            slots: pf_vaadec::SlotMap::new(slots - 1),
-            fourcc: pf_vaadec::VA_FOURCC_NV12,
+            slots: pf_vaapi::SlotMap::new(slots - 1),
+            fourcc: pf_vaapi::VA_FOURCC_NV12,
             generation: 1,
         }
     }
@@ -2113,7 +2108,7 @@ mod tests {
         DmabufFrame {
             width: 64,
             height: 64,
-            fourcc: pf_vaadec::VA_FOURCC_NV12,
+            fourcc: pf_vaapi::VA_FOURCC_NV12,
             modifier: 0,
             planes: Vec::new(),
             color: PLAIN.color,
@@ -2185,7 +2180,7 @@ mod tests {
         let ok = shape_of(
             1920,
             1088,
-            pf_vaadec::DisplayCrop {
+            pf_vaapi::DisplayCrop {
                 x: 0,
                 y: 0,
                 width: 1920,
@@ -2202,7 +2197,7 @@ mod tests {
         assert!(shape_of(
             1920,
             1088,
-            pf_vaadec::DisplayCrop {
+            pf_vaapi::DisplayCrop {
                 x: 8,
                 y: 0,
                 width: 1912,
@@ -2215,15 +2210,15 @@ mod tests {
         .is_err());
     }
 
-    fn av1_plan(max: (u16, u16), frame: (u32, u32), render: (u32, u32)) -> pf_vaadec::AuPlanAv1 {
-        let sequence = pf_vaadec::ParsedSequenceHeaderAv1 {
+    fn av1_plan(max: (u16, u16), frame: (u32, u32), render: (u32, u32)) -> pf_vaapi::AuPlanAv1 {
+        let sequence = pf_vaapi::ParsedSequenceHeaderAv1 {
             max_frame_width_minus_1: max.0 - 1,
             max_frame_height_minus_1: max.1 - 1,
             ..Default::default()
         };
-        pf_vaadec::AuPlanAv1 {
-            picture: pf_vaadec::PicturePlanAv1 {
-                frame_type: pf_vaadec::FrameTypeAv1::KeyFrame,
+        pf_vaapi::AuPlanAv1 {
+            picture: pf_vaapi::PicturePlanAv1 {
+                frame_type: pf_vaapi::FrameTypeAv1::KeyFrame,
                 is_key: true,
                 // Key frame: `false` would withhold a re-anchor.
                 references_clean: true,
@@ -2237,7 +2232,7 @@ mod tests {
                 render_height: render.1,
                 bit_depth: 8,
                 chroma_format_idc: 1,
-                colour: pf_vaadec::ColourDescription {
+                colour: pf_vaapi::ColourDescription {
                     colour_primaries: 1,
                     transfer_characteristics: 1,
                     matrix_coefficients: 1,
@@ -2246,11 +2241,11 @@ mod tests {
             },
             tiles: Vec::new(),
             refs: [None; 7],
-            dpb: pf_vaadec::DpbUpdateAv1::default(),
+            dpb: pf_vaapi::DpbUpdateAv1::default(),
             dpb_refs: Vec::new(),
             warnings: Vec::new(),
             sequence: std::rc::Rc::new(sequence),
-            header: std::rc::Rc::new(pf_vaadec::ParsedFrameHeaderAv1::default()),
+            header: std::rc::Rc::new(pf_vaapi::ParsedFrameHeaderAv1::default()),
         }
     }
 
@@ -2317,7 +2312,7 @@ mod tests {
     #[test]
     fn a_shape_with_no_profile_is_refused_before_libva_is_loaded() {
         let e = NativeVaapiDecoder::new(
-            pf_vaadec::Codec::H264,
+            pf_vaapi::Codec::H264,
             StreamFormat {
                 chroma_format_idc: 3,
                 bit_depth: 8,
@@ -2377,12 +2372,12 @@ mod tests {
                         version,
                     };
                     for (name, profile) in [
-                        ("H.264 High", pf_vaadec::config::VA_PROFILE_H264_HIGH),
-                        ("HEVC Main", pf_vaadec::config::VA_PROFILE_HEVC_MAIN),
-                        ("HEVC Main 10", pf_vaadec::config::VA_PROFILE_HEVC_MAIN10),
+                        ("H.264 High", pf_vaapi::config::VA_PROFILE_H264_HIGH),
+                        ("HEVC Main", pf_vaapi::config::VA_PROFILE_HEVC_MAIN),
+                        ("HEVC Main 10", pf_vaapi::config::VA_PROFILE_HEVC_MAIN10),
                         // `profile_for` maps both 8- and 10-bit AV1 4:2:0 onto Profile 0.
-                        ("AV1 Profile 0", pf_vaadec::config::VA_PROFILE_AV1_PROFILE0),
-                        ("AV1 Profile 1", pf_vaadec::config::VA_PROFILE_AV1_PROFILE1),
+                        ("AV1 Profile 0", pf_vaapi::config::VA_PROFILE_AV1_PROFILE0),
+                        ("AV1 Profile 1", pf_vaapi::config::VA_PROFILE_AV1_PROFILE1),
                     ] {
                         match d.require_entrypoint(profile) {
                             Ok(()) => eprintln!("    {name}: VLD decode"),
@@ -2436,7 +2431,7 @@ mod tests {
             "the vendored AV1 vector is 250 temporal units"
         );
 
-        let mut decoder = NativeVaapiDecoder::new(pf_vaadec::Codec::Av1, StreamFormat::SDR_420_8)
+        let mut decoder = NativeVaapiDecoder::new(pf_vaapi::Codec::Av1, StreamFormat::SDR_420_8)
             .expect("this box is supposed to have a VAAPI AV1 decode entry point");
         eprintln!("VAAPI AV1 rung constructed: {}", decoder.name());
 
@@ -2583,7 +2578,7 @@ mod tests {
         let main10 = split_h265_aus(MAIN10_H265);
         assert_eq!(main10.len(), MAIN10_AU_COUNT, "Main 10 vector access units");
 
-        let mut planner = pf_vaadec::H265Planner::new();
+        let mut planner = pf_vaapi::H265Planner::new();
         let plan = planner
             .plan_au(main10[0])
             .expect("the Main 10 vector's first access unit must plan");
@@ -2614,7 +2609,7 @@ mod tests {
 
     /// Two walks: the planners share no trait.
     fn effects_h264(aus: &[&[u8]]) -> VectorEffects {
-        let mut planner = pf_vaadec::H264Planner::new();
+        let mut planner = pf_vaapi::H264Planner::new();
         let mut max_dpb_frames = 0usize;
         let walked = aus
             .iter()
@@ -2644,7 +2639,7 @@ mod tests {
 
     /// RASL skip is an empty effect, matching [`NativeVaapiDecoder::decode_h265`].
     fn effects_h265(aus: &[&[u8]]) -> VectorEffects {
-        let mut planner = pf_vaadec::H265Planner::new();
+        let mut planner = pf_vaapi::H265Planner::new();
         let mut max_dpb_frames = 0usize;
         let walked = aus
             .iter()
@@ -2657,7 +2652,7 @@ mod tests {
                         removed: plan.dpb.removed.clone(),
                     }
                 }
-                Err(pf_vaadec::PlanErrorH265::RaslSkipped { .. }) => AuEffect::default(),
+                Err(pf_vaapi::PlanErrorH265::RaslSkipped { .. }) => AuEffect::default(),
                 Err(e) => panic!("the vendored HEVC vector must plan: {e:?}"),
             })
             .collect();
@@ -2806,7 +2801,7 @@ mod tests {
             ("Main 10", effects_h265(&split_h265_aus(MAIN10_H265)), 8, 7),
         ] {
             let dpb = vector.max_dpb_frames;
-            let pool = pf_vaadec::surface_count(dpb);
+            let pool = pf_vaapi::surface_count(dpb);
             let run = simulate(&vector.aus, Some(&vector.flush), dpb);
             let queueless = simulate(&vector.aus, Some(&vector.flush), 0);
 
@@ -2824,13 +2819,13 @@ mod tests {
                 queueless.peak_claim
             );
             assert!(
-                pool - run.peak_claim >= pf_vaadec::config::PRESENTER_HEADROOM - 2,
+                pool - run.peak_claim >= pf_vaapi::config::PRESENTER_HEADROOM - 2,
                 "{label}: {} of a {pool}-surface pool claimed, leaving {} of the \
                  {}-surface presenter headroom — a session that cannot find a free \
                  surface refuses the access unit and demotes the rung",
                 run.peak_claim,
                 pool - run.peak_claim,
-                pf_vaadec::config::PRESENTER_HEADROOM,
+                pf_vaapi::config::PRESENTER_HEADROOM,
             );
         }
 
@@ -2878,7 +2873,7 @@ mod tests {
 
     /// Decode measurement, not pixels. Shared so the three H.26x legs cannot diverge.
     fn run_annex_b(
-        codec: pf_vaadec::Codec,
+        codec: pf_vaapi::Codec,
         stream: StreamFormat,
         aus: &[&[u8]],
         label: &str,
@@ -2949,7 +2944,7 @@ mod tests {
         assert_eq!(aus.len(), H26X_AU_COUNT, "the H.264 vector is 250 AUs");
 
         let (delivered, first) = run_annex_b(
-            pf_vaadec::Codec::H264,
+            pf_vaapi::Codec::H264,
             StreamFormat::SDR_420_8,
             &aus,
             "H.264",
@@ -2957,7 +2952,7 @@ mod tests {
         assert_eq!((first.width, first.height), (320, 240), "320x240");
         assert_eq!(
             first.fourcc,
-            pf_vaadec::VA_FOURCC_NV12,
+            pf_vaapi::VA_FOURCC_NV12,
             "an 8-bit pool exports NV12"
         );
         assert_eq!(
@@ -2982,7 +2977,7 @@ mod tests {
         assert_eq!(aus.len(), H26X_AU_COUNT, "the H.265 vector is 250 AUs");
 
         let (delivered, first) = run_annex_b(
-            pf_vaadec::Codec::H265,
+            pf_vaapi::Codec::H265,
             StreamFormat::SDR_420_8,
             &aus,
             "H.265",
@@ -2990,7 +2985,7 @@ mod tests {
         assert_eq!((first.width, first.height), (320, 240), "320x240");
         assert_eq!(
             first.fourcc,
-            pf_vaadec::VA_FOURCC_NV12,
+            pf_vaapi::VA_FOURCC_NV12,
             "an 8-bit pool exports NV12"
         );
         assert_eq!(
@@ -3011,7 +3006,7 @@ mod tests {
         assert_eq!(aus.len(), MAIN10_AU_COUNT, "the Main 10 vector is 50 AUs");
 
         let (delivered, first) = run_annex_b(
-            pf_vaadec::Codec::H265,
+            pf_vaapi::Codec::H265,
             StreamFormat {
                 bit_depth: 10,
                 ..StreamFormat::SDR_420_8
@@ -3022,7 +3017,7 @@ mod tests {
         assert_eq!((first.width, first.height), (320, 240), "320x240");
         assert_eq!(
             first.fourcc,
-            pf_vaadec::VA_FOURCC_P010,
+            pf_vaapi::VA_FOURCC_P010,
             "a ten-bit stream must build a P010 pool, not an 8-bit one"
         );
         assert_eq!(
@@ -3133,13 +3128,13 @@ mod parity {
     struct ImageApi {
         _va: libloading::Library,
         derive_image:
-            unsafe extern "C" fn(VaDisplay, VaSurfaceId, *mut pf_vaadec::VaImage) -> VaStatus,
+            unsafe extern "C" fn(VaDisplay, VaSurfaceId, *mut pf_vaapi::VaImage) -> VaStatus,
         create_image: unsafe extern "C" fn(
             VaDisplay,
-            *mut pf_vaadec::VaImageFormat,
+            *mut pf_vaapi::VaImageFormat,
             c_int,
             c_int,
-            *mut pf_vaadec::VaImage,
+            *mut pf_vaapi::VaImage,
         ) -> VaStatus,
         get_image: unsafe extern "C" fn(
             VaDisplay,
@@ -3155,7 +3150,7 @@ mod parity {
         unmap_buffer: unsafe extern "C" fn(VaDisplay, VaBufferId) -> VaStatus,
         max_image_formats: unsafe extern "C" fn(VaDisplay) -> c_int,
         query_image_formats:
-            unsafe extern "C" fn(VaDisplay, *mut pf_vaadec::VaImageFormat, *mut c_int) -> VaStatus,
+            unsafe extern "C" fn(VaDisplay, *mut pf_vaapi::VaImageFormat, *mut c_int) -> VaStatus,
     }
 
     impl ImageApi {
@@ -3205,7 +3200,7 @@ mod parity {
     }
 
     struct Staging {
-        image: pf_vaadec::VaImage,
+        image: pf_vaapi::VaImage,
         size: (u32, u32),
         fourcc: u32,
     }
@@ -3213,7 +3208,7 @@ mod parity {
     struct Readback {
         api: ImageApi,
         /// Driver's own formats — not a guessed `bits_per_pixel`.
-        formats: Vec<pf_vaadec::VaImageFormat>,
+        formats: Vec<pf_vaapi::VaImageFormat>,
         staging: Option<Staging>,
         forced: Option<Route>,
         /// Latched so a refused derive is paid once, not per frame.
@@ -3235,7 +3230,7 @@ mod parity {
                     Vec::new()
                 } else {
                     let mut formats =
-                        vec![pf_vaadec::VaImageFormat::default(); max.unsigned_abs() as usize];
+                        vec![pf_vaapi::VaImageFormat::default(); max.unsigned_abs() as usize];
                     let mut count: c_int = 0;
                     let status =
                         (api.query_image_formats)(d.display, formats.as_mut_ptr(), &mut count);
@@ -3281,7 +3276,7 @@ mod parity {
         fn read_mapped(
             &self,
             d: &Display,
-            image: &pf_vaadec::VaImage,
+            image: &pf_vaapi::VaImage,
             display: (u32, u32),
             fourcc: u32,
         ) -> std::result::Result<Vec<u8>, String> {
@@ -3305,7 +3300,7 @@ mod parity {
             // the end.
             let mapped =
                 unsafe { std::slice::from_raw_parts(base.cast::<u8>(), image.data_size as usize) };
-            let packed = pf_vaadec::pack_two_plane(image, mapped, display, fourcc).map_err(|e| {
+            let packed = pf_vaapi::pack_two_plane(image, mapped, display, fourcc).map_err(|e| {
                 format!(
                     "{e} — the driver's image is {}x{}, {} plane(s), pitches {:?}, \
                      offsets {:?}, data_size {}",
@@ -3323,9 +3318,9 @@ mod parity {
         }
 
         /// Some drivers have no vertical padding; the chroma-offset trap is CPU-tested
-        /// in `pf-vaadec`.
+        /// in `pf-vaapi`.
         fn describe(&self, d: &Display, surface: VaSurfaceId) -> String {
-            let mut image = pf_vaadec::VaImage::zeroed();
+            let mut image = pf_vaapi::VaImage::zeroed();
             // SAFETY: a live display and a surface from its own pool; `image` is a
             // zeroed local of the measured layout that outlives the call.
             let status = unsafe { (self.api.derive_image)(d.display, surface, &mut image) };
@@ -3360,7 +3355,7 @@ mod parity {
             display: (u32, u32),
             fourcc: u32,
         ) -> std::result::Result<Vec<u8>, String> {
-            let mut image = pf_vaadec::VaImage::zeroed();
+            let mut image = pf_vaapi::VaImage::zeroed();
             // SAFETY: a live display and a surface from its own pool; `image` is a
             // zeroed local of the measured layout that outlives the call.
             let status = unsafe { (self.api.derive_image)(d.display, surface, &mut image) };
@@ -3399,7 +3394,7 @@ mod parity {
                         self.offered()
                     )
                 })?;
-            let mut image = pf_vaadec::VaImage::zeroed();
+            let mut image = pf_vaapi::VaImage::zeroed();
             // SAFETY: a live display; `format` and `image` are locals of the measured
             // layouts that outlive the call, and libva copies the format it is handed.
             let status = unsafe {
@@ -3464,7 +3459,7 @@ mod parity {
             self.read_mapped(d, &image, display, fourcc)
         }
 
-        /// Picture first, then the whole surface; crop in [`pf_vaadec::pack_two_plane`].
+        /// Picture first, then the whole surface; crop in [`pf_vaapi::pack_two_plane`].
         fn read_via_get_image(
             &mut self,
             d: &Display,
@@ -3669,7 +3664,7 @@ mod parity {
     }
 
     fn localise(got: &[u8], want: &[u8], display: (u32, u32), fourcc: u32) -> Divergence {
-        let stride = if fourcc == pf_vaadec::VA_FOURCC_P010 {
+        let stride = if fourcc == pf_vaapi::VA_FOURCC_P010 {
             2usize
         } else {
             1
@@ -3735,7 +3730,7 @@ mod parity {
     }
 
     fn order_h264(aus: &[&[u8]]) -> Order {
-        let mut planner = pf_vaadec::H264Planner::new();
+        let mut planner = pf_vaapi::H264Planner::new();
         let mut order = Order::empty();
         for (index, au) in aus.iter().enumerate() {
             let plan = planner
@@ -3760,12 +3755,12 @@ mod parity {
     }
 
     fn order_h265(aus: &[&[u8]]) -> Order {
-        let mut planner = pf_vaadec::H265Planner::new();
+        let mut planner = pf_vaapi::H265Planner::new();
         let mut order = Order::empty();
         for (index, au) in aus.iter().enumerate() {
             let plan = match planner.plan_au(au) {
                 Ok(plan) => plan,
-                Err(pf_vaadec::PlanErrorH265::RaslSkipped { .. }) => {
+                Err(pf_vaapi::PlanErrorH265::RaslSkipped { .. }) => {
                     order.per_unit.push(Vec::new());
                     continue;
                 }
@@ -3790,7 +3785,7 @@ mod parity {
 
     /// One decoded picture per FRAME; a unit may carry several. No planner flush.
     fn order_av1(units: &[&[u8]], render: (u32, u32)) -> Order {
-        let mut planner = pf_vaadec::Av1Planner::new();
+        let mut planner = pf_vaapi::Av1Planner::new();
         let mut order = Order::empty();
         for (index, unit) in units.iter().enumerate() {
             let plans = planner
@@ -3857,7 +3852,7 @@ mod parity {
         let bytes = readback.read(&decoder.display, surface, display, coded, fourcc, what);
         assert_eq!(
             bytes.len(),
-            pf_vaadec::packed_len(display, fourcc).expect("the pool's fourcc is one of ours"),
+            pf_vaapi::packed_len(display, fourcc).expect("the pool's fourcc is one of ours"),
             "{what}: the readback is not the golden's own layout"
         );
         bytes
@@ -3991,7 +3986,7 @@ mod parity {
     }
 
     fn parity_run(
-        codec: pf_vaadec::Codec,
+        codec: pf_vaapi::Codec,
         stream: StreamFormat,
         aus: &[&[u8]],
         order: &Order,
@@ -4060,7 +4055,7 @@ mod parity {
         assert_eq!(order.display.len(), goldens.len());
         assert_eq!(order.display.len(), shown_count);
 
-        let mut decoder = NativeVaapiDecoder::new(pf_vaadec::Codec::Av1, StreamFormat::SDR_420_8)
+        let mut decoder = NativeVaapiDecoder::new(pf_vaapi::Codec::Av1, StreamFormat::SDR_420_8)
             .unwrap_or_else(|e| panic!("{label}: this box must host AV1 Profile 0 — {e:#}"));
         let mut readback = Readback::new(&decoder.display);
         let dump_tag = std::env::var("PF_VAAPI_DUMP").ok();
@@ -4085,7 +4080,7 @@ mod parity {
                     &delivered.first_bytes,
                     golden,
                     DISPLAY_AV1,
-                    pf_vaadec::VA_FOURCC_NV12,
+                    pf_vaapi::VA_FOURCC_NV12,
                 );
                 panic!(
                     "{label}: display frame 0 does not match libavcodec's own pixels — \
@@ -4120,7 +4115,7 @@ mod parity {
         let aus = split_h264_aus(H264_25FPS);
         let order = order_h264(&aus);
         parity_run(
-            pf_vaadec::Codec::H264,
+            pf_vaapi::Codec::H264,
             StreamFormat::SDR_420_8,
             &aus,
             &order,
@@ -4136,7 +4131,7 @@ mod parity {
         let aus = split_h264_aus(LOWDELAY_H264);
         let order = order_h264(&aus);
         parity_run(
-            pf_vaadec::Codec::H264,
+            pf_vaapi::Codec::H264,
             StreamFormat::SDR_420_8,
             &aus,
             &order,
@@ -4152,7 +4147,7 @@ mod parity {
         let aus = split_h265_aus(H265_25FPS);
         let order = order_h265(&aus);
         parity_run(
-            pf_vaadec::Codec::H265,
+            pf_vaapi::Codec::H265,
             StreamFormat::SDR_420_8,
             &aus,
             &order,
@@ -4168,7 +4163,7 @@ mod parity {
         let aus = split_h265_aus(LOWDELAY_H265);
         let order = order_h265(&aus);
         parity_run(
-            pf_vaadec::Codec::H265,
+            pf_vaapi::Codec::H265,
             StreamFormat::SDR_420_8,
             &aus,
             &order,
@@ -4185,7 +4180,7 @@ mod parity {
         let aus = split_h265_aus(MAIN10_H265);
         let order = order_h265(&aus);
         parity_run(
-            pf_vaadec::Codec::H265,
+            pf_vaapi::Codec::H265,
             StreamFormat {
                 bit_depth: 10,
                 ..StreamFormat::SDR_420_8
@@ -4238,7 +4233,7 @@ mod parity {
     #[ignore = "needs a machine with a libva runtime and an H.264 VLD entry point"]
     fn probe_this_machines_readback_routes() {
         let aus = split_h264_aus(H264_25FPS);
-        let mut decoder = NativeVaapiDecoder::new(pf_vaadec::Codec::H264, StreamFormat::SDR_420_8)
+        let mut decoder = NativeVaapiDecoder::new(pf_vaapi::Codec::H264, StreamFormat::SDR_420_8)
             .expect("this box is supposed to have a VAAPI H.264 decode entry point");
         let mut frame = None;
         for (index, au) in aus.iter().enumerate() {
@@ -4298,7 +4293,7 @@ mod parity {
     fn the_readback_reads_real_pixels_and_the_comparison_can_fail() {
         let aus = split_h264_aus(H264_25FPS);
         let goldens = golden_hashes(GOLDENS_H264);
-        let mut decoder = NativeVaapiDecoder::new(pf_vaadec::Codec::H264, StreamFormat::SDR_420_8)
+        let mut decoder = NativeVaapiDecoder::new(pf_vaapi::Codec::H264, StreamFormat::SDR_420_8)
             .expect("this box is supposed to have a VAAPI H.264 decode entry point");
         let mut readback = Readback::new(&decoder.display);
 
@@ -4348,7 +4343,7 @@ mod parity {
             &corrupted,
             &frames[victim],
             (320, 240),
-            pf_vaadec::VA_FOURCC_NV12,
+            pf_vaapi::VA_FOURCC_NV12,
         );
         assert_eq!(
             diff.luma_samples, 1,
@@ -4571,7 +4566,7 @@ mod parity {
                 one_block[(y * w + x) as usize] = 0x48;
             }
         }
-        let d = localise(&one_block, &clean, (w, h), pf_vaadec::VA_FOURCC_NV12);
+        let d = localise(&one_block, &clean, (w, h), pf_vaapi::VA_FOURCC_NV12);
         assert_eq!(d.luma_samples, 16 * 24);
         assert_eq!(d.chroma_samples, 0);
         assert_eq!(d.luma_box, Some((16, 24, 31, 47)));
@@ -4580,20 +4575,20 @@ mod parity {
         assert!(format!("{d}").contains("16x24"));
 
         let structural = vec![0xffu8; clean.len()];
-        let d = localise(&structural, &clean, (w, h), pf_vaadec::VA_FOURCC_NV12);
+        let d = localise(&structural, &clean, (w, h), pf_vaapi::VA_FOURCC_NV12);
         assert_eq!(d.luma_samples, (w * h) as usize);
         assert_eq!(d.chroma_samples, (w * h / 2) as usize);
         assert_eq!(d.max_delta, 0xff - 0x40);
         assert!(!format!("{d}").contains("chroma CLEAN"));
 
         assert_eq!(
-            localise(&clean, &clean, (w, h), pf_vaadec::VA_FOURCC_NV12).luma_samples,
+            localise(&clean, &clean, (w, h), pf_vaapi::VA_FOURCC_NV12).luma_samples,
             0
         );
         assert_eq!(
             format!(
                 "{}",
-                localise(&clean, &clean, (w, h), pf_vaadec::VA_FOURCC_NV12)
+                localise(&clean, &clean, (w, h), pf_vaapi::VA_FOURCC_NV12)
             ),
             "identical"
         );
@@ -4607,14 +4602,14 @@ mod parity {
         let msb: Vec<u8> = (0..samples).flat_map(|_| 0x0200u16.to_le_bytes()).collect();
         let lsb: Vec<u8> = (0..samples).flat_map(|_| 0x0008u16.to_le_bytes()).collect();
 
-        let d = localise(&lsb, &msb, (w, h), pf_vaadec::VA_FOURCC_P010);
+        let d = localise(&lsb, &msb, (w, h), pf_vaapi::VA_FOURCC_P010);
         assert_eq!(d.low_bits_set, samples, "every sample carries low bits");
         assert!(
             format!("{d}").contains("low six bits"),
             "the report must point at the FORMAT: {d}"
         );
 
-        let d = localise(&msb, &msb, (w, h), pf_vaadec::VA_FOURCC_P010);
+        let d = localise(&msb, &msb, (w, h), pf_vaapi::VA_FOURCC_P010);
         assert_eq!(d.low_bits_set, 0);
         assert_eq!(format!("{d}"), "identical");
     }

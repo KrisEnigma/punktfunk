@@ -3170,7 +3170,7 @@ dependencies = [
  "pf-bitstream",
  "pf-dxvadec",
  "pf-update-check",
- "pf-vaadec",
+ "pf-vaapi",
  "pf-vkdecode",
  "pipewire",
  "punktfunk-core",
@@ -3386,7 +3386,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pf-vaadec"
+name = "pf-vaapi"
 version = "0.34.0"
 dependencies = [
  "cros-codecs",
