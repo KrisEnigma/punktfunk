@@ -118,6 +118,7 @@ impl From<CustomEntry> for GameEntry {
             // Stays set so attribution survives the claim.
             provider: c.provider,
             detect,
+            stats: None,
             meta: c.meta,
         }
     }

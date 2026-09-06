@@ -6721,6 +6721,17 @@
               "role": {
                 "$ref": "#/components/schemas/GameRole"
               },
+              "stats": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GameStats",
+                    "description": "Play stats, once this host has launched the title (`stats.rs`). Joined at read\ntime from `library-stats.json`, never stored on the entry."
+                  }
+                ]
+              },
               "store": {
                 "type": "string",
                 "description": "Which store surfaced it: `\"steam\"` or `\"custom\"`.",
@@ -6867,6 +6878,41 @@
           "auto",
           "dedicated"
         ]
+      },
+      "GameStats": {
+        "type": "object",
+        "description": "One title's numbers. On the wire as `GameEntry.stats`; absent until the first launch.",
+        "required": [
+          "last_played_unix_ms",
+          "play_time_ms",
+          "last_run_ms",
+          "launch_count"
+        ],
+        "properties": {
+          "last_played_unix_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms of the most recent launch. Stamped at launch, so a game just started sorts first.",
+            "minimum": 0
+          },
+          "last_run_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The run that started at `last_played_unix_ms`. Still growing while it runs.",
+            "minimum": 0
+          },
+          "launch_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "play_time_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Every run added up.",
+            "minimum": 0
+          }
+        }
       },
       "GpuState": {
         "type": "object",

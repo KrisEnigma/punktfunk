@@ -360,6 +360,15 @@ impl Claim {
         self.procs.clone()
     }
 
+    /// The title a spawn on this claim is credited to
+    /// ([`crate::library::record_launch`]). `None` for an unrecordable launch
+    /// or an adoption: a reconnect is not a launch.
+    pub fn credits(&self) -> Option<&str> {
+        self.must_spawn()
+            .then(|| self.key.as_ref().map(|k| k.game_id.as_str()))
+            .flatten()
+    }
+
     /// Mark the launch as having happened. No-op if a newer session has
     /// already re-stamped the record — that session confirms its own.
     pub fn launched(&self) {

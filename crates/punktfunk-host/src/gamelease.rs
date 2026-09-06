@@ -42,6 +42,9 @@ const TERM_GRACE: Duration = Duration::from_secs(10);
 /// an unclean exit; an unbounded veto never ends the session. Ending a moment
 /// early (reconnect; `finish` does not kill) is cheaper than ending never.
 const VETO_LIMIT: Duration = Duration::from_secs(30);
+/// 60 s between play-time flushes ([`crate::library::record_run_time`]). A
+/// host crash loses at most this much of the current run.
+const STATS_FLUSH: Duration = Duration::from_secs(60);
 
 /// Spawned child, and whether a group signal is safe for it.
 #[derive(Clone, Copy, Debug)]
@@ -400,6 +403,9 @@ fn watch(
 ) {
     let scanner = crate::procscan::Scanner::system();
     let cancelled = || shared.cancel.load(Ordering::Relaxed);
+    // Play time credits a recorded launch's title. Unrecorded — no client key,
+    // no library id, a test lease — keeps none ([`crate::launchreg::Claim`]).
+    let credit: Option<String> = procs.as_ref().and(shared.game.id.clone());
     // Concrete, non-empty pids only — never the spec (rule 1: a later
     // re-scan would adopt a copy the player started). Never cleared: last
     // set is how the record answers `Gone` instead of "no opinion".
@@ -480,7 +486,8 @@ fn watch(
             } else if matches!(kind, LeaseKind::Untracked) {
                 // Outlived the shim window; nothing else identifies it.
                 shared.was_running.store(true, Ordering::Relaxed);
-                finish(&shared, &on_exit, "the launched process exited");
+                let run = credit.clone().map(|id| RunClock::since(id, spawned_at));
+                finish(&shared, &on_exit, "the launched process exited", run);
                 return;
             }
             // Signals exist: the scan decides; this may have been a wrapper.
@@ -517,7 +524,8 @@ fn watch(
                         if matches!(kind, LeaseKind::Untracked) {
                             if spawned_at.elapsed() >= SHIM_WINDOW {
                                 shared.was_running.store(true, Ordering::Relaxed);
-                                finish(&shared, &on_exit, "the launched process exited");
+                                let run = credit.clone().map(|id| RunClock::since(id, spawned_at));
+                                finish(&shared, &on_exit, "the launched process exited", run);
                             }
                             return;
                         }
@@ -590,10 +598,15 @@ fn watch(
     }
 
     // Phase 2: wait for it to stay gone across [`EXIT_CONFIRM`].
+    let mut run = credit.map(|id| RunClock::since(id, Instant::now()));
     let mut gone_since: Option<Instant> = None;
     let mut vetoed = false;
     loop {
         if cancelled() {
+            // The session left; the game may live on unwatched.
+            if let Some(run) = run.as_mut() {
+                run.flush();
+            }
             return;
         }
         if matches!(kind, LeaseKind::Child) {
@@ -601,7 +614,7 @@ fn watch(
                 child = None;
                 shared.forget_child();
                 if shared.spec.is_empty() {
-                    finish(&shared, &on_exit, "the launched process exited");
+                    finish(&shared, &on_exit, "the launched process exited", run);
                     return;
                 }
             }
@@ -610,7 +623,7 @@ fn watch(
             if spawned.is_some() && !spawned_up(&spawned) {
                 spawned = None;
                 if shared.spec.is_empty() {
-                    finish(&shared, &on_exit, "the launched process exited");
+                    finish(&shared, &on_exit, "the launched process exited", run);
                     return;
                 }
             }
@@ -642,7 +655,12 @@ fn watch(
                 vetoed = false;
                 shared.last_seen_ms.store(now_ms(), Ordering::Relaxed);
             } else {
-                finish(&shared, &on_exit, "its provider reported the game stopped");
+                finish(
+                    &shared,
+                    &on_exit,
+                    "its provider reported the game stopped",
+                    run,
+                );
                 return;
             }
         } else {
@@ -674,10 +692,13 @@ fn watch(
                             VETO_LIMIT.as_secs()
                         );
                     }
-                    finish(&shared, &on_exit, "the game exited");
+                    finish(&shared, &on_exit, "the game exited", run);
                     return;
                 }
             }
+        }
+        if let Some(run) = run.as_mut() {
+            run.tick();
         }
         std::thread::sleep(POLL);
     }
@@ -691,9 +712,50 @@ fn exit_confirmed(gone_for: Duration, hint_running: bool) -> bool {
     gone_for >= EXIT_CONFIRM && (!hint_running || gone_for >= VETO_LIMIT)
 }
 
-/// Record the exit. Skip `on_exit` when the host itself ended the game.
+/// Play-time clock for one run, credited to a library id. Flushes deltas, so
+/// a reconnect's second watcher adds to the same run instead of restarting it.
 #[cfg(any(target_os = "linux", windows))]
-fn finish(shared: &Arc<LeaseShared>, on_exit: &OnExit, why: &str) {
+struct RunClock {
+    id: String,
+    started: Instant,
+    /// How much of `started.elapsed()` is already on disk.
+    flushed: Duration,
+    last_flush: Instant,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl RunClock {
+    fn since(id: String, started: Instant) -> Self {
+        Self {
+            id,
+            started,
+            flushed: Duration::ZERO,
+            last_flush: Instant::now(),
+        }
+    }
+
+    /// Once per [`STATS_FLUSH`]; call every poll.
+    fn tick(&mut self) {
+        if self.last_flush.elapsed() >= STATS_FLUSH {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        let total = self.started.elapsed();
+        crate::library::record_run_time(&self.id, total.saturating_sub(self.flushed));
+        self.flushed = total;
+        self.last_flush = Instant::now();
+    }
+}
+
+/// Record the exit: flush the run's play time, then the state. Skip `on_exit`
+/// when the host itself ended the game.
+#[cfg(any(target_os = "linux", windows))]
+fn finish(shared: &Arc<LeaseShared>, on_exit: &OnExit, why: &str, run: Option<RunClock>) {
+    if let Some(mut run) = run {
+        run.flush();
+    }
     shared.set_state(GameState::Exited);
     let terminated = shared.is_terminating();
     crate::events::emit(crate::events::EventKind::GameExited {
