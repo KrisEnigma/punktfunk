@@ -3420,7 +3420,16 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     }
     drop(frame_tx);
     let _ = send_thread.join();
-    tracing::info!(sent, "punktfunk/1 virtual stream complete");
+    // Source against wire: `source_seq` is what DWM composed into the driver's pool,
+    // `dropped` what the pool refused. A source under the refresh rate is the desktop.
+    let src = capturer.health();
+    tracing::info!(
+        sent,
+        source_seq = src.as_ref().map_or(0, |h| h.source_seq),
+        published = src.as_ref().map_or(0, |h| h.published_total),
+        dropped = src.as_ref().map_or(0, |h| h.dropped_total),
+        "punktfunk/1 virtual stream complete"
+    );
     Ok(())
 }
 

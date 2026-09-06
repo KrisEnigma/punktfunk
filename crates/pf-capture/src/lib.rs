@@ -73,6 +73,8 @@ pub struct CaptureHealth {
     /// Access units the driver published, and frames it dropped at the encode pool.
     pub published_total: u64,
     pub dropped_total: u64,
+    /// Frames the drain worker handed the pool — DWM's compose count, the source clock.
+    pub source_seq: u64,
     /// The recovery stage running now, if an episode is open.
     pub current_stage: Option<&'static str>,
     /// The last closed episode.
