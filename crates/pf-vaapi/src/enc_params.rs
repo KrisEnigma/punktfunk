@@ -177,10 +177,12 @@ impl SessionParams {
         let hrd = VaEncMiscParameterHrd {
             buffer_size: vbv_bits,
             initial_buffer_fullness: vbv_bits / 4 * 3,
+            va_reserved: [0; 4],
         };
         let frame_rate = VaEncMiscParameterFrameRate {
             framerate: self.fps_num & 0xffff | (self.fps_den & 0xffff) << 16,
             framerate_flags: 0,
+            va_reserved: [0; 4],
         };
         (rc, hrd, frame_rate)
     }

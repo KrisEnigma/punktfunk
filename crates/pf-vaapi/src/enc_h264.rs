@@ -216,6 +216,8 @@ pub struct VaEncMiscParameterRateControl {
     pub max_qp: u32,
     pub quality_factor: u32,
     pub target_frame_size: u32,
+    /// libva pads every misc struct; a buffer short of it is read past its end.
+    pub va_reserved: [u32; 4],
 }
 
 #[repr(C)]
@@ -223,6 +225,7 @@ pub struct VaEncMiscParameterRateControl {
 pub struct VaEncMiscParameterHrd {
     pub initial_buffer_fullness: u32,
     pub buffer_size: u32,
+    pub va_reserved: [u32; 4],
 }
 
 #[repr(C)]
@@ -231,6 +234,7 @@ pub struct VaEncMiscParameterFrameRate {
     /// `num | (den << 16)`; a bare integer means denominator 1.
     pub framerate: u32,
     pub framerate_flags: u32,
+    pub va_reserved: [u32; 4],
 }
 
 /// Precedes each packed header's bytes.
@@ -301,11 +305,12 @@ const _: () = {
     assert!(offset_of!(VaEncSliceParameterBufferH264, va_reserved) == 3124);
 
     assert!(size_of::<VaEncMiscParameterBuffer>() == 4);
-    assert!(size_of::<VaEncMiscParameterRateControl>() == 44);
+    assert!(size_of::<VaEncMiscParameterRateControl>() == 60);
     assert!(offset_of!(VaEncMiscParameterRateControl, rc_flags) == 24);
     assert!(offset_of!(VaEncMiscParameterRateControl, target_frame_size) == 40);
-    assert!(size_of::<VaEncMiscParameterHrd>() == 8);
-    assert!(size_of::<VaEncMiscParameterFrameRate>() == 8);
+    assert!(offset_of!(VaEncMiscParameterRateControl, va_reserved) == 44);
+    assert!(size_of::<VaEncMiscParameterHrd>() == 24);
+    assert!(size_of::<VaEncMiscParameterFrameRate>() == 24);
     assert!(offset_of!(VaEncPackedHeaderParameterBuffer, bit_length) == 4);
     assert!(offset_of!(VaEncPackedHeaderParameterBuffer, has_emulation_bytes) == 8);
 
