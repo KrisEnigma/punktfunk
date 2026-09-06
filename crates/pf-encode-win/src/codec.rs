@@ -230,6 +230,10 @@ pub struct EncoderCaps {
     /// cursor channel with `pf_encode::cursor_blend_capable`;
     /// `open_video`'s post-open check is the backstop.
     pub blends_cursor: bool,
+    /// A larger input picture is scaled down to the session's size on ingest
+    /// (the native VAAPI VideoProc pass). The host opens a mirrored head at the
+    /// client's size only when this is set; every other backend gets the head's own.
+    pub downscales_input: bool,
 }
 
 /// Hardware encoder. One per session, on the encode thread.

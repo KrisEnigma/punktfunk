@@ -945,6 +945,7 @@ impl Encoder for MfEncoder {
             intra_refresh: false,
             intra_refresh_recovery: false,
             intra_refresh_period: 0,
+            downscales_input: false,
         }
     }
 

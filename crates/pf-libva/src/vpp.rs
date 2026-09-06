@@ -1,9 +1,10 @@
 //! The VideoProc context: ingest colour conversion into the encoder's input surface.
 //!
-//! One context per session, sized to the visible picture. Every capture shape — a
-//! packed-RGB dmabuf, CPU RGB on a staging surface, a producer's own NV12 — goes
-//! through it, so the encoder sees one kind of input; the copy an NV12 source pays
-//! is the price of one path.
+//! One context per session, sized to the encoder's visible picture. Every capture
+//! shape — a packed-RGB dmabuf, CPU RGB on a staging surface, a producer's own NV12 —
+//! goes through it, so the encoder sees one kind of input; the copy an NV12 source
+//! pays is the price of one path. A larger source — a mirrored head — is scaled down
+//! on the same pass.
 
 use std::os::raw::c_int;
 
@@ -29,7 +30,7 @@ pub struct Vpp {
 }
 
 impl Vpp {
-    /// Open a VideoProc context on `display` for `width`×`height` visible pictures.
+    /// Open a VideoProc context on `display` writing `width`×`height` visible pictures.
     pub fn new(display: &Display, width: u32, height: u32) -> Result<Self> {
         let mut config = VA_INVALID_ID;
         // SAFETY: live display; no attributes, so the null and the zero count agree;
@@ -72,7 +73,8 @@ impl Vpp {
         })
     }
 
-    /// Convert the visible picture of `source` into `target`, and wait for it: the
+    /// Convert the `source_size` picture of `source` into this context's size in
+    /// `target` — the driver scales when the two differ — and wait for it: the
     /// encoder reads `target` on another queue, and libva orders nothing across
     /// contexts. The regions are explicit so a target padded to the macroblock grid
     /// is written, not scaled into.
@@ -80,19 +82,26 @@ impl Vpp {
         &self,
         display: &Display,
         source: VaSurfaceId,
+        source_size: (u32, u32),
         source_is_rgb: bool,
         ten_bit: bool,
         target: VaSurfaceId,
     ) -> Result<()> {
-        let region = VaRectangle {
+        let source_region = VaRectangle {
+            x: 0,
+            y: 0,
+            width: source_size.0 as u16,
+            height: source_size.1 as u16,
+        };
+        let output_region = VaRectangle {
             x: 0,
             y: 0,
             width: self.width as u16,
             height: self.height as u16,
         };
         let mut params = VaProcPipelineParameterBuffer::convert(source, source_is_rgb, ten_bit);
-        params.surface_region = &region;
-        params.output_region = &region;
+        params.surface_region = &source_region;
+        params.output_region = &output_region;
         let buf = display.create_buffer(
             self.context,
             VA_PROC_PIPELINE_PARAMETER_BUFFER_TYPE,

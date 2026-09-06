@@ -741,8 +741,9 @@ fn gs_session_plan(cfg: &StreamConfig, cursor_blend: bool) -> crate::session_pla
     )
 }
 
-/// The session's encoder at `frame`'s geometry. An IDD-push source has no pixels to submit —
-/// the driver encodes — so it gets the driver's encoder, which then owes access units through
+/// The session's encoder for `frame` — at the client's size when a larger head is mirrored
+/// (`session_plan::open_encoder_fitted`). An IDD-push source has no pixels to submit — the
+/// driver encodes — so it gets the driver's encoder, which then owes access units through
 /// `ready_aus`; its wire domain continues at `wire_seq_base` (the loop's `au_seq`).
 #[allow(clippy::too_many_arguments)]
 fn gs_open_encoder(
@@ -767,20 +768,27 @@ fn gs_open_encoder(
         );
     }
     let _ = (plan, capturer, wire_seq_base);
-    encode::open_video(
-        cfg.codec,
-        frame.format,
-        frame.width,
-        frame.height,
-        cfg.fps,
-        enc_bps,
-        frame.is_cuda(),
-        gs_bit_depth(frame.format),
-        // Stock Moonlight cannot decode 4:4:4.
-        encode::ChromaFormat::Yuv420,
-        cursor_blend,
-        cfg.slices,
-    )
+    let (enc, _) = crate::session_plan::open_encoder_fitted(
+        frame,
+        (cfg.width, cfg.height),
+        |width, height| {
+            encode::open_video(
+                cfg.codec,
+                frame.format,
+                width,
+                height,
+                cfg.fps,
+                enc_bps,
+                frame.is_cuda(),
+                gs_bit_depth(frame.format),
+                // Stock Moonlight cannot decode 4:4:4.
+                encode::ChromaFormat::Yuv420,
+                cursor_blend,
+                cfg.slices,
+            )
+        },
+    )?;
+    Ok(enc)
 }
 
 /// Encoder `bit_depth` from the captured format. Backends key the real profile off `format`;
@@ -1036,15 +1044,16 @@ fn stream_body(
     on_lost: &super::OnSessionLost,
 ) -> Result<()> {
     let mut frame = capturer.next_frame().context("capture first frame")?;
-    if frame.width != cfg.width || frame.height != cfg.height {
-        // Not fatal. Expected for a mirror (panel's own mode); a fault on a virtual display
-        // created at the negotiated size. Encoder opens at the captured size.
+    // A mirror is sized by `open_encoder_fitted`. A virtual display was created at the
+    // negotiated size, so a mismatch is a backend fault — not fatal, the encoder opens at the
+    // captured size.
+    if !crate::session_plan::mirrored() && (frame.width != cfg.width || frame.height != cfg.height)
+    {
         tracing::warn!(
             captured = ?(frame.width, frame.height),
             negotiated = ?(cfg.width, cfg.height),
             "captured size != negotiated size — the client decodes a stream that disagrees with \
-             what it negotiated (expected when mirroring a monitor; a virtual-display backend fault \
-             otherwise — see the vdisplay lines above)"
+             what it negotiated (a virtual-display backend fault — see the vdisplay lines above)"
         );
     }
     // Sunshine default 20. `PUNKTFUNK_FEC_PCT=0` is data-only. Read before the encoder opens:
