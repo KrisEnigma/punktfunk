@@ -6,6 +6,7 @@
   Start at boot with nobody logged in: yes  (the SteamOS installer always enables it)
 ==> Installing: host web-console plugin-runner (built on this device)
   + [ -d ~/punktfunk/.git ] || git clone https://git.unom.io/unom/punktfunk ~/punktfunk
+  !! the build runs on this device — it asks for your sudo password first, then takes about 25 minutes on a first run (minutes on a re-run) and prints nothing until it finishes
   + bash ~/punktfunk/scripts/steamdeck/install.sh
   ok would set PUNKTFUNK_CLIPBOARD=on in /box/config/punktfunk/host.env
 ==> Checking for Sunshine / Apollo / Vibeshine
