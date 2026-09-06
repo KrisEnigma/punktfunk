@@ -21,7 +21,7 @@ use pf_frame::HdrMeta;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
-use super::convert::{AdapterId, Fail, InputKind, pixel_format};
+use super::convert::{AdapterId, Fail, InputKind, bridge, pixel_format};
 use super::drive::Drive;
 use super::pool::Pool;
 use super::section::{AuSection, EncodeSession};
@@ -86,10 +86,13 @@ fn caps_wire(c: EncoderCaps) -> EncoderCapsWire {
 }
 
 /// Walk the request's backend list in order; the first that opens wins. `Err` is the last
-/// failure as the wire reply — no silent fallback past the list.
+/// failure as the wire reply — no silent fallback past the list. Opening runs
+/// `prepare_d3d11`, so `reply.caps` describes the live session rather than the backend's
+/// defaults — the host reads those caps once and never asks again.
 fn open_listed(
     req: &SetEncodeRequest,
     adapter: &AdapterId,
+    device: &windows62::Win32::Graphics::Direct3D11::ID3D11Device,
 ) -> Result<(Box<dyn Encoder>, OpenSpec, SetEncodeReply), SetEncodeReply> {
     let mut last: Fail = (-1, "nobackend");
     for &backend in req.backends.iter().take_while(|&&b| b != 0) {
@@ -107,6 +110,13 @@ fn open_listed(
                 }
                 if req.hdr == 1 {
                     enc.set_hdr_meta(Some(hdr_meta(&req.hdr_meta)));
+                }
+                if let Err(e) =
+                    enc.prepare_d3d11(device, pixel_format(spec.kind), spec.width, spec.height)
+                {
+                    dbglog!("[pf-vd] encode: backend {backend} prepare FAILED: {e:#}");
+                    last = (-1, "prepare");
+                    continue;
                 }
                 let applied = enc.applied_bitrate_bps().unwrap_or(spec.bitrate_bps);
                 let mut reply = fail_reply(
@@ -187,7 +197,11 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
     let Some(monitor) = ctx.monitor.upgrade() else {
         return fail(wire::SET_ENCODE_NO_MONITOR, (-6, "gone"));
     };
-    let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter) {
+    let device = match bridge(&ctx.device.device) {
+        Ok(d) => d,
+        Err(f) => return fail(wire::SET_ENCODE_NO_DEVICE, f),
+    };
+    let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter, &device) {
         Ok(x) => x,
         Err(reply) => {
             let _ = ctx.opened.send(reply);

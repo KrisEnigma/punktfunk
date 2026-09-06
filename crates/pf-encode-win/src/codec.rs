@@ -234,6 +234,26 @@ pub struct EncoderCaps {
 
 /// Hardware encoder. One per session, on the encode thread.
 pub trait Encoder: Send {
+    /// Build the encode session now, before [`caps`](Self::caps) is read.
+    ///
+    /// A backend that defers session creation to the first [`submit`](Self::submit) has
+    /// nothing to query yet and answers [`caps`](Self::caps) with its own defaults. NVENC
+    /// defers, and its default is `supports_rfi: false`, so a caller that reads caps at open
+    /// keyframes on every lost frame instead of invalidating one reference. Caps describe the
+    /// hardware only after this has run.
+    ///
+    /// Idempotent: a repeat call with the same device, format and size keeps the session.
+    #[cfg(target_os = "windows")]
+    fn prepare_d3d11(
+        &mut self,
+        _device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        _format: pf_frame::PixelFormat,
+        _width: u32,
+        _height: u32,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Submit one captured frame. Keep `frame` and its GPU payload alive until
     /// this frame's AU returns from [`poll`](Self::poll): a stream-ordered
     /// backend may still read the payload after `submit` returns.
