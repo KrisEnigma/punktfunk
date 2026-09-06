@@ -491,8 +491,27 @@ extension SettingsView {
                         Toggle("Start in collections", isOn: $libraryCollections)
                     }
                 }
+                described(startInFooter) {
+                    Picker("Start in", selection: $startInRaw) {
+                        ForEach(StartIn.allCases, id: \.stored) { value in
+                            Text(value.label).tag(value.stored)
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// Names the host the setting resolves to, so the row explains itself — and says when it
+    /// resolves to nothing, which is what every value does with no default host.
+    private var startInFooter: String {
+        let hosts = StartScreen.savedHosts()
+        guard let host = StartScreen.defaultHost(id: defaultHostID, hosts: hosts).host else {
+            return "Opens on the host list: there is no default host. Pair one, or pick one "
+                + "from a host's menu when several are paired."
+        }
+        return "Library opens \(host.displayName)'s games; Stream also connects to its desktop. "
+            + "Back leaves either one on the host list."
     }
 
     // MARK: - Input

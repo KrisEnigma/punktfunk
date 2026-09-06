@@ -68,6 +68,8 @@ struct SettingsView: View {
     /// stored as the cross-client `library_view` / `library_collections` values.
     @AppStorage(DefaultsKey.libraryView) var libraryViewRaw = LibraryArrangement.shelf.stored
     @AppStorage(DefaultsKey.libraryCollections) var libraryCollections = false
+    @AppStorage(DefaultsKey.startIn) var startInRaw = StartIn.library.stored
+    @AppStorage(DefaultsKey.defaultHost) var defaultHostID = ""
     @AppStorage(DefaultsKey.fullscreenWhileStreaming) var fullscreenWhileStreaming = true
     @AppStorage(DefaultsKey.micEnabled) var micEnabled = true
     @AppStorage(DefaultsKey.echoCancel) var echoCancel = true

@@ -241,6 +241,16 @@ public enum DefaultsKey {
     /// not worth browsing (one platform, one store) opens on the shelf regardless. Presentation
     /// only.
     public static let libraryCollections = "punktfunk.libraryCollections"
+    /// Where a bare launch opens — a `StartIn` stored value (`"hosts"`, `"library"` the default,
+    /// `"stream"`). The cross-client `start_in` key; unknown reads as library, and with no default
+    /// host every value degrades to the host list. Resolve through `StartScreen.resolve`, never by
+    /// reading this alone. Presentation only — a device preference, never part of a profile.
+    public static let startIn = "punktfunk.startIn"
+    /// The host a bare launch opens on — a `StoredHost.id` uuid string, absent when there is none.
+    /// The cross-client `default_host` key. Only half the answer: with exactly one paired host
+    /// saved that host is the default with nothing written here, so `StartScreen.resolve` is the
+    /// only correct reader. A dangling id falls through to that derived rule.
+    public static let defaultHost = "punktfunk.defaultHost"
     /// The TOUCH library grid's grouping — `""` (none, the default), `"platform"` or `"store"`:
     /// one section per collated group. Touch-only: on the console the grouping is a PLACE
     /// (Collections), not a mode of the shelf, so there is no cross-client key for it. The sort it

@@ -90,6 +90,10 @@ struct GamepadSettingsView: View {
     /// bar writes it too, so the field and this row can never disagree.
     @AppStorage(DefaultsKey.libraryView) private var libraryViewRaw = LibraryArrangement.shelf.stored
     @AppStorage(DefaultsKey.libraryCollections) private var libraryCollections = false
+    /// Where a bare launch opens, and which host it opens on. The pointer is written from a
+    /// host's own options menu, not here — this row only picks between the three landings.
+    @AppStorage(DefaultsKey.startIn) private var startInRaw = StartIn.library.stored
+    @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     @AppStorage(DefaultsKey.gamepadUIEnabled) private var gamepadUIEnabled = true
     /// When the switch above takes over — the row is only built while it is on.
     @AppStorage(DefaultsKey.gamepadUIMode) private var gamepadUIMode =
@@ -943,6 +947,13 @@ struct GamepadSettingsView: View {
                 detail: "Opens a library on its platform groups first; one-platform libraries "
                     + "still open on the shelf.",
                 value: $libraryCollections, enabled: libraryEnabled),
+            choiceRow(
+                id: "startIn", tab: .interface, icon: "house",
+                label: "Start in",
+                detail: startInDetail,
+                options: StartIn.allCases.map { (label: $0.label, tag: $0.stored) },
+                current: StartIn.parse(startInRaw).stored
+            ) { startInRaw = $0 },
             toggleRow(
                 id: "gamepadUI", tab: .interface, icon: "hand.tap",
                 label: "Controller-optimized UI",
@@ -1147,6 +1158,15 @@ struct GamepadSettingsView: View {
     }
 
     // MARK: - Row builders
+
+    /// Names the host the setting resolves to, and says so when it resolves to nothing — which
+    /// is what every value does until one host is paired.
+    private var startInDetail: String {
+        guard let host = StartScreen.defaultHost(id: defaultHostID, hosts: store.hosts).host else {
+            return "Opens on the host list: there is no default host yet."
+        }
+        return "Library opens \(host.displayName)'s games; Stream also connects to its desktop."
+    }
 
     private func choiceRow<T: Equatable>(
         id: String, tab: GpSettingsTab, icon: String, label: String, detail: String,

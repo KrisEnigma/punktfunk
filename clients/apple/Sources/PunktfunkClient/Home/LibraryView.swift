@@ -686,6 +686,13 @@ struct LibraryView: View {
     private var launchAndRemember: ((String) -> Void)? {
         guard let onLaunch else { return nil }
         return { id in
+            // The desktop tile is the host, not one of its titles: it connects with no launch
+            // id, and there is no position to remember for something that is not in the catalog.
+            // Every pick lands here — tap, keyboard, coverflow — so one guard covers all three.
+            if id == LibraryCollation.desktopID {
+                onConnect?()
+                return
+            }
             LibraryScrollMemory.remember(id, forHost: host.id.uuidString)
             LaunchedEntry.remember(games.first { $0.id == id }, from: TileFrames.rect(id))
             onLaunch(id)
@@ -706,8 +713,20 @@ struct LibraryView: View {
     /// every running entry first, over `launchersFirst`, so a running game jumped ahead of the
     /// launcher prefix and the coverflow's heading read GAMES · LAUNCHERS · GAMES along the strip.)
     private var ordered: [GameEntry] {
-        guard !running.isEmpty else { return games }
-        return LibraryOrder.display(games, running: Set(running.keys))
+        // …and the desktop tile leads all of it, so streaming the host itself is one press
+        // rather than a menu — and a host with no plugins still has something to press.
+        // Only where a launch is possible: browse-only mode has nothing to connect with.
+        let all = onConnect == nil ? games : [desktopTile] + games
+        guard !running.isEmpty else { return all }
+        return LibraryOrder.display(all, running: Set(running.keys))
+    }
+
+    /// The tile names what the press does, so it does not read "Desktop" while pressing it
+    /// resumes a game the host already has up.
+    private var desktopTile: GameEntry {
+        let playing = nowPlayingStore.title(for: host)
+        return LibraryCollation.desktopEntry(
+            title: playing.map { "Resume \($0)" } ?? "Desktop")
     }
 
     /// Whether the titles on screen are remembered rather than observed, and what the host is
