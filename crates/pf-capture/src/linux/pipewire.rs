@@ -666,6 +666,18 @@ fn realtime_minus_monotonic_ns() -> i64 {
     rt - (ts.tv_sec * 1_000_000_000 + ts.tv_nsec)
 }
 
+/// The dmabuf's allocation as `fstat` reports it; 0 once the fd is gone.
+fn dmabuf_len(fd: i32) -> u64 {
+    // SAFETY: `stat` is plain data that `fstat` only writes.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is an integer; a closed fd fails the call and nothing is dereferenced.
+    if unsafe { libc::fstat(fd, &mut st) } == 0 {
+        st.st_size as u64
+    } else {
+        0
+    }
+}
+
 fn packed_frame_geometry(
     width: usize,
     height: usize,
@@ -917,11 +929,22 @@ fn consume_frame(
                 // native NV12 has none.
                 cursor: ud.cursor.overlay(),
             });
-            static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-            if ONCE.swap(false, Ordering::Relaxed) {
+            // Once per geometry, not once: a resize renegotiates the pool, and a stale
+            // stride against a new size is a sheared picture.
+            static LAST: std::sync::Mutex<(usize, usize, u32, u32)> =
+                std::sync::Mutex::new((0, 0, 0, 0));
+            let geometry = (w, h, offset, stride);
+            let changed = std::mem::replace(
+                &mut *LAST.lock().unwrap_or_else(|e| e.into_inner()),
+                geometry,
+            ) != geometry;
+            if changed {
                 tracing::info!(
                     w,
                     h,
+                    offset,
+                    stride,
+                    fd_size = dmabuf_len(dup),
                     modifier = ud.modifier,
                     fourcc = format_args!("{:#010x}", fourcc),
                     source = if fmt == PixelFormat::Nv12 {
