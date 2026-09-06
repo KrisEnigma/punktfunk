@@ -333,6 +333,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The virtual DualSense reports its adaptive-trigger status.** A game that arms a Weapon
+  effect fires on the trigger's status nibble, not on the axis, so with adaptive triggers on
+  in-game R2 did nothing — the host left those two report bytes zero. The host now derives the
+  status from the armed effect and the trigger position, on every backend; nothing to do.
 - **The "audio format but not CLIENT_CAP_AUDIO_HIRES" warning fires only for a real
   contradiction.** Hello decodes an absent format as 48 kHz/16-bit, so every ordinary session
   logged it; nothing to do.
