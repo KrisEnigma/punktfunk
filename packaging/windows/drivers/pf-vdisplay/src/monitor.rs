@@ -227,6 +227,24 @@ impl Monitor {
         session
     }
 
+    /// Remove the live session only if it IS `generation`, matched under the lock. A proxy
+    /// closing the session it owns must never take the one that replaced it: a mid-stream resize
+    /// installs the replacement first, so an unconditional take leaves the monitor encoding
+    /// nothing while the drain worker keeps filling its pool.
+    pub fn take_encode_if(&self, generation: u32) -> Option<Arc<EncodeSession>> {
+        let session = {
+            let mut slot = lock(&self.encode);
+            match slot.as_ref() {
+                Some(live) if live.generation == generation => slot.take(),
+                _ => None,
+            }
+        };
+        if session.is_some() {
+            self.bump_encode_gen();
+        }
+        session
+    }
+
     /// The encode pool, if one was ever built.
     pub fn pool(&self) -> Option<Arc<crate::encode::pool::Pool>> {
         lock(&self.pool).clone()

@@ -170,9 +170,11 @@ pub fn encode_ctl(owner: u32, req: &EncodeCtlRequest) -> NTSTATUS {
         wire::ENCODE_CTL_RESET => return reset(&monitor, &session, req.arg0),
         wire::ENCODE_CTL_CLOSE => {
             // The host's proxy is gone; a stale proxy names an older generation and stops
-            // nothing. The pool stays for the retained slot.
+            // nothing. The pool stays for the retained slot. Matching the LIVE session too is
+            // what keeps a close from taking its own replacement: a mid-stream resize installs
+            // the new session first, and this close arrives a moment later.
             if session.generation == req.arg0
-                && let Some(live) = monitor.take_encode()
+                && let Some(live) = monitor.take_encode_if(session.generation)
             {
                 live.stop();
                 if let Some(pool) = monitor.pool() {
