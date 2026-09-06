@@ -164,6 +164,7 @@ jobs:
       # `rusty_enet` (transpiled C ENet), no `rsa`. Kept compiling here so the cfg boundary can't
       # rot, and the dependency claim is ASSERTED, not assumed: `cargo tree -i` must find neither
       # crate in the native-only graph (it exits non-zero with "nothing depends on" — inverted).
+      # The same build leaves `libav-fallback` off, so it must link no FFmpeg either.
       - name: Clippy + tree (native-only host, no gamestream feature)
         run: |
           cargo clippy -p punktfunk-host --no-default-features --features pyrowave \
@@ -174,6 +175,9 @@ jobs:
           if cargo tree -p punktfunk-host --no-default-features --features pyrowave \
             --locked -i rsa 2>/dev/null | grep -q "^rsa"; then
             echo "native-only build still depends on rsa"; exit 1; fi
+          if cargo tree -p punktfunk-host --no-default-features --features pyrowave \
+            --locked -i ffmpeg-sys-next 2>/dev/null | grep -q ffmpeg; then
+            echo "native-only build still links FFmpeg"; exit 1; fi
 
       - name: Build
         run: cargo build --workspace --locked
@@ -225,17 +229,19 @@ jobs:
       # through `--features punktfunk-host/...` would force punktfunk-host into the selection and
       # re-run its entire test suite a second time for no extra coverage.
       #
-      # `pyrowave` is listed explicitly even though it is punktfunk-host's default: selecting only
-      # `-p pf-encode` takes the host out of the resolution, and pf-encode's own default is empty.
-      # Naming it keeps this the SHIPPED Linux feature set — deb.yml builds
+      # `pyrowave` and `libav-fallback` are listed explicitly even though they are punktfunk-host's
+      # defaults: selecting only `-p pf-encode` takes the host out of the resolution, and pf-encode's
+      # own default is empty. Naming them keeps this the SHIPPED Linux feature set — deb.yml builds
       # `--features punktfunk-host/nvenc,punktfunk-host/vulkan-encode` WITHOUT
-      # `--no-default-features`, so the .deb carries nvenc + vulkan-encode + pyrowave together, and
-      # that combination is what deserves the lint.
+      # `--no-default-features`, so the .deb carries nvenc + vulkan-encode + pyrowave + libav
+      # together, and that combination is what deserves the lint. The bare crate is the FFmpeg-free
+      # build (native VAAPI only); it lints on its own.
       - name: Clippy + test the feature-gated Linux encode backends
         run: |
           cargo clippy -p pf-encode --all-targets --locked \
-            --features nvenc,vulkan-encode,pyrowave -- -D warnings
-          cargo test -p pf-encode --locked --features nvenc,vulkan-encode,pyrowave
+            --features nvenc,vulkan-encode,pyrowave,libav-fallback -- -D warnings
+          cargo clippy -p pf-encode --all-targets --locked -- -D warnings
+          cargo test -p pf-encode --locked --features nvenc,vulkan-encode,pyrowave,libav-fallback
 
       - name: C ABI harness (standalone link proof)
         run: bash crates/punktfunk-core/tests/c/run.sh

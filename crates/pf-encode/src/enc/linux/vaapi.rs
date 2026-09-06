@@ -374,13 +374,6 @@ pub fn probe_can_encode_10bit(codec: Codec) -> bool {
     }
 }
 
-/// Always `false`. No validated HEVC 4:4:4 encode entrypoint, so a VAAPI host advertises 4:2:0
-/// and the client never builds a 4:4:4 decoder for 4:2:0 frames.
-pub fn probe_can_encode_444(_codec: Codec) -> bool {
-    tracing::info!("VAAPI HEVC 4:4:4 encode is not implemented yet — declining (encoding 4:2:0)");
-    false
-}
-
 struct VaapiHw {
     // frames-BEFORE-device: drop order matches the frames ctx holding a ref on the device.
     // Do not reorder.
@@ -979,7 +972,7 @@ impl VaapiEncoder {
             ),
             DepthResolution::Agreed => {}
         }
-        // 4:4:4 is unimplemented ([`probe_can_encode_444`] is false). If a request slips
+        // 4:4:4 is unimplemented (`can_encode_444` says so). If a request slips
         // through, encode 4:2:0 — the Welcome already advertised 4:2:0.
         if chroma.is_444() {
             tracing::warn!("VAAPI 4:4:4 encode not implemented — encoding 4:2:0");

@@ -47,6 +47,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`libav-fallback` feature on `pf-encode`, on by default in `punktfunk-host`.** The libavcodec
+  NVENC and VAAPI backends sit behind it on Linux, so a `--no-default-features` host links no
+  FFmpeg and the native VAAPI session answers the codec probes itself. Packagers change nothing;
+  the default build links the FFmpeg it did.
 - **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
   and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
   rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.

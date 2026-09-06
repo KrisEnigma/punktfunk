@@ -128,6 +128,36 @@ impl NativeVaapiEncoder {
     }
 }
 
+/// Whether the host's render node offers an encode entrypoint for `codec`
+/// at this depth — what a native open needs. AV1 is not a native path.
+#[cfg(not(feature = "libav-fallback"))]
+pub fn probe_can_encode(codec: Codec, ten_bit: bool) -> bool {
+    use pf_vaapi::config::{VA_PROFILE_H264_HIGH, VA_PROFILE_HEVC_MAIN, VA_PROFILE_HEVC_MAIN10};
+    use pf_vaapi::enc_h264::{VA_ENTRYPOINT_ENC_SLICE, VA_ENTRYPOINT_ENC_SLICE_LP};
+    let profile = match (codec, ten_bit) {
+        (Codec::H264, false) => VA_PROFILE_H264_HIGH,
+        (Codec::H265, false) => VA_PROFILE_HEVC_MAIN,
+        (Codec::H265, true) => VA_PROFILE_HEVC_MAIN10,
+        _ => return false,
+    };
+    let node = pf_gpu::linux_render_node();
+    let display = match Libva::load().and_then(|va| Display::open_path(va, &node.to_string_lossy()))
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::info!(error = %format!("{e:#}"), "no VAAPI display to probe");
+            return false;
+        }
+    };
+    display
+        .entrypoints(profile)
+        .map(|e| {
+            e.iter()
+                .any(|&p| p == VA_ENTRYPOINT_ENC_SLICE || p == VA_ENTRYPOINT_ENC_SLICE_LP)
+        })
+        .unwrap_or(false)
+}
+
 impl Encoder for NativeVaapiEncoder {
     fn submit(&mut self, frame: &CapturedFrame) -> Result<()> {
         ensure!(
@@ -390,5 +420,17 @@ mod tests {
             enc.poll().unwrap().unwrap().keyframe,
             "a rebuild starts with an IDR"
         );
+    }
+    /// The probe agrees with an open: H.264 and both HEVC depths yes, AV1 and
+    /// ten-bit H.264 no.
+    #[cfg(not(feature = "libav-fallback"))]
+    #[test]
+    #[ignore = "needs a real VAAPI device"]
+    fn native_probe_matches_open() {
+        assert!(probe_can_encode(Codec::H264, false));
+        assert!(probe_can_encode(Codec::H265, false));
+        assert!(probe_can_encode(Codec::H265, true));
+        assert!(!probe_can_encode(Codec::Av1, false));
+        assert!(!probe_can_encode(Codec::H264, true));
     }
 }
