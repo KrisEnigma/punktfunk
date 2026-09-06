@@ -51,7 +51,9 @@ public enum DefaultsKey {
     /// 28DE:1302, which the host's Steam drives directly. Two transports — CoreBluetooth against
     /// a paired pad's vendor GATT service (iOS and macOS), and raw USB HID against a wired pad or
     /// a Puck dongle (macOS only, `Sc2UsbLink`; IOKit HID is not available to apps on iOS).
-    /// The cross-client `sc2_capture` key — same gate as Android's `settings.sc2Capture`, read at
+    /// This client's own key, NOT a shared one: nothing writes an unprefixed `sc2_capture`, and
+    /// Android files the same decision under `android.sc2_capture`. Same gate as its
+    /// `settings.sc2Capture` though, read at
     /// connect beside `gamepadForwarding`: both must be on for `SessionModel` to build an
     /// `Sc2Capture`. iOS/macOS only (tvOS has neither capture path; the code is `#if`-gated
     /// out there). On iOS it is ALSO read app-lifetime, by `GamepadManager`: the same pad
@@ -222,9 +224,10 @@ public enum DefaultsKey {
     /// "pointer" (the cursor jumps to the finger), or "touch" (real multi-touch passthrough).
     /// Read live per gesture by `StreamLayerUIView`.
     public static let touchMode = "punktfunk.touchMode"
-    /// Show the host's game library (browsed over the management API). On by default — every
-    /// reader defaults it to `true`.
-    public static let libraryEnabled = "punktfunk.libraryEnabled"
+    // RETIRED: `punktfunk.libraryEnabled`, the "Show game library" switch. Pairing is the only
+    // gate now — the fetch authenticates with the pinned identity, so an unpaired host could
+    // only ever be refused. The Rust `library_enabled` went the same way; a stored value is
+    // simply ignored, on every client. Do not reintroduce the key under a new name.
     /// How the library's titles are ordered within a group — a `LibrarySortKey` stored value
     /// (`"host"` = the host's own order, the default; `"title"` A–Z; `"platform"`; `"store"`).
     /// The cross-client `library_sort` key: the desktop console persists the same ids, and an
@@ -241,6 +244,16 @@ public enum DefaultsKey {
     /// not worth browsing (one platform, one store) opens on the shelf regardless. Presentation
     /// only.
     public static let libraryCollections = "punktfunk.libraryCollections"
+    /// Where a bare launch opens — a `StartIn` stored value (`"hosts"`, `"library"` the default,
+    /// `"stream"`). The cross-client `start_in` key; unknown reads as library, and with no default
+    /// host every value degrades to the host list. Resolve through `StartScreen.resolve`, never by
+    /// reading this alone. Presentation only — a device preference, never part of a profile.
+    public static let startIn = "punktfunk.startIn"
+    /// The host a bare launch opens on — a `StoredHost.id` uuid string, absent when there is none.
+    /// The cross-client `default_host` key. Only half the answer: with exactly one paired host
+    /// saved that host is the default with nothing written here, so `StartScreen.resolve` is the
+    /// only correct reader. A dangling id falls through to that derived rule.
+    public static let defaultHost = "punktfunk.defaultHost"
     /// The TOUCH library grid's grouping — `""` (none, the default), `"platform"` or `"store"`:
     /// one section per collated group. Touch-only: on the console the grouping is a PLACE
     /// (Collections), not a mode of the shelf, so there is no cross-client key for it. The sort it

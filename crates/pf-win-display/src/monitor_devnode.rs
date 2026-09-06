@@ -481,6 +481,20 @@ mod tests {
         );
     }
 
+    /// The exclusive re-assert passes an EMPTY baseline: a panel that re-lit itself while the
+    /// isolate held it off is a sink from then on, operator display or not.
+    #[test]
+    fn an_empty_baseline_selects_the_re_lit_operator_panel() {
+        let keep = [CcdTargetKey::new(9, 257)];
+        let inventory = [
+            target(1, 100, false, true), // the operator's panel, re-lit and re-deactivated
+            target(9, 257, true, false), // ours
+        ];
+        let picked = select_connected_inactive(&inventory, &keep, &[]);
+        assert_eq!(picked.len(), 1, "picked: {picked:?}");
+        assert!(picked[0].0.contains("ACM0100"), "picked: {picked:?}");
+    }
+
     /// The lease journal (WP11) round-trips prior state, selector and generation, and an older
     /// host's bare-id file still reads as recoverable leases.
     #[test]

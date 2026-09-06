@@ -156,6 +156,16 @@ struct HostCardView: View {
     /// line rather than a line of its own: a card that grows when a game starts would make the
     /// grid's rows jump, which is the reason the profile chip shares the title line too.
     var nowPlaying: String? = nil
+    /// The start-screen pointer, written from this card's own menu. Empty means none is stored,
+    /// which with exactly one paired host still resolves to that host.
+    @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
+
+    /// The pointer names this host. Case-insensitive: the Rust client mints lowercase ids into
+    /// the same key, and `UUID.uuidString` is uppercase.
+    private var isDefaultHost: Bool {
+        !defaultHostID.isEmpty
+            && defaultHostID.lowercased() == host.id.uuidString.lowercased()
+    }
 
     /// The profile this card announces: a pinned card's own, else the host's binding.
     private var shownProfile: StreamProfile? {
@@ -271,6 +281,17 @@ struct HostCardView: View {
             }
             if !isOnline, !host.wakeMacs.isEmpty, PunktfunkConnection.wakeOnLANAvailable, let onWake {
                 Button("Wake Host", systemImage: "power", action: onWake)
+            }
+            // Needs a pairing to point at: the start screen skips an unpaired host, so writing
+            // one would set a pointer that never resolves. Unchecked is not "not the default" —
+            // a lone paired host is the default with nothing written.
+            if host.pinnedSHA256 != nil {
+                Button(
+                    isDefaultHost ? "Default Host ✓" : "Make Default Host",
+                    systemImage: "house"
+                ) {
+                    defaultHostID = isDefaultHost ? "" : host.id.uuidString
+                }
             }
             // …and the other half of that round trip: what the HOST says this device may do to
             // it. Empty unless it answered and this device's access carries the grant, so no row

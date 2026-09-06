@@ -11,6 +11,15 @@
 use anyhow::Result;
 use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 
+/// Least zero-copy pool depth asked of a compositor. 2 is what every producer already
+/// serves; the negotiated depth minus the hold reserve is the deferred-requeue budget.
+pub const POOL_MIN: i32 = 2;
+/// KWin ≥ 6.2 offers `Range(3, 2, 4)` as a driver stream, so its default 3 wins any
+/// intersection that contains it, and a pool of 3 spares one hold while the encoder keeps
+/// two frames in flight. A minimum of 4 is the only ask that moves it; above 4 fails
+/// negotiation outright.
+pub const KWIN_POOL_MIN: i32 = 4;
+
 /// A FATAL capture fault: retrying `try_latest` cannot help — the caller must rebuild the
 /// capture attachment or fail the session. Carried inside the `anyhow::Error` a capture call
 /// returns (downcast to route on it), so it can never collapse into an ordinary `Ok(None)`.
@@ -64,6 +73,8 @@ pub struct CaptureHealth {
     /// Access units the driver published, and frames it dropped at the encode pool.
     pub published_total: u64,
     pub dropped_total: u64,
+    /// Frames the drain worker handed the pool — DWM's compose count, the source clock.
+    pub source_seq: u64,
     /// The recovery stage running now, if an episode is open.
     pub current_stage: Option<&'static str>,
     /// The last closed episode.
@@ -633,7 +644,8 @@ pub fn open_portal_monitor(
 /// node. The capturer takes `keepalive`; dropping it releases the output. Pass
 /// `want_hdr` only when the output was brought up HDR — a PQ session cannot
 /// fall back to SDR. `cursor_id0_hides`: KWin rewrites `SPA_META_Cursor` on
-/// every buffer and treats `id == 0` as "pointer hidden".
+/// every buffer and treats `id == 0` as "pointer hidden". `pool_min`:
+/// [`POOL_MIN`], or [`KWIN_POOL_MIN`] for a KWin output.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub fn open_virtual_output(
@@ -647,6 +659,7 @@ pub fn open_virtual_output(
     policy: ZeroCopyPolicy,
     expect_exact_dims: bool,
     cursor_id0_hides: bool,
+    pool_min: i32,
 ) -> Result<Box<dyn Capturer>> {
     linux::PortalCapturer::from_virtual_output(
         remote_fd,
@@ -659,6 +672,7 @@ pub fn open_virtual_output(
         policy,
         expect_exact_dims,
         cursor_id0_hides,
+        pool_min,
     )
     .map(|c| Box::new(c) as Box<dyn Capturer>)
 }

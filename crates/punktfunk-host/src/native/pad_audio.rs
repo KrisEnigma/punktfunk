@@ -232,10 +232,15 @@ pub(super) fn host_cap(client_caps: u8) -> bool {
 /// Stream `kinds` (bit 0 = haptics, bit 1 = speaker) toward `conn`. `stop` is this handle's own
 /// flag. `None` if the slot has no endpoint (failed/still-running provision, or pad ≥
 /// `PUNKTFUNK_PAD_AUDIO_SLOTS`) or spawn fails; the pad still works, without audio.
+///
+/// `pad` addresses the client's wire pad; `slot` is the host-wide OS slot whose endpoint —
+/// stamped with the virtual pad's own container — is the thing being captured. They differ
+/// whenever a session's pads arrive out of wire order, and every host serving two sessions.
 #[cfg(target_os = "windows")]
 pub(super) fn spawn(
     conn: super::link::SessionLink,
     pad: u8,
+    slot: u8,
     kinds: u8,
     _edge: bool,
     stop: Arc<AtomicBool>,
@@ -243,9 +248,10 @@ pub(super) fn spawn(
     if kinds & (KIND_BIT_HAPTICS | KIND_BIT_SPEAKER) == 0 {
         return None;
     }
-    let Some(ep) = crate::audio::pad_endpoint::endpoint_for(pad) else {
+    let Some(ep) = crate::audio::pad_endpoint::endpoint_for(slot) else {
         tracing::debug!(
             pad,
+            slot,
             "pad-audio arrival for a slot without a provisioned endpoint — not streaming"
         );
         return None;
@@ -339,10 +345,15 @@ impl crate::audio::AudioCapturer for LinuxPadCapture {
 /// Capture follows the pad transport flag, not whether a stream is published yet — otherwise
 /// the race between pad arrival and this thread would mint a duplicate node graph over a
 /// real usbip card.
+///
+/// `pad` addresses the client's wire pad; `slot` is the host-wide OS slot the usbip card and
+/// the minted node graph are both named by (the sink carries the slot's pad MAC). They differ
+/// whenever a session's pads arrive out of wire order, and every host serving two sessions.
 #[cfg(target_os = "linux")]
 pub(super) fn spawn(
     conn: super::link::SessionLink,
     pad: u8,
+    slot: u8,
     kinds: u8,
     edge: bool,
     stop: Arc<AtomicBool>,
@@ -350,10 +361,11 @@ pub(super) fn spawn(
     if kinds & (KIND_BIT_HAPTICS | KIND_BIT_SPEAKER) == 0 {
         return None;
     }
-    if pad >= crate::audio::pad_sink::pad_audio_slots() {
+    if slot >= crate::audio::pad_sink::pad_audio_slots() {
         tracing::debug!(
             pad,
-            "pad-audio arrival past PUNKTFUNK_PAD_AUDIO_SLOTS — not streaming"
+            slot,
+            "pad-audio slot past PUNKTFUNK_PAD_AUDIO_SLOTS — not streaming"
         );
         return None;
     }
@@ -368,9 +380,9 @@ pub(super) fn spawn(
                 kinds,
                 move || {
                     if usb {
-                        crate::audio::pad_usb::PadUsbCapturer::open(pad).map(LinuxPadCapture::Usb)
+                        crate::audio::pad_usb::PadUsbCapturer::open(slot).map(LinuxPadCapture::Usb)
                     } else {
-                        crate::audio::pad_sink::PadSinkCapturer::open(pad, edge)
+                        crate::audio::pad_sink::PadSinkCapturer::open(slot, edge)
                             .map(LinuxPadCapture::Sink)
                     }
                 },
@@ -393,6 +405,7 @@ pub(super) fn spawn(
 pub(super) fn spawn(
     _conn: super::link::SessionLink,
     _pad: u8,
+    _slot: u8,
     _kinds: u8,
     _edge: bool,
     _stop: Arc<AtomicBool>,

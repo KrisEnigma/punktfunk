@@ -27,6 +27,8 @@ import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.discovery.HostDiscovery
 import io.unom.punktfunk.kit.library.LibraryCache
+import io.unom.punktfunk.kit.link.StartScreen
+import io.unom.punktfunk.kit.link.host
 import io.unom.punktfunk.kit.library.LibraryClient
 import io.unom.punktfunk.kit.library.LibraryResult
 import io.unom.punktfunk.kit.library.RunningGame
@@ -187,7 +189,12 @@ object SkiaConsole {
      * the native handle (`0` = the console could not be built; the caller keeps the Compose
      * console).
      */
-    fun ensure(context: Context, initial: Settings): Long {
+    /**
+     * @param pendingLink true when a `punktfunk://` URL is waiting to be routed. Explicit intent
+     *   beats the start-screen policy, and the link is handled after composition — so the console
+     *   must not open a shelf first and make the link the second thing that happens.
+     */
+    fun ensure(context: Context, initial: Settings, pendingLink: Boolean = false): Long {
         if (handle != 0L) return handle
         val app = context.applicationContext
         appContext = app
@@ -207,7 +214,7 @@ object SkiaConsole {
             .put("settings", ConsoleJson.settings(initial, base))
             .put("profiles", JSONArray(ConsoleJson.profiles(profiles)))
             .put("known_hosts", JSONObject(ConsoleJson.knownHosts(knownHostStore.all())))
-            .put("entry", JSONObject())
+            .put("entry", startEntry(initial, pendingLink, profiles))
         handle = runCatching { NativeBridge.nativeConsoleCreate(opts.toString()) }.getOrDefault(0L)
         if (handle == 0L) {
             Log.e(TAG, "console: native create failed")
@@ -218,6 +225,25 @@ object SkiaConsole {
         startEventThread()
         startServices(app)
         return handle
+    }
+
+    /**
+     * The console's entry screen: `{}` for the host list, `{"library": row}` for the default
+     * host's shelf, `{"stream": row}` to also dial its desktop. Once per process — this runs
+     * inside [ensure], which returns early on every later call.
+     */
+    private fun startEntry(
+        s: Settings,
+        pendingLink: Boolean,
+        profiles: List<StreamProfile>,
+    ): JSONObject {
+        if (pendingLink) return JSONObject()
+        val hosts = knownHostStore.all()
+        val start = StartScreen.resolve(s.startIn, s.defaultHost, hosts)
+        val host = start.host ?: return JSONObject()
+        Log.i(TAG, "console start: start_in=${s.startIn} default=${host.name}")
+        val row = ConsoleJson.hostRow(host, null, profiles)
+        return JSONObject().put(if (start is StartScreen.Stream) "stream" else "library", row)
     }
 
     /**

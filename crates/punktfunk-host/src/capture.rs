@@ -104,10 +104,11 @@ pub fn capture_virtual_output(
     vout: crate::vdisplay::VirtualOutput,
     want: OutputFormat,
     _capture: crate::session_plan::CaptureBackend,
-    // The output's compositor rewrites `SPA_META_Cursor` on every buffer (KWin),
-    // so id-0 is an authoritative hide. Derived from the backend that created
-    // `vout` — a pooled display only ever matches its own backend.
-    cursor_id0_hides: bool,
+    // The output's compositor is KWin, derived from the backend that created
+    // `vout` (a pooled display only ever matches its own backend). KWin rewrites
+    // `SPA_META_Cursor` on every buffer, so id-0 is an authoritative hide, and
+    // serves a 3-buffer pool unless asked for `KWIN_POOL_MIN`.
+    kwin: bool,
 ) -> Result<Box<dyn Capturer>> {
     // Portal negotiates its own pixel format, so `want.gpu` gates GPU zero-copy
     // (this path is always the portal; `CaptureBackend` is Windows-only dispatch)
@@ -132,7 +133,12 @@ pub fn capture_virtual_output(
         want.hdr,
         zero_copy_policy(want.pyrowave, want.nv12_native),
         vout.expect_exact_dims,
-        cursor_id0_hides,
+        kwin,
+        if kwin {
+            pf_capture::KWIN_POOL_MIN
+        } else {
+            pf_capture::POOL_MIN
+        },
     )
 }
 
@@ -167,8 +173,9 @@ pub fn capture_virtual_output(
     vout: crate::vdisplay::VirtualOutput,
     want: OutputFormat,
     _capture: crate::session_plan::CaptureBackend,
-    // Linux-only (`SPA_META_Cursor`). IDD-push has no such meta; hide is CURSOR_SUPPRESSED.
-    _cursor_id0_hides: bool,
+    // Linux-only (`SPA_META_Cursor`, pool depth). IDD-push has no such meta; hide is
+    // CURSOR_SUPPRESSED.
+    _kwin: bool,
 ) -> Result<Box<dyn Capturer>> {
     let target = vout.win_capture.clone().ok_or_else(|| {
         anyhow::anyhow!(
@@ -364,7 +371,7 @@ pub fn capture_virtual_output(
     _vout: crate::vdisplay::VirtualOutput,
     _want: OutputFormat,
     _capture: crate::session_plan::CaptureBackend,
-    _cursor_id0_hides: bool,
+    _kwin: bool,
 ) -> Result<Box<dyn Capturer>> {
     anyhow::bail!("virtual-output capture requires Linux or Windows")
 }

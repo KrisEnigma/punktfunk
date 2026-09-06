@@ -7,9 +7,10 @@
 
 use crate::spawn::{self, SpawnOpts};
 use crate::trust::{self, Settings};
-use crate::ui_hosts::{ConnectRequest, HostsMsg, HostsOutput, HostsPage};
+use crate::ui_hosts::{self, ConnectRequest, HostsMsg, HostsOutput, HostsPage};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use pf_client_core::start;
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::config::{CompositorPref, GamepadPref};
 use relm4::prelude::*;
@@ -371,7 +372,33 @@ impl SimpleComponent for AppModel {
         // The deep-link seam is live from here: anything GApplication delivered during a cold
         // start has been parked, and everything from now on arrives as a message.
         LINK_TX.with_borrow_mut(|tx| *tx = Some(sender.input_sender().clone()));
-        for url in PENDING_LINKS.with_borrow_mut(std::mem::take) {
+        let parked = PENDING_LINKS.with_borrow_mut(std::mem::take);
+        // Where a bare launch opens (design/default-host.md). Only a bare one: `--connect`,
+        // `--browse` and every headless verb have already exec'd or returned before the
+        // application object exists, and a parked link is explicit intent that wins outright.
+        if parked.is_empty() {
+            let settings = model.settings.borrow();
+            let known = trust::KnownHosts::load();
+            let (default, source) = start::default_host_with_source(&settings, &known);
+            tracing::info!(
+                start_in = start::StartIn::parse(&settings.start_in).as_str(),
+                default = default.map_or("none", |i| known.hosts[i].name.as_str()),
+                source = source.as_str(),
+                "client start"
+            );
+            let screen = start::start_screen(&settings, &known);
+            drop(settings);
+            if let Some(i) = screen.host_index() {
+                let req = ui_hosts::saved_request(&known.hosts[i]);
+                sender.input(AppMsg::OpenLibrary(req.clone(), known.hosts[i].mgmt_port));
+                // Stream is the library PLUS a connect, never a screen of its own: the session
+                // window is the overlay, so ending it leaves the shelf on screen underneath.
+                if matches!(screen, start::Start::Stream(_)) {
+                    sender.input(AppMsg::WakeConnect(req));
+                }
+            }
+        }
+        for url in parked {
             sender.input(AppMsg::DeepLink(url));
         }
 

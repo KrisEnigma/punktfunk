@@ -87,7 +87,8 @@ smooth, and the displays at both ends keep their colour settings untouched. This
 *encoder's* precision, not a 10-bit capture: the desktop stays 8-bit, the win is that compression
 stops adding banding of its own. Needs a Windows host on an NVIDIA GPU and HEVC; anywhere else the
 session stays 8-bit, and the host says so in the handshake. When HDR engages it takes over (HDR is
-already 10-bit). Linux, Windows and the desktop console.
+already 10-bit), and the row dims to say so. Every client except the TV apps: unlike HDR it asks
+nothing of your display, so an ordinary panel gets the smoother gradients too.
 
 **Prioritize** — *default: Lowest latency.* **Lowest latency** shows every frame the moment the
 display can take it — a network hiccup becomes an occasional repeated or skipped frame.
@@ -267,16 +268,20 @@ screen), a Steam Deck (real sticks) or the desktop clients (a keyboard).
 
 ## Behavior
 
+**Start in** — *default: Library.* Where the app opens. **Library** lands on your default host's
+games, **Stream** goes on to its desktop, and **Host list** is the old first screen. Back leaves
+either landing on the host list, so a wrong guess costs one press. With one paired host saved, that
+host is the default and there is nothing to set; with several, use **Make default host** on a
+host's card or ▲ menu, and until you do, every value opens the host list. Naming one explicitly
+also matters later: pairing a second host drops a derived default, and keeps an explicit one.
+Every client, plus `punktfunk default-host` for a box you only reach over ssh.
+
 **Auto-wake on connect** — *default: on.* Connecting to a saved host that looks offline sends
 Wake-on-LAN and waits — only for a host whose MAC this client has learned. Turn it off for hosts
 reached over a VPN, where the wake only adds delay. Linux, Windows, Apple, Android and the console
 home; on a Steam Deck it also governs the [Decky plugin's](/docs/steam-deck) launches. The console
 home additionally offers wake as an explicit action on an offline host, whatever the toggle says.
 See [Wake-on-LAN](/docs/wake-on-lan).
-
-**Show game library** — *Apple and Android only, default: on.* Browse a paired host's games and
-launch one directly. Linux and Windows have **Browse library…** on every paired host's card, and
-the console home a **Library** button — nothing to switch. See [Game library](/docs/game-library).
 
 **Start streams in fullscreen** — *default: on.* On Linux and Windows, F11 or Alt+Enter leaves
 fullscreen live. On a Mac the setting is **Fullscreen while streaming**, and the window returns
@@ -343,7 +348,7 @@ profile**:
 - **Speaker** and **Microphone** device pickers — this device's audio endpoints.
 - **Forwarded controller** — which physical pad is in your hands. (The *type* the host creates is a
   preference and can live in a profile, as can **Forward controllers**.)
-- **Auto-wake on connect**, and **Show game library** where it exists (Apple, Android).
+- **Auto-wake on connect**.
 - Everything under **Interface**.
 
 One switch you might expect here isn't in Settings at all: **Share clipboard** lives in a saved

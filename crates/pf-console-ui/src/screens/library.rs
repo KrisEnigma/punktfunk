@@ -508,7 +508,7 @@ impl LibraryScreen {
         Some(GridShape::new(
             self.len(),
             self.grid_cols_last?,
-            self.launcher_count(),
+            self.lead_count(),
         ))
     }
 
@@ -782,6 +782,12 @@ impl LibraryScreen {
                 }
                 _ => None,
             },
+            // A host with no plugins still has a desktop, so Confirm streams it rather
+            // than doing nothing. Loading has nothing to offer yet.
+            LibraryPhase::Empty if ev == MenuEvent::Confirm => {
+                fx.connect = Some(self.desktop_intent());
+                Some(MenuPulse::Confirm)
+            }
             LibraryPhase::Loading | LibraryPhase::Empty => {
                 if ev == MenuEvent::Back {
                     fx.pop();
@@ -869,10 +875,50 @@ impl LibraryScreen {
         }
     }
 
+    /// The desktop tile's caption: the host's desk, or the game it already has up. Same
+    /// `/status` field the Options screen's Connect row reads, so the two cannot disagree.
+    pub(crate) fn desktop_caption(&self) -> String {
+        if self.host.running.is_empty() {
+            "Desktop".into()
+        } else {
+            format!("Resume {}", self.host.running)
+        }
+    }
+
+    /// Stream the host itself, launching nothing — asking a host to launch what it is
+    /// already showing is how a second copy starts. The takeover names the running game
+    /// when there is one, the host otherwise: the verb lives on the tile.
+    fn desktop_intent(&self) -> ConnectIntent {
+        let subject = if self.host.running.is_empty() {
+            &self.host.name
+        } else {
+            &self.host.running
+        };
+        ConnectIntent {
+            addr: self.host.addr.clone(),
+            port: self.host.port,
+            fp_hex: self.host.fp_hex.clone(),
+            launch: None,
+            title: match &self.host.pin {
+                Some(p) => format!("{subject} \u{b7} {}", p.name),
+                None => subject.clone(),
+            },
+            request_access: false,
+            profile: self.host.pin.as_ref().map(|p| p.id.clone()),
+        }
+    }
+
     fn ready_action(&mut self, ev: MenuEvent, fx: &mut Outbox) -> Option<MenuPulse> {
         match ev {
             MenuEvent::Confirm => {
                 let g = self.focused()?;
+                // The desktop tile streams the host and launches nothing — asking a host
+                // to launch what it is already showing is how a second copy starts.
+                let desktop = g.id == crate::library::DESKTOP_ID;
+                if desktop {
+                    fx.connect = Some(self.desktop_intent());
+                    return Some(MenuPulse::Confirm);
+                }
                 fx.connect = Some(ConnectIntent {
                     addr: self.host.addr.clone(),
                     port: self.host.port,
@@ -891,7 +937,12 @@ impl LibraryScreen {
             // X, not Up: the grid spends Up on rows.
             MenuEvent::Tertiary => {
                 let g = self.focused()?;
-                fx.options(super::options::OptionsScreen::for_game(&self.host, g));
+                // The desktop tile IS the host, so its menu is the host's.
+                if g.id == crate::library::DESKTOP_ID {
+                    fx.options(super::options::OptionsScreen::for_host(&self.host));
+                } else {
+                    fx.options(super::options::OptionsScreen::for_game(&self.host, g));
+                }
                 Some(MenuPulse::Confirm)
             }
             MenuEvent::Back => {
@@ -1008,11 +1059,13 @@ impl LibraryScreen {
     }
 
     /// Launcher prefix length. [`LibraryShared::set_games`] groups them at the front.
-    fn launcher_count(&self) -> usize {
+    /// Length of the leading band ([`LibraryGame::leads`]): the desktop tile and the
+    /// launchers behind it. This is [`GridShape`]'s split, not a count of launchers.
+    fn lead_count(&self) -> usize {
         self.view
             .iter()
             .map_while(|&i| self.games.get(i))
-            .take_while(|g| g.launcher)
+            .take_while(|g| g.leads())
             .count()
     }
 
@@ -1032,15 +1085,23 @@ impl LibraryScreen {
         }
         match &self.phase {
             LibraryPhase::Ready => {
+                let desktop = self
+                    .focused()
+                    .is_some_and(|g| g.id == crate::library::DESKTOP_ID);
                 let mut hints = vec![Hint::new(
                     HintKey::Confirm,
                     match (
+                        desktop,
                         self.focused().is_some_and(|g| g.running),
                         self.focused_is_launcher(),
                     ) {
-                        (true, _) => "Resume",
-                        (false, true) => "Open",
-                        (false, false) => "Play",
+                        // The desktop tile resumes when the host has a game up, and it is
+                        // the ONE tile that never launches anything.
+                        (true, _, _) if !self.host.running.is_empty() => "Resume",
+                        (true, _, _) => "Stream",
+                        (_, true, _) => "Resume",
+                        (_, false, true) => "Open",
+                        (_, false, false) => "Play",
                     },
                 )];
                 if !self.drilled && crate::collate::worth_browsing(&self.games) {
@@ -1058,6 +1119,11 @@ impl LibraryScreen {
                 can_retry: true, ..
             } => vec![
                 Hint::new(HintKey::Confirm, "Retry"),
+                Hint::new(HintKey::Back, "Back"),
+            ],
+            // No catalog is not no host: Confirm still streams the desk.
+            LibraryPhase::Empty => vec![
+                Hint::new(HintKey::Confirm, "Stream"),
                 Hint::new(HintKey::Back, "Back"),
             ],
             _ => vec![Hint::new(HintKey::Back, "Back")],
@@ -1167,6 +1233,16 @@ impl LibraryScreen {
                     fg(0.55),
                     cx,
                     cy_all + 12.0 * k,
+                    w * 0.8,
+                );
+                fonts.centered(
+                    canvas,
+                    "This host still streams its desktop.",
+                    W::Regular,
+                    14.0 * k,
+                    fg(0.55),
+                    cx,
+                    cy_all + 34.0 * k,
                     w * 0.8,
                 );
             }
@@ -1287,7 +1363,7 @@ impl LibraryScreen {
             self.grid_cols_last = Some(cols);
             self.seat_grid_col();
         }
-        let shape = GridShape::new(self.len(), cols, self.launcher_count());
+        let shape = GridShape::new(self.len(), cols, self.lead_count());
         // Two-column clamp can overflow a narrow rect; shrink cells only, never headings.
         let fit = ((f64::from(rect.width()) - 2.0 * GRID_MARGIN * k)
             / ((cols as f64 * (GRID_W + GRID_GAP) - GRID_GAP) * k))
@@ -1467,12 +1543,16 @@ impl LibraryScreen {
         let bump = self.bump.pos * k;
 
         // Coverflow is 1-D: name the group at the cursor. Skip if the shelf is one group.
-        let launchers = self.launcher_count();
-        if launchers > 0 && launchers < self.len() {
-            let heading = if (self.cursor as usize) < launchers {
-                "LAUNCHERS"
-            } else {
+        let lead = self.lead_count();
+        if lead > 0 && lead < self.len() {
+            // The desktop tile sits under the launcher heading: both open something.
+            // A shelf whose whole lead band IS the tile says so instead.
+            let heading = if (self.cursor as usize) >= lead {
                 "GAMES"
+            } else if lead == 1 {
+                "HOST"
+            } else {
+                "LAUNCHERS"
             };
             fonts.centered(
                 canvas,
@@ -1629,11 +1709,18 @@ impl LibraryScreen {
             );
         }
         let Some(g) = self.focused() else { return };
+        // The desktop tile's own caption names what the press does — "Resume <title>"
+        // once the host has something up. Every other tile is its title.
+        let title = if g.id == crate::library::DESKTOP_ID {
+            self.desktop_caption()
+        } else {
+            g.title.clone()
+        };
         let w = f64::from(rect.width());
         let cx = f64::from(rect.left) + w / 2.0;
         fonts.centered(
             canvas,
-            &g.title,
+            &title,
             W::Bold,
             27.0 * k,
             fg(1.0),
@@ -1651,6 +1738,7 @@ mod tests {
     fn host() -> HostRow {
         HostRow {
             key: "aa".into(),
+            id: None,
             name: "Desk".into(),
             addr: "10.0.0.5".into(),
             port: 9777,
@@ -1811,11 +1899,16 @@ mod tests {
         s.adopt_settings(&ctx(&library, &mut settings));
         assert_eq!(s.sort, crate::collate::SortKey::Title);
         assert_eq!(
-            s.game(0).map(|g| g.title.as_str()),
+            s.game(0).map(|g| g.id.as_str()),
+            Some(crate::library::DESKTOP_ID),
+            "the desktop tile leads whatever the sort"
+        );
+        assert_eq!(
+            s.game(1).map(|g| g.title.as_str()),
             Some("Alpha"),
             "the display order did not follow the sort"
         );
-        assert_eq!(s.focused().map(|g| g.title.as_str()), Some("Alpha"));
+        assert_eq!(s.focused().map(|g| g.title.as_str()), Some("Desktop"));
 
         press(
             &mut s,
@@ -1908,8 +2001,23 @@ mod tests {
             MenuEvent::Move(MenuDir::Down),
         );
         assert_eq!(s.view_mode, LibraryView::Grid);
-        assert_eq!(s.cursor, 3, "down moved a row");
+        // The desktop tile is a one-tile lead band, so it owns row 0 and the games
+        // section restarts at column 0 below it — the same split launchers get.
+        assert_eq!(s.cursor, 1, "down moved a row");
+        press(
+            &mut s,
+            &library,
+            &mut settings,
+            MenuEvent::Move(MenuDir::Down),
+        );
+        assert_eq!(s.cursor, 4, "and a second row inside the games section");
 
+        press(
+            &mut s,
+            &library,
+            &mut settings,
+            MenuEvent::Move(MenuDir::Up),
+        );
         let (pulse, _) = press(
             &mut s,
             &library,
@@ -2352,5 +2460,71 @@ mod tests {
         library.set_games(games(&[("Rez", Some("PS2"))]));
         s.sync(&library);
         assert!(s.art.is_empty(), "a different library kept the old covers");
+    }
+
+    /// The tile is the host, not a title: Confirm streams it with no launch id, and X
+    /// opens the HOST's options — a title menu here would offer a per-title profile
+    /// binding for a title that does not exist.
+    #[test]
+    fn confirm_on_the_desktop_tile_launches_nothing() {
+        let (mut s, library) = live_shelf();
+        let mut settings = pf_client_core::trust::Settings::default();
+        assert_eq!(
+            s.focused().map(|g| g.id.as_str()),
+            Some(crate::library::DESKTOP_ID),
+            "the tile is where the cursor starts"
+        );
+
+        let (_, fx) = press(&mut s, &library, &mut settings, MenuEvent::Confirm);
+        let intent = fx.connect.expect("a connect intent");
+        assert_eq!(intent.launch, None, "the desktop tile launched a title");
+        assert_eq!(intent.title, "Desk", "the takeover names the host");
+
+        let (_, fx) = press(&mut s, &library, &mut settings, MenuEvent::Tertiary);
+        assert!(
+            matches!(fx.nav, Some(crate::screens::Nav::Push(_))),
+            "X on the tile opens the host's options"
+        );
+    }
+
+    /// A host with no plugins is still one press from its desk. The catalog's verdict
+    /// stands — the empty copy is what explains the missing shelf.
+    #[test]
+    fn an_empty_library_still_streams_the_desktop() {
+        crate::screens::settings::tests::fake_home();
+        let library = LibraryShared::default();
+        library.set_games(Vec::new());
+        let mut s = LibraryScreen::new(&host(), 0);
+        s.sync(&library);
+        s.entrance_armed = true;
+        assert!(matches!(s.phase, LibraryPhase::Empty));
+
+        let mut settings = pf_client_core::trust::Settings::default();
+        let (pulse, fx) = press(&mut s, &library, &mut settings, MenuEvent::Confirm);
+        assert!(matches!(pulse, Some(MenuPulse::Confirm)));
+        let intent = fx.connect.expect("a connect intent");
+        assert_eq!(intent.launch, None);
+        assert_eq!(intent.addr, "10.0.0.5");
+        assert!(
+            hint_keys(&s, &library, &mut settings).contains(&HintKey::Confirm),
+            "the legend must offer the press that works"
+        );
+    }
+
+    /// The caption is the verb: it names the game the host already has up, so the tile
+    /// does not read "Desktop" while pressing it resumes Elden Ring.
+    #[test]
+    fn the_desktop_tile_says_resume_when_the_host_has_a_game_up() {
+        let busy = HostRow {
+            running: "Elden Ring".into(),
+            ..host()
+        };
+        let s = LibraryScreen::new(&busy, 0);
+        assert_eq!(s.desktop_caption(), "Resume Elden Ring");
+        assert_eq!(s.desktop_intent().title, "Elden Ring");
+
+        let idle = LibraryScreen::new(&host(), 0);
+        assert_eq!(idle.desktop_caption(), "Desktop");
+        assert_eq!(idle.desktop_intent().title, "Desk");
     }
 }

@@ -43,13 +43,10 @@ pub mod nvenc_status;
 // Shared `nvEncodeAPI` glue (`NvStatusExt`/`nv_ok`, `codec_guid`). Sibling of `nvenc_status`.
 #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "nvenc"))]
 pub mod nvenc_core;
-// Slot-family RFI policy (taint sweep + pre-loss anchor) for AMF, QSV, and
-// Vulkan Video. Mechanisms stay in each backend. Cfg is the union of callers
-// (`amf` is featureless on Windows; `vulkan_video` needs `vulkan-encode`).
-#[cfg(any(
-    target_os = "windows",
-    all(target_os = "linux", feature = "vulkan-encode")
-))]
+// Slot-family RFI policy (taint sweep + pre-loss anchor) for AMF, QSV, Vulkan
+// Video and the native VAAPI encoder. Mechanisms stay in each backend. Cfg is
+// the union of callers, and the VAAPI one is featureless on Linux.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod rfi;
 // Shared loss-recovery env knobs. Defaults and API clamps stay per-backend.
 #[cfg(any(target_os = "linux", target_os = "windows"))]

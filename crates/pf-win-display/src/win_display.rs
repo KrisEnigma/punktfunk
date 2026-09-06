@@ -676,9 +676,11 @@ pub fn set_active_mode_ccd(key: CcdTargetKey, mode: Mode) -> bool {
 
 /// Force `gdi_name` to `mode`. ADD only advertises; Windows otherwise lights
 /// an IDD at 1280×720. `CDS_TEST` first so an unadvertised mode leaves the
-/// default instead of failing the session. `false` if nothing was written —
-/// callers using this as [`set_active_mode_ccd`]'s fallback owe that a log,
-/// or a display left on the wrong mode looks like it was never asked.
+/// default instead of failing the session. A refresh the OS does not list
+/// clamps to the nearest lower one, and warns: the client asked for a rate
+/// this display will not run. `false` if nothing was written — callers using
+/// this as [`set_active_mode_ccd`]'s fallback owe that a log, or a display
+/// left on the wrong mode looks like it was never asked.
 pub fn set_active_mode(gdi_name: &str, mode: Mode) -> bool {
     let wname: Vec<u16> = gdi_name.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -735,7 +737,7 @@ pub fn set_active_mode(gdi_name: &str, mode: Mode) -> bool {
             mode.refresh_hz
         );
     } else if chosen_hz != mode.refresh_hz {
-        tracing::info!(
+        tracing::warn!(
             "{gdi_name}: {}x{}@{} not advertised; using {}x{}@{} (advertised refreshes here: {:?})",
             mode.width,
             mode.height,

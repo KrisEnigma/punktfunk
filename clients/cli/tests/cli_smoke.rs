@@ -51,6 +51,63 @@ fn per_verb_help_answers_both_spellings() {
     }
 }
 
+/// `default-host` is the only door to the start-screen pointer on a headless box, and the
+/// verbs that read it must refuse rather than guess. Runs against a scratch config dir —
+/// the store this writes is the developer's otherwise.
+#[test]
+fn default_host_is_set_read_and_cleared() {
+    let home = std::env::temp_dir().join(format!("pf-cli-default-host-{}", std::process::id()));
+    let store = home.join(if cfg!(windows) {
+        "punktfunk"
+    } else {
+        ".config/punktfunk"
+    });
+    std::fs::create_dir_all(&store).expect("scratch config dir");
+    std::fs::write(
+        store.join("client-known-hosts.json"),
+        r#"{"hosts":[{"name":"Desk","addr":"10.0.0.5","port":9777,
+           "fp_hex":"aa","paired":true,"id":"rec-1"}]}"#,
+    )
+    .expect("seed the store");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_punktfunk"))
+            .args(args)
+            .env(if cfg!(windows) { "APPDATA" } else { "HOME" }, &home)
+            .output()
+            .expect("run punktfunk")
+    };
+
+    // One paired host derives, with nothing written.
+    let out = run(&["default-host"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Desk") && stdout.contains("derived"),
+        "{stdout}"
+    );
+
+    let out = run(&["default-host", "Desk"]);
+    assert!(
+        out.status.success(),
+        "naming a paired host must be accepted"
+    );
+    assert!(String::from_utf8_lossy(&run(&["default-host"]).stdout).contains("explicit"));
+
+    let out = run(&["default-host", "--clear"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&run(&["default-host"]).stdout).contains("derived"));
+
+    // No records at all: nothing to derive, and the verbs that read it say so.
+    std::fs::write(store.join("client-known-hosts.json"), r#"{"hosts":[]}"#).expect("empty store");
+    assert!(String::from_utf8_lossy(&run(&["default-host"]).stdout).contains("none"));
+    let out = run(&["library"]);
+    assert_eq!(out.status.code(), Some(5), "no default host is not-found");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no default host"));
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
 #[test]
 fn version_prints_the_crate_version() {
     let out = punktfunk(&["--version"]);

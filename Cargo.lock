@@ -3169,8 +3169,9 @@ dependencies = [
  "opus",
  "pf-bitstream",
  "pf-dxvadec",
+ "pf-libva",
  "pf-update-check",
- "pf-vaadec",
+ "pf-vaapi",
  "pf-vkdecode",
  "pipewire",
  "punktfunk-core",
@@ -3260,6 +3261,8 @@ dependencies = [
  "pf-frame",
  "pf-gpu",
  "pf-host-config",
+ "pf-libva",
+ "pf-vaapi",
  "pf-zerocopy",
  "punktfunk-core",
  "pyrowave-sys",
@@ -3344,6 +3347,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pf-libva"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "cros-codecs",
+ "libloading 0.9.0",
+ "pf-bitstream",
+ "pf-vaapi",
+ "tracing",
+]
+
+[[package]]
 name = "pf-paths"
 version = "0.34.0"
 dependencies = [
@@ -3386,7 +3401,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pf-vaadec"
+name = "pf-vaapi"
 version = "0.34.0"
 dependencies = [
  "cros-codecs",

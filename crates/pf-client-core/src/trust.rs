@@ -985,6 +985,11 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub gamepad_forwarding: bool,
     /// `vid:pid:name` (`PadInfo::key`) forwarded as pad 0; empty = most recently connected.
+    ///
+    /// Per device, and NOT the same value as Apple's `gamepadID`, which is
+    /// `vendorName|productCategory`: GameController exposes no vid/pid, and iOS and tvOS have no
+    /// IOKit to get one from. The two grammars cannot be exchanged — do not "unify" them by
+    /// copying a value across.
     pub forward_pad: String,
     /// Guide / QAM while streaming: `"auto"` (default), `"forward"`, or `"local"`.
     /// Auto forwards everywhere except Gaming Mode, where the local Steam UI also
@@ -1057,6 +1062,10 @@ pub struct Settings {
     pub hdr_enabled: bool,
     /// Advertise 10-bit without HDR (`VIDEO_CAP_10BIT`): SDR desktop at Main10.
     /// Subsumed by `hdr_enabled`. `default` so older stores load off.
+    ///
+    /// Unlike `hdr_enabled` this asks nothing of the panel, so no client gates it on a display
+    /// probe. webOS is the exception that cannot obey it: NDL decodes what it is given and
+    /// exposes no bit-depth ask.
     #[serde(default)]
     pub ten_bit_sdr: bool,
     /// `"latency"` (default) or `"smooth"`. Unknown reads as latency so a future
@@ -1075,6 +1084,10 @@ pub struct Settings {
     pub vsync: bool,
     /// Let a VRR display follow the stream cadence when fullscreen. Inert on
     /// fixed-refresh (measured from on-glass timestamps). Default on.
+    ///
+    /// Desktop only, and deliberately absent on Android: that client pins a fixed display mode
+    /// and declares its surface FIXED_SOURCE, because OEM refresh governors ignore the advisory
+    /// hint. A setting there would have to fight that, not merely gate it.
     #[serde(default = "default_true")]
     pub allow_vrr: bool,
     /// Legacy on/off for the stats overlay — kept in sync with `stats_verbosity`
@@ -1114,6 +1127,15 @@ pub struct Settings {
     /// Default off so an existing install's deep-link landing screen does not move.
     #[serde(default)]
     pub library_collections: bool,
+    /// Where a bare launch opens: `"hosts"`, `"library"` (default), or `"stream"`.
+    /// `""`/unknown = library, the `library_view` convention. Resolve through
+    /// [`crate::start::start_screen`] — no default host degrades every value to the list.
+    #[serde(default)]
+    pub start_in: String,
+    /// The host a bare launch opens on, a [`KnownHost::id`]. `None` = derive it: the sole
+    /// paired record, else none. A dangling id falls through to that rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_host: Option<String>,
     /// Wake-on-LAN before connecting and wait for boot. Default on. Off for VPN
     /// hosts, where broadcast never reaches and the wait only adds delay.
     #[serde(default = "default_true")]
@@ -1297,6 +1319,8 @@ impl Default for Settings {
             library_sort: String::new(),
             library_view: String::new(),
             library_collections: false,
+            start_in: String::new(),
+            default_host: None,
             auto_wake: true,
             invert_scroll: false,
             overlay_actions: String::new(),

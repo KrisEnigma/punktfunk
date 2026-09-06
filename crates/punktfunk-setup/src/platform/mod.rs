@@ -460,6 +460,12 @@ impl PkgBackend for Steamos {
             .iter()
             .map(|line| Step::run(format!("[ -d ~/punktfunk/.git ] || {line}")))
             .collect();
+        // The progress view captures the step's output, so without this line the build looks
+        // frozen for its whole run.
+        steps.push(Step::note(
+            Level::Warn,
+            "the build runs on this device — it asks for your sudo password first, then takes about 30 minutes on a first run (minutes on a re-run) and prints nothing until it finishes",
+        ));
         steps.push(Step::run(if choices.gamestream {
             format!("{build} --gamestream")
         } else {

@@ -342,12 +342,12 @@ fn committed_mode_or(key: CcdTargetKey, requested: Mode) -> Mode {
         return requested;
     }
     if refresh_hz != requested.refresh_hz {
-        tracing::info!(
+        tracing::warn!(
             target = %key,
             requested_hz = requested.refresh_hz,
             committed_hz = refresh_hz,
-            "the OS committed a different refresh than requested (the driver does not advertise \
-             it) — recording what the display actually runs"
+            "the OS committed a different refresh than requested — recording what the display \
+             actually runs; the client streams below the rate it asked for"
         );
     }
     Mode {
@@ -985,6 +985,12 @@ impl VirtualDisplayManager {
                             Ok(()) => {
                                 warned = false;
                                 gone_streak = 0;
+                                // The driver's lines ride the keepalive: this thread already
+                                // holds the only handle open for the whole device lifetime, so
+                                // the encoder's diagnostics reach the log even between sessions.
+                                // SAFETY: `h` is the same live handle the ping just used, held
+                                // across this call by the Arc.
+                                unsafe { vdm().driver.drain_log(dev_raw(&h)) };
                             }
                             Err(e) if is_device_gone(&e) => {
                                 gone_streak += 1;
@@ -1090,7 +1096,7 @@ impl VirtualDisplayManager {
                         }
                         slept += slice;
                     }
-                    let Ok(inner) = vdm().state.try_lock() else {
+                    let Ok(mut inner) = vdm().state.try_lock() else {
                         continue;
                     };
                     if inner.group.ccd_saved.is_none() || !inner.group.ccd_exclusive {
@@ -1185,7 +1191,7 @@ impl VirtualDisplayManager {
                         outcome,
                         Some(IsolateOutcome::Verified { deactivated, .. }) if deactivated > 0
                     );
-                    pf_win_display::topology_churn::finish(
+                    let finished = pf_win_display::topology_churn::finish(
                         txn,
                         match outcome {
                             Some(IsolateOutcome::Verified { .. }) if changed => {
@@ -1205,6 +1211,28 @@ impl VirtualDisplayManager {
                     // write is not a recovery incident for the stream to react to).
                     if changed {
                         TOPOLOGY_REASSERT_GEN.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // A display that re-lit itself while held off is a sink for the rest of
+                    // the session, operator panel or not: park its devnode so the next HPD
+                    // pulse cannot evict again. Leased like the acquire's, enabled at teardown.
+                    if changed && crate::policy::prefs().standby_sink_neutralise() {
+                        let parked = pf_win_display::monitor_devnode::disable_connected_inactive(
+                            &keep,
+                            &[],
+                            finished.generation,
+                        );
+                        if !parked.is_empty() {
+                            tracing::info!(
+                                parked = parked.len(),
+                                "exclusive re-assert: PnP-disabled the re-lit display for the \
+                                 session (re-enabled at teardown)"
+                            );
+                        }
+                        for id in parked {
+                            if !inner.group.pnp_disabled.contains(&id) {
+                                inner.group.pnp_disabled.push(id);
+                            }
+                        }
                     }
                 }
             });

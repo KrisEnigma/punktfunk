@@ -456,6 +456,7 @@ mod tests {
     fn host() -> HostRow {
         HostRow {
             key: "10.0.0.7:9777".into(),
+            id: None,
             name: "Tower".into(),
             addr: "10.0.0.7".into(),
             port: 9777,

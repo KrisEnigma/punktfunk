@@ -21,6 +21,7 @@ use pf_client_core::profiles::{ProfilesFile, StreamProfile};
 // profile round-trips. A second copy of the spellings in this file is exactly the drift the
 // shared table exists to prevent — which is why this row has no `const` beside AUDIO_CHANNELS.
 use pf_client_core::session::AUDIO_FORMATS;
+use pf_client_core::start;
 use pf_client_core::trust::StatsVerbosity;
 use punktfunk_core::config::GamepadPref;
 use std::sync::Arc;
@@ -587,6 +588,23 @@ fn setting_combo(
         })
 }
 
+/// Names the host the Start in row resolves to, and says when it resolves to nothing — which
+/// is what every value does until one host is paired. The pointer is written from a host's own
+/// tile menu, not from this page, so the help line is where the two meet.
+fn start_in_help() -> String {
+    let known = KnownHosts::load();
+    match start::default_host(&Settings::load(), &known) {
+        Some(i) => format!(
+            "Library opens {}\u{2019}s games; Stream also connects to its desktop. Back leaves \
+             either one on the host list.",
+            known.hosts[i].name
+        ),
+        None => "Opens on the host list: there is no default host yet. Pair one, or pick one \
+                 from a host\u{2019}s menu when several are paired."
+            .into(),
+    }
+}
+
 /// The labels of a `(value, label)` preset table, plus the index of `is_current`'s match.
 fn presets<V>(table: &[(V, &str)], is_current: impl Fn(&V) -> bool) -> (Vec<String>, usize) {
     let names = table.iter().map(|(_, l)| l.to_string()).collect();
@@ -872,6 +890,22 @@ pub(crate) fn settings_page(
     let auto_wake_toggle = setting_toggle(ctx, scope, (rev, set_rev), s.auto_wake, |s, on| {
         s.auto_wake = on
     });
+    // Where a bare launch opens. A device preference like auto-wake beside it: which host this
+    // machine opens on says nothing about how a stream should look, so it is never profileable.
+    let start_in_combo = {
+        let want = start::StartIn::parse(&s.start_in);
+        let names = start::StartIn::ALL
+            .iter()
+            .map(|v| v.label().to_string())
+            .collect();
+        let current = start::StartIn::ALL
+            .iter()
+            .position(|v| *v == want)
+            .unwrap_or(1);
+        setting_combo(ctx, scope, (rev, set_rev), names, current, |s, i| {
+            s.start_in = start::StartIn::ALL[i].as_str().to_string();
+        })
+    };
     let fullscreen_toggle = setting_toggle(
         ctx,
         scope,
@@ -1019,6 +1053,19 @@ pub(crate) fn settings_page(
         setting_toggle(ctx, scope, (rev, set_rev), s.gamepad_forwarding, |s, on| {
             s.gamepad_forwarding = on
         });
+    // The two DualSense pad-audio rows, GTK parity. The session binary this shell spawns has
+    // honoured both all along; only the rows were missing here. Global scope only, like GTK's:
+    // no override marker exists for either, so a profile-scope toggle would be discarded.
+    let pad_haptics_toggle = setting_toggle(ctx, scope, (rev, set_rev), s.pad_haptics, |s, on| {
+        s.pad_haptics = on
+    });
+    let pad_speaker_toggle = setting_toggle(
+        ctx,
+        scope,
+        (rev, set_rev),
+        pf_client_core::pad_audio::speaker_active(&s.pad_speaker),
+        |s, on| s.pad_speaker = if on { "pad".into() } else { "off".into() },
+    );
     let (pad_names, pad_i) = presets(GAMEPADS, |v| {
         GamepadPref::from_name(v) == GamepadPref::from_name(&s.gamepad)
     });
@@ -1547,6 +1594,22 @@ pub(crate) fn settings_page(
                          still goes through, slightly delayed. Automatic arms it only where \
                          the real button can't reach the host.",
                     )),
+                    (!profile_mode).then(|| {
+                        described_labeled(
+                            "Controller haptics",
+                            pad_haptics_toggle,
+                            "Play a DualSense's voice-coil haptics on the pad itself. Wired \
+                             pads only, and only while controllers are forwarded.",
+                        )
+                    }),
+                    (!profile_mode).then(|| {
+                        described_labeled(
+                            "Controller speaker",
+                            pad_speaker_toggle,
+                            "Play the audio a game sends to the pad's own speaker on the pad, \
+                             not through this PC.",
+                        )
+                    }),
                 ]
                 .into_iter()
                 .flatten()
@@ -1700,6 +1763,10 @@ pub(crate) fn settings_page(
                          they aren\u{2019}t.",
                     )
                 }))
+                .chain(
+                    (!profile_mode)
+                        .then(|| described_labeled("Start in", start_in_combo, &start_in_help())),
+                )
                 .collect(),
                 None,
             );

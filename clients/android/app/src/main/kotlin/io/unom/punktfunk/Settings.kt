@@ -32,6 +32,16 @@ data class Settings(
      * would mis-tone-map. Turning this off forces SDR even on a capable panel.
      */
     val hdrEnabled: Boolean = true,
+    /**
+     * Ask for 10-bit WITHOUT HDR — Main10 at BT.709. Off by default, and subsumed by
+     * [hdrEnabled], which already implies 10 bits.
+     *
+     * Unlike HDR this asks nothing of the panel: an 8-bit display shows a dithered Main10 stream
+     * perfectly well, and the gain is banding-free gradients — skies, fades, dark scenes — for a
+     * little bandwidth. So it is never gated on [displaySupportsHdr]. Mirrors the cross-client
+     * `ten_bit_sdr` key the desktop clients write.
+     */
+    val tenBitSdr: Boolean = false,
     val compositor: Int = 0,
     val gamepad: Int = 0,
     /**
@@ -150,12 +160,6 @@ data class Settings(
      * unrecognized resolves to `"connected"`. A TV ignores it — it is always in console mode.
      */
     val gamepadUiMode: String = GAMEPAD_UI_WHEN_CONNECTED,
-    /**
-     * Show the experimental game-library browser (the coverflow reached with Y from a saved host).
-     * Fetched from the host's management API over mTLS; needs a paired host. Mirrors the Apple
-     * client's `libraryEnabled`.
-     */
-    val libraryEnabled: Boolean = true,
     /**
      * Which colour family the console (gamepad) UI's living backdrop drifts through — the
      * cross-client `ui_palette` key: `"violet"` (the brand default), then `"oled"`, `"nebula"`,
@@ -280,6 +284,20 @@ data class Settings(
      * shortcuts, the virtual pad's preset). Empty = the platform default ring.
      */
     val overlayActions: String = "",
+    /**
+     * Where a bare launch opens — the cross-client `start_in` key: `"hosts"`, `"library"` (the
+     * default) or `"stream"`. Empty or unknown reads as library, and with no default host every
+     * value degrades to the host list. Resolve through [io.unom.punktfunk.kit.link.StartScreen],
+     * never by reading this alone.
+     */
+    val startIn: String = "",
+    /**
+     * The host a bare launch opens on — a [io.unom.punktfunk.kit.security.KnownHost.id], `null`
+     * when none is written. Only half the answer: with exactly one paired host saved, that host
+     * is the default with nothing here, and a dangling id falls through to that same rule.
+     * The cross-client `default_host` key.
+     */
+    val defaultHost: String? = null,
     // NOTE: clipboard sync is NOT here. It is a decision about a HOST, not about this device or
     // this stream (design/client-settings-profiles.md §3, tier H), so it lives on the host record
     // — see `KnownHost.clipboardSync`. It used to be a global here; `KnownHostStore.migrate`
@@ -336,6 +354,7 @@ class SettingsStore(context: Context) {
         bitrateKbps = prefs.getInt(K_BITRATE, 0),
         renderScale = prefs.getFloat(K_RENDER_SCALE, 1.0f).toDouble(),
         hdrEnabled = prefs.getBoolean(K_HDR, true),
+        tenBitSdr = prefs.getBoolean(K_TEN_BIT_SDR, false),
         compositor = prefs.getInt(K_COMPOSITOR, 0),
         gamepad = prefs.getInt(K_GAMEPAD, 0),
         gamepadForwarding = prefs.getBoolean(K_GAMEPAD_FORWARDING, true),
@@ -365,7 +384,6 @@ class SettingsStore(context: Context) {
         reduceUiResolution = prefs.getBoolean(K_REDUCE_UI_RES, false),
         gamepadUiMode = prefs.getString(K_GAMEPAD_UI_MODE, GAMEPAD_UI_WHEN_CONNECTED)
             ?: GAMEPAD_UI_WHEN_CONNECTED,
-        libraryEnabled = prefs.getBoolean(K_LIBRARY, true),
         uiPalette = prefs.getString(K_UI_PALETTE, "violet") ?: "violet",
         lowLatencyMode = prefs.getBoolean(K_LOW_LATENCY, true),
         presentPriority = prefs.getString(K_PRESENT_PRIORITY, "latency") ?: "latency",
@@ -385,6 +403,8 @@ class SettingsStore(context: Context) {
             ?: if (prefs.getBoolean(K_POINTER_CAPTURE, false)) MouseMode.CAPTURE else MouseMode.DESKTOP,
         invertScroll = prefs.getBoolean(K_INVERT_SCROLL, false),
         overlayActions = prefs.getString(K_OVERLAY_ACTIONS, "") ?: "",
+        startIn = prefs.getString(K_START_IN, "") ?: "",
+        defaultHost = prefs.getString(K_DEFAULT_HOST, null),
     )
 
     fun save(s: Settings) {
@@ -395,6 +415,7 @@ class SettingsStore(context: Context) {
             .putInt(K_BITRATE, s.bitrateKbps)
             .putFloat(K_RENDER_SCALE, s.renderScale.toFloat())
             .putBoolean(K_HDR, s.hdrEnabled)
+            .putBoolean(K_TEN_BIT_SDR, s.tenBitSdr)
             .putInt(K_COMPOSITOR, s.compositor)
             .putInt(K_GAMEPAD, s.gamepad)
             .putBoolean(K_GAMEPAD_FORWARDING, s.gamepadForwarding)
@@ -411,7 +432,6 @@ class SettingsStore(context: Context) {
             .putBoolean(K_GAMEPAD_UI, s.gamepadUiEnabled)
             .putBoolean(K_REDUCE_UI_RES, s.reduceUiResolution)
             .putString(K_GAMEPAD_UI_MODE, s.gamepadUiMode)
-            .putBoolean(K_LIBRARY, s.libraryEnabled)
             .putString(K_UI_PALETTE, s.uiPalette)
             .putBoolean(K_LOW_LATENCY, s.lowLatencyMode)
             .putString(K_PRESENT_PRIORITY, s.presentPriority)
@@ -426,6 +446,8 @@ class SettingsStore(context: Context) {
             .putString(K_MOUSE_MODE, s.mouseMode.storedName)
             .putBoolean(K_INVERT_SCROLL, s.invertScroll)
             .putString(K_OVERLAY_ACTIONS, s.overlayActions)
+            .putString(K_START_IN, s.startIn)
+            .putString(K_DEFAULT_HOST, s.defaultHost)
             .apply()
     }
 
@@ -436,6 +458,7 @@ class SettingsStore(context: Context) {
         const val K_BITRATE = "bitrate_kbps"
         const val K_RENDER_SCALE = "render_scale"
         const val K_HDR = "hdr_enabled"
+        const val K_TEN_BIT_SDR = "ten_bit_sdr"
         const val K_COMPOSITOR = "compositor"
         const val K_GAMEPAD = "gamepad"
         const val K_GAMEPAD_FORWARDING = "gamepad_forwarding"
@@ -456,7 +479,8 @@ class SettingsStore(context: Context) {
         const val K_GAMEPAD_UI = "gamepad_ui_enabled"
         const val K_REDUCE_UI_RES = "reduce_ui_resolution"
         const val K_GAMEPAD_UI_MODE = "gamepad_ui_mode"
-        const val K_LIBRARY = "library_enabled"
+        // RETIRED: "library_enabled", the game-library switch. Pairing is the only gate now, on
+        // every client. A stored value is left where it is and never read again.
         const val K_UI_PALETTE = "ui_palette"
 
         /**
@@ -485,6 +509,10 @@ class SettingsStore(context: Context) {
         const val K_POINTER_CAPTURE = "pointer_capture"
         const val K_INVERT_SCROLL = "invert_scroll"
         const val K_OVERLAY_ACTIONS = "overlay_actions"
+
+        /** Cross-client start-screen keys; the console writes the same two names. */
+        const val K_START_IN = "start_in"
+        const val K_DEFAULT_HOST = "default_host"
 
         /** Legacy Boolean the enum replaced — read once as the migration default, never written. */
         const val K_TRACKPAD = "trackpad_mode"
@@ -982,6 +1010,9 @@ val GAMEPAD_UI_MODE_OPTIONS = listOf(
     GAMEPAD_UI_WHEN_CONNECTED to "With a controller",
     GAMEPAD_UI_ALWAYS to "Always",
 )
+
+/** (stored value, label) for where a bare launch opens — the cross-client table verbatim. */
+val START_IN_OPTIONS = io.unom.punktfunk.kit.link.StartIn.entries.map { it.stored to it.label }
 
 /** (mode, label) for the touch-input model. */
 val TOUCH_MODE_OPTIONS = listOf(

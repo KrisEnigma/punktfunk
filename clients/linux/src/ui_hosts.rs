@@ -7,9 +7,10 @@
 //! callback bag and `Rc<RefCell<HostsUi>>` pokes of the pre-relm4 shell are gone.
 
 use crate::discovery::{self, DiscoveredHost, DiscoveryEvent};
-use crate::trust::{KnownHost, KnownHosts, Settings};
+use crate::trust::{self, KnownHost, KnownHosts, Settings};
 use adw::prelude::*;
 use gtk::{gio, glib};
+use pf_client_core::start;
 use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
 use std::cell::RefCell;
@@ -37,6 +38,24 @@ pub struct ConnectRequest {
     /// host, `None` honors the binding. It never rebinds anything — the host's default changes
     /// only through an explicit "Default profile" pick (design/client-settings-profiles.md §5.2).
     pub profile: Option<String>,
+}
+
+/// A saved host's plain connect: its fingerprint is already pinned, so this is the silent
+/// pinned dial a card's click makes. `profile: None` honours the host's own binding, which
+/// is what a click without "Connect with" does — the card overrides it for a pinned card.
+///
+/// Free rather than a method so the shell's start screen can build one before any card exists.
+pub fn saved_request(k: &trust::KnownHost) -> ConnectRequest {
+    ConnectRequest {
+        name: k.name.clone(),
+        addr: k.addr.clone(),
+        port: k.port,
+        fp_hex: Some(k.fp_hex.clone()),
+        pair_optional: false,
+        launch: None,
+        mac: k.mac.clone(),
+        profile: None,
+    }
 }
 
 impl ConnectRequest {
@@ -115,6 +134,12 @@ pub enum CardOutput {
         fp_hex: String,
         name: String,
     },
+    /// Point `Settings::default_host` at this record, or clear it when it already names it.
+    /// `id` is `None` on a record old enough to predate the minted ids; the handler says so.
+    MakeDefault {
+        id: Option<String>,
+        name: String,
+    },
     Wake {
         mac: Vec<String>,
         addr: String,
@@ -146,17 +171,10 @@ impl HostCard {
             CardKind::Saved {
                 host: k, pinned, ..
             } => ConnectRequest {
-                name: k.name.clone(),
-                addr: k.addr.clone(),
-                port: k.port,
-                fp_hex: Some(k.fp_hex.clone()),
-                // Saved host: its fp is already pinned → silent pinned connect.
-                pair_optional: false,
-                launch: None,
-                mac: k.mac.clone(),
                 // A pinned card IS its profile: clicking it connects with that one, without
                 // touching the host's default.
                 profile: pinned.as_ref().map(|(id, _)| id.clone()),
+                ..saved_request(k)
             },
             CardKind::Discovered(a) => ConnectRequest {
                 name: a.name.clone(),
@@ -379,6 +397,16 @@ impl relm4::factory::FactoryComponent for HostCard {
                         "forget",
                         Box::new(move || CardOutput::Forget {
                             fp_hex: fp.clone(),
+                            name: name.clone(),
+                        }),
+                    );
+                }
+                {
+                    let (id, name) = (k.id.clone(), k.name.clone());
+                    add(
+                        "make-default",
+                        Box::new(move || CardOutput::MakeDefault {
+                            id: id.clone(),
                             name: name.clone(),
                         }),
                     );
@@ -615,6 +643,24 @@ impl relm4::factory::FactoryComponent for HostCard {
                     menu.append_section(None, &links);
 
                     let manage = gio::Menu::new();
+                    // Which host the app opens on. Needs a pairing to point at — the start
+                    // screen skips an unpaired host, so writing one would set a pointer that
+                    // never resolves. Unchecked is not "not the default": a lone paired host
+                    // is the default with nothing written.
+                    if k.paired {
+                        // One settings read per card build. Cards rebuild on store changes,
+                        // not per frame, so this is a file read per host per change.
+                        let named = k.id.is_some()
+                            && Settings::load().default_host.as_deref() == k.id.as_deref();
+                        manage.append(
+                            Some(if named {
+                                "Default host \u{2713}"
+                            } else {
+                                "Make default host"
+                            }),
+                            Some("card.make-default"),
+                        );
+                    }
                     manage.append(Some("Edit\u{2026}"), Some("card.rename"));
                     manage.append(Some("Pair with PIN\u{2026}"), Some("card.pair"));
                     manage.append(Some("Forget"), Some("card.forget"));
@@ -1132,6 +1178,27 @@ impl SimpleComponent for HostsPage {
                 }
                 CardOutput::Edit { fp_hex, name } => self.edit_host_dialog(&sender, &fp_hex, &name),
                 CardOutput::Forget { fp_hex, name } => self.forget_dialog(&sender, &fp_hex, &name),
+                // Whole-file writer: rebase on the store before mutating, or a setting another
+                // surface just wrote is reverted.
+                CardOutput::MakeDefault { id, name } => {
+                    let Some(id) = id else {
+                        let _ = sender.output(HostsOutput::Toast(format!(
+                            "{name} has no record id \u{2014} re-save it"
+                        )));
+                        return;
+                    };
+                    let mut settings = trust::Settings::load();
+                    let on = settings.default_host.as_deref() != Some(id.as_str());
+                    settings.default_host = on.then_some(id);
+                    settings.save();
+                    let opens = start::StartIn::parse(&settings.start_in) != start::StartIn::Hosts;
+                    let _ = sender.output(HostsOutput::Toast(match (on, opens) {
+                        (true, true) => format!("{name} opens on launch"),
+                        (true, false) => format!("{name} is the default host"),
+                        (false, _) => format!("{name} is no longer the default host"),
+                    }));
+                    sender.input(HostsMsg::Refresh);
+                }
                 CardOutput::Wake { mac, addr } => crate::wol::wake(&mac, addr.parse().ok()),
                 CardOutput::CopyLink(url) => {
                     if let Some(display) = gtk::gdk::Display::default() {
@@ -1511,8 +1578,19 @@ impl HostsPage {
             let fp = fp_hex.to_string();
             dialog.connect_response(Some("remove"), move |_, _| {
                 let mut known = KnownHosts::load();
+                let gone = known
+                    .hosts
+                    .iter()
+                    .find(|h| h.fp_hex == fp)
+                    .and_then(|h| h.id.clone());
                 known.remove_by_fp(&fp);
                 let _ = known.save();
+                // The resolver already ignores a dangling pointer, so this is hygiene: without
+                // it a later re-pair of a different box would inherit somebody's old choice.
+                let mut settings = trust::Settings::load();
+                if start::clear_default(&mut settings, gone.as_deref()) {
+                    settings.save();
+                }
                 sender.input(HostsMsg::Refresh);
             });
         }

@@ -14,7 +14,7 @@ Built in Rust end to end (no C ABI): the shell shares its plumbing with the sess
 
 - **Zero-copy hardware decode, and it's ours** — the session presenter decodes with Punktfunk's own
   decoders; no FFmpeg is linked or bundled. **Vulkan Video** (`pf-vkdecode`, decoding onto the
-  presenter's own device) leads on NVIDIA and AMD, **VAAPI** (`pf-vaadec` driving a dlopen'd libva,
+  presenter's own device) leads on NVIDIA and AMD, **VAAPI** (`pf-vaapi` driving a dlopen'd libva,
   exporting DRM-PRIME dmabufs) leads on Intel, whichever isn't first is the fallback, and an
   OpenH264/rav1d CPU rung is last.
 - **Your display's native mode** — the host builds a virtual output at exactly your WxH@Hz; no

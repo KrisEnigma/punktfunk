@@ -331,7 +331,11 @@ impl Pool {
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
         let seq = self.source_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        dbglog!("[pf-vd] cursor: re-encode on pointer move (no compose) slot={slot} seq={seq}");
+        // The one per-frame `dbglog!`: an idle desktop under a moving pointer fires this at the
+        // cursor poll rate, which would swamp the host's drain ring and `host.log` with it.
+        if crate::log::file_log_enabled() {
+            dbglog!("[pf-vd] cursor: re-encode on pointer move (no compose) slot={slot} seq={seq}");
+        }
         Some((slot, qpc_now(), seq))
     }
 
@@ -470,7 +474,9 @@ impl Attached {
         let Some(pool) = &self.pool else {
             // No pool attached: every acquired surface goes nowhere, with nothing else logging it.
             if !self.warned_no_pool.swap(true, Ordering::AcqRel) {
-                dbglog!("[pf-vd] pool attach: NO pool for this worker - surfaces are being discarded");
+                dbglog!(
+                    "[pf-vd] pool attach: NO pool for this worker - surfaces are being discarded"
+                );
             }
             return false;
         };
@@ -484,7 +490,9 @@ impl Attached {
                 // A pool with no free slot means the encode thread is not releasing them. Rate
                 // limited: this fires per frame once the encoder stops draining.
                 if n == 1 || n % 512 == 0 {
-                    dbglog!("[pf-vd] pool: no free slot - dropped {n} surfaces (encoder not draining)");
+                    dbglog!(
+                        "[pf-vd] pool: no free slot - dropped {n} surfaces (encoder not draining)"
+                    );
                 }
             }
             Offer::Taken(seq) => {

@@ -1,0 +1,140 @@
+//! The VideoProc context: ingest colour conversion into the encoder's input surface.
+//!
+//! One context per session, sized to the visible picture. Every capture shape — a
+//! packed-RGB dmabuf, CPU RGB on a staging surface, a producer's own NV12 — goes
+//! through it, so the encoder sees one kind of input; the copy an NV12 source pays
+//! is the price of one path.
+
+use std::os::raw::c_int;
+
+use anyhow::Result;
+use pf_vaapi::vpp::VaProcPipelineParameterBuffer;
+use pf_vaapi::vpp::VaRectangle;
+use pf_vaapi::vpp::VA_ENTRYPOINT_VIDEO_PROC;
+use pf_vaapi::vpp::VA_PROC_PIPELINE_PARAMETER_BUFFER_TYPE;
+use pf_vaapi::vpp::VA_PROFILE_NONE;
+
+use crate::Display;
+use crate::VaConfigId;
+use crate::VaContextId;
+use crate::VaSurfaceId;
+use crate::VA_INVALID_ID;
+use crate::VA_PROGRESSIVE;
+
+pub struct Vpp {
+    config: VaConfigId,
+    context: VaContextId,
+    width: u32,
+    height: u32,
+}
+
+impl Vpp {
+    /// Open a VideoProc context on `display` for `width`×`height` visible pictures.
+    pub fn new(display: &Display, width: u32, height: u32) -> Result<Self> {
+        let mut config = VA_INVALID_ID;
+        // SAFETY: live display; no attributes, so the null and the zero count agree;
+        // `config` is a local written through.
+        display.va.check("vaCreateConfig(VideoProc)", unsafe {
+            (display.va.create_config)(
+                display.display,
+                VA_PROFILE_NONE,
+                VA_ENTRYPOINT_VIDEO_PROC,
+                std::ptr::null_mut(),
+                0,
+                &mut config,
+            )
+        })?;
+        let mut context = VA_INVALID_ID;
+        // SAFETY: `config` was just created on this display. No render targets are
+        // pinned — the target is named per picture — so the null and zero agree.
+        let status = unsafe {
+            (display.va.create_context)(
+                display.display,
+                config,
+                width as c_int,
+                height as c_int,
+                VA_PROGRESSIVE as c_int,
+                std::ptr::null_mut(),
+                0,
+                &mut context,
+            )
+        };
+        if let Err(e) = display.va.check("vaCreateContext(VideoProc)", status) {
+            // SAFETY: the config created above, destroyed once.
+            unsafe { (display.va.destroy_config)(display.display, config) };
+            return Err(e);
+        }
+        Ok(Self {
+            config,
+            context,
+            width,
+            height,
+        })
+    }
+
+    /// Convert the visible picture of `source` into `target`, and wait for it: the
+    /// encoder reads `target` on another queue, and libva orders nothing across
+    /// contexts. The regions are explicit so a target padded to the macroblock grid
+    /// is written, not scaled into.
+    pub fn convert(
+        &self,
+        display: &Display,
+        source: VaSurfaceId,
+        source_is_rgb: bool,
+        ten_bit: bool,
+        target: VaSurfaceId,
+    ) -> Result<()> {
+        let region = VaRectangle {
+            x: 0,
+            y: 0,
+            width: self.width as u16,
+            height: self.height as u16,
+        };
+        let mut params = VaProcPipelineParameterBuffer::convert(source, source_is_rgb, ten_bit);
+        params.surface_region = &region;
+        params.output_region = &region;
+        let buf = display.create_buffer(
+            self.context,
+            VA_PROC_PIPELINE_PARAMETER_BUFFER_TYPE,
+            std::mem::size_of_val(&params),
+            1,
+            (&raw const params).cast(),
+        )?;
+
+        // SAFETY: `context` and `target` are live on this display; a success here
+        // is closed by the `end_picture` below, even if the render fails.
+        let begun = display.va.check("vaBeginPicture(VideoProc)", unsafe {
+            (display.va.begin_picture)(display.display, self.context, target)
+        });
+        if let Err(e) = begun {
+            display.destroy_buffers(&[buf]);
+            return Err(e);
+        }
+        let mut ids = [buf];
+        // SAFETY: one live buffer id created on this context; the call does not
+        // retain the array.
+        let rendered = display.va.check("vaRenderPicture(VideoProc)", unsafe {
+            (display.va.render_picture)(display.display, self.context, ids.as_mut_ptr(), 1)
+        });
+        // SAFETY: closes the picture opened above; must run after a failed render too.
+        let ended = unsafe { (display.va.end_picture)(display.display, self.context) };
+        display.destroy_buffers(&[buf]);
+        rendered?;
+        display.va.check("vaEndPicture(VideoProc)", ended)?;
+        // SAFETY: `target` is live; sync returns once the conversion has landed.
+        display.va.check("vaSyncSurface(VideoProc)", unsafe {
+            (display.va.sync_surface)(display.display, target)
+        })
+    }
+
+    /// Release the context and config. No `Drop`: the display is the caller's, and
+    /// it must outlive this call.
+    pub fn destroy(&self, display: &Display) {
+        // SAFETY: both ids were created on this display in `new`; destroyed once,
+        // context before config.
+        unsafe {
+            (display.va.destroy_context)(display.display, self.context);
+            (display.va.destroy_config)(display.display, self.config);
+        }
+    }
+}

@@ -22,6 +22,7 @@ The patches here add the missing half, and nothing else. See
 | `0009-pipewire-destroy-capture-textures-on-the-compositor-.patch` | Move capture-buffer destruction off the PipeWire thread: `remove_buffer`/stale-push queue the corpse (`bury_buffer`), steamcompmgr reaps on every vblank — including while the stream is paused, which is exactly the linger window. Without it, dropping the last `CVulkanTexture` ref on the PW thread races `vulkan_screenshot` on the same device and SIGSEGVs (NVIDIA `insertBarrier`), so a lingered display is dead and reconnect loses the session. Reported + written by luxus (punktfunk-overlay#9) | **Yes** — the race is upstream's `paint_pipewire` vs `destroy_buffer`; our patches only make the paint path heavier |
 | `0010-wlserver-give-the-seat-s-stub-keyboard-the-compiled-.patch` | Set the compiled keymap on `wlserver.wlr.virtual_keyboard_device` too. gamescope builds a keymap from `XKB_DEFAULT_*` but only puts it on `keyboard_group`, while the SEAT carries the keymap-less stub that `wlserver_keyboardfocus()` re-binds on every focus change — so clients get no keymap and fall back to their own `us`, and a headless session (no libinput devices) never recovers | **Yes** — the stub's own comment says it exists "only to set the keymap"; it just never did |
 | `0011-headless-support-adaptive-sync-paint-on-the-game-s-c.patch` | `CHeadlessConnector` advertises VRR (`SupportsVRR()` true; `IsVRRActive()` = `cv_adaptive_sync` — no scanout cycle to honor, so "supported" and "active" collapse into "asked for"), making `--adaptive-sync` paint — and publish to PipeWire — on the game's commit instead of the synthetic vblank tick. `PacesPresents()` (new, default true, headless false) keeps the VRR framerate limiter armed when the target equals the refresh: that skip defers to a display's own pacing, and a display that paces nothing must not be deferred to | **Yes** — a headless output is the ideal adaptive-sync display (its vblank is a fiction), and the tick-quantization loss it removes is measurable by any PipeWire consumer |
+| `0012-steamcompmgr-persist-the-CLI-framerate-limit.patch` | Seed `--framerate-limit` into both screen types' persistent overrides without enabling refresh switching. Later Steam requests can replace or clear the limit | **Yes** — a CLI limit must survive the refresh-policy update in every paint |
 
 ### Why the headless patch matters
 
@@ -106,6 +107,12 @@ The number is a **monotonic patch-set revision**, so one probe answers every cap
 | `+pfhdr6` | …and `GAMESCOPE_NO_FOCUS` windows are never focus candidates (no new capability) |
 | `+pfhdr7` | …and PipeWire teardown cannot SIGSEGV a lingering compositor (no new capability) |
 | `+pfhdr8` | …and the seat's keyboard carries the `XKB_DEFAULT_*` keymap, so the session follows the box's configured layout |
+| `+pfhdr9` | …and headless adaptive sync paints on game commits, with software pacing at the refresh rate |
+| `+pfhdr10` | …and `--framerate-limit` persists across paints without changing refresh; Steam can still replace or clear it |
+
+Require `+pfhdr10` for headless `--adaptive-sync` with a CLI cap: `+pfhdr9` clears that cap
+on the first paint unless Steam or a control command supplies an override. The Arch package is
+`3.16.25.pfhdr10-1`; its build checks the complete upstream version and capability level.
 
 Bump it whenever a patch adds or changes something the host must know about before it spawns.
 
@@ -148,9 +155,8 @@ distro's `gamescope`.
 
 ## Building
 
-Pinned upstream: `5fb8dce4` (master, 2026-08-03 — `3.16.25-11-g5fb8dce`). The patches apply
-cleanly to that commit; they touch `src/pipewire.cpp`, `src/steamcompmgr.cpp`,
-`src/rendervulkan.cpp`, `src/rendervulkan.hpp` and `src/meson.build` only.
+Pinned upstream: `5fb8dce4a09d0a68d097b9faf9513782106bc843` (`3.16.25-11-g5fb8dce`).
+All patches apply in filename order to that commit.
 
 The bump from `8c676c39` is deliberate: it brings upstream's `vulkan_get_rgb10_capture_format()`
 (`ff6b924`), which probes `linearTilingFeatures` for STORAGE+SAMPLED and falls back to
@@ -159,17 +165,25 @@ NVIDIA. That covers the paths that are upstream's rather than ours: the RGB inte
 `paint_pipewire()` acquires when the stream is YCbCr, and AVIF screenshots. Our own 10-bit RGB
 node is covered by patch `0001`, which offers `xBGR_210LE` first for the same reason.
 
-```sh
-git clone https://github.com/ValveSoftware/gamescope.git
-cd gamescope
-git checkout 5fb8dce4
-git submodule update --init --recursive          # or let meson fetch the subprojects
-git am /path/to/punktfunk/packaging/gamescope/patches/*.patch
+Build into a staging directory on Linux. The system gamescope and file capabilities stay untouched:
 
-meson setup build/ --prefix=/usr -Dpipewire=enabled
-ninja -C build/
-# install as punktfunk-gamescope, NOT as gamescope
-install -Dm755 build/src/gamescope /usr/bin/punktfunk-gamescope
+```sh
+PF=/absolute/path/to/punktfunk
+STAGE="$PWD/gamescope-stage"
+bash "$PF/packaging/gamescope/build-punktfunk-gamescope.sh" \
+    --destdir "$STAGE" --prefix /usr --jobs "$(nproc)"
+"$STAGE/usr/bin/punktfunk-gamescope" --version
+```
+
+The script requires the exact current capability marker before staging the binary. To retain
+build logs, pass `--srcdir /path/to/gamescope` with a checkout at the pinned commit and its
+submodules initialized. A reused checkout with an older marker is rejected; use a fresh checkout
+to upgrade the patch set.
+
+The package's banner regression cases run without a compiler or `makepkg`:
+
+```sh
+bash -c 'source "$1/packaging/gamescope/PKGBUILD"; check' _ "$PF"
 ```
 
 ### Build dependencies
@@ -237,7 +251,7 @@ Note what is NOT in that table: the `.deb`. Debian/Ubuntu boxes build it by hand
 ## Verifying the patch on a box (P0 exit)
 
 ```sh
-punktfunk-gamescope --version                    # must contain +pfhdr4
+punktfunk-gamescope --version                    # version token ends in +pfhdr10
 punktfunk-gamescope --backend headless -W 1920 -H 1080 -r 60 \
     --hdr-enabled --hdr-debug-force-support --pipewire-composite-cursor -- vkcube &
 pw-dump | grep -A40 '"gamescope"'                # node offers xRGB_210LE / xBGR_210LE
@@ -245,6 +259,37 @@ pw-dump | grep -A40 '"gamescope"'                # node offers xRGB_210LE / xBGR
 
 The stream is only 10-bit once a **consumer** asks for it: the formats are listed last, so any
 consumer that negotiates the 8-bit stream today keeps negotiating it bit-for-bit.
+
+### Headless VRR limiter regression
+
+With Linux Vulkan, Xwayland and Vulkan-tools' `vkcube`, run the staged binary without Steam or
+`gamescopectl`. Both runs must take roughly four seconds plus startup for 240 FIFO frames at
+60 FPS. A sub-3.5-second run fails the cap check. This checks pacing, not capture latency.
+The WSI layers are disabled so an installed layer cannot mask the compositor's limiter behavior.
+
+```sh
+python3 - "$STAGE/usr/bin/punktfunk-gamescope" <<'PY'
+import os
+import subprocess
+import sys
+import time
+
+env = dict(os.environ, DISABLE_GAMESCOPE_WSI="1", PUNKTFUNK_GAMESCOPE_WSI_DISABLE="1",
+           MESA_VK_WSI_PRESENT_MODE="fifo")
+for adaptive_sync in (False, True):
+    args = [sys.argv[1], "--backend", "headless", "-W", "1280", "-H", "720",
+            "-r", "60", "--framerate-limit", "60"]
+    if adaptive_sync:
+        args.append("--adaptive-sync")
+    start = time.monotonic()
+    subprocess.run(args + ["--", "vkcube", "--present_mode", "2", "--c", "240"],
+                   env=env, check=True, timeout=30)
+    elapsed = time.monotonic() - start
+    print(f"adaptive_sync={adaptive_sync}: {elapsed:.2f}s")
+    if elapsed < 3.5:
+        raise SystemExit("FAIL: the CLI framerate limit did not pace FIFO presents")
+PY
+```
 
 ## Rebase policy
 

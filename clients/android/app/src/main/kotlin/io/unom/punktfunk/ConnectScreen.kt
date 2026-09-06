@@ -867,7 +867,17 @@ fun ConnectScreen(
         // the last moment either can be found.
         io.unom.punktfunk.kit.library.LibraryCache.standard(context.cacheDir).forget(kh.id)
         LibraryPosition.forget(context, kh.id)
+        // The resolver already ignores a dangling pointer, so this is hygiene: without it a later
+        // re-pair of a different box would inherit somebody's old choice.
+        if (settings.defaultHost == kh.id) {
+            onSettingsChange(settings.copy(defaultHost = null))
+        }
         savedHosts = knownHostStore.all()
+    }
+
+    /** Point the start-screen setting at [kh], or clear it. The caller persists. */
+    fun setDefaultHost(kh: KnownHost, on: Boolean) {
+        onSettingsChange(settings.copy(defaultHost = if (on) kh.id else null))
     }
 
     ConnectGrid(
@@ -893,8 +903,9 @@ fun ConnectScreen(
         onHostAction = { kh, a -> hostAction(kh, a) },
         onCopyLink = { kh, pin -> copyLink(kh, pin) },
         onTogglePin = { kh, p -> togglePin(kh, p) },
-        libraryEnabled = settings.libraryEnabled,
         onBrowseLibrary = { kh, pin -> onOpenLibrary(kh, pin?.id) },
+        defaultHost = settings.defaultHost,
+        onMakeDefault = { kh, on -> setDefaultHost(kh, on) },
         onRescan = { discovery.restart() },
         onAddHost = { showManualSheet = true },
     )

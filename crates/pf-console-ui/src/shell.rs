@@ -18,6 +18,7 @@ use crate::store::SettingsStore;
 use anyhow::{anyhow, Result};
 use pf_client_core::console::OverlayAction;
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse, PadInfo};
+use pf_client_core::start;
 use pf_client_core::trust;
 use skia_safe::{Canvas, Color4f, Data, Rect, RuntimeEffect};
 use std::collections::VecDeque;
@@ -279,6 +280,9 @@ pub(crate) struct Shell {
     /// window or navigation races the wake ungated.
     wake_optimistic: bool,
     toast: Option<Toast>,
+    /// Fingerprint of a first pairing whose shelf has not opened yet. See
+    /// [`Self::open_first_paired_library`].
+    first_pair: Option<String>,
     /// When Back at the root was last pressed, where that press has to be repeated to exit.
     /// See [`EXIT_CONFIRM_WINDOW`].
     exit_armed: Option<std::time::Instant>,
@@ -379,6 +383,7 @@ impl Shell {
             wake: None,
             wake_optimistic: false,
             toast: None,
+            first_pair: None,
             exit_armed: None,
             mesh,
             mesh_lift,
@@ -836,6 +841,12 @@ impl Shell {
                 if matches!(self.stack.last(), Some(Screen::Pair(_))) {
                     self.apply_nav(Nav::Pop);
                 }
+                // The first pairing is where the default host comes into being, so show
+                // the user where the next launch will land. A later pairing resolves to
+                // no default and leaves the toast and the list exactly as they are.
+                if self.pairing_made_the_default(key) {
+                    self.first_pair = Some(key.clone());
+                }
             }
             phase => {
                 if let Some(Screen::Pair(p)) = self.stack.last_mut() {
@@ -846,6 +857,7 @@ impl Shell {
                 }
             }
         }
+        self.open_first_paired_library();
 
         match self.console.wake() {
             Some(w) => {
@@ -919,7 +931,44 @@ impl Shell {
         }
     }
 
-    fn start_connect(&mut self, intent: ConnectIntent) {
+    /// This pairing is what turned its host into the default one. False for a second or
+    /// later pairing, which leaves several paired records and so no derived default, and
+    /// false under `start_in = hosts`, where a launch stays on the list by choice.
+    fn pairing_made_the_default(&self, key: &str) -> bool {
+        if start::StartIn::parse(&self.settings.start_in) == start::StartIn::Hosts {
+            return false;
+        }
+        let known = self.store.known_hosts();
+        let paired = known.hosts.iter().position(|h| h.fp_hex == key);
+        paired.is_some() && start::default_host(&self.settings, &known) == paired
+    }
+
+    /// Hand a completed first pairing to that host's shelf. Deferred by a frame or two:
+    /// the carousel row keyed by the new fingerprint arrives after the pairing does.
+    /// Dropped once the user navigates — this is a handoff, not a queued action.
+    fn open_first_paired_library(&mut self) {
+        let Some(key) = self.first_pair.take() else {
+            return;
+        };
+        if !matches!(self.stack.as_slice(), [Screen::Home(_)]) {
+            return;
+        }
+        let Some(row) = self.hosts.iter().find(|h| h.key == key).cloned() else {
+            self.first_pair = Some(key);
+            return;
+        };
+        self.bus.send(ConsoleCmd::FetchLibrary {
+            addr: row.addr.clone(),
+            mgmt: row.mgmt_port,
+            fp_hex: row.fp_hex.clone(),
+        });
+        let epoch = self.library.fetch_epoch();
+        self.apply_nav(Nav::Push(Box::new(Screen::Library(
+            crate::screens::library::LibraryScreen::new(&row, epoch),
+        ))));
+    }
+
+    pub(crate) fn start_connect(&mut self, intent: ConnectIntent) {
         // A game launch comes off a shelf, which knows both the host's management
         // port and where it just drew the tile.
         let launch = match (&intent.launch, self.stack.last()) {

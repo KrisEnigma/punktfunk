@@ -717,6 +717,15 @@ pub struct LibraryGame {
     pub running: bool,
 }
 
+impl LibraryGame {
+    /// In the shelf's leading band: the desktop tile, then the launchers — the tiles that
+    /// open something rather than play a title. [`GridShape`]'s split is this run's length,
+    /// so cursor math, the section heading and the renderer must all ask here.
+    pub fn leads(&self) -> bool {
+        self.launcher || self.id == DESKTOP_ID
+    }
+}
+
 /// Observation vs memory, and whether a memory is still being fetched.
 ///
 /// Three states because Waking and Offline need different shelf copy. A boolean would
@@ -877,9 +886,13 @@ impl LibraryShared {
     }
 
     fn put_games(&self, mut games: Vec<LibraryGame>, stale: Stale) {
+        // Empty is the CATALOG's verdict, taken before the desktop tile joins: a host with
+        // no plugins keeps its empty copy, and gets the tile beside it.
+        let empty = games.is_empty();
+        games.insert(0, desktop_tile());
         order(&mut games);
         let mut s = self.0.lock().unwrap();
-        s.phase = if games.is_empty() {
+        s.phase = if empty {
             LibraryPhase::Empty
         } else {
             LibraryPhase::Ready
@@ -1014,7 +1027,29 @@ impl LibraryShared {
 /// Launchers first (the [`GridShape`] prefix). Running titles lead within their group.
 /// `sort_by_key` is stable, so host title order survives inside each band.
 fn order(games: &mut [LibraryGame]) {
-    games.sort_by_key(|g| (!g.launcher, !g.running));
+    games.sort_by_key(|g| (g.id != DESKTOP_ID, !g.launcher, !g.running));
+}
+
+/// The desktop tile's id. `\0` prefix as Home's Add and Rescan tiles use: a host title id
+/// is a store reference, and none of them can start with a NUL.
+pub const DESKTOP_ID: &str = "\0desktop";
+
+/// Every shelf leads with the host's own desktop, so Library is never a dead end for the
+/// desktop-only user and a plugin-less host is still one press from streaming. Model state
+/// only: the disk cache stores wire `GameEntry`s and never sees this.
+fn desktop_tile() -> LibraryGame {
+    LibraryGame {
+        id: DESKTOP_ID.into(),
+        title: "Desktop".into(),
+        store: String::new(),
+        launcher: false,
+        icon: "monitor".into(),
+        platform: None,
+        developer: None,
+        year: None,
+        genres: Vec::new(),
+        running: false,
+    }
 }
 
 /// Store id → display label (the GTK `ui_library` table).
@@ -1439,8 +1474,15 @@ mod tests {
         assert!(matches!(snap.phase, LibraryPhase::Ready));
         assert_eq!(snap.stale, Stale::No, "a live fetch is not a memory");
         let titles: Vec<&str> = snap.games.iter().map(|g| g.title.as_str()).collect();
-        assert_eq!(titles, ["Big Picture", "Heroic", "Celeste", "Portal 2"]);
-        assert_eq!(snap.games.iter().take_while(|g| g.launcher).count(), 2);
+        assert_eq!(
+            titles,
+            ["Desktop", "Big Picture", "Heroic", "Celeste", "Portal 2"]
+        );
+        assert_eq!(
+            snap.games.iter().take_while(|g| g.leads()).count(),
+            3,
+            "the lead band is the desktop tile plus both launchers"
+        );
     }
 
     /// Running titles lead within their group; the launcher prefix [`GridShape`] counts stays intact.
@@ -1472,15 +1514,22 @@ mod tests {
         let titles: Vec<&str> = snap.games.iter().map(|g| g.title.as_str()).collect();
         assert_eq!(
             titles,
-            ["Heroic", "Big Picture", "Portal 2", "Celeste", "Tunic"],
-            "running first inside each group; launchers still the prefix"
+            [
+                "Desktop",
+                "Heroic",
+                "Big Picture",
+                "Portal 2",
+                "Celeste",
+                "Tunic"
+            ],
+            "running first inside each group; the lead band is still the prefix"
         );
         assert_eq!(
-            snap.games.iter().take_while(|g| g.launcher).count(),
-            2,
-            "the launcher prefix GridShape depends on is intact"
+            snap.games.iter().take_while(|g| g.leads()).count(),
+            3,
+            "the lead band GridShape depends on is intact"
         );
-        assert!(snap.games[0].running && snap.games[2].running);
+        assert!(snap.games[1].running && snap.games[3].running);
 
         // Same set: no generation bump. This is polled.
         let gen_before = snap.generation;
@@ -1529,8 +1578,8 @@ mod tests {
             Some("launching")
         );
         assert!(
-            shared.snapshot().games[0].running,
-            "launching is up on the shelf"
+            shared.snapshot().games[1].running,
+            "launching is up on the shelf, behind the desktop tile"
         );
         let badges = shared.snapshot().generation;
         shared.set_running(&running(&["steam:Celeste"], "running"));
@@ -1576,12 +1625,13 @@ mod tests {
             "the host answered — these are observed now"
         );
         assert!(live.stale.note().is_none());
-        assert_eq!(live.games.len(), 3);
+        assert_eq!(live.games.len(), 4, "three titles behind the desktop tile");
         // A late give-up from an abandoned fetch must not mark a fresh library stale.
         shared.set_stale(Stale::Offline);
         assert_eq!(shared.snapshot().stale, Stale::No);
     }
 
+    /// A launcher-less library keeps the host's order behind the one tile we add.
     #[test]
     fn set_games_leaves_a_launcher_less_library_alone() {
         let shared = LibraryShared::default();
@@ -1608,7 +1658,77 @@ mod tests {
             .iter()
             .map(|g| g.title.clone())
             .collect();
-        assert_eq!(titles, ["Celeste", "Portal 2", "Tunic"]);
+        assert_eq!(titles, ["Desktop", "Celeste", "Portal 2", "Tunic"]);
+    }
+
+    /// The tile is model state, so it leads whatever the catalog says — including a
+    /// catalog with nothing in it, which keeps its Empty verdict for the shelf's copy.
+    #[test]
+    fn the_desktop_tile_leads_every_shelf_including_an_empty_one() {
+        let shared = LibraryShared::default();
+        shared.set_games(Vec::new());
+        let snap = shared.snapshot();
+        assert!(matches!(snap.phase, LibraryPhase::Empty));
+        assert_eq!(snap.games.len(), 1);
+        assert_eq!(snap.games[0].id, DESKTOP_ID);
+        assert!(snap.games[0].leads());
+
+        // A running title re-orders the games; the tile is not one of them.
+        shared.set_games(vec![LibraryGame {
+            id: "steam:Celeste".into(),
+            title: "Celeste".into(),
+            store: "steam".into(),
+            launcher: false,
+            icon: String::new(),
+            platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
+            running: true,
+        }]);
+        assert_eq!(shared.snapshot().games[0].id, DESKTOP_ID);
+    }
+
+    /// Collections must never offer a "Desktop" group, and a one-store library must not
+    /// look browsable because of it — but the unfiltered shelf still leads with the tile.
+    #[test]
+    fn collections_never_group_the_desktop_tile() {
+        use crate::collate::{collate, filtered, worth_browsing, GroupBy, SortKey};
+
+        let shared = LibraryShared::default();
+        shared.set_games(
+            ["Celeste", "Tunic"]
+                .iter()
+                .map(|t| LibraryGame {
+                    id: format!("steam:{t}"),
+                    title: (*t).to_string(),
+                    store: "steam".into(),
+                    launcher: false,
+                    icon: String::new(),
+                    platform: Some("PC".into()),
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
+                    running: false,
+                })
+                .collect(),
+        );
+        let games = shared.snapshot().games;
+        assert!(
+            !worth_browsing(&games),
+            "one platform plus the tile is still one platform"
+        );
+        for group in collate(&games, SortKey::Title, Some(GroupBy::Platform)) {
+            assert!(
+                !group.games.iter().any(|&i| games[i].id == DESKTOP_ID),
+                "the tile reached a collection"
+            );
+        }
+        assert_eq!(
+            filtered(&games, SortKey::Title, None).first(),
+            Some(&0),
+            "the unfiltered shelf still leads with the tile"
+        );
     }
 
     #[test]

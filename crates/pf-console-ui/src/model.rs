@@ -23,6 +23,11 @@ pub struct ProfileChip {
 pub struct HostRow {
     /// Fingerprint when pinned, else `addr:port` — cursor identity across snapshot churn.
     pub key: String,
+    /// The store record's stable id (`KnownHost::id`), what "Make default host" points at.
+    /// `None` on a merely discovered row, and on any row a producer built before this
+    /// field existed — `serde(default)` because Android's bridge is one of them.
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub addr: String,
     pub port: u16,
@@ -314,6 +319,7 @@ mod tests {
         let shared = ConsoleShared::default();
         let row = HostRow {
             key: "aa".into(),
+            id: None,
             name: "Tower".into(),
             addr: "10.0.0.2".into(),
             port: 9777,

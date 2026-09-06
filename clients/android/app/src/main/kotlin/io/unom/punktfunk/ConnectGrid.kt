@@ -88,14 +88,16 @@ internal fun ConnectGrid(
     onHostAction: (KnownHost, HostActions.Action) -> Unit,
     onCopyLink: (KnownHost, StreamProfile?) -> Unit,
     onTogglePin: (KnownHost, StreamProfile) -> Unit,
-    /** The experimental game-library toggle — off hides "Browse library…" everywhere. */
-    libraryEnabled: Boolean,
     /**
      * Open this card's game library. The second argument is the shelf's pinned profile id, exactly
      * as [onConnect] takes the card's one-off: browsing IS this card's connect with a title picked
      * first, so a pinned card's shelf launches with that card's profile.
      */
     onBrowseLibrary: (KnownHost, StreamProfile?) -> Unit,
+    /** `Settings.defaultHost` — which card wears the checkmark. Null when none is written. */
+    defaultHost: String?,
+    /** Point the start-screen setting at this host, or clear it (`false`). */
+    onMakeDefault: (KnownHost, Boolean) -> Unit,
     onRescan: () -> Unit,
     onAddHost: () -> Unit,
 ) {
@@ -105,10 +107,10 @@ internal fun ConnectGrid(
     // lives in the Edit sheet instead.
     fun hostMenu(kh: KnownHost, pin: StreamProfile?): List<HostMenuItem> = buildList {
         // Browsing IS a connect-shaped action — this card's connect with a title picked first — so
-        // a PINNED card offers it too, and its shelf launches with that card's profile. Without it
-        // the touch home had no route to the library at all: the console shell reaches it with Y
-        // from a tile, and a finger has no Y.
-        if (libraryEnabled) {
+        // a PINNED card offers it too, and its shelf launches with that card's profile. Pairing is
+        // the whole gate: the fetch authenticates with the pinned identity, so an unpaired card
+        // could only ever be refused.
+        if (kh.paired) {
             add(HostMenuItem("Browse library…") { onBrowseLibrary(kh, pin) })
         }
         if (pin == null) {
@@ -134,6 +136,17 @@ internal fun ConnectGrid(
             }
         }
         add(HostMenuItem("Copy link") { onCopyLink(kh, pin) })
+        // Which host the app opens on. Needs a pairing to point at — the start screen skips an
+        // unpaired host, so writing one would set a pointer that never resolves. An unchecked row
+        // is not "not the default": a lone paired host is the default with nothing written.
+        if (pin == null && kh.paired) {
+            val isDefault = defaultHost?.lowercase() == kh.id.lowercase()
+            add(
+                HostMenuItem(if (isDefault) "Default host ✓" else "Make default host") {
+                    onMakeDefault(kh, !isDefault)
+                },
+            )
+        }
         if (profiles.isEmpty()) return@buildList
         if (pin != null) {
             add(HostMenuItem("Unpin card", startsSection = true) { onTogglePin(kh, pin) })

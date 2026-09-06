@@ -96,6 +96,14 @@ pub mod logring;
     target_family = "wasm"
 ))]
 pub mod deeplink;
+// Where a bare launch opens (`design/default-host.md`). One resolver, held to the Swift/Kotlin ports by a shared vector file.
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
+pub mod start;
 // Connect, the wake state machine, and the session spawn + stdout contract (`design/client-architecture-split.md`).
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod orchestrate;
@@ -160,7 +168,7 @@ pub mod video_vk;
 pub mod video_csc_spv;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 mod video_software;
-// Native VAAPI: pf-vaadec plans into dlopen'd libva, DRM-PRIME dmabufs for the presenter.
+// Native VAAPI: pf-vaapi plans into dlopen'd libva, DRM-PRIME dmabufs for the presenter.
 // Only VAAPI rung; `auto` reaches it when vendor order puts VAAPI first, or pin `PUNKTFUNK_DECODER=native-vaapi`. Evidence: `video`.
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod video_vaapi_native;

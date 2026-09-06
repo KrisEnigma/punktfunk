@@ -261,6 +261,7 @@ mod tests {
     fn host(bound: Option<&str>) -> HostRow {
         HostRow {
             key: "aa".into(),
+            id: None,
             name: "Desk".into(),
             addr: "10.0.0.9".into(),
             port: 9777,

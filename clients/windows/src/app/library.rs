@@ -15,7 +15,7 @@
 //! as a prop; `Shared::library_gen` invalidates a superseded fetch exactly like the
 //! speed test's generation guard.
 
-use super::connect::initiate_launch;
+use super::connect::{initiate_launch, initiate_waking};
 use super::lucide;
 use super::style::*;
 use super::{AppCtx, Screen, Svc};
@@ -47,6 +47,22 @@ pub(crate) struct Game {
     /// [`super::launcher_icons::uri`] — `None` when the entry names no mark or one we don't ship.
     /// Resolved at decode time rather than per render: the shelf re-renders on every art arrival.
     pub(crate) icon_uri: Option<String>,
+}
+
+/// The synthetic tile every shelf leads with — the host's own desktop. Shares its id with the
+/// console's (`pf-console-ui`'s `DESKTOP_ID`), a NUL prefix nothing on the wire can carry.
+pub(crate) const DESKTOP_ID: &str = "\0desktop";
+
+/// Streaming the desktop was the host tile's click, two pages back from a shelf. Built here
+/// rather than fetched: it is presentation, never persisted and never cached.
+fn desktop_entry() -> Game {
+    Game {
+        id: DESKTOP_ID.into(),
+        title: "Desktop".into(),
+        store: String::new(),
+        launcher: false,
+        icon_uri: None,
+    }
 }
 
 #[derive(Clone, PartialEq, Default)]
@@ -453,11 +469,20 @@ pub(crate) fn library_page(props: &LibraryProps, cx: &mut RenderCx) -> Element {
                 let (ctx2, ss, st) = (ctx.clone(), ss.clone(), st.clone());
                 let (target, id) = (target.clone(), g.id.clone());
                 let (link_target, link_id) = (target.clone(), id.clone());
+                // The desktop tile is the host, not one of its titles: it streams with no
+                // launch id, and wakes first because it is often the first dial of the day.
+                let desktop = g.id == DESKTOP_ID;
                 poster_tile(
                     g,
                     props.state.art.get(&g.id).map(String::as_str),
                     poster_h,
-                    Box::new(move || initiate_launch(&ctx2, target.clone(), id.clone(), &ss, &st)),
+                    Box::new(move || {
+                        if desktop {
+                            initiate_waking(&ctx2, target.clone(), &ss, &st);
+                        } else {
+                            initiate_launch(&ctx2, target.clone(), id.clone(), &ss, &st);
+                        }
+                    }),
                     // Silent on success, exactly like the host tile's "Copy link" on the
                     // hosts page — this shell has no toast, and the two must not disagree
                     // about what copying a link looks like.
@@ -473,19 +498,24 @@ pub(crate) fn library_page(props: &LibraryProps, cx: &mut RenderCx) -> Element {
             // entries renders exactly as it did before.
             let (launchers, titles): (Vec<&Game>, Vec<&Game>) =
                 games.iter().partition(|g| g.launcher);
-            let both = !launchers.is_empty() && !titles.is_empty();
-            if !launchers.is_empty() {
-                if both {
-                    body.push(group_heading("Launchers"));
-                }
+            // The desktop leads the launcher band: both open something rather than play a
+            // title, and it means the shelf is never a dead end for the desktop-only user.
+            let desktop = desktop_entry();
+            let leading: Vec<&Game> = std::iter::once(&desktop).chain(launchers).collect();
+            {
+                body.push(group_heading(if leading.len() == 1 {
+                    "Host"
+                } else {
+                    "Launchers"
+                }));
                 body.push(tile_grid(
-                    launchers.iter().map(|g| tile(g)).collect(),
+                    leading.iter().map(|g| tile(g)).collect(),
                     cols,
                     POSTER_GAP,
                 ));
             }
             if !titles.is_empty() {
-                if both {
+                {
                     body.push(group_heading("Games"));
                 }
                 body.push(tile_grid(

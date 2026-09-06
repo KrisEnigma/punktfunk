@@ -116,7 +116,7 @@ in the future."
    the two agree there — a conformant stream is never refused. This is also what keeps
    punktfunk's own `sps.max_num_reorder_pics[max_sub_layers_minus1]` and
    `sps.max_dec_pic_buffering_minus1[max_sub_layers_minus1]` reads in bounds
-   (`pf-bitstream` h265.rs, and the `pf-vaadec` / `pf-dxvadec` / `pf-vkdecode` picture
+   (`pf-bitstream` h265.rs, and the `pf-vaapi` / `pf-dxvadec` / `pf-vkdecode` picture
    builders downstream of it) — they all take their `Sps` from this parser, so the
    parse-time check is the single choke point and none of them needs its own guard.
    Regression-tested in `pf-bitstream`
@@ -218,7 +218,7 @@ in the future."
     leaves `overflow-checks` off, which is why the parser's other unchecked accumulations
     merely wrap), and it aborts whichever thread is decoding.
 
-    Blast radius is every native AV1 rung: `pf-vkdecode`, `pf-dxvadec` and `pf-vaadec` are all
+    Blast radius is every native AV1 rung: `pf-vkdecode`, `pf-dxvadec` and `pf-vaapi` are all
     re-exports of `pf_bitstream::av1::Av1Planner`, whose `plan_au` hands raw access-unit bytes
     straight to this function. Reachable from the project's own `PUNKTFUNK_AU_FAULT=truncate`
     injector — whose `FaultMode::Truncate` docs reason only about Annex-B, where a NALU carries
@@ -248,6 +248,17 @@ in the future."
     the stale reference. No regression test: the synthesizer does not write
     `frame_size_with_refs`, and authoring the syntax by hand is out of proportion for a
     two-line zero check. **Not filed upstream.**
+
+23. `src/codec/h264/parser.rs` — new `SpsBuilder::bitstream_restriction`. The
+    synthesizer already writes `bitstream_restriction_flag`, `max_num_reorder_frames` and
+    `max_dec_frame_buffering` (`synthesizer.rs` VUI tail); the builder had no way to set them,
+    so no SPS it authored could state a reorder bound. punktfunk's native VAAPI encoder packs
+    its own SPS (both radeonsi and iHD require the app to), and stating the bound is what lets a
+    client output on it instead of holding pictures until the DPB fills — several frames of
+    latency on a stream that reorders nothing. `max_dec_frame_buffering` is floored at
+    `max_num_ref_frames` per E.2.1, which is the livelock the sweep's S-77 refuses at parse.
+    Regression test: `an_authored_sps_states_the_reorder_bound` in `pf-vaapi`.
+    **Report upstream — not yet filed.**
 
 Re-sync procedure: fetch the AOSP tree, re-apply this trim, diff `codec/` +
 `bitstream_utils.rs` (expect near-zero conflicts), update the commit pin above.

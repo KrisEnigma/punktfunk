@@ -35,6 +35,7 @@ data class SettingsOverlay(
     val renderScale: Double? = null,
     val codec: String? = null,
     val hdrEnabled: Boolean? = null,
+    val tenBitSdr: Boolean? = null,
     val compositor: Int? = null,
     val audioChannels: Int? = null,
     /**
@@ -81,6 +82,7 @@ data class SettingsOverlay(
         renderScale = renderScale ?: base.renderScale,
         codec = codec ?: base.codec,
         hdrEnabled = hdrEnabled ?: base.hdrEnabled,
+        tenBitSdr = tenBitSdr ?: base.tenBitSdr,
         compositor = compositor ?: base.compositor,
         audioChannels = audioChannels ?: base.audioChannels,
         audioFormat = audioFormat ?: base.audioFormat,
@@ -121,6 +123,7 @@ data class SettingsOverlay(
         renderScale = if (after.renderScale != before.renderScale) after.renderScale else renderScale,
         codec = if (after.codec != before.codec) after.codec else codec,
         hdrEnabled = if (after.hdrEnabled != before.hdrEnabled) after.hdrEnabled else hdrEnabled,
+        tenBitSdr = if (after.tenBitSdr != before.tenBitSdr) after.tenBitSdr else tenBitSdr,
         compositor = if (after.compositor != before.compositor) after.compositor else compositor,
         audioChannels = if (after.audioChannels != before.audioChannels) after.audioChannels else audioChannels,
         audioFormat = if (after.audioFormat != before.audioFormat) after.audioFormat else audioFormat,
@@ -157,6 +160,7 @@ data class SettingsOverlay(
         "render_scale" -> copy(renderScale = null)
         "codec" -> copy(codec = null)
         "hdr_enabled" -> copy(hdrEnabled = null)
+        "ten_bit_sdr" -> copy(tenBitSdr = null)
         "compositor" -> copy(compositor = null)
         "audio_channels" -> copy(audioChannels = null)
         "audio_format" -> copy(audioFormat = null)
@@ -186,6 +190,7 @@ data class SettingsOverlay(
         if (renderScale != null) add("render_scale")
         if (codec != null) add("codec")
         if (hdrEnabled != null) add("hdr_enabled")
+        if (tenBitSdr != null) add("ten_bit_sdr")
         if (compositor != null) add("compositor")
         if (audioChannels != null) add("audio_channels")
         if (audioFormat != null) add("audio_format")
@@ -223,6 +228,7 @@ data class SettingsOverlay(
         renderScale?.let { j.put("render_scale", it) }
         codec?.let { j.put("codec", it) }
         hdrEnabled?.let { j.put("hdr_enabled", it) }
+        tenBitSdr?.let { j.put("ten_bit_sdr", it) }
         compositor?.let { j.put("compositor", it) }
         audioChannels?.let { j.put("audio_channels", it) }
         audioFormat?.let { j.put("audio_format", it) }
@@ -267,6 +273,7 @@ data class SettingsOverlay(
             renderScale = if (j.has("render_scale")) j.optDouble("render_scale") else null,
             codec = j.optStringOrNull("codec"),
             hdrEnabled = j.optBooleanOrNull("hdr_enabled"),
+            tenBitSdr = j.optBooleanOrNull("ten_bit_sdr"),
             compositor = j.optIntOrNull("compositor"),
             audioChannels = j.optIntOrNull("audio_channels"),
             audioFormat = j.optStringOrNull("audio_format"),

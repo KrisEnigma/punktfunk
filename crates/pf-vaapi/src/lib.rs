@@ -25,12 +25,22 @@
 
 pub mod config;
 pub mod drm;
+/// H.264 encode parameter buffers — the encode mirror of [`va`].
+pub mod enc_h264;
+/// HEVC encode parameter buffers and the driver feature words.
+pub mod enc_h265;
+/// One description of the stream, feeding both the packed headers and the VA buffer.
+pub mod enc_params;
+/// HEVC parameter sets, slice headers and HDR10 SEI, written from one description.
+pub mod hevc;
 pub mod pic;
 pub mod pic_av1;
 pub mod pic_h265;
 pub mod va;
 pub mod va_av1;
 pub mod va_h265;
+/// VideoProc: the ingest colour conversion and the dmabuf import attributes.
+pub mod vpp;
 
 /// DPB slot ledger, re-exported from [`pf_vkdecode`] (crate docs).
 pub use pf_vkdecode::SlotError;
@@ -50,7 +60,7 @@ pub use pf_bitstream::av1::PlanError as PlanErrorAv1;
 pub use pf_bitstream::av1::PlanWarning as PlanWarningAv1;
 pub use pf_bitstream::av1::NUM_REF_SLOTS;
 /// H.264/H.265 planners, re-exported so the Linux layer names them through
-/// `pf_vaadec` and does not grow a pf-bitstream dependency of its own.
+/// `pf_vaapi` and does not grow a pf-bitstream dependency of its own.
 pub use pf_bitstream::h264::AuPlan;
 pub use pf_bitstream::h264::ColourDescription;
 pub use pf_bitstream::h264::DisplayCrop;

@@ -8,7 +8,7 @@
 # needed.
 #
 # NO libav* here since M10 (design/client-native-decode.md §6): the client decodes with
-# pf-vkdecode / pf-vaadec (libva is dlopen'd, never linked) / openh264+rav1d, so nothing in
+# pf-vkdecode / pf-vaapi (libva is dlopen'd, never linked) / openh264+rav1d, so nothing in
 # either binary has an FFmpeg DT_NEEDED and shlibdeps stops emitting `libavcodec…` on its
 # own — there is no list here to prune, which is exactly the property to keep. That also
 # ends the soname coupling that forced the host package's BUNDLE_FFMPEG dance: a client

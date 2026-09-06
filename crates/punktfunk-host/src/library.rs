@@ -26,6 +26,7 @@ mod hidden;
 mod launch;
 mod plugin_launch;
 mod scanners;
+mod stats;
 
 pub use art::*;
 pub use custom::*;
@@ -34,6 +35,7 @@ pub use hidden::*;
 pub use launch::*;
 pub use plugin_launch::*;
 pub use scanners::*;
+pub use stats::*;
 
 /// Cover art. The client prefers `portrait` for a grid and falls back to `header`
 /// when a title has no 600×900 capsule (common for older Steam apps).
@@ -172,6 +174,10 @@ pub struct GameEntry {
     #[serde(skip)]
     #[schema(ignore)]
     pub detect: DetectSpec,
+    /// Play stats, once this host has launched the title (`stats.rs`). Joined at read
+    /// time from `library-stats.json`, never stored on the entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<GameStats>,
     #[serde(flatten)]
     pub meta: GameMeta,
 }
@@ -247,16 +253,21 @@ pub fn all_games_for_operator() -> Vec<OperatorGameEntry> {
         .collect()
 }
 
-/// Merge every enabled source and the custom entries, sorted by title.
-/// Split out so the two public views differ only in how they apply the hidden set.
+/// Merge every enabled source and the custom entries, sorted by title, each
+/// carrying its play stats. Split out so the two public views differ only in
+/// how they apply the hidden set.
 fn collect_games() -> Vec<GameEntry> {
     let off = disabled_scanners();
+    let stats = game_stats();
     // Manual entries always contribute; a provider's follow the operator's source toggle.
     let mut games: Vec<GameEntry> = load_custom()
         .into_iter()
         .filter(|e| !source_id_for(e).is_some_and(|src| off.contains(src)))
         .map(GameEntry::from)
         .collect();
+    for g in &mut games {
+        g.stats = stats.get(&g.id).copied();
+    }
     games.sort_by_key(|g| g.title.to_lowercase());
     games
 }
@@ -276,6 +287,7 @@ mod tests {
             launch: None,
             provider: None,
             detect: DetectSpec::default(),
+            stats: None,
             meta: GameMeta::default(),
         }
     }

@@ -94,6 +94,9 @@ struct GamepadHostOptionsView: View {
     @State private var armedRowID: String?
     @State private var armed = false
     @State private var copied = false
+    /// The start-screen pointer. Empty means none is written, which with exactly one paired host
+    /// still resolves to it — so an unchecked row here is not the same as "not the default".
+    @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     /// A host action's outcome, reported in place — this surface has no toast, exactly like
     /// `sendLogs` above.
     @State private var hostActionState: HostActionState = .idle
@@ -112,6 +115,8 @@ struct GamepadHostOptionsView: View {
 
     private enum Action: String {
         case wake
+        /// Point the start-screen setting at this host, or clear it when it already names it.
+        case makeDefault
         /// One of the host's own actions; WHICH one rides on the row (`Row.hostAction`),
         /// because this enum's raw values are fixed and the host's list is not.
         case hostAction
@@ -216,6 +221,13 @@ struct GamepadHostOptionsView: View {
         var id: String { hostAction.map { "hostAction:\($0.id)" } ?? action.rawValue }
     }
 
+    /// The pointer names this host. Case-insensitive: the Rust client mints lowercase ids into
+    /// the same key, and `UUID.uuidString` is uppercase.
+    private var isDefaultHost: Bool {
+        !defaultHostID.isEmpty
+            && defaultHostID.lowercased() == host.id.uuidString.lowercased()
+    }
+
     private var rows: [Row] {
         // A pinned card is a shortcut, not a host: everything host-level is deliberately absent.
         if pinnedProfile != nil {
@@ -229,6 +241,14 @@ struct GamepadHostOptionsView: View {
         // Waking a host that is already answering would just sit there counting seconds.
         if canWake, !isOnline {
             list.append(Row(action: .wake, label: "Wake host", icon: "power"))
+        }
+        // Needs a pairing to point at: the start screen skips an unpaired host, so writing one
+        // would set a pointer that never resolves.
+        if host.pinnedSHA256 != nil {
+            list.append(Row(
+                action: .makeDefault,
+                label: isDefaultHost ? "Default host \u{2713}" : "Make default host",
+                icon: "house"))
         }
         // …and the other half of that round trip, immediately below it. A destructive one wears
         // the same "press again" the Remove row does; an unavailable one stays listed and says
@@ -292,6 +312,10 @@ struct GamepadHostOptionsView: View {
             }
         case .wake:
             return "Send a Wake-on-LAN packet and wait for this host to answer."
+        case .makeDefault:
+            return isDefaultHost
+                ? "This is the host the app opens on. Press again to stop choosing it."
+                : "Open the app on this host. Change what that opens under Settings › Start in."
         case .copyLink:
             return "Copy a punktfunk:// link to this host — paste it anywhere to connect."
         case .edit:
@@ -361,6 +385,9 @@ struct GamepadHostOptionsView: View {
             }
         case .wake:
             onWake()
+            performClose()
+        case .makeDefault:
+            defaultHostID = isDefaultHost ? "" : host.id.uuidString
             performClose()
         case .copyLink:
             LinkClipboard.copy(

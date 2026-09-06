@@ -21,6 +21,7 @@ use pf_client_core::profiles::{ProfilesFile, SettingsOverlay, StreamProfile};
 // clients so one profile round-trips. A second copy of the spellings in this file is exactly the
 // drift the shared table exists to prevent.
 use pf_client_core::session::AUDIO_FORMATS;
+use pf_client_core::start;
 use pf_client_core::trust::StatsVerbosity;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -867,6 +868,20 @@ pub fn show_about(parent: &impl IsA<gtk::Widget>) {
 /// True inside a gamescope session (Steam game mode on the Deck / Bazzite): GTK popovers
 /// are xdg_popups, which gamescope never maps for nested apps — a ComboRow's dropdown
 /// flashes the row but no list ever appears. Selection UI must stay inside the toplevel.
+/// Names the host the Start in row resolves to, and says when it resolves to nothing — which
+/// is what every value does until one host is paired. Read at build time: the row is rebuilt
+/// each time the dialog opens, and the pointer is written from a host card, not from here.
+fn start_in_subtitle() -> String {
+    let known = pf_client_core::trust::KnownHosts::load();
+    match start::default_host(&Settings::load(), &known) {
+        Some(i) => format!(
+            "Library opens {}'s games; Stream also connects to its desktop",
+            known.hosts[i].name
+        ),
+        None => "Opens on the host list: there is no default host yet".into(),
+    }
+}
+
 fn gamescope_session() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.eq_ignore_ascii_case("gamescope"))
         || pf_client_core::gamescope::under_gamescope()
@@ -1419,6 +1434,15 @@ pub fn show_scoped(
              off if hosts behind a VPN look offline when they aren't",
         )
         .build();
+    // Where a bare launch opens. The subtitle names the resolved host, because with no default
+    // host every value lands on the list and the row would otherwise promise a shelf.
+    let start_in_row = ChoiceRow::new(
+        &dialog,
+        inline,
+        "Start in",
+        &start_in_subtitle(),
+        &start::StartIn::ALL.map(start::StartIn::label),
+    );
     let stats_row = ChoiceRow::new(
         &dialog,
         inline,
@@ -1741,6 +1765,13 @@ pub fn show_scoped(
         let dec_i = DECODERS.iter().position(|&d| d == dec_stored).unwrap_or(0);
         decoder_row.set_selected(dec_i as u32);
         stats_row.set_selected(index::stats(s));
+        let want = start::StartIn::parse(&s.start_in);
+        start_in_row.set_selected(
+            start::StartIn::ALL
+                .iter()
+                .position(|v| *v == want)
+                .unwrap_or(1) as u32,
+        );
         fullscreen_row.set_active(s.fullscreen_on_stream);
         theme_row.set_active(s.follow_os_theme);
         menu_row.set_active(pf_client_core::omarchy_menu::enabled());
@@ -2114,6 +2145,9 @@ pub fn show_scoped(
     // global in v1 (design §3, tier H/G).
     if !profile_mode {
         session_group.add(&wake_row);
+        // A device preference like auto-wake: which host this machine opens on says nothing
+        // about how a stream should look, so it is never part of a profile.
+        session_group.add(start_in_row.widget());
     }
     // Appearance is device-level like the console's palette, never part of a profile, and
     // the row exists only where the theme does — Omarchy — rather than sitting disabled.
@@ -2319,6 +2353,10 @@ pub fn show_scoped(
                 StatsVerbosity::ALL
                     [(stats_row.selected() as usize).min(StatsVerbosity::ALL.len() - 1)],
             );
+            s.start_in = start::StartIn::ALL
+                [(start_in_row.selected() as usize).min(start::StartIn::ALL.len() - 1)]
+            .as_str()
+            .to_string();
             s.fullscreen_on_stream = fullscreen_row.is_active();
             s.follow_os_theme = theme_row.is_active();
             // Live: the switch must not wait out the shell's 2 s poll to mean something.

@@ -23,6 +23,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
+- **The game-library toggle is gone from Apple and Android too.** `DefaultsKey.libraryEnabled`
+  and the Kotlin `Settings.libraryEnabled` follow the Rust `library_enabled` retired in 0.31:
+  pairing is the only gate on every client now. A stored value is left where it is and never
+  read again, so nothing migrates and a downgrade still finds it.
 - **The Windows driver protocol floor is 8.** The pf-vdisplay driver encodes what DWM composes
   and answers only to the host process that created each monitor, so a host and a driver from
   different releases share neither a video transport nor an ownership rule. Install the
@@ -43,6 +47,25 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
+  and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
+  rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.
+- **`NativeBridge.nativeConnect` takes a `tenBitSdr` flag.** The Android JNI entry point gained a
+  `Boolean` after `hdrEnabled`, splitting `VIDEO_CAP_10BIT` from `VIDEO_CAP_HDR` so the client can
+  ask for Main10 under SDR. Rebuild the kit against the matching native library; an unchanged
+  caller will not link.
+- **`start_in` and `default_host` are cross-client settings keys.** The client settings record
+  gained where a bare launch opens (`"hosts"`, `"library"`, `"stream"`; unknown reads as library)
+  and which saved-host id it opens on. Resolve them through `pf_client_core::start`, never by
+  reading either alone: with one paired host the default is derived and `default_host` is empty.
+  The Swift and Kotlin ports are held to it by `clients/shared/start-screen-vectors.json`.
+- **`HostRow.id` on the Android console bridge JSON.** The console's host row carries the store
+  record's id, which is what its "Make default host" row points at. `serde(default)`, so a bridge
+  that does not send it still parses — but that bridge's rows cannot offer the row.
+- **`GameEntry.stats` carries a title's play stats.** Every library entry a host has launched
+  gains `last_played_unix_ms`, `play_time_ms`, `last_run_ms` and `launch_count`, kept in
+  `library-stats.json` beside the hide list and absent until the first launch. A client that
+  sorts by recency or shows play time reads them off the entry; nothing to negotiate.
 - **`GamepadType.steamController2Puck` (pref `10`) is declared by an Apple client.** The macOS
   SC2 passthrough now captures over USB — a cabled pad or a Puck dongle, each collection its own
   wire pad — and a Puck slot declares kind 10 where a wired or BLE pad still declares 9. Nothing
@@ -253,17 +276,22 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `lb`, `rb`, `lt`, `rt`, `select`, `guide`, `start` — to `{x, y, scale, hidden}`; absent
   fields keep the preset, unknown ids survive a rewrite, and a parser that predates the maps
   ignores them, so nothing to do.
-- **Gamescope sessions run adaptive sync** (`punktfunk-gamescope` `+pfhdr9`, patch 0011): the
-  headless connector advertises VRR, so gamescope paints — and publishes to PipeWire — on the
-  game's commit instead of its synthetic vblank tick, and the stream receives every unique frame
-  up to the session rate instead of the tick's quantization of them. The spawn pairs
-  `--adaptive-sync` with `--framerate-limit` at the `-r` rate, because VRR frame callbacks no
-  longer pace the game and the limiter must (the patch keeps it armed on a connector that paces
-  nothing). `PUNKTFUNK_GAMESCOPE_VRR=0` opts out; a stock or older gamescope gets neither flag
-  and behaves exactly as before.
+- **Gamescope adaptive sync** paints on game commits while preserving the game-rate limit
+  across compositor refresh updates. Install `punktfunk-gamescope` `+pfhdr10` or newer;
+  `PUNKTFUNK_GAMESCOPE_VRR=0` opts out.
 
 ### Changed
 
+- **The Windows driver's diagnostics reach `host.log`.** The encoder runs inside WUDFHost, so its
+  backend rejections, bitrate retargets and wedges used to need `PFVD_DEBUG_LOG` and a file in
+  LocalService's temp directory; the host now drains them over `IOCTL_DRAIN_LOG` at the keepalive
+  cadence and once after every encoder open. Nothing to do — the knob still adds the driver's own
+  file and debug-string tee on top of it.
+- **The SteamOS host carries its own FFmpeg.** The on-device build now compiles the pinned LGPL
+  FFmpeg the .deb already bundles into `target-steamos/ffmpeg` and links it behind an absolute
+  rpath, because SteamOS's FFmpeg moves independently of any Debian release and a host linked
+  against the box's copy stops loading when it does. A first install takes about four minutes
+  longer and `update.sh` reuses the build until the pin moves; nothing else changes.
 - **A Windows host serves pref `10` as the wired Triton pad.** It used to degrade to the Xbox 360
   pad, because 28DE:1304 has no Windows synthesis; it now folds onto the same 28DE:1302 virtual
   pad a cabled SC2 mints, which Steam treats as the canonical controller. Nothing to do — a Puck
@@ -329,12 +357,48 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A display that re-lights itself mid-stream is parked for the session.** A standby TV on a
+  Windows host re-lit 35–100 s after every exclusive isolate and each eviction cost the stream a
+  0.2–1.8 s rebuild, so after the first re-assert the host PnP-disables that panel — journaled,
+  re-enabled at teardown. Nothing to do; `PUNKTFUNK_STANDBY_SINK_KEEP` still opts out.
+- **A game's own display mode survives a topology re-assert.** The session kept the client's
+  original mode after the encoder had followed a mid-session mode change, so the next re-assert
+  or rebuild set the display back to it. Nothing to do.
+- **AV1 tile starts reach the decoder in superblocks.** `pMiColStarts`/`pMiRowStarts` carried 4x4
+  units, so a client whose Vulkan driver reads those arrays instead of recomputing them — AMD on
+  Windows — painted everything below the first tile row green on the multi-tile AV1 a host emits
+  at 4K120. Update the client; nothing to configure.
+- **The virtual DualSense reports its adaptive-trigger status.** A game that arms a Weapon
+  effect fires on the trigger's status nibble, not on the axis, so with adaptive triggers on
+  in-game R2 did nothing — the host left those two report bytes zero. The host now derives the
+  status from the armed effect and the trigger position, on every backend; nothing to do.
+- **The "audio format but not CLIENT_CAP_AUDIO_HIRES" warning fires only for a real
+  contradiction.** Hello decodes an absent format as 48 kHz/16-bit, so every ordinary session
+  logged it; nothing to do.
+- **A capture-loss rebuild replaces the stalled display instead of extending its group.** On
+  Mutter the rebuilt stream used to land on a fresh secondary monitor showing an empty desktop
+  while the stalled one lingered; the rebuild now supersedes and retires it, as a mode switch
+  does. Nothing to do.
+- **A KWin virtual output negotiates a 4-buffer capture pool.** KWin's default of 3 left the
+  zero-copy hold one buffer short, so every other frame went back to the compositor while the
+  encoder still read it and could tear under load; nothing to do, and `PUNKTFUNK_FORCE_SHM=1`
+  stays the escape should a future KWin refuse the ask.
 - **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
   Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
   command to `100F6C34`, id byte stripped in both cases, where the link had written every frame
   whole to whichever writable characteristic it discovered first — so lizard mode never went off,
   at most one actuator could be reached, and Steam's gyro-enable was swallowed. The link now also
   re-acquires a pad that powers off mid-session; nothing to do beyond the update.
+- **A DualSense's haptics and speaker stream from its own pad.** The capture source — the
+  Windows endpoint, the usbip card, the minted PipeWire sink — is named by the pad's OS slot,
+  which the streamer was opening by the client's pad number instead: with two pads it could
+  carry the other player's audio, and a host serving two sessions the other session's. Nothing
+  to do.
+- **Two controllers no longer swap raw reports and rumble.** The host claims an OS pad slot on a
+  pad's first frame — the pad that moves first takes the lowest slot, whatever the client
+  numbered it — and the rich plane (touchpad, motion, a passed-through Steam Controller 2's raw
+  HID reports) was the one index never translated into that space: each pad drove the other's
+  virtual device, and the game's rumble came back on the wrong controller. Nothing to do.
 - **The forwarded pointer is native-sized on a scaled Wayland client.** SDL hands the compositor
   a custom cursor's pixel size as a viewport destination — surface-local units, so the display
   scale is applied there — while the client folded that same scale into the bitmap it built,
@@ -456,6 +520,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   toolset's `msvcp140*.dll` and `vcruntime140*.dll` beside the exe, so a machine whose
   redistributable predates 14.40 no longer kills the session in `MSVCP140.dll` on the first
   text layout. Nothing to do; a system redist update is no longer required.
+- **A clamped Windows refresh logs at warn.** A mode set that lands on a lower refresh than the
+  client asked for now warns with the rates the OS listed, where it used to be an info line.
+  Nothing to do; grep `host.log` for `not advertised` when a client streams below the rate it
+  asked for.
 
 ### Fixed
 

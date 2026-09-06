@@ -62,6 +62,7 @@ use crate::trust::{KnownHosts, Settings};
 use hosts::HostsProps;
 use pf_client_core::discovery::{self, DiscoveredHost, DiscoveryEvent};
 use pf_client_core::gamepad::GamepadService;
+use pf_client_core::start;
 use punktfunk_core::client::NativeClient;
 use speed::{SpeedProps, SpeedState};
 use std::collections::HashMap;
@@ -373,6 +374,43 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
     let (probed, set_probed) = cx.use_async_state(HashMap::<String, bool>::new());
     // Library fetch/art state (thread-driven → root; see `library::start_fetch`).
     let (library, set_library) = cx.use_async_state(library::LibraryState::default());
+    // Where a bare launch opens (design/default-host.md). Once per process, before the poll
+    // below can deliver anything: a link queued at startup is explicit intent and wins, and
+    // `pending()` reads the queue WITHOUT draining it so the router still gets it.
+    cx.use_effect((), {
+        let (ctx, set_screen, set_library, set_status) = (
+            ctx.clone(),
+            set_screen.clone(),
+            set_library.clone(),
+            set_status.clone(),
+        );
+        move || {
+            if crate::deeplink::pending() {
+                return;
+            }
+            let settings = ctx.settings.lock().unwrap().clone();
+            let known = pf_client_core::trust::KnownHosts::load();
+            let (default, source) = start::default_host_with_source(&settings, &known);
+            tracing::info!(
+                start_in = start::StartIn::parse(&settings.start_in).as_str(),
+                default = default.map_or("none", |i| known.hosts[i].name.as_str()),
+                source = source.as_str(),
+                "client start"
+            );
+            let screen = start::start_screen(&settings, &known);
+            let Some(i) = screen.host_index() else { return };
+            let target = hosts::saved_target(&known.hosts[i]);
+            // The same three steps the "Browse library" menu item takes, in the same order.
+            *ctx.shared.target.lock().unwrap() = target.clone();
+            library::start_fetch(&ctx, &set_library);
+            set_screen.call(Screen::Library);
+            // Stream is the library PLUS a connect, never a screen of its own: the session
+            // window is the overlay, so ending it leaves the shelf on screen underneath.
+            if matches!(screen, start::Start::Stream(_)) {
+                connect::initiate_waking(&ctx, target, &set_screen, &set_status);
+            }
+        }
+    });
 
     // Continuous LAN discovery (spawned once).
     // Route an arriving link. Parsing, host and profile resolution and every refusal rule —

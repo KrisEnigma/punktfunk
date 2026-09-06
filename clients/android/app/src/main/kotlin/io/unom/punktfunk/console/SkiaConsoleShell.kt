@@ -70,7 +70,9 @@ fun SkiaConsoleShell(
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
-    val handle = remember { SkiaConsole.ensure(context, settings) }
+    // A cold start with a link waiting must not open a shelf first: the link is routed after
+    // composition, and would then be the SECOND screen the user sees.
+    val handle = remember { SkiaConsole.ensure(context, settings, pendingLink = deepLink != null) }
     val haptics = rememberConsoleHaptics()
     // A platform-native screen the console opened over itself (design D7): the console's own
     // input is held while it is up, and Back closes it.

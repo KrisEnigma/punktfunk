@@ -316,6 +316,29 @@ impl Pads {
         }
     }
 
+    /// Reserve this wire pad's OS slot without building a device — the identity every
+    /// per-pad host resource is named by ([`crate::inject::pad_pool`]), which a pad-audio
+    /// streamer needs before the pad's first frame. Idempotent: the frame that follows
+    /// claims the same slot. `None` once every slot on the host is held.
+    fn claim_os_slot(&mut self, wire: usize) -> Option<u8> {
+        self.slots.claim_for(wire)
+    }
+
+    /// [`Self::re_index`] for the rich plane (touchpad, motion, raw HID reports).
+    /// `None` when this wire pad holds no slot: rich never creates a device.
+    ///
+    /// A client numbers its first pad 0 and the slot is claimed on that pad's first
+    /// frame, so the pad that moves first takes slot 0 whatever its wire index. Skip
+    /// this and two pads swap devices — every SC2 raw report, and the rumble Steam
+    /// answers it with, lands on the other player's controller.
+    fn rich_in_slot_space(
+        &self,
+        mut rich: punktfunk_core::quic::RichInput,
+    ) -> Option<punktfunk_core::quic::RichInput> {
+        rich.set_pad(self.slots.slot_of(rich.pad() as usize)?);
+        Some(rich)
+    }
+
     fn route_handle(&mut self, kind: GamepadPref, ev: &punktfunk_core::input::GamepadEvent) {
         match kind {
             #[cfg(target_os = "linux")]
@@ -430,12 +453,12 @@ impl Pads {
 
     /// Touchpad / motion for the pad's manager. No device yet → no-op. Xbox has no rich plane.
     fn apply_rich(&mut self, rich: punktfunk_core::quic::RichInput) {
-        use punktfunk_core::quic::RichInput;
-        let idx = match rich {
-            RichInput::Touchpad { pad, .. }
-            | RichInput::Motion { pad, .. }
-            | RichInput::TouchpadEx { pad, .. }
-            | RichInput::HidReport { pad, .. } => pad as usize,
+        let idx = rich.pad() as usize;
+        // Same wire→OS-slot rewrite `re_index` does for events: the managers index their
+        // slot table in OS space. No slot = no device for this pad, and rich never
+        // creates one.
+        let Some(rich) = self.rich_in_slot_space(rich) else {
+            return;
         };
         // Owner, else declared kind (pre-first-frame). After a kind change, rich must not
         // land on the wrong backend.
@@ -716,7 +739,17 @@ impl PadAudioSlots {
     /// stays empty (arrivals retry a few times). Only an actual open spends
     /// [`MAX_PAD_AUDIO_STARTS`]. `edge` selects DualSense Edge on Linux; Windows
     /// endpoints are pre-stamped so it is ignored there.
-    fn ensure(&mut self, conn: &super::link::SessionLink, pad: u8, kinds: u8, edge: bool) {
+    ///
+    /// Two index spaces: this table and the client's datagrams use `pad`, while the
+    /// endpoint / card / sink a streamer captures is named by the pad's OS `slot`.
+    fn ensure(
+        &mut self,
+        conn: &super::link::SessionLink,
+        pad: u8,
+        slot: u8,
+        kinds: u8,
+        edge: bool,
+    ) {
         let idx = pad as usize;
         if idx >= MAX_WIRE_PADS {
             return;
@@ -745,7 +778,7 @@ impl PadAudioSlots {
             self.stop(idx);
         }
         let stop = Arc::new(AtomicBool::new(false));
-        if let Some(h) = pad_audio::spawn(conn.clone(), pad, kinds, edge, stop) {
+        if let Some(h) = pad_audio::spawn(conn.clone(), pad, slot, kinds, edge, stop) {
             // Charge only an open that happened. A slot with no endpoint must not
             // spend the ceiling on arrival re-sends.
             self.starts[idx] += 1;
@@ -1125,15 +1158,25 @@ pub(super) fn input_thread(
                             } else {
                                 0
                             };
-                            if want != 0 {
-                                pad_streams.ensure(
+                            // The streamer captures the pad's own endpoint / card / sink,
+                            // all named by its OS slot, so reserve that here: the
+                            // declaration is what starts the stream, and the first frame
+                            // that would otherwise claim the slot may be seconds away.
+                            // No slot means no device, so no audio either.
+                            let slot = if want != 0 {
+                                pads.claim_os_slot(idx)
+                            } else {
+                                None
+                            };
+                            match slot {
+                                Some(slot) => pad_streams.ensure(
                                     &conn,
                                     pad,
+                                    slot,
                                     want,
                                     matches!(kind, GamepadPref::DualSenseEdge),
-                                );
-                            } else {
-                                pad_streams.stop(idx);
+                                ),
+                                None => pad_streams.stop(idx),
                             }
                         }
                     }
@@ -1309,6 +1352,46 @@ mod tests {
         route.send(ev).unwrap();
         assert!(shared_rx.try_recv().is_err(), "old target no longer fed");
         assert_eq!(pinned_rx.try_recv().unwrap().y, 2);
+    }
+
+    /// Two pads whose OS slots were claimed out of wire order — the pad that moves
+    /// first takes the lower slot whatever the client numbered it. Untranslated, one
+    /// pad's raw reports drive the other's device and Steam answers the touch with
+    /// rumble on the wrong controller.
+    #[test]
+    fn rich_input_is_re_addressed_into_slot_space() {
+        use punktfunk_core::quic::{RichInput, HID_REPORT_MAX};
+        let mut pads = Pads::new(GamepadPref::Xbox360);
+        let slot1 = pads.slots.claim_for(1).expect("a free OS slot");
+        let slot0 = pads.slots.claim_for(0).expect("a free OS slot");
+        assert_ne!(slot0, slot1, "two wire pads share an OS slot");
+
+        let report = |pad| RichInput::HidReport {
+            pad,
+            len: 1,
+            data: [0x42; HID_REPORT_MAX],
+        };
+        assert_eq!(
+            pads.rich_in_slot_space(report(1)).map(|r| r.pad()),
+            Some(slot1)
+        );
+        assert_eq!(
+            pads.rich_in_slot_space(report(0)).map(|r| r.pad()),
+            Some(slot0)
+        );
+        // No slot = no device. Dropped, never folded onto slot 0.
+        assert!(pads.rich_in_slot_space(report(2)).is_none());
+    }
+
+    /// A pad-audio streamer starts at the arrival and captures the endpoint / card / sink
+    /// named by the pad's OS slot, so the arrival must reserve the same slot the pad's
+    /// first frame would have taken — never a second name for one pad.
+    #[test]
+    fn an_arrival_reserves_the_slot_the_first_frame_would_claim() {
+        let mut pads = Pads::new(GamepadPref::DualSense);
+        let slot = pads.claim_os_slot(1).expect("a free OS slot");
+        assert_eq!(pads.slots.claim_for(1), Some(slot), "first frame re-mints");
+        assert_eq!(pads.claim_os_slot(1), Some(slot), "re-declare re-mints");
     }
 
     #[test]
