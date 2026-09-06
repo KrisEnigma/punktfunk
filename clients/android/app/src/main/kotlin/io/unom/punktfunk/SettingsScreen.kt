@@ -757,6 +757,22 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
             field = "hdr_enabled",
             onCheckedChange = { on -> update(s.copy(hdrEnabled = on)) },
         )
+        // Asks nothing of the panel, so no capability gate: an 8-bit display shows a dithered
+        // Main10 stream, and the gain is gradients that do not band. Inert while HDR is on
+        // above — that already carries 10 bits — so the row dims rather than disappearing.
+        val hdrOn = s.hdrEnabled && hdrCapable
+        ToggleRow(
+            title = "10-bit colour",
+            subtitle = if (hdrOn) {
+                "HDR already streams in 10-bit"
+            } else {
+                "Smoother gradients on any display, for a little more bandwidth."
+            },
+            checked = s.tenBitSdr && !hdrOn,
+            enabled = !hdrOn,
+            field = "ten_bit_sdr",
+            onCheckedChange = { on -> update(s.copy(tenBitSdr = on)) },
+        )
     }
 
     // The desktop clients group their decoder and GPU pickers here, and keep them out of profiles —

@@ -360,6 +360,7 @@ internal object ConsoleJson {
         j.put("audio_format", s.audioFormat)
         j.put("codec", s.codec)
         j.put("hdr_enabled", s.hdrEnabled)
+        j.put("ten_bit_sdr", s.tenBitSdr)
         j.put("present_priority", s.presentPriority)
         j.put("smooth_buffer", s.smoothBuffer)
         j.put("show_stats", s.statsVerbosity != StatsVerbosity.OFF)
@@ -424,6 +425,7 @@ internal object ConsoleJson {
             audioFormat = str("audio_format", s.audioFormat),
             codec = str("codec", s.codec),
             hdrEnabled = j.optBoolean("hdr_enabled", s.hdrEnabled),
+            tenBitSdr = j.optBoolean("ten_bit_sdr", s.tenBitSdr),
             presentPriority = str("present_priority", s.presentPriority),
             smoothBuffer = j.optInt("smooth_buffer", s.smoothBuffer),
             statsVerbosity = StatsVerbosity.entries

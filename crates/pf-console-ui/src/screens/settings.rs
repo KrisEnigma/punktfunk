@@ -944,11 +944,15 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         RowId::DsCapture => &[Android, WebOS],
         // That client's own audio plane and its remote's missing second button.
         RowId::AudioRoute | RowId::CursorGestures => &[WebOS],
-        // Decoder choice, chroma/bit-depth and the window-manager knobs: the TV decodes
-        // through NDL and has no window manager, so none of these is a control it could obey.
+        // Main10 at BT.709 asks nothing of the panel, and MediaCodec decodes it from the SPS, so
+        // Android obeys this one. The TV does not: NDL decodes what it is given and exposes no
+        // bit-depth ask.
+        RowId::TenBitSdr => &[Desktop, Android],
+        // Decoder choice, chroma and the window-manager knobs: the TV decodes through NDL and has
+        // no window manager, so none of these is a control it could obey. VRR is desktop-only for
+        // a different reason — Android pins a fixed mode on purpose (`trust::Settings::allow_vrr`).
         RowId::Decoder
         | RowId::Chroma444
-        | RowId::TenBitSdr
         | RowId::Vsync
         | RowId::AllowVrr
         | RowId::Fullscreen
@@ -2670,7 +2674,8 @@ pub(crate) mod tests {
             vec![
                 RowId::Decoder,
                 RowId::Chroma444,
-                RowId::TenBitSdr,
+                // TenBitSdr is NOT here: MediaCodec decodes Main10 from the SPS and the depth
+                // asks nothing of the panel, so Android obeys it. webOS still does not.
                 RowId::Vsync,
                 RowId::AllowVrr,
                 RowId::AudioRoute,

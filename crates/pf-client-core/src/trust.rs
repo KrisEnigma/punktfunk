@@ -1063,8 +1063,9 @@ pub struct Settings {
     /// Advertise 10-bit without HDR (`VIDEO_CAP_10BIT`): SDR desktop at Main10.
     /// Subsumed by `hdr_enabled`. `default` so older stores load off.
     ///
-    /// Desktop only. Android welds the two bits together at one site — it sends 10-bit with HDR
-    /// or nothing — so there is nothing there for this to gate until that split.
+    /// Unlike `hdr_enabled` this asks nothing of the panel, so no client gates it on a display
+    /// probe. webOS is the exception that cannot obey it: NDL decodes what it is given and
+    /// exposes no bit-depth ask.
     #[serde(default)]
     pub ten_bit_sdr: bool,
     /// `"latency"` (default) or `"smooth"`. Unknown reads as latency so a future

@@ -32,6 +32,16 @@ data class Settings(
      * would mis-tone-map. Turning this off forces SDR even on a capable panel.
      */
     val hdrEnabled: Boolean = true,
+    /**
+     * Ask for 10-bit WITHOUT HDR — Main10 at BT.709. Off by default, and subsumed by
+     * [hdrEnabled], which already implies 10 bits.
+     *
+     * Unlike HDR this asks nothing of the panel: an 8-bit display shows a dithered Main10 stream
+     * perfectly well, and the gain is banding-free gradients — skies, fades, dark scenes — for a
+     * little bandwidth. So it is never gated on [displaySupportsHdr]. Mirrors the cross-client
+     * `ten_bit_sdr` key the desktop clients write.
+     */
+    val tenBitSdr: Boolean = false,
     val compositor: Int = 0,
     val gamepad: Int = 0,
     /**
@@ -344,6 +354,7 @@ class SettingsStore(context: Context) {
         bitrateKbps = prefs.getInt(K_BITRATE, 0),
         renderScale = prefs.getFloat(K_RENDER_SCALE, 1.0f).toDouble(),
         hdrEnabled = prefs.getBoolean(K_HDR, true),
+        tenBitSdr = prefs.getBoolean(K_TEN_BIT_SDR, false),
         compositor = prefs.getInt(K_COMPOSITOR, 0),
         gamepad = prefs.getInt(K_GAMEPAD, 0),
         gamepadForwarding = prefs.getBoolean(K_GAMEPAD_FORWARDING, true),
@@ -404,6 +415,7 @@ class SettingsStore(context: Context) {
             .putInt(K_BITRATE, s.bitrateKbps)
             .putFloat(K_RENDER_SCALE, s.renderScale.toFloat())
             .putBoolean(K_HDR, s.hdrEnabled)
+            .putBoolean(K_TEN_BIT_SDR, s.tenBitSdr)
             .putInt(K_COMPOSITOR, s.compositor)
             .putInt(K_GAMEPAD, s.gamepad)
             .putBoolean(K_GAMEPAD_FORWARDING, s.gamepadForwarding)
@@ -446,6 +458,7 @@ class SettingsStore(context: Context) {
         const val K_BITRATE = "bitrate_kbps"
         const val K_RENDER_SCALE = "render_scale"
         const val K_HDR = "hdr_enabled"
+        const val K_TEN_BIT_SDR = "ten_bit_sdr"
         const val K_COMPOSITOR = "compositor"
         const val K_GAMEPAD = "gamepad"
         const val K_GAMEPAD_FORWARDING = "gamepad_forwarding"

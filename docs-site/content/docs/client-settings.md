@@ -87,7 +87,8 @@ smooth, and the displays at both ends keep their colour settings untouched. This
 *encoder's* precision, not a 10-bit capture: the desktop stays 8-bit, the win is that compression
 stops adding banding of its own. Needs a Windows host on an NVIDIA GPU and HEVC; anywhere else the
 session stays 8-bit, and the host says so in the handshake. When HDR engages it takes over (HDR is
-already 10-bit). Linux, Windows and the desktop console.
+already 10-bit), and the row dims to say so. Every client except the TV apps: unlike HDR it asks
+nothing of your display, so an ordinary panel gets the smoother gradients too.
 
 **Prioritize** — *default: Lowest latency.* **Lowest latency** shows every frame the moment the
 display can take it — a network hiccup becomes an occasional repeated or skipped frame.

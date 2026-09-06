@@ -47,6 +47,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`NativeBridge.nativeConnect` takes a `tenBitSdr` flag.** The Android JNI entry point gained a
+  `Boolean` after `hdrEnabled`, splitting `VIDEO_CAP_10BIT` from `VIDEO_CAP_HDR` so the client can
+  ask for Main10 under SDR. Rebuild the kit against the matching native library; an unchanged
+  caller will not link.
 - **`start_in` and `default_host` are cross-client settings keys.** The client settings record
   gained where a bare launch opens (`"hosts"`, `"library"`, `"stream"`; unknown reads as library)
   and which saved-host id it opens on. Resolve them through `pf_client_core::start`, never by

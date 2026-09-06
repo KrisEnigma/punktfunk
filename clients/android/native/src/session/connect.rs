@@ -227,9 +227,73 @@ fn audio_rate_is_openable(_rate_hz: u32, _channels: u8) -> bool {
     false
 }
 
+/// The `Hello`'s video capability bits, from what the panel can present and what the decoders
+/// tolerate.
+///
+/// `hdr` is panel truth: Kotlin checks `Display.getHdrCapabilities()`, because asking for PQ on
+/// an SDR screen gets a stream the panel mis-tone-maps. It implies 10 bits, so it carries both.
+///
+/// `ten_bit_sdr` is the separate ask, and not an HDR question: Main10 at BT.709 costs a little
+/// bandwidth and buys gradients that do not band, on any panel. The decode path needs nothing for
+/// it — the HDR metadata and the Surface dataspace are gated on the stream's own colour, so an
+/// SDR Main10 stream skips both.
+///
+/// `multi_slice` is DECODER truth, not panel truth: Kotlin probes every decoder this device would
+/// use (`VideoDecoders.multiSliceTolerant`), because Amlogic wedges the whole device on
+/// multi-slice AUs — the 0.17.0 field regression. Only then may the host send >1 slice per frame.
+fn video_caps(hdr: bool, ten_bit_sdr: bool, multi_slice: bool) -> u8 {
+    use punktfunk_core::quic::{VIDEO_CAP_10BIT, VIDEO_CAP_HDR, VIDEO_CAP_MULTI_SLICE};
+    let mut caps = 0;
+    if hdr {
+        caps |= VIDEO_CAP_10BIT | VIDEO_CAP_HDR;
+    }
+    if ten_bit_sdr {
+        caps |= VIDEO_CAP_10BIT;
+    }
+    if multi_slice {
+        caps |= VIDEO_CAP_MULTI_SLICE;
+    }
+    caps
+}
+
+#[cfg(test)]
+mod caps_tests {
+    use super::video_caps;
+    use punktfunk_core::quic::{VIDEO_CAP_10BIT, VIDEO_CAP_HDR, VIDEO_CAP_MULTI_SLICE};
+
+    /// HDR carries 10-bit with it, 10-bit-SDR asks for the depth alone, and neither reaches for
+    /// the other's bit. The whole point of the split: an SDR panel can still get Main10.
+    #[test]
+    fn ten_bit_is_asked_for_with_or_without_hdr() {
+        assert_eq!(video_caps(false, false, false), 0);
+        assert_eq!(
+            video_caps(true, false, false),
+            VIDEO_CAP_10BIT | VIDEO_CAP_HDR
+        );
+        assert_eq!(video_caps(false, true, false), VIDEO_CAP_10BIT);
+        // HDR already implies the depth, so asking for both is the same request as HDR.
+        assert_eq!(
+            video_caps(true, true, false),
+            VIDEO_CAP_10BIT | VIDEO_CAP_HDR
+        );
+        // …and 10-bit alone never implies PQ, which would be the mis-tone-mapped stream.
+        assert_eq!(video_caps(false, true, false) & VIDEO_CAP_HDR, 0);
+    }
+
+    /// Multi-slice is decoder truth and rides alongside, never gated by the colour asks.
+    #[test]
+    fn multi_slice_is_independent_of_the_colour_bits() {
+        assert_eq!(video_caps(false, false, true), VIDEO_CAP_MULTI_SLICE);
+        assert_eq!(
+            video_caps(true, false, true),
+            VIDEO_CAP_10BIT | VIDEO_CAP_HDR | VIDEO_CAP_MULTI_SLICE
+        );
+    }
+}
+
 /// `NativeBridge.nativeConnect(host, port, w, h, hz, certPem, keyPem, pinHex, bitrateKbps,
-/// compositorPref, gamepadPref, hdrEnabled, audioChannels, audioRateHz, audioBits, preferredCodec,
-/// timeoutMs, launch, deviceName): Long`.
+/// compositorPref, gamepadPref, hdrEnabled, tenBitSdr, audioChannels, audioRateHz, audioBits,
+/// preferredCodec, timeoutMs, launch, deviceName): Long`.
 /// `launch` (empty ⇒ none) is a store-qualified library id to boot straight into a game.
 /// `deviceName` (empty ⇒ none) rides the Hello as `name` — what the host's pending-approval list
 /// and trust store show for this device (Kotlin passes `Build.MODEL`, its `nativePair` convention).
@@ -267,6 +331,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'lo
     compositor_pref: jint,
     gamepad_pref: jint,
     hdr_enabled: jboolean,
+    ten_bit_sdr: jboolean,
     multi_slice_ok: jboolean,
     frame_parts_ok: jboolean,
     audio_channels: jint,
@@ -335,11 +400,12 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'lo
     // inert client-side unless BOTH probes pass — this line is the one place that says which.
     log::info!(
         target: "pf.caps",
-        "decoder caps: multi_slice={} partial_frame={}{} hdr={} codec_bits={:#x}",
+        "decoder caps: multi_slice={} partial_frame={}{} hdr={} ten_bit_sdr={} codec_bits={:#x}",
         multi_slice_ok,
         frame_parts_ok,
         if force_parts { " (FORCED by sysprop)" } else { "" },
         hdr_enabled,
+        ten_bit_sdr,
         video_codecs,
     );
     let pin: Option<[u8; 32]> = if pin_hex.is_empty() {
@@ -379,25 +445,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'lo
         CompositorPref::from_u8(compositor_pref.clamp(0, u8::MAX as jint) as u8),
         GamepadPref::from_u8(gamepad_pref.clamp(0, u8::MAX as jint) as u8),
         bitrate_kbps.max(0) as u32, // 0 = host default
-        // Advertise 10-bit + HDR ONLY when this device's display can actually present it (Kotlin
-        // checks Display.getHdrCapabilities() and passes the result): the host (e.g. Windows) then
-        // upgrades to a Main10 / BT.2020 PQ encode. On an SDR display we advertise 0 so the host
-        // sends a proper 8-bit BT.709 stream rather than PQ the panel would mis-tone-map. AMediaCodec
-        // decodes Main10 from the SPS and the decode loop signals the Surface HDR dataspace + static
-        // metadata (see crate::decode).
-        // 10-bit/HDR by panel truth (above) + multi-slice by DECODER truth: Kotlin probes every
-        // decoder this device would use (`VideoDecoders.multiSliceTolerant` — Amlogic wedges the
-        // whole device on multi-slice AUs, the 0.17.0 field regression) and only then may the
-        // host default to >1 slice per frame (its sub-frame readback / the P2 slice pipeline).
-        (if hdr_enabled {
-            punktfunk_core::quic::VIDEO_CAP_10BIT | punktfunk_core::quic::VIDEO_CAP_HDR
-        } else {
-            0
-        }) | (if multi_slice_ok {
-            punktfunk_core::quic::VIDEO_CAP_MULTI_SLICE
-        } else {
-            0
-        }),
+        video_caps(hdr_enabled, ten_bit_sdr, multi_slice_ok),
         audio_channels,
         // The audio format this session ASKS for (resolved above). A non-default pair is what
         // makes core set `CLIENT_CAP_AUDIO_HIRES` in the `Hello` — capable AND the user turned it
