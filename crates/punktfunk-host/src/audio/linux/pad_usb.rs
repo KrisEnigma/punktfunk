@@ -36,7 +36,8 @@ fn normalize_hw_quad(mut chunk: Vec<f32>) -> Vec<f32> {
 }
 
 impl PadUsbCapturer {
-    /// Claim wire pad `pad`'s USB audio stream.
+    /// Claim the USB audio stream of the pad at OS slot `pad` — the index pf-inject
+    /// attached the card under, not the client's wire numbering.
     ///
     /// Fails until usbip publishes one (normal between thread start and attach).
     /// The streamer's open-with-backoff retries, so this is a late start, not silence.

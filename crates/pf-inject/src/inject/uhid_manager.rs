@@ -239,14 +239,10 @@ impl<B: PadProto> UhidManager<B> {
         }
     }
 
-    /// Never creates a pad; dropped if the pad is not present.
+    /// Never creates a pad; dropped if the pad is not present. `rich` is addressed in
+    /// OS-slot space, like every other index here — the caller translates.
     pub fn apply_rich(&mut self, rich: RichInput) {
-        let idx = match rich {
-            RichInput::Touchpad { pad, .. }
-            | RichInput::Motion { pad, .. }
-            | RichInput::TouchpadEx { pad, .. }
-            | RichInput::HidReport { pad, .. } => pad as usize,
-        };
+        let idx = rich.pad() as usize;
         if idx >= MAX_PADS || self.slots.get(idx).is_none() {
             return;
         }

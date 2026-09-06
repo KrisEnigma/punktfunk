@@ -306,9 +306,10 @@ pub struct PadSinkCapturer {
 }
 
 impl PadSinkCapturer {
-    /// Mint the node graph for wire pad `pad` (`edge` = DualSense Edge) and
-    /// start capturing. Fails if PipeWire is unreachable; the caller owns
-    /// reopen-with-backoff.
+    /// Mint the node graph for the pad at OS slot `pad` (`edge` = DualSense Edge)
+    /// and start capturing. The slot, not the client's wire numbering: these node
+    /// names and the pad MAC are host-wide, and two sessions both number from zero.
+    /// Fails if PipeWire is unreachable; the caller owns reopen-with-backoff.
     pub fn open(pad: u8, edge: bool) -> Result<PadSinkCapturer> {
         let identity = PadSinkIdentity::new(pad, edge);
         let node_name = identity.speaker_name.clone();
