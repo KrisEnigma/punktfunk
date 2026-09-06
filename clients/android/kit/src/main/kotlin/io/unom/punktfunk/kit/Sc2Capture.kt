@@ -30,9 +30,12 @@ import java.nio.ByteBuffer
  *
  * The wire slot is claimed lazily on the FIRST state report — a Puck with no controller powered
  * on stays invisible to the host — and released (with a wireless-disconnect event or on [stop])
- * so pad indices never leak. Report callbacks arrive on the link's own thread; the router's slot
- * table and chord timer are thread-safe for this (same contract as the feedback poll threads),
- * and UI-mode consumers hop to the main thread themselves.
+ * so pad indices never leak. A dropped BLE link releases the slot but keeps its transport
+ * SELECTED, because [Sc2BleLink] re-acquires by itself; the slot comes back with the reports.
+ *
+ * Report callbacks arrive on the link's own thread; the router's slot table and chord timer are
+ * thread-safe for this (same contract as the feedback poll threads), and UI-mode consumers hop to
+ * the main thread themselves.
  */
 class Sc2Capture(
     context: Context,
@@ -65,6 +68,10 @@ class Sc2Capture(
 
     /** Report ids seen so far — each logged once, for remote diagnosis of what the pad emits. */
     private val seenIds = HashSet<Int>()
+
+    /** Whether the live transport is delivering reports. Deliberately not `activeLink !=
+     *  LINK_NONE`: a BLE link stays selected while it re-acquires a pad that was switched off. */
+    private var reporting = false
 
     // UI-mode state (router == null): held navigation keys + the stick's current synth direction.
     private var uiHeld = HashSet<Int>()
@@ -102,6 +109,7 @@ class Sc2Capture(
         if (ok) {
             activeLink = LINK_USB
             dongleLink = dev.productId != Sc2Device.PID_WIRED
+            reporting = true
             onActiveChanged?.invoke(true)
         }
         return ok
@@ -113,6 +121,7 @@ class Sc2Capture(
         val ok = ble.start(address)
         if (ok) {
             activeLink = LINK_BLE
+            reporting = true
             onActiveChanged?.invoke(true)
         }
         return ok
@@ -136,6 +145,7 @@ class Sc2Capture(
         }
         activeLink = LINK_NONE
         dongleLink = false
+        reporting = false
         releaseSlot()
         releaseUiKeys()
         if (wasActive) onActiveChanged?.invoke(false)
@@ -144,6 +154,11 @@ class Sc2Capture(
     // ---- link callbacks (link thread) ----
 
     private fun onReport(report: ByteArray, len: Int) {
+        if (len == 0) return // a zero-length BLE notification has no id to read
+        if (!reporting) {
+            reporting = true
+            onActiveChanged?.invoke(true) // a re-acquired BLE pad is live again
+        }
         val id = report[0].toInt() and 0xFF
         if (seenIds.add(id)) Log.i(TAG, "SC2 report id=0x%02x seen (len=%d)".format(id, len))
         // Wireless status: authoritative ONLY through a Puck dongle (powering the pad off frees
@@ -283,19 +298,17 @@ class Sc2Capture(
 
     private fun onLinkClosed() {
         Log.i(TAG, "SC2 link closed (unplug / power-off)")
-        // Both transports share this callback, so read which one was live BEFORE clearing it —
-        // releasing the other would tear down a link that never dropped.
-        val dropped = activeLink
-        activeLink = LINK_NONE
-        dongleLink = false
         releaseSlot()
         releaseUiKeys()
-        // Release the transport too — see the note in DsCapture.onLinkClosed. The Puck makes this
-        // worse than a single leak: it is the pad that gets power-cycled, so the same process can
-        // round-trip a link many times in one session.
-        when (dropped) {
-            LINK_USB -> usb.stop()
-            LINK_BLE -> ble.stop()
+        reporting = false
+        // BLE holds a standing connection request, so leave the transport selected: host raw
+        // writes keep routing to it and the next state report re-opens the slot. USB has no such
+        // request — release it (see the note in DsCapture.onLinkClosed) and go idle, or the same
+        // process leaks a link per power-cycle, which the Puck does many times in one session.
+        if (activeLink == LINK_USB) {
+            activeLink = LINK_NONE
+            dongleLink = false
+            usb.stop()
         }
         onActiveChanged?.invoke(false)
     }

@@ -24,9 +24,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * GATT operations are serialized by a small state machine (connect → MTU → discover → subscribe
  * each notify char → lizard-off → ready); duplicate callbacks (the Android stack sometimes fires
- * `onMtuChanged` twice) are ignored. Notified state reports arrive with the report-id byte
- * stripped by the transport, so `0x45` (`ID_STATE_BLE`) is re-prepended for ≥40-byte payloads —
- * the wire then carries the same id-first framing as USB.
+ * `onMtuChanged` twice) are ignored. Every framing rule lives device-free in [Sc2Device], where
+ * tests reach it: the `0x45` re-prepend on the way up, and on the way down the per-report
+ * characteristic each output id is routed to and the feature characteristic every command goes
+ * to, id byte stripped in both directions.
+ *
+ * The link re-acquires by itself — `autoConnect` leaves the request with the stack, so a pad that
+ * powers off mid-session reconnects on its own and [onClosed] only means "release the slot".
  *
  * Requires BLUETOOTH_CONNECT (the caller gates on it); connection priority is bumped to HIGH to
  * pull the connection interval from ~50 ms down to ~11 ms.
@@ -42,11 +46,22 @@ class Sc2BleLink(
     private val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
 
     private var gatt: BluetoothGatt? = null
-    private var writeChar: BluetoothGattCharacteristic? = null
     private val pendingSubs = mutableListOf<BluetoothGattCharacteristic>()
     private var subsIndex = 0
     private val writeBusy = AtomicBoolean(false)
     private var lizardTicker: Thread? = null
+
+    /** Output ids this firmware has no characteristic for — one line each, not one per resend. */
+    private val unmappedIds = HashSet<Int>()
+
+    /** Lowercase characteristic uuid → characteristic. Rebuilt whole on discovery and read-only
+     *  after, so the write path reaches it from the feedback thread without a lock. */
+    @Volatile private var chars: Map<String, BluetoothGattCharacteristic> = emptyMap()
+
+    @Volatile private var featureChar: BluetoothGattCharacteristic? = null
+
+    /** Set by [stop] so a disconnect tears the link down instead of re-arming it. */
+    @Volatile private var stopped = false
 
     @Volatile private var state = State.IDLE
 
@@ -80,54 +95,104 @@ class Sc2BleLink(
         val adapter = manager.adapter ?: return false
         if (!adapter.isEnabled) return false
         val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull() ?: return false
+        stopped = false
         state = State.CONNECTING
-        gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+        // autoConnect: the stack keeps the request and connects whenever the pad appears, so a
+        // controller that is bonded but asleep costs nothing instead of failing a 30 s attempt.
+        gatt = device.connectGatt(context, true, callback, BluetoothDevice.TRANSPORT_LE)
         return true
     }
 
     /**
-     * Replay one raw report from the host: output reports (rumble) ride WRITE_NO_RESPONSE so they
-     * can't queue behind acks at the 25 Hz resend rate; feature reports (settings) use an acked
-     * write. The report-id byte stays in the payload (the firmware's vendor-channel framing).
+     * Replay one raw host report on the pad. [kind] is the C ABI's HID_RAW_OUTPUT (0) /
+     * HID_RAW_FEATURE (1) and [data] is id-first, exactly as Steam wrote it. The id selects the
+     * destination and never rides along: an output goes to its own characteristic trimmed to that
+     * id's declared length, a feature command to [Sc2Device.BLE_FEATURE_CHAR] whole.
      */
     fun writeRaw(kind: Int, data: ByteArray) {
-        if (state != State.READY || data.isEmpty()) return
+        if (state != State.READY) return
         val g = gatt ?: return
-        val ch = writeChar ?: return
-        runCatching {
-            ch.value = data
-            ch.writeType = if (kind == 0) {
-                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            } else {
-                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            }
-            g.writeCharacteristic(ch)
+        if (kind == 0) {
+            val out = Sc2Device.outputWrite(data) ?: return
+            val ch = chars[out.charUuid]
+                ?: return noteUnmapped(data[0].toInt() and 0xFF, out.charUuid)
+            write(g, ch, out.payload, acked = false)
+        } else {
+            val payload = Sc2Device.featurePayload(data) ?: return
+            write(g, featureChar ?: return, payload, acked = true)
         }
     }
 
+    /**
+     * One GATT write, honouring what the characteristic offers. Output prefers unacked (the 25 Hz
+     * rumble resend must not queue behind acks), feature prefers acked. An acked write holds
+     * [writeBusy]: the stack rejects a second one while the first is in flight.
+     */
+    private fun write(
+        g: BluetoothGatt,
+        ch: BluetoothGattCharacteristic,
+        payload: ByteArray,
+        acked: Boolean,
+    ) {
+        val canAck = ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0
+        val canFire = ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0
+        val useAck = if (acked) canAck else !canFire
+        if (useAck && !writeBusy.compareAndSet(false, true)) return
+        val ok = runCatching {
+            ch.value = payload
+            ch.writeType = if (useAck) {
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            } else {
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            }
+            g.writeCharacteristic(ch)
+        }.getOrDefault(false)
+        if (useAck && !ok) writeBusy.set(false)
+    }
+
+    /**
+     * A firmware that does not put this output id at `id + 0x35`. Nothing here can recover it
+     * live: the output characteristics share one property mask, so a guess is as likely to drive
+     * the wrong actuator as the right one. Drop the write and say so once per id.
+     */
+    private fun noteUnmapped(id: Int, want: String) {
+        if (!unmappedIds.add(id)) return
+        Log.w(
+            TAG,
+            "no characteristic for output 0x%02x (want %s) — that actuator is silent"
+                .format(id, want),
+        )
+    }
+
+    /** Feed the firmware watchdog: lizard mode off, on the feature characteristic. */
     private fun sendLizardOff() {
         if (state != State.READY) return
         val g = gatt ?: return
-        val ch = writeChar ?: return
-        if (!writeBusy.compareAndSet(false, true)) return // previous acked write still in flight
-        runCatching {
-            ch.value = Sc2Device.DISABLE_LIZARD
-            ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            if (!g.writeCharacteristic(ch)) writeBusy.set(false)
-        }.onFailure { writeBusy.set(false) }
+        val ch = featureChar ?: return
+        val payload = Sc2Device.featurePayload(Sc2Device.DISABLE_LIZARD) ?: return
+        write(g, ch, payload, acked = true)
     }
 
-    /** Disconnect and stop the lizard ticker. Idempotent; does not fire [onClosed]. */
+    /** Disconnect for good and stop the lizard ticker. Idempotent; does not fire [onClosed]. */
     fun stop() {
+        stopped = true // a disconnect from here must not re-arm the autoConnect request
+        state = State.IDLE // before the disconnect, so its callback cannot report a live drop
         lizardTicker?.interrupt()
         lizardTicker = null
         runCatching { gatt?.disconnect() }
         runCatching { gatt?.close() }
         gatt = null
-        writeChar = null
+        forgetConnection()
+    }
+
+    /** Drop everything scoped to one connection. The GATT handle itself outlives this — it is
+     *  what the stack re-arms onto. */
+    private fun forgetConnection() {
+        chars = emptyMap()
+        featureChar = null
         pendingSubs.clear()
         subsIndex = 0
-        state = State.IDLE
+        writeBusy.set(false) // an ack that can never land now would wedge every later write
     }
 
     private val callback = object : BluetoothGattCallback() {
@@ -146,13 +211,16 @@ class Sc2BleLink(
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     val wasLive = state != State.IDLE
-                    runCatching { g.close() }
-                    gatt = null
-                    writeChar = null
-                    pendingSubs.clear()
-                    subsIndex = 0
+                    lizardTicker?.interrupt()
+                    lizardTicker = null
+                    forgetConnection()
                     state = State.IDLE
                     if (wasLive) onClosed()
+                    // A pad power-cycles many times in one session, so re-arm rather than tear
+                    // down: with autoConnect that is one call, idle until the pad comes back.
+                    if (stopped) return
+                    state = State.CONNECTING
+                    if (!g.connect()) state = State.IDLE
                 }
             }
         }
@@ -170,16 +238,17 @@ class Sc2BleLink(
                 return
             }
             pendingSubs.clear()
-            writeChar = null
+            val found = HashMap<String, BluetoothGattCharacteristic>()
             for (ch in valve.characteristics) {
+                found[ch.uuid.toString().lowercase()] = ch
                 val short = shortUuid(ch.uuid) ?: continue
                 val canNotify = ch.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
-                val canWrite = ch.properties and (
-                    BluetoothGattCharacteristic.PROPERTY_WRITE or
-                        BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE
-                    ) != 0
                 if (canNotify && short in NOTIFY_LOW..NOTIFY_HIGH) pendingSubs.add(ch)
-                if (canWrite && short in WRITE_LOW..WRITE_HIGH && writeChar == null) writeChar = ch
+            }
+            chars = found
+            featureChar = found[Sc2Device.BLE_FEATURE_CHAR]
+            if (featureChar == null) {
+                Log.w(TAG, "no feature characteristic — lizard mode and the gyro stay as they are")
             }
             subsIndex = 0
             state = State.SUBSCRIBING
@@ -196,16 +265,8 @@ class Sc2BleLink(
 
         override fun onCharacteristicChanged(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
             val data = ch.value ?: return
-            // BLE strips the report-id prefix; restore 0x45 on state-sized payloads so the raw
-            // wire framing matches USB. Short payloads (battery/status) pass through as-is.
-            if (data.size >= 40) {
-                val framed = ByteArray(data.size + 1)
-                framed[0] = Sc2Device.ID_STATE_BLE.toByte()
-                System.arraycopy(data, 0, framed, 1, data.size)
-                onReport(framed, framed.size)
-            } else {
-                onReport(data, data.size)
-            }
+            val framed = Sc2Device.frameIncoming(data)
+            onReport(framed, framed.size)
         }
     }
 
@@ -245,12 +306,10 @@ class Sc2BleLink(
     companion object {
         private const val TAG = "Sc2BleLink"
 
-        private val VALVE_SERVICE: UUID = UUID.fromString("100f6c32-1735-4313-b402-38567131e5f3")
+        private val VALVE_SERVICE: UUID = UUID.fromString(Sc2Device.BLE_SERVICE)
         private const val VALVE_UUID_TAIL = "-1735-4313-b402-38567131e5f3"
         private const val NOTIFY_LOW = 0x100f6c75L
         private const val NOTIFY_HIGH = 0x100f6c7aL
-        private const val WRITE_LOW = 0x100f6cb5L
-        private const val WRITE_HIGH = 0x100f6cbeL
         private val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         private val NAME_HINTS =
