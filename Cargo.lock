@@ -3349,7 +3349,9 @@ name = "pf-libva"
 version = "0.34.0"
 dependencies = [
  "anyhow",
+ "cros-codecs",
  "libloading 0.9.0",
+ "pf-bitstream",
  "pf-vaapi",
  "tracing",
 ]

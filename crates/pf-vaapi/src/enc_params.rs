@@ -148,8 +148,8 @@ impl SessionParams {
         seq.vui_fields = u32::from(vui.aspect_ratio_info_present_flag)
             | u32::from(vui.timing_info_present_flag) << 1
             | u32::from(vui.bitstream_restriction_flag) << 2
-            | (u32::from(vui.log2_max_mv_length_horizontal) & 0x1f) << 3
-            | (u32::from(vui.log2_max_mv_length_vertical) & 0x1f) << 8
+            | (vui.log2_max_mv_length_horizontal & 0x1f) << 3
+            | (vui.log2_max_mv_length_vertical & 0x1f) << 8
             | u32::from(vui.fixed_frame_rate_flag) << 13
             | u32::from(vui.low_delay_hrd_flag) << 14
             | u32::from(vui.motion_vectors_over_pic_boundaries_flag) << 15;
@@ -164,19 +164,24 @@ impl SessionParams {
     }
 }
 
-/// The parameter-set access unit a decoder needs before any slice: SPS then PPS,
-/// each as its own annex-B NALU with emulation prevention.
+/// The two parameter sets a decoder needs before any slice, each as its own
+/// annex-B NALU with emulation prevention.
+///
+/// Returned separately because VAAPI describes them separately: the SPS is the
+/// *sequence* packed header and the PPS is the *picture* one, and a single buffer
+/// holding both is not a shape the descriptor can name.
 ///
 /// Written on every IDR, not once at open: a client that joins mid-stream, or one
 /// that reconnects after a loss, has no earlier bytes to have read.
-pub fn packed_parameter_sets(sps: &Sps, pps: &Pps) -> Vec<u8> {
-    let mut out = Vec::new();
+pub fn packed_parameter_sets(sps: &Sps, pps: &Pps) -> (Vec<u8>, Vec<u8>) {
+    let mut packed_sps = Vec::new();
+    let mut packed_pps = Vec::new();
     // nal_ref_idc 3: parameter sets are never discardable.
-    Synthesizer::<'_, Sps, _>::synthesize(3, sps, &mut out, true)
+    Synthesizer::<'_, Sps, _>::synthesize(3, sps, &mut packed_sps, true)
         .expect("writing to a Vec cannot fail, and the SPS is ours");
-    Synthesizer::<'_, Pps, _>::synthesize(3, pps, &mut out, true)
+    Synthesizer::<'_, Pps, _>::synthesize(3, pps, &mut packed_pps, true)
         .expect("writing to a Vec cannot fail, and the PPS is ours");
-    out
+    (packed_sps, packed_pps)
 }
 
 #[cfg(test)]
@@ -241,10 +246,7 @@ mod tests {
         assert_eq!(seq.picture_width_in_mbs, 120);
         assert_eq!(seq.picture_height_in_mbs, 68);
         assert_eq!(seq.bits_per_second, 20_000_000);
-        assert_eq!(
-            u32::from(seq.max_num_ref_frames),
-            u32::from(sps.max_num_ref_frames)
-        );
+        assert_eq!(seq.max_num_ref_frames, u32::from(sps.max_num_ref_frames));
 
         // chroma_format_idc 1 in the low two bits, frame_mbs_only above it.
         assert_eq!(seq.seq_fields & 0x3, 1);
@@ -268,14 +270,14 @@ mod tests {
         let p = params();
         let sps = p.sps();
         let pps = p.pps(Rc::clone(&sps));
-        let au = packed_parameter_sets(&sps, &pps);
+        let (packed_sps, packed_pps) = packed_parameter_sets(&sps, &pps);
 
-        let starts: Vec<usize> = (0..au.len().saturating_sub(3))
-            .filter(|&i| au[i..i + 4] == [0, 0, 0, 1])
-            .collect();
-        assert_eq!(starts.len(), 2, "one start code per parameter set");
-        // nal_unit_type is the low 5 bits of the byte after the start code: 7 = SPS, 8 = PPS.
-        assert_eq!(au[starts[0] + 4] & 0x1f, 7);
-        assert_eq!(au[starts[1] + 4] & 0x1f, 8);
+        // nal_unit_type is the low 5 bits of the byte after the start code.
+        for (bytes, want) in [(&packed_sps, 7u8), (&packed_pps, 8u8)] {
+            let start = (0..bytes.len().saturating_sub(3))
+                .find(|&i| bytes[i..i + 4] == [0, 0, 0, 1])
+                .expect("each set carries its own start code");
+            assert_eq!(bytes[start + 4] & 0x1f, want);
+        }
     }
 }

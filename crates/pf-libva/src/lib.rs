@@ -12,6 +12,9 @@
 //! both fall through it.
 
 use std::os::fd::AsRawFd as _;
+/// An H.264 encode session driven with `pf-vaapi`'s parameter buffers.
+pub mod encode;
+
 use std::os::fd::OwnedFd;
 use std::os::raw::c_char;
 use std::os::raw::c_int;
@@ -139,6 +142,20 @@ pub struct Libva {
     /// use for either, so both arrived with the encoder.
     pub map_buffer: unsafe extern "C" fn(VaDisplay, VaBufferId, *mut *mut c_void) -> VaStatus,
     pub unmap_buffer: unsafe extern "C" fn(VaDisplay, VaBufferId) -> VaStatus,
+    /// Writing pixels into a surface without a dmabuf: derive its image, map, fill.
+    /// The encoder's real ingest is a dmabuf import; this is how tests make frames.
+    pub derive_image: unsafe extern "C" fn(VaDisplay, VaSurfaceId, *mut c_void) -> VaStatus,
+    pub destroy_image: unsafe extern "C" fn(VaDisplay, u32) -> VaStatus,
+    pub query_config_attributes: unsafe extern "C" fn(
+        VaDisplay,
+        VaConfigId,
+        *mut c_int,
+        *mut c_int,
+        *mut c_void,
+        *mut c_int,
+    ) -> VaStatus,
+    pub get_config_attributes:
+        unsafe extern "C" fn(VaDisplay, c_int, c_int, *mut c_void, c_int) -> VaStatus,
 }
 
 impl Libva {
@@ -183,6 +200,10 @@ impl Libva {
             let export_surface_handle = get!(va, "vaExportSurfaceHandle");
             let map_buffer = get!(va, "vaMapBuffer");
             let unmap_buffer = get!(va, "vaUnmapBuffer");
+            let derive_image = get!(va, "vaDeriveImage");
+            let destroy_image = get!(va, "vaDestroyImage");
+            let query_config_attributes = get!(va, "vaQueryConfigAttributes");
+            let get_config_attributes = get!(va, "vaGetConfigAttributes");
             Ok(Libva {
                 get_display_drm,
                 initialize,
@@ -205,6 +226,10 @@ impl Libva {
                 export_surface_handle,
                 map_buffer,
                 unmap_buffer,
+                derive_image,
+                destroy_image,
+                query_config_attributes,
+                get_config_attributes,
                 _va: va,
                 _drm: drm,
             })

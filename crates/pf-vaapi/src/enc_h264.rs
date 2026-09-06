@@ -32,11 +32,33 @@ pub const VA_ENC_MISC_PARAMETER_TYPE_FRAME_RATE: u32 = 0;
 pub const VA_ENC_MISC_PARAMETER_TYPE_RATE_CONTROL: u32 = 1;
 pub const VA_ENC_MISC_PARAMETER_TYPE_HRD: u32 = 5;
 
-/// `VAEncPackedHeaderType`. Both drivers we target advertise all three, which means
-/// the *app* writes SPS/PPS/slice headers — see the encoder's packed-header module.
-pub const VA_ENC_PACKED_HEADER_SEQUENCE: u32 = 1;
-pub const VA_ENC_PACKED_HEADER_PICTURE: u32 = 2;
-pub const VA_ENC_PACKED_HEADER_SLICE: u32 = 3;
+/// Packed headers are described by **two different numbering schemes** that share a
+/// prefix in libva, agree on the first two values, and diverge on the third.
+///
+/// `VAConfigAttribEncPackedHeaders` takes a bitmask of `VA_ENC_PACKED_HEADER_*`
+/// (SLICE is `0x4`); `VAEncPackedHeaderParameterBuffer::type` takes an ordinal from
+/// `VAEncPackedHeaderType` (SLICE is `3`). Using one where the other belongs is
+/// silent: `SEQUENCE | PICTURE | SLICE` with the ordinals computes `1 | 2 | 3 == 3`,
+/// which is `SEQUENCE | PICTURE` — the driver then ignores every packed header the
+/// app supplies and encodes anyway, reporting success.
+///
+/// Named apart so the two can never be confused again.
+pub const VA_ENC_PACKED_HEADER_FLAG_SEQUENCE: u32 = 0x0000_0001;
+pub const VA_ENC_PACKED_HEADER_FLAG_PICTURE: u32 = 0x0000_0002;
+pub const VA_ENC_PACKED_HEADER_FLAG_SLICE: u32 = 0x0000_0004;
+pub const VA_ENC_PACKED_HEADER_FLAG_MISC: u32 = 0x0000_0008;
+
+/// `VAEncPackedHeaderType`, for the descriptor's `type` field.
+pub const VA_ENC_PACKED_HEADER_TYPE_SEQUENCE: u32 = 1;
+pub const VA_ENC_PACKED_HEADER_TYPE_PICTURE: u32 = 2;
+pub const VA_ENC_PACKED_HEADER_TYPE_SLICE: u32 = 3;
+
+const _: () = {
+    // The trap, pinned: the two schemes agree on the first two and part on the third.
+    assert!(VA_ENC_PACKED_HEADER_FLAG_SEQUENCE == VA_ENC_PACKED_HEADER_TYPE_SEQUENCE);
+    assert!(VA_ENC_PACKED_HEADER_FLAG_PICTURE == VA_ENC_PACKED_HEADER_TYPE_PICTURE);
+    assert!(VA_ENC_PACKED_HEADER_FLAG_SLICE != VA_ENC_PACKED_HEADER_TYPE_SLICE);
+};
 
 /// `VAEntrypointEncSlice` — the slice-level encode entrypoint both drivers expose.
 pub const VA_ENTRYPOINT_ENC_SLICE: i32 = 6;
