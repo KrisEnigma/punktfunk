@@ -19,9 +19,14 @@
 //   frozen (gyro-off) IMU block out of state reports, so a stale resting sample can't drive
 //   Steam's desktop gyro-mouse (the cursor-fly the bench debugged 2026-06-08).
 // - **Typed mirror:** buttons/sticks/triggers are ALSO diffed onto the ordinary per-transition
-//   plane, so the emergency exit chord works, and a host that degraded the kind still gets a
-//   playable controller. No rich Motion/Touchpad is ever sent for an SC2 — its IMU rides inside
-//   the opaque raw report; the capture never uses the motion plane.
+//   plane, so a host that degraded the kind still gets a playable controller. No rich
+//   Motion/Touchpad is ever sent for an SC2 — its IMU rides inside the opaque raw report; the
+//   capture never uses the motion plane.
+// - **Local chords:** the exit chord, the stats chord and the quick-action ring are read off a
+//   per-source HARDWARE mask, never the forwarded one, so no client-side gate can hide the way
+//   out of a stream. What the ring consumes is held out of BOTH planes until it releases, and
+//   while the ring owns the pad the host is sent neutral state at the same cadence rather than
+//   nothing — a frozen last frame is a held sprint that survives the menu.
 // - **Raw return:** the host's hidraw writes (Steam's 0x80 rumble outputs, lizard/IMU feature
 //   settings) arrive via `GamepadFeedback`'s hidRaw sink → `onHidRaw` → the link, landing on the
 //   real controller's motors/firmware.
@@ -86,7 +91,12 @@ public final class Sc2Capture {
     private final class PadSource {
         var padIndex: UInt8?
         var claimPending = false
+        /// What the HOST has been told is held (wire layout) — the typed mirror's diff state,
+        /// gated, so it is 0 for anything the ring swallowed.
         var wireButtons: UInt32 = 0
+        /// This pad's local chords and ring state, including the ungated hardware mask the
+        /// escape chord reads.
+        let ring = Sc2RingGate()
         var lastAxis = [Int32](repeating: Int32.min, count: 6)
         let imuGate = Sc2ImuGate()
         /// Reusable up-path buffer: the gated report is copied in and sent from here, so the
@@ -114,7 +124,7 @@ public final class Sc2Capture {
     /// resign observer in `start()`.
     private var suspended = false
 
-    /// The cross-client controller escape chord, read off this capture's own typed mirror —
+    /// The cross-client controller escape chord, read off this capture's own hardware mask —
     /// MUST stay equal to `GamepadCapture.escapeChord` (pinned by `Sc2EscapeChordMirrorTests`;
     /// re-declared here because the original is main-actor-isolated and this class reads the
     /// mask on the BLE queue). Held `disconnectHold` it ends the session, so a captured SC2 —
@@ -142,6 +152,31 @@ public final class Sc2Capture {
     }
     /// Fired ON MAIN on `Phase` edges — the session owner surfaces the passthrough badge.
     public var onPhaseChange: ((Phase) -> Void)?
+
+    /// `Select+A` on a captured pad: the quick-action ring's opener, the same contract as
+    /// `GamepadCapture.onRingChord`. Fired ON MAIN, on the press that completes the chord.
+    public var onRingChord: (() -> Void)?
+    /// A press while the ring owns the pad (`ringOpen`) — fired ON MAIN.
+    public var onRingNav: ((RingNav) -> Void)?
+    /// The ring is up: the pad drives it, and the host sees a neutral report at the same cadence
+    /// instead — the raw plane's answer to GamepadCapture's flush, which a frozen last frame (a
+    /// held sprint surviving a menu) is exactly what it must avoid. Set from the session owner
+    /// on main; read on the link queue, hence the lock.
+    public var ringOpen: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return ringOpenLocked
+        }
+        set {
+            lock.lock()
+            ringOpenLocked = newValue
+            // Every live pad, plus whatever arrives while the dial is up (`sourceLocked`).
+            for src in sources.values { src.ring.ringOpen = newValue }
+            lock.unlock()
+        }
+    }
+    private var ringOpenLocked = false
 
     public init(connection: PunktfunkConnection, manager: GamepadManager) {
         self.connection = connection
@@ -347,15 +382,42 @@ public final class Sc2Capture {
             lock.unlock()
             return
         }
+        // The gate reads the ungated hardware; the two planes below see what is left of it, so
+        // a press the client consumed never reaches the game.
+        deliver(src.ring.read(state))
+        updateChordLocked(src)
+        src.ring.apply(&report, &state)
         forwardRawLocked(src, &report, pad: pad)
         mirrorTypedLocked(src, state, pad: pad)
         lock.unlock()
     }
 
-    /// The state slot for `source`, created on first sight. Caller holds `lock`.
+    /// Deliver one pad's local-chord events. The gate decided them off the ungated hardware;
+    /// this only routes them to the main actor, where the ring and the overlay live.
+    private func deliver(_ events: [Sc2RingGate.Event]) {
+        guard !events.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                for event in events {
+                    switch event {
+                    case .ringChord: self.onRingChord?()
+                    case .nav(let nav): self.onRingNav?(nav)
+                    // Straight to the shared tier default, like GamepadCapture: every reader
+                    // observes `StatsVerbosity` through @AppStorage, so nothing wires back.
+                    case .statsChord: StatsVerbosity.cycle()
+                    }
+                }
+            }
+        }
+    }
+
+    /// The state slot for `source`, created on first sight — a pad that powers on while the ring
+    /// is up joins it already gated. Caller holds `lock`.
     private func sourceLocked(_ source: UInt64) -> PadSource {
         if let existing = sources[source] { return existing }
         let fresh = PadSource()
+        fresh.ring.ringOpen = ringOpenLocked
         sources[source] = fresh
         return fresh
     }
@@ -397,8 +459,9 @@ public final class Sc2Capture {
         }
     }
 
-    /// Diff the parsed state onto the per-transition plane (buttons + axes, on change only) and
-    /// feed the escape chord. Caller holds `lock`.
+    /// Diff the parsed state onto the per-transition plane (buttons + axes, on change only).
+    /// The state is already gated, so a swallowed button is simply never held here. Caller
+    /// holds `lock`.
     private func mirrorTypedLocked(_ src: PadSource, _ state: Sc2Device.State, pad: UInt8) {
         let wired = Sc2Device.wireButtons(state.buttons)
         var changed = wired ^ src.wireButtons
@@ -414,7 +477,6 @@ public final class Sc2Capture {
         axisLocked(src, GamepadWire.axisRSY, state.rsY, pad: pad)
         axisLocked(src, GamepadWire.axisLT, state.lt, pad: pad)
         axisLocked(src, GamepadWire.axisRT, state.rt, pad: pad)
-        updateChordLocked(src)
     }
 
     private func axisLocked(_ src: PadSource, _ id: UInt32, _ value: Int32, pad: UInt8) {
@@ -424,11 +486,12 @@ public final class Sc2Capture {
         connection.send(.gamepadAxis(id, value: value, pad: UInt32(pad)))
     }
 
-    /// Arm the disconnect timer while the full chord is held on a pad's typed mirror, disarm on
-    /// any release — GamepadCapture's rule, off this capture's own state. Any captured pad can
-    /// fire the chord. Caller holds `lock`.
+    /// Arm the disconnect timer while the full chord is held, disarm on any release —
+    /// GamepadCapture's rule, off this capture's own state. Read from the HARDWARE mask, never
+    /// the forwarded one: the way out of a stream must not be something a client-side gate can
+    /// swallow. Any captured pad can fire it. Caller holds `lock`.
     private func updateChordLocked(_ src: PadSource) {
-        let held = src.wireButtons & Self.escapeChord == Self.escapeChord
+        let held = src.ring.hardware & Self.escapeChord == Self.escapeChord
         if held, src.chordWork == nil {
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }

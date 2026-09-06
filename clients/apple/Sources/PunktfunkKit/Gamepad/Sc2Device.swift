@@ -322,6 +322,43 @@ enum Sc2Device {
         return true
     }
 
+    /// The SC2 bits behind a wire mask — `wireButtons` read backwards, so a chord expressed in
+    /// `GamepadWire` terms can be cleared from a raw report and a parsed state, which both speak
+    /// the device's own layout.
+    static func sc2Buttons(forWire wire: UInt32) -> UInt32 {
+        var out: UInt32 = 0
+        for (sc2, w) in wireMap where wire & w != 0 {
+            out |= sc2
+        }
+        return out
+    }
+
+    /// Clear input the host must not see from a state report, in place: the buttons in `clear`
+    /// (device layout), plus every stick and trigger when `zeroAxes`. What the quick-action ring
+    /// forwards while it owns the pad — a well-formed report at the same cadence, so the host's
+    /// virtual pad stays live instead of freezing on whatever was held when the dial opened.
+    /// Same id-first offsets `parseState` reads, and identical in all three state shapes.
+    static func maskInputs(_ report: inout [UInt8], clear: UInt32, zeroAxes: Bool) {
+        guard report.count >= 18 else { return }
+        switch report[0] {
+        case idState, idStateBLE, idStateTimestamp: break
+        default: return
+        }
+        if clear != 0 {
+            let held = (UInt32(report[2]) | (UInt32(report[3]) << 8)
+                | (UInt32(report[4]) << 16) | (UInt32(report[5]) << 24)) & ~clear
+            report[2] = UInt8(held & 0xFF)
+            report[3] = UInt8((held >> 8) & 0xFF)
+            report[4] = UInt8((held >> 16) & 0xFF)
+            report[5] = UInt8((held >> 24) & 0xFF)
+        }
+        if zeroAxes {
+            for i in 6 ..< 18 {
+                report[i] = 0
+            }
+        }
+    }
+
     // MARK: - Framing (pure; the BLE shim calls these — see Sc2FramingTests)
 
     /// Incoming (up-path): a GATT characteristic VALUE is the raw payload with NO HID report-id
