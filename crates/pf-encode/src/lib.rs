@@ -198,6 +198,7 @@ pub fn open_video(
     // multi-slice AUs); 32 = no client limit. `PUNKTFUNK_NVENC_SLICES` overrides.
     max_slices: u32,
 ) -> Result<Box<dyn Encoder>> {
+    let bitrate_bps = bitrate_bps.max(MIN_BITRATE_BPS);
     let (inner, backend) = open_video_backend(
         codec,
         format,
@@ -319,7 +320,7 @@ impl Encoder for TrackedEncoder {
         self.inner.reset()
     }
     fn reconfigure_bitrate(&mut self, bps: u64) -> bool {
-        self.inner.reconfigure_bitrate(bps)
+        self.inner.reconfigure_bitrate(bps.max(MIN_BITRATE_BPS))
     }
     fn applied_bitrate_bps(&self) -> Option<u64> {
         self.inner.applied_bitrate_bps()
@@ -328,6 +329,11 @@ impl Encoder for TrackedEncoder {
         self.inner.flush()
     }
 }
+
+/// No backend clamps a bitrate of 0: an AMF rebuild fails its `TargetBitrate`
+/// and NVENC's bisect lands at 10 Mbps. One floor here, at the trait boundary,
+/// matching the host's own 500 kbps ABR floor.
+pub const MIN_BITRATE_BPS: u64 = 500_000;
 
 /// openh264 rate-control misconfigures if handed a hardware-session bitrate.
 #[cfg(target_os = "linux")]
