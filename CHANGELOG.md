@@ -23,6 +23,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
+- **The game-library toggle is gone from Apple and Android too.** `DefaultsKey.libraryEnabled`
+  and the Kotlin `Settings.libraryEnabled` follow the Rust `library_enabled` retired in 0.31:
+  pairing is the only gate on every client now. A stored value is left where it is and never
+  read again, so nothing migrates and a downgrade still finds it.
 - **The Windows driver protocol floor is 8.** The pf-vdisplay driver encodes what DWM composes
   and answers only to the host process that created each monitor, so a host and a driver from
   different releases share neither a video transport nor an ownership rule. Install the

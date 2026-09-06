@@ -282,10 +282,6 @@ home; on a Steam Deck it also governs the [Decky plugin's](/docs/steam-deck) lau
 home additionally offers wake as an explicit action on an offline host, whatever the toggle says.
 See [Wake-on-LAN](/docs/wake-on-lan).
 
-**Show game library** — *Apple and Android only, default: on.* Browse a paired host's games and
-launch one directly. Linux and Windows have **Browse library…** on every paired host's card, and
-the console home a **Library** button — nothing to switch. See [Game library](/docs/game-library).
-
 **Start streams in fullscreen** — *default: on.* On Linux and Windows, F11 or Alt+Enter leaves
 fullscreen live. On a Mac the setting is **Fullscreen while streaming**, and the window returns
 with the host list. The console home carries the row for the desktop client that shares the store —
@@ -351,7 +347,7 @@ profile**:
 - **Speaker** and **Microphone** device pickers — this device's audio endpoints.
 - **Forwarded controller** — which physical pad is in your hands. (The *type* the host creates is a
   preference and can live in a profile, as can **Forward controllers**.)
-- **Auto-wake on connect**, and **Show game library** where it exists (Apple, Android).
+- **Auto-wake on connect**.
 - Everything under **Interface**.
 
 One switch you might expect here isn't in Settings at all: **Share clipboard** lives in a saved
