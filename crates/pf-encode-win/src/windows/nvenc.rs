@@ -1392,6 +1392,90 @@ impl NvencD3d11Encoder {
             });
         Ok(())
     }
+
+    /// Build the encode session now, so [`caps`](Encoder::caps) describes the hardware.
+    ///
+    /// [`submit`](Encoder::submit) calls this on its own, but a caller that reads caps before
+    /// the first frame would otherwise get the struct defaults — `supports_rfi: false` on a
+    /// card that does support reference-picture invalidation, which costs every later loss a
+    /// full IDR. `device` must be the one the frames will arrive on, or the first submit
+    /// rebuilds the session.
+    ///
+    /// Idempotent: a repeat call with the same device, format and size keeps the session.
+    pub fn prepare_d3d11(
+        &mut self,
+        device: &ID3D11Device,
+        format: PixelFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        // Capturer recreates its D3D11 device on a desktop switch and may return a different
+        // resolution. Re-init on a different device or size. HDR (BT.2020 PQ) when the capturer
+        // hands a 10-bit frame (Rgb10a2 or P010); 8-bit NV12/ARGB is SDR. Can flip mid-session.
+        let hdr = matches!(format, PixelFormat::Rgb10a2 | PixelFormat::P010);
+        let dev_raw = device.as_raw();
+        let size_changed = self.inited && (self.width != width || self.height != height);
+        // Compare against last-init REQUEST, not effective `self.hdr`: on a no-10-bit GPU
+        // `query_caps` clears `self.hdr`, so a P010 capturer would rebuild every frame.
+        let hdr_changed = self.inited && self.hdr_requested != hdr;
+        if self.inited && (self.init_device != dev_raw || size_changed || hdr_changed) {
+            tracing::info!(
+                device_changed = self.init_device != dev_raw,
+                size_changed,
+                hdr_changed,
+                hdr,
+                new = format!("{width}x{height}"),
+                "NVENC: capture device/size/HDR changed — re-initializing session"
+            );
+            // SAFETY: `teardown` needs the encode thread with no NVENC call in flight and a session
+            // whose cached regs/bitstreams/pending belong to `self.encoder`. All hold: this is the
+            // encode thread, `self.inited` so `self.encoder` is the live session, and the previous
+            // frame's encode has already been polled.
+            unsafe { self.teardown() };
+        }
+        if !self.inited {
+            self.width = width;
+            self.height = height;
+            self.hdr_requested = hdr;
+            // Effective until `query_caps` clears it on a card without 10-bit.
+            self.hdr = hdr;
+            // Recompute effective 4:4:4 from the negotiation. Overwriting `chroma_444` on the
+            // first subsampled-YUV frame would permanently demote the session.
+            self.chroma_444 = self.chroma_444_requested;
+            // YUV (NV12/P010): native encode, no RGB→YUV CSC. RGB is the shader path.
+            // 10-bit forces Main10; NV12 pins 8 — `register_resource` rejects it in a
+            // 10-bit session, unlike ARGB.
+            self.buffer_fmt = buffer_format(format);
+            match format {
+                PixelFormat::P010 | PixelFormat::Rgb10a2 | PixelFormat::Rgb10a2Sdr => {
+                    self.bit_depth = 10;
+                }
+                PixelFormat::Nv12 => self.bit_depth = 8,
+                _ => {}
+            }
+            // Clear the effective flag so `caps().chroma_444` reports what the stream carries;
+            // keep `chroma_444_requested` so a later RGB re-init recovers 4:4:4.
+            if self.chroma_444 && !full_chroma_input(self.buffer_fmt) {
+                tracing::warn!(
+                    ?format,
+                    "4:4:4 negotiated but the capturer delivered subsampled YUV — encoding 4:2:0"
+                );
+                self.chroma_444 = false;
+            }
+            // `init_session` publishes `self.encoder` (and charges units) before its last
+            // fallible steps, so a failure leaves a live session with `inited == false`.
+            // Re-init guards key off `inited`; teardown here, keyed off `encoder.is_null()`,
+            // so the next submit does not overwrite a live handle.
+            if let Err(e) = self.init_session(device) {
+                // SAFETY: same contract as the teardown above — encode thread owns the session,
+                // and a failed init leaves nothing mid-encode.
+                unsafe { self.teardown() };
+                return Err(e);
+            }
+            self.init_device = dev_raw;
+        }
+        Ok(())
+    }
 }
 
 impl Encoder for NvencD3d11Encoder {
@@ -1404,73 +1488,12 @@ impl Encoder for NvencD3d11Encoder {
                 )
             }
         };
-        // Capturer recreates its D3D11 device on a desktop switch and may return a different
-        // resolution. Re-init on a different device or size. HDR (BT.2020 PQ) when the capturer
-        // hands a 10-bit frame (Rgb10a2 or P010); 8-bit NV12/ARGB is SDR. Can flip mid-session.
-        let hdr = matches!(captured.format, PixelFormat::Rgb10a2 | PixelFormat::P010);
-        let dev_raw = frame.device.as_raw();
-        let size_changed =
-            self.inited && (self.width != captured.width || self.height != captured.height);
-        // Compare against last-init REQUEST, not effective `self.hdr`: on a no-10-bit GPU
-        // `query_caps` clears `self.hdr`, so a P010 capturer would rebuild every frame.
-        let hdr_changed = self.inited && self.hdr_requested != hdr;
-        if self.inited && (self.init_device != dev_raw || size_changed || hdr_changed) {
-            tracing::info!(
-                device_changed = self.init_device != dev_raw,
-                size_changed,
-                hdr_changed,
-                hdr,
-                new = format!("{}x{}", captured.width, captured.height),
-                "NVENC: capture device/size/HDR changed — re-initializing session"
-            );
-            // SAFETY: `teardown` needs the encode thread with no NVENC call in flight and a session
-            // whose cached regs/bitstreams/pending belong to `self.encoder`. All hold: this is the
-            // encode thread, `self.inited` so `self.encoder` is the live session, and the previous
-            // frame's encode has already been polled.
-            unsafe { self.teardown() };
-        }
-        if !self.inited {
-            self.width = captured.width;
-            self.height = captured.height;
-            self.hdr_requested = hdr;
-            // Effective until `query_caps` clears it on a card without 10-bit.
-            self.hdr = hdr;
-            // Recompute effective 4:4:4 from the negotiation. Overwriting `chroma_444` on the
-            // first subsampled-YUV frame would permanently demote the session.
-            self.chroma_444 = self.chroma_444_requested;
-            // YUV (NV12/P010): native encode, no RGB→YUV CSC. RGB is the shader path.
-            // 10-bit forces Main10; NV12 pins 8 — `register_resource` rejects it in a
-            // 10-bit session, unlike ARGB.
-            self.buffer_fmt = buffer_format(captured.format);
-            match captured.format {
-                PixelFormat::P010 | PixelFormat::Rgb10a2 | PixelFormat::Rgb10a2Sdr => {
-                    self.bit_depth = 10;
-                }
-                PixelFormat::Nv12 => self.bit_depth = 8,
-                _ => {}
-            }
-            // Clear the effective flag so `caps().chroma_444` reports what the stream carries;
-            // keep `chroma_444_requested` so a later RGB re-init recovers 4:4:4.
-            if self.chroma_444 && !full_chroma_input(self.buffer_fmt) {
-                tracing::warn!(
-                    format = ?captured.format,
-                    "4:4:4 negotiated but the capturer delivered subsampled YUV — encoding 4:2:0"
-                );
-                self.chroma_444 = false;
-            }
-            let device = frame.device.clone();
-            // `init_session` publishes `self.encoder` (and charges units) before its last
-            // fallible steps, so a failure leaves a live session with `inited == false`.
-            // Re-init guards key off `inited`; teardown here, keyed off `encoder.is_null()`,
-            // so the next submit does not overwrite a live handle.
-            if let Err(e) = self.init_session(&device) {
-                // SAFETY: same contract as the teardown above — encode thread owns the session,
-                // and a failed init leaves nothing mid-encode.
-                unsafe { self.teardown() };
-                return Err(e);
-            }
-            self.init_device = dev_raw;
-        }
+        self.prepare_d3d11(
+            &frame.device,
+            captured.format,
+            captured.width,
+            captured.height,
+        )?;
         // Opening frame: NVENC emits an IDR regardless of pic flags, so HDR SEI must ride it.
         // Detected via `next == 0` (`teardown` zeroes it), not `pts == 0`: `submit_indexed`
         // pins pts to the wire index, which is non-zero on a mid-session rebuild's first frame.
@@ -2240,6 +2263,144 @@ mod tests {
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
     };
+
+    #[test]
+    #[ignore = "requires an RTX GPU with HEVC/AV1 encode and the default synchronous retrieve mode"]
+    fn nvenc_prepare_publishes_caps_before_submit() {
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM,
+        };
+
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI factory");
+        let adapter = (0..)
+            .map_while(|i| unsafe { factory.EnumAdapters1(i) }.ok())
+            .find(|a| unsafe { a.GetDesc1() }.is_ok_and(|d| d.VendorId == 0x10de))
+            .expect("NVIDIA adapter");
+        let (device, _) = pf_frame::dxgi::make_device(&adapter).expect("make_device");
+        const W: u32 = 1280;
+        const H: u32 = 720;
+        const BPS: u64 = 20_000_000;
+        for codec in [Codec::H265, Codec::Av1] {
+            for (format, dxgi, depth, hdr) in [
+                (PixelFormat::Nv12, DXGI_FORMAT_NV12, 8, false),
+                (PixelFormat::P010, DXGI_FORMAT_P010, 10, true),
+                (
+                    PixelFormat::Rgb10a2Sdr,
+                    DXGI_FORMAT_R10G10B10A2_UNORM,
+                    10,
+                    false,
+                ),
+            ] {
+                let mut enc = NvencD3d11Encoder::open(
+                    codec,
+                    format,
+                    W,
+                    H,
+                    60,
+                    BPS,
+                    10,
+                    ChromaFormat::Yuv444,
+                    1,
+                    None,
+                )
+                .expect("NVENC open");
+                enc.prepare_d3d11(&device, format, W, H).expect("prepare");
+                assert!(enc.inited);
+                assert_eq!(enc.init_device, device.as_raw());
+                assert_eq!((enc.bit_depth, enc.hdr_requested), (depth, hdr));
+                assert_eq!(enc.next, 0);
+                assert_eq!(enc.frame_idx, 0);
+                assert!(enc.pending.is_empty());
+                assert!(enc.regs.is_empty());
+                assert!(enc.poll().expect("poll before submit").is_none());
+                let rfi = unsafe {
+                    enc.get_cap(
+                        enc.encoder,
+                        nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
+                    )
+                } != 0;
+                let yuv444 = unsafe {
+                    enc.get_cap(
+                        enc.encoder,
+                        nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_YUV444_ENCODE,
+                    )
+                } != 0;
+                let caps = enc.caps();
+                assert_eq!(caps.supports_rfi, rfi);
+                assert_eq!(
+                    caps.chroma_444,
+                    codec == Codec::H265 && full_chroma_input(buffer_format(format)) && yuv444,
+                );
+                assert_eq!(enc.applied_bitrate_bps(), Some(BPS));
+                let session = enc.encoder;
+                let bitstreams = enc.bitstreams.clone();
+                enc.prepare_d3d11(&device, format, W, H)
+                    .expect("prepare again");
+                assert_eq!(enc.encoder, session);
+                assert_eq!(enc.bitstreams, bitstreams);
+                assert_eq!(enc.caps(), caps);
+                assert!(!enc.invalidate_ref_frames(-1, -1));
+                assert!(!enc.invalidate_ref_frames(100, 100));
+
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: W,
+                    Height: H,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: dxgi,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                    ..Default::default()
+                };
+                let mut texture = None;
+                unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
+                    .expect("input texture");
+                let mut frame = CapturedFrame {
+                    provenance: Default::default(),
+                    width: W,
+                    height: H,
+                    pts_ns: 0,
+                    format,
+                    payload: FramePayload::D3d11(D3d11Frame {
+                        texture: texture.expect("input texture"),
+                        device: device.clone(),
+                        pyro: None,
+                    }),
+                    cursor: None,
+                };
+                for i in 100..104 {
+                    frame.pts_ns = u64::from(i) * 16_666_667;
+                    enc.submit_indexed(&frame, i).expect("submit");
+                    let au = enc.poll().expect("poll").expect("AU");
+                    assert_eq!(au.keyframe, i == 100);
+                    assert_eq!(enc.encoder, session);
+                    assert_eq!(enc.bitstreams, bitstreams);
+                    assert_eq!(enc.caps(), caps);
+                    assert_eq!(enc.applied_bitrate_bps(), Some(BPS));
+                }
+                enc.rfi_supported = false;
+                assert!(!enc.invalidate_ref_frames(103, 103));
+                assert!(!enc.pending_anchor);
+                enc.rfi_supported = rfi;
+                enc.distrust_references();
+                assert!(!enc.invalidate_ref_frames(103, 103));
+                enc.distrusted = false;
+                let recovered = enc.invalidate_ref_frames(103, 103);
+                if !recovered {
+                    enc.request_keyframe();
+                }
+                frame.pts_ns += 16_666_667;
+                enc.submit_indexed(&frame, 104).expect("recovery submit");
+                let au = enc.poll().expect("recovery poll").expect("recovery AU");
+                assert_eq!(au.recovery_anchor, recovered);
+                assert_eq!(au.keyframe, !recovered);
+            }
+        }
+    }
 
     /// Saturated primaries separate BT.601 from BT.709 by tens of code points (pure-green luma 145 vs 173).
     const BARS: [(u8, u8, u8); 8] = [

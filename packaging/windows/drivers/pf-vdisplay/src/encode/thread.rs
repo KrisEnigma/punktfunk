@@ -21,7 +21,7 @@ use pf_frame::HdrMeta;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
-use super::convert::{AdapterId, Fail, InputKind, pixel_format};
+use super::convert::{AdapterId, Fail, InputKind, bridge, pixel_format};
 use super::drive::Drive;
 use super::pool::Pool;
 use super::section::{AuSection, EncodeSession};
@@ -86,10 +86,13 @@ fn caps_wire(c: EncoderCaps) -> EncoderCapsWire {
 }
 
 /// Walk the request's backend list in order; the first that opens wins. `Err` is the last
-/// failure as the wire reply — no silent fallback past the list.
+/// failure as the wire reply — no silent fallback past the list. `open_backend` returns a
+/// backend whose session already exists, so `reply.caps` describes the live encoder rather
+/// than its defaults — the host reads those caps once and never asks again.
 fn open_listed(
     req: &SetEncodeRequest,
     adapter: &AdapterId,
+    device: &windows62::Win32::Graphics::Direct3D11::ID3D11Device,
 ) -> Result<(Box<dyn Encoder>, OpenSpec, SetEncodeReply), SetEncodeReply> {
     let mut last: Fail = (-1, "nobackend");
     for &backend in req.backends.iter().take_while(|&&b| b != 0) {
@@ -100,7 +103,7 @@ fn open_listed(
                 continue;
             }
         };
-        match open_backend(&spec, adapter) {
+        match open_backend(&spec, adapter, device) {
             Ok(mut enc) => {
                 if req.wire_chunk_bytes != 0 {
                     enc.set_wire_chunking(req.wire_chunk_bytes as usize);
@@ -187,7 +190,11 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
     let Some(monitor) = ctx.monitor.upgrade() else {
         return fail(wire::SET_ENCODE_NO_MONITOR, (-6, "gone"));
     };
-    let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter) {
+    let device = match bridge(&ctx.device.device) {
+        Ok(d) => d,
+        Err(f) => return fail(wire::SET_ENCODE_NO_DEVICE, f),
+    };
+    let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter, &device) {
         Ok(x) => x,
         Err(reply) => {
             let _ = ctx.opened.send(reply);
@@ -295,7 +302,16 @@ pub fn disable_implicit_vulkan_layers() {
 }
 
 /// One backend open on `adapter`. `Err` carries the stage tag; the backend's message is logged.
-pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Encoder>, Fail> {
+/// `device` is the one the pool's frames carry: NVENC opens its session against it here so the
+/// caller's caps read describes the hardware.
+pub fn open_backend(
+    spec: &OpenSpec,
+    adapter: &AdapterId,
+    device: &windows62::Win32::Graphics::Direct3D11::ID3D11Device,
+) -> Result<Box<dyn Encoder>, Fail> {
+    // NVENC is the only arm that opens against the device, and it is x86-64 only.
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = device;
     let (w, h, fps, bps) = (spec.width, spec.height, spec.fps, spec.bitrate_bps);
     let (depth, chroma) = (spec.bit_depth, spec.chroma);
     let format = pixel_format(spec.kind);
@@ -307,7 +323,12 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
         1 => pf_encode_win::nvenc::NvencD3d11Encoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, 1, luid,
         )
-        .map(|e| Box::new(e) as Box<dyn Encoder>),
+        .and_then(|mut e| {
+            // NVENC alone defers its session to the first frame, and the host reads the caps in
+            // our reply once per session: open it here or it caches the defaults.
+            e.prepare_d3d11(device, format, w, h)?;
+            Ok(Box::new(e) as Box<dyn Encoder>)
+        }),
         2 => pf_encode_win::amf::AmfEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )

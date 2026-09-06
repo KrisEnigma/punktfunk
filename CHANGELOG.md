@@ -366,6 +366,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The Windows driver reports NVENC's real capabilities.** NVENC builds its session on the
+  first frame, so the driver answered the host's one capability read with defaults and pinned
+  every session to `supports_rfi: false`, which turned every lost frame into a full IDR instead
+  of one re-referenced P frame. Update host and driver together; nothing to configure.
 - **The guided installer starts the web console it installs.** It enabled `punktfunk-web` only
   when the unit existed before the install ran, so a fresh box got a console that never answered
   on 47992 and a warning that it was "not installed". Nothing to do; a re-run enables it.
