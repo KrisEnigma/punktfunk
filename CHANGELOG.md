@@ -282,6 +282,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **AMD and Intel Linux hosts encode H.264 and HEVC through the native VAAPI session.** It
+  replaces the libavcodec path on radeonsi and iHD: a packet loss is answered on a P picture
+  instead of a full IDR, a bitrate step lands in place, and HEVC Main 10 carries its HDR10
+  metadata. Nothing to do; `PUNKTFUNK_VAAPI_NATIVE=0` returns a host to the libav path, and a
+  native open that fails falls back to it on its own.
 - **The Windows driver's diagnostics reach `host.log`.** The encoder runs inside WUDFHost, so its
   backend rejections, bitrate retargets and wedges used to need `PFVD_DEBUG_LOG` and a file in
   LocalService's temp directory; the host now drains them over `IOCTL_DRAIN_LOG` at the keepalive
@@ -357,6 +362,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **`open_video` and `reconfigure_bitrate` floor the bitrate at 500 kbps.** A zero from a bad
+  ABR step used to fail an AMF rebuild and bisect NVENC down to 10 Mbps; every backend now sees
+  at least the floor. Nothing to do.
 - **A display that re-lights itself mid-stream is parked for the session.** A standby TV on a
   Windows host re-lit 35–100 s after every exclusive isolate and each eviction cost the stream a
   0.2–1.8 s rebuild, so after the first re-assert the host PnP-disables that panel — journaled,
