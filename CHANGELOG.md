@@ -284,6 +284,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **The SteamOS host carries its own FFmpeg.** The on-device build now compiles the pinned LGPL
+  FFmpeg the .deb already bundles into `target-steamos/ffmpeg` and links it behind an absolute
+  rpath, because SteamOS's FFmpeg moves independently of any Debian release and a host linked
+  against the box's copy stops loading when it does. A first install takes about four minutes
+  longer and `update.sh` reuses the build until the pin moves; nothing else changes.
 - **A Windows host serves pref `10` as the wired Triton pad.** It used to degrade to the Xbox 360
   pad, because 28DE:1304 has no Windows synthesis; it now folds onto the same 28DE:1302 virtual
   pad a cabled SC2 mints, which Steam treats as the canonical controller. Nothing to do — a Puck

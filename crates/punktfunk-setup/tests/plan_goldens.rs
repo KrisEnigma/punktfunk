@@ -709,7 +709,7 @@ fn trap_the_steamos_build_is_announced_before_it_runs() {
     let steps: Vec<&StepAction> = plan.steps().map(|s| &s.action).collect();
     let note = steps
         .iter()
-        .position(|a| matches!(a, StepAction::Note(_, t) if t.contains("25 minutes")))
+        .position(|a| matches!(a, StepAction::Note(_, t) if t.contains("30 minutes")))
         .expect("the wait is announced");
     let build = steps
         .iter()

@@ -56,15 +56,26 @@ if [ "${1:-}" = "--pull" ]; then
     ok "pulled"
 fi
 
+FFMPEG_PREFIX="$TARGET_DIR/ffmpeg"
+bash "$SRC/scripts/steamdeck/build-ffmpeg.sh"
+
 log "Rebuilding host (release)"
 # vulkan-encode matches the packaged builds (deb/arch) — see install.sh. punktfunk-encode-worker
 # rides along: host and worker version-check each other over their socket and fall back to the
 # in-process encoder on any mismatch, so an update must never move one without the other.
-distrobox enter "$BOX" -- bash -lc "set -e; export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR'; cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/vulkan-encode"
+distrobox enter "$BOX" -- bash -lc "set -e
+export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR'
+# PKG_CONFIG_PATH is searched before the default dirs, so ffmpeg-sys-next takes the vendored
+# build while PipeWire, libva and the rest still come from the box. DT_RPATH is transitive and
+# survives AT_SECURE, which is what the setcap'd encode worker needs.
+export PKG_CONFIG_PATH='$FFMPEG_PREFIX/lib/pkgconfig'
+export RUSTFLAGS=\"-C link-arg=-Wl,-rpath,$FFMPEG_PREFIX/lib -C link-arg=-Wl,--disable-new-dtags\"
+cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/vulkan-encode"
 MISSING="$({ ldd "$BIN" 2>/dev/null || true; } | awk '/not found/ {print $1}' | sort -u | tr '\n' ' ')"
 [ -z "$MISSING" ] || die "the host rebuilt, but SteamOS still cannot load it. Missing: $MISSING
-     Another rebuild will not help — the build container no longer matches this SteamOS. The
-     services were left as they are. Report it: https://git.unom.io/unom/punktfunk/issues"
+     Another rebuild will not help, and the services were left as they are. Delete
+     $TARGET_DIR/ffmpeg to force the carried FFmpeg to build again, then re-run this. Still
+     broken? Report it: https://git.unom.io/unom/punktfunk/issues"
 ok "host rebuilt"
 if [ "$WEB" = 1 ]; then
     log "Rebuilding web console"
