@@ -167,6 +167,7 @@ fn the_session_encodes_what_ingest_gives_it() {
         max_num_ref_frames: 1,
         max_num_reorder_frames: 0,
         initial_qp: 26,
+        vbv_frames: 1.0,
     })
     .expect("an encoder");
     let mut stream = Vec::new();

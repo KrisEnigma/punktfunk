@@ -23,6 +23,9 @@ use cros_codecs::codec::h264::parser::Sps;
 use cros_codecs::codec::h264::parser::SpsBuilder;
 use cros_codecs::codec::h264::synthesizer::Synthesizer;
 
+use crate::enc_h264::VaEncMiscParameterFrameRate;
+use crate::enc_h264::VaEncMiscParameterHrd;
+use crate::enc_h264::VaEncMiscParameterRateControl;
 use crate::enc_h264::VaEncSequenceParameterBufferH264;
 
 /// A macroblock is 16×16; every VAAPI dimension is counted in them.
@@ -45,6 +48,9 @@ pub struct SessionParams {
     /// shape every punktfunk host emits.
     pub max_num_reorder_frames: u32,
     pub initial_qp: u8,
+    /// VBV depth in frames of bits. One holds picture size roughly constant and
+    /// takes motion as a QP dip; the libav path's `PUNKTFUNK_VBV_FRAMES` knob.
+    pub vbv_frames: f32,
 }
 
 impl SessionParams {
@@ -107,6 +113,43 @@ impl SessionParams {
             .pic_init_qp(self.initial_qp)
             .deblocking_filter_control_present_flag(true)
             .build()
+    }
+
+    /// The rate-control facts, as the three misc buffers the drivers read them from.
+    ///
+    /// Sent with every picture: both drivers compare against the last and re-plan
+    /// on a change, which is what makes a mid-stream `bitrate_bps` step land with
+    /// no IDR. Mesa takes the target from here and nowhere else — the sequence
+    /// buffer's `bits_per_second` is never read.
+    pub fn rate_control(
+        &self,
+    ) -> (
+        VaEncMiscParameterRateControl,
+        VaEncMiscParameterHrd,
+        VaEncMiscParameterFrameRate,
+    ) {
+        let fps = self.fps_num as f64 / self.fps_den.max(1) as f64;
+        let vbv_bits = (self.bitrate_bps as f64 / fps.max(1.0) * f64::from(self.vbv_frames))
+            .clamp(1.0, u32::MAX as f64) as u32;
+        let rc = VaEncMiscParameterRateControl {
+            bits_per_second: self.bitrate_bps,
+            target_percentage: 100,
+            window_size: (1000.0 * f64::from(self.vbv_frames) / fps.max(1.0)).ceil() as u32,
+            initial_qp: u32::from(self.initial_qp),
+            // disable_frame_skip:1 << 1 | disable_bit_stuffing:1 << 2. A skipped
+            // frame is a stall on the client; filler is bits the wire pays for.
+            rc_flags: 1 << 1 | 1 << 2,
+            ..Default::default()
+        };
+        let hrd = VaEncMiscParameterHrd {
+            buffer_size: vbv_bits,
+            initial_buffer_fullness: vbv_bits / 4 * 3,
+        };
+        let frame_rate = VaEncMiscParameterFrameRate {
+            framerate: self.fps_num & 0xffff | (self.fps_den & 0xffff) << 16,
+            framerate_flags: 0,
+        };
+        (rc, hrd, frame_rate)
     }
 
     /// The same facts in the shape the driver reads.
@@ -308,7 +351,29 @@ mod tests {
             max_num_ref_frames: 2,
             max_num_reorder_frames: 0,
             initial_qp: 26,
+            vbv_frames: 1.0,
         }
+    }
+
+    /// A one-frame VBV at 60 fps is a sixtieth of the rate, and the frame rate
+    /// travels as `num | den << 16` — a bare integer means 59.94 arrives as 59.
+    #[test]
+    fn rate_control_sizes_the_vbv_in_frames() {
+        let p = SessionParams {
+            bitrate_bps: 6_000_000,
+            fps_num: 60000,
+            fps_den: 1001,
+            ..params()
+        };
+        let (rc, hrd, fr) = p.rate_control();
+        assert_eq!(rc.bits_per_second, 6_000_000);
+        assert_eq!(rc.target_percentage, 100, "CBR");
+        assert_eq!(rc.window_size, 17, "one frame at 59.94, in whole ms");
+        assert_eq!(rc.rc_flags & 0b110, 0b110, "no frame skip, no filler");
+        assert_eq!(hrd.buffer_size, 100_100, "6 Mbps / 59.94");
+        assert!(hrd.initial_buffer_fullness < hrd.buffer_size);
+        assert_eq!(fr.framerate & 0xffff, 60000);
+        assert_eq!(fr.framerate >> 16, 1001);
     }
 
     /// 1080 is not a multiple of 16, so the coded height is 1088 and the difference

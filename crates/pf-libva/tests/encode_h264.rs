@@ -26,6 +26,7 @@ fn params() -> SessionParams {
         max_num_ref_frames: 1,
         max_num_reorder_frames: 0,
         initial_qp: 26,
+        vbv_frames: 1.0,
     }
 }
 
@@ -105,6 +106,52 @@ fn the_encoder_emits_a_decodable_stream() {
         }
     }
     assert_eq!(planned, 30, "every access unit should plan");
+}
+
+/// The bitrate steps mid-stream and the pictures follow, with no IDR. Noise makes
+/// every rate bind — a flat picture would sit under both targets and prove nothing.
+#[test]
+#[ignore = "needs a VAAPI encode device"]
+fn a_bitrate_step_lands_without_an_idr() {
+    let p = SessionParams {
+        bitrate_bps: 8_000_000,
+        ..params()
+    };
+    let mut enc = open(p).expect("an encoder");
+    let (w, h) = (p.width as usize, p.height as usize);
+    let mut seed = 0x2545_f491u32;
+    let mut sizes = Vec::new();
+    let mut idrs = 0;
+    for i in 0..120 {
+        if i == 60 {
+            enc.set_bitrate(2_000_000);
+        }
+        let y: Vec<u8> = (0..w * h)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        enc.write_nv12(&y, &vec![128u8; w * h / 2]).expect("fill");
+        let pic = enc.encode(i == 0).expect("encode");
+        idrs += usize::from(
+            pic.bytes
+                .windows(5)
+                .any(|s| s[..4] == [0, 0, 0, 1] && s[4] & 0x1f == 5),
+        );
+        sizes.push(pic.bytes.len());
+    }
+    let mean = |s: &[usize]| s.iter().sum::<usize>() / s.len();
+    let (high, low) = (mean(&sizes[20..60]), mean(&sizes[80..120]));
+    println!("8 Mbps: {high} B/frame, 2 Mbps: {low} B/frame, {idrs} IDR");
+    assert_eq!(idrs, 1, "the step must not cost an IDR");
+    let ratio = high as f64 / low as f64;
+    assert!(
+        (2.5..6.0).contains(&ratio),
+        "sizes should track the rate: {high} vs {low}"
+    );
+    // 8 Mbps at 60 fps is 16.7 KB a picture; CBR should sit near it, not under.
+    assert!(high > 10_000, "8 Mbps did not bind: {high} B/frame");
 }
 
 /// Split on the parameter-set/slice boundary: each AU here is the SPS+PPS+slice of

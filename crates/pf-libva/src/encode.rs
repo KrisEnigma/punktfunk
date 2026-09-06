@@ -254,6 +254,17 @@ impl H264Encoder {
         self.input[self.next_surface]
     }
 
+    /// Retarget in place: the next picture is rate-controlled to `bps`, with no IDR
+    /// and no rebuild. This is the ABR step libav cannot take on this hardware.
+    pub fn set_bitrate(&mut self, bps: u32) {
+        self.params.bitrate_bps = bps;
+    }
+
+    /// What the next picture is rate-controlled to.
+    pub fn bitrate_bps(&self) -> u32 {
+        self.params.bitrate_bps
+    }
+
     /// Fill the next input surface with NV12 from `y` and `uv`, for tests. Capture
     /// goes through [`Self::submit_packed`] or [`Self::submit_dmabuf`].
     pub fn write_nv12(&self, y: &[u8], uv: &[u8]) -> Result<()> {
@@ -405,6 +416,14 @@ impl H264Encoder {
         let is_idr = slice.is_idr;
         let seq = self.params.va_sequence(sps);
         self.render(owned, vah::VA_ENC_SEQUENCE_PARAMETER_BUFFER_TYPE, &seq)?;
+        let (rc, hrd, frame_rate) = self.params.rate_control();
+        self.render_misc(owned, vah::VA_ENC_MISC_PARAMETER_TYPE_RATE_CONTROL, &rc)?;
+        self.render_misc(owned, vah::VA_ENC_MISC_PARAMETER_TYPE_HRD, &hrd)?;
+        self.render_misc(
+            owned,
+            vah::VA_ENC_MISC_PARAMETER_TYPE_FRAME_RATE,
+            &frame_rate,
+        )?;
 
         if is_idr {
             let (packed_sps, packed_pps) = pf_vaapi::enc_params::packed_parameter_sets(sps, pps);
@@ -456,6 +475,30 @@ impl H264Encoder {
         // from this one, iHD copies it.
         let (header, bits) = packed_slice_header(sps, pps, slice);
         self.render_packed(owned, vah::VA_ENC_PACKED_HEADER_TYPE_SLICE, &header, bits)
+    }
+
+    /// A misc buffer is a four-byte type tag with the payload inline after it, in
+    /// one allocation.
+    fn render_misc<T: Copy>(
+        &self,
+        owned: &mut Vec<VaBufferId>,
+        kind: u32,
+        value: &T,
+    ) -> Result<()> {
+        let mut bytes = Vec::with_capacity(4 + std::mem::size_of::<T>());
+        bytes.extend_from_slice(&kind.to_ne_bytes());
+        // SAFETY: every `T` here is a `repr(C)` struct of `u32` fields with no
+        // padding, so all `size_of::<T>()` bytes are initialised.
+        bytes.extend_from_slice(unsafe {
+            std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
+        });
+        let buf = self.create(
+            vah::VA_ENC_MISC_PARAMETER_BUFFER_TYPE,
+            bytes.len() as u32,
+            bytes.as_ptr().cast::<c_void>(),
+        )?;
+        owned.push(buf);
+        Ok(())
     }
 
     /// One `vaCreateBuffer` + `vaRenderPicture` for a plain parameter struct.
