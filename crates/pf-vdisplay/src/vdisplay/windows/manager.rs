@@ -963,6 +963,12 @@ impl VirtualDisplayManager {
                             Ok(()) => {
                                 warned = false;
                                 gone_streak = 0;
+                                // The driver's lines ride the keepalive: this thread already
+                                // holds the only handle open for the whole device lifetime, so
+                                // the encoder's diagnostics reach the log even between sessions.
+                                // SAFETY: `h` is the same live handle the ping just used, held
+                                // across this call by the Arc.
+                                unsafe { vdm().driver.drain_log(dev_raw(&h)) };
                             }
                             Err(e) if is_device_gone(&e) => {
                                 gone_streak += 1;
