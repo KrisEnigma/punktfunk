@@ -84,6 +84,7 @@ internal object ConsoleJson {
             val online = "${h.address}:${h.port}" in reachable
             val base = JSONObject()
                 .put("key", key)
+                .put("id", h.id)
                 .put("name", h.name.ifBlank { h.address })
                 .put("addr", h.address)
                 .put("port", h.port)
@@ -157,7 +158,8 @@ internal object ConsoleJson {
         val key = rowKey(h.fpHex, h.address, h.port)
         return JSONObject()
             .put("key", if (pin == null) key else "$key\u0000${pin.id}")
-            .put("name", h.name.ifBlank { h.address })
+            .put("id", h.id)
+                .put("name", h.name.ifBlank { h.address })
             .put("addr", h.address)
             .put("port", h.port)
             .put("fp_hex", h.fpHex)
@@ -368,6 +370,11 @@ internal object ConsoleJson {
         j.put("overlay_actions", s.overlayActions)
         j.put("pad_haptics", s.padHaptics)
         j.put("pad_speaker", if (s.padSpeaker) "pad" else "off")
+        // Both shells write these, so both must be mapped in BOTH directions: carrying them in
+        // `base` alone would work until the touch UI wrote one, at which point the next push
+        // would paste the console's older copy back over it.
+        j.put("start_in", s.startIn)
+        if (s.defaultHost != null) j.put("default_host", s.defaultHost) else j.remove("default_host")
         // Android-only rows ride `Settings::extra`, which is `#[serde(flatten)]` — so they are
         // TOP-LEVEL keys of this document, not a nested `extra` object. Nesting them put the
         // whole object into the map under the literal key "extra", where no console row could
@@ -441,6 +448,10 @@ internal object ConsoleJson {
                 .ifEmpty { s.gamepadUiMode },
             gamepadUiEnabled = j.optBoolean("gamepad_ui_enabled", s.gamepadUiEnabled),
             reduceUiResolution = j.optBoolean("android.reduce_ui_resolution", s.reduceUiResolution),
+            startIn = str("start_in", s.startIn),
+            // An absent key CLEARS this one, unlike every field above: the console omits it when
+            // no host is chosen (`skip_serializing_if`), and that absence is the value.
+            defaultHost = j.optString("default_host", "").ifEmpty { null },
         )
     }
 }

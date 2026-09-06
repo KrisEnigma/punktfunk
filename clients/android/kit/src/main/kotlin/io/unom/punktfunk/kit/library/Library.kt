@@ -74,6 +74,29 @@ data class GameEntry(
     /** Whether this entry opens a launcher rather than a game. */
     val isLauncher: Boolean get() = role == "launcher"
 
+    /** The synthetic desktop tile rather than one of the host's titles. */
+    val isDesktop: Boolean get() = id == DESKTOP_ID
+
+    companion object {
+        /**
+         * The desktop tile's id — the synthetic entry every shelf leads with, so the library is
+         * never a dead end for the desktop-only user and a host with no plugins is still one tap
+         * from streaming. The NUL prefix is the desktop console's (`pf-console-ui`'s
+         * `DESKTOP_ID`): a host title id is a store reference, and none can start with a NUL.
+         *
+         * Presentation only. Never persisted, never fetched, never grouped.
+         */
+        const val DESKTOP_ID = "\u0000desktop"
+
+        /** The tile itself. [title] reads "Resume …" when the host already has something up. */
+        fun desktop(title: String = "Desktop") = GameEntry(
+            id = DESKTOP_ID,
+            store = "",
+            title = title,
+            art = Artwork(portrait = null, header = null, hero = null),
+        )
+    }
+
     /**
      * The brand-icon token, re-validated rather than taken on trust.
      *

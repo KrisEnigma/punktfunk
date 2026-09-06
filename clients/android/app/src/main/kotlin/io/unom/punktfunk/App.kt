@@ -56,6 +56,8 @@ import android.widget.Toast
 import io.unom.punktfunk.kit.link.DeepLinkResult
 import io.unom.punktfunk.kit.link.DeepLinks
 import io.unom.punktfunk.kit.link.HostResolution
+import io.unom.punktfunk.kit.link.StartScreen
+import io.unom.punktfunk.kit.link.host
 import io.unom.punktfunk.kit.SessionEndReason
 import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.KnownHostStore
@@ -87,6 +89,10 @@ fun App(forceGamepadUi: Boolean = false) {
     // a PUSH over the whole shell, and a `remember` down in ConnectScreen would not survive the
     // stream that a launch off the shelf starts — which is exactly what `reopenLibrary` restores.
     var touchLibrary by remember { mutableStateOf<Pair<KnownHost, String?>?>(null) }
+    // …and whether that shelf should dial the host's desktop as it opens (`start_in = stream`).
+    // Only the cold-start effect below ever sets it; every other route to the library is a
+    // deliberate press and must not start a stream on its own.
+    var touchAutoStream by remember { mutableStateOf(false) }
 
     // Console (gamepad) mode mirrors the Apple client: the setting AND (its mode says Always OR a
     // pad is attached OR this is a TV OR the dev force flag). Flips live as controllers
@@ -152,6 +158,22 @@ fun App(forceGamepadUi: Boolean = false) {
                 Toast.LENGTH_LONG,
             ).show()
         }
+    }
+
+    // Where a bare launch opens (design/default-host.md). Once per PROCESS, not per composition:
+    // `LaunchedEffect(Unit)` in this composable runs on a cold start and never again, so
+    // foregrounding, a finished stream and a return from Settings all land where the shell would
+    // land anyway. Never with a link waiting — explicit intent wins — and never while the console
+    // shell is up, which resolves the same policy for itself in `SkiaConsole.ensure`.
+    LaunchedEffect(Unit) {
+        if (gamepadUi || pendingLink != null || session != null) return@LaunchedEffect
+        val hosts = KnownHostStore(context).all()
+        val start = StartScreen.resolve(settings.startIn, settings.defaultHost, hosts)
+        val host = start.host ?: return@LaunchedEffect
+        // Stream is the library PLUS a connect, not a fourth screen: the shelf goes up either
+        // way, so a cancelled or refused dial lands there rather than back on the host grid.
+        touchLibrary = host to null
+        touchAutoStream = start is StartScreen.Stream
     }
 
     // The touch shell's half of "come back to the library this game was launched from" — the console
@@ -238,8 +260,12 @@ fun App(forceGamepadUi: Boolean = false) {
                 host = host,
                 settings = settings,
                 onLaunched = { session = it },
-                onBack = { touchLibrary = null },
+                onBack = {
+                    touchLibrary = null
+                    touchAutoStream = false
+                },
                 pinnedProfileId = pinId,
+                autoStream = touchAutoStream,
             )
         } else {
             // Adaptive nav: a bottom bar on phones; on tablets / large windows a side NavigationRail

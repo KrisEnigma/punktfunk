@@ -280,6 +280,20 @@ data class Settings(
      * shortcuts, the virtual pad's preset). Empty = the platform default ring.
      */
     val overlayActions: String = "",
+    /**
+     * Where a bare launch opens — the cross-client `start_in` key: `"hosts"`, `"library"` (the
+     * default) or `"stream"`. Empty or unknown reads as library, and with no default host every
+     * value degrades to the host list. Resolve through [io.unom.punktfunk.kit.link.StartScreen],
+     * never by reading this alone.
+     */
+    val startIn: String = "",
+    /**
+     * The host a bare launch opens on — a [io.unom.punktfunk.kit.security.KnownHost.id], `null`
+     * when none is written. Only half the answer: with exactly one paired host saved, that host
+     * is the default with nothing here, and a dangling id falls through to that same rule.
+     * The cross-client `default_host` key.
+     */
+    val defaultHost: String? = null,
     // NOTE: clipboard sync is NOT here. It is a decision about a HOST, not about this device or
     // this stream (design/client-settings-profiles.md §3, tier H), so it lives on the host record
     // — see `KnownHost.clipboardSync`. It used to be a global here; `KnownHostStore.migrate`
@@ -385,6 +399,8 @@ class SettingsStore(context: Context) {
             ?: if (prefs.getBoolean(K_POINTER_CAPTURE, false)) MouseMode.CAPTURE else MouseMode.DESKTOP,
         invertScroll = prefs.getBoolean(K_INVERT_SCROLL, false),
         overlayActions = prefs.getString(K_OVERLAY_ACTIONS, "") ?: "",
+        startIn = prefs.getString(K_START_IN, "") ?: "",
+        defaultHost = prefs.getString(K_DEFAULT_HOST, null),
     )
 
     fun save(s: Settings) {
@@ -426,6 +442,8 @@ class SettingsStore(context: Context) {
             .putString(K_MOUSE_MODE, s.mouseMode.storedName)
             .putBoolean(K_INVERT_SCROLL, s.invertScroll)
             .putString(K_OVERLAY_ACTIONS, s.overlayActions)
+            .putString(K_START_IN, s.startIn)
+            .putString(K_DEFAULT_HOST, s.defaultHost)
             .apply()
     }
 
@@ -485,6 +503,10 @@ class SettingsStore(context: Context) {
         const val K_POINTER_CAPTURE = "pointer_capture"
         const val K_INVERT_SCROLL = "invert_scroll"
         const val K_OVERLAY_ACTIONS = "overlay_actions"
+
+        /** Cross-client start-screen keys; the console writes the same two names. */
+        const val K_START_IN = "start_in"
+        const val K_DEFAULT_HOST = "default_host"
 
         /** Legacy Boolean the enum replaced — read once as the migration default, never written. */
         const val K_TRACKPAD = "trackpad_mode"
@@ -982,6 +1004,9 @@ val GAMEPAD_UI_MODE_OPTIONS = listOf(
     GAMEPAD_UI_WHEN_CONNECTED to "With a controller",
     GAMEPAD_UI_ALWAYS to "Always",
 )
+
+/** (stored value, label) for where a bare launch opens — the cross-client table verbatim. */
+val START_IN_OPTIONS = io.unom.punktfunk.kit.link.StartIn.entries.map { it.stored to it.label }
 
 /** (mode, label) for the touch-input model. */
 val TOUCH_MODE_OPTIONS = listOf(

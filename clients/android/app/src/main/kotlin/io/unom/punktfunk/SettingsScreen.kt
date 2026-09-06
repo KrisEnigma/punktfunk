@@ -80,6 +80,8 @@ import androidx.core.content.ContextCompat
 import io.unom.punktfunk.kit.DeviceGyro
 import io.unom.punktfunk.kit.VideoDecoders
 import io.unom.punktfunk.kit.deviceBodyVibrator
+import io.unom.punktfunk.kit.link.StartIn
+import io.unom.punktfunk.kit.link.StartScreen
 import io.unom.punktfunk.kit.security.KnownHostStore
 
 /**
@@ -605,6 +607,12 @@ private fun GeneralSettings(s: Settings, update: (Settings) -> Unit) {
                 checked = s.libraryEnabled,
                 onCheckedChange = { on -> update(s.copy(libraryEnabled = on)) },
             )
+            SettingDropdown(
+                label = "Start in",
+                options = START_IN_OPTIONS,
+                selected = StartIn.parse(s.startIn).stored,
+                caption = startInCaption(s, LocalContext.current),
+            ) { v -> update(s.copy(startIn = v)) }
         }
         // The footer is null on every device where the console works, so it costs nothing there —
         // and on the ones where it doesn't, it is the only place the app admits that this switch
@@ -1248,4 +1256,18 @@ private fun ResolutionField(
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = modifier.onFocusChanged { if (!it.isFocused) text = if (value > 0) value.toString() else "" },
     )
+}
+
+/**
+ * Names the host the Start in row resolves to, and says when it resolves to nothing — which is
+ * what every value does until one host is paired. The pointer is written from a host's own card
+ * menu, not from this screen, so the caption is where the two meet.
+ */
+private fun startInCaption(s: Settings, context: android.content.Context): String {
+    val hosts = KnownHostStore(context).all()
+    val host = StartScreen.defaultHost(s.defaultHost, hosts).host
+        ?: return "Opens on the host list: there is no default host yet. Pair one, or pick one " +
+            "from a host's menu when several are paired."
+    return "Library opens ${host.name}'s games; Stream also connects to its desktop. " +
+        "Back leaves either one on the host list."
 }
