@@ -163,14 +163,13 @@ jobs:
   # PR code could therefore persist on that machine or harvest signing material a later job exposes.
   # The DEFINITIVE fix is operational and lives outside this file: enable Gitea's "require approval to
   # run workflows for PRs from outside collaborators/forks", and/or route PR CI to isolated ephemeral
-  # runners. The `if:` below is only a backstop — it skips fork PRs where Gitea reports the fork flag,
-  # and FAILS OPEN (still runs) for same-repo PRs and on Gitea versions that don't populate it, so it
-  # never blocks internal PR CI.
+  # runners. The `if:` below is only a backstop, and it fails closed: only a PR whose head repo IS
+  # this repo runs. A fork, or a Gitea that leaves the field empty, does not.
   client:
     runs-on: windows-amd64
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.fork != true
+      github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 90
     strategy:
       fail-fast: false

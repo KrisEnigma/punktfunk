@@ -566,6 +566,16 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **The device-auth nonce cap evicts one challenge, not all of them.** An unauthenticated caller
   could flush every outstanding nonce with 256 requests to `POST /api/v1/auth/device/challenge`,
   cancelling a real browser's exchange in flight. Nothing to do.
+- **A reserved AV1 OBU header bit is a parse error, not an abort.** `parse_obu_header` asserted on
+  two wire bits in release and runs before any type dispatch, so one byte from a host ended the
+  client's decoding thread — and any corruption surviving FEC did the same. Nothing to do.
+- **`Welcome` audio fields are bounded before they size a buffer.** An `audio_rate_hz` off the
+  supported set now folds to 48 kHz and a non-zero `audio_frame_us` floors at 1 ms, where a hostile
+  or corrupt value reached a multi-gigabyte allocation. Nothing to do; 44 100 still arrives verbatim.
+- **The CI fork gate fails closed.** Six jobs on the persistent signing runners ran a pull request
+  whose head-repo fork flag Gitea left unset, and now require the head repo to be this repo. Turn on
+  Gitea's outside-collaborator approval as well; a skipped job on an internal PR means the context
+  field is absent.
 
 ---
 

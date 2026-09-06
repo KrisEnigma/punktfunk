@@ -536,12 +536,13 @@ impl Welcome {
         // Codec is verbatim: folding an unknown id onto Opus would play the wrong
         // plane as silence. Client refuses a plane it cannot play.
         let audio_codec = b.get(audio_off).copied().unwrap_or(AUDIO_CODEC_OPUS);
-        // Rate is not clamped; only 0/absent → legacy. Clamping 44100 to 48000
-        // would mislabel the stream.
+        // A rate off the supported set is folded, not carried: it sizes decode buffers, and
+        // `u32::MAX` asks for hundreds of gigabytes. Supported rates pass through unchanged,
+        // so 44100 still arrives as 44100 rather than mislabelled as 48000.
         let audio_rate_hz = b
             .get(audio_off + 1..audio_off + 5)
             .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
-            .filter(|&hz| hz != 0)
+            .filter(|&hz| crate::audio::pcm::rate_is_supported(hz))
             .unwrap_or(crate::audio::SAMPLE_RATE_HZ);
         // Depth feeds unpack stride: unsupported → 16, matching audio_channels.
         // Only a corrupt or future wire reaches this (pinned-TLS control stream).
@@ -549,9 +550,13 @@ impl Welcome {
             Some(d) if crate::audio::pcm::depth_is_supported(d) => d,
             _ => crate::audio::pcm::BITS_16,
         };
+        // 0 stays 0: it means the host stated no duration, and each consumer has its own
+        // default for that. Any other value floors at the ladder's shortest rung, because
+        // conceal counts divide 50 ms by it — `frame_us = 1` asks for 50_000 packets of scratch.
         let audio_frame_us = b
             .get(audio_off + 6..audio_off + 8)
             .map(|s| u16::from_le_bytes(s.try_into().unwrap()))
+            .map(|us| if us == 0 { 0 } else { us.max(1_000) })
             .unwrap_or(0);
         // Trails the audio block (87 AES / 119 ChaCha). Absent → 0.
         let host_caps2 = b.get(audio_off + 8).copied().unwrap_or(0);
@@ -1796,10 +1801,28 @@ mod tests {
         let mut bad_depth = enc.clone();
         bad_depth[84] = 32;
         assert_eq!(Welcome::decode(&bad_depth).unwrap().audio_bits, BITS_16);
-        // Rate is verbatim. Clamping 44100 to 48000 would mislabel the stream.
+        // A supported rate is verbatim. Clamping 44100 to 48000 would mislabel the stream.
         let mut odd_rate = enc.clone();
         odd_rate[80..84].copy_from_slice(&44_100u32.to_le_bytes());
         assert_eq!(Welcome::decode(&odd_rate).unwrap().audio_rate_hz, 44_100);
+
+        // Off the supported set the rate folds: it sizes decode buffers, and both the ABI and
+        // the client session size from it before libopus ever sees the value.
+        let mut absurd_rate = enc.clone();
+        absurd_rate[80..84].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            Welcome::decode(&absurd_rate).unwrap().audio_rate_hz,
+            SAMPLE_RATE_HZ
+        );
+
+        // `frame_us` divides 50 ms into a conceal-packet count, so a 1 µs frame asks for
+        // 50_000 packets of scratch. Floor at the ladder's shortest rung; 0 stays absent.
+        let mut tiny_frame = enc.clone();
+        tiny_frame[85..87].copy_from_slice(&1u16.to_le_bytes());
+        assert_eq!(Welcome::decode(&tiny_frame).unwrap().audio_frame_us, 1_000);
+        let mut absent_frame = enc.clone();
+        absent_frame[85..87].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(Welcome::decode(&absent_frame).unwrap().audio_frame_us, 0);
     }
 
     /// `host_caps2` past the audio block: presence forces earlier placeholders to their
