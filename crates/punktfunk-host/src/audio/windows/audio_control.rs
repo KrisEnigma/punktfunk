@@ -191,11 +191,68 @@ fn pad_render_ids(renders: &[Endpoint]) -> Vec<String> {
 /// assignment. `park_defaults` is true only from desktop-audio capture open: that parks
 /// playback on the loopback sink and recording on the virtual mic. The idle mic pump
 /// passes false — it must neither silence speakers nor steal the default microphone.
+/// Set once a wait has timed out: minting succeeded but MMDevice never listed the result, so
+/// every later pass would pay the ceiling for endpoints that are not coming. True inside a seat,
+/// where minting lands a machine-wide devnode the remote session cannot enumerate at all.
+static MINTED_NEVER_LISTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Render and capture endpoints, once everything already minted is enumerable. MMDevice publishes
+/// a minted endpoint a few tens of milliseconds after the devnode lands, so an immediate
+/// enumeration can miss the endpoints this process just created and plan as if the box had none.
+/// Waits only for ids [`minted_ids`](super::minted::minted_ids) reports, so a box that mints
+/// nothing — or one where they never show, see [`MINTED_NEVER_LISTED`] — pays one enumeration.
+fn enumerate_including_minted() -> (Vec<Endpoint>, Vec<Endpoint>) {
+    use std::sync::atomic::Ordering;
+    // 500 ms ceiling: measured appearance is ~12 ms, and the caller is on the session-open path.
+    let attempts = if MINTED_NEVER_LISTED.load(Ordering::Relaxed) {
+        1
+    } else {
+        10
+    };
+    for attempt in 0..attempts {
+        let renders = list_endpoints(Direction::Render);
+        let captures = list_endpoints(Direction::Capture);
+        let minted = super::minted::minted_ids();
+        let listed = |want: &Option<String>, eps: &[Endpoint]| {
+            want.as_ref()
+                .is_none_or(|id| eps.iter().any(|(_, have)| have == id))
+        };
+        if listed(&minted.speakers_render, &renders)
+            && listed(&minted.mic_render, &renders)
+            && listed(&minted.mic_capture, &captures)
+        {
+            if attempt > 0 {
+                tracing::debug!(attempt, "minted audio endpoints became enumerable");
+            }
+            return (renders, captures);
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    if !MINTED_NEVER_LISTED.swap(true, Ordering::Relaxed) {
+        tracing::info!(
+            "a minted audio endpoint never appeared in this session's device enumeration — \
+             planning without it, and not waiting for it again (a seat's remote session cannot \
+             enumerate the machine-wide devnode minting creates)"
+        );
+    }
+    (
+        list_endpoints(Direction::Render),
+        list_endpoints(Direction::Capture),
+    )
+}
+
 /// COM-initialized thread. Logged only when the assignment changes.
 pub(crate) fn wire_now_full(park_defaults: bool) -> WiredPlan {
     recover_orphaned_default();
-    let renders = list_endpoints(Direction::Render);
-    let captures = list_endpoints(Direction::Capture);
+    // Mint BEFORE enumerating, and wait for what was minted to become enumerable. A freshly
+    // minted endpoint is not in MMDevice's list for a few tens of milliseconds, and a plan built
+    // from the earlier snapshot reports "no render endpoints exist at all" about endpoints this
+    // same pass just created.
+    super::minted::ensure_provisioned();
+    let (renders, captures) = enumerate_including_minted();
     let fingerprint = wiring_plan::fingerprint(&renders, &captures);
     let want = std::env::var("PUNKTFUNK_MIC_DEVICE")
         .ok()
@@ -220,12 +277,9 @@ pub(crate) fn wire_now_full(park_defaults: bool) -> WiredPlan {
         // can be made against without a session. Cannot-carry-stereo cannot-carry-5.1.
         2,
         &pad_ids,
-        // Minted Speakers/Microphone ids — empty until the provider latches. `ensure`
-        // here mints when Steam arrives mid-run instead of waiting for the next reboot.
-        &{
-            super::minted::ensure_provisioned();
-            super::minted::minted_ids()
-        },
+        // Minted Speakers/Microphone ids — empty until the provider latches.
+        // `wire_now_full` mints above, before the enumeration these are matched against.
+        &super::minted::minted_ids(),
     );
     let done = |wiring: Wiring| WiredPlan {
         wiring,

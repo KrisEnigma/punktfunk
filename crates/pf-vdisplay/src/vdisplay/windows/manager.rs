@@ -846,6 +846,28 @@ impl VirtualDisplayManager {
                 return Ok(out);
             }
             // Same mode — concurrent-session join (refcount++), no re-arrival.
+            // A monitor the OS never activated carries no GDI name, and a plain join hands that
+            // same dead target back, so the caller's whole retry budget re-reads one failure. The
+            // monitor is live, so run the activation ladder again before joining.
+            let unresolved = match inner.slots.get(&slot) {
+                Some(SlotState::Active { mon, .. }) if mon.gdi_name.is_none() => {
+                    Some(mon.ccd_key())
+                }
+                _ => None,
+            };
+            if let Some(key) = unresolved {
+                if let Some(name) = self.resolve_target_gdi(key) {
+                    tracing::info!(
+                        slot,
+                        target = %key,
+                        gdi_name = %name,
+                        "virtual-display target activated on a later acquire"
+                    );
+                    if let Some(SlotState::Active { mon, .. }) = inner.slots.get_mut(&slot) {
+                        mon.gdi_name = Some(name);
+                    }
+                }
+            }
             let Some(SlotState::Active { mon, refs }) = inner.slots.get_mut(&slot) else {
                 unreachable!("just matched Active");
             };
@@ -1436,11 +1458,19 @@ impl VirtualDisplayManager {
                     gdi = %n,
                     "IDD target activated into a display path"
                 );
-                // ADD only advertises; force the mode so DXGI captures the
-                // requested size. Exclusive: first member captures restore;
-                // later members re-isolate the grown set (never deactivate a
-                // sibling). Primary/Extend leave physicals lit.
-                set_active_mode(n, mode);
+                // ADD only advertises; force the mode so DXGI captures the requested size. CCD
+                // takes it as data; GDI can only pick from an enumeration that has not refreshed
+                // this soon after arrival. Exclusive: first member captures restore, later ones
+                // re-isolate the grown set. Primary/Extend leave physicals lit.
+                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode)
+                    && !set_active_mode(n, mode)
+                {
+                    tracing::warn!(
+                        target = %added_key,
+                        mode = %format!("{}x{}@{}", mode.width, mode.height, mode.refresh_hz),
+                        "neither CCD nor GDI wrote the mode — the display stays on the one it runs"
+                    );
+                }
                 use crate::policy::Topology;
                 let first_member = inner.slots.is_empty();
                 match topology_action() {
@@ -1687,7 +1717,15 @@ impl VirtualDisplayManager {
             }
         }
         let advertised_ms = t0.elapsed().as_millis() as u64;
-        set_active_mode(&gdi, mode);
+        if !pf_win_display::win_display::set_active_mode_ccd(mon_key, mode)
+            && !set_active_mode(&gdi, mode)
+        {
+            tracing::warn!(
+                target = %mon_key,
+                mode = %format!("{}x{}@{}", mode.width, mode.height, mode.refresh_hz),
+                "neither CCD nor GDI wrote the mode — the display stays on the one it runs"
+            );
+        }
         // Same committed-state predicate as create. Uncommitted within the
         // ceiling routes to the re-arrival fallback.
         let settle_start = Instant::now();
@@ -1824,8 +1862,19 @@ impl VirtualDisplayManager {
                     backend = self.driver.name(),
                     "re-arrival target {added_key} -> {n}"
                 );
-                // ADD only advertises; force the mode so DXGI/IDD capture the new size.
-                set_active_mode(n, mode);
+                // ADD only advertises; force the mode so DXGI/IDD capture the new size. CCD first:
+                // it takes the size as data, while GDI can only pick from an enumeration that has
+                // not refreshed this soon after the arrival — which left the path on the old mode,
+                // and on a seat with no swap chain at all.
+                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode)
+                    && !set_active_mode(n, mode)
+                {
+                    tracing::warn!(
+                        target = %added_key,
+                        mode = %format!("{}x{}@{}", mode.width, mode.height, mode.refresh_hz),
+                        "neither CCD nor GDI wrote the mode — the display stays on the one it runs"
+                    );
+                }
                 // 4. Re-isolate the composited set with the NEW target replacing the old — preserving
                 //    the group's first-member restore snapshot. Under the `state` lock (the caller
                 //    holds it and lent us `inner`), as its topology-mutator discipline requires.

@@ -409,6 +409,29 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   dark — left the only lit screen at a non-zero origin, an arrangement no display KCM produces
   and one Plasma places popups off: the launcher pinned to the right edge, the desktop context
   menu to the left. Nothing to do beyond the update.
+- **A seat captures its own session's audio, not the machine's.** A seat host leaves the box's
+  default playback device alone, and the loopback capture read that as "capture whatever the
+  default is" — so seats on one box shared an endpoint, or found none at all and retried forever;
+  a remote session also has no audio endpoint whatsoever until its RDP client asks for playback
+  redirection. The seats keeper asks for it and each seat captures the endpoint its own session
+  owns, which is what keeps one seat's audio out of another's — Valve's Remote Play streaming
+  drivers stay a console-host prerequisite, not a seat one.
+- **A seat's display survives its host taking over.** The placeholder monitor a seat adapter
+  presents at init holds the only display path the remoting stack ever commits, so departing it
+  emptied the session's display config and the host's own monitor arrived where no path, no mode
+  commit and no swap chain could follow. It stays for the session's life now, and a seat isolates
+  its topology as a console host does — display config is per session, so it never reaches a
+  neighbour.
+- **A virtual Xbox pad enumerates on Windows Server.** Its install section attaches Microsoft's
+  `xinputhid` filter, which Server does not ship, and PnP treats a filter service it cannot
+  resolve as fatal — the devnode sat at `CM_PROB_REGISTRY` with no driver serving it. The host
+  probes for the service once and falls back to an unfiltered model line, so the pad works there;
+  classic XInput needs that service either way and is unaffected.
+- **A seat mints its own virtual pointer.** The resident HID mouse took pad index 0 on every
+  host, so the second seat on a box was refused the bootstrap mailbox `Global\pfmouse-boot-0`
+  and streamed a cursor-less desktop with no HID display-wake kick. A seat host now names the
+  mouse after the display connector it owns, so nothing is shared; the console host keeps index
+  0 and is unchanged.
 - **The Windows host is per-monitor DPI aware from launch.** Windows hands a DPI-unaware process
   the cursor bitmap for the DPI it was started at, so a host started on a 300 % desktop kept
   forwarding a 96 px pointer onto the 96 DPI virtual display, three times too large on every
