@@ -407,22 +407,22 @@ fn open_video_backend_linux(
                     tracing::info!(
                         codec = ?codec,
                         "Linux Vulkan Video encode (real RFI via DPB reference slots) — \
-                         set PUNKTFUNK_VULKAN_ENCODE=0 for libav VAAPI"
+                         set PUNKTFUNK_VULKAN_ENCODE=0 for VAAPI"
                     );
                     return Ok((Box::new(e) as Box<dyn Encoder>, "vulkan"));
                 }
-                // Native NV12 has no VAAPI fallback: libav would import the
-                // two-plane buffer as packed RGB (silent garbage). Die instead.
-                Err(e) if format == PixelFormat::Nv12 => {
+                // The native session imports two-plane NV12; libav would read it
+                // as packed RGB (silent garbage), so with native off die instead.
+                Err(e) if format == PixelFormat::Nv12 && !vaapi_native_enabled() => {
                     return Err(e.context(
                         "Vulkan Video open failed on a native-NV12 capture \
-                         — no VAAPI fallback exists; set PUNKTFUNK_PIPEWIRE_NV12=0 to \
+                         — libav VAAPI cannot take it; set PUNKTFUNK_PIPEWIRE_NV12=0 to \
                          restore the packed-RGB negotiation",
                     ));
                 }
                 Err(e) => tracing::warn!(
                     error = %format!("{e:#}"),
-                    "Vulkan Video encode open failed — falling back to libav VAAPI"
+                    "Vulkan Video encode open failed — falling back to VAAPI"
                 ),
             }
         }
