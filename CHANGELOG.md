@@ -329,6 +329,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
+  Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
+  command to `100F6C34`, id byte stripped in both cases, where the link had written every frame
+  whole to whichever writable characteristic it discovered first — so lizard mode never went off,
+  at most one actuator could be reached, and Steam's gyro-enable was swallowed. The link now also
+  re-acquires a pad that powers off mid-session; nothing to do beyond the update.
 - **The forwarded pointer is native-sized on a scaled Wayland client.** SDL hands the compositor
   a custom cursor's pixel size as a viewport destination — surface-local units, so the display
   scale is applied there — while the client folded that same scale into the bitmap it built,
