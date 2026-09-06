@@ -701,6 +701,26 @@ fn trap_the_steamos_clone_tolerates_a_tree_that_is_already_there() {
     assert!(clone.starts_with("[ -d ~/punktfunk/.git ] ||"), "{clone}");
 }
 
+/// The progress line captures the build's output, so the wait is announced before the script
+/// starts; otherwise the run looks frozen for 25 minutes.
+#[test]
+fn trap_the_steamos_build_is_announced_before_it_runs() {
+    let plan = plan_for(&fresh("steamos", Family::Steamos), &pins());
+    let steps: Vec<&StepAction> = plan.steps().map(|s| &s.action).collect();
+    let note = steps
+        .iter()
+        .position(|a| matches!(a, StepAction::Note(_, t) if t.contains("30 minutes")))
+        .expect("the wait is announced");
+    let build = steps
+        .iter()
+        .position(|a| matches!(a, StepAction::Run(c) if c.contains("scripts/steamdeck/install.sh")))
+        .expect("the on-device build step");
+    assert!(
+        note < build,
+        "the estimate must print before the build starts"
+    );
+}
+
 /// The build script takes `--gamestream`; there is no host.env route to the Moonlight planes
 /// before the units it starts already exist.
 #[test]

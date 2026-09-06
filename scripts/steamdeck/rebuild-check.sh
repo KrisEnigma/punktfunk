@@ -43,4 +43,16 @@ fi
 
 [ "$NEED" = 0 ] && exit 0 # everything resolves — nothing to do (every normal boot)
 
-exec bash "$SRC/scripts/steamdeck/update.sh"
+# One attempt per source tree and OS version. When a rebuild cannot fix the breakage the next
+# boot builds the same unloadable binary again, and each attempt costs ~25 minutes.
+STAMP="$HOME/.cache/punktfunk/rebuild-attempt"
+ATTEMPT="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown)@$(. /etc/os-release 2>/dev/null; echo "${BUILD_ID:-${VERSION_ID:-unknown}}")"
+if [ "$(cat "$STAMP" 2>/dev/null || true)" = "$ATTEMPT" ]; then
+    echo "the last rebuild at this source and SteamOS version did not fix it — not retrying" >&2
+    echo "run it by hand to see why: bash $SRC/scripts/steamdeck/update.sh --pull" >&2
+    exit 0
+fi
+mkdir -p "$(dirname "$STAMP")"
+printf '%s\n' "$ATTEMPT" > "$STAMP"
+bash "$SRC/scripts/steamdeck/update.sh"
+rm -f "$STAMP" # it worked, so a later break at this same version gets its own attempt

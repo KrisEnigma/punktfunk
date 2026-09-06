@@ -57,8 +57,6 @@ pub struct Opts {
 pub struct Outcome {
     pub relogin: bool,
     pub started: bool,
-    /// Omarchy hand-off ran, so skip the generic wiring.
-    pub ended_early: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +87,6 @@ impl Executor<'_> {
                 let ran = self.step(&step.action, facts, choices, &mut outcome)?;
                 // A skipped hand-off did nothing, so the generic wiring it would replace still runs.
                 if step.ends_run && ran && !self.opts.dry {
-                    outcome.ended_early = true;
                     return Ok(outcome);
                 }
             }
@@ -107,8 +104,12 @@ impl Executor<'_> {
     ) -> Result<bool, Failed> {
         match action {
             StepAction::Run(cmd) => {
-                // Group changes apply only after re-login; the outro must say so.
-                if cmd.contains("usermod -aG") || cmd.contains("add-user-to-input-group") {
+                // Group changes apply only after re-login; the outro must say so. The
+                // SteamOS build joins input and punktfunk itself, and its own notice is captured.
+                if cmd.contains("usermod -aG")
+                    || cmd.contains("add-user-to-input-group")
+                    || cmd.contains("steamdeck/install.sh")
+                {
                     outcome.relogin = true;
                 }
                 self.shell(cmd, facts).map(|()| true)
