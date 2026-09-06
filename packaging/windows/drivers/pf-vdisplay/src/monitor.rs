@@ -613,7 +613,8 @@ fn advertised_modes(requested: Mode) -> Vec<Mode> {
 }
 
 /// The seat placeholder's owner and session. Pid 0 is never a requestor, so the pair cannot
-/// collide with a host's, and it is what [`create_monitor`] departs when a host takes over.
+/// collide with a host's. It stays for the session's life: it holds the only display path the
+/// remoting stack commits, and a monitor arriving into an empty topology gets none of its own.
 pub const SEAT_PLACEHOLDER_OWNER: u32 = 0;
 pub const SEAT_PLACEHOLDER_SESSION: u64 = 0;
 
@@ -644,17 +645,6 @@ pub fn create_monitor(
         min_millinits: req.min_luminance_millinits,
     };
     let adapter = crate::adapter::adapter()?;
-    // The seat placeholder is a display for the remoting stack at adapter init, before any host
-    // exists. It goes as soon as a host brings its own: on a mid-stream re-arrival the OS makes
-    // the placeholder active again and moves the swap chain to it, leaving the host's monitor
-    // without one. The owner-scoped dedup below cannot reach it — its owner is not the host's.
-    if owner != SEAT_PLACEHOLDER_OWNER
-        && crate::adapter::is_seat_role()
-        && registry::find(|m| m.owner == SEAT_PLACEHOLDER_OWNER).is_some()
-    {
-        dbglog!("[pf-vd] seat placeholder departing — the host's monitor drives the seat now");
-        remove_monitor(SEAT_PLACEHOLDER_OWNER, SEAT_PLACEHOLDER_SESSION);
-    }
     // One identity per owner and session: a re-ADD of a still-live `session_id` departs the
     // stale monitor first, so no duplicate EDID/target lingers. Another owner's same key is
     // a different monitor.
