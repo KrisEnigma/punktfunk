@@ -2925,6 +2925,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             );
             enc = new_enc;
             enc_src = (frame.format, frame.width, frame.height);
+            // The delivered mode is the session's now: a rebuild or topology re-assert
+            // reopens at it instead of forcing the display back to the client's ask.
+            cur_mode = actual;
             adopt_built_bitrate(&mut bitrate_kbps, src_kbps, &live_bitrate, &retarget_tx);
             inflight.clear();
             last_au_at = std::time::Instant::now();
@@ -3417,7 +3420,16 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     }
     drop(frame_tx);
     let _ = send_thread.join();
-    tracing::info!(sent, "punktfunk/1 virtual stream complete");
+    // Source against wire: `source_seq` is what DWM composed into the driver's pool,
+    // `dropped` what the pool refused. A source under the refresh rate is the desktop.
+    let src = capturer.health();
+    tracing::info!(
+        sent,
+        source_seq = src.as_ref().map_or(0, |h| h.source_seq),
+        published = src.as_ref().map_or(0, |h| h.published_total),
+        dropped = src.as_ref().map_or(0, |h| h.dropped_total),
+        "punktfunk/1 virtual stream complete"
+    );
     Ok(())
 }
 

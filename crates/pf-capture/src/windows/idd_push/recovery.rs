@@ -160,6 +160,7 @@ impl Supervisor {
             detached: enc.map_or(0, |e| e.detached),
             published_total: enc.map_or(0, |e| e.published_total),
             dropped_total: enc.map_or(0, |e| e.dropped_total),
+            source_seq: enc.map_or(0, |e| e.source_seq),
             current_stage: self.coordinator.current_stage().map(stage_name),
             last_episode: self.coordinator.last_summary().map(|s| CaptureEpisode {
                 stall_class: stall_name(s.class),
