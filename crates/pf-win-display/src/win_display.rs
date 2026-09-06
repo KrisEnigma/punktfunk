@@ -29,11 +29,13 @@ use windows::core::PCWSTR;
 use windows::Win32::Devices::Display::QUERY_DISPLAY_CONFIG_FLAGS;
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
-    QueryDisplayConfig, SetDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+    QueryDisplayConfig, SetDisplayConfig, DISPLAYCONFIG_2DREGION,
+    DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
     DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
-    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_COMPONENT_VIDEO,
+    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_MODE_INFO_TYPE_TARGET,
+    DISPLAYCONFIG_OUTPUT_TECHNOLOGY_COMPONENT_VIDEO,
     DISPLAYCONFIG_OUTPUT_TECHNOLOGY_COMPOSITE_VIDEO,
     DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED,
     DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DVI,
@@ -41,12 +43,12 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS,
     DISPLAYCONFIG_OUTPUT_TECHNOLOGY_SDI, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_SDTVDONGLE,
     DISPLAYCONFIG_OUTPUT_TECHNOLOGY_SVIDEO, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED,
-    DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EXTERNAL, DISPLAYCONFIG_PATH_INFO,
-    DISPLAYCONFIG_SDR_WHITE_LEVEL, DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE,
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY, QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS, SDC_ALLOW_CHANGES,
-    SDC_APPLY, SDC_FORCE_MODE_ENUMERATION, SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND,
-    SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EXTERNAL, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_RATIONAL,
+    DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE, DISPLAYCONFIG_SDR_WHITE_LEVEL,
+    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY, QDC_ALL_PATHS,
+    QDC_ONLY_ACTIVE_PATHS, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_FORCE_MODE_ENUMERATION,
+    SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
 };
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, POINTL};
 use windows::Win32::Graphics::Gdi::{
@@ -586,10 +588,100 @@ pub fn force_mode_reset(gdi_name: &str) -> bool {
     true
 }
 
+/// Put `key`'s path on `mode` through CCD, supplying the source mode outright.
+///
+/// [`set_active_mode`] goes through GDI, which can only pick a mode `EnumDisplaySettings`
+/// already lists — and the OS pins that list when a monitor arrives. A driver that has just
+/// published a new list (`IOCTL_UPDATE_MODES`) is therefore unreachable that way, which is why a
+/// resize used to need a hotplug. CCD takes the source size as data instead of choosing from a
+/// list, so the mode lands on the live path: same target, same swap chain, no re-arrival.
+///
+/// Both halves are supplied — source size and target timing — because the OS answers
+/// `ERROR_BAD_CONFIGURATION` rather than searching for whatever the caller left out.
+/// `false` if the target has no active path or the apply failed.
+pub fn set_active_mode_ccd(key: CcdTargetKey, mode: Mode) -> bool {
+    let Ok((mut paths, mut modes)) = query_display_config(QDC_ONLY_ACTIVE_PATHS) else {
+        return false;
+    };
+    let Some(pi) = paths.iter().position(|p| path_target_key(p) == key) else {
+        tracing::warn!(target = %key, "ccd mode set: no active path for this target");
+        return false;
+    };
+    // SAFETY: the CCD contract at the top of this file — on an ACTIVE path the union carries
+    // `modeInfoIdx`, and this path came back from `QDC_ONLY_ACTIVE_PATHS`.
+    let src_idx = unsafe { paths[pi].sourceInfo.Anonymous.modeInfoIdx } as usize;
+    if src_idx >= modes.len() || modes[src_idx].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+        tracing::warn!(target = %key, "ccd mode set: the path carries no source mode to rewrite");
+        return false;
+    }
+    // SAFETY: guarded by `infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE` immediately above —
+    // moving that guard makes this access unjustified.
+    unsafe {
+        modes[src_idx].Anonymous.sourceMode.width = mode.width;
+        modes[src_idx].Anonymous.sourceMode.height = mode.height;
+    }
+    // Supply the target timing too. Leaving it out makes the OS search for a workable one and
+    // answer ERROR_BAD_CONFIGURATION (0x64a) when it cannot; these are the numbers the driver
+    // advertises for this mode, so the search is not needed. `v_sync_freq_divider` is 1 for a
+    // target mode, per the DDI contract the driver builds its own mode list against.
+    // SAFETY: the CCD contract — an ACTIVE path carries `modeInfoIdx` in this union.
+    let tgt_idx = unsafe { paths[pi].targetInfo.Anonymous.modeInfoIdx } as usize;
+    if tgt_idx < modes.len() && modes[tgt_idx].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET {
+        let region = DISPLAYCONFIG_2DREGION {
+            cx: mode.width,
+            cy: mode.height,
+        };
+        let hz = u64::from(mode.refresh_hz);
+        // SAFETY: guarded by `infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET` immediately above.
+        unsafe {
+            let si = &mut modes[tgt_idx].Anonymous.targetMode.targetVideoSignalInfo;
+            si.pixelRate = hz * u64::from(mode.width) * u64::from(mode.height);
+            si.hSyncFreq = DISPLAYCONFIG_RATIONAL {
+                Numerator: u32::try_from(hz * u64::from(mode.height)).unwrap_or(u32::MAX),
+                Denominator: 1,
+            };
+            si.vSyncFreq = DISPLAYCONFIG_RATIONAL {
+                Numerator: mode.refresh_hz,
+                Denominator: 1,
+            };
+            si.totalSize = region;
+            si.activeSize = region;
+            si.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
+            si.Anonymous.videoStandard = 255 | (1 << 16);
+        }
+    } else {
+        paths[pi].targetInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+    }
+    // SAFETY: CCD contract — slices, so pointer and length agree, and both outlive this
+    // synchronous call. `retry_set_display_config` binds the input desktop.
+    let rc = crate::input_desktop::retry_set_display_config(|| unsafe {
+        SetDisplayConfig(
+            Some(paths.as_slice()),
+            Some(modes.as_slice()),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
+        )
+    });
+    if rc != 0 {
+        tracing::warn!(
+            target = %key,
+            "ccd mode set to {}x{}: SetDisplayConfig rc={rc:#x}{}",
+            mode.width,
+            mode.height,
+            sdc_access_denied_hint(rc)
+        );
+        return false;
+    }
+    true
+}
+
 /// Force `gdi_name` to `mode`. ADD only advertises; Windows otherwise lights
 /// an IDD at 1280×720. `CDS_TEST` first so an unadvertised mode leaves the
-/// default instead of failing the session.
-pub fn set_active_mode(gdi_name: &str, mode: Mode) {
+/// default instead of failing the session. A refresh the OS does not list
+/// clamps to the nearest lower one, and warns: the client asked for a rate
+/// this display will not run. `false` if nothing was written — callers using
+/// this as [`set_active_mode_ccd`]'s fallback owe that a log, or a display
+/// left on the wrong mode looks like it was never asked.
+pub fn set_active_mode(gdi_name: &str, mode: Mode) -> bool {
     let wname: Vec<u16> = gdi_name.encode_utf16().chain(std::iter::once(0)).collect();
 
     // Prefer same WxH: exact Hz, else highest advertised ≤ requested, else
@@ -645,7 +737,7 @@ pub fn set_active_mode(gdi_name: &str, mode: Mode) {
             mode.refresh_hz
         );
     } else if chosen_hz != mode.refresh_hz {
-        tracing::info!(
+        tracing::warn!(
             "{gdi_name}: {}x{}@{} not advertised; using {}x{}@{} (advertised refreshes here: {:?})",
             mode.width,
             mode.height,
@@ -687,7 +779,7 @@ pub fn set_active_mode(gdi_name: &str, mode: Mode) {
             chosen_hz,
             disp_change_reason(test.0)
         );
-        return;
+        return false;
     }
     // SAFETY: same inputs as the CDS_TEST above; both outlive the call.
     // CDS_UPDATEREGISTRY applies the already-validated mode; API only reads.
@@ -711,16 +803,17 @@ pub fn set_active_mode(gdi_name: &str, mode: Mode) {
             mode.height,
             chosen_hz
         );
-    } else {
-        tracing::warn!(
-            result = apply.0,
-            "{gdi_name}: failed to apply {}x{}@{} ({})",
-            mode.width,
-            mode.height,
-            chosen_hz,
-            disp_change_reason(apply.0)
-        );
+        return true;
     }
+    tracing::warn!(
+        result = apply.0,
+        "{gdi_name}: failed to apply {}x{}@{} ({})",
+        mode.width,
+        mode.height,
+        chosen_hz,
+        disp_change_reason(apply.0)
+    );
+    false
 }
 
 /// Decode a failed `ChangeDisplaySettingsExW`. `BADMODE` = not advertised;

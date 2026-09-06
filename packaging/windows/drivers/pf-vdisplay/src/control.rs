@@ -1,7 +1,8 @@
 //! The `pf-driver-proto` control plane (`EvtIddCxDeviceIoControl`). The host opens the device
 //! interface (`PF_VDISPLAY_INTERFACE_GUID`) and drives the low-frequency IOCTLs: GET_INFO (version
 //! handshake), PING (watchdog keepalive), ADD/REMOVE/CLEAR_ALL (virtual monitors),
-//! SET_RENDER_ADAPTER, UPDATE_MODES, the cursor channel, and the encoder verbs.
+//! SET_RENDER_ADAPTER, UPDATE_MODES, the cursor channel, the encoder verbs, and DRAIN_LOG (this
+//! process's diagnostic lines, on their way to `host.log`).
 //!
 //! [`dispatch`] wraps the raw `WDFREQUEST` in a [`Request`] token once and hands it to a handler BY
 //! VALUE; completing consumes the token, so "every path completes exactly once" (the
@@ -41,6 +42,11 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
             write_output_prefix_complete(request, &reply, size_of::<control::InfoReply>());
         }
         control::IOCTL_PING => request.complete(STATUS_SUCCESS),
+        control::IOCTL_DRAIN_LOG => {
+            let lines = crate::log::drain(request.output_buffer_len());
+            let status = request.copy_to_output(&lines);
+            request.complete(status);
+        }
         control::IOCTL_ADD => add(owner, request),
         control::IOCTL_REMOVE => remove(owner, request),
         control::IOCTL_CLEAR_ALL => {
