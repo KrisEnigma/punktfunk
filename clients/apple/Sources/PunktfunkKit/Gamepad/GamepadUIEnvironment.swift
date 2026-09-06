@@ -22,11 +22,13 @@ public enum GamepadUIEnvironment {
     /// once the switch is on: `modeAlways` takes over unconditionally, anything else (including a
     /// value a newer client wrote) waits for a controller.
     ///
-    /// `gamepadConnected` is `GamepadManager.shared.active != nil` — active only once a usable
-    /// controller is actually attached (a non-extended-profile device leaves `active` nil, which
-    /// keeps the touch UI). A `Bool` rather than the `DiscoveredController` itself: this function
-    /// has nothing else to inspect, and it keeps the helper testable without a real `GCController`
-    /// (which XCTest can't construct).
+    /// `gamepadConnected` is `GamepadManager.shared.uiPadConnected` — true only once a usable
+    /// controller is actually attached: an extended GameController pad (a non-extended-profile
+    /// device leaves `active` nil, which keeps the touch UI), or the iOS Steam Controller 2
+    /// GameController never surfaces. Exactly the sources `GamepadMenuInput` navigates with, so
+    /// a screen this takes over is always a screen the pad can drive. A `Bool` rather than the
+    /// `DiscoveredController` itself: this function has nothing else to inspect, and it keeps the
+    /// helper testable without a real `GCController` (which XCTest can't construct).
     /// `mode` carries no default on purpose: a call site that forgot it would silently strand
     /// everyone who picked Always back on "only with a controller", which is exactly the bug
     /// this parameter exists to make impossible.

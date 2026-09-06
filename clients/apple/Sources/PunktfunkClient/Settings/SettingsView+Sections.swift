@@ -29,13 +29,14 @@ extension SettingsView {
     /// (the caption rule). macOS says it differently because USB is the preferred transport
     /// there and its cost is the Input Monitoring grant, not Bluetooth — the controller
     /// interface carries the lizard keyboard collection, so macOS gates the open behind that
-    /// permission (on-glass 2026-08-31).
+    /// permission (on-glass 2026-08-31). Only iOS names menus: a Mac reaches them through
+    /// GameController, which never sees the pad on iOS.
     static var sc2CaptureCaption: String {
         #if os(macOS)
         return "Stream a Steam Controller 2 or Puck as-is; needs Input Monitoring "
             + "(or Bluetooth) access."
         #else
-        return "Stream a Steam Controller 2 as-is; needs Bluetooth access."
+        return "Browse and stream with a Steam Controller 2 as-is; needs Bluetooth access."
         #endif
     }
 

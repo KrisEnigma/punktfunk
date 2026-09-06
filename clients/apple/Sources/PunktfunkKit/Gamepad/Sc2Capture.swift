@@ -197,6 +197,8 @@ public final class Sc2Capture {
         stopped = false
         suspended = false
         lock.unlock()
+        // Take the hardware off the menu-nav reader (iOS): one peripheral, one central.
+        manager.holdSc2Hardware(true)
         #if os(macOS)
         let resign = NSApplication.willResignActiveNotification
         let activate = NSApplication.didBecomeActiveNotification
@@ -285,6 +287,7 @@ public final class Sc2Capture {
         lock.unlock()
         guard !wasStopped else { return }
         manager.steamController2Suppressed = false
+        manager.holdSc2Hardware(false)
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
         releaseAll(reason: "stop")
