@@ -17,6 +17,9 @@ use anyhow::bail;
 use anyhow::Context as _;
 use anyhow::Result;
 use pf_vaapi::enc_h264 as vah;
+use pf_vaapi::enc_params::packed_slice_header;
+use pf_vaapi::enc_params::va_pic_fields;
+use pf_vaapi::enc_params::PictureSlice;
 use pf_vaapi::enc_params::SessionParams;
 use pf_vaapi::va::VaImage;
 
@@ -65,6 +68,8 @@ pub struct H264Encoder {
     params: SessionParams,
     /// Frames encoded since the last IDR; `frame_num` in the slice header.
     frame_num: u16,
+    /// Toggled on every IDR, so two in a row are told apart.
+    idr_pic_id: u16,
     /// Rolling index for the picture being encoded.
     next_surface: usize,
     /// The reconstruction holding the most recent reference, if any.
@@ -118,14 +123,18 @@ impl H264Encoder {
         if supported_rc & vah::VA_RC_CBR == 0 {
             bail!("this driver offers no CBR rate control for H.264 encode");
         }
-        // Both radeonsi and iHD want the app to write the slice header as well as the
-        // parameter sets. Take whatever of the three the driver actually offers.
+        // Both kinds are required: the session writes every header itself, and
+        // radeonsi drops the packed SPS and PPS of a picture that brings no slice
+        // header.
         let want_packed = vah::VA_ENC_PACKED_HEADER_FLAG_SEQUENCE
             | vah::VA_ENC_PACKED_HEADER_FLAG_PICTURE
             | vah::VA_ENC_PACKED_HEADER_FLAG_SLICE;
         let packed = supported_packed & want_packed;
         if packed & vah::VA_ENC_PACKED_HEADER_FLAG_SEQUENCE == 0 {
             bail!("this driver will not take a packed sequence header ({supported_packed:#x})");
+        }
+        if packed & vah::VA_ENC_PACKED_HEADER_FLAG_SLICE == 0 {
+            bail!("this driver will not take a packed slice header ({supported_packed:#x})");
         }
 
         let attribs = [
@@ -223,6 +232,7 @@ impl H264Encoder {
             coded_buf,
             params,
             frame_num: 0,
+            idr_pic_id: 0,
             next_surface: 0,
             reference: None,
         })
@@ -319,6 +329,12 @@ impl H264Encoder {
     /// referencing the previous one.
     pub fn encode(&mut self, force_idr: bool) -> Result<EncodedPicture> {
         let is_idr = force_idr || self.reference.is_none();
+        let slice = PictureSlice {
+            is_idr,
+            // An IDR restarts frame_num at 0, wherever the count stood.
+            frame_num: if is_idr { 0 } else { self.frame_num },
+            idr_pic_id: self.idr_pic_id ^ u16::from(is_idr),
+        };
         let surface = self.input[self.next_surface];
         let recon = self.recon[self.next_surface];
         let sps = self.params.sps();
@@ -332,7 +348,7 @@ impl H264Encoder {
 
         let mut owned: Vec<VaBufferId> = Vec::new();
         let result = self
-            .render_picture(&mut owned, &sps, &pps, recon, is_idr)
+            .render_picture(&mut owned, &sps, &pps, recon, slice)
             .and_then(|()| self.render_ids(&mut owned.clone()));
 
         // SAFETY: `context` is live; `end_picture` closes the picture `begin_picture`
@@ -356,25 +372,25 @@ impl H264Encoder {
 
         self.reference = Some(recon);
         self.next_surface = (self.next_surface + 1) % Self::SURFACES;
-        self.frame_num = if is_idr {
-            1
-        } else {
-            // log2_max_frame_num_minus4 = 4 in the SPS, so frame_num is 8 bits wide.
-            (self.frame_num + 1) % 256
-        };
+        let max_frame_num = 1u16 << (sps.log2_max_frame_num_minus4 + 4);
+        self.frame_num = (slice.frame_num + 1) % max_frame_num;
+        self.idr_pic_id = slice.idr_pic_id;
         Ok(EncodedPicture { bytes, is_idr })
     }
 
-    /// Build and hand over every buffer this picture needs, in the order libva
-    /// expects: sequence, packed headers, picture, then slice.
+    /// Build and hand over every buffer this picture needs, in the order the
+    /// drivers parse them: sequence, packed parameter sets, picture, slice, then
+    /// the packed slice header — which Mesa reads against the sequence and picture
+    /// state the earlier buffers set.
     fn render_picture(
         &self,
         owned: &mut Vec<VaBufferId>,
         sps: &cros_codecs::codec::h264::parser::Sps,
         pps: &cros_codecs::codec::h264::parser::Pps,
         recon: VaSurfaceId,
-        is_idr: bool,
+        slice: PictureSlice,
     ) -> Result<()> {
+        let is_idr = slice.is_idr;
         let seq = self.params.va_sequence(sps);
         self.render(owned, vah::VA_ENC_SEQUENCE_PARAMETER_BUFFER_TYPE, &seq)?;
 
@@ -382,30 +398,29 @@ impl H264Encoder {
             let (packed_sps, packed_pps) = pf_vaapi::enc_params::packed_parameter_sets(sps, pps);
             let mut sets = packed_sps;
             sets.extend_from_slice(&packed_pps);
-            self.render_packed(owned, vah::VA_ENC_PACKED_HEADER_TYPE_SEQUENCE, &sets)?;
+            let bits = (sets.len() * 8) as u32;
+            self.render_packed(owned, vah::VA_ENC_PACKED_HEADER_TYPE_SEQUENCE, &sets, bits)?;
         }
 
         let mut pic = vah::VaEncPictureParameterBufferH264 {
             coded_buf: self.coded_buf,
-            frame_num: self.frame_num,
+            frame_num: slice.frame_num,
             pic_init_qp: self.params.initial_qp,
             ..Default::default()
         };
         pic.curr_pic = pf_vaapi::va::VaPictureH264 {
             picture_id: recon,
-            frame_idx: u32::from(self.frame_num),
+            frame_idx: u32::from(slice.frame_num),
             flags: 0,
             top_field_order_cnt: 0,
             bottom_field_order_cnt: 0,
             va_reserved: [0; 4],
         };
-        // idr_pic_flag:1 | reference_pic_flag:2 — every picture is a reference here,
-        // because the next P has only this one to point at.
-        pic.pic_fields = u32::from(is_idr) | 1 << 1;
+        pic.pic_fields = va_pic_fields(pps, is_idr);
         if let Some(reference) = self.reference.filter(|_| !is_idr) {
             pic.reference_frames[0] = pf_vaapi::va::VaPictureH264 {
                 picture_id: reference,
-                frame_idx: u32::from(self.frame_num.saturating_sub(1)),
+                frame_idx: u32::from(slice.frame_num.saturating_sub(1)),
                 flags: 0,
                 top_field_order_cnt: 0,
                 bottom_field_order_cnt: 0,
@@ -414,17 +429,21 @@ impl H264Encoder {
         }
         self.render(owned, vah::VA_ENC_PICTURE_PARAMETER_BUFFER_TYPE, &pic)?;
 
-        let mut slice = vah::VaEncSliceParameterBufferH264 {
+        let mut va_slice = vah::VaEncSliceParameterBufferH264 {
             num_macroblocks: self.params.mbs_per_picture(),
             slice_type: if is_idr { 2 } else { 0 },
+            idr_pic_id: slice.idr_pic_id,
             ..Default::default()
         };
-        if let Some(reference) = self.reference.filter(|_| !is_idr) {
-            slice.ref_pic_list_0[0] = pic.reference_frames[0];
-            let _ = reference;
+        if !is_idr {
+            va_slice.ref_pic_list_0[0] = pic.reference_frames[0];
         }
-        self.render(owned, vah::VA_ENC_SLICE_PARAMETER_BUFFER_TYPE, &slice)?;
-        Ok(())
+        self.render(owned, vah::VA_ENC_SLICE_PARAMETER_BUFFER_TYPE, &va_slice)?;
+
+        // Neither driver writes a slice header of its own: radeonsi templates its
+        // from this one, iHD copies it.
+        let (header, bits) = packed_slice_header(sps, pps, slice);
+        self.render_packed(owned, vah::VA_ENC_PACKED_HEADER_TYPE_SLICE, &header, bits)
     }
 
     /// One `vaCreateBuffer` + `vaRenderPicture` for a plain parameter struct.
@@ -442,10 +461,19 @@ impl H264Encoder {
     /// driver in **one** `vaRenderPicture` call. Rendered as separate calls they are
     /// silently dropped: the picture still encodes, the driver still reports success,
     /// and the header simply is not in the stream.
-    fn render_packed(&self, owned: &mut Vec<VaBufferId>, kind: u32, bytes: &[u8]) -> Result<()> {
+    ///
+    /// `bit_length` is exact, not `bytes.len() * 8`: a slice header ends mid-byte
+    /// and the driver writes slice data from the very next bit.
+    fn render_packed(
+        &self,
+        owned: &mut Vec<VaBufferId>,
+        kind: u32,
+        bytes: &[u8],
+        bit_length: u32,
+    ) -> Result<()> {
         let desc = vah::VaEncPackedHeaderParameterBuffer {
             kind,
-            bit_length: (bytes.len() * 8) as u32,
+            bit_length,
             // Our synthesizer already inserted emulation prevention; asking the
             // driver to insert it again would corrupt every 00 00 0x sequence.
             has_emulation_bytes: 1,

@@ -1,9 +1,10 @@
 //! One description of the stream, two consumers.
 //!
 //! Both radeonsi and iHD report `VAConfigAttribEncPackedHeaders`, which means the
-//! *app* writes the SPS and PPS — the driver will not. So the same session facts
-//! have to reach two places: the packed-header bytes a decoder reads, and
-//! [`VaEncSequenceParameterBufferH264`] which tells the driver how to encode.
+//! *app* writes the SPS, the PPS and every slice header — the driver will not. So
+//! the same session facts have to reach two places: the packed-header bytes a
+//! decoder reads, and [`VaEncSequenceParameterBufferH264`] which tells the driver
+//! how to encode.
 //!
 //! Describing them separately is how they drift, and a drifted pair is a stream whose
 //! header says one thing and whose macroblocks say another. [`SessionParams`] is the
@@ -11,7 +12,10 @@
 
 use std::rc::Rc;
 
+use cros_codecs::codec::h264::nalu_writer::NaluWriter;
+use cros_codecs::codec::h264::nalu_writer::NaluWriterResult;
 use cros_codecs::codec::h264::parser::Level;
+use cros_codecs::codec::h264::parser::NaluType;
 use cros_codecs::codec::h264::parser::Pps;
 use cros_codecs::codec::h264::parser::PpsBuilder;
 use cros_codecs::codec::h264::parser::Profile;
@@ -164,6 +168,29 @@ impl SessionParams {
     }
 }
 
+/// `VAEncPictureParameterBufferH264::pic_fields`, from the PPS the stream carries.
+///
+/// radeonsi regenerates the PPS from these bits, not from the packed one, so a bit
+/// that disagrees with the PPS is a stream whose PPS disagrees with the host's.
+/// Every picture here is a reference: the next P has only this one to point at.
+pub fn va_pic_fields(pps: &Pps, is_idr: bool) -> u32 {
+    // idr_pic_flag:1 | reference_pic_flag:2 | entropy_coding_mode:1 |
+    // weighted_pred:1 | weighted_bipred_idc:2 | constrained_intra_pred:1 |
+    // transform_8x8_mode:1 | deblocking_filter_control_present:1 |
+    // redundant_pic_cnt_present:1 | pic_order_present:1 | pic_scaling_matrix_present:1
+    u32::from(is_idr)
+        | 1 << 1
+        | u32::from(pps.entropy_coding_mode_flag) << 3
+        | u32::from(pps.weighted_pred_flag) << 4
+        | (u32::from(pps.weighted_bipred_idc) & 0x3) << 5
+        | u32::from(pps.constrained_intra_pred_flag) << 7
+        | u32::from(pps.transform_8x8_mode_flag) << 8
+        | u32::from(pps.deblocking_filter_control_present_flag) << 9
+        | u32::from(pps.redundant_pic_cnt_present_flag) << 10
+        | u32::from(pps.bottom_field_pic_order_in_frame_present_flag) << 11
+        | u32::from(pps.pic_scaling_matrix_present_flag) << 12
+}
+
 /// The two parameter sets a decoder needs before any slice, each as its own
 /// annex-B NALU with emulation prevention.
 ///
@@ -184,8 +211,91 @@ pub fn packed_parameter_sets(sps: &Sps, pps: &Pps) -> (Vec<u8>, Vec<u8>) {
     (packed_sps, packed_pps)
 }
 
+/// What one picture's slice header says that the parameter sets do not.
+#[derive(Clone, Copy, Debug)]
+pub struct PictureSlice {
+    pub is_idr: bool,
+    /// 0 on an IDR, counting up from 1 after it, modulo `MaxFrameNum`.
+    pub frame_num: u16,
+    /// Consecutive IDRs must differ here, or a decoder takes the second for a
+    /// repeat of the first.
+    pub idr_pic_id: u16,
+}
+
+/// The slice header as a packed header: its bytes, and how many of their bits
+/// are header.
+///
+/// Both drivers want it, differently. radeonsi parses it for the NAL header and
+/// the marking syntax, then templates its own; iHD copies exactly `bits` and
+/// writes slice data from the next bit. So the count excludes the stop bit and
+/// alignment that byte-complete the buffer — a byte length × 8 is off by up to
+/// seven bits and the slice data lands mid-header.
+///
+/// One slice per picture, every picture a reference, the reference list in its
+/// default order (newest first).
+pub fn packed_slice_header(sps: &Sps, pps: &Pps, slice: PictureSlice) -> (Vec<u8>, u32) {
+    // Type 2 is the SPS's choice precisely so there is no per-slice POC syntax.
+    debug_assert_eq!(sps.pic_order_cnt_type, 2);
+    let mut buf = Vec::new();
+    let write = |w: &mut NaluWriter<&mut Vec<u8>>| -> NaluWriterResult<()> {
+        if slice.is_idr {
+            w.write_header(3, NaluType::SliceIdr as u8)?;
+        } else {
+            w.write_header(2, NaluType::Slice as u8)?;
+        }
+        w.write_ue(0u32)?; // first_mb_in_slice
+        w.write_ue(if slice.is_idr { 7u32 } else { 5 })?; // slice_type: 7 = I, 5 = P
+        w.write_ue(u32::from(pps.pic_parameter_set_id))?;
+        w.write_f(
+            usize::from(sps.log2_max_frame_num_minus4) + 4,
+            u32::from(slice.frame_num),
+        )?;
+        if slice.is_idr {
+            w.write_ue(u32::from(slice.idr_pic_id))?;
+        } else {
+            w.write_f(1, 0u32)?; // num_ref_idx_active_override_flag: the PPS default of one
+            w.write_f(1, 0u32)?; // ref_pic_list_modification_flag_l0
+        }
+        // dec_ref_pic_marking: sliding window, nothing long-term.
+        if slice.is_idr {
+            w.write_f(1, 0u32)?; // no_output_of_prior_pics_flag
+            w.write_f(1, 0u32)?; // long_term_reference_flag
+        } else {
+            w.write_f(1, 0u32)?; // adaptive_ref_pic_marking_mode_flag
+        }
+        if pps.entropy_coding_mode_flag && !slice.is_idr {
+            w.write_ue(0u32)?; // cabac_init_idc
+        }
+        w.write_se(0i32)?; // slice_qp_delta
+        if pps.deblocking_filter_control_present_flag {
+            w.write_ue(0u32)?; // disable_deblocking_filter_idc
+            w.write_se(0i32)?; // slice_alpha_c0_offset_div2
+            w.write_se(0i32)?; // slice_beta_offset_div2
+        }
+        // Not header: the stop bit makes the header's last bit findable from the
+        // bytes alone, and the alignment lets the writer flush.
+        w.write_f(1, 1u32)?;
+        while !w.aligned() {
+            w.write_f(1, 0u32)?;
+        }
+        Ok(())
+    };
+    write(&mut NaluWriter::new(&mut buf, true))
+        .expect("writing to a Vec cannot fail, and every value fits its field");
+    let trailing = buf.last().map_or(0, |b| b.trailing_zeros() + 1);
+    let bits = buf.len() as u32 * 8 - trailing;
+    (buf, bits)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use cros_codecs::codec::h264::parser::Nalu;
+    use cros_codecs::codec::h264::parser::Parser;
+    use cros_codecs::codec::h264::parser::SliceHeader;
+    use cros_codecs::codec::h264::parser::SliceType;
+
     use super::*;
 
     fn params() -> SessionParams {
@@ -261,6 +371,90 @@ mod tests {
         // Cropping is carried, not silently dropped.
         assert_eq!(seq.frame_cropping_flag, 1);
         assert_eq!(seq.frame_crop_bottom_offset, 4);
+    }
+
+    /// Parse a slice header the way the client does, with our own parameter sets
+    /// active.
+    fn parse_slice(p: &SessionParams, bytes: &[u8]) -> SliceHeader {
+        let sps = p.sps();
+        let pps = p.pps(Rc::clone(&sps));
+        let (packed_sps, packed_pps) = packed_parameter_sets(&sps, &pps);
+        let mut parser = Parser::default();
+        let nalu = Nalu::next(&mut Cursor::new(&packed_sps[..])).unwrap();
+        parser.parse_sps(&nalu).unwrap();
+        let nalu = Nalu::next(&mut Cursor::new(&packed_pps[..])).unwrap();
+        parser.parse_pps(&nalu).unwrap();
+        let nalu = Nalu::next(&mut Cursor::new(bytes)).unwrap();
+        parser.parse_slice_header(nalu).unwrap().header
+    }
+
+    /// The parser counts the header's bits from the NAL header byte, with
+    /// emulation prevention taken back out; the driver's count starts at the
+    /// start code and keeps it in.
+    fn driver_bits(header: &SliceHeader) -> u32 {
+        (32 + header.header_bit_size + 8 * header.n_emulation_prevention_bytes) as u32
+    }
+
+    /// The bit count is the contract: iHD writes slice data from that bit. The
+    /// parser that reads the header back is the independent measure of where it
+    /// ends, and a P header is deliberately not byte-aligned so a length × 8
+    /// cannot pass by luck.
+    #[test]
+    fn the_packed_slice_header_reports_its_exact_bit_length() {
+        let p = params();
+        let sps = p.sps();
+        let pps = p.pps(Rc::clone(&sps));
+
+        let idr = PictureSlice {
+            is_idr: true,
+            frame_num: 0,
+            idr_pic_id: 1,
+        };
+        let (bytes, bits) = packed_slice_header(&sps, &pps, idr);
+        assert_eq!(bytes[4] & 0x1f, 5, "an IDR slice NALU");
+        let header = parse_slice(&p, &bytes);
+        assert_eq!(header.slice_type, SliceType::I);
+        assert_eq!(header.frame_num, 0);
+        assert_eq!(header.idr_pic_id, 1);
+        assert_eq!(bits, driver_bits(&header));
+
+        let p_slice = PictureSlice {
+            is_idr: false,
+            frame_num: 7,
+            idr_pic_id: 1,
+        };
+        let (bytes, bits) = packed_slice_header(&sps, &pps, p_slice);
+        assert_eq!(bytes[4] & 0x1f, 1, "a non-IDR slice NALU");
+        assert_ne!(
+            bytes[4] >> 5,
+            0,
+            "a reference picture has a non-zero nal_ref_idc"
+        );
+        let header = parse_slice(&p, &bytes);
+        assert_eq!(header.slice_type, SliceType::P);
+        assert_eq!(header.frame_num, 7);
+        assert!(!header.num_ref_idx_active_override_flag);
+        assert!(
+            !header
+                .dec_ref_pic_marking
+                .adaptive_ref_pic_marking_mode_flag
+        );
+        assert_eq!(bits, driver_bits(&header));
+        assert_ne!(bits % 8, 0, "this header is not byte-aligned, by design");
+    }
+
+    /// The PPS says deblocking control is present and the driver must be told the
+    /// same, or radeonsi regenerates a PPS that disagrees with the one we authored.
+    #[test]
+    fn the_va_picture_fields_agree_with_the_pps() {
+        let p = params();
+        let pps = p.pps(p.sps());
+        let fields = va_pic_fields(&pps, true);
+        assert_eq!(fields & 1, 1, "idr_pic_flag");
+        assert_eq!((fields >> 1) & 0x3, 1, "reference_pic_flag");
+        assert_eq!((fields >> 3) & 1, 0, "CAVLC");
+        assert_eq!((fields >> 9) & 1, 1, "deblocking_filter_control_present");
+        assert_eq!(va_pic_fields(&pps, false) & 1, 0);
     }
 
     /// The bytes a joining client reads first. Two NALUs, SPS then PPS, each with a

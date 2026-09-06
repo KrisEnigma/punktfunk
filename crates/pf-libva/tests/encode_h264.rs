@@ -43,16 +43,11 @@ fn frame(width: usize, height: usize, phase: usize) -> (Vec<u8>, Vec<u8>) {
     (y, vec![128u8; width * height / 2])
 }
 
-/// **Known failing, deliberately.** The session encodes, the driver reports success
-/// and the sizes are sane, but radeonsi emits slice payload with a zero NAL header:
-/// the app has supplied packed parameter sets and no packed *slice* header. libav's
-/// own VAAPI encoder requests `SEQUENCE | SLICE | MISC` and supplies all three.
-///
-/// Left failing rather than deleted or weakened. It names the exact remaining gap,
-/// and a test that passed without slice headers would be asserting the wrong
-/// contract — the stream would still not decode.
+/// Thirty frames: SPS, PPS, one IDR, twenty-nine P slices, and every access unit
+/// accepted by the client's own planner. `PF_ENC_OUT` hands the same bytes to
+/// ffmpeg, the reader that shares no code with either side.
 #[test]
-#[ignore = "needs a VAAPI encode device; fails until the packed slice header exists"]
+#[ignore = "needs a VAAPI encode device"]
 fn the_encoder_emits_a_decodable_stream() {
     let p = params();
     let mut enc = match open(p) {
