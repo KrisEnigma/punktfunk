@@ -80,7 +80,7 @@ impl SessionParams {
         SpsBuilder::new()
             .seq_parameter_set_id(0)
             .profile_idc(Profile::High)
-            .level_idc(Level::L4_1)
+            .level_idc(self.h264_level())
             .chroma_format_idc(1)
             .bit_depth_luma(8)
             .bit_depth_chroma(8)
@@ -99,6 +99,38 @@ impl SessionParams {
             .timing_info(self.fps_den, self.fps_num * 2, true)
             .bitstream_restriction(self.max_num_reorder_frames)
             .build()
+    }
+
+    /// The smallest level from 4.1 up whose frame size and macroblock rate hold
+    /// this stream (A.3.1): 4.2 for 1080p60, 5.2 for 4K60. A decoder that trusts
+    /// the level sizes its DPB and its throughput from it.
+    pub fn h264_level(&self) -> Level {
+        let mbs = u64::from(self.mbs_per_picture());
+        let rate = mbs * u64::from(self.fps_num) / u64::from(self.fps_den.max(1));
+        let ladder = [
+            (8_192, 245_760, Level::L4_1),
+            (8_192, 522_240, Level::L4_2),
+            (22_080, 983_040, Level::L5_1),
+            (36_864, 2_073_600, Level::L5_2),
+            (139_264, 4_177_920, Level::L6_1),
+        ];
+        ladder
+            .into_iter()
+            .find(|&(max_fs, max_mbps, _)| mbs <= max_fs && rate <= max_mbps)
+            .map_or(Level::L6_2, |(_, _, level)| level)
+    }
+
+    /// The most slots this level's DPB holds beside the current picture and the
+    /// gap placeholder (A.3.1 `MaxDpbMbs`), capped at four: 3 at 1080p, 4 at 4K.
+    pub fn h264_max_slots(&self) -> u8 {
+        let max_dpb_mbs: u64 = match self.h264_level() {
+            Level::L4_1 => 32_768,
+            Level::L4_2 => 34_816,
+            Level::L5_1 | Level::L5_2 => 184_320,
+            _ => 696_320,
+        };
+        let frames = (max_dpb_mbs / u64::from(self.mbs_per_picture())).min(16) as u8;
+        frames.saturating_sub(1).clamp(1, 4)
     }
 
     /// The PPS.
@@ -383,6 +415,29 @@ mod tests {
             initial_qp: 26,
             vbv_frames: 1.0,
         }
+    }
+
+    /// 1080p60 is 489 600 macroblocks a second — past level 4.1's 245 760, which
+    /// is what the SPS used to claim. 4K60 needs 5.2; the DPB there holds five.
+    #[test]
+    fn the_level_follows_the_picture_rate() {
+        let p = params();
+        assert_eq!(p.h264_level() as u8, Level::L4_2 as u8, "1080p60");
+        assert_eq!(p.h264_max_slots(), 3);
+        let uhd = SessionParams {
+            width: 3840,
+            height: 2160,
+            ..params()
+        };
+        assert_eq!(uhd.h264_level() as u8, Level::L5_2 as u8, "4K60");
+        assert_eq!(uhd.h264_max_slots(), 4);
+        let small = SessionParams {
+            width: 320,
+            height: 240,
+            ..params()
+        };
+        assert_eq!(small.h264_level() as u8, Level::L4_1 as u8);
+        assert_eq!(small.sps().level_idc as u8, Level::L4_1 as u8);
     }
 
     /// A one-frame VBV at 60 fps is a sixtieth of the rate, and the frame rate
