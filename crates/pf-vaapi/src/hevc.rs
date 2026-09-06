@@ -247,7 +247,16 @@ impl HevcParams {
                 w.write_f(1, 0u32)?; // no_output_of_prior_pics_flag
             }
             w.write_ue(0u32)?; // slice_pic_parameter_set_id
-            w.write_ue(if slice.is_idr { 2u32 } else { 1 })?; // slice_type: I or P
+                               // slice_type: 2 = I, 1 = P, 0 = B — a generalised-B P picture is a B
+                               // slice whose L1 is L0 again.
+            let b_slice = !slice.is_idr && f.gpb;
+            w.write_ue(if slice.is_idr {
+                2u32
+            } else if b_slice {
+                0
+            } else {
+                1
+            })?;
             if !slice.is_idr {
                 let lsb_bits = usize::from(LOG2_MAX_POC_LSB_MINUS4) + 4;
                 w.write_f(lsb_bits, (slice.poc as u32) & ((1 << lsb_bits) - 1))?;
@@ -272,6 +281,13 @@ impl HevcParams {
             if !slice.is_idr {
                 w.write_f(1, 1u32)?; // num_ref_idx_active_override_flag
                 w.write_ue(0u32)?; // num_ref_idx_l0_active_minus1: one reference
+                if b_slice {
+                    w.write_ue(0u32)?; // num_ref_idx_l1_active_minus1: the same one
+                    w.write_f(1, 0u32)?; // mvd_l1_zero_flag
+                    if f.temporal_mvp {
+                        w.write_f(1, 1u32)?; // collocated_from_l0_flag
+                    }
+                }
                 w.write_ue(0u32)?; // five_minus_max_num_merge_cand
             }
             w.write_se(0i32)?; // slice_qp_delta
@@ -307,8 +323,11 @@ impl HevcParams {
             general_profile_idc: self.profile_idc(),
             general_level_idc: self.level_idc(),
             general_tier_flag: 0,
-            intra_period: 0,
-            intra_idr_period: 0,
+            // Not 0: VDEnc's HuC rate control budgets a GOP from this and fails
+            // the first picture on an empty one. Picture types stay ours — the
+            // driver never inserts an IDR of its own.
+            intra_period: u32::from(u16::MAX),
+            intra_idr_period: u32::from(u16::MAX),
             ip_period: 1,
             bits_per_second: self.common.bitrate_bps,
             pic_width_in_luma_samples: self.coded_width() as u16,
@@ -570,6 +589,25 @@ mod tests {
         assert_eq!(header.num_ref_idx_l0_active_minus1, 0);
         assert_eq!(header.five_minus_max_num_merge_cand, 0);
         assert!(header.loop_filter_across_slices_enabled_flag);
+
+        // Intel's shape: the same picture as a B slice whose L1 repeats L0.
+        let mut gpb = p;
+        gpb.features.gpb = true;
+        let recovery = gpb.slice_header(HevcSlice {
+            is_idr: false,
+            poc: 10,
+            rps: &[(7, true), (6, false), (5, false)],
+        });
+        let header = parse(&gpb, &recovery);
+        assert_eq!(header.type_, SliceType::B);
+        assert_eq!(header.num_ref_idx_l0_active_minus1, 0);
+        assert_eq!(header.num_ref_idx_l1_active_minus1, 0);
+        assert!(!header.mvd_l1_zero_flag);
+        assert!(header.collocated_from_l0_flag);
+        assert_eq!(
+            &header.short_term_ref_pic_set.delta_poc_s0[..3],
+            &[-3, -4, -5]
+        );
     }
 
     /// Two SEI messages in one NAL, 24 and 4 bytes of payload. The luminance

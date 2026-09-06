@@ -241,6 +241,89 @@ fn a_bitrate_step_lands_without_an_idr() {
     assert!(high > 10_000, "8 Mbps did not bind: {high} B/frame");
 }
 
+/// What one 1080p60 picture costs, submit to bytes, on each codec: the number that
+/// decides whether the session must pipeline (WP8) or may stay synchronous. Noise
+/// content, so the encoder works; printed, not asserted, because it is a
+/// measurement of this box.
+#[test]
+#[ignore = "needs a VAAPI encode device; prints a measurement"]
+fn a_1080p60_picture_costs() {
+    for (name, codec) in [
+        ("H.264", CodecParams::H264),
+        (
+            "HEVC",
+            CodecParams::Hevc {
+                ten_bit: false,
+                colour: pf_vaapi::hevc::COLOUR_BT709,
+            },
+        ),
+    ] {
+        let p = SessionParams {
+            width: 1920,
+            height: 1080,
+            bitrate_bps: 20_000_000,
+            slots: 3,
+            ..params()
+        };
+        let mut enc = open(p, codec).expect("an encoder");
+        // The input surface is the coded size: 1088 rows, not 1080.
+        let (w, h) = (p.width as usize, p.height.div_ceil(16) as usize * 16);
+        let mut seed = 0x2545_f491u32;
+        let mut y = vec![0u8; w * h];
+        let uv = vec![128u8; w * h / 2];
+        let mut encode_us = Vec::new();
+        let mut ingest_us = Vec::new();
+        for i in 0..60 {
+            for px in y.iter_mut() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *px = (seed >> 24) as u8;
+            }
+            let t0 = std::time::Instant::now();
+            enc.write_nv12(&y, &uv).expect("fill");
+            let t1 = std::time::Instant::now();
+            enc.encode(i == 0).expect("encode");
+            let t2 = std::time::Instant::now();
+            if i >= 10 {
+                ingest_us.push((t1 - t0).as_micros() as u64);
+                encode_us.push((t2 - t1).as_micros() as u64);
+            }
+        }
+        let stats = |v: &mut Vec<u64>| {
+            v.sort_unstable();
+            (
+                v.iter().sum::<u64>() / v.len() as u64,
+                v[v.len() / 2],
+                v[v.len() - 1],
+            )
+        };
+        let (e_mean, e_med, e_max) = stats(&mut encode_us);
+        let (i_mean, _, i_max) = stats(&mut ingest_us);
+        println!(
+            "{name} 1080p60 noise (low power {}): encode+sync mean {e_mean} us, median {e_med} \
+             us, max {e_max} us; CPU NV12 upload mean {i_mean} us, max {i_max} us (budget \
+             16 667 us)",
+            enc.low_power()
+        );
+        // The real CPU path: packed BGRA up, converted on the GPU.
+        let bgra: Vec<u8> = (0..p.width * p.height)
+            .flat_map(|i| [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8, 255])
+            .collect();
+        let mut vpp_us = Vec::new();
+        for i in 0..30 {
+            let t0 = std::time::Instant::now();
+            enc.submit_packed(&bgra, pf_vaapi::vpp::VA_FOURCC_BGRA, p.width as usize * 4)
+                .expect("ingest");
+            let t1 = std::time::Instant::now();
+            enc.encode(false).expect("encode");
+            if i >= 5 {
+                vpp_us.push((t1 - t0).as_micros() as u64);
+            }
+        }
+        let (v_mean, _, v_max) = stats(&mut vpp_us);
+        println!("{name} 1080p BGRA upload + VPP: mean {v_mean} us, max {v_max} us");
+    }
+}
+
 /// Split on the parameter-set/slice boundary: each AU here is the SPS+PPS+slice of
 /// an IDR, or a single P slice.
 fn split_aus(stream: &[u8]) -> Vec<&[u8]> {

@@ -13,6 +13,10 @@ pub const VA_PROFILE_HEVC_MAIN: i32 = 17;
 pub const VA_PROFILE_HEVC_MAIN10: i32 = 18;
 pub const VA_CONFIG_ATTRIB_ENC_HEVC_FEATURES: u32 = 50;
 pub const VA_CONFIG_ATTRIB_ENC_HEVC_BLOCK_SIZES: u32 = 51;
+/// `VAConfigAttribPredictionDirection`: `BI_NOT_EMPTY` set means every inter
+/// slice must be a B slice with L1 filled — VDEnc refuses a P slice outright.
+pub const VA_CONFIG_ATTRIB_PREDICTION_DIRECTION: u32 = 39;
+pub const VA_PREDICTION_DIRECTION_BI_NOT_EMPTY: u32 = 0x4;
 /// `VA_ATTRIB_NOT_SUPPORTED`: the driver has no opinion, take the defaults.
 pub const VA_ATTRIB_NOT_SUPPORTED: u32 = 0x8000_0000;
 
@@ -45,6 +49,9 @@ pub struct HevcFeatures {
     pub log2_max_tb_minus2: u8,
     pub max_transform_hierarchy_depth_inter: u8,
     pub max_transform_hierarchy_depth_intra: u8,
+    /// Generalised P/B: a P picture is coded as a B slice whose L1 repeats L0.
+    /// Intel says so (`BI_NOT_EMPTY`) on both entrypoints; AMD takes P slices.
+    pub gpb: bool,
 }
 
 impl HevcFeatures {
@@ -70,6 +77,7 @@ impl HevcFeatures {
             log2_min_tb_minus2: b(8),
             max_transform_hierarchy_depth_inter: b(10),
             max_transform_hierarchy_depth_intra: b(14),
+            gpb: false,
         }
     }
 
@@ -88,6 +96,7 @@ impl HevcFeatures {
             log2_max_tb_minus2: 3,
             max_transform_hierarchy_depth_inter: 0,
             max_transform_hierarchy_depth_intra: 0,
+            gpb: false,
         }
     }
 
