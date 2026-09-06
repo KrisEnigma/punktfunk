@@ -203,3 +203,18 @@ fn the_default_run_collapses_to_a_progress_line() {
         "never reached the outro:\n{text}"
     );
 }
+
+/// A hand-off ends the plan early. Its own summary goes into the progress view's capture buffer,
+/// so this outro is the only thing that tells the user the install worked — or did not.
+#[test]
+fn a_hand_off_still_reports_the_outcome() {
+    let text = plain(&run(&["--demo", "omarchy", "-v"], b"\r", "Done. Next"));
+    assert!(
+        text.contains("punktfunk-omarchy setup"),
+        "the hand-off never ran:\n{text}"
+    );
+    assert!(
+        text.contains("Done. Next"),
+        "the hand-off swallowed the outro:\n{text}"
+    );
+}

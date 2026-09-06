@@ -364,10 +364,9 @@ fn main() -> ExitCode {
         report::uninstall_outro(ui);
         return ExitCode::SUCCESS;
     }
-    // `punktfunk-omarchy setup` did the wiring and prints its own outro.
-    if !outcome.ended_early {
-        report::verify(ui, run, &facts, &choices, &outcome, opts);
-    }
+    // A hand-off ends the plan early and its own summary went into the progress view's capture
+    // buffer, so this is the only report that says whether the box ended up working.
+    report::verify(ui, run, &facts, &choices, &outcome, opts);
     ExitCode::SUCCESS
 }
 
