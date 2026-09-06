@@ -1104,6 +1104,30 @@ impl SpsBuilder {
         self
     }
 
+    /// Signal the reorder bound: `bitstream_restriction_flag` with
+    /// `max_num_reorder_frames` and `max_dec_frame_buffering`.
+    ///
+    /// The synthesizer already writes these; only the builder could not set them.
+    /// A host that states them lets a decoder output on the bound instead of holding
+    /// pictures until the DPB fills, which is several frames of latency on a stream
+    /// that reorders nothing. Implies `vui_parameters_present`.
+    pub fn bitstream_restriction(mut self, max_num_reorder_frames: u32) -> Self {
+        self = self.vui_parameters_present();
+        let vui = &mut self.0.vui_parameters;
+        vui.bitstream_restriction_flag = true;
+        vui.motion_vectors_over_pic_boundaries_flag = true;
+        vui.max_bytes_per_pic_denom = 0;
+        vui.max_bits_per_mb_denom = 0;
+        vui.log2_max_mv_length_horizontal = 15;
+        vui.log2_max_mv_length_vertical = 15;
+        vui.max_num_reorder_frames = max_num_reorder_frames;
+        // E.2.1: max_dec_frame_buffering >= max_num_reorder_frames, and must not be
+        // below max_num_ref_frames or a conforming decoder livelocks on a full DPB.
+        vui.max_dec_frame_buffering =
+            max_num_reorder_frames.max(u32::from(self.0.max_num_ref_frames));
+        self
+    }
+
     pub fn vui_parameters_present(mut self) -> Self {
         if self.0.vui_parameters_present_flag {
             return self;

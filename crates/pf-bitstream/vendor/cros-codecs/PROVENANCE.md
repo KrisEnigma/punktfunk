@@ -249,5 +249,16 @@ in the future."
     `frame_size_with_refs`, and authoring the syntax by hand is out of proportion for a
     two-line zero check. **Not filed upstream.**
 
+23. `src/codec/h264/parser.rs` — new `SpsBuilder::bitstream_restriction`. The
+    synthesizer already writes `bitstream_restriction_flag`, `max_num_reorder_frames` and
+    `max_dec_frame_buffering` (`synthesizer.rs` VUI tail); the builder had no way to set them,
+    so no SPS it authored could state a reorder bound. punktfunk's native VAAPI encoder packs
+    its own SPS (both radeonsi and iHD require the app to), and stating the bound is what lets a
+    client output on it instead of holding pictures until the DPB fills — several frames of
+    latency on a stream that reorders nothing. `max_dec_frame_buffering` is floored at
+    `max_num_ref_frames` per E.2.1, which is the livelock the sweep's S-77 refuses at parse.
+    Regression test: `an_authored_sps_states_the_reorder_bound` in `pf-vaapi`.
+    **Report upstream — not yet filed.**
+
 Re-sync procedure: fetch the AOSP tree, re-apply this trim, diff `codec/` +
 `bitstream_utils.rs` (expect near-zero conflicts), update the commit pin above.

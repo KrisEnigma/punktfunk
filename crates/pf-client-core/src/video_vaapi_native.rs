@@ -18,10 +18,8 @@
 //! `PUNKTFUNK_DECODER=native-vaapi`. Evidence: `video::native_evidence` and the
 //! ignored tests in this file.
 
-use std::os::fd::AsRawFd as _;
 use std::os::fd::FromRawFd as _;
 use std::os::fd::OwnedFd;
-use std::os::raw::c_char;
 use std::os::raw::c_int;
 use std::os::raw::c_uint;
 use std::os::raw::c_void;
@@ -44,404 +42,19 @@ use crate::video_color::ColorDesc;
 /// missing `video::native_evidence` ungeneratable.
 pub(crate) const DECODER_PIN: &str = "native-vaapi";
 
-type VaDisplay = *mut c_void;
-type VaStatus = c_int;
-type VaSurfaceId = c_uint;
-type VaConfigId = c_uint;
-type VaContextId = c_uint;
-type VaBufferId = c_uint;
-
-const VA_STATUS_SUCCESS: VaStatus = 0;
-/// Also the "no surface" sentinel in a slot table. 0 is a plausible `VASurfaceID`.
-const VA_INVALID_ID: c_uint = 0xffff_ffff;
-/// The only picture structure this rung's envelope contains.
-const VA_PROGRESSIVE: c_uint = 0x0001;
-
-/// `VAGenericValue`: 16 bytes, value at offset 8, align 8 (`pf-vaapi/layout-probe.c`).
-///
-/// The C `value` is a union that includes a pointer, so it is eight-byte aligned —
-/// four bytes of padding after `kind`, 16 bytes total not 12. A Rust union written
-/// through the `i32` arm leaves the other four bytes uninitialised, and those are
-/// the bytes a driver reading the pointer arm would see. `_rest` is always zero so
-/// every byte crossing the FFI was written here.
-#[repr(C, align(8))]
-#[derive(Clone, Copy)]
-struct VaGenericValue {
-    kind: c_int,
-    _pad: u32,
-    i: i32,
-    /// Always zero: the unused half of the C union.
-    _rest: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct VaSurfaceAttrib {
-    kind: c_int,
-    flags: c_uint,
-    value: VaGenericValue,
-}
-
-/// Measured by `pf-vaapi/layout-probe.c`.
-const VA_SURFACE_ATTRIB_PIXEL_FORMAT: c_int = 1;
-const VA_GENERIC_VALUE_TYPE_INTEGER: c_int = 1;
-const VA_SURFACE_ATTRIB_SETTABLE: c_uint = 0x0002;
-
-// Layouts passed by value, measured (`pf-vaapi/layout-probe.c`).
-const _: () = {
-    assert!(size_of::<VaGenericValue>() == 16);
-    assert!(std::mem::offset_of!(VaGenericValue, i) == 8);
-    assert!(size_of::<VaSurfaceAttrib>() == 24);
-    assert!(std::mem::offset_of!(VaSurfaceAttrib, flags) == 4);
-    assert!(std::mem::offset_of!(VaSurfaceAttrib, value) == 8);
-};
-
-/// libva entry points from `libva.so.2` / `libva-drm.so.2`. Absent library is a
-/// clean refusal, not a link error.
-struct Libva {
-    _va: libloading::Library,
-    _drm: libloading::Library,
-    get_display_drm: unsafe extern "C" fn(c_int) -> VaDisplay,
-    initialize: unsafe extern "C" fn(VaDisplay, *mut c_int, *mut c_int) -> VaStatus,
-    terminate: unsafe extern "C" fn(VaDisplay) -> VaStatus,
-    error_str: unsafe extern "C" fn(VaStatus) -> *const c_char,
-    query_config_entrypoints:
-        unsafe extern "C" fn(VaDisplay, c_int, *mut c_int, *mut c_int) -> VaStatus,
-    max_entrypoints: unsafe extern "C" fn(VaDisplay) -> c_int,
-    create_config: unsafe extern "C" fn(
-        VaDisplay,
-        c_int,
-        c_int,
-        *mut c_void,
-        c_int,
-        *mut VaConfigId,
-    ) -> VaStatus,
-    destroy_config: unsafe extern "C" fn(VaDisplay, VaConfigId) -> VaStatus,
-    create_surfaces: unsafe extern "C" fn(
-        VaDisplay,
-        c_uint,
-        c_uint,
-        c_uint,
-        *mut VaSurfaceId,
-        c_uint,
-        *mut VaSurfaceAttrib,
-        c_uint,
-    ) -> VaStatus,
-    destroy_surfaces: unsafe extern "C" fn(VaDisplay, *mut VaSurfaceId, c_int) -> VaStatus,
-    create_context: unsafe extern "C" fn(
-        VaDisplay,
-        VaConfigId,
-        c_int,
-        c_int,
-        c_int,
-        *mut VaSurfaceId,
-        c_int,
-        *mut VaContextId,
-    ) -> VaStatus,
-    destroy_context: unsafe extern "C" fn(VaDisplay, VaContextId) -> VaStatus,
-    create_buffer: unsafe extern "C" fn(
-        VaDisplay,
-        VaContextId,
-        c_uint,
-        c_uint,
-        c_uint,
-        *mut c_void,
-        *mut VaBufferId,
-    ) -> VaStatus,
-    destroy_buffer: unsafe extern "C" fn(VaDisplay, VaBufferId) -> VaStatus,
-    begin_picture: unsafe extern "C" fn(VaDisplay, VaContextId, VaSurfaceId) -> VaStatus,
-    render_picture:
-        unsafe extern "C" fn(VaDisplay, VaContextId, *mut VaBufferId, c_int) -> VaStatus,
-    end_picture: unsafe extern "C" fn(VaDisplay, VaContextId) -> VaStatus,
-    sync_surface: unsafe extern "C" fn(VaDisplay, VaSurfaceId) -> VaStatus,
-    export_surface_handle:
-        unsafe extern "C" fn(VaDisplay, VaSurfaceId, c_uint, c_uint, *mut c_void) -> VaStatus,
-}
-
-impl Libva {
-    fn load() -> Result<Libva> {
-        // SAFETY: `Library::new` runs the trusted system libva's initialisers, and each
-        // `lib.get` resolves a documented libva symbol to the matching `unsafe extern "C"`
-        // signature transcribed from `va.h` / `va_drm.h` (by-value integers and pointers
-        // throughout, no callbacks). Both `Library` handles are stored in the returned
-        // struct, so every resolved pointer outlives its uses.
-        unsafe {
-            let va = libloading::Library::new("libva.so.2")
-                .context("libva.so.2 (no VAAPI runtime on this system)")?;
-            let drm = libloading::Library::new("libva-drm.so.2")
-                .context("libva-drm.so.2 (no VAAPI DRM backend on this system)")?;
-            // Resolved at the field's own type — no `transmute`. Bound with `let`
-            // so each `Library` borrow ends before the handle moves into the struct.
-            macro_rules! get {
-                ($lib:expr, $name:literal) => {
-                    *$lib
-                        .get(concat!($name, "\0").as_bytes())
-                        .map_err(|e| anyhow!(concat!("dlsym ", $name, ": {}"), e))?
-                };
-            }
-            let get_display_drm = get!(drm, "vaGetDisplayDRM");
-            let initialize = get!(va, "vaInitialize");
-            let terminate = get!(va, "vaTerminate");
-            let error_str = get!(va, "vaErrorStr");
-            let query_config_entrypoints = get!(va, "vaQueryConfigEntrypoints");
-            let max_entrypoints = get!(va, "vaMaxNumEntrypoints");
-            let create_config = get!(va, "vaCreateConfig");
-            let destroy_config = get!(va, "vaDestroyConfig");
-            let create_surfaces = get!(va, "vaCreateSurfaces");
-            let destroy_surfaces = get!(va, "vaDestroySurfaces");
-            let create_context = get!(va, "vaCreateContext");
-            let destroy_context = get!(va, "vaDestroyContext");
-            let create_buffer = get!(va, "vaCreateBuffer");
-            let destroy_buffer = get!(va, "vaDestroyBuffer");
-            let begin_picture = get!(va, "vaBeginPicture");
-            let render_picture = get!(va, "vaRenderPicture");
-            let end_picture = get!(va, "vaEndPicture");
-            let sync_surface = get!(va, "vaSyncSurface");
-            let export_surface_handle = get!(va, "vaExportSurfaceHandle");
-            Ok(Libva {
-                get_display_drm,
-                initialize,
-                terminate,
-                error_str,
-                query_config_entrypoints,
-                max_entrypoints,
-                create_config,
-                destroy_config,
-                create_surfaces,
-                destroy_surfaces,
-                create_context,
-                destroy_context,
-                create_buffer,
-                destroy_buffer,
-                begin_picture,
-                render_picture,
-                end_picture,
-                sync_surface,
-                export_surface_handle,
-                _va: va,
-                _drm: drm,
-            })
-        }
-    }
-
-    fn err(&self, what: &str, status: VaStatus) -> anyhow::Error {
-        // SAFETY: `vaErrorStr` is documented total — it returns a pointer into libva's
-        // static string table for any input, valid while the library is loaded, which
-        // `&self` proves.
-        let text = unsafe {
-            let p = (self.error_str)(status);
-            if p.is_null() {
-                String::new()
-            } else {
-                std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
-            }
-        };
-        if text.is_empty() {
-            anyhow!("{what} failed ({status})")
-        } else {
-            anyhow!("{what} failed: {text} ({status})")
-        }
-    }
-
-    fn check(&self, what: &str, status: VaStatus) -> Result<()> {
-        if status == VA_STATUS_SUCCESS {
-            Ok(())
-        } else {
-            Err(self.err(what, status))
-        }
-    }
-}
-
-/// Initialised `VADisplay` over a DRM render node.
-struct Display {
-    va: Libva,
-    display: VaDisplay,
-    /// libva does not dup the fd; the display is valid only while this stays open,
-    /// and it is dropped after `vaTerminate`.
-    node: Option<OwnedFd>,
-    path: String,
-    version: (c_int, c_int),
-}
-
-// SAFETY: the display is created and used from ONE thread (the pump), and `Send` only
-// permits MOVING that ownership. libva is not safe for concurrent calls on one
-// display, which is why `Sync` is deliberately absent: every path into it goes through
-// `&mut NativeVaapiDecoder`, and that is the serialisation.
-unsafe impl Send for Display {}
-
-impl Display {
-    /// `PUNKTFUNK_VAAPI_DEVICE` pins a node; otherwise name order, first that
-    /// initialises wins. That GPU need not be the presenter's — a dmabuf across
-    /// GPUs fails or copies — so the pin is the escape hatch.
-    fn open(va: Libva) -> Result<Display> {
-        if let Some(pin) = std::env::var_os("PUNKTFUNK_VAAPI_DEVICE") {
-            let path = pin.to_string_lossy().into_owned();
-            let (display, node, version) = Display::probe(&va, &path)
-                .with_context(|| format!("PUNKTFUNK_VAAPI_DEVICE={path}"))?;
-            return Ok(Display {
-                va,
-                display,
-                node: Some(node),
-                path,
-                version,
-            });
-        }
-        let mut nodes: Vec<std::path::PathBuf> = std::fs::read_dir("/dev/dri")
-            .context("/dev/dri (no DRM devices on this machine)")?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("renderD"))
-            })
-            .collect();
-        nodes.sort();
-        let mut tried: Vec<String> = Vec::new();
-        for node in &nodes {
-            let path = node.to_string_lossy().into_owned();
-            match Display::probe(&va, &path) {
-                Ok((display, node, version)) => {
-                    return Ok(Display {
-                        va,
-                        display,
-                        node: Some(node),
-                        path,
-                        version,
-                    })
-                }
-                Err(e) => {
-                    tracing::debug!(node = %path, reason = %format!("{e:#}"), "not a VAAPI device");
-                    tried.push(path);
-                }
-            }
-        }
-        bail!(
-            "no render node initialised a VAAPI display ({})",
-            if tried.is_empty() {
-                "/dev/dri has no renderD* nodes".to_string()
-            } else {
-                format!("tried {}", tried.join(", "))
-            }
-        )
-    }
-
-    /// One node, borrowing the already-loaded library.
-    fn probe(va: &Libva, path: &str) -> Result<(VaDisplay, OwnedFd, (c_int, c_int))> {
-        let node = OwnedFd::from(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-                .with_context(|| format!("open {path}"))?,
-        );
-        // SAFETY: `vaGetDisplayDRM` takes the render node's fd by value and returns an
-        // opaque display or null; `vaInitialize` writes the two version ints through
-        // the out-pointers, which are locals live across the call. The fd stays open in
-        // `node` for as long as the display exists — libva does not dup it.
-        unsafe {
-            let display = (va.get_display_drm)(node.as_raw_fd());
-            if display.is_null() {
-                bail!("vaGetDisplayDRM({path}) returned no display");
-            }
-            let (mut major, mut minor) = (0, 0);
-            let status = (va.initialize)(display, &mut major, &mut minor);
-            if status != VA_STATUS_SUCCESS {
-                let e = va.err("vaInitialize", status);
-                // Unusable but still allocated; terminate so the driver state goes too.
-                (va.terminate)(display);
-                // Callers already name the node; putting it in the error printed it twice.
-                return Err(e);
-            }
-            Ok((display, node, (major, minor)))
-        }
-    }
-}
-
-impl Display {
-    /// Asked before `vaCreateConfig` so an unsupported profile is a named refusal,
-    /// not a driver status code.
-    fn require_entrypoint(&self, profile: c_int) -> Result<()> {
-        // SAFETY: `vaMaxNumEntrypoints` returns the array size this display needs;
-        // the vector is allocated to exactly that and `count` is a local written
-        // through by the call.
-        unsafe {
-            let max = (self.va.max_entrypoints)(self.display);
-            if max <= 0 {
-                bail!("vaMaxNumEntrypoints returned {max}");
-            }
-            let mut entrypoints = vec![0 as c_int; max as usize];
-            let mut count: c_int = 0;
-            self.va.check(
-                "vaQueryConfigEntrypoints",
-                (self.va.query_config_entrypoints)(
-                    self.display,
-                    profile,
-                    entrypoints.as_mut_ptr(),
-                    &mut count,
-                ),
-            )?;
-            let vld = pf_vaapi::VA_ENTRYPOINT_VLD as c_int;
-            if !entrypoints[..count.clamp(0, max) as usize].contains(&vld) {
-                bail!("this device has no VLD decode entrypoint for VAProfile {profile}");
-            }
-        }
-        Ok(())
-    }
-
-    /// libva copies a non-null `data` before returning, so the caller's structs may
-    /// die immediately. `size` is one element and `count` is how many — not
-    /// interchangeable. H.264/H.265 pass `count = 1`; AV1's tile-parameter buffer
-    /// is the exception (one buffer, a whole tile group's records).
-    fn create_buffer(
-        &self,
-        context: VaContextId,
-        kind: u32,
-        size: usize,
-        count: usize,
-        data: *const c_void,
-    ) -> Result<VaBufferId> {
-        let mut id: VaBufferId = VA_INVALID_ID;
-        // SAFETY: a live display and context; `data` points at `size * count` readable
-        // bytes for the duration of the call (the caller's live struct or slice), and
-        // `id` is a local written through. libva copies the payload before returning.
-        self.va.check("vaCreateBuffer", unsafe {
-            (self.va.create_buffer)(
-                self.display,
-                context,
-                kind as c_uint,
-                size as c_uint,
-                count as c_uint,
-                data.cast_mut(),
-                &mut id,
-            )
-        })?;
-        Ok(id)
-    }
-
-    /// `vaEndPicture` does not consume buffers. `va.h` requires `vaDestroyBuffer`;
-    /// leaking two-plus per picture at 60 fps exhausts the driver's store.
-    fn destroy_buffers(&self, buffers: &[VaBufferId]) {
-        for &b in buffers {
-            if b == VA_INVALID_ID {
-                continue;
-            }
-            // SAFETY: each id came from `create_buffer` on this display and is
-            // destroyed exactly once — the submission's list is consumed here.
-            unsafe { (self.va.destroy_buffer)(self.display, b) };
-        }
-    }
-}
-
-impl Drop for Display {
-    fn drop(&mut self) {
-        // SAFETY: `self.display` was initialised in `open_node` and nothing else
-        // terminates it; `Drop` runs once. The node fd is dropped AFTER this, which is
-        // the order libva requires — it holds the fd, it does not own it.
-        unsafe { (self.va.terminate)(self.display) };
-        self.node = None;
-    }
-}
+// The libva runtime lives in `pf-vaapi` so the host encoder binds the same one.
+use pf_libva::Display;
+use pf_libva::Libva;
+use pf_libva::VaBufferId;
+use pf_libva::VaConfigId;
+use pf_libva::VaContextId;
+use pf_libva::VaGenericValue;
+use pf_libva::VaSurfaceAttrib;
+use pf_libva::VaSurfaceId;
+use pf_libva::VA_INVALID_ID;
+use pf_libva::VA_PROGRESSIVE;
+use pf_libva::VA_SURFACE_ATTRIB_PIXEL_FORMAT;
+use pf_libva::VA_SURFACE_ATTRIB_SETTABLE;
 
 /// Anything that sizes or configures a session. A change rebuilds the whole
 /// thing — a half-rebuilt session hands out surfaces the pool does not have.
@@ -635,13 +248,8 @@ impl Session {
             let mut pixel = VaSurfaceAttrib {
                 kind: VA_SURFACE_ATTRIB_PIXEL_FORMAT,
                 flags: VA_SURFACE_ATTRIB_SETTABLE,
-                value: VaGenericValue {
-                    kind: VA_GENERIC_VALUE_TYPE_INTEGER,
-                    _pad: 0,
-                    // Integer arm is i32; every fourcc here has the top bit clear.
-                    i: fourcc as i32,
-                    _rest: 0,
-                },
+                // Integer arm is i32; every fourcc here has the top bit clear.
+                value: VaGenericValue::integer(fourcc as i32),
             };
             // Coded size: a display-sized pool is short by granule padding and smears rows.
             // SAFETY: live display; the surface array and the attribute outlive the
@@ -3052,6 +2660,11 @@ mod parity {
     use super::tests::split_h264_aus;
     use super::tests::split_h265_aus;
     use super::tests::split_ivf;
+    // Test-only `ImageApi` re-dlopens libva and names these; the lib itself does not.
+    use pf_libva::VaDisplay;
+    use pf_libva::VaStatus;
+    use pf_libva::VA_STATUS_SUCCESS;
+
     use super::tests::AV1_25FPS;
     use super::tests::H264_25FPS;
     use super::tests::H265_25FPS;

@@ -25,12 +25,18 @@
 
 pub mod config;
 pub mod drm;
+/// H.264 encode parameter buffers — the encode mirror of [`va`].
+pub mod enc_h264;
+/// One description of the stream, feeding both the packed headers and the VA buffer.
+pub mod enc_params;
 pub mod pic;
 pub mod pic_av1;
 pub mod pic_h265;
 pub mod va;
 pub mod va_av1;
 pub mod va_h265;
+/// VideoProc: the ingest colour conversion and the dmabuf import attributes.
+pub mod vpp;
 
 /// DPB slot ledger, re-exported from [`pf_vkdecode`] (crate docs).
 pub use pf_vkdecode::SlotError;
