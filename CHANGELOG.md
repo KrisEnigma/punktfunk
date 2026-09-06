@@ -276,14 +276,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `lb`, `rb`, `lt`, `rt`, `select`, `guide`, `start` — to `{x, y, scale, hidden}`; absent
   fields keep the preset, unknown ids survive a rewrite, and a parser that predates the maps
   ignores them, so nothing to do.
-- **Gamescope sessions run adaptive sync** (`punktfunk-gamescope` `+pfhdr9`, patch 0011): the
-  headless connector advertises VRR, so gamescope paints — and publishes to PipeWire — on the
-  game's commit instead of its synthetic vblank tick, and the stream receives every unique frame
-  up to the session rate instead of the tick's quantization of them. The spawn pairs
-  `--adaptive-sync` with `--framerate-limit` at the `-r` rate, because VRR frame callbacks no
-  longer pace the game and the limiter must (the patch keeps it armed on a connector that paces
-  nothing). `PUNKTFUNK_GAMESCOPE_VRR=0` opts out; a stock or older gamescope gets neither flag
-  and behaves exactly as before.
+- **Gamescope adaptive sync** paints on game commits while preserving the game-rate limit
+  across compositor refresh updates. Install `punktfunk-gamescope` `+pfhdr10` or newer;
+  `PUNKTFUNK_GAMESCOPE_VRR=0` opts out.
 
 ### Changed
 
