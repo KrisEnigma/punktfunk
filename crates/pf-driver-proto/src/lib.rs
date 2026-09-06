@@ -109,6 +109,45 @@ pub mod control {
     /// The probe's tally → [`EncodeProbeReply`]. No input.
     pub const IOCTL_ENCODE_PROBE_STATUS: u32 = ctl_code(0x90B);
 
+    /// Take the driver's pending diagnostic lines. No input; the driver fills the output buffer
+    /// with whole [`log_lines`] records, completes with the bytes written, and keeps whatever did
+    /// not fit for the next call. The encoder runs inside WUDFHost, so this is the only way its
+    /// backend rejections, retargets and wedges reach `host.log`.
+    ///
+    /// Additive at v8: a driver built before it answers `STATUS_NOT_FOUND`, which reads as
+    /// "no lines" — the host never depends on the reply.
+    pub const IOCTL_DRAIN_LOG: u32 = ctl_code(0x90E);
+
+    /// Severity byte a [`log_lines`] record opens with. Unknown bytes read as [`LOG_INFO`].
+    pub const LOG_ERROR: u8 = b'E';
+    /// See [`LOG_ERROR`].
+    pub const LOG_WARN: u8 = b'W';
+    /// See [`LOG_ERROR`].
+    pub const LOG_INFO: u8 = b'I';
+    /// See [`LOG_ERROR`].
+    pub const LOG_DEBUG: u8 = b'D';
+
+    /// Append one record: the severity byte, the text, `\n`. Embedded newlines become spaces —
+    /// the separator IS the framing, so a record is exactly one line. Byte-wise is safe: `\n`
+    /// never appears in a UTF-8 continuation byte.
+    pub fn write_log_record(out: &mut alloc::vec::Vec<u8>, level: u8, text: &str) {
+        out.push(level);
+        out.extend(
+            text.as_bytes()
+                .iter()
+                .map(|&b| if b == b'\n' { b' ' } else { b }),
+        );
+        out.push(b'\n');
+    }
+
+    /// The records in a drained buffer as `(severity, text)`. A record that is empty or not UTF-8
+    /// is skipped, never guessed at.
+    pub fn log_lines(buf: &[u8]) -> impl Iterator<Item = (u8, &str)> {
+        buf.split(|&b| b == b'\n')
+            .filter(|r| !r.is_empty())
+            .filter_map(|r| Some((r[0], core::str::from_utf8(&r[1..]).ok()?)))
+    }
+
     /// `IOCTL_ADD` input. `session_id` keys the monitor (host refcount owns collisions).
     /// The driver advertises this mode as preferred; the host still CCD-forces the active mode.
     ///
@@ -2856,6 +2895,7 @@ mod tests {
             control::IOCTL_ENCODE_PROBE_STATUS,
             encode::IOCTL_SET_ENCODE,
             encode::IOCTL_ENCODE_CTL,
+            control::IOCTL_DRAIN_LOG,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
@@ -2863,6 +2903,28 @@ mod tests {
             }
         }
         assert_eq!(encode::IOCTL_ENCODE_CTL, ctl_code(0x90D));
+        assert_eq!(control::IOCTL_DRAIN_LOG, ctl_code(0x90E));
+    }
+
+    /// The driver writes these records and the host parses them in another process: a one-sided
+    /// change to either half silently loses the encoder's diagnostics.
+    #[test]
+    fn log_records_roundtrip_and_stay_one_line_each() {
+        let mut buf = alloc::vec::Vec::new();
+        control::write_log_record(&mut buf, control::LOG_WARN, "AMF rejected 4:4:4");
+        control::write_log_record(&mut buf, control::LOG_INFO, "two\nlines");
+        control::write_log_record(&mut buf, control::LOG_ERROR, "");
+        let got: alloc::vec::Vec<_> = control::log_lines(&buf).collect();
+        assert_eq!(
+            got,
+            [
+                (control::LOG_WARN, "AMF rejected 4:4:4"),
+                (control::LOG_INFO, "two lines"),
+                (control::LOG_ERROR, ""),
+            ]
+        );
+        // Framing holds only while every record is exactly one line.
+        assert_eq!(buf.iter().filter(|&&b| b == b'\n').count(), 3);
     }
 
     #[test]

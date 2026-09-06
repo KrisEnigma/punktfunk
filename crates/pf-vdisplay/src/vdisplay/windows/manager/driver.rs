@@ -77,6 +77,17 @@ pub(crate) trait VdisplayDriver: Send + Sync {
     /// # Safety
     /// `dev` must be the live control handle.
     unsafe fn ping(&self, dev: HANDLE) -> Result<()>;
+    /// Move the driver's diagnostic lines into this process's log; issued after each ping, since
+    /// the encoder runs in WUDFHost and reports nowhere else. Defaulted to nothing, so a backend
+    /// with no such channel needs no stub.
+    ///
+    // unsafe-fn-no-op-ok: trait method — the "dev is live" contract binds every impl; this
+    // default body discards it.
+    /// # Safety
+    /// `dev` must be the live control handle.
+    unsafe fn drain_log(&self, dev: HANDLE) {
+        let _ = dev;
+    }
 }
 
 #[cfg(test)]

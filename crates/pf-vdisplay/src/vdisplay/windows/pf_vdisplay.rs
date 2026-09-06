@@ -378,15 +378,20 @@ pub unsafe fn send_set_encode(
     let mut reply = encode::SetEncodeReply::zeroed();
     // SAFETY: `dev` is the live control handle by this fn's contract; `bytes_of(req)` and
     // `bytes_of_mut(&mut reply)` borrow the caller's request and this local for the call.
-    let n = unsafe {
+    let res = unsafe {
         ioctl(
             dev,
             encode::IOCTL_SET_ENCODE,
             bytemuck::bytes_of(req),
             bytemuck::bytes_of_mut(&mut reply),
         )
-    }
-    .context("pf-vdisplay SET_ENCODE")?;
+    };
+    // The open's own story — which backends were tried, what each refused, the bitrate applied —
+    // is written inside WUDFHost. Take it here so it lands beside this host's open line instead
+    // of a pinger tick later, or not at all when a failed open tears the session down first.
+    // SAFETY: `dev` is the live control handle by this fn's contract.
+    unsafe { drain_driver_log(dev) };
+    let n = res.context("pf-vdisplay SET_ENCODE")?;
     if (n as usize) < size_of::<encode::SetEncodeReply>() {
         // Typed: the IOCTL completed, so the driver owns the handles the caller duplicated.
         return Err(anyhow::Error::new(encode::ReplyTooShort {
@@ -395,6 +400,34 @@ pub unsafe fn send_set_encode(
         }));
     }
     Ok(reply)
+}
+
+/// Take the driver's pending diagnostic lines (`IOCTL_DRAIN_LOG`) and re-emit them into this
+/// process's log at the level the driver chose. The encoder lives in WUDFHost, so without this
+/// its backend rejections, bitrate retargets and wedges are visible only to a debugger.
+///
+/// Best-effort and silent on failure: a driver built before the verb answers `STATUS_NOT_FOUND`,
+/// which means "no lines", and a lost keepalive is the pinger's to report, not this.
+///
+/// # Safety
+/// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
+unsafe fn drain_driver_log(dev: HANDLE) {
+    // One pinger tick of driver chatter. 512 lines' worth of ceiling against a 256-line ring, so
+    // a drain never leaves a backlog behind that the next tick has to catch up on.
+    let mut buf = vec![0u8; 256 * 1024];
+    // SAFETY: `dev` is the live control handle by this fn's contract. DRAIN_LOG takes no input
+    // (`&[]`) and writes at most `buf.len()` bytes into `buf`, which outlives the call.
+    let Ok(n) = (unsafe { ioctl(dev, control::IOCTL_DRAIN_LOG, &[], &mut buf) }) else {
+        return;
+    };
+    for (level, text) in control::log_lines(&buf[..n as usize]) {
+        match level {
+            control::LOG_ERROR => tracing::error!(target: "pf_vdisplay::driver", "{text}"),
+            control::LOG_WARN => tracing::warn!(target: "pf_vdisplay::driver", "{text}"),
+            control::LOG_DEBUG => tracing::debug!(target: "pf_vdisplay::driver", "{text}"),
+            _ => tracing::info!(target: "pf_vdisplay::driver", "{text}"),
+        }
+    }
 }
 
 /// One-shot control on a monitor's live in-driver encoder (`IOCTL_ENCODE_CTL`, proto v7).
@@ -945,6 +978,12 @@ impl VdisplayDriver for PfVdisplayDriver {
         // SAFETY: per `ping`'s contract `dev` is the live control handle. `IOCTL_PING` has no
         // input (`&[]`) and no output (`none` is empty).
         unsafe { ioctl(dev, control::IOCTL_PING, &[], &mut none) }.map(|_| ())
+    }
+
+    unsafe fn drain_log(&self, dev: HANDLE) {
+        // SAFETY: per `drain_log`'s contract `dev` is the live control handle, which is exactly
+        // what `drain_driver_log` requires.
+        unsafe { drain_driver_log(dev) };
     }
 }
 

@@ -1,17 +1,89 @@
-//! Minimal driver logger, gated as a whole on [`file_log_enabled`] (debug builds, or the
-//! `PFVD_DEBUG_LOG` env var): a RELEASE build without the opt-in emits NOTHING — the
-//! `OutputDebugStringA` used to fire unconditionally, a syscall + CString + `format!` alloc per
-//! logged event on paths that run per IOCTL/frame. The file tee (WUDFHost temp dir, not
-//! world-writable — audit §4.4) rides the same gate. Best-effort; ignores all errors. Production
-//! driver-state visibility is the AU header's `driver_status` word, not this module.
+//! Minimal driver logger. Every line lands in the ring the host drains over
+//! [`IOCTL_DRAIN_LOG`](pf_driver_proto::control::IOCTL_DRAIN_LOG) — the encoder runs inside
+//! WUDFHost, so that ring is how its backend rejections, retargets and wedges reach `host.log`.
+//! The syscall sinks stay gated on [`file_log_enabled`] (debug builds, or the `PFVD_DEBUG_LOG`
+//! env var): `OutputDebugStringA` traps into a global-serializing debugger call, and the file tee
+//! (WUDFHost temp dir, not world-writable — audit §4.4) takes a knob plus a device restart to
+//! reach. Best-effort; ignores all errors.
+
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
+
+use pf_driver_proto::control;
 
 unsafe extern "system" {
     fn OutputDebugStringA(s: *const u8);
 }
 
-/// Whether driver logging (debug string + bring-up file) is enabled (resolved once). Off in release
-/// builds unless the `PFVD_DEBUG_LOG` knob is set. `pub(crate)` so `dbglog!` can skip its
-/// `format!` too.
+/// Lines the host has not drained yet. Bounded, because a per-frame failure loop must cost a
+/// fixed ceiling rather than the WUDFHost: the oldest goes and `dropped` counts it, so a flood
+/// reads as a flood instead of as silence. 256 lines covers several sessions' worth of open and
+/// retarget chatter at the pinger's ~3.3 s cadence.
+const RING_LINES: usize = 256;
+
+/// Longest line kept. Past this a record could outgrow the host's drain buffer and never leave
+/// the ring; only an `{e:#}` chain comes close.
+const MAX_LINE: usize = 512;
+
+struct Ring {
+    lines: VecDeque<(u8, String)>,
+    dropped: u64,
+}
+
+fn ring() -> &'static Mutex<Ring> {
+    static R: OnceLock<Mutex<Ring>> = OnceLock::new();
+    R.get_or_init(|| {
+        Mutex::new(Ring {
+            lines: VecDeque::new(),
+            dropped: 0,
+        })
+    })
+}
+
+/// Queue one line for the host, dropping the oldest when full.
+fn push(level: u8, line: &str) {
+    let end = (0..=MAX_LINE.min(line.len()))
+        .rev()
+        .find(|&i| line.is_char_boundary(i))
+        .unwrap_or(0);
+    let Ok(mut r) = ring().lock() else { return };
+    if r.lines.len() >= RING_LINES {
+        r.lines.pop_front();
+        r.dropped += 1;
+    }
+    r.lines.push_back((level, line[..end].to_string()));
+}
+
+/// Answer `IOCTL_DRAIN_LOG`: whole records, oldest first, up to `cap` bytes. What does not fit
+/// stays queued for the next call — except a record that alone exceeds `cap`, which is dropped
+/// rather than left to wedge every line behind it.
+pub fn drain(cap: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let Ok(mut r) = ring().lock() else { return out };
+    if r.dropped > 0 {
+        let n = std::mem::take(&mut r.dropped);
+        let line = format!("[pf-vd] log ring overflowed — {n} lines dropped");
+        control::write_log_record(&mut out, control::LOG_WARN, &line);
+    }
+    while let Some((level, line)) = r.lines.pop_front() {
+        let start = out.len();
+        control::write_log_record(&mut out, level, &line);
+        if out.len() > cap {
+            out.truncate(start);
+            if start == 0 {
+                r.dropped += 1;
+            } else {
+                r.lines.push_front((level, line));
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Whether the syscall sinks (debug string + bring-up file) are enabled (resolved once). Off in
+/// release builds unless the `PFVD_DEBUG_LOG` knob is set. The host's drain ring does not ride
+/// this gate; only these two do, and so does whether `DEBUG` events are kept at all.
 pub(crate) fn file_log_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
@@ -86,7 +158,15 @@ fn file_appender() -> Option<&'static std::sync::Mutex<std::fs::File>> {
         .as_ref()
 }
 
+/// One line at `INFO`; see [`log_at`].
 pub fn log(s: &str) {
+    log_at(control::LOG_INFO, s);
+}
+
+/// Queue one line for the host and, when [`file_log_enabled`], tee it to the debugger and the
+/// bring-up file.
+pub(crate) fn log_at(level: u8, s: &str) {
+    push(level, s);
     if !file_log_enabled() {
         return;
     }
@@ -98,31 +178,53 @@ pub fn log(s: &str) {
     if let Some(m) = file_appender()
         && let Ok(mut f) = m.lock()
     {
-        let _ = writeln!(f, "{s}");
+        let _ = writeln!(f, "{} {s}", utc_hms_millis());
         let _ = f.flush();
     }
 }
 
-// The `file_log_enabled()` pre-check skips the `format!` alloc too when logging is off.
-macro_rules! dbglog {
-    ($($a:tt)*) => { if $crate::log::file_log_enabled() { $crate::log::log(&::std::format!($($a)*)) } };
+/// `HH:MM:SS.mmm` UTC for the file line. The host logs RFC3339 UTC, and without a shared clock
+/// on both sides a driver line cannot be placed against the host event it explains — which is
+/// the whole question when frames stop. Date-free: same-day alignment is what a session needs.
+fn utc_hms_millis() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60,
+        now.subsec_millis()
+    )
 }
 
-/// Route the encoder backends' `tracing` events into [`log`], behind the same gate: with no
-/// subscriber in WUDFHost every NVENC status string and AMF rejection is dropped, and a failed
-/// open reaches the host as a bare stage tag. Call from `DriverEntry`, once.
+// Always formats: the line is the host's only view of this process. One `String` per event costs
+// nothing beside the encode it describes, and the ring bounds what a failure loop can hold.
+macro_rules! dbglog {
+    ($($a:tt)*) => { $crate::log::log(&::std::format!($($a)*)) };
+}
+
+/// Route the encoder backends' `tracing` events into [`log_at`]: with no subscriber in WUDFHost
+/// every NVENC status string and AMF rejection is dropped, and a failed open reaches the host as
+/// a bare stage tag. Call from `DriverEntry`, once.
 pub(crate) fn install_tracing_bridge() {
-    if !file_log_enabled() {
-        return;
-    }
     let _ = tracing::subscriber::set_global_default(Bridge);
 }
 
 struct Bridge;
 
 impl tracing::Subscriber for Bridge {
+    /// `DEBUG` only under the local sinks — a backend may emit one per submitted frame, and the
+    /// host's ring is for the session story, not a per-frame trace.
     fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-        *m.level() <= tracing::Level::DEBUG
+        *m.level()
+            <= if file_log_enabled() {
+                tracing::Level::DEBUG
+            } else {
+                tracing::Level::INFO
+            }
     }
 
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -133,11 +235,19 @@ impl tracing::Subscriber for Bridge {
 
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
 
+    /// The severity travels as the record's byte, so the host re-emits at the level the backend
+    /// chose instead of flattening every encoder warning into an info line.
     fn event(&self, event: &tracing::Event<'_>) {
         let mut line = String::new();
         event.record(&mut Line(&mut line));
         let m = event.metadata();
-        dbglog!("[pf-vd] {} {}:{line}", m.level(), m.target());
+        let level = match *m.level() {
+            tracing::Level::ERROR => control::LOG_ERROR,
+            tracing::Level::WARN => control::LOG_WARN,
+            tracing::Level::INFO => control::LOG_INFO,
+            _ => control::LOG_DEBUG,
+        };
+        log_at(level, &format!("[pf-vd] {}:{line}", m.target()));
     }
 
     fn enter(&self, _: &tracing::span::Id) {}

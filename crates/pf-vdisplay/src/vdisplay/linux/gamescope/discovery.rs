@@ -490,11 +490,10 @@ pub(crate) fn gamescope_can_composite_external_overlay() -> bool {
     gamescope_patch_level() >= 4 && !flags_lost()
 }
 
-/// Paint-on-commit under adaptive sync. Below this, `--adaptive-sync` is inert
-/// headless (no VRR on the connector) and a `--framerate-limit` equal to refresh
-/// is skipped — those two flags only travel together (`adaptive_sync_args`).
+/// Paint-on-commit with a persistent game-rate limit. Level 9 loses the CLI limit during
+/// refresh updates; only level 10+ may receive the paired `adaptive_sync_args` flags.
 pub(crate) fn gamescope_paints_on_commit() -> bool {
-    gamescope_patch_level() >= 9 && !flags_lost()
+    gamescope_patch_level() >= 10 && !flags_lost()
 }
 
 /// Latched when a spawn's gamescope did not receive our flags.
