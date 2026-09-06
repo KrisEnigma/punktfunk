@@ -23,7 +23,7 @@ fn params() -> SessionParams {
         fps_num: 60,
         fps_den: 1,
         bitrate_bps: 4_000_000,
-        max_num_ref_frames: 1,
+        slots: 1,
         max_num_reorder_frames: 0,
         initial_qp: 26,
         vbv_frames: 1.0,
@@ -106,6 +106,92 @@ fn the_encoder_emits_a_decodable_stream() {
         }
     }
     assert_eq!(planned, 30, "every access unit should plan");
+}
+
+/// The headline: two pictures are lost, the next is predicted from the newest slot
+/// the client still holds, and the client's own planner resolves that reference
+/// to the pre-loss picture. No IDR anywhere after the first.
+#[test]
+#[ignore = "needs a VAAPI encode device"]
+fn a_loss_recovers_on_an_anchored_p_not_an_idr() {
+    let p = SessionParams {
+        slots: 4,
+        ..params()
+    };
+    let mut enc = open(p).expect("an encoder");
+    let (w, h) = (p.width as usize, p.height as usize);
+    let mut aus = Vec::new();
+    let encode = |enc: &mut pf_libva::encode::H264Encoder, i: usize, anchor: Option<usize>| {
+        let (y, uv) = frame(w, h, i);
+        enc.write_nv12(&y, &uv).expect("fill");
+        let pic = match anchor {
+            Some(slot) => enc.encode_anchored(slot).expect("anchored encode"),
+            None => enc.encode(i == 0).expect("encode"),
+        };
+        assert_eq!(pic.is_idr, i == 0, "picture {i}");
+        assert_eq!(pic.recovery_anchor, anchor.is_some());
+        assert_eq!(pic.wire, i as i64);
+        pic.bytes
+    };
+    for i in 0..10 {
+        aus.push(encode(&mut enc, i, None));
+    }
+    // Pictures 8 and 9 never reached the client. `plan_slot_recovery` on the
+    // session's slots: taint everything from 8 on, anchor on the newest before it.
+    let refs = enc.slots();
+    let tainted = refs
+        .iter()
+        .filter(|&&(_, wire)| wire >= 8)
+        .fold(0u32, |m, &(slot, _)| m | 1 << slot);
+    let (anchor, anchor_wire) = refs
+        .iter()
+        .copied()
+        .filter(|&(_, wire)| wire < 8)
+        .max_by_key(|&(_, wire)| wire)
+        .expect("a pre-loss slot survives");
+    assert_eq!(anchor_wire, 7);
+    enc.distrust(tainted);
+    aus.push(encode(&mut enc, 10, Some(anchor)));
+    for i in 11..13 {
+        aus.push(encode(&mut enc, i, None));
+    }
+
+    // What the client decodes: everything but 8 and 9.
+    let received: Vec<&[u8]> = aus
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !(8..10).contains(i))
+        .map(|(_, au)| au.as_slice())
+        .collect();
+    if let Ok(path) = std::env::var("PF_ENC_OUT") {
+        std::fs::write(&path, received.concat()).expect("write the stream out");
+        println!("wrote {path} — 8 and 9 are missing on purpose");
+    }
+
+    let mut planner = pf_bitstream::h264::H264Planner::new();
+    let mut stored = Vec::new();
+    for (n, au) in received.iter().enumerate() {
+        let plan = planner
+            .plan_au(au)
+            .unwrap_or_else(|e| panic!("AU {n} did not plan: {e}"));
+        let refs: Vec<u64> = plan
+            .slices
+            .iter()
+            .flat_map(|s| s.ref_list0.iter().map(|r| r.id))
+            .collect();
+        stored.push(plan.dpb.stored);
+        // The client sees 0..=7 then 10: its reference must be 7's picture, not a
+        // placeholder for the gap.
+        if n == 8 {
+            assert!(!plan.picture.is_idr, "recovery must not be an IDR");
+            assert_eq!(refs, vec![stored[7].expect("7 was stored")]);
+        } else if n > 8 {
+            assert_eq!(
+                refs,
+                vec![stored[n - 1].expect("the previous picture was stored")]
+            );
+        }
+    }
 }
 
 /// The bitrate steps mid-stream and the pictures follow, with no IDR. Noise makes

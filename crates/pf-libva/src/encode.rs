@@ -5,9 +5,11 @@
 //! PPS, the parameter buffers — comes from [`pf_vaapi`], which is pure and tested
 //! anywhere; this drives libva with it.
 //!
-//! Deliberately narrow for now: H.264, CBR, one slice per picture, one reference.
-//! One reference is not a simplification we chose — `VAConfigAttribEncMaxRefFrames`
+//! Deliberately narrow for now: H.264, CBR, one slice per picture, one reference
+//! per picture. One is not a simplification we chose — `VAConfigAttribEncMaxRefFrames`
 //! is `l0=1` on radeonsi, so a second list entry would be advertised and ignored.
+//! Which one is the point: every reference lives in a long-term slot, and a loss
+//! is answered by predicting from a slot the client still has, not by an IDR.
 
 use std::os::raw::c_int;
 use std::os::raw::c_void;
@@ -53,6 +55,20 @@ pub struct EncodedPicture {
     pub bytes: Vec<u8>,
     /// `true` when this picture opened a GOP: it carries SPS, PPS and an IDR slice.
     pub is_idr: bool,
+    /// Predicted from a pre-loss slot on request: the wire's recovery anchor.
+    pub recovery_anchor: bool,
+    /// This picture's index in the session, the number a slot remembers it by.
+    pub wire: i64,
+}
+
+/// One long-term reference the session still holds.
+#[derive(Clone, Copy, Debug)]
+struct Slot {
+    surface: VaSurfaceId,
+    wire: i64,
+    /// Cleared by [`H264Encoder::distrust`]; an untrusted slot is never predicted
+    /// from again, and is replaced in its turn.
+    trusted: bool,
 }
 
 /// A live encode session. Owns its config, context, surfaces and coded buffer, and
@@ -66,7 +82,15 @@ pub struct H264Encoder {
     /// Where the driver writes each reconstruction — what `CurrPic` names and what a
     /// later `ReferenceFrames` entry points at. Distinct from the input: the driver
     /// writes these while it is still reading that, and a surface cannot be both.
+    /// One more than there are slots, so the picture being written never shares a
+    /// surface with a reference being read.
     recon: Vec<VaSurfaceId>,
+    /// Reconstruction surfaces no slot holds.
+    free: Vec<VaSurfaceId>,
+    /// The long-term references, by `LongTermFrameIdx`.
+    slots: Vec<Option<Slot>>,
+    /// Pictures encoded so far; the next one's `wire`.
+    wire: i64,
     coded_buf: VaBufferId,
     /// Ingest: every capture shape is converted into the input surface here.
     vpp: Vpp,
@@ -79,8 +103,6 @@ pub struct H264Encoder {
     idr_pic_id: u16,
     /// Rolling index for the picture being encoded.
     next_surface: usize,
-    /// The reconstruction holding the most recent reference, if any.
-    reference: Option<VaSurfaceId>,
 }
 
 impl H264Encoder {
@@ -175,8 +197,10 @@ impl H264Encoder {
         };
         display.va.check("vaCreateConfig", status)?;
 
-        let mut surfaces = vec![VA_INVALID_ID; Self::SURFACES * 2];
-        // SAFETY: `surfaces` is a live array of exactly `SURFACES` ids the call
+        let slot_count = usize::from(params.slots.max(1));
+        let surface_count = Self::SURFACES + slot_count + 1;
+        let mut surfaces = vec![VA_INVALID_ID; surface_count];
+        // SAFETY: `surfaces` is a live array of exactly `surface_count` ids the call
         // writes through; no surface attributes are passed, so the null is correct.
         let status = unsafe {
             (display.va.create_surfaces)(
@@ -185,7 +209,7 @@ impl H264Encoder {
                 coded_w as u32,
                 coded_h as u32,
                 surfaces.as_mut_ptr(),
-                (Self::SURFACES * 2) as u32,
+                surface_count as u32,
                 std::ptr::null_mut(),
                 0,
             )
@@ -203,7 +227,7 @@ impl H264Encoder {
                 coded_h,
                 VA_PROGRESSIVE as c_int,
                 surfaces.as_mut_ptr(),
-                (Self::SURFACES * 2) as c_int,
+                surface_count as c_int,
                 &mut context,
             )
         };
@@ -237,7 +261,10 @@ impl H264Encoder {
             config,
             context,
             input: surfaces,
+            free: recon.clone(),
             recon,
+            slots: vec![None; slot_count],
+            wire: 0,
             coded_buf,
             vpp,
             staging: None,
@@ -245,8 +272,33 @@ impl H264Encoder {
             frame_num: 0,
             idr_pic_id: 0,
             next_surface: 0,
-            reference: None,
         })
+    }
+
+    /// The trusted references, as `(slot, wire)` — what `rfi::plan_slot_recovery`
+    /// takes.
+    pub fn slots(&self) -> Vec<(usize, i64)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.filter(|s| s.trusted).map(|s| (i, s.wire)))
+            .collect()
+    }
+
+    /// Stop predicting from these slots: the plan's `tainted` mask.
+    pub fn distrust(&mut self, mask: u32) {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if mask & (1 << i) != 0 {
+                if let Some(s) = slot {
+                    s.trusted = false;
+                }
+            }
+        }
+    }
+
+    /// Stop predicting from every slot; the next picture is an IDR.
+    pub fn distrust_all(&mut self) {
+        self.distrust(u32::MAX);
     }
 
     /// The surface a caller writes its picture into before [`Self::encode`].
@@ -349,17 +401,47 @@ impl H264Encoder {
     ///
     /// `force_idr` opens a GOP: SPS and PPS are packed ahead of the slice, so a
     /// client that joins here has parameter sets. Every other picture is a P
-    /// referencing the previous one.
+    /// predicted from the newest trusted slot — or an IDR when there is none.
     pub fn encode(&mut self, force_idr: bool) -> Result<EncodedPicture> {
-        let is_idr = force_idr || self.reference.is_none();
+        let newest = self
+            .slots()
+            .into_iter()
+            .max_by_key(|&(_, wire)| wire)
+            .map(|(slot, _)| slot);
+        let reference = if force_idr { None } else { newest };
+        self.encode_with(reference, false)
+    }
+
+    /// Encode the picture predicting from `slot` — the recovery anchor a loss plan
+    /// picked. Refuses a slot that is empty or distrusted.
+    pub fn encode_anchored(&mut self, slot: usize) -> Result<EncodedPicture> {
+        match self.slots.get(slot) {
+            Some(Some(s)) if s.trusted => self.encode_with(Some(slot), true),
+            _ => bail!("slot {slot} holds no trusted reference"),
+        }
+    }
+
+    fn encode_with(&mut self, reference: Option<usize>, anchor: bool) -> Result<EncodedPicture> {
+        let is_idr = reference.is_none();
+        let slot_count = self.slots.len();
         let slice = PictureSlice {
             is_idr,
             // An IDR restarts frame_num at 0, wherever the count stood.
             frame_num: if is_idr { 0 } else { self.frame_num },
             idr_pic_id: self.idr_pic_id ^ u16::from(is_idr),
+            slot: if is_idr {
+                0
+            } else {
+                (self.wire as usize % slot_count) as u8
+            },
+            max_slots: slot_count as u8,
+            reference_slot: reference.map(|s| s as u8),
         };
         let surface = self.input[self.next_surface];
-        let recon = self.recon[self.next_surface];
+        let recon = self
+            .free
+            .pop()
+            .ok_or_else(|| anyhow!("no free reconstruction surface"))?;
         let sps = self.params.sps();
         let pps = self.params.pps(std::rc::Rc::clone(&sps));
 
@@ -373,6 +455,9 @@ impl H264Encoder {
         let result = self
             .render_picture(&mut owned, &sps, &pps, recon, slice)
             .and_then(|()| self.render_ids(&mut owned.clone()));
+        if result.is_err() {
+            self.free.push(recon);
+        }
 
         // SAFETY: `context` is live; `end_picture` closes the picture `begin_picture`
         // opened, and must run even if a render failed or the driver keeps the
@@ -383,22 +468,55 @@ impl H264Encoder {
             // is destroyed exactly once; the driver has consumed them by end_picture.
             unsafe { (self.display.va.destroy_buffer)(self.display.display, buf) };
         }
-        result?;
-        self.display.va.check("vaEndPicture", end)?;
+        if let Err(e) = result.and_then(|()| self.display.va.check("vaEndPicture", end)) {
+            if !self.free.contains(&recon) {
+                self.free.push(recon);
+            }
+            return Err(e);
+        }
 
         // SAFETY: `surface` is live; sync blocks until the encode that names it has
         // completed, which is what makes the coded buffer readable.
         let status = unsafe { (self.display.va.sync_surface)(self.display.display, surface) };
-        self.display.va.check("vaSyncSurface", status)?;
+        let synced = self.display.va.check("vaSyncSurface", status);
+        let bytes = synced.and_then(|()| self.read_coded());
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.free.push(recon);
+                return Err(e);
+            }
+        };
 
-        let bytes = self.read_coded()?;
-
-        self.reference = Some(recon);
+        // The picture is now the long-term reference in its slot. An IDR also
+        // emptied the decoder's DPB, so every other slot goes with it.
+        if is_idr {
+            for slot in self.slots.iter_mut() {
+                if let Some(old) = slot.take() {
+                    self.free.push(old.surface);
+                }
+            }
+        }
+        let held = Slot {
+            surface: recon,
+            wire: self.wire,
+            trusted: true,
+        };
+        if let Some(old) = self.slots[usize::from(slice.slot)].replace(held) {
+            self.free.push(old.surface);
+        }
+        let wire = self.wire;
+        self.wire += 1;
         self.next_surface = (self.next_surface + 1) % Self::SURFACES;
         let max_frame_num = 1u16 << (sps.log2_max_frame_num_minus4 + 4);
         self.frame_num = (slice.frame_num + 1) % max_frame_num;
         self.idr_pic_id = slice.idr_pic_id;
-        Ok(EncodedPicture { bytes, is_idr })
+        Ok(EncodedPicture {
+            bytes,
+            is_idr,
+            recovery_anchor: anchor,
+            wire,
+        })
     }
 
     /// Build and hand over every buffer this picture needs, in the order the
@@ -439,24 +557,32 @@ impl H264Encoder {
             pic_init_qp: self.params.initial_qp,
             ..Default::default()
         };
-        pic.curr_pic = pf_vaapi::va::VaPictureH264 {
-            picture_id: recon,
-            frame_idx: u32::from(slice.frame_num),
-            flags: 0,
+        // For a long-term picture `frame_idx` is its `LongTermFrameIdx` — the slot.
+        let long_term = |surface: VaSurfaceId, slot: u8| pf_vaapi::va::VaPictureH264 {
+            picture_id: surface,
+            frame_idx: u32::from(slot),
+            flags: pf_vaapi::va::VA_PICTURE_H264_LONG_TERM_REFERENCE,
             top_field_order_cnt: 0,
             bottom_field_order_cnt: 0,
             va_reserved: [0; 4],
         };
+        pic.curr_pic = long_term(recon, slice.slot);
         pic.pic_fields = va_pic_fields(pps, is_idr);
-        if let Some(reference) = self.reference.filter(|_| !is_idr) {
-            pic.reference_frames[0] = pf_vaapi::va::VaPictureH264 {
-                picture_id: reference,
-                frame_idx: u32::from(slice.frame_num.saturating_sub(1)),
-                flags: 0,
-                top_field_order_cnt: 0,
-                bottom_field_order_cnt: 0,
-                va_reserved: [0; 4],
-            };
+        // The whole DPB, trusted or not: the driver's eviction must match the
+        // decoder's, and a distrusted slot is still a picture the decoder holds.
+        let mut reference_list_entry = None;
+        if !is_idr {
+            let live = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.map(|s| (i as u8, s.surface)));
+            for (n, (slot, surface)) in live.enumerate() {
+                pic.reference_frames[n] = long_term(surface, slot);
+                if Some(slot) == slice.reference_slot {
+                    reference_list_entry = Some(pic.reference_frames[n]);
+                }
+            }
         }
         self.render(owned, vah::VA_ENC_PICTURE_PARAMETER_BUFFER_TYPE, &pic)?;
 
@@ -464,10 +590,13 @@ impl H264Encoder {
             num_macroblocks: self.params.mbs_per_picture(),
             slice_type: if is_idr { 2 } else { 0 },
             idr_pic_id: slice.idr_pic_id,
+            num_ref_idx_active_override_flag: u8::from(!is_idr),
             ..Default::default()
         };
-        if !is_idr {
-            va_slice.ref_pic_list_0[0] = pic.reference_frames[0];
+        if let Some(entry) = reference_list_entry {
+            va_slice.ref_pic_list_0[0] = entry;
+        } else if !is_idr {
+            bail!("reference slot {:?} is not held", slice.reference_slot);
         }
         self.render(owned, vah::VA_ENC_SLICE_PARAMETER_BUFFER_TYPE, &va_slice)?;
 

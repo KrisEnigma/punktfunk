@@ -40,10 +40,11 @@ pub struct SessionParams {
     pub fps_num: u32,
     pub fps_den: u32,
     pub bitrate_bps: u32,
-    /// References the encoder may hold. AMD's `EncMaxRefFrames` is `l0=1`, so a
-    /// session that wants an anchor plus a recent reference asks for two and gets
-    /// one usable list entry; the anchor mechanism is built for that.
-    pub max_num_ref_frames: u8,
+    /// Long-term slots the session keeps — how far back a recovery anchor can be.
+    /// The SPS declares one more: the room a decoder needs for the short-term
+    /// placeholder it makes for a lost picture (8.2.5.3), or the recovery it was
+    /// kept for fails to store.
+    pub slots: u8,
     /// The reorder bound this stream actually uses. Zero for the low-delay P-only
     /// shape every punktfunk host emits.
     pub max_num_reorder_frames: u32,
@@ -83,7 +84,7 @@ impl SessionParams {
             .chroma_format_idc(1)
             .bit_depth_luma(8)
             .bit_depth_chroma(8)
-            .max_num_ref_frames(self.max_num_ref_frames)
+            .max_num_ref_frames(self.slots + 1)
             .frame_mbs_only_flag(true)
             .direct_8x8_inference_flag(true)
             // Type 2 is display order == decode order, which is what a P-only
@@ -255,6 +256,11 @@ pub fn packed_parameter_sets(sps: &Sps, pps: &Pps) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// What one picture's slice header says that the parameter sets do not.
+///
+/// Every picture is a reference and every reference is long-term, in a slot: the
+/// `LongTermFrameIdx` it is marked into. A P picture names its reference by slot,
+/// so a recovery anchor stays addressable however many pictures were lost between
+/// — `frame_num` arithmetic never enters it.
 #[derive(Clone, Copy, Debug)]
 pub struct PictureSlice {
     pub is_idr: bool,
@@ -263,6 +269,14 @@ pub struct PictureSlice {
     /// Consecutive IDRs must differ here, or a decoder takes the second for a
     /// repeat of the first.
     pub idr_pic_id: u16,
+    /// The slot this picture takes. An IDR's is always 0: `long_term_reference_flag`
+    /// gives it `LongTermFrameIdx` 0 and no choice.
+    pub slot: u8,
+    /// How many slots exist — `max_long_term_frame_idx_plus1`, restated on every P
+    /// because an IDR resets it to one.
+    pub max_slots: u8,
+    /// P only: the slot predicted from.
+    pub reference_slot: Option<u8>,
 }
 
 /// The slice header as a packed header: its bytes, and how many of their bits
@@ -279,6 +293,11 @@ pub struct PictureSlice {
 pub fn packed_slice_header(sps: &Sps, pps: &Pps, slice: PictureSlice) -> (Vec<u8>, u32) {
     // Type 2 is the SPS's choice precisely so there is no per-slice POC syntax.
     debug_assert_eq!(sps.pic_order_cnt_type, 2);
+    debug_assert!(
+        !slice.is_idr || slice.slot == 0,
+        "an IDR is long-term index 0"
+    );
+    debug_assert!(slice.is_idr || slice.reference_slot.is_some());
     let mut buf = Vec::new();
     let write = |w: &mut NaluWriter<&mut Vec<u8>>| -> NaluWriterResult<()> {
         if slice.is_idr {
@@ -296,15 +315,26 @@ pub fn packed_slice_header(sps: &Sps, pps: &Pps, slice: PictureSlice) -> (Vec<u8
         if slice.is_idr {
             w.write_ue(u32::from(slice.idr_pic_id))?;
         } else {
-            w.write_f(1, 0u32)?; // num_ref_idx_active_override_flag: the PPS default of one
-            w.write_f(1, 0u32)?; // ref_pic_list_modification_flag_l0
+            w.write_f(1, 1u32)?; // num_ref_idx_active_override_flag
+            w.write_ue(0u32)?; // num_ref_idx_l0_active_minus1: one reference
+                               // The list starts as every long-term picture by index; put ours first.
+            w.write_f(1, 1u32)?; // ref_pic_list_modification_flag_l0
+            w.write_ue(2u32)?; // modification_of_pic_nums_idc: long_term_pic_num
+            w.write_ue(u32::from(slice.reference_slot.unwrap_or(0)))?;
+            w.write_ue(3u32)?; // end of modifications
         }
-        // dec_ref_pic_marking: sliding window, nothing long-term.
+        // dec_ref_pic_marking: this picture becomes the long-term reference in its
+        // slot, replacing whatever held it.
         if slice.is_idr {
             w.write_f(1, 0u32)?; // no_output_of_prior_pics_flag
-            w.write_f(1, 0u32)?; // long_term_reference_flag
+            w.write_f(1, 1u32)?; // long_term_reference_flag: LongTermFrameIdx 0
         } else {
-            w.write_f(1, 0u32)?; // adaptive_ref_pic_marking_mode_flag
+            w.write_f(1, 1u32)?; // adaptive_ref_pic_marking_mode_flag
+            w.write_ue(4u32)?; // MMCO 4: max_long_term_frame_idx_plus1
+            w.write_ue(u32::from(slice.max_slots))?;
+            w.write_ue(6u32)?; // MMCO 6: mark the current picture long-term
+            w.write_ue(u32::from(slice.slot))?;
+            w.write_ue(0u32)?; // end of operations
         }
         if pps.entropy_coding_mode_flag && !slice.is_idr {
             w.write_ue(0u32)?; // cabac_init_idc
@@ -348,7 +378,7 @@ mod tests {
             fps_num: 60,
             fps_den: 1,
             bitrate_bps: 20_000_000,
-            max_num_ref_frames: 2,
+            slots: 2,
             max_num_reorder_frames: 0,
             initial_qp: 26,
             vbv_frames: 1.0,
@@ -400,6 +430,10 @@ mod tests {
     fn an_authored_sps_states_the_reorder_bound() {
         let p = params();
         let sps = p.sps();
+        assert_eq!(
+            sps.max_num_ref_frames, 3,
+            "two slots and the gap placeholder"
+        );
         assert!(sps.vui_parameters.bitstream_restriction_flag);
         assert_eq!(sps.vui_parameters.max_num_reorder_frames, 0);
         // E.2.1: never below max_num_ref_frames, or a conforming decoder livelocks
@@ -474,6 +508,9 @@ mod tests {
             is_idr: true,
             frame_num: 0,
             idr_pic_id: 1,
+            slot: 0,
+            max_slots: 4,
+            reference_slot: None,
         };
         let (bytes, bits) = packed_slice_header(&sps, &pps, idr);
         assert_eq!(bytes[4] & 0x1f, 5, "an IDR slice NALU");
@@ -481,12 +518,16 @@ mod tests {
         assert_eq!(header.slice_type, SliceType::I);
         assert_eq!(header.frame_num, 0);
         assert_eq!(header.idr_pic_id, 1);
+        assert!(header.dec_ref_pic_marking.long_term_reference_flag);
         assert_eq!(bits, driver_bits(&header));
 
         let p_slice = PictureSlice {
             is_idr: false,
             frame_num: 7,
             idr_pic_id: 1,
+            slot: 2,
+            max_slots: 4,
+            reference_slot: Some(3),
         };
         let (bytes, bits) = packed_slice_header(&sps, &pps, p_slice);
         assert_eq!(bytes[4] & 0x1f, 1, "a non-IDR slice NALU");
@@ -498,12 +539,26 @@ mod tests {
         let header = parse_slice(&p, &bytes);
         assert_eq!(header.slice_type, SliceType::P);
         assert_eq!(header.frame_num, 7);
-        assert!(!header.num_ref_idx_active_override_flag);
-        assert!(
-            !header
-                .dec_ref_pic_marking
-                .adaptive_ref_pic_marking_mode_flag
-        );
+        assert!(header.num_ref_idx_active_override_flag);
+        assert_eq!(header.num_ref_idx_l0_active_minus1, 0);
+        // The reference is named by slot, and this picture takes slot 2.
+        let modification = &header.ref_pic_list_modification_l0[0];
+        assert_eq!(modification.modification_of_pic_nums_idc, 2);
+        assert_eq!(modification.long_term_pic_num, 3);
+        let marking = &header.dec_ref_pic_marking;
+        assert!(marking.adaptive_ref_pic_marking_mode_flag);
+        let ops: Vec<(u8, u32)> = marking
+            .inner
+            .iter()
+            .map(|op| {
+                let arg = match op.memory_management_control_operation {
+                    4 => op.max_long_term_frame_idx.to_value_plus1(),
+                    _ => op.long_term_frame_idx,
+                };
+                (op.memory_management_control_operation, arg)
+            })
+            .collect();
+        assert_eq!(ops, vec![(4, 4), (6, 2)]);
         assert_eq!(bits, driver_bits(&header));
         assert_ne!(bits % 8, 0, "this header is not byte-aligned, by design");
     }
