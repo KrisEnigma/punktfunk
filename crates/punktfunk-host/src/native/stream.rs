@@ -2925,6 +2925,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             );
             enc = new_enc;
             enc_src = (frame.format, frame.width, frame.height);
+            // The delivered mode is the session's now: a rebuild or topology re-assert
+            // reopens at it instead of forcing the display back to the client's ask.
+            cur_mode = actual;
             adopt_built_bitrate(&mut bitrate_kbps, src_kbps, &live_bitrate, &retarget_tx);
             inflight.clear();
             last_au_at = std::time::Instant::now();
