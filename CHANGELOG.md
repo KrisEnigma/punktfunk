@@ -610,6 +610,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   pointer-free plate cost one full-frame `CopyResource` on every composed frame in both cursor
   modes, and it was read only when a blended pointer moved over a still desktop. Install the new
   driver; a client that draws its own pointer is back to one GPU pass per composed frame.
+- **AMF, QSV and Media Foundation retrieve their output off the encode thread.** All three
+  sampled for finished access units in a 250 µs loop that blocked the thread feeding them for up
+  to three quarters of a frame period; AMF and QSV now have a retrieve thread and Media
+  Foundation an `IMFAsyncCallback`, and each hands its completion event to callers that park on
+  handles. Nothing to do — `poll` keeps the bound it always had, spent on a handle instead of a
+  sampler.
 
 ### Fixed
 
