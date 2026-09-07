@@ -56,6 +56,20 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`ConsoleCmd::SpeedTest` is the console shell's network speed test.** The gamepad host menu
+  grew a "Test network speed…" row on every surface `pf-console-ui` fronts — Android TV, the
+  Steam Deck and Linux console, webOS — reported back through the new
+  `ConsoleShared::advance_speed` and, on Android, `NativeBridge.nativeConsoleAdvanceSpeed`. An
+  embedder that drains the bus must handle the new variant, or the takeover the shell raises
+  never leaves "Connecting".
+- **`pf_client_core::speed` holds the one probe.** `run_speed_probe` and `recommended_kbps` are
+  now shared by the Windows shell and the session binary, so burst length and the 70 % headroom
+  cannot drift between two clients. `clients/windows`'s `probe::run_speed_probe` re-exports it;
+  nothing to change at a call site.
+- **`ProfileChip` carries `bitrate_kbps`.** The console reads it to tell a profile that *pins*
+  bitrate from one that inherits, because it writes the global default and applying there would
+  leave the tested host alone while retuning every other one. Producers that leave the field out
+  read as "inherits", so fill it in wherever a chip is built from a real profile.
 - **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
   and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
   rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.

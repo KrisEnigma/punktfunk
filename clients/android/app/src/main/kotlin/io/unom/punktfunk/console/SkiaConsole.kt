@@ -17,11 +17,13 @@ import io.unom.punktfunk.HostActions
 import io.unom.punktfunk.ProfileStore
 import io.unom.punktfunk.Settings
 import io.unom.punktfunk.SettingsStore
+import io.unom.punktfunk.SpeedTestPhase
 import io.unom.punktfunk.StreamProfile
 import io.unom.punktfunk.connectToHost
 import io.unom.punktfunk.deviceName
 import io.unom.punktfunk.effectiveFor
 import io.unom.punktfunk.matches
+import io.unom.punktfunk.runSpeedTest
 import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
@@ -707,6 +709,7 @@ object SkiaConsole {
                     c.optJSONObject("RefreshRunning")?.let { fetchLibrary(it, refreshOnly = true) }
                     c.optJSONObject("Pair")?.let(::pair)
                     c.optJSONObject("SendLogs")?.let(::sendLogs)
+                    c.optJSONObject("SpeedTest")?.let(::speedTest)
                     c.optJSONObject("HostAction")?.let(::hostAction)
                     c.optJSONObject("SaveHost")?.let(::saveHost)
                     c.optJSONObject("UpdateHost")?.let(::updateHost)
@@ -810,6 +813,46 @@ object SkiaConsole {
             val message = io.unom.punktfunk.SendLogs.toHost(app, id, addr, mgmt, fp, hostName)
             main.post { notice(message) }
         }
+    }
+
+    /**
+     * `ConsoleCmd::SpeedTest` — [io.unom.punktfunk.runSpeedTest], the same measurement the touch
+     * home's card menu runs. Only the PHASE crosses back: the console raised the takeover when
+     * it sent the command, and owns clearing it.
+     */
+    private fun speedTest(c: JSONObject) {
+        val key = c.optString("key")
+        val addr = c.optString("addr"); val port = c.optInt("port"); val fp = c.optString("fp_hex")
+        val id = identity
+        if (id == null) {
+            advanceSpeed(key, SpeedTestPhase.Failed("Identity not ready yet — try again in a moment"))
+            return
+        }
+        val app = appContext ?: return
+        // Same lane as the connect above: the probe blocks for its two-second burst, and the
+        // console keeps drawing.
+        ioPool.execute {
+            kotlinx.coroutines.runBlocking {
+                runSpeedTest(app, id, addr, port, fp) { p -> main.post { advanceSpeed(key, p) } }
+            }
+        }
+    }
+
+    /** The phase in `SpeedPhase`'s serde shape: unit variants are bare strings. */
+    private fun advanceSpeed(key: String, p: SpeedTestPhase) {
+        val json = when (p) {
+            SpeedTestPhase.Connecting -> "\"Connecting\""
+            SpeedTestPhase.Measuring -> "\"Measuring\""
+            is SpeedTestPhase.Failed -> JSONObject().put("Failed", p.message).toString()
+            is SpeedTestPhase.Done -> JSONObject().put(
+                "Done",
+                JSONObject()
+                    .put("throughput_kbps", p.throughputKbps)
+                    .put("loss_pct", p.lossPct)
+                    .put("recommended_kbps", p.recommendedKbps),
+            ).toString()
+        }
+        NativeBridge.nativeConsoleAdvanceSpeed(handle, key, json)
     }
 
     /**
