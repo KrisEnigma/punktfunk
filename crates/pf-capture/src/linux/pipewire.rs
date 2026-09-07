@@ -80,6 +80,8 @@ struct UserData {
     gate_since: Option<std::time::Instant>,
     /// Encode reads the dmabuf after `.process` returns; do not rejoin the pool until [`BufferHold`] drops.
     defer: std::sync::Arc<DeferredRequeue>,
+    /// Lazy-driver pacing; `None` when the producer keeps the tick.
+    pacer: Option<std::rc::Rc<Pacer>>,
 }
 
 impl UserData {
@@ -1288,17 +1290,24 @@ pub fn pipewire_thread(
         cursor_id0_hides,
         pool_min,
         unpaced,
+        lazy,
         ..
     } = opts;
     crate::pwinit::ensure_init();
 
     let mainloop = pw::main_loop::MainLoopRc::new(None).context("pw MainLoop")?;
     // Capturer `Drop` lands here on the loop thread and stops `run()` so the thread unwinds
-    // instead of blocking to process exit. Hold the attachment for the loop's life.
+    // instead of blocking to process exit. Hold the attachment for the loop's life. The
+    // registry probe below also runs the loop; `quit_seen` keeps a quit during it terminal.
+    let quit_seen = std::rc::Rc::new(std::cell::Cell::new(false));
     let quit_loop = mainloop.clone();
-    let _quit_attach = quit_rx.attach(mainloop.loop_(), move |()| {
-        tracing::debug!("pipewire: quit signal received — stopping capture loop");
-        quit_loop.quit();
+    let _quit_attach = quit_rx.attach(mainloop.loop_(), {
+        let quit_seen = quit_seen.clone();
+        move |()| {
+            tracing::debug!("pipewire: quit signal received — stopping capture loop");
+            quit_seen.set(true);
+            quit_loop.quit();
+        }
     });
     let context = pw::context::ContextRc::new(&mainloop, None).context("pw Context")?;
     // Portal source: fd to a sandboxed PipeWire remote. KWin virtual-output: no fd, default daemon.
@@ -1310,6 +1319,14 @@ pub fn pipewire_thread(
             .connect_rc(None)
             .context("pw connect (default daemon)")?,
     };
+    // Lazy driver (PipeWire ≥ 1.2.7 "headless server" scheduling): the producer paints only
+    // in a graph cycle this stream starts, so the encode loop owns the tick and no second
+    // clock beats against it. Only a producer that emits RequestProcess (Mutter ≥ 49 virtual
+    // monitors) may be driven this way; any other stays the driver as before.
+    let lazy = lazy && producer_supports_request(&core, &mainloop, node_id);
+    if quit_seen.get() {
+        return Ok(());
+    }
 
     let backend_is_vaapi = policy.backend_is_vaapi;
     let force_shm = plan.force_shm;
@@ -1477,6 +1494,12 @@ pub fn pipewire_thread(
         logged_shallow: std::sync::atomic::AtomicBool::new(false),
     });
 
+    // The heartbeat timer reads `driving` after `signals` moves into the listener's state.
+    let signals_hb = signals.clone();
+    // A driven producer paints only in cycles this stream starts; the pacer starts one per
+    // request, no sooner than a wire interval after the last. Every entry point runs on this
+    // thread. The stream pointer lands once the stream exists.
+    let pacer = lazy.then(|| Pacer::new(wire_interval(preferred)));
     let data = UserData {
         info: VideoInfoRaw::default(),
         format: None,
@@ -1507,34 +1530,45 @@ pub fn pipewire_thread(
         gate_skips: 0,
         gate_since: None,
         defer: defer.clone(),
+        pacer: pacer.clone(),
     };
 
-    let stream = pw::stream::StreamBox::new(
-        &core,
-        "punktfunk-screencast",
-        properties! {
-            *pw::keys::MEDIA_TYPE     => "Video",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE     => "Screen",
-            // Do not let the session manager re-target this stream: an orphaned auto-link to
-            // a fresh Video/Source wedges that node and head-blocks the daemon work queue,
-            // stalling all new link negotiation system-wide.
-            "node.dont-reconnect"     => "true",
-        },
-    )
-    .context("pw Stream")?;
+    let mut props = properties! {
+        *pw::keys::MEDIA_TYPE     => "Video",
+        *pw::keys::MEDIA_CATEGORY => "Capture",
+        *pw::keys::MEDIA_ROLE     => "Screen",
+        // Do not let the session manager re-target this stream: an orphaned auto-link to
+        // a fresh Video/Source wedges that node and head-blocks the daemon work queue,
+        // stalling all new link negotiation system-wide.
+        "node.dont-reconnect"     => "true",
+    };
+    if lazy {
+        // "2" outranks the producer's supports-request, so PipeWire picks this node as the
+        // driver and the producer becomes a requesting follower.
+        props.insert("node.supports-lazy", "2");
+    }
+    let stream =
+        pw::stream::StreamBox::new(&core, "punktfunk-screencast", props).context("pw Stream")?;
+    if let Some(p) = &pacer {
+        p.stream.set(stream.as_raw_ptr());
+    }
 
     let _listener = stream
         .add_local_listener_with_user_data(data)
-        .state_changed(|_stream, ud, old, new| {
-            tracing::info!(?old, ?new, "pipewire stream state");
+        .state_changed(|stream, ud, old, new| {
+            let streaming = matches!(new, pw::stream::StreamState::Streaming);
+            // Valid only while Streaming. True = the pacer's triggers start every cycle;
+            // false = the producer kept the tick.
+            let driving = streaming && stream.is_driving();
+            tracing::info!(?old, ?new, driving, "pipewire stream state");
             // `Streaming` with no buffers is a static desktop. Anything else means the source
             // went away; `try_latest` turns a sustained non-Streaming state into capture-loss
             // so the encode loop rebuilds instead of freezing on the last frame.
-            ud.signals.streaming.store(
-                matches!(new, pw::stream::StreamState::Streaming),
-                Ordering::Relaxed,
-            );
+            ud.signals.streaming.store(streaming, Ordering::Relaxed);
+            ud.signals.driving.store(driving, Ordering::Relaxed);
+            if let Some(p) = &ud.pacer {
+                p.on_streaming(driving);
+            }
         })
         .param_changed(|_stream, ud, id, param| {
             let Some(param) = param else { return };
@@ -1795,6 +1829,9 @@ pub fn pipewire_thread(
                     return;
                 }
 
+                if let Some(p) = &ud.pacer {
+                    p.on_paint();
+                }
                 consume_frame(ud, spa_buf, newest, hdr_pts);
             }));
             // Requeue `newest` exactly once on every path unless `try_defer` withheld it —
@@ -2001,19 +2038,399 @@ pub fn pipewire_thread(
         .map(|&b| Pod::from_bytes(b).context("pod from bytes"))
         .collect::<Result<_>>()?;
 
+    let mut flags = pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS;
+    if lazy {
+        flags |= pw::stream::StreamFlags::DRIVER;
+    }
     stream
         .connect(
             spa::utils::Direction::Input,
             Some(node_id),
-            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+            flags,
             &mut params,
         )
         .context("pw stream connect")?;
+
+    let cap_timer = pacer.as_ref().map(|p| {
+        let p = p.clone();
+        mainloop.loop_().add_timer(move |_| p.schedule())
+    });
+    if let (Some(p), Some(t)) = (&pacer, &cap_timer) {
+        use pw::loop_::IsSource;
+        p.timer.set(Some(RawTimer {
+            utils: mainloop.loop_().as_raw().utils,
+            source: t.as_ptr(),
+        }));
+    }
+    let _requests = pacer
+        .as_ref()
+        .map(|p| RequestListener::attach(&stream, p.clone()));
+    let heartbeat = pacer.as_ref().map(|p| {
+        let (p, signals) = (p.clone(), signals_hb.clone());
+        mainloop.loop_().add_timer(move |_| {
+            // Re-read the role: PipeWire may assign the driver after the Streaming edge.
+            // SAFETY: the stream outlives this timer source (declared after it).
+            let driving = signals.streaming.load(Ordering::Relaxed)
+                && unsafe { pw::sys::pw_stream_is_driving(p.stream.get()) };
+            if driving != signals.driving.swap(driving, Ordering::Relaxed) {
+                p.on_streaming(driving);
+            }
+            if driving {
+                p.heartbeat();
+            }
+        })
+    });
+    if let Some(t) = &heartbeat {
+        let _ = t.update_timer(Some(HEARTBEAT), Some(HEARTBEAT));
+    }
 
     // Blocks until capturer `Drop` fires the quit channel; `run()` returns and the thread
     // unwinds, releasing the importer / CUDA context.
     mainloop.run();
     Ok(())
+}
+
+/// Heartbeat period: a cycle out this long is lost and a driver that never started one
+/// gets its first (Mutter's first paint follows a request only once a cycle has run).
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The least spacing between two paints: one wire interval. The multiplier is undone —
+/// a driven monitor never ticks on its own, so a multiplied refresh only inflates the
+/// mode its clients see.
+fn wire_interval(preferred: Option<(u32, u32, u32)>) -> std::time::Duration {
+    let hz = preferred.map(|(_, _, hz)| hz).unwrap_or(60).max(1);
+    let hz = (hz / pf_host_config::config().vdisplay_hz_mult.max(1)).max(1);
+    std::time::Duration::from_nanos(1_000_000_000 / u64::from(hz))
+}
+
+/// One-shot loop timer the pacer re-arms from any of its entry points. Both pointers belong
+/// to the loop thread and outlive the pacer's listeners.
+#[derive(Clone, Copy)]
+struct RawTimer {
+    utils: *mut spa::sys::spa_loop_utils,
+    source: *mut spa::sys::spa_source,
+}
+
+impl RawTimer {
+    fn arm(&self, after: std::time::Duration) {
+        let value = spa::sys::timespec {
+            tv_sec: after.as_secs() as _,
+            tv_nsec: after.subsec_nanos() as _,
+        };
+        let interval = spa::sys::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `utils` is the loop's utils interface and `source` a live timer source of
+        // that loop; `update_timer` reads the two timespecs for the duration of the call.
+        unsafe {
+            // The macro names the sys crate by this alias.
+            use spa::sys as spa_sys;
+            let mut iface = (*self.utils).iface;
+            spa::spa_interface_call_method!(
+                &mut iface as *mut spa::sys::spa_interface,
+                spa::sys::spa_loop_utils_methods,
+                update_timer,
+                self.source,
+                &value as *const _ as *mut _,
+                &interval as *const _ as *mut _,
+                false
+            );
+        }
+    }
+}
+
+/// Request-driven paint pacing for a lazy driver.
+///
+/// The producer's frame clock is passive: it paints only inside a graph cycle this stream
+/// starts, and asks for one (RequestProcess) when a client committed, a frame callback is
+/// owed, or the pointer moved. Each request is answered with a cycle at once, or on the cap
+/// timer when the last *paint* is less than a wire interval old. The cap counts paints, not
+/// cycles: a cycle that only serves a frame callback or the cursor delivers no frame, and a
+/// commit right behind it must not wait an interval for it. The producer's node is sync in
+/// the graph, so its paint runs inside the cycle and this stream wakes with the frame the
+/// same cycle. Every field is a `Cell`: `trigger_done` can land inside `schedule` when a
+/// trigger has to close a cycle the producer never finished.
+struct Pacer {
+    stream: std::cell::Cell<*mut pw::sys::pw_stream>,
+    interval: std::time::Duration,
+    /// Streaming and driving: the only state a trigger starts a cycle in.
+    live: std::cell::Cell<bool>,
+    timer: std::cell::Cell<Option<RawTimer>>,
+    /// A request came since the last trigger.
+    pending: std::cell::Cell<bool>,
+    /// The cycle out now, if any: its trigger time.
+    in_flight: std::cell::Cell<Option<std::time::Instant>>,
+    last_trigger: std::cell::Cell<Option<std::time::Instant>>,
+    /// Trigger time of the last cycle that delivered a frame: the cap's anchor.
+    last_paint: std::cell::Cell<Option<std::time::Instant>>,
+    requests: std::cell::Cell<u64>,
+    triggers: std::cell::Cell<u64>,
+    /// Requests that waited on the cap timer.
+    deferred: std::cell::Cell<u64>,
+    reported: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+/// A cycle out longer than this is lost (the producer stalled or the stream re-linked).
+const LOST_CYCLE: std::time::Duration = std::time::Duration::from_millis(100);
+
+impl Pacer {
+    fn new(interval: std::time::Duration) -> std::rc::Rc<Pacer> {
+        std::rc::Rc::new(Pacer {
+            stream: std::cell::Cell::new(std::ptr::null_mut()),
+            interval,
+            live: std::cell::Cell::new(false),
+            timer: std::cell::Cell::new(None),
+            pending: std::cell::Cell::new(false),
+            in_flight: std::cell::Cell::new(None),
+            last_trigger: std::cell::Cell::new(None),
+            last_paint: std::cell::Cell::new(None),
+            requests: std::cell::Cell::new(0),
+            triggers: std::cell::Cell::new(0),
+            deferred: std::cell::Cell::new(0),
+            reported: std::cell::Cell::new(None),
+        })
+    }
+
+    fn on_request(&self) {
+        self.requests.set(self.requests.get() + 1);
+        self.pending.set(true);
+        self.schedule();
+    }
+
+    /// Every edge into Streaming-and-driving starts a cycle at once: the producer's request
+    /// gate stays latched across a renegotiation, and a trigger sent while paused is lost.
+    fn on_streaming(&self, live: bool) {
+        self.live.set(live);
+        self.in_flight.set(None);
+        if live {
+            self.pending.set(true);
+            self.last_paint.set(None);
+            self.schedule();
+        }
+    }
+
+    fn on_done(&self) {
+        self.in_flight.set(None);
+        self.schedule();
+    }
+
+    /// A cycle delivered a frame (called from `.process`, before it is consumed). The
+    /// anchor is that cycle's trigger, not the arrival: the next trigger then lands one
+    /// interval after it and the paint period is the interval, not interval plus cycle.
+    fn on_paint(&self) {
+        self.last_paint.set(Some(
+            self.in_flight.get().unwrap_or_else(std::time::Instant::now),
+        ));
+    }
+
+    /// Start a cycle if one is wanted and allowed; else arm the cap timer for the moment
+    /// it is. Never two cycles out at once.
+    fn schedule(&self) {
+        if !self.live.get() || !self.pending.get() || self.in_flight.get().is_some() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if let Some(next) = self.last_paint.get().map(|t| t + self.interval) {
+            if now < next {
+                if let Some(timer) = self.timer.get() {
+                    timer.arm(next - now);
+                }
+                self.deferred.set(self.deferred.get() + 1);
+                return;
+            }
+        }
+        self.pending.set(false);
+        self.trigger(now);
+    }
+
+    fn trigger(&self, now: std::time::Instant) {
+        // SAFETY: `stream` is this thread's live stream; the listeners that reach the pacer
+        // are removed before it drops.
+        let res = unsafe { pw::sys::pw_stream_trigger_process(self.stream.get()) };
+        if res < 0 {
+            // Not started (paused, unlinked): the request stays pending for the next edge.
+            self.pending.set(true);
+            return;
+        }
+        self.in_flight.set(Some(now));
+        self.last_trigger.set(Some(now));
+        self.triggers.set(self.triggers.get() + 1);
+    }
+
+    /// Every [`HEARTBEAT`]: retry a lost cycle (its request was never served), serve a
+    /// request whose cap timer was missed, and report the tally.
+    fn heartbeat(&self) {
+        let now = std::time::Instant::now();
+        if self.in_flight.get().is_some_and(|t| now - t > LOST_CYCLE) {
+            self.in_flight.set(None);
+            self.pending.set(true);
+        }
+        self.schedule();
+        if self
+            .reported
+            .get()
+            .is_none_or(|t| now - t >= PTS_REPORT_EVERY)
+        {
+            if self.reported.get().is_some() {
+                tracing::info!(
+                    requests = self.requests.get(),
+                    triggers = self.triggers.get(),
+                    deferred = self.deferred.get(),
+                    interval_us = self.interval.as_micros() as u64,
+                    "lazy capture pacer: producer requests answered with cycles (deferred = held \
+                     to the wire interval)"
+                );
+            }
+            self.reported.set(Some(now));
+        }
+    }
+}
+
+/// The stream events pipewire-rs 0.9 has no builder for: RequestProcess and `trigger_done`.
+/// Both callbacks run on the loop thread. Dropping removes the hook, before the pacer.
+struct RequestListener {
+    hook: Box<spa::sys::spa_hook>,
+    _events: Box<pw::sys::pw_stream_events>,
+    _pacer: std::rc::Rc<Pacer>,
+}
+
+impl RequestListener {
+    fn attach(stream: &pw::stream::Stream, pacer: std::rc::Rc<Pacer>) -> RequestListener {
+        unsafe extern "C" fn on_command(
+            data: *mut std::ffi::c_void,
+            command: *const spa::sys::spa_command,
+        ) {
+            // SAFETY: `data` is the `Rc<Pacer>` this listener holds; `command` is the live pod
+            // PipeWire passes for the callback.
+            unsafe {
+                let body = (*command).body.body;
+                if body.type_ == spa::sys::SPA_TYPE_COMMAND_Node
+                    && body.id == spa::sys::SPA_NODE_COMMAND_RequestProcess
+                {
+                    (*(data as *const Pacer)).on_request();
+                }
+            }
+        }
+        unsafe extern "C" fn on_trigger_done(data: *mut std::ffi::c_void) {
+            // SAFETY: as above.
+            unsafe { (*(data as *const Pacer)).on_done() }
+        }
+        // SAFETY: zeroed is the C initialiser for both structs; every unset event stays
+        // `None` and the hook's list link is filled in by `pw_stream_add_listener`.
+        let (mut events, mut hook): (Box<pw::sys::pw_stream_events>, Box<spa::sys::spa_hook>) =
+            unsafe { (Box::new(std::mem::zeroed()), Box::new(std::mem::zeroed())) };
+        events.version = pw::sys::PW_VERSION_STREAM_EVENTS;
+        events.command = Some(on_command);
+        events.trigger_done = Some(on_trigger_done);
+        // SAFETY: the hook and events boxes live as long as this listener, which is removed
+        // in `Drop` before either is freed; `data` stays valid while `_pacer` is held.
+        unsafe {
+            pw::sys::pw_stream_add_listener(
+                stream.as_raw_ptr(),
+                &mut *hook,
+                &*events,
+                std::rc::Rc::as_ptr(&pacer) as *mut std::ffi::c_void,
+            );
+        }
+        RequestListener {
+            hook,
+            _events: events,
+            _pacer: pacer,
+        }
+    }
+}
+
+impl Drop for RequestListener {
+    fn drop(&mut self) {
+        // SAFETY: the hook was added by `attach` and not removed since.
+        unsafe { spa::sys::spa_hook_remove(&mut *self.hook) }
+    }
+}
+
+/// Whether the producer node emits RequestProcess (`node.supports-request` > 0). The
+/// registry announce carries only a subset of a node's props, so the node is bound and
+/// the value read off its `info`. False on any doubt — a wrong true makes a non-lazy
+/// producer a follower of a driver that never triggers.
+fn producer_supports_request(
+    core: &pw::core::CoreRc,
+    mainloop: &pw::main_loop::MainLoopRc,
+    node_id: u32,
+) -> bool {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    let Ok(registry) = core.get_registry_rc() else {
+        return false;
+    };
+    let found: Rc<Cell<Option<bool>>> = Rc::new(Cell::new(None));
+    // The bound proxy and its listener must outlive the round trips that deliver `info`.
+    let bound: Rc<RefCell<Option<(pw::node::Node, pw::node::NodeListener)>>> = Rc::default();
+    let _reg = registry
+        .add_listener_local()
+        .global({
+            let (registry, found, bound) = (registry.clone(), found.clone(), bound.clone());
+            move |g| {
+                if g.id != node_id || g.type_ != pw::types::ObjectType::Node {
+                    return;
+                }
+                let Ok(node) = registry.bind::<pw::node::Node, _>(g) else {
+                    found.set(Some(false));
+                    return;
+                };
+                let listener = node
+                    .add_listener_local()
+                    .info({
+                        let found = found.clone();
+                        move |info| {
+                            let v = info
+                                .props()
+                                .and_then(|p| p.get("node.supports-request"))
+                                .and_then(|v| v.trim().parse::<u32>().ok())
+                                .unwrap_or(0);
+                            found.set(Some(v > 0));
+                        }
+                    })
+                    .register();
+                *bound.borrow_mut() = Some((node, listener));
+            }
+        })
+        .register();
+    // Round 1 replays the globals and binds; round 2 lands the bind's `info`. The timer
+    // bounds a daemon that never answers.
+    let awaited: Rc<Cell<Option<pw::spa::utils::result::AsyncSeq>>> = Rc::new(Cell::new(None));
+    let _core_l = core
+        .add_listener_local()
+        .done({
+            let (ml, awaited) = (mainloop.clone(), awaited.clone());
+            move |_, seq| {
+                if awaited.get() == Some(seq) {
+                    ml.quit();
+                }
+            }
+        })
+        .register();
+    let guard = mainloop.loop_().add_timer({
+        let ml = mainloop.clone();
+        move |_| ml.quit()
+    });
+    let _ = guard.update_timer(Some(std::time::Duration::from_secs(2)), None);
+    for _ in 0..2 {
+        let Ok(seq) = core.sync(0) else {
+            return false;
+        };
+        awaited.set(Some(seq));
+        mainloop.run();
+        if found.get().is_some() {
+            break;
+        }
+    }
+    let supports = found.get();
+    tracing::info!(
+        node_id,
+        supports_request = ?supports,
+        "capture producer probed for PipeWire request scheduling"
+    );
+    supports.unwrap_or(false)
 }
 
 #[cfg(test)]

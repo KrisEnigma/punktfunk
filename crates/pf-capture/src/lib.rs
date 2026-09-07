@@ -36,6 +36,18 @@ pub fn unpaced_capture() -> bool {
     !pf_host_config::env_on("PUNKTFUNK_KWIN_PACED").unwrap_or(false)
 }
 
+/// Whether a virtual output may be driven as a PipeWire lazy driver.
+///
+/// A producer that emits RequestProcess (Mutter ≥ 49 virtual monitors) paints only in a
+/// graph cycle the consumer starts, so the encode loop's slot is the one tick: no
+/// compositor timer to beat against, no throttle to lose frames in, no extra render.
+/// Producers without it are never driven. `PUNKTFUNK_LAZY_CAPTURE=0` restores the
+/// producer-driven stream.
+#[cfg(target_os = "linux")]
+pub fn lazy_capture() -> bool {
+    pf_host_config::env_on("PUNKTFUNK_LAZY_CAPTURE").unwrap_or(true)
+}
+
 /// A FATAL capture fault: retrying `try_latest` cannot help — the caller must rebuild the
 /// capture attachment or fail the session. Carried inside the `anyhow::Error` a capture call
 /// returns (downcast to route on it), so it can never collapse into an ordinary `Ok(None)`.
