@@ -1389,21 +1389,15 @@ public final class Stage2Pipeline {
                 ring: ring, renderSignal: renderSignal,
                 device: presenter.metalDevice, queue: presenter.metalQueue,
                 decodeMeter: decodeMeter, cadence: cadence, rateHint: frameRateHint,
-                onFrame: onFrame, onSessionEnd: onSessionEnd, onDecodedSize: onDecodedSize)
+                onFrame: onFrame, onSessionEnd: onSessionEnd, onDecodedSize: onDecodedSize,
+                onHdrMeta: { [weak presenter] meta in presenter?.setHdrMeta(meta) })
         } else {
             thread = Thread {
             defer { pumpStopped.signal() } // let stop() join the pump (bounded) before decoder.reset()
-            var format: CMVideoFormatDescription?
-            // Report coded dims to the resize overlay only on a CHANGE (new-mode IDR), not per
-            // loss-recovery IDR at the same size (see StreamPump).
-            var lastDecodedDims: CMVideoDimensions?
-            // Persistent WANT for the two states only an IDR's parameter sets can end: no
-            // decodable format yet, or a decoder reset. Loss goes through the gate — an RFI
-            // anchor heals it, and asking on until an IDR turns every loss into one.
-            var awaitingIDR = false
-            // Newest submitted frame index — a late partial (the reassembler's 30 ms fuse can
-            // deliver one behind a newer complete frame) must not travel back in time.
-            var newestIndex: UInt32?
+            // Format, decoded size, straggler filter and the keyframe WANT — the same rules the
+            // stage-1 pump follows, in one tested place. Loss itself goes through the gate, where
+            // an RFI anchor heals it without an IDR.
+            var pump = AUPumpState()
             // 4:4:4 backstop: a run of decode/create failures in a 4:4:4 session means this device can't
             // decode 4:4:4 at the negotiated resolution (the HW probe clears the common case but not a
             // resolution-ceiling miss). End cleanly instead of looping on a black screen.
@@ -1424,7 +1418,7 @@ public final class Stage2Pipeline {
                         _ = try connection.nextAU(timeoutMs: 100)
                         return true
                     }
-                    if awaitingIDR { recovery.request() }
+                    if pump.awaitingIDR { recovery.request() }
                     // Loss recovery through the shared gate: a drop-count climb beyond the gap's
                     // credit arms the freeze and asks (the decoder conceals reference-missing
                     // deltas without an error), and an overdue freeze re-asks for the re-anchor.
@@ -1448,46 +1442,24 @@ public final class Stage2Pipeline {
                     let gapWidth = connection.noteFrameIndexGapWidth(au.frameIndex)
                     if gapWidth > 0 { reanchorGate.arm(expectingDrops: UInt64(gapWidth)) }
                     onFrame?(au)
-                    // Straggler: the core reports gap width 0 for one, so nothing else filters it.
-                    // Decoding it rewinds the DPB — H.264 reads a frame_num wrap, HEVC's RPS
-                    // unmarks the newer picture — corrupting the stream that already moved past it.
-                    if let newest = newestIndex,
-                       Int32(bitPattern: au.frameIndex &- newest) <= 0 {
-                        return true
+                    let step = pump.note(
+                        frameIndex: au.frameIndex,
+                        idrFormat: connection.videoCodec.formatDescription(fromKeyframe: au.data))
+                    if step.straggler { return true }
+                    if let size = step.newSize { onDecodedSize?(size.width, size.height) }
+                    if step.startedFormatWait {
+                        pumpLog.warning(
+                            "video: received AUs but no decodable format (missing/unparsed parameter sets) — requesting an IDR until one seeds it"
+                        )
                     }
-                    newestIndex = au.frameIndex
-                    if let f = connection.videoCodec.formatDescription(fromKeyframe: au.data) {
-                        format = f          // refreshed on every IDR (mode changes included)
-                        let dims = CMVideoFormatDescriptionGetDimensions(f)
-                        if lastDecodedDims?.width != dims.width || lastDecodedDims?.height != dims.height {
-                            lastDecodedDims = dims
-                            onDecodedSize?(Int(dims.width), Int(dims.height))
-                        }
-                        awaitingIDR = false // a fresh IDR re-anchored decode — recovery complete
-                    }
-                    if format == nil {
-                        // No decodable format yet: the opening IDR's parameter sets never
-                        // arrived (or never parsed), and under the host's infinite GOP nothing
-                        // re-delivers them unless we ASK. Without this the guard below drops
-                        // every AU silently, forever — the field "black stream, zero recovery
-                        // requests" state (2026-08-12): the host streams perfectly, the client
-                        // shows nothing and says nothing. awaitingIDR routes through the same
-                        // 100 ms-throttled recovery.request() at the top of the loop.
-                        if !awaitingIDR {
-                            pumpLog.warning(
-                                "video: received AUs but no decodable format (missing/unparsed parameter sets) — requesting an IDR until one seeds it"
-                            )
-                        }
-                        awaitingIDR = true
-                    }
-                    guard let f = format, !token.isStopped else { return true }
+                    guard let f = pump.format, !token.isStopped else { return true }
                     if decoder.decode(au: au, format: f) {
                         decodeFailRun = 0
                     } else {
                         // Submit/decoder error: drop the session and re-gate on the next IDR's in-band
                         // parameter sets (a delta frame can't recover) and keep asking for that IDR.
                         decoder.reset()
-                        awaitingIDR = true
+                        pump.requireIDR()
                         decodeFailRun += 1
                         // ~3 s of solid failure in a 4:4:4 session (and only there — a 4:2:0 loss
                         // recovers within a GOP) ⇒ 4:4:4 isn't decodable here; end the session.
@@ -2010,7 +1982,8 @@ public final class Stage2Pipeline {
         decodeMeter: LatencyMeter?, cadence: CadenceClock?, rateHint: FrameRateHint,
         onFrame: (@Sendable (AccessUnit) -> Void)?,
         onSessionEnd: (@Sendable () -> Void)?,
-        onDecodedSize: (@Sendable (Int, Int) -> Void)?
+        onDecodedSize: (@Sendable (Int, Int) -> Void)?,
+        onHdrMeta: (@Sendable (PunktfunkConnection.HdrMeta) -> Void)?
     ) -> Thread {
         // The chunk-aligned parse window = the session's negotiated shard payload (Welcome);
         // the 64-byte floor mirrors the Rust client's guard against a nonsense value.
@@ -2038,6 +2011,13 @@ public final class Stage2Pipeline {
                         if connection.isVideoDropped {
                             _ = try connection.nextAU(timeoutMs: 100)
                             return true
+                        }
+                        // Mastering metadata (0xCE), same as the VideoToolbox pump: a PQ PyroWave
+                        // session drives the same EDR machinery, and without this it tone-maps
+                        // against the bare reference-white anchor with no mastering volume or
+                        // content-light level for the whole session.
+                        if let meta = try? connection.nextHdrMeta(timeoutMs: 0) {
+                            onHdrMeta?(meta)
                         }
                         guard let au = try connection.nextAU(timeoutMs: 100) else { return true }
                         onFrame?(au)
