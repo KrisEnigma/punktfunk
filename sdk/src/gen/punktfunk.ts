@@ -1795,17 +1795,17 @@ readonly "unpairClient": <Config extends OperationConfig>(fingerprint: string, o
 */
 readonly "renameClient": <Config extends OperationConfig>(fingerprint: string, options: { readonly payload: typeof RenameClientRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof RenameClient200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"RenameClient400", typeof RenameClient400.Type> | PunktfunkError<"RenameClient401", typeof RenameClient401.Type> | PunktfunkError<"RenameClient404", typeof RenameClient404.Type>>
   /**
-* Compositor backends the host can drive, with availability and the `Auto` default.
-* Clients pass `id` to `--compositor` or `PUNKTFUNK_COMPOSITOR_*`.
+* Each row carries availability and whether `Auto` resolves to it. Clients pass
+* `id` to `--compositor` or `PUNKTFUNK_COMPOSITOR_*`.
 */
 readonly "listCompositors": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof ListCompositors200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"ListCompositors401", typeof ListCompositors401.Type>>
   /**
-* Last cached health report. Probes run at startup and on `POST /diagnostics/refresh`.
+* Probes run at startup and on `POST /diagnostics/refresh`.
 */
 readonly "getDiagnostics": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetDiagnostics200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetDiagnostics401", typeof GetDiagnostics401.Type>>
   /**
-* Re-run every probe and return the new report. Poll GET; membership and udev
-* rules only change after the operator changes them.
+* Returns the new report. Poll GET; membership and udev rules only change
+* after the operator changes them.
 */
 readonly "refreshDiagnostics": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof RefreshDiagnostics200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"RefreshDiagnostics401", typeof RefreshDiagnostics401.Type>>
   /**
@@ -1871,7 +1871,7 @@ readonly "streamEvents": <Config extends OperationConfig>(options: { readonly pa
 */
 readonly "streamEventsSse": (options: { readonly params?: typeof StreamEventsParams.Encoded | undefined } | undefined) => Stream.Stream<{ readonly event: string; readonly id: string | undefined; readonly data: typeof StreamEvents200Sse.Type }, HttpClientError.HttpClientError | SchemaError | Sse.Retry, typeof StreamEvents200Sse.DecodingServices>
   /**
-* End games waiting out the reconnect window. Does not touch a live session
+* Ends games waiting out the reconnect window. Does not touch a live session
 * (`DELETE /session` plus `game_on_session_end`).
 */
 readonly "endGame": <Config extends OperationConfig>(options: { readonly payload: typeof EndGameRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof EndGame200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"EndGame401", typeof EndGame401.Type> | PunktfunkError<"EndGame409", typeof EndGame409.Type>>
@@ -1885,7 +1885,7 @@ readonly "listGpus": <Config extends OperationConfig>(options: { readonly config
 */
 readonly "setGpuPreference": <Config extends OperationConfig>(options: { readonly payload: typeof SetGpuPreferenceRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof SetGpuPreference200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"SetGpuPreference400", typeof SetGpuPreference400.Type> | PunktfunkError<"SetGpuPreference401", typeof SetGpuPreference401.Type> | PunktfunkError<"SetGpuPreference500", typeof SetGpuPreference500.Type>>
   /**
-* Liveness probe. Unauthenticated (`require_auth` exempts it).
+* Unauthenticated: `require_auth` exempts it.
 */
 readonly "getHealth": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetHealth200.Type, Config>, HttpClientError.HttpClientError | SchemaError>
   /**
@@ -1917,7 +1917,7 @@ readonly "getLibrary": <Config extends OperationConfig>(options: { readonly para
 */
 readonly "getLibraryArt": <Config extends OperationConfig>(id: string, kind: string, options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<void, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetLibraryArt401", typeof GetLibraryArt401.Type> | PunktfunkError<"GetLibraryArt404", typeof GetLibraryArt404.Type>>
   /**
-* Create a user-curated title. The host assigns a stable id, returned in the body.
+* A user-curated entry. The host assigns a stable id, returned in the body.
 */
 readonly "createCustomGame": <Config extends OperationConfig>(options: { readonly payload: typeof CreateCustomGameRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof CreateCustomGame201.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"CreateCustomGame400", typeof CreateCustomGame400.Type> | PunktfunkError<"CreateCustomGame401", typeof CreateCustomGame401.Type> | PunktfunkError<"CreateCustomGame500", typeof CreateCustomGame500.Type>>
   readonly "updateCustomGame": <Config extends OperationConfig>(id: string, options: { readonly payload: typeof UpdateCustomGameRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof UpdateCustomGame200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"UpdateCustomGame400", typeof UpdateCustomGame400.Type> | PunktfunkError<"UpdateCustomGame401", typeof UpdateCustomGame401.Type> | PunktfunkError<"UpdateCustomGame404", typeof UpdateCustomGame404.Type> | PunktfunkError<"UpdateCustomGame500", typeof UpdateCustomGame500.Type>>
@@ -1940,7 +1940,7 @@ readonly "setLibraryEntryHidden": <Config extends OperationConfig>(id: string, o
 */
 readonly "reconcileProviderEntries": <Config extends OperationConfig>(provider: string, options: { readonly params?: typeof ReconcileProviderEntriesParams.Encoded | undefined; readonly payload: typeof ReconcileProviderEntriesRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof ReconcileProviderEntries200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"ReconcileProviderEntries400", typeof ReconcileProviderEntries400.Type> | PunktfunkError<"ReconcileProviderEntries401", typeof ReconcileProviderEntries401.Type> | PunktfunkError<"ReconcileProviderEntries409", typeof ReconcileProviderEntries409.Type> | PunktfunkError<"ReconcileProviderEntries500", typeof ReconcileProviderEntries500.Type>>
   /**
-* Delete every entry owned by `{provider}` (plugin uninstall). Emits `library.changed`
+* Everything owned by `{provider}`, for plugin uninstall. Emits `library.changed`
 * when anything was removed.
 */
 readonly "deleteProviderEntries": <Config extends OperationConfig>(provider: string, options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof DeleteProviderEntries200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"DeleteProviderEntries400", typeof DeleteProviderEntries400.Type> | PunktfunkError<"DeleteProviderEntries401", typeof DeleteProviderEntries401.Type> | PunktfunkError<"DeleteProviderEntries500", typeof DeleteProviderEntries500.Type>>
@@ -1955,8 +1955,9 @@ readonly "deleteProviderEntries": <Config extends OperationConfig>(provider: str
 */
 readonly "reportProviderRunning": <Config extends OperationConfig>(provider: string, options: { readonly payload: typeof ReportProviderRunningRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof ReportProviderRunning200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"ReportProviderRunning400", typeof ReportProviderRunning400.Type> | PunktfunkError<"ReportProviderRunning401", typeof ReportProviderRunning401.Type>>
   /**
-* One row per installed library plugin. Sources default to enabled; disabling hides titles
-* from the next read. The custom store is not a source and is always on. Every row is
+* One row per installed library plugin, with its enable state. Sources default to
+* enabled; disabling hides titles from the next read. The custom store is not a
+* source and is always on. Every row is
 * `origin: "plugin"`.
 */
 readonly "listLibraryScanners": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof ListLibraryScanners200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"ListLibraryScanners401", typeof ListLibraryScanners401.Type>>
@@ -1966,12 +1967,13 @@ readonly "listLibraryScanners": <Config extends OperationConfig>(options: { read
 */
 readonly "setLibraryScanner": <Config extends OperationConfig>(id: string, options: { readonly payload: typeof SetLibraryScannerRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof SetLibraryScanner200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"SetLibraryScanner401", typeof SetLibraryScanner401.Type> | PunktfunkError<"SetLibraryScanner404", typeof SetLibraryScanner404.Type> | PunktfunkError<"SetLibraryScanner500", typeof SetLibraryScanner500.Type>>
   /**
-* Loopback tray summary. Unauthenticated; `require_auth` admits loopback only.
+* Unauthenticated; `require_auth` admits loopback only.
 */
 readonly "getLocalSummary": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetLocalSummary200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetLocalSummary401", typeof GetLocalSummary401.Type>>
   /**
-* Poll with `after` = last `next`. `dropped: true` means the ring wrapped
-* between polls and entries were evicted.
+* In-memory, DEBUG and above, independent of `RUST_LOG`. Poll with `after` = last
+* `next`. `dropped: true` means the ring wrapped between polls and entries were
+* evicted.
 */
 readonly "logsGet": <Config extends OperationConfig>(options: { readonly params?: typeof LogsGetParams.Encoded | undefined; readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof LogsGet200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"LogsGet401", typeof LogsGet401.Type>>
   /**
@@ -2057,13 +2059,13 @@ readonly "deregisterPlugin": <Config extends OperationConfig>(id: string, option
 */
 readonly "getPluginUiCredential": <Config extends OperationConfig>(id: string, options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetPluginUiCredential200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetPluginUiCredential401", typeof GetPluginUiCredential401.Type> | PunktfunkError<"GetPluginUiCredential404", typeof GetPluginUiCredential404.Type>>
   /**
-* Deliberate stop: skip keep-alive linger and apply `game_on_session_end`.
+* A deliberate stop: skip keep-alive linger and apply `game_on_session_end`.
 */
 readonly "stopSession": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<void, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"StopSession401", typeof StopSession401.Type>>
   readonly "requestIdr": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<void, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"RequestIdr401", typeof RequestIdr401.Type> | PunktfunkError<"RequestIdr409", typeof RequestIdr409.Type>>
   readonly "getSessionSettings": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetSessionSettings200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetSessionSettings401", typeof GetSessionSettings401.Type>>
   /**
-* Persist (clamped). Takes effect on the next decision, including a session
+* Persisted clamped. Takes effect on the next decision, including a session
 * already streaming — policy is read at session end, not start.
 */
 readonly "setSessionSettings": <Config extends OperationConfig>(options: { readonly payload: typeof SetSessionSettingsRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof SetSessionSettings200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"SetSessionSettings400", typeof SetSessionSettings400.Type> | PunktfunkError<"SetSessionSettings401", typeof SetSessionSettings401.Type> | PunktfunkError<"SetSessionSettings500", typeof SetSessionSettings500.Type>>
@@ -2079,7 +2081,7 @@ readonly "statsCaptureStart": <Config extends OperationConfig>(options: { readon
 */
 readonly "statsCaptureStop": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof StatsCaptureStop200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"StatsCaptureStop401", typeof StatsCaptureStop401.Type> | PunktfunkError<"StatsCaptureStop500", typeof StatsCaptureStop500.Type>>
   /**
-* Saved capture summaries (`meta` only, no sample body), newest first.
+* Summaries only (`meta`, no sample body), newest first.
 */
 readonly "statsRecordingsList": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof StatsRecordingsList200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"StatsRecordingsList401", typeof StatsRecordingsList401.Type>>
   readonly "statsRecordingGet": <Config extends OperationConfig>(id: string, options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof StatsRecordingGet200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"StatsRecordingGet401", typeof StatsRecordingGet401.Type> | PunktfunkError<"StatsRecordingGet404", typeof StatsRecordingGet404.Type> | PunktfunkError<"StatsRecordingGet500", typeof StatsRecordingGet500.Type>>
@@ -2147,8 +2149,9 @@ readonly "deletePluginSource": <Config extends OperationConfig>(name: string, op
 */
 readonly "uninstallPlugin": <Config extends OperationConfig>(options: { readonly payload: typeof UninstallPluginRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof UninstallPlugin202.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"UninstallPlugin400", typeof UninstallPlugin400.Type> | PunktfunkError<"UninstallPlugin401", typeof UninstallPlugin401.Type> | PunktfunkError<"UninstallPlugin403", typeof UninstallPlugin403.Type> | PunktfunkError<"UninstallPlugin409", typeof UninstallPlugin409.Type>>
   /**
-* No version or URL in the body — the host installs the verified manifest.
-* Poll `GET /update/status` (`job`); after restart, the outcome is `last_result`.
+* Only for install kinds that support it. No version or URL in the body — the host
+* installs the verified manifest. Poll `GET /update/status` (`job`); after restart,
+* the outcome is `last_result`.
 */
 readonly "applyUpdate": <Config extends OperationConfig>(options: { readonly payload: typeof ApplyUpdateRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof ApplyUpdate202.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"ApplyUpdate401", typeof ApplyUpdate401.Type> | PunktfunkError<"ApplyUpdate409", typeof ApplyUpdate409.Type>>
   /**
