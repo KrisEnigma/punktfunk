@@ -298,7 +298,7 @@ const CUSTOM_MAX_MBPS: u32 = 2_000;
 /// webOS is the one platform with a real ceiling: the TV client bounds its own slider at
 /// 200 Mbps and clamps the document to it, so a shell offering more would write a number the
 /// classic menus take straight back off again. Everywhere else the ladder's own top stands.
-fn bitrate_ceiling_kbps(platform: crate::platform::Platform) -> u32 {
+pub(crate) fn bitrate_ceiling_kbps(platform: crate::platform::Platform) -> u32 {
     match platform {
         crate::platform::Platform::WebOS => 200_000,
         crate::platform::Platform::Desktop
@@ -2521,6 +2521,7 @@ pub(crate) mod tests {
                 id: "p1".into(),
                 name: "Work".into(),
                 accent: None,
+                bitrate_kbps: None,
             }),
             bound_profile: None,
             running: String::new(),

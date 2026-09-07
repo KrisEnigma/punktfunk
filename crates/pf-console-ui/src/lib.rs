@@ -228,7 +228,8 @@ pub use library::{DecodedPoster, LibraryGame, LibraryPhase, LibraryShared, Stale
     target_family = "wasm"
 ))]
 pub use model::{
-    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, PairPhase, ProfileChip, WakeStatus,
+    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, PairPhase, ProfileChip, SpeedPhase,
+    SpeedStatus, WakeStatus,
 };
 #[cfg(any(
     target_os = "linux",

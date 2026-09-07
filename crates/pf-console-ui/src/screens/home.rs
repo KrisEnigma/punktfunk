@@ -943,6 +943,7 @@ mod tests {
             id: "p1".into(),
             name: "Work".into(),
             accent: None,
+            bitrate_kbps: None,
         });
         let hosts = [pinned];
         let pads: Vec<pf_client_core::menu_nav::PadInfo> = Vec::new();
