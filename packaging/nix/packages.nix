@@ -43,6 +43,7 @@
   libxkbcommon,
   libGL,
   vulkan-loader,
+  libva,
   # gbm lives in `libgbm` on recent nixpkgs, `mesa` on older ones.
   libgbm ? null,
   mesa,
@@ -169,6 +170,7 @@ in
         libGL # src/linux/zerocopy/egl.rs `#[link(name = "GL")]`
         gbm # src/linux/zerocopy/egl.rs `#[link(name = "gbm")]`
         vulkan-loader # ash (Vulkan-Video encode + the dmabuf→VK bridge); loaded at runtime
+        libva # pf-libva (native VAAPI encode); dlopen'd, and no longer transitively via FFmpeg
       ];
 
       # KWin resolves a streaming client to a .desktop by matching /proc/<pid>/exe against `Exec`, so
@@ -212,20 +214,29 @@ in
         install -Dm0644 api/openapi.json                      "$out/share/punktfunk-host/openapi.json"
       '';
 
-      # Run AFTER fixup. Two entries, two reasons: /run/opengl-driver/lib is empty at build time so
-      # fixup strips it, and libvulkan.so.1 is never DT_NEEDED (ash and volk only dlopen it) so the
-      # vulkan-loader buildInput never reaches RUNPATH at all. The driver link resolves libcuda.so.1
-      # / libnvidia-encode.so.1 / libEGL.so.1 and the vendor ICD from the running system; it never
-      # carries the Khronos loader, and without that ash dies at `Entry::load()`.
+      # Run AFTER fixup, and add every dlopen'd library by hand. A `buildInputs` entry only reaches
+      # RUNPATH when something DT_NEEDEDs it, and nothing links these: ash and volk dlopen
+      # libvulkan.so.1, pf-libva dlopens libva.so.2. The driver link is the third entry and covers
+      # libcuda.so.1 / libnvidia-encode.so.1 / libnvidia-ml.so.1 / libEGL.so.1 and the vendor ICD,
+      # but carries neither the Khronos loader nor libva. A miss here is silent: the codepath just
+      # reports "unavailable" and falls back.
       postFixup = ''
         # Both binaries dlopen the GPU stack; the worker owns a Vulkan device of its own for
         # PyroWave, and without it the host silently falls back to the in-process encoder at
         # default priority. The tray (its own derivation, copied in above) does not.
         for b in punktfunk-host punktfunk-encode-worker; do
           addDriverRunpath "$out/bin/$b"
-          patchelf --add-rpath "${vulkan-loader}/lib" "$out/bin/$b"
-          patchelf --print-rpath "$out/bin/$b" | tr : '\n' | grep -qxF "${vulkan-loader}/lib" \
-            || { echo "$b: no vulkan-loader in RUNPATH — Entry::load() would fail"; exit 1; }
+          patchelf --add-rpath "${vulkan-loader.out}/lib" "$out/bin/$b"
+          patchelf --add-rpath "${libva.out}/lib" "$out/bin/$b"
+          # Assert each soname RESOLVES, not merely that a directory is listed: a package whose
+          # default output is `dev` puts a lib-less path on RUNPATH and the dlopen still fails.
+          for s in libvulkan.so.1 libva.so.2; do
+            ok=""
+            for d in $(patchelf --print-rpath "$out/bin/$b" | tr : ' '); do
+              [ -e "$d/$s" ] && ok=1
+            done
+            [ -n "$ok" ] || { echo "$b: $s unresolvable from RUNPATH"; exit 1; }
+          done
         done
       '';
 
@@ -267,6 +278,7 @@ in
         libxkbcommon
         libGL
         vulkan-loader # ash presenter + Vulkan-Video decode (loaded at runtime)
+        libva # pf-vaapi decode; dlopen'd, so the postFixup below is what actually finds it
       ];
 
       # wrapGApp needs to run on the real ELF, and addDriverRunpath must run post-shrink — so disable
@@ -289,13 +301,19 @@ in
       '';
 
       postFixup = ''
-        # Same two runpath entries as the host: the driver link for the vendor ICD and libEGL,
-        # vulkan-loader for the libvulkan.so.1 the presenter and Vulkan-Video decode dlopen.
+        # Same three runpath entries as the host: the driver link for the vendor ICD and libEGL,
+        # vulkan-loader for the presenter and Vulkan-Video decode, libva for pf-vaapi decode.
         for b in punktfunk-client punktfunk-session; do
           addDriverRunpath "$out/bin/$b"
-          patchelf --add-rpath "${vulkan-loader}/lib" "$out/bin/$b"
-          patchelf --print-rpath "$out/bin/$b" | tr : '\n' | grep -qxF "${vulkan-loader}/lib" \
-            || { echo "$b: no vulkan-loader in RUNPATH — Entry::load() would fail"; exit 1; }
+          patchelf --add-rpath "${vulkan-loader.out}/lib" "$out/bin/$b"
+          patchelf --add-rpath "${libva.out}/lib" "$out/bin/$b"
+          for s in libvulkan.so.1 libva.so.2; do
+            ok=""
+            for d in $(patchelf --print-rpath "$out/bin/$b" | tr : ' '); do
+              [ -e "$d/$s" ] && ok=1
+            done
+            [ -n "$ok" ] || { echo "$b: $s unresolvable from RUNPATH"; exit 1; }
+          done
         done
         # Only the GTK shell needs the GApps wrapper (GSETTINGS_SCHEMA_DIR, icon themes, typelibs);
         # the ash session binary is not a GTK app. Wrap last: it renames the ELF just patched.
