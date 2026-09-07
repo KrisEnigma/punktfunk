@@ -135,8 +135,6 @@ pub(super) async fn run(task: Task) {
     // `select!` drops this future whenever a sibling fires. `io::read_msg`
     // would lose a partial frame and misalign the rest of the session.
     let mut ctrl_reader = io::MsgReader::new(ctrl_recv);
-    // After real loss, decay stops at 5 % not 1 % (`FecFloor`).
-    let mut fec_floor = FecFloor::default();
     loop {
         tokio::select! {
             msg = ctrl_reader.read_msg() => {
@@ -213,12 +211,7 @@ pub(super) async fn run(task: Task) {
                         // clean ~750 ms window so a burst every few seconds
                         // does not drop FEC to the floor between hits.
                         let prev = fec_target_ctl.load(Ordering::Relaxed);
-                        // Floor binds decay, not attack. Real loss raises it to
-                        // 5 %; ~2 clean minutes re-earn the 1 % floor.
-                        let floor = fec_floor.on_report(rep.loss_ppm);
-                        let target = adapt_fec(rep.loss_ppm)
-                            .max(prev.saturating_sub(1))
-                            .max(floor);
+                        let target = adapt_fec(rep.loss_ppm).max(prev.saturating_sub(1));
                         fec_target_ctl.store(target, Ordering::Relaxed);
                         if prev != target {
                             tracing::debug!(

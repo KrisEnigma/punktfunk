@@ -287,6 +287,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **Adaptive FEC on the native plane floors at 5 % and two parity shards per block.** The
+  old 1 % floor left one shard per frame, so a clean link lost a frame to a two-packet burst;
+  nothing to do, `PUNKTFUNK_FEC_PCT` still pins a percent.
 - **AMD and Intel Linux hosts encode H.264 and HEVC through the native VAAPI session.** It
   replaces the libavcodec path on radeonsi and iHD: a packet loss is answered on a P picture
   instead of a full IDR, a bitrate step lands in place, and HEVC Main 10 carries its HDR10

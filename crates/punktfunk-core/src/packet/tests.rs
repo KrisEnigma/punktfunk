@@ -596,7 +596,7 @@ fn adaptive_fec_ramp_keeps_maximal_blocks_within_the_peers_ceiling() {
     let mut pk = Packetizer::new(&cfg);
 
     // Mid-session ramp past the negotiated 10%, as `apply_fec_target` does under loss.
-    pk.set_fec_percent(50);
+    pk.set_fec_percent(90);
 
     let frame_len = cfg.shard_payload * cfg.fec.max_data_per_block as usize * 2;
     let src: Vec<u8> = (0..frame_len).map(|i| (i * 131 + 7) as u8).collect();
@@ -613,7 +613,7 @@ fn adaptive_fec_ramp_keeps_maximal_blocks_within_the_peers_ceiling() {
              would be dropped",
             lim.max_total_shards
         );
-        // Unclamped 50% would put 2 parity on a full block; the 10% ceiling leaves 1.
+        // Unclamped 90% would put 4 parity on a full block; the 10% ceiling leaves 2.
         if hdr.data_shards as usize == k {
             assert!(
                 (hdr.recovery_shards as usize) < cfg.fec.recovery_for(k).max(1) + 1,
@@ -690,10 +690,11 @@ fn streamed_roundtrip(scheme: FecScheme, kill: &[usize], reverse: bool) {
         .collect();
     let chunk_refs: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
     let (pkts, src) = streamed_packets(scheme, 50, &chunk_refs);
-    // 150 B / 16 B / 4-shard blocks → sentinels 0,1 (4+2 each) + final (2+1) = 15 packets.
+    // 150 B / 16 B / 4-shard blocks → sentinels 0,1 (4+2 each) + final (2+2, the
+    // `MIN_RECOVERY_SHARDS` floor) = 16 packets.
     assert_eq!(
         pkts.len(),
-        15,
+        16,
         "expected geometry changed — update the kills"
     );
 
@@ -740,9 +741,9 @@ fn streamed_roundtrip_clean_and_reversed() {
 #[test]
 fn streamed_roundtrip_survives_loss_and_reorder() {
     // Wire order: blk0 = 0..4 data + 4..6 rec, blk1 = 6..10 data + 10..12 rec,
-    // final = 12..14 data + 14 rec.
-    streamed_roundtrip(FecScheme::Gf16, &[1, 12], false);
-    streamed_roundtrip(FecScheme::Gf16, &[1, 12], true);
+    // final = 12..14 data + 14..16 rec. Both final data shards die: the floor covers it.
+    streamed_roundtrip(FecScheme::Gf16, &[1, 12, 13], false);
+    streamed_roundtrip(FecScheme::Gf16, &[1, 12, 13], true);
 }
 
 /// Sentinel: `block_count=0`, `frame_bytes=0`, full-K. Real totals + EOF on the final block.
