@@ -26,8 +26,34 @@ final class ProfileStore: ObservableObject {
             // Saving would write them into the tester's real catalog — see HostStore.persist().
             if ScreenshotMode.isActive { return }
             #endif
-            catalog.save()
+            scheduleSave()
         }
+    }
+
+    /// Coalesces the write. A save encodes EVERY profile, and a continuous control in profile
+    /// scope writes per drag tick — dragging one slider re-encoded the whole catalog hundreds of
+    /// times. One run-loop turn is enough to collapse a drag into a single write while still
+    /// landing long before the app can be killed.
+    private var saveTask: Task<Void, Never>?
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            self.saveTask = nil
+            self.catalog.save()
+        }
+    }
+
+    /// Write now, for a caller that cannot wait for the coalesced turn (app teardown).
+    func flush() {
+        saveTask?.cancel()
+        saveTask = nil
+        #if DEBUG
+        if ScreenshotMode.isActive { return }
+        #endif
+        catalog.save()
     }
 
     var profiles: [StreamProfile] { catalog.profiles }
