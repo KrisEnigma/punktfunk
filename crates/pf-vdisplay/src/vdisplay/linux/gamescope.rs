@@ -4015,7 +4015,8 @@ fn resolved_spawn_app(cmd: Option<&str>) -> Option<String> {
 }
 
 /// `None` app is `sleep infinity`. Wrapper relays `LIBEI_SOCKET` and optionally backgrounds splash
-/// — gamescope pushes capture buffers only when it composites.
+/// — gamescope pushes capture buffers only when it composites. WSI env on this process is how
+/// nested Vulkan games get HDR10 swapchains.
 fn spawn(
     w: u32,
     h: u32,
@@ -4062,11 +4063,20 @@ fn spawn(
             cmd.env("PULSE_SOURCE", src);
         }
     }
+    let wsi = WsiPlan::resolve();
+    if matches!(wsi, WsiPlan::DistroDisabled) && hdr {
+        tracing::warn!(
+            "gamescope: HDR session without a matching WSI layer — nested games get SDR swapchains"
+        );
+    }
+    tracing::info!(?wsi, "gamescope WSI plan");
     cmd.args(app.split_whitespace())
         // Prefer the NVIDIA GL vendor for the nested session (harmless on a pure-NVIDIA box).
         .env("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
         // The box's keyboard layout — see [`xkb_env`]. Empty on an unconfigured box.
         .envs(xkb_env())
+        // Nested Vulkan clients load this layer for HDR10 swapchains.
+        .envs(wsi.env())
         // Headless must not attach. Stale WAYLAND_DISPLAY in the manager env aborts gamescope
         // before its PipeWire node appears. Nested apps get gamescope's own DISPLAY.
         .env_remove("DISPLAY")
