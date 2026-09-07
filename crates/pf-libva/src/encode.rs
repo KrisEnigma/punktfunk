@@ -163,8 +163,7 @@ impl Encoder {
             }
         };
         // Low power where it exists and rate-controls, unless
-        // `PUNKTFUNK_VAAPI_LOW_POWER=0` — the libav path's knob, kept so an A/B pins
-        // the same entrypoint on both. VDEnc's bitrate control is HuC firmware; a
+        // `PUNKTFUNK_VAAPI_LOW_POWER=0`. VDEnc's bitrate control is HuC firmware; a
         // box without it (the passthrough VM) offers CQP only there.
         let entrypoints = display.entrypoints(profile)?;
         let allow_lp = std::env::var("PUNKTFUNK_VAAPI_LOW_POWER")
@@ -439,7 +438,7 @@ impl Encoder {
     }
 
     /// Retarget in place: the next picture is rate-controlled to `bps`, with no IDR
-    /// and no rebuild. This is the ABR step libav cannot take on this hardware.
+    /// and no rebuild — the ABR step that would otherwise cost a full rebuild.
     pub fn set_bitrate(&mut self, bps: u32) {
         self.params.bitrate_bps = bps;
     }

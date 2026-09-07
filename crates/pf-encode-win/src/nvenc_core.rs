@@ -1344,8 +1344,8 @@ mod arbiter_tests {
 }
 
 /// Hand-written split constants in `codec.rs` must equal the SDK enum.
-/// Duplicated so the libav path (no `nvenc` feature, no enum) shares one
-/// policy. This is the only crate that can see both.
+/// Duplicated so a build without the `nvenc` feature — which cannot see the
+/// SDK enum — still carries the policy. This crate sees both.
 #[cfg(test)]
 mod split_constant_parity {
     use nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_SPLIT_ENCODE_MODE as M;

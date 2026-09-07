@@ -125,8 +125,8 @@ fn base_codec_mode_support() -> u32 {
             return m;
         }
     }
-    // AMF probes with no extra feature; QSV needs libavcodec or VPL, NVENC the `nvenc`
-    // build. Unprobed → superset, same fail-open as the Linux arms.
+    // AMF probes with no extra feature; QSV needs the `qsv` build and NVENC the
+    // `nvenc` one. Unprobed → superset, same fail-open as the Linux arms.
     #[cfg(target_os = "windows")]
     if crate::encode::windows_backend_is_probed() {
         if let Some(m) = probed_mask(crate::encode::windows_codec_support()) {

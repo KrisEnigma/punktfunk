@@ -1,7 +1,7 @@
 //! Direct-SDK NVENC encoder (Linux, CUDA input).
 //!
 //! Raw `nvEncodeAPI` so this host can do reference-frame invalidation, the recovery-anchor
-//! tag, `reset()`, and HDR/Main10 — none of which libavcodec `hevc_nvenc` can express.
+//! tag, `reset()`, and HDR/Main10. CUDA frames go in zero-copy; CPU frames are uploaded.
 //! Sibling of `encode/windows/nvenc.rs`. Design: `design/linux-direct-nvenc.md`; recovery:
 //! `encoder-recovery-hardening.md`.
 //!
@@ -137,9 +137,7 @@ pub(crate) struct ProbedSupport {
     /// HEVC 4:4:4 encode. `false` when unanswered (fail closed: a 4:2:0 session beats a dead
     /// one).
     pub hevc_444: bool,
-    /// 10-bit encode per listed codec. Must not go through ffmpeg `hevc_nvenc`: mixing that
-    /// client with this direct-SDK session wedges later opens process-wide
-    /// (`NV_ENC_ERR_INVALID_VERSION`). `false` when unanswered (fail closed).
+    /// 10-bit encode per listed codec. `false` when unanswered (fail closed).
     pub ten_bit: crate::CodecSupport,
 }
 
@@ -151,10 +149,9 @@ pub(crate) fn probe_support() -> ProbedSupport {
 
 /// Ask this GPU's driver which codecs it encodes, plus HEVC 4:4:4 / 10-bit.
 ///
-/// Do not open a libav `*_nvenc` to answer: mixing ffmpeg's NVENC client with this direct-SDK
-/// session wedges later opens process-wide (`NV_ENC_ERR_INVALID_VERSION`). Same client, same
-/// shared CUDA context as live sessions. Failures return "nothing probed"; per-field fail
-/// direction is on [`ProbedSupport`].
+/// Same client and shared CUDA context as the live sessions: a second NVENC client in this
+/// process wedges later opens (`NV_ENC_ERR_INVALID_VERSION`). Failures return "nothing
+/// probed"; per-field fail direction is on [`ProbedSupport`].
 fn probe_support_uncached() -> ProbedSupport {
     let unknown = ProbedSupport {
         codecs: crate::CodecSupport {
@@ -620,6 +617,8 @@ pub struct NvencCudaEncoder {
     /// HDR (BT.2020 PQ). Follows packed 10-bit input, same as `bit_depth`.
     hdr: bool,
     hdr_meta: Option<pf_frame::HdrMeta>,
+    /// Device copy of the last CPU frame, reused while the size and layout hold.
+    upload: Option<cuda::DeviceBuffer>,
     ring: Vec<RingSlot>,
     next: usize,
     /// Lifetime submit count (never reset, unlike `next`) — `PUNKTFUNK_PERF` sample cadence.
@@ -759,6 +758,7 @@ impl NvencCudaEncoder {
             yuv444_supported: false,
             hdr: false,
             hdr_meta: None,
+            upload: None,
             ring: Vec::new(),
             next: 0,
             frames: 0,
@@ -1677,16 +1677,62 @@ impl NvencCudaEncoder {
             });
         Ok(())
     }
-}
-
-impl Encoder for NvencCudaEncoder {
-    fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
-        let buf = match &captured.payload {
-            FramePayload::Cuda(b) => b,
-            _ => bail!(
-                "Linux direct-NVENC needs a CUDA frame (FramePayload::Cuda); got a CPU/dmabuf frame"
-            ),
+    /// CPU pixels into a reused pitched device buffer: BGRA-order 32-bit as is, RGBA-order
+    /// swizzled, 24-bit repacked, NV12 as two planes. Synchronous, so the buffer is free
+    /// again on return.
+    fn upload_cpu(
+        &mut self,
+        captured: &CapturedFrame,
+        pixels: &[u8],
+    ) -> Result<cuda::DeviceBuffer> {
+        use pf_frame::PixelFormat as P;
+        use std::borrow::Cow;
+        let (w, h) = (captured.width, captured.height);
+        cuda::make_current().context("cuCtxSetCurrent (CPU upload)")?;
+        let nv12 = captured.format == P::Nv12;
+        let buf = match self.upload.take() {
+            Some(b) if b.width == w && b.height == h && b.uv.is_some() == nv12 => b,
+            _ if nv12 => cuda::DeviceBuffer::alloc_nv12(w, h)?,
+            _ => cuda::DeviceBuffer::alloc(w, h)?,
         };
+        let (w, h) = (w as usize, h as usize);
+        if nv12 {
+            let (uv_ptr, uv_pitch) = buf
+                .uv
+                .context("NV12 device buffer without a chroma plane")?;
+            cuda::write_plane_from_host(buf.ptr, buf.pitch, pixels, w, h)?;
+            cuda::write_plane_from_host(uv_ptr, uv_pitch, &pixels[w * h..], w, h / 2)?;
+            return Ok(buf);
+        }
+        let packed: Cow<[u8]> = match captured.format {
+            P::Bgra | P::Bgrx | P::X2Rgb10 | P::X2Bgr10 | P::Rgb10a2 => Cow::Borrowed(pixels),
+            P::Rgba | P::Rgbx => Cow::Owned(
+                pixels
+                    .chunks_exact(4)
+                    .flat_map(|px| [px[2], px[1], px[0], px[3]])
+                    .collect(),
+            ),
+            P::Bgr => Cow::Owned(
+                pixels
+                    .chunks_exact(3)
+                    .flat_map(|px| [px[0], px[1], px[2], 255])
+                    .collect(),
+            ),
+            P::Rgb => Cow::Owned(
+                pixels
+                    .chunks_exact(3)
+                    .flat_map(|px| [px[2], px[1], px[0], 255])
+                    .collect(),
+            ),
+            other => bail!("Linux direct-NVENC cannot upload a {other:?} CPU frame"),
+        };
+        cuda::write_plane_from_host(buf.ptr, buf.pitch, &packed, w * 4, h)?;
+        Ok(buf)
+    }
+
+    /// One frame from a device buffer: session (re)init on a size or layout change, the copy
+    /// into a ring slot, the cursor, then the encode call.
+    fn submit_device(&mut self, captured: &CapturedFrame, buf: &cuda::DeviceBuffer) -> Result<()> {
         self.maybe_engage_async();
         self.maybe_disengage_async();
         // Size or format change (NV12↔YUV444) re-inits.
@@ -1961,7 +2007,26 @@ impl Encoder for NvencCudaEncoder {
         }
         Ok(())
     }
+}
 
+impl Encoder for NvencCudaEncoder {
+    fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
+        let uploaded = match &captured.payload {
+            FramePayload::Cuda(_) => None,
+            FramePayload::Cpu(pixels) => Some(self.upload_cpu(captured, pixels)?),
+            _ => bail!("Linux direct-NVENC needs a CUDA or CPU frame; got a dmabuf"),
+        };
+        let buf = match (&captured.payload, &uploaded) {
+            (FramePayload::Cuda(b), _) => b,
+            (_, Some(b)) => b,
+            _ => unreachable!("the match above took every other payload"),
+        };
+        let result = self.submit_device(captured, buf);
+        if let Some(b) = uploaded {
+            self.upload = Some(b);
+        }
+        result
+    }
     fn submit_indexed(&mut self, frame: &CapturedFrame, wire_index: u32) -> Result<()> {
         self.frame_idx = wire_index as i64;
         self.submit(frame)

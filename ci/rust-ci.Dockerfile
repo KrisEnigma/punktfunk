@@ -1,11 +1,11 @@
 # CI builder for the Rust workspace — Ubuntu 26.04 to match the dev/host boxes
-# (FFmpeg 8 / libavcodec 62, PipeWire 1.6). Used by .gitea/workflows/ci.yml as the job
-# container; rebuilt+pushed by .gitea/workflows/docker.yml.
+# (PipeWire 1.6). Used by .gitea/workflows/ci.yml as the job container; rebuilt+pushed
+# by .gitea/workflows/docker.yml.
 #
 #   docker build -f ci/rust-ci.Dockerfile -t punktfunk-rust-ci ci
 #
 # The workspace links real system libs at build time (CLAUDE.md "Pinned crate facts"):
-# FFmpeg, PipeWire, Opus, GL/EGL/GBM — and libcuda, which has no real driver here; the
+# PipeWire, Opus, GL/EGL/GBM — and libcuda, which has no real driver here; the
 # zerocopy path only needs the symbols at link time, so a driver userspace package plus a
 # libcuda.so -> libcuda.so.1 symlink stands in for it (CI never executes the CUDA path).
 FROM ubuntu:26.04
@@ -16,11 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # mold: the link-phase accelerator. Linking is the one thing sccache cannot cache, and this
     # image relinks the whole workspace on every job. Wired via cargo-config-mold.toml below.
     mold \
-    # ffmpeg-next 9, built against whatever libav* 26.04 ships (FFmpeg 8 / libavcodec 62 today).
-    # The crate major is a CEILING — ffmpeg-sys-next 9 spans libavcodec 56..63 — so this image does
-    # not need to move in lockstep with Arch's FFmpeg 9; it just links what the distro has.
-    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev \
-    libavdevice-dev \
     # capture / audio / display stacks (+xkbcommon for the wlr input backend)
     libpipewire-0.3-dev libopus-dev libwayland-dev libxkbcommon-dev \
     # zerocopy link deps (GL via libglvnd, EGL, GBM)

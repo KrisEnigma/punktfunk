@@ -46,8 +46,9 @@ pub fn read_plane_to_host(
     Ok(host)
 }
 
-/// Packed host→pitched-device upload. Synchronous. Benchmarks only: uninitialised device memory
-/// comes back zeroed, and CBR then has nothing to code.
+/// Packed host→pitched-device upload. Synchronous: the direct encoder's CPU-frame path, and
+/// the benchmarks, where uninitialised device memory comes back zeroed and CBR has nothing
+/// to code.
 pub fn write_plane_from_host(
     dst_ptr: CUdeviceptr,
     dst_pitch: usize,

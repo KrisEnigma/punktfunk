@@ -11,13 +11,14 @@ This README is the deep reference for what the scripts do and how to operate the
 SteamOS 3 is an **immutable, read-only Arch** base:
 
 - No `pacman -S` for system libs; `/usr` is read-only and reset on A/B updates.
-- A **prebuilt binary is fragile** — it links the system FFmpeg/glibc, and a SteamOS update can bump
-  those sonames out from under it (the same class of breakage as the NVIDIA-driver-after-update issue).
+- A **prebuilt binary is fragile** — it links the system glibc, PipeWire and libva, and a SteamOS
+  update can bump those sonames out from under it (the same class of breakage as the
+  NVIDIA-driver-after-update issue).
 - The host needs **unsandboxed** `/dev/uinput` + `/dev/uhid`, PipeWire, the compositor, and VAAPI — so
   Flatpak (the normal Deck app channel) doesn't fit. Flatpak/Decky are for the *client*.
 
 So the host is built **natively inside a Debian-trixie distrobox** (`pf2`), chosen because its
-FFmpeg/glibc ABI matches SteamOS's — the resulting binary runs **natively on SteamOS** (the container
+glibc ABI matches SteamOS's — the resulting binary runs **natively on SteamOS** (the container
 is only the build environment; `punktfunk-host` is launched directly, not via `distrobox enter`). A
 rebuild always matches the running OS. Encode is **VAAPI** on the Deck's AMD GPU (NVENC on NVIDIA),
 auto-selected by `PUNKTFUNK_ENCODER=auto`.
@@ -27,7 +28,7 @@ toolchain) and adds moving parts (apt mirrors, rustup, bun) — the price of an 
 always chase the OS. Both failure modes of that chase are automated away now:
 `punktfunk-rebuild-check` rebuilds when an OS update breaks the binary's links, and the
 atomic-update keep list preserves the `/etc` tuning. The eventual lighter-weight alternative is a
-CI-prebuilt bundle with the volatile libraries (FFmpeg et al.) vendored under an `$ORIGIN` rpath —
+CI-prebuilt bundle with the volatile libraries vendored under an `$ORIGIN` rpath —
 OS-update-proof without a toolchain on the device — worth it once SteamOS host volume justifies
 per-release artifact signing/hosting; the from-source path would stay as the dev/fallback route.
 

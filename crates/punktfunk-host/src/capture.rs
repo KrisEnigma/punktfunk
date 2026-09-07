@@ -58,7 +58,7 @@ fn zero_copy_policy(
         pyrowave_modifiers,
         native_nv12_session,
         // Only the direct-SDK NVENC backend takes a packed 10-bit PQ CUDA payload.
-        // Without it HDR capture stays on the CPU path (libav swscales into P010).
+        // Without it HDR capture stays on the CPU path.
         hdr_cuda_ok: pf_encode::linux_hdr_cuda_ok(),
     }
 }

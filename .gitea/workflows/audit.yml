@@ -223,7 +223,7 @@ jobs:
   #
   # WHAT IT DOES NOT BUY — do not let anyone report this as unsafe coverage, and do not publish a
   #   "Miri coverage" percentage; it would be noise. Miri can execute on the order of 2% of the
-  #   host's unsafe. It cannot run ash, windows-rs, ffmpeg, CUDA or the WDK, and in those crates
+  #   host's unsafe. It cannot run ash, windows-rs, libva, CUDA or the WDK, and in those crates
   #   the unsafe *is* the foreign call, so there is nothing for an interpreter to execute. This
   #   job is a targeted instrument for three leaf surfaces, not a safety net.
   #

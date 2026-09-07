@@ -412,15 +412,15 @@ pub struct ZeroCopyPolicy {
     /// Per-session, unlike `backend_is_vaapi`.
     pub pyrowave_session: bool,
     /// Encoder can ingest producer-native NV12 (Linux raw Vulkan Video on
-    /// H265/AV1 — `pf_encode::linux_native_nv12_ok`). libav VAAPI (H264)
-    /// misreads the two-plane buffer; H264/GameStream/PyroWave must never see NV12.
+    /// H265/AV1 — `pf_encode::linux_native_nv12_ok`). Every other arm takes
+    /// packed RGB; H264/GameStream/PyroWave must never see NV12.
     pub native_nv12_session: bool,
     /// PyroWave Vulkan-importable dmabuf modifiers for packed-RGB. Advertised
     /// so Mutter+NVIDIA (tiled-only alloc) still negotiates zero-copy. Empty otherwise.
     pub pyrowave_modifiers: Vec<u64>,
     /// Encoder can ingest packed 10-bit PQ CUDA (`pf_encode::linux_hdr_cuda_ok`,
-    /// direct-SDK NVENC only). libav's HDR route swscales into P010, so packed
-    /// 2:10:10:10 CUDA lands as garbage unless this holds.
+    /// direct-SDK NVENC only). No other arm reads those 2:10:10:10 words as
+    /// anything but garbage, so do not produce them unless this holds.
     pub hdr_cuda_ok: bool,
 }
 

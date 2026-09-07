@@ -27,7 +27,7 @@ use super::nvenc_core::{
     resolve_slices, resolve_split_subframe, resolve_subframe, store_ceiling, subframe_env_forced,
     CeilingKey, LowLatencyConfig, NvStatusExt, RangePlan,
 };
-// Shared with the libav path (builds without the `nvenc` feature). Do not fork this copy.
+// Shared with Linux's direct session. Do not fork this copy.
 use super::nvenc_core::{
     cached_split_verdict, store_split_verdict, ArbAction, SplitArbiter, SplitKey,
 };
@@ -1693,7 +1693,7 @@ impl Encoder for NvencD3d11Encoder {
             supports_rfi: self.rfi_supported,
             // What the session actually configured (cleared in `query_caps` if the GPU lacks YUV444).
             chroma_444: self.chroma_444,
-            // Direct-NVENC recovers via real RFI (or a forced IDR), not libavcodec intra-refresh.
+            // Direct-NVENC recovers via real RFI (or a forced IDR), never an intra-refresh wave.
             intra_refresh: false,
             intra_refresh_recovery: false,
             intra_refresh_period: 0,

@@ -10,7 +10,7 @@ Gitea Release) — separate repos, so a stable box never jumps to a canary build
 [Release Channels](https://punktfunk.unom.io/docs/channels)). The `baseurl` below subscribes to the
 `bazzite` stable group; use `bazzite-canary` for the latest main builds. The RPM is built in the
 Fedora 43 image (`ci/fedora-rpm.Dockerfile`) so its auto-generated library Requires
-(`libavcodec.so.NN`, …) match Bazzite's sonames; the NVIDIA driver lib (`libcuda.so.1`) is
+match Bazzite's sonames; the NVIDIA driver lib (`libcuda.so.1`) is
 excluded — NVENC/EGL come from whatever NVIDIA stack the host runs (a weak Recommends).
 
 This is the same package as the [COPR](../copr/README.md) / [bootc](../bootc/Containerfile)

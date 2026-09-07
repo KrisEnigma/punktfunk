@@ -179,7 +179,7 @@ pub(super) struct NegotiationPlan {
 ///    takes the Vulkan-bridge arm. The per-frame gate in `.process` enforces the tiled half.
 /// 2. 4:4:4 never prefers producer NV12 (must not subsample).
 /// 3. Producer-native NV12 only on a `native_nv12_session` under active raw passthrough
-///    (libav VAAPI misreads two-plane; the CUDA importer expects packed RGB).
+///    (the VAAPI session takes RGB; the CUDA importer expects packed RGB).
 /// 4. Raw passthrough is off once its latch has fired.
 pub(super) fn negotiation_plan(i: NegotiationInputs) -> NegotiationPlan {
     // Consumer imports raw dmabufs: VAAPI (libva + GPU CSC) or PyroWave (its Vulkan device).
@@ -187,7 +187,7 @@ pub(super) fn negotiation_plan(i: NegotiationInputs) -> NegotiationPlan {
     // Skip under raw passthrough (payloads only NVENC consumes) and both GPU latches
     // (worker-death crash-loop; compositor that rejects our modifiers would re-pay 10 s).
     // HDR is allowed: pods are LINEAR-only, so it never hits the 8-bit de-tile blit. Exclude
-    // HDR when the encoder cannot take packed 10-bit CUDA (`PUNKTFUNK_NVENC_DIRECT=0` is garbage).
+    // HDR when the encoder cannot take packed 10-bit CUDA (a build without `nvenc`).
     let build_importer = i.zerocopy
         && !raw_passthrough
         && !i.gpu_import_disabled
@@ -1444,9 +1444,8 @@ pub fn pipewire_thread(
             if std::env::var_os("PUNKTFUNK_ZEROCOPY").is_some() {
                 "PUNKTFUNK_ZEROCOPY is set falsy"
             } else if want_hdr && !policy.hdr_cuda_ok {
-                // `build_importer` drops HDR when the encoder cannot take packed 10-bit CUDA
-                // (libav swscales into P010). Naming the output format would send the reader
-                // to the wrong knob.
+                // `build_importer` drops HDR when the encoder cannot take packed 10-bit
+                // CUDA. Naming the output format would send the reader to the wrong knob.
                 "this HDR session's encoder cannot ingest a 10-bit CUDA payload, so the capture \
                  stays on CPU frames"
             } else {
@@ -2066,7 +2065,7 @@ mod tests {
             })
             .build_importer
         );
-        // Never when the encoder cannot take packed 10-bit CUDA (libav HDR swscales to P010).
+        // Never when the encoder cannot take packed 10-bit CUDA.
         // SDR is unaffected — the term is HDR-only.
         assert!(
             !negotiation_plan(NegotiationInputs {
@@ -2102,7 +2101,7 @@ mod tests {
         );
 
         // Producer-native NV12 needs a `native_nv12_session` and an active raw passthrough:
-        // libav VAAPI misreads two-plane; the CUDA importer expects packed RGB.
+        // the VAAPI session takes RGB, and so does the CUDA importer.
         assert!(negotiation_plan(vaapi_native_nv12()).prefer_native_nv12);
         assert!(
             !negotiation_plan(NegotiationInputs {

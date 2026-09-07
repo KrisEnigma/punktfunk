@@ -139,10 +139,10 @@ impl SessionPlan {
     /// `gpu` from the already-resolved `encoder` (no second probe); `hdr` from the plan.
     pub fn output_format(&self) -> crate::capture::OutputFormat {
         let gpu = self.encoder.is_gpu();
-        // Linux NVENC 4:4:4: libavcodec `hevc_nvenc` only emits 4:4:4 from a YUV444
-        // *input*; RGB-in is always 4:2:0. Zero-copy produces that input on the GPU
-        // (`ImportKind::Tiled444`). Without it the encoder swscales CPU RGB → YUV444P,
-        // so force GPU capture off here only. (VAAPI 4:4:4 keeps dmabuf; Windows NVENC takes BGRA.)
+        // Linux NVENC 4:4:4: zero-copy hands the encoder a GPU YUV444 surface
+        // (`ImportKind::Tiled444`). Without it the encoder takes CPU RGB and CSCs
+        // itself, so force GPU capture off here only. (VAAPI 4:4:4 keeps dmabuf;
+        // Windows NVENC takes BGRA.)
         #[cfg(target_os = "linux")]
         let gpu = {
             let force_cpu_for_nvenc_444 = self.chroma.is_444()
@@ -212,7 +212,7 @@ pub(crate) fn resolve_topology() -> SessionTopology {
 ///   gamescope (no pointer in the capture; XFixes must be drawn), and for a
 ///   no-channel session when the backend can composite. Mutter virtual streams
 ///   never re-record on cursor-only motion, so compositor-embeds is not a
-///   fallback except on backends that cannot blend (libav VAAPI/NVENC, software).
+///   fallback except on backends that cannot blend (VAAPI, software).
 /// * **Everywhere else**: never. Windows IDD composites the pointer itself
 ///   (`cursor_blend.rs` / DWM); no Windows encode backend reads `frame.cursor`.
 ///   Gated on Linux because the VAAPI/CUDA prediction and zero-copy switch
@@ -240,7 +240,7 @@ pub(crate) fn cursor_blend_for(
             return true;
         }
         // Same CUDA-payload prediction as `handshake::cursor_forward`: NVIDIA plus
-        // the zero-copy switch, deciding direct-SDK NVENC (blends) vs libav (doesn't).
+        // the zero-copy switch. Only a CUDA payload reaches the blend.
         let cuda_planned = !crate::encode::linux_zero_copy_is_vaapi() && crate::zerocopy::enabled();
         crate::encode::cursor_blend_capable(codec, cuda_planned, bit_depth == 10)
     }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # punktfunk — SteamOS post-OS-update self-heal (runs before punktfunk-host at session start).
 #
-# The host binary links SteamOS system libraries (FFmpeg, PipeWire, libva, …). A SteamOS A/B
+# The host binary links SteamOS system libraries (PipeWire, libva, …). A SteamOS A/B
 # update that bumps a soname leaves the binary unable to load — a silently dead host until
 # someone remembers to re-run update.sh. This probe is the reliability backstop:
 #   * healthy binary  → exit in milliseconds (every normal boot);

@@ -18,8 +18,8 @@ use pf_frame::CapturedFrame;
 /// staging surface follow this, not `negotiated_depth`.
 ///
 /// A client can advertise 10-bit and still deliver 8-bit NV12. Opening a
-/// P010 encoder against that capture fails at `open` (native AMF/QSV) or
-/// on every `submit` (libavcodec). Negotiated depth is an upper bound; a
+/// P010 encoder against that capture fails at `open` (native AMF/QSV).
+/// Negotiated depth is an upper bound; a
 /// session that still labels itself HDR is a negotiation mismatch.
 #[cfg(target_os = "windows")]
 pub fn ten_bit_input(format: pf_frame::PixelFormat, negotiated_depth: u8) -> bool {
@@ -141,55 +141,6 @@ impl Codec {
     pub fn supports_10bit(self) -> bool {
         matches!(self, Codec::H265 | Codec::Av1 | Codec::PyroWave)
     }
-
-    /// FFmpeg NVENC encoder name. Selected by name: a codec id would pick the
-    /// software encoder.
-    pub fn nvenc_name(self) -> &'static str {
-        match self {
-            Codec::H264 => "h264_nvenc",
-            Codec::H265 => "hevc_nvenc",
-            Codec::Av1 => "av1_nvenc",
-            // `open_video` never routes PyroWave to a libavcodec backend.
-            Codec::PyroWave => unreachable!("PyroWave has no FFmpeg encoder"),
-        }
-    }
-
-    /// FFmpeg VAAPI encoder name. One libavcodec encoder per codec covers AMD
-    /// and Intel. Selected by name (codec id would pick SW). AV1 VAAPI is
-    /// narrow — probe, never assume (see `pf_encode::open_video`).
-    pub fn vaapi_name(self) -> &'static str {
-        match self {
-            Codec::H264 => "h264_vaapi",
-            Codec::H265 => "hevc_vaapi",
-            Codec::Av1 => "av1_vaapi",
-            // `open_video` never routes PyroWave to a libavcodec backend.
-            Codec::PyroWave => unreachable!("PyroWave has no FFmpeg encoder"),
-        }
-    }
-
-    /// FFmpeg AMD AMF encoder name (Windows). Selected by name. AV1 (`av1_amf`)
-    /// is RDNA3+ — probe, never assume.
-    pub fn amf_name(self) -> &'static str {
-        match self {
-            Codec::H264 => "h264_amf",
-            Codec::H265 => "hevc_amf",
-            Codec::Av1 => "av1_amf",
-            // `open_video` never routes PyroWave to a libavcodec backend.
-            Codec::PyroWave => unreachable!("PyroWave has no FFmpeg encoder"),
-        }
-    }
-
-    /// FFmpeg Intel QSV encoder name (Windows). Selected by name. AV1
-    /// (`av1_qsv`) is Arc/Xe2+ and HEVC Main10 is Gen9.5+ — probe, never assume.
-    pub fn qsv_name(self) -> &'static str {
-        match self {
-            Codec::H264 => "h264_qsv",
-            Codec::H265 => "hevc_qsv",
-            Codec::Av1 => "av1_qsv",
-            // `open_video` never routes PyroWave to a libavcodec backend.
-            Codec::PyroWave => unreachable!("PyroWave has no FFmpeg encoder"),
-        }
-    }
 }
 
 /// Static capabilities an [`Encoder`] declares so session glue routes
@@ -198,8 +149,8 @@ impl Codec {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EncoderCaps {
     /// [`invalidate_ref_frames`](Encoder::invalidate_ref_frames) can return `true`.
-    /// When `false` the caller skips the call and keyframes on loss. Windows
-    /// direct-NVENC and native AMF implement it; libavcodec paths cannot.
+    /// When `false` the caller skips the call and keyframes on loss. Direct
+    /// NVENC, native AMF and the native VAAPI session implement it.
     pub supports_rfi: bool,
     /// Opened encoder is producing `chroma_format_idc = 3`. Post-open
     /// cross-check against `Welcome::chroma_format` from the pre-open probe.
@@ -253,7 +204,7 @@ pub trait Encoder: Send {
         self.submit(frame)
     }
     /// Static [capabilities](EncoderCaps). Session glue routes by query, not
-    /// no-op/`false` defaults. Default: none (software / libavcodec).
+    /// no-op/`false` defaults. Default: none (software).
     fn caps(&self) -> EncoderCaps {
         EncoderCaps::default()
     }
@@ -269,7 +220,7 @@ pub trait Encoder: Send {
     /// so the encoder re-references an older still-valid frame instead of an
     /// IDR. `true` = real invalidation; `false` = range older than DPB/LTR or
     /// no RFI — caller should [`request_keyframe`](Self::request_keyframe).
-    /// Default `false`. libavcodec cannot implement this.
+    /// Default `false`: software keeps no reference model to invalidate.
     fn invalidate_ref_frames(&mut self, _first_frame: i64, _last_frame: i64) -> bool {
         false
     }
@@ -339,7 +290,7 @@ pub trait Encoder: Send {
     /// live encoder accepted it: reference chain, in-flight frames, and the
     /// caller's wire-index prediction survive. `false` = backend cannot or the
     /// driver rejected the rate; caller falls back to a full rebuild.
-    /// Default: no in-place retarget (libavcodec/software).
+    /// Default: no in-place retarget (software).
     fn reconfigure_bitrate(&mut self, _bps: u64) -> bool {
         false
     }
@@ -417,8 +368,8 @@ impl Codec {
 }
 
 /// Pixel rate (luma samples/s) at or above which NVENC split-frame encoding
-/// is forced 2-way. Shared by the direct-SDK selector ([`resolve_split_mode`])
-/// and the libav `split_encode_mode` option so the two paths cannot disagree.
+/// is forced 2-way. Both hosts select through [`resolve_split_mode`], so
+/// Windows and Linux cannot disagree.
 /// A single NVENC engine tops out ~1 Gpix/s on HEVC, and AUTO does not
 /// engage below ~2112 px height, so sessions that need the second engine
 /// must be forced. 4K120 is 3840×2160×120 = 995,328,000; 950 M keeps
@@ -427,15 +378,11 @@ pub const SPLIT_FORCE_PIXEL_RATE: u64 = 950_000_000;
 
 /// `NV_ENC_SPLIT_ENCODE_MODE` values as plain constants.
 ///
-/// They live here, not in `nvenc_core`, because the split policy must be
-/// shared with the libav NVENC path, which compiles with the `nvenc`
-/// feature off (`PUNKTFUNK_NVENC_DIRECT=0`). Gating them behind the feature
-/// would let the libav copy diverge. `nvenc_split_constants_match_the_sdk`
-/// pins these against the SDK enum.
-// Split-policy cfg: union of callers. Linux always (libav NVENC in
-// `enc/linux/mod.rs` calls `resolve_split_mode` with `nvenc` off). Windows
-// only with `feature = "nvenc"`. Ungated this is `dead_code` on a
-// featureless Windows build — an item lint, not a module one.
+/// They live here, not in `nvenc_core`, so the policy and the SDK enum have one
+/// home for both hosts. `nvenc_split_constants_match_the_sdk` pins them.
+// Split-policy cfg: union of callers. Linux always, Windows only with
+// `feature = "nvenc"`. Ungated this is `dead_code` on a featureless Windows
+// build — an item lint, not a module one.
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
 pub const SPLIT_AUTO: u32 = 0;
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
@@ -512,25 +459,6 @@ pub fn max_forced_split_mode(engines: u32) -> u32 {
         3 => SPLIT_THREE_FORCED,
         // More engines than the enum can name: let the driver use them all.
         _ => SPLIT_AUTO_FORCED,
-    }
-}
-
-/// N of an N-way forced split, or `None` for modes that do not name a width
-/// (`DISABLE`, `AUTO`, `AUTO_FORCED` — the last forces a split but lets the
-/// driver choose how wide).
-///
-/// For callers that can only say "split this many ways": the libav path,
-/// whose `split_encode_mode` AVOption is libavcodec's enum, not NVENC's
-/// (`DISABLE` is `15`, meaningless there).
-// Linux-only: sole caller is the libav NVENC path (`enc/linux/mod.rs`).
-// `codec.rs` compiles everywhere; without this cfg it is `dead_code` on
-// Windows (item lint, not a module one).
-#[cfg(target_os = "linux")]
-pub fn forced_split_width(mode: u32) -> Option<u32> {
-    match mode {
-        m if m == SPLIT_TWO_FORCED => Some(2),
-        m if m == SPLIT_THREE_FORCED => Some(3),
-        _ => None,
     }
 }
 

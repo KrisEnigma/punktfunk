@@ -37,7 +37,6 @@
   addDriverRunpath,
   wrapGAppsHook4,
   # host + client shared libs
-  ffmpeg,
   pipewire,
   libopus,
   wayland,
@@ -104,7 +103,7 @@ let
       cmake # pyrowave-sys (C++/Vulkan), the vendored libopus (opus crate), aws-lc-sys (rustls)
       nasm # libopus SIMD + OpenH264 (openh264 `source` feature)
       perl # aws-lc-sys asm generation (rustls' aws-lc-rs crypto provider)
-      rustPlatform.bindgenHook # LIBCLANG_PATH + clang args for ffmpeg-sys-next (host) / pyrowave-sys bindgen
+      rustPlatform.bindgenHook # LIBCLANG_PATH + clang args for pyrowave-sys bindgen
       addDriverRunpath # provides the `addDriverRunpath` shell fn used in postFixup
     ];
   };
@@ -163,7 +162,6 @@ in
       PUNKTFUNK_BUILD_VERSION = buildVersion;
 
       buildInputs = [
-        ffmpeg # libavcodec/avformat/avutil (NVENC + VAAPI encode), via ffmpeg-next → ffmpeg-sys-next pkg-config
         pipewire # libpipewire-0.3 + libspa-0.2 (portal capture + the `pipewire` crate)
         libopus # audiopus_sys links system opus via pkg-config (else it vendors a static libopus that mis-links)
         wayland # libwayland-client (wlr / KWin fake_input backends)
@@ -250,9 +248,8 @@ in
 
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ wrapGAppsHook4 ];
 
-      # No ffmpeg: the client decodes natively since M10 (pf-vkdecode / pf-vaapi — libva is
-      # dlopen'd, never linked — / openh264 + rav1d, both built from vendored source). The HOST
-      # derivation above still has it.
+      # The client decodes natively (pf-vkdecode / pf-vaapi — libva is dlopen'd, never linked —
+      # / openh264 + rav1d, both built from vendored source).
       buildInputs = [
         pipewire # PipeWire audio playback + mic capture
         libopus # audiopus_sys → system opus via pkg-config (Opus decode)

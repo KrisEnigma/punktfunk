@@ -71,7 +71,6 @@ fn box_of(id: &str, pretty: &str, version: &str, family: Family, docs: &str) -> 
         in_punktfunk_group: false,
         has_input_group: true,
         nvidia: Nvidia::Absent,
-        has_rpmfusion_ffmpeg: false,
         firewall: Firewall::None,
         systemd_pid1: true,
         user_manager: true,
@@ -125,7 +124,6 @@ pub fn preset(name: &str) -> Option<Facts> {
             f.sunshine_active = true;
             f.firewall = Firewall::Firewalld;
             f.nvidia = Nvidia::Ok;
-            f.has_rpmfusion_ffmpeg = true;
             f
         }
         "bazzite-couch" => {

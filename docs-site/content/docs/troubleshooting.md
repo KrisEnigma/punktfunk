@@ -173,20 +173,6 @@ After a kernel update the module may need a rebuild — reinstall the driver pac
 KMS; if it doesn't, `echo 'options nvidia-drm modeset=1' | sudo tee /etc/modprobe.d/nvidia-drm.conf`,
 regenerate the initramfs, reboot).
 
-## No video on Fedora: NVENC fails (ffmpeg-libs is missing)
-
-Fedora's own `ffmpeg-free` is built **without NVENC**, and RPM Fusion's `ffmpeg-libs` is only a
-*recommended* dependency of the `punktfunk` RPM (`Recommends: ffmpeg-libs`) — so the package installs
-happily without it, and NVENC then fails at runtime with no video. Enable RPM Fusion and swap the
-FFmpeg (the [Fedora guide](/docs/fedora#1-gpu-driver), step 1), then check the encoders are there:
-
-```sh
-sudo dnf install --allowerasing ffmpeg ffmpeg-libs
-ffmpeg -hide_banner -encoders | grep nvenc   # expect hevc_nvenc / av1_nvenc / h264_nvenc
-```
-
-The same applies on a layered Bazzite / Fedora Atomic install; the sysext image carries its own.
-
 ## `systemctl --user status punktfunk-web`: unit not found
 
 The web console is its own package, and the `punktfunk` RPM only *recommends* it
@@ -212,28 +198,6 @@ a second time leaves two `[punktfunk]` sections, and every later pacman run open
 It's harmless (pacman ignores the duplicate), but to silence it delete the extra block from
 `/etc/pacman.conf`. (The [current add line](/docs/arch#2-install-the-host) checks first and won't
 append a second copy.)
-
-## pacman: unable to satisfy dependency 'libavcodec.so=…'
-
-```
-:: unable to satisfy dependency 'libavcodec.so=62-64' required by punktfunk-host
-```
-
-`punktfunk-host` links FFmpeg and depends on the exact libav sonames it was built against — FFmpeg 8
-provides `libavcodec.so=62`, FFmpeg 9 `libavcodec.so=63`. The package on offer was built against a
-*different* FFmpeg major than your box has, and because pacman prepares the whole transaction at
-once, it stops your entire `pacman -Syu`. The bound is deliberate: without it the upgrade succeeds
-and leaves a host that cannot start at all (exit 127 before `main()`, in a restart loop, with
-nothing in its log — `ldd /usr/bin/punktfunk-host | grep 'not found'` is the one-line diagnosis).
-
-1. `sudo pacman -Syyu` — a forced refresh, in case the matching build is already published.
-   Compare `pacman -Si punktfunk-host` against `pacman -Q ffmpeg`.
-2. Still refused? We published a build against the wrong FFmpeg — please report it. The repair is a
-   higher **pkgrel** of the same version (`0.25.0-2`), so a later `-Syu` picks it up with nothing to undo.
-3. Meanwhile, to let the rest of the system upgrade: `sudo pacman -Syu --ignore punktfunk-host`. If
-   pacman still refuses (your *installed* copy carries the bound), `sudo pacman -Rdd punktfunk-host`,
-   upgrade, and install it again once the rebuild lands. The host stays down until then — that is
-   the soname break itself, not a second fault.
 
 ## The desktop won't start, or "GPU … not supported by EGL"
 
