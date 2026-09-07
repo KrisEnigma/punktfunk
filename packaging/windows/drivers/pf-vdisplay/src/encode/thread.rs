@@ -324,6 +324,9 @@ pub fn open_backend(
             spec.codec, format, w, h, fps, bps, depth, chroma, 1, luid,
         )
         .and_then(|mut e| {
+            // The drive loop parks on handles, so the session opens async and hands its
+            // completion events out through `ready_event` — no retrieve thread, no sampling.
+            e.use_completion_events(true);
             // NVENC alone defers its session to the first frame, and the host reads the caps in
             // our reply once per session: open it here or it caches the defaults.
             e.prepare_d3d11(device, format, w, h)?;
