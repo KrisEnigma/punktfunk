@@ -1966,6 +1966,15 @@ impl Encoder for NvencD3d11Encoder {
                     "NVENC chunked poll: picture type diverged from the submit-time prediction"
                 );
             }
+            // Chunked path is how a sub-frame session finishes — feed the arbiter here too or
+            // the HEVC sub-frame incumbent is invisible and the experiment never concludes.
+            let encode_us = self
+                .last_submit_at
+                .take()
+                .map(|t| t.elapsed().as_micros() as u64);
+            if let Some(us) = encode_us {
+                self.feed_split_arbiter(us);
+            }
             Ok(Some(AuChunk {
                 data,
                 pts_ns,
@@ -2271,12 +2280,21 @@ mod tests {
             DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM,
         };
 
+        // SAFETY: DXGI factory creation borrows nothing and has no preconditions.
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI factory");
         let adapter = (0..)
-            .map_while(|i| unsafe { factory.EnumAdapters1(i) }.ok())
-            .find(|a| unsafe { a.GetDesc1() }.is_ok_and(|d| d.VendorId == 0x10de))
+            .map_while(|i| {
+                // SAFETY: `factory` outlives this closure and the call takes no lasting alias.
+                unsafe { factory.EnumAdapters1(i) }.ok()
+            })
+            .find(|a| {
+                // SAFETY: `a` is a live adapter the enumeration above just returned.
+                unsafe { a.GetDesc1() }.is_ok_and(|d| d.VendorId == 0x10de)
+            })
             .expect("NVIDIA adapter");
-        let (device, _) = pf_frame::dxgi::make_device(&adapter).expect("make_device");
+        // SAFETY: `adapter` is a live enumeration result held by this scope for the whole call,
+        // and `make_device` takes no lasting alias to it.
+        let (device, _) = unsafe { pf_frame::dxgi::make_device(&adapter) }.expect("make_device");
         const W: u32 = 1280;
         const H: u32 = 720;
         const BPS: u64 = 20_000_000;
@@ -2313,12 +2331,15 @@ mod tests {
                 assert!(enc.pending.is_empty());
                 assert!(enc.regs.is_empty());
                 assert!(enc.poll().expect("poll before submit").is_none());
+                // SAFETY: `enc.encoder` is the open session this test built above, and a cap
+                // query neither retains the handle nor mutates session state.
                 let rfi = unsafe {
                     enc.get_cap(
                         enc.encoder,
                         nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
                     )
                 } != 0;
+                // SAFETY: as above — same live session, same read-only query.
                 let yuv444 = unsafe {
                     enc.get_cap(
                         enc.encoder,
@@ -2357,6 +2378,8 @@ mod tests {
                     ..Default::default()
                 };
                 let mut texture = None;
+                // SAFETY: `device` is live for this scope and `desc` is a fully initialised
+                // D3D11_TEXTURE2D_DESC; the out-parameter is a local the call writes once.
                 unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
                     .expect("input texture");
                 let mut frame = CapturedFrame {
