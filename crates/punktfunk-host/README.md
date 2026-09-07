@@ -69,7 +69,7 @@ the per-platform guides at **[docs.punktfunk.unom.io/docs/install](https://docs.
 ```
 src/
   main.rs            CLI + subcommand dispatch
-  config.rs · session_plan.rs · session_tuning.rs · pipeline.rs   session setup + the frame pipeline
+  config.rs · session_plan.rs · session_tuning.rs   session setup + the frame pipeline
   vdisplay/          per-compositor virtual outputs (kwin · gamescope · mutter · wlroots)
   capture/ · capture.rs    screen/dmabuf capture (+ Windows IDD-push)
   encode/ · encode.rs      per-GPU encoders (nvenc · vaapi · amf · qsv · sw)

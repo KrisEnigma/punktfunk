@@ -3740,7 +3740,6 @@ dependencies = [
 name = "punktfunk-client-windows"
 version = "0.34.0"
 dependencies = [
- "async-channel",
  "pf-client-core",
  "punktfunk-core",
  "serde_json",
@@ -3773,7 +3772,6 @@ dependencies = [
  "rcgen",
  "reed-solomon-simd",
  "rustls",
- "rustls-pki-types",
  "sha2 0.11.0",
  "socket2",
  "spake2",
@@ -3883,7 +3881,6 @@ dependencies = [
 name = "punktfunk-setup"
 version = "0.34.0"
 dependencies = [
- "anyhow",
  "console",
  "getrandom 0.3.4",
  "portable-pty",
