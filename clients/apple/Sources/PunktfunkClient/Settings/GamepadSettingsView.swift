@@ -783,13 +783,41 @@ struct GamepadSettingsView: View {
 
     /// Every row on the screen, tagged with its section. Built as one list (not per tab) so the
     /// platform-conditional insertions below can still place a row RELATIVE to another by id.
+    /// The profile the start-screen host streams with, if it is bound to one. These rows edit the
+    /// GLOBAL defaults — profiles are made and edited in the standard interface (design §5.4) — so
+    /// a bound host would otherwise show one value here and stream with another, with nothing on
+    /// screen saying which one wins.
+    /// The session will stream PyroWave: the codec is selected AND this device can decode it.
+    private var pyroWaveSelected: Bool {
+        codec == "pyrowave" && MetalWaveletDecoder.supported
+    }
+
+    private var landingProfile: (host: String, profile: StreamProfile)? {
+        let stored = UserDefaults.standard.string(forKey: DefaultsKey.defaultHost) ?? ""
+        guard let host = store.hosts.first(where: {
+            $0.id.uuidString.lowercased() == stored.lowercased()
+        }), let profile = profiles.profile(id: host.profileID) else { return nil }
+        return (host.displayName, profile)
+    }
+
     private var allRows: [Row] {
         let resolution = resolutionOptions
         let refresh = SettingsOptions.refreshRates(including: hz)
             .map { (label: "\($0) Hz", tag: $0) }
         let bitrate = SettingsOptions.bitrateOptions(current: bitrateKbps)
         let controllers = SettingsOptions.controllerOptions(gamepads)
-        var list: [Row] = [
+        var list: [Row] = []
+        if let bound = landingProfile {
+            list.append(Row(
+                id: "profileNotice", tab: .stream, icon: "person.crop.circle.badge.checkmark",
+                label: "\(bound.host) uses “\(bound.profile.name)”",
+                value: "",
+                detail: "These are the defaults. Where that profile sets a value, it wins for "
+                    + "that host — edit it in the standard settings.",
+                adjustable: false,
+                adjust: { _ in false }, activate: {}))
+        }
+        list += [
             choiceRow(
                 id: "resolution", tab: .stream, icon: "aspectratio",
                 label: "Resolution",
@@ -808,8 +836,12 @@ struct GamepadSettingsView: View {
             ) { hz = $0 },
             choiceRow(
                 id: "bitrate", tab: .stream, icon: "speedometer", label: "Bitrate",
-                detail: "Automatic uses the host's default, 20 Mbps.",
-                options: bitrate, current: bitrateKbps
+                // PyroWave pins the rate per mode, so the host ignores whatever is set here —
+                // the same reason both other shells replace this row under that codec.
+                detail: pyroWaveSelected
+                    ? "PyroWave sets its own rate per mode; this is ignored."
+                    : "Automatic uses the host's default, 20 Mbps.",
+                options: bitrate, current: bitrateKbps, enabled: !pyroWaveSelected
             ) { bitrateKbps = $0 },
             choiceRow(
                 id: "compositor", tab: .stream, icon: "macwindow", label: "Compositor",
@@ -864,7 +896,7 @@ struct GamepadSettingsView: View {
             toggleRow(
                 id: "echoCancel", tab: .audio, icon: "waveform", label: "Echo cancellation",
                 detail: "Filters the stream's own audio out of the mic pickup.",
-                value: $echoCancel),
+                value: $echoCancel, enabled: micEnabled),
 
             toggleRow(
                 id: "padForward", tab: .controller, icon: "gamecontroller",
@@ -923,7 +955,8 @@ struct GamepadSettingsView: View {
                 id: "hudPlacement", tab: .interface, icon: "rectangle.inset.topright.filled",
                 label: "Overlay position",
                 detail: "Which corner the statistics overlay sits in.",
-                options: SettingsOptions.hudPlacements, current: hudPlacement
+                options: SettingsOptions.hudPlacements, current: hudPlacement,
+                enabled: statsVerbosityRaw != StatsVerbosity.off.rawValue
             ) { hudPlacement = $0 },
             // The two console-parity library rows (the desktop's `library_view` and
             // `library_collections`). Always live: pairing is the only thing that decides
