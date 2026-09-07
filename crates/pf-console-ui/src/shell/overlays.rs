@@ -218,7 +218,13 @@ impl Shell {
         hints: &[Hint],
     ) {
         let cx = w / 2.0;
-        canvas.save_layer_alpha_f(None, appear as f32);
+        // Only while it is arriving: an unbounded layer is a full-screen offscreen per frame,
+        // and `appear` is at 1.0 within half a second of a hold that runs for many.
+        if appear < 0.999 {
+            canvas.save_layer_alpha_f(None, appear as f32);
+        } else {
+            canvas.save();
+        }
         self.draw_takeover_field(canvas, w, h, t);
 
         let title_y = h / 2.0 + if spinner { 14.0 * k } else { 0.0 };
@@ -314,7 +320,11 @@ impl Shell {
     ) {
         // Fades in rather than replacing the shelf outright: the cover has to be seen
         // LEAVING its tile, which means the tile has to still be there when it does.
-        canvas.save_layer_alpha_f(None, l.appear as f32);
+        if l.appear < 0.999 {
+            canvas.save_layer_alpha_f(None, l.appear as f32);
+        } else {
+            canvas.save();
+        }
         self.draw_takeover_field(canvas, w, h, t);
         canvas.restore();
 
