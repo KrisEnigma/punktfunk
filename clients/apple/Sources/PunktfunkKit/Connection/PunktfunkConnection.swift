@@ -109,6 +109,12 @@ public enum HostRejection: Sendable {
     /// going to sleep or shutting down, deliberately. Without this case the close reads as a
     /// transport failure, and sleeping your own host from the couch looks like a crash.
     case hostPower
+    /// The host accepted the connection and then failed to bring the stream up — no encoder
+    /// for the codec, pf-vdisplay missing, capture open failed. Everything host-side funnels
+    /// here, so the cause is in the host's log, not on this device. Missing this case sent the
+    /// connect down the untyped path, where a reachable host reads as unreachable and the app
+    /// answers with Wake-on-LAN.
+    case setupFailed
 
     init?(status: Int32) {
         switch status {
@@ -124,6 +130,7 @@ public enum HostRejection: Sendable {
         case PUNKTFUNK_STATUS_REJECTED_ACCESS_EXPIRED.rawValue: self = .accessExpired
         case PUNKTFUNK_STATUS_REJECTED_LAUNCH_NOT_PERMITTED.rawValue: self = .launchNotPermitted
         case PUNKTFUNK_STATUS_REJECTED_HOST_POWER.rawValue: self = .hostPower
+        case PUNKTFUNK_STATUS_REJECTED_SETUP_FAILED.rawValue: self = .setupFailed
         default: return nil
         }
     }
@@ -162,6 +169,9 @@ public enum HostRejection: Sendable {
         case .hostPower:
             return "The host is going to sleep or shutting down — wake it when you want "
                 + "to play again."
+        case .setupFailed:
+            return "The host accepted the connection but couldn't start the stream — the "
+                + "host's log (web console → Log) has the cause."
         }
     }
 }
