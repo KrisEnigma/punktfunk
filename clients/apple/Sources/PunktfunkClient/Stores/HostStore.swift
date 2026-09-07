@@ -73,12 +73,10 @@ final class HostStore: ObservableObject {
 
     init() {
         Self.migrateToAppGroupIfNeeded()
-        if let data = defaults.data(forKey: Self.key),
-           let decoded = try? JSONDecoder().decode([StoredHost].self, from: data) {
-            hosts = decoded
-        } else {
-            hosts = []
-        }
+        // Per-element (see `StoredHost.loadAll`): decoding the array as a whole meant one
+        // unreadable record lost every saved host, and the first `markConnected` after that
+        // persisted the empty array straight over the user's real store.
+        hosts = StoredHost.loadAll(from: defaults, recentFirst: false)
     }
 
     /// One-time move of the saved-host JSON from `UserDefaults.standard` (where every build before

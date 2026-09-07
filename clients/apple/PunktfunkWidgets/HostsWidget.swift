@@ -35,15 +35,8 @@ struct HostsProvider: TimelineProvider {
         completion(Timeline(entries: [entry], policy: .never))
     }
 
-    /// Decode the shared-suite host JSON (same wire format the app writes), most-recent first.
-    static func loadHosts() -> [StoredHost] {
-        guard let data = AppGroup.defaults.data(forKey: DefaultsKey.hosts),
-              let hosts = try? JSONDecoder().decode([StoredHost].self, from: data)
-        else { return [] }
-        return hosts.sorted {
-            ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast)
-        }
-    }
+    /// The shared-suite host JSON, most-recent first — see `StoredHost.loadAll`.
+    static func loadHosts() -> [StoredHost] { StoredHost.loadAll(recentFirst: true) }
 }
 
 // MARK: - Widget

@@ -417,8 +417,7 @@ public enum LibraryClient {
 
     /// `https://addr:port`, IPv6 literals bracketed — the mirror of the Rust client's `base_url`.
     static func baseURL(address: String, port: UInt16) -> String {
-        let bare = address.hasPrefix("[") && address.hasSuffix("]")
-            ? String(address.dropFirst().dropLast()) : address
+        let bare = MgmtTransport.unbracketed(address)
         return bare.contains(":") ? "https://[\(bare)]:\(port)" : "https://\(bare):\(port)"
     }
 
@@ -573,8 +572,7 @@ public final class LibraryArtLoader: LibraryArtSource, @unchecked Sendable {
     /// string prefix, so a differently-spelled but equivalent URL still takes the pinned path.
     private func isHostOrigin(_ url: URL) -> Bool {
         guard let host = url.host else { return false }
-        let bare = address.hasPrefix("[") && address.hasSuffix("]")
-            ? String(address.dropFirst().dropLast()) : address
+        let bare = MgmtTransport.unbracketed(address)
         let scheme = url.scheme?.lowercased()
         return host.caseInsensitiveCompare(bare) == .orderedSame
             && (url.port ?? (scheme == "http" ? 80 : 443)) == Int(port)

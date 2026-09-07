@@ -107,8 +107,8 @@ extension SettingsView {
         let bitrate = scoped(SettingsFields.bitrateKbps)
         return Binding(
             get: {
-                let v = Double(bitrate.wrappedValue)
-                    .clamped(Self.minSliderKbps, Self.maxSliderKbps)
+                let v = min(max(Double(bitrate.wrappedValue), Self.minSliderKbps),
+                            Self.maxSliderKbps)
                 return log(v / Self.minSliderKbps)
                     / log(Self.maxSliderKbps / Self.minSliderKbps)
             },

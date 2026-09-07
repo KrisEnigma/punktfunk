@@ -124,12 +124,7 @@ final class ProfileStore: ObservableObject {
     /// Saved hosts straight from the shared store. The settings surface owns no `HostStore` — it
     /// only needs to COUNT what a delete is about to change, and reading the same App-Group blob
     /// the widget reads beats threading a store through a separate macOS Settings scene.
-    static func savedHosts() -> [StoredHost] {
-        guard let data = AppGroup.defaults.data(forKey: DefaultsKey.hosts),
-              let hosts = try? JSONDecoder().decode([StoredHost].self, from: data)
-        else { return [] }
-        return hosts
-    }
+    static func savedHosts() -> [StoredHost] { StoredHost.loadAll(recentFirst: false) }
 
     // MARK: - Overrides
 
