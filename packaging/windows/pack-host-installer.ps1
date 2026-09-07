@@ -435,7 +435,6 @@ if ($Engine) {
     Copy-Item $readme -Destination (Join-Path $appStage 'README.txt') -Force
     Copy-Item (Join-Path $brandStage 'punktfunk.ico') -Destination $appStage -Force
     Copy-Item $licStage -Destination (Join-Path $appStage 'licenses') -Recurse -Force
-    if ($ffmpegStage -and (Test-Path $ffmpegStage)) { Copy-Item (Join-Path $ffmpegStage '*.dll') -Destination $appStage -Force }
     if ($wantWeb -or $wantScripting) {
         New-Item -ItemType Directory -Force -Path (Join-Path $appStage 'bun') | Out-Null
         Copy-Item $bunStage -Destination (Join-Path $appStage 'bun\bun.exe') -Force
