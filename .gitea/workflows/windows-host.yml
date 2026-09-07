@@ -4,7 +4,7 @@
 # run by scheduled tasks on a bundled bun) from one signed setup.exe. Runs on a self-hosted
 # windows-amd64 runner
 # (host mode; same MSVC/Windows-SDK/LLVM env as windows-client.yml — generic from unom/infra's
-# windows-runner/, FFmpeg/Inno Setup self-provision via the "Ensure Windows toolchain" step below).
+# windows-runner/, Inno Setup self-provisions via the "Ensure Windows toolchain" step below).
 #
 # Why an installer and not MSIX (like the client): the host installs a LocalSystem SCM service that
 # CreateProcessAsUserW's into the interactive session for secure-desktop capture, and bundles a
@@ -152,7 +152,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Ensure Windows toolchain (WDK, FFmpeg, Inno Setup, ARM64 target)
+      - name: Ensure Windows toolchain (WDK, Inno Setup, ARM64 target)
         shell: pwsh
         run: ./scripts/ci/ensure-windows-toolchain.ps1
 

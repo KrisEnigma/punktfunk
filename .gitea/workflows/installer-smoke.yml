@@ -150,7 +150,7 @@ jobs:
           # openh264 lives in fedora-cisco-openh264, hosted by Cisco rather than on the Fedora
           # mirrors, and the runners cannot reach it — one unreachable package failed the whole
           # transaction while the other 251 pulled at 15 MiB/s. It arrives as a weak dep of
-          # ffmpeg-libs and punktfunk vendors its own openh264, so dropping the repo costs the
+          # other packages, and punktfunk vendors its own openh264, so dropping the repo costs the
           # smoke nothing. This is the debian row's --no-install-recommends, aimed at one repo.
           - family: fedora-44
             image: fedora:44

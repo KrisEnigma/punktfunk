@@ -84,9 +84,9 @@ mid-stream mode renegotiation and a wall-clock skew handshake so latency stays v
 Both run from **one process**: bare `punktfunk-host serve` is the **secure native-only default**
 (`punktfunk/1` + the management API/web console), and `serve --gamestream` additionally enables the
 GameStream/Moonlight-compat planes (opt-in, trusted-LAN only — GameStream has inherent on-path
-weaknesses). The host is managed through a REST API and web console. The **host** builds against
-FFmpeg 7 or 8; the **clients** link no FFmpeg at all — they decode natively (Vulkan Video, DXVA,
-VAAPI, VideoToolbox, MediaCodec, openh264 + rav1d).
+weaknesses). The host is managed through a REST API and web console. Nothing here links FFmpeg: the host
+encodes through the vendor SDKs, and the clients decode natively (Vulkan Video, DXVA, VAAPI,
+VideoToolbox, MediaCodec, openh264 + rav1d).
 
 What works where: **[the support matrix](https://docs.punktfunk.unom.io/docs/support-matrix)** ·
 where it's heading: **[the roadmap](https://docs.punktfunk.unom.io/docs/roadmap)**.
@@ -225,10 +225,8 @@ additional terms or conditions. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Punktfunk's own source is MIT/Apache-2.0. Shipped binaries additionally link third-party components
 under their own (permissive) licenses — see [`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt)
-(regenerate with `scripts/gen-third-party-notices.sh`). The Windows **host** build also
-bundles FFmpeg under the **LGPL v2.1+** (dynamically linked, replaceable DLLs; the license text and
-notice ship in the installed `licenses/` folder). The **clients** bundle no FFmpeg — they link
-none.
+(regenerate with `scripts/gen-third-party-notices.sh`). No shipped binary bundles or links
+FFmpeg.
 
 ### Trademarks
 

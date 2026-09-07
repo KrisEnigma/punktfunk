@@ -1,9 +1,9 @@
 # Packaging punktfunk for Fedora / Bazzite
 
-The punktfunk host links system FFmpeg (NVENC on NVIDIA, VAAPI on AMD/Intel, with a GPU-less
-software-H.264 fallback), PipeWire and Opus. This page covers packaging it for the
-**Fedora Atomic / Bazzite** world (rpm-ostree + bootc), where most of those deps are already
-present; the NVIDIA-specific notes below apply to the NVENC path.
+The punktfunk host encodes through the vendor SDKs — NVENC on NVIDIA, VAAPI on AMD/Intel, with a
+GPU-less software-H.264 fallback — and links PipeWire and Opus. This page covers packaging it for
+the **Fedora Atomic / Bazzite** world (rpm-ostree + bootc), where those deps are already present;
+the NVIDIA-specific notes below apply to the NVENC path.
 
 > 👉 **Ubuntu/Debian hosts** install via `apt` from Gitea's package registry — see
 > [`debian/README.md`](debian/README.md) (`apt update && apt upgrade` for new builds).
@@ -34,13 +34,13 @@ packages plus a `services.punktfunk` NixOS module — see [`nix/README.md`](nix/
 
 | Dependency | Where it comes from |
 |---|---|
-| `ffmpeg-libs` with **NVENC** | **RPM Fusion nonfree** (`ffmpeg`, not `ffmpeg-free`) |
+| `mesa-va-drivers-freeworld` (full AMD/Intel VAAPI encode) | **RPM Fusion** — Fedora's stock driver has HEVC and AV1 disabled |
 | NVIDIA driver (`libnvidia-encode`, `libEGL_nvidia`) | Bazzite **-nvidia** images ship it; plain Fedora: `akmod-nvidia` + `xorg-x11-drv-nvidia-cuda` |
 | gamescope, PipeWire, wireplumber | **Bazzite ships these**; plain Fedora: `dnf install gamescope pipewire wireplumber` |
 | `opus`, `libei` | Fedora base / updates |
 
-On **Bazzite** the only genuinely new runtime bits are `ffmpeg-libs` (RPM Fusion) + `opus` +
-`libei` — the rest of the stack is already there. The default backend is **gamescope**
+On **Bazzite** the only genuinely new runtime bits are `opus` + `libei` — the rest of the stack
+is already there. The default backend is **gamescope**
 (`packaging/bazzite/host.env`), which the host spawns headless per session — no desktop login.
 
 ## Option A — systemd-sysext (recommended; no layering, no reboot)
@@ -83,11 +83,10 @@ rpm-ostree install punktfunk && systemctl reboot
 ## Option C — COPR (per-host, `rpm-ostree install`)
 
 1. Create a COPR project, enable **build-from-SCM** pointing at this repo, spec path
-   `packaging/rpm/punktfunk.spec` (see `copr/README.md`). Under *External Repositories* add
-   RPM Fusion nonfree so `ffmpeg-devel` resolves at build time.
+   `packaging/rpm/punktfunk.spec` (see `copr/README.md`).
 2. On the Bazzite host:
    ```sh
-   # RPM Fusion (for the NVENC ffmpeg) — usually already enabled on Bazzite
+   # RPM Fusion (for the freeworld VAAPI drivers) — usually already enabled on Bazzite
    rpm-ostree install \
      https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
      https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm

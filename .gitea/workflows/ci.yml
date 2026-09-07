@@ -1,6 +1,6 @@
 # CI for punktfunk (Gitea Actions). Linux jobs run on the `ubuntu-24.04` fleet label; the
-# Rust job runs inside the prebuilt builder image (ci/rust-ci.Dockerfile — system FFmpeg 8,
-# PipeWire, GL/GBM, libcuda link stub, pinned-channel rustup) so the workspace links the
+# Rust job runs inside the prebuilt builder image (ci/rust-ci.Dockerfile — PipeWire, GL/GBM,
+# libcuda link stub, pinned-channel rustup) so the workspace links the
 # same libs as the dev boxes. Builder images come from the LAN registry on home-ci-core
 # (content-keyed, docker.yml) — never the WAN. Apple client CI lives in apple.yml (macOS
 # runner). The report-only benchmarks moved to bench.yml (nightly + dispatch) so they stop
@@ -56,11 +56,9 @@ jobs:
       # forwards it as -DCMAKE_C_COMPILER_LAUNCHER, so this covers both build-script styles.
       #
       # ⚠ JOB-scoped, NOT workflow-scoped, and it must stay that way: the `rust-arm64` job below
-      # runs in the cross image, which sets CC_x86_64_unknown_linux_gnu=/usr/local/bin/pf-host-cc
-      # (ci/rust-ci-arm64cross.Dockerfile) — a wrapper that strips arm64 include dirs off
-      # HOST-targeted compiles so ffmpeg-sys-next's probe resolves against the amd64 headers.
-      # Setting this at workflow level would silently overwrite that wrapper and break the cross
-      # build in a way that looks like a header mismatch, not a CI config error.
+      # runs in the cross image, whose own compiler env (ci/rust-ci-arm64cross.Dockerfile) a
+      # workflow-level value would silently overwrite — breaking the cross build in a way that
+      # looks like a header mismatch, not a CI config error.
       CC_x86_64_unknown_linux_gnu: sccache cc
       CXX_x86_64_unknown_linux_gnu: sccache c++
     steps:

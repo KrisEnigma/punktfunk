@@ -72,7 +72,7 @@ src/
   config.rs · session_plan.rs · session_tuning.rs · pipeline.rs   session setup + the frame pipeline
   vdisplay/          per-compositor virtual outputs (kwin · gamescope · mutter · wlroots)
   capture/ · capture.rs    screen/dmabuf capture (+ Windows IDD-push)
-  encode/ · encode.rs      per-GPU encoders (nvenc · vaapi · ffmpeg_win (AMF/QSV) · sw)
+  encode/ · encode.rs      per-GPU encoders (nvenc · vaapi · amf · qsv · sw)
   linux/zerocopy/    dmabuf → CUDA → NVENC bridges (EGL/GL tiled, Vulkan LINEAR)
   inject/ · inject.rs      input backends (libei · wlr · uinput gamepads · UHID DualSense/DS4)
   audio/ · audio.rs        Opus out + virtual mic (PipeWire / WASAPI)

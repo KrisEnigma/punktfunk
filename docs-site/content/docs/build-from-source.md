@@ -9,8 +9,9 @@ repo group), or to hack on it. A source build gets **no packaged units and no cl
 wire the service up by hand ([Running as a service](/docs/running-as-a-service) shows the unit).
 
 Two build features matter on every distro: `punktfunk-host/nvenc` (direct NVENC on NVIDIA) and
-`punktfunk-host/vulkan-encode` (Vulkan Video on AMD/Intel). They're what the packaged builds use;
-without them the host falls back to the slower libav backends. Rust comes from
+`punktfunk-host/vulkan-encode` (Vulkan Video on AMD/Intel). They're what the packaged builds use.
+Without `nvenc` an NVIDIA box has no hardware encoder at all; without `vulkan-encode` AMD and
+Intel fall back to VAAPI, which cannot recover from a lost frame without a keyframe. Rust comes from
 [rustup](https://rustup.rs) if you don't have it:
 
 ```sh
@@ -19,16 +20,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ## Ubuntu / Debian
 
-The packaged host is built against **FFmpeg 8**. Ubuntu 26.04's and Debian 13's `libavcodec-dev`
-are new enough; Ubuntu 24.04's is FFmpeg 6.1 — build FFmpeg 8 yourself first there (what
-`ci/rust-ci-noble.Dockerfile` does), or stick with the packaged host.
-
 ```sh
 sudo apt install build-essential pkg-config cmake clang libclang-dev nasm git curl \
   pipewire pipewire-pulse wireplumber libpipewire-0.3-dev libspa-0.2-dev \
   libwayland-dev wayland-protocols libxkbcommon-dev libopus-dev \
   libdrm-dev libgbm-dev libgl-dev libegl-dev libgles-dev mesa-common-dev libva-dev \
-  ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libavdevice-dev \
   libnvidia-egl-wayland1 libnvidia-egl-gbm1 libei-dev
 git clone https://git.unom.io/unom/punktfunk.git && cd punktfunk
 cargo build --release --locked \
@@ -42,15 +38,14 @@ cargo build --release --locked \
 sudo dnf install gcc gcc-c++ make cmake clang clang-devel nasm git pkgconf-pkg-config \
   pipewire-devel wayland-devel wayland-protocols-devel libxkbcommon-devel opus-devel \
   libdrm-devel mesa-libgbm-devel mesa-libGL-devel mesa-libEGL-devel mesa-libGLES-devel libva-devel \
-  ffmpeg-devel libei-devel
+  libei-devel
 git clone https://git.unom.io/unom/punktfunk.git && cd punktfunk
 cargo build --release --locked \
   --features punktfunk-host/nvenc,punktfunk-host/vulkan-encode \
   -p punktfunk-host
 ```
 
-`ffmpeg-devel` must be RPM Fusion's (with NVENC), not `ffmpeg-free-devel`. `mesa-libGL-devel` isn't
-optional — the zero-copy GPU path links `libGL`, and without it the build fails at link time with
+`mesa-libGL-devel` isn't optional — the zero-copy GPU path links `libGL`, and without it the build fails at link time with
 `cannot find -lGL`. To build an RPM instead, use the same toolchain CI does:
 `docker build --build-arg FEDORA_VERSION=NN -f ci/fedora-rpm.Dockerfile -t pf-rpm ci`, then run
 `packaging/rpm/build-rpm.sh` inside it.

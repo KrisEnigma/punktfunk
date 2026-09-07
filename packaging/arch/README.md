@@ -51,43 +51,6 @@ is on the
 Then the same first-run steps as a source build (printed by the install scriptlet): `input`
 group, `host.env`, `systemctl --user enable --now punktfunk-host` — see the next section.
 
-### If pacman says `unable to satisfy dependency 'libavcodec.so=…'`
-
-```
-:: unable to satisfy dependency 'libavcodec.so=62-64' required by punktfunk-host
-```
-
-`punktfunk-host` links FFmpeg, so it depends on the exact libav sonames it was built against —
-FFmpeg 8 provides `libavcodec.so=62`, FFmpeg 9 provides `libavcodec.so=63`. This message means the
-package on offer was built against a *different* FFmpeg major than your box has. Because pacman
-prepares the whole transaction at once, it stops your entire `pacman -Syu`, not just this package.
-
-The bound is deliberate. Without it the upgrade succeeds and leaves a host binary that cannot
-start at all — exit 127 before `main()`, in a systemd restart loop, with nothing in its own log
-to explain it (`ldd /usr/bin/punktfunk-host | grep 'not found'` is the one-line diagnosis).
-
-1. `sudo pacman -Syyu` — a forced db refresh, in case the matching build is already published.
-   Compare `pacman -Si punktfunk-host` against your `pacman -Q ffmpeg`.
-2. Still refused? Then we published a build made against the wrong FFmpeg — please report it. The
-   repair arrives as a higher **pkgrel** of the same version (`0.25.0-2`), so a later `-Syu`
-   picks it up with nothing to undo.
-3. To let the rest of the system upgrade in the meantime: `sudo pacman -Syu --ignore punktfunk-host`.
-   If pacman still refuses (your *installed* copy is the one carrying the bound), remove it with
-   `sudo pacman -Rdd punktfunk-host`, upgrade, and install it again once the rebuild lands. Either
-   way the host stays down until then — that is the soname break itself, not a second fault.
-
-## Build from source — Arch Linux (mutable)
-
-```sh
-cd packaging/arch
-# Build the working tree (CI / dev) — no git fetch:
-PF_SRCDIR="$(git rev-parse --show-toplevel)" makepkg -f --holdver
-# …or build the tagged release the AUR way:
-makepkg -si
-# …add the web console too (needs bun / bun-bin):
-PF_WITH_WEB=1 PF_SRCDIR="$(git rev-parse --show-toplevel)" makepkg -f --holdver
-```
-
 ### aarch64 (Arch Linux ARM) — the client
 
 The PKGBUILD declares `arch=('x86_64' 'aarch64')`. On aarch64 it builds the **client only** —
@@ -116,14 +79,12 @@ systemctl --user enable --now punktfunk-host
 systemctl --user enable --now punktfunk-web
 journalctl --user -u punktfunk-web-init | sed -n 's/.*password generated: //p'   # open https://<host-ip>:47992
 ```
-NVENC/EGL come from the NVIDIA driver: `sudo pacman -S --needed nvidia-utils`. Arch's stock
-`ffmpeg` already has NVENC built in — no RPM-Fusion-style swap needed (unlike Fedora).
+NVENC/EGL come from the NVIDIA driver: `sudo pacman -S --needed nvidia-utils`.
 
 ### Runtime dependency map (Fedora/Debian → Arch)
 
 | Need | Arch package |
 |------|--------------|
-| FFmpeg + NVENC | `ffmpeg` (NVENC built in) |
 | PipeWire + session mgr | `pipewire` `wireplumber` |
 | PulseAudio-API audio for games | `pipewire-pulse` *(host optdepend — real `pulseaudio` also works; never a hard dep, it CONFLICTS with `pulseaudio`)* |
 | Opus / input injection | `opus` `libei` |

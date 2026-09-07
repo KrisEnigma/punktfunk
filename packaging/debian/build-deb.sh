@@ -4,32 +4,21 @@
 # Mirrors the Fedora RPM (../rpm/punktfunk.spec): the host binary + the uinput udev rule
 # + the systemd *user* unit + headless session helpers + example config + the OpenAPI doc.
 #
-# Runtime Depends are computed by `dpkg-shlibdeps` from the binary's actual DT_NEEDED, NOT
-# hand-listed: the binary pulls a large transitive lib closure (most of it via ffmpeg) and
-# the exact soname package names (libavcodec62, libpipewire-0.3-0t64, …) drift across distro
+# Runtime Depends are computed by `dpkg-shlibdeps` from the binaries' actual DT_NEEDED, NOT
+# hand-listed: the exact soname package names (libpipewire-0.3-0t64, …) drift across distro
 # releases — shlibdeps tracks them automatically and pins them to whatever the BUILD distro
 # ships. Build this inside the Ubuntu 26.04 rust-ci image so those names match the target
 # boxes exactly. `--ignore-missing-info` drops libcuda.so.1 (the NVIDIA driver lib, linked via
 # FFI): on a GPU-less builder it resolves to no package, and we must never hard-depend on a
 # specific libnvidia-compute-<ver> anyway — NVENC/EGL come from the driver, out of band.
 #
-# BUNDLE_FFMPEG=1 (Ubuntu 24.04 LTS builds, ci/rust-ci-noble.Dockerfile): instead of hard-depending
-# on the distro's libav* — which don't exist on 24.04 (it ships FFmpeg 6.1 / libavcodec60, the host
-# needs 8 / libavcodec62) — copy a from-source FFmpeg into /usr/lib/punktfunk-host, repoint the
-# binary's rpath there, and drop the libav*/libsw*/libpostproc sonames from the auto Depends. Set
-# FFMPEG_PREFIX to that FFmpeg's install prefix (default /opt/ffmpeg, as the noble image sets it).
-# See packaging/debian/README.md → "Ubuntu 24.04 LTS".
-#
-# Usage: VERSION=0.0.1~ci42.gdeadbee [ARCH=amd64] [BUNDLE_FFMPEG=1] bash packaging/debian/build-deb.sh
+# Usage: VERSION=0.0.1~ci42.gdeadbee [ARCH=amd64] bash packaging/debian/build-deb.sh
 # Output: dist/punktfunk-host_<version>_<arch>.deb
 set -euo pipefail
 
 VERSION="${VERSION:?set VERSION (e.g. 0.0.1 or 0.0.1~ci42.gdeadbee)}"
 ARCH="${ARCH:-amd64}"
 PKG="punktfunk-host"
-BUNDLE_FFMPEG="${BUNDLE_FFMPEG:-0}"
-FFMPEG_PREFIX="${FFMPEG_PREFIX:-/opt/ffmpeg}"
-LIBDIR_REL="usr/lib/$PKG"                     # bundled FFmpeg lands here: /usr/lib/punktfunk-host
 ROOTDIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOTDIR"
 
@@ -202,52 +191,8 @@ printf '%s (%s) stable; urgency=medium\n\n  * Automated build %s.\n\n -- unom <p
   "$PKG" "$VERSION" "$VERSION" "$(date -uR 2>/dev/null || echo 'Thu, 01 Jan 1970 00:00:00 +0000')" \
   | gzip -9n > "$DOCDIR/changelog.Debian.gz"
 
-# --- bundled FFmpeg (Ubuntu 24.04 LTS builds) --------------------------------
-# Copy the from-source libav*/libsw*/libpostproc .so's into /usr/lib/punktfunk-host and repoint the
-# binary at them, so the package carries FFmpeg 8 instead of depending on a distro libavcodec62 that
-# 24.04 doesn't have. BUNDLED_LIBS is fed to dpkg-shlibdeps below so the libs' OWN external deps
-# (libva2, libdrm2, …, all present on 24.04) still become Depends.
-BUNDLED_LIBS=""
-if [ "$BUNDLE_FFMPEG" = "1" ]; then
-  command -v patchelf >/dev/null || { echo "BUNDLE_FFMPEG=1 needs patchelf" >&2; exit 1; }
-  [ -d "$FFMPEG_PREFIX/lib" ] || { echo "FFMPEG_PREFIX=$FFMPEG_PREFIX has no lib/ — build FFmpeg first" >&2; exit 1; }
-  DEST="$STAGE/$LIBDIR_REL"
-  install -d "$DEST"
-  # cp -a preserves the SONAME symlink chain (libavcodec.so -> .so.62 -> .so.62.x.x); the loader
-  # resolves the binary's DT_NEEDED (libavcodec.so.62) to the middle link.
-  shopt -s nullglob
-  for so in "$FFMPEG_PREFIX"/lib/lib{avcodec,avformat,avutil,avfilter,avdevice,swscale,swresample,postproc}.so*; do
-    cp -a "$so" "$DEST/"
-  done
-  shopt -u nullglob
-  ls "$DEST"/libavcodec.so.* >/dev/null 2>&1 || { echo "no libav* found under $FFMPEG_PREFIX/lib" >&2; exit 1; }
-  # Each bundled lib finds its siblings (libavcodec needs libavutil) via its own $ORIGIN RUNPATH;
-  # patch only the real versioned files, not the symlinks. The executable then finds the top-level
-  # libs via ../lib/$PKG, written as DT_RPATH (--force-rpath) so it's also searched transitively —
-  # belt-and-suspenders against DT_RUNPATH's non-transitivity.
-  for so in "$DEST"/*.so.*; do
-    [ -L "$so" ] && continue
-    patchelf --set-rpath '$ORIGIN' "$so"
-  done
-  patchelf --force-rpath --set-rpath "\$ORIGIN/../lib/$PKG" "$STAGE/usr/bin/$PKG"
-  # The encode worker gets an ABSOLUTE rpath, not the $ORIGIN one the host uses — and this is
-  # load-bearing, not style. postinst grants the worker cap_sys_nice=ep, which makes it AT_SECURE,
-  # and glibc DROPS any $ORIGIN-expanded RPATH entry for a secure binary unless it normalizes into
-  # a system-trusted directory (/lib, /usr/lib — /usr/lib/punktfunk-host is not one). So a capped
-  # worker with `$ORIGIN/../lib/punktfunk-host` would find no libavcodec at all on Ubuntu 24.04 and
-  # fail to exec — the host would fall back inline (never a dead session, by the ladder's design)
-  # but the lever would be silently dead on exactly the channel that bundles FFmpeg. An absolute
-  # DT_RPATH is honoured under AT_SECURE, and because it is DT_RPATH (--force-rpath) it is searched
-  # transitively, so it also resolves libavutil for the bundled libavcodec — whose own $ORIGIN
-  # RUNPATH is subject to the same AT_SECURE rule inside this process.
-  patchelf --force-rpath --set-rpath "/usr/lib/$PKG" "$STAGE/usr/bin/punktfunk-encode-worker"
-  BUNDLED_LIBS="$(printf '%s ' "$DEST"/*.so.*)"
-  echo "==> bundled FFmpeg from $FFMPEG_PREFIX into /$LIBDIR_REL"
-fi
-
 # --- dependencies ------------------------------------------------------------
-# Auto: the binaries' directly-linked shared libs (libcuda ignored, see header). In bundle mode the
-# bundled .so's are appended so their external deps (libva2/libdrm2/…) are captured too. The encode
+# Auto: the binaries' directly-linked shared libs (libcuda ignored, see header). The encode
 # worker is scanned alongside the host: its link set is a subset today, but it is a shipped
 # executable in this package and a future divergence must show up as a Depends, not as a worker
 # that silently fails to exec on a fresh install.
@@ -261,14 +206,10 @@ Architecture: any
 Depends: \${shlibs:Depends}
 Recommends: rtkit
 EOF
-# In bundle mode the libav* live in FFMPEG_PREFIX/lib — not a standard loader path, and the
-# target/release binary carries no rpath (only the staged copy does) — so dpkg-shlibdeps can't
-# locate libavcodec.so.62 and exits 2. Point it there via LD_LIBRARY_PATH. Stderr is captured so a
-# future resolution failure is visible instead of swallowed.
+# Stderr is captured so a future resolution failure is visible instead of swallowed.
 SHDEPS_RAW="$(
   cd "$SHLIB_TMP"
-  if [ "$BUNDLE_FFMPEG" = "1" ]; then export LD_LIBRARY_PATH="$FFMPEG_PREFIX/lib"; fi
-  dpkg-shlibdeps -O --ignore-missing-info "$ROOTDIR/$BIN" "$ROOTDIR/$WORKER_BIN" $BUNDLED_LIBS 2>"$SHLIB_TMP/err" \
+  dpkg-shlibdeps -O --ignore-missing-info "$ROOTDIR/$BIN" "$ROOTDIR/$WORKER_BIN" 2>"$SHLIB_TMP/err" \
     | sed -n 's/^shlibs:Depends=//p'
 )" || { echo "dpkg-shlibdeps failed (exit $?):" >&2; sed 's/^/  /' "$SHLIB_TMP/err" >&2; rm -rf "$SHLIB_TMP"; exit 1; }
 rm -rf "$SHLIB_TMP"
@@ -278,10 +219,7 @@ rm -rf "$SHLIB_TMP"
 # GPU-less builder (stub, no owning package), but on a box WITH the driver shlibdeps resolves
 # libcuda.so.1 -> libnvidia-compute-<ver> and would pin that exact driver build. NVENC/EGL are
 # provided by whatever driver the host runs, so this must never be a package dependency.
-# In bundle mode also drop the FFmpeg sonames: they're shipped inside the package (/usr/lib/$PKG),
-# not pulled from apt, so a `Depends: libavcodec62` would wrongly re-block install on 24.04.
 FILTER='^(libnvidia-compute|libcuda)'
-[ "$BUNDLE_FFMPEG" = "1" ] && FILTER='^(libnvidia-compute|libcuda|libav|libsw|libpostproc)'
 SHDEPS="$(printf '%s' "$SHDEPS_RAW" | tr ',' '\n' | sed 's/^ *//; s/ *$//' \
           | grep -ivE "$FILTER" | awk 'NF' | paste -sd ',' - | sed 's/,/, /g')"
 [ -n "$SHDEPS" ] || { echo "no deps left after filtering — unexpected" >&2; exit 1; }
@@ -290,9 +228,7 @@ SHDEPS="$(printf '%s' "$SHDEPS_RAW" | tr ',' '\n' | sed 's/^ *//; s/ *$//' \
 #  - libei1: input injection (libei) is loaded at runtime, not in DT_NEEDED.
 #  - pipewire/wireplumber: runtime services (the daemon + session manager), not linked libs.
 DEPENDS="$SHDEPS, libei1, pipewire, wireplumber"
-# ffmpeg: Ubuntu's ffmpeg ships the NVENC-enabled libav* the binary links AND is the encoder
-# runtime; the libav* sonames are already hard Depends via shlibdeps, so the ffmpeg metapackage
-# is a Recommends. gamescope = a ready compositor backend; pipewire-pulse = desktop audio.
+# gamescope = a ready compositor backend; pipewire-pulse = desktop audio.
 # mesa-va-drivers / intel-media-va-driver = the VAAPI encode drivers for AMD (radeonsi) and Intel
 # (iHD) — pulled by default so the auto-selected VAAPI backend works out of the box; NVIDIA boxes
 # don't need them (NVENC comes from the driver) and can --no-install-recommends.
@@ -301,7 +237,7 @@ DEPENDS="$SHDEPS, libei1, pipewire, wireplumber"
 # headless/encoding-only box can opt out with --no-install-recommends.
 # punktfunk-scripting = the plugin/script runner (host automation on bun). Recommends so it's pulled
 # by default; its systemd --user unit ships disabled (inert until you add scripts/plugins).
-RECOMMENDS="ffmpeg, gamescope, pipewire-pulse, mesa-va-drivers, intel-media-va-driver, punktfunk-web, punktfunk-scripting"
+RECOMMENDS="gamescope, pipewire-pulse, mesa-va-drivers, intel-media-va-driver, punktfunk-web, punktfunk-scripting"
 SUGGESTS="kwin-wayland, mutter"
 
 INSTALLED_KB="$(du -k -s "$STAGE" | cut -f1)"
@@ -383,8 +319,7 @@ if [ "$1" = "configure" ]; then
     # runs on upgrade too, which is what re-applies the grant to the replaced (new-inode) file.
     #
     # Debugging the WORKER: a capability makes it AT_SECURE — the loader ignores LD_LIBRARY_PATH
-    # and LD_PRELOAD for it, and core dumps are suppressed. (On a bundled-FFmpeg build the worker
-    # carries an ABSOLUTE rpath for exactly that reason; see build-deb.sh.)
+    # and LD_PRELOAD for it, and core dumps are suppressed.
     if [ -x /usr/bin/punktfunk-encode-worker ]; then
         setcap 'cap_sys_nice=ep' /usr/bin/punktfunk-encode-worker 2>/dev/null || true
     fi

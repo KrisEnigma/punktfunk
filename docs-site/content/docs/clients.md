@@ -49,7 +49,7 @@ native protocol's extensions (client-side speed test, jumbo frames).
 `punktfunk/1` directly, with vendor-ordered hardware decode (**Vulkan Video first on NVIDIA and
 AMD**, **VAAPI dmabuf first on Intel**; whichever isn't first is the fallback, and software decode
 is last), PipeWire audio, and SDL3 controllers (rumble, lightbar, DualSense touchpad/motion). The
-decoders are Punktfunk's own — the client links no FFmpeg and talks to your GPU's Vulkan and VAAPI
+decoders are Punktfunk's own — nothing here links FFmpeg, and they talk to your GPU's Vulkan and VAAPI
 drivers directly. To force one, pick it in *Preferences → Display → Video decoder* or set
 `PUNKTFUNK_DECODER=native-vulkan|native-vaapi|software`. Like the Apple app it discovers hosts
 automatically, does PIN pairing, pins reconnects, and browses the host's **game library** (with

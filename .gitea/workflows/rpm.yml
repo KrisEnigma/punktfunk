@@ -1,7 +1,7 @@
 # Build the punktfunk-host RPM and publish it to Gitea's RPM package registry, so Bazzite /
 # Fedora Atomic hosts layer + update it with rpm-ostree. Counterpart to deb.yml (apt). Runs in
 # the Fedora 43 builder image (ci/fedora-rpm.Dockerfile) so the RPM's auto library Requires
-# (libavcodec.so.NN, …) match the target's sonames.
+# match the target's sonames.
 #
 # Registry (public, unom org), group "bazzite":
 #   repo file  https://git.unom.io/api/packages/unom/rpm/bazzite.repo
@@ -67,8 +67,8 @@ env:
 jobs:
   build-publish:
     runs-on: ubuntu-24.04
-    # One RPM per target whose ffmpeg soname must match (a binary RPM is soname-coupled to its
-    # base): Fedora 43 == Bazzite (libavcodec.so.61), Fedora 44 == the Fedora KDE spin (.so.62).
+    # One RPM per target whose sonames must match (a binary RPM is soname-coupled to its base):
+    # Fedora 43 == Bazzite, Fedora 44 == the Fedora KDE spin.
     # Each builds in its matching builder image and publishes to its own registry group.
     strategy:
       fail-fast: false
@@ -283,7 +283,7 @@ jobs:
       # `packaging/gamescope/**` (the patches and the upstream pin, which lives in the build
       # script). So the key is that directory's hash and a normal push restores a binary instead of
       # building one. Per-Fedora-major, because the binary is soname-coupled to its base exactly
-      # like the RPM is — an f43 build does not start on f44 (libavutil.so.59 vs .60).
+      # like the RPM is — an f43 build does not start on f44.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: gamescope
         with:
