@@ -595,8 +595,12 @@ impl Drive<'_> {
 /// The loop's own ten-second line: how many access units went out, how old each was when it did,
 /// and how many submits and parks it took. AU age is `published_at − PresentDisplayQPCTime`, so
 /// it carries the compose-to-publish span the design pays for a frame — encode time once the
-/// loop stops fetching one AU on the next frame's submit. Cursor-only re-encodes carry no present
-/// stamp and are counted, not aged.
+/// loop stops fetching one AU on the next frame's submit.
+///
+/// `aged` is how many of `published` that span could be taken from, and reading it is not
+/// optional: a cursor-only re-encode carries no present stamp, and a head whose stamp names the
+/// vblank the frame is *for* rather than the one it came from puts it in the future, which is not
+/// an age at all. `aged=0` means no measurement, not a zero one.
 struct Report {
     hz: u64,
     since: u64,
@@ -641,10 +645,11 @@ impl Report {
             return;
         }
         dbglog!(
-            "[pf-vd] drive: win_ms={window_ms} published={} submits={} parks={} au_age_us mean={} max={}",
+            "[pf-vd] drive: win_ms={window_ms} published={} submits={} parks={} aged={} au_age_us mean={} max={}",
             self.n,
             self.submits,
             self.parks,
+            self.aged,
             self.sum_us / self.aged.max(1),
             self.max_us
         );
