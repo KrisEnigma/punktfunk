@@ -591,6 +591,39 @@ impl Shell {
             && self.stack.last().is_some_and(Screen::editing)
     }
 
+    /// What a screen reader should speak for the focused row. `None` while a takeover owns
+    /// the input, or on a screen that names no focus.
+    /// `&mut` only to hand `Ctx` the settings it wants by `&mut`; nothing on this
+    /// path writes them. A host polls this once per frame, so cloning the settings
+    /// to get an `&self` here would be ~9 string allocations per frame on a still
+    /// screen — the per-frame-work-that-changes-nothing shape this shell has
+    /// already paid to remove once.
+    pub(crate) fn focus_announcement(&mut self) -> Option<String> {
+        if self.in_stream
+            || self.holds_stream()
+            || self.connecting.is_some()
+            || self.wake.is_some()
+            || self.speed.is_some()
+        {
+            return None;
+        }
+        let t = self.t();
+        let screen = self.stack.last()?;
+        let ctx = Ctx {
+            hosts: &self.hosts,
+            library: &self.library,
+            settings: &mut self.settings,
+            store: &*self.store,
+            platform: self.platform,
+            pads: &self.pads,
+            deck: self.deck,
+            fallback_ui: self.fallback_ui,
+            device_name: &self.device_name,
+            t,
+        };
+        screen.announcement(&ctx)
+    }
+
     /// The console is covering a live stream — a launch hold — and wants the
     /// pad as menu events, masked off the wire.
     pub(crate) fn holds_stream(&self) -> bool {

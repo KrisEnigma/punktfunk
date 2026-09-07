@@ -1872,3 +1872,76 @@ fn a_superseded_speed_test_cannot_report_under_the_new_host() {
         "the abandoned host's report must not land here"
     );
 }
+
+/// A screen reader gets the focused tile, and a different string once focus moves — the whole
+/// point of the seam: a constant would announce the same host forever.
+#[test]
+fn the_announcement_follows_the_home_carousel() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    let first = s.focus_announcement().expect("home names its focused tile");
+    assert!(first.starts_with("Living Room PC"), "{first}");
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    let second = s
+        .focus_announcement()
+        .expect("…and the tile it stepped onto");
+    assert!(second.starts_with("Office Tower"), "{second}");
+    assert_ne!(first, second);
+}
+
+/// The trailing action tiles speak their own caption, not a host's.
+#[test]
+fn the_announcement_names_the_trailing_actions() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    for _ in 0..hosts().len() {
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    }
+    assert_eq!(
+        s.focus_announcement().as_deref(),
+        Some("Add Host, Register a host by address")
+    );
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    assert_eq!(
+        s.focus_announcement().as_deref(),
+        Some("Rescan, Look for hosts on this network again")
+    );
+}
+
+/// A settings row is its label plus the value drawn beside it; the strip names the section.
+#[test]
+fn the_announcement_carries_a_settings_value() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    s.handle_menu(MenuEvent::Tertiary);
+    finish_motion(&mut s);
+    let row = s.focus_announcement().expect("a settings row names itself");
+    assert!(row.starts_with("Resolution, "), "{row}");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    let below = s.focus_announcement().expect("…and so does the row below");
+    assert!(below.starts_with("Refresh rate, "), "{below}");
+    assert_ne!(row, below);
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    assert_eq!(s.focus_announcement().as_deref(), Some("Stream section"));
+}
+
+/// Silence, not the wrong row: a screen this driver does not describe, and a takeover that
+/// owns the input, both say nothing.
+#[test]
+fn the_announcement_stays_quiet_where_it_cannot_name_the_focus() {
+    let (mut s, _console, _library) = shell(vec![Screen::AddHost(
+        crate::screens::add_host::AddHostScreen::new(),
+    )]);
+    s.sync();
+    assert!(s.focus_announcement().is_none());
+
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    s.handle_menu(MenuEvent::Confirm);
+    assert!(s.connecting.is_some());
+    assert!(
+        s.focus_announcement().is_none(),
+        "a takeover owns the input"
+    );
+}

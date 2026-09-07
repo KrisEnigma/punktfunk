@@ -56,6 +56,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`Console::focus_announcement` names the focused row for a screen reader.** The Skia console
+  has no accessibility node tree, so the driver hands the host a string for home, the library and
+  settings (`None` elsewhere) and Android speaks it through the new `{"announce": …}` event on
+  `nativeConsoleNextEvent`. An embedder should poll it and speak only when the string changes.
 - **`ConsoleCmd::SpeedTest` is the console shell's network speed test.** The gamepad host menu
   grew a "Test network speed…" row on every surface `pf-console-ui` fronts — Android TV, the
   Steam Deck and Linux console, webOS — reported back through the new

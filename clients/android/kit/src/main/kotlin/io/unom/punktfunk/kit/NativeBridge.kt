@@ -795,8 +795,9 @@ object NativeBridge {
 
     /**
      * Block up to ~100 ms for the next event: `{"action": <OverlayAction>}`, `{"pulse": "move" |
-     * "confirm" | "boundary"}`, `{"editing": bool}`, `{"settings": <Settings>}` (persist it),
-     * `{"gles": 2 | 3}`, `{"dead": "<why>"}`. `""` on timeout. Call from a dedicated poll thread.
+     * "confirm" | "boundary"}`, `{"editing": bool}`, `{"announce": "<focused row>"}` (speak it),
+     * `{"settings": <Settings>}` (persist it), `{"gles": 2 | 3}`, `{"dead": "<why>"}`. `""` on
+     * timeout. Call from a dedicated poll thread.
      */
     external fun nativeConsoleNextEvent(handle: Long): String
 
