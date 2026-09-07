@@ -689,3 +689,178 @@ impl Targets {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows62::Win32::Foundation::HMODULE;
+    use windows62::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+
+    /// A device for the pixel tests: the real adapter, else WARP, so a runner with no GPU still
+    /// runs them. `None` means neither exists and the caller skips.
+    fn device() -> Option<(d3d::ID3D11Device, d3d::ID3D11DeviceContext)> {
+        for kind in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+            let (mut dev, mut ctx) = (None, None);
+            // SAFETY: plain device creation; both out-params are valid locals checked below.
+            let hr = unsafe {
+                d3d::D3D11CreateDevice(
+                    None,
+                    kind,
+                    HMODULE(core::ptr::null_mut()),
+                    d3d::D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    None,
+                    d3d::D3D11_SDK_VERSION,
+                    Some(&mut dev),
+                    None,
+                    Some(&mut ctx),
+                )
+            };
+            if let (Ok(()), Some(dev), Some(ctx)) = (hr, dev, ctx) {
+                return Some((dev, ctx));
+            }
+        }
+        None
+    }
+
+    /// Slot 0's pixels, through a staging copy.
+    fn read_back(t: &Targets, ctx: &d3d::ID3D11DeviceContext, w: u32, h: u32) -> Vec<u8> {
+        let Planes::Bgra(slots) = &t.planes else {
+            panic!("BGRA targets only")
+        };
+        let desc = d3d::D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: dxgi::DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: dxgi::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: d3d::D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: d3d::D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut stage: Option<Tex> = None;
+        // SAFETY: `desc` is a fully-initialized local and `stage` a valid out-param; the copy and
+        // the map below run on the same immediate context that owns both textures.
+        unsafe {
+            t.dev
+                .CreateTexture2D(&desc, None, Some(&mut stage))
+                .expect("staging texture");
+            let stage = stage.expect("staging texture");
+            ctx.CopyResource(&stage, &slots[0]);
+            let mut m = d3d::D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.Map(&stage, 0, d3d::D3D11_MAP_READ, 0, Some(&mut m))
+                .expect("map staging");
+            let mut out = Vec::with_capacity((w * h * 4) as usize);
+            for row in 0..h {
+                let src = (m.pData as *const u8).add((row * m.RowPitch) as usize);
+                out.extend_from_slice(core::slice::from_raw_parts(src, (w * 4) as usize));
+            }
+            ctx.Unmap(&stage, 0);
+            out
+        }
+    }
+
+    fn source(dev: &d3d::ID3D11Device, w: u32, h: u32) -> Tex {
+        let pixels: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, (i % 253) as u8, (i % 241) as u8, 0xFF])
+            .collect();
+        let desc = d3d::D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: dxgi::DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: dxgi::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: d3d::D3D11_USAGE_DEFAULT,
+            BindFlags: d3d::D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let init = d3d::D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: w * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut t: Option<Tex> = None;
+        // SAFETY: `desc`/`init` are locals describing `pixels`, which outlives the call; `t` is a
+        // valid out-param checked by `expect`.
+        unsafe {
+            dev.CreateTexture2D(&desc, Some(&init), Some(&mut t))
+                .expect("source texture");
+        }
+        t.expect("source texture")
+    }
+
+    fn pointer(x: i32, y: i32) -> CursorImage {
+        CursorImage {
+            x,
+            y,
+            w: 16,
+            h: 16,
+            hot_x: 0,
+            hot_y: 0,
+            rgba: Arc::new(vec![0xFF; 16 * 16 * 4]),
+            serial: 1,
+            visible: true,
+        }
+    }
+
+    /// The save-under contract: the blend changes the slot, and the restore puts back exactly
+    /// what was there. A blend that never drew would leave the two reads equal and fail here
+    /// first, so a build without the quad cannot pass this by doing nothing.
+    #[test]
+    fn a_restored_slot_is_the_frame_the_blend_covered() {
+        let Some((dev, ctx)) = device() else {
+            eprintln!("no D3D11 device (not even WARP) — skipping");
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let mut t = Targets::new(InputKind::Bgra, &dev, &ctx, (w, h), 1).expect("targets");
+        let src = source(&dev, w, h);
+        t.pass(&src, 0, true).expect("pass");
+        let clean = read_back(&t, &ctx, w, h);
+
+        t.blend(0, &pointer(8, 8), 0.0);
+        let drawn = read_back(&t, &ctx, w, h);
+        assert_ne!(clean, drawn, "the cursor quad drew nothing");
+
+        t.restore_under(0).expect("restore");
+        assert_eq!(read_back(&t, &ctx, w, h), clean, "restore left the pointer");
+    }
+
+    /// A pointer hanging off the edge saves only the part the blend can write, and the restore
+    /// puts that part back — the clip is what keeps the copy inside both textures.
+    #[test]
+    fn a_pointer_off_the_edge_restores_the_part_that_landed() {
+        let Some((dev, ctx)) = device() else {
+            eprintln!("no D3D11 device (not even WARP) — skipping");
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let mut t = Targets::new(InputKind::Bgra, &dev, &ctx, (w, h), 1).expect("targets");
+        let src = source(&dev, w, h);
+        t.pass(&src, 0, true).expect("pass");
+        let clean = read_back(&t, &ctx, w, h);
+
+        t.blend(0, &pointer(-8, 56), 0.0);
+        assert_ne!(
+            clean,
+            read_back(&t, &ctx, w, h),
+            "the cursor quad drew nothing"
+        );
+        t.restore_under(0).expect("restore");
+        assert_eq!(read_back(&t, &ctx, w, h), clean, "restore left the pointer");
+
+        // Wholly outside: nothing saved, nothing to put back, and no stale rectangle kept.
+        t.blend(0, &pointer(200, 200), 0.0);
+        t.restore_under(0).expect("restore");
+        assert_eq!(read_back(&t, &ctx, w, h), clean);
+    }
+}
