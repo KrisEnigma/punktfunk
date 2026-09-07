@@ -309,6 +309,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **Error messages follow one register rule across the stack (`docs/writing.md` §4).** Operator
+  lines name the operation, screen text is a plain sentence with the next move, and the
+  management API's `error` field is now screen text because the console shows it verbatim —
+  re-read any string your code matches on, since none of them are a stable API.
+- **`LibraryError`'s text is a phrase, not a sentence, in all three clients.** Callers already
+  supply the frame (a "Couldn't load the library" title, a "Shut down failed — " lead), so the
+  sentence read as a second headline; a 4xx from a host action also reported itself as
+  unreachable and now uses `Http`. Compose it under your own title rather than showing it alone.
 - **Adaptive FEC on the native plane floors at 5 % and two parity shards per block.** The
   old 1 % floor left one shard per frame, so a clean link lost a frame to a two-packet burst;
   nothing to do, `PUNKTFUNK_FEC_PCT` still pins a percent.

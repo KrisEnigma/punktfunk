@@ -775,7 +775,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             );
                             fullscreen = false;
                             if let Err(e) = window.set_fullscreen(false) {
-                                tracing::warn!(error = %e, "failed to leave fullscreen");
+                                tracing::warn!(error = %e, "fullscreen exit failed");
                             }
                             continue;
                         }
@@ -935,7 +935,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         fullscreen = !fullscreen;
                         tracing::debug!(fullscreen, "fullscreen toggle");
                         if let Err(e) = window.set_fullscreen(fullscreen) {
-                            tracing::warn!(error = %e, fullscreen, "failed to toggle fullscreen");
+                            tracing::warn!(error = %e, fullscreen, "fullscreen toggle failed");
                         }
                         continue;
                     }
@@ -1978,8 +1978,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             }
                             Err(e) => {
                                 if device_lost(&e) {
-                                    return Err(e)
-                                        .context("GPU device lost — the session cannot continue");
+                                    return Err(e).context("GPU device lost");
                                 }
                                 if !st.pyro_present_warned {
                                     st.pyro_present_warned = true;
@@ -2010,8 +2009,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             }
                             Err(e) => {
                                 if device_lost(&e) {
-                                    return Err(e)
-                                        .context("GPU device lost — the session cannot continue");
+                                    return Err(e).context("GPU device lost");
                                 }
                                 if !st.cpu_present_warned {
                                     st.cpu_present_warned = true;
@@ -2046,8 +2044,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             // device is not survivable and must not demote.
                             Err(e) => {
                                 if device_lost(&e) {
-                                    return Err(e)
-                                        .context("GPU device lost — the session cannot continue");
+                                    return Err(e).context("GPU device lost");
                                 }
                                 st.hw_fails += 1;
                                 tracing::warn!(error = %format!("{e:#}"), fails = st.hw_fails,
@@ -2092,8 +2089,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             }
                             Err(e) => {
                                 if device_lost(&e) {
-                                    return Err(e)
-                                        .context("GPU device lost — the session cannot continue");
+                                    return Err(e).context("GPU device lost");
                                 }
                                 st.hw_fails += 1;
                                 tracing::warn!(error = %format!("{e:#}"), fails = st.hw_fails,
@@ -2139,8 +2135,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             }
                             Err(e) => {
                                 if device_lost(&e) {
-                                    return Err(e)
-                                        .context("GPU device lost — the session cannot continue");
+                                    return Err(e).context("GPU device lost");
                                 }
                                 st.hw_fails += 1;
                                 tracing::warn!(error = %format!("{e:#}"), fails = st.hw_fails,

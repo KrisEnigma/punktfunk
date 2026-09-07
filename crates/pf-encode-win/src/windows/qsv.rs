@@ -981,7 +981,7 @@ impl QsvEncoder {
                 if sts < vpl::MFX_ERR_NONE {
                     tracing::debug!(
                         status = sts_name(sts),
-                        "QSV: could not read back CodingOption2 — trusting the intra-refresh request"
+                        "QSV: CodingOption2 did not read back — trusting the intra-refresh request"
                     );
                     true
                 } else {

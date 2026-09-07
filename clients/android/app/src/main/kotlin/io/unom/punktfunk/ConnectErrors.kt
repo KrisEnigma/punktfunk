@@ -32,7 +32,7 @@ object ConnectErrors {
                 } else {
                     transport(token)
                 }
-            else -> "Connection failed — check host/port and logcat."
+            else -> "Couldn't connect — check the host's address and port."
         }
 
     /** The host's typed rejection reasons — identical wording across every punktfunk client. */
@@ -81,6 +81,6 @@ object ConnectErrors {
         "io" ->
             "Couldn't reach the host — check that this device and the host are on the same " +
                 "network (no VPN on this device, no guest-Wi-Fi / AP isolation)."
-        else -> "Pairing failed — the host didn't answer or closed the connection (see logcat)."
+        else -> "Pairing failed — the host didn't answer or closed the connection."
     }
 }

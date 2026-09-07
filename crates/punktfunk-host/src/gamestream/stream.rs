@@ -293,7 +293,7 @@ fn run(
                         spawned_now = true;
                     }
                     Err(e) => {
-                        tracing::warn!(title = %t.game.title, error = %e, "gamestream: could not launch app")
+                        tracing::warn!(title = %t.game.title, error = %e, "gamestream: app not launched")
                     }
                 }
             }
@@ -320,7 +320,7 @@ fn run(
                     Some(spawned)
                 }
                 Err(e) => {
-                    tracing::warn!(command = %cmd, error = %e, "gamestream: could not launch app");
+                    tracing::warn!(command = %cmd, error = %e, "gamestream: app not launched");
                     None
                 }
             },

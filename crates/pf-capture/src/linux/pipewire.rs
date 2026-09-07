@@ -1591,7 +1591,7 @@ pub fn pipewire_thread(
             if let Err(e) = &parsed {
                 tracing::error!(
                     error = %e,
-                    "pipewire: failed to parse the negotiated Format pod — capture will time out \
+                    "pipewire: the negotiated Format pod does not parse — capture will time out \
                      with no usable format"
                 );
             }

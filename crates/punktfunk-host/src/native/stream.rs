@@ -1581,7 +1581,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     spawned_now = true;
                 }
                 Err(e) => {
-                    tracing::warn!(launch_id = id, error = %e, "could not launch requested library title")
+                    tracing::warn!(launch_id = id, error = %e, "requested library title not launched")
                 }
             }
         }
@@ -1618,7 +1618,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 Some(spawned)
             }
             Err(e) => {
-                tracing::warn!(command = %cmd, error = %e, "could not launch requested title into the session");
+                tracing::warn!(command = %cmd, error = %e, "requested title not launched into the session");
                 None
             }
         },
@@ -1685,7 +1685,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     });
     #[cfg(target_os = "linux")]
     if let Some(Err(e)) = steam_exit_watch.as_ref().map(|r| r.as_ref()) {
-        tracing::warn!(error = %e, "could not start the dedicated Steam exit watcher");
+        tracing::warn!(error = %e, "dedicated Steam exit watcher not started");
     }
 
     let game_lease = launch_target.as_ref().map(|target| {
@@ -3875,7 +3875,7 @@ fn is_permanent_build_error(chain: &str) -> bool {
     const PERMANENT: &[&str] = &[
         "virtual displays require linux",
         "unknown punktfunk_compositor",
-        "could not detect compositor",
+        "compositor not detected",
         "kwin virtual output failed",
         "must be a node id",
         "is it installed",

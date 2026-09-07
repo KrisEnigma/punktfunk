@@ -476,9 +476,7 @@ private fun padAction(activity: MainActivity?, action: String, padKey: String) {
                     SkiaConsole.notice(
                         when {
                             r > 0 -> "Haptics test passed — $r frames to the pad."
-                            r == -1 ->
-                                "Could not open the pad's audio interface. Some kernels " +
-                                    "refuse it; the pad still works normally."
+                            r == -1 -> "Couldn't open the pad's haptics — the pad still works normally"
                             r == -2 -> "The audio stream stopped part-way."
                             else -> "The stream opened but no audio reached the pad."
                         },
