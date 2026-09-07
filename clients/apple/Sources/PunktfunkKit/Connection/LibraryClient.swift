@@ -127,6 +127,8 @@ public enum LibraryError: LocalizedError {
     case pinMismatch
     case http(Int)
     case unreachable(String)
+    /// A library entry's art URL is not something we will fetch (only http/https).
+    case badArtURL
 
     public var errorDescription: String? {
         switch self {
@@ -138,6 +140,8 @@ public enum LibraryError: LocalizedError {
                 + "If the host was reinstalled, forget it here and pair again."
         case .http(let code):
             return "The management API returned HTTP \(code)."
+        case .badArtURL:
+            return "That title's artwork address isn't a web address."
         case .unreachable(let why):
             // The library rides a DIFFERENT port than the stream (the management API, 47990 by
             // default; the stream is QUIC on 9777), so it can fail while streaming to the same
@@ -539,9 +543,25 @@ public final class LibraryArtLoader: LibraryArtSource, @unchecked Sendable {
     }
 
     private func fetch(_ url: URL) async throws -> Data {
-        guard isHostOrigin(url) else { return try await cdn.data(from: url).0 }
-        var path = url.path.isEmpty ? "/" : url.path
-        if let query = url.query { path += "?\(query)" }
+        guard isHostOrigin(url) else {
+            // A library entry names its own art URL, so this is host-supplied. Web schemes only —
+            // a `file:` URL would make the client read its own container and cache the result as a
+            // poster — and the same ceiling the pinned path enforces, since nothing else bounds a
+            // CDN body.
+            guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http"
+            else { throw LibraryError.badArtURL }
+            let data = try await cdn.data(from: url).0
+            guard data.count <= MgmtTransport.maxResponseBytes else { throw MgmtTransportError.tooLarge }
+            return data
+        }
+        // The ENCODED components: `url.path` and `url.query` hand back percent-DECODED text, and
+        // writing that straight into the request line breaks any id that needed encoding (a space
+        // in a custom entry's id makes the line unparseable, so that tile silently never gets
+        // art) — and a decoded CRLF would split the request outright.
+        let parts = URLComponents(url: url, resolvingAgainstBaseURL: true)
+        var path = parts?.percentEncodedPath ?? ""
+        if path.isEmpty { path = "/" }
+        if let query = parts?.percentEncodedQuery { path += "?\(query)" }
         let response = try await LibraryClient.send(
             path: path, address: address, port: port,
             identity: identity, hostFingerprint: hostFingerprint)
