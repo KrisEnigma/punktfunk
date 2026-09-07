@@ -4064,12 +4064,15 @@ fn spawn(
         }
     }
     let wsi = WsiPlan::resolve();
-    if matches!(wsi, WsiPlan::DistroDisabled) && hdr {
+    if wsi == WsiPlan::DistroDisabled {
+        // `hdr` is a field, not a gate: the layer is missing either way, and so is the fix.
         tracing::warn!(
-            "gamescope: HDR session without a matching WSI layer — nested games get SDR swapchains"
+            hdr,
+            "gamescope: this box's VkLayer_FROG_gamescope_wsi was built for a different gamescope \
+             than the one we run, so it is disabled for this session and no nested game can get \
+             an HDR10 swapchain. The punktfunk-gamescope package ships a matching layer."
         );
     }
-    tracing::info!(?wsi, "gamescope WSI plan");
     cmd.args(app.split_whitespace())
         // Prefer the NVIDIA GL vendor for the nested session (harmless on a pure-NVIDIA box).
         .env("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
@@ -4089,7 +4092,7 @@ fn spawn(
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
     tracing::info!(
-        w, h, hz, steam_mode, hdr,
+        w, h, hz, steam_mode, hdr, ?wsi,
         bin = %gamescope_bin(),
         splash = splash_exe.is_some(),
         %app,
