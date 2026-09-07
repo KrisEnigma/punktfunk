@@ -650,7 +650,9 @@ impl MenuList {
             // Scale 0.98 → 1.0 about the centre, times the confirm dip. Two
             // channels: pop = this is the row, dip = you just pressed it.
             let pop = self.focus_pop.get(i).map_or(f, |s| s.pos);
-            let dip = if i == self.cursor {
+            // A switch is its own feedback: squashing the row around it reads as the list
+            // lurching on what is one control moving.
+            let dip = if i == self.cursor && !matches!(row.control, Control::Toggle(_)) {
                 self.press.pos
             } else {
                 1.0
