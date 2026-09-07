@@ -617,6 +617,11 @@ impl MenuList {
         self.buttons_geom.resize(rows.len(), Vec::new());
         self.tracks_geom.clear();
         self.tracks_geom.resize(rows.len(), Rect::new_empty());
+        let dot_gutter = if rows.iter().any(|r| r.dot) {
+            16.0 * k
+        } else {
+            0.0
+        };
         for (i, row) in rows.iter().enumerate() {
             let f = self.focus[i];
             let top = f64::from(rect.top) + tops[i] * k - self.scroll + self.bump.pos * k;
@@ -645,7 +650,9 @@ impl MenuList {
             // Scale 0.98 → 1.0 about the centre, times the confirm dip. Two
             // channels: pop = this is the row, dip = you just pressed it.
             let pop = self.focus_pop.get(i).map_or(f, |s| s.pos);
-            let dip = if i == self.cursor {
+            // A switch is its own feedback: squashing the row around it reads as the list
+            // lurching on what is one control moving.
+            let dip = if i == self.cursor && !matches!(row.control, Control::Toggle(_)) {
                 self.press.pos
             } else {
                 1.0
@@ -703,7 +710,7 @@ impl MenuList {
                     off
                 }
             };
-            // Leading marks shift the label: a Lucide icon, then the override dot.
+            // Leading marks shift the label: a Lucide icon.
             let mut label_x = x0 + 16.0 * k;
             if let Some(icon) = row.icon.and_then(crate::icons::by_name) {
                 crate::icons::draw_icon(
@@ -715,14 +722,6 @@ impl MenuList {
                     tone(fg(0.85), fg(0.4)),
                 );
                 label_x += 32.0 * k;
-            }
-            if row.dot {
-                canvas.draw_circle(
-                    ((label_x + 4.0 * k) as f32, cy as f32),
-                    (4.0 * k) as f32,
-                    &fill(accent(1.0)),
-                );
-                label_x += 16.0 * k;
             }
             if row.handle {
                 if let Some(grip) = crate::icons::by_name("grip-vertical") {
@@ -785,6 +784,17 @@ impl MenuList {
                 }
             }
             let row_w = row_w - buttons_w;
+            // The dot marks the row's value, so it reads as part of that group: outboard of
+            // the value, inboard of the buttons. The gutter is reserved on every row, or one
+            // marked row pulls its own value in past its neighbours'.
+            if row.dot {
+                canvas.draw_circle(
+                    ((x0 + row_w - 12.0 * k) as f32, cy as f32),
+                    (4.0 * k) as f32,
+                    &fill(accent(1.0)),
+                );
+            }
+            let row_w = row_w - dot_gutter;
             if let Some(note) = &row.note {
                 fonts.draw_clipped(
                     canvas,
