@@ -976,9 +976,10 @@ fn fec_static_override() -> Option<u8> {
         .map(|p| p.min(90))
 }
 
-/// Adaptive-FEC band. Clean link decays toward [`FEC_MIN`] (fewer packets on a rate-bound
-/// uplink); loss ramps toward [`FEC_MAX`]. Start moderate so the first frames are protected.
-const FEC_MIN: u8 = 1;
+/// Adaptive-FEC band. A clean link decays to [`FEC_MIN`]; loss ramps toward [`FEC_MAX`].
+/// 5 % is 4 parity shards on a ~110 KB frame (2 on a 30 KB one) — the burst a clean link
+/// still drops. A 1 % floor left one, so the cleanest link lost a frame to two packets.
+const FEC_MIN: u8 = 5;
 const FEC_MAX: u8 = 50;
 const FEC_ADAPTIVE_START: u8 = 10;
 
@@ -988,71 +989,6 @@ fn adapt_fec(loss_ppm: u32) -> u8 {
     let loss_pct = loss_ppm as f64 / 10_000.0; // ppm → percent
     let target = (loss_pct * 1.4).ceil() as u32 + 1;
     target.clamp(FEC_MIN as u32, FEC_MAX as u32) as u8
-}
-
-/// Decay floor after any real loss. 5 % so a static stretch cannot drop protection before motion.
-const FEC_BURNED_MIN: u8 = 5;
-/// Clean 750 ms windows (~2 min) before a burned session re-earns [`FEC_MIN`].
-const FEC_REEARN_WINDOWS: u32 = 160;
-/// Cap on the doubled re-earn (~16 min) so a periodic-burst link does not run the counter away.
-const FEC_REEARN_MAX: u32 = 1280;
-
-/// Adaptive-FEC decay floor with a memory of real loss.
-///
-/// Any `loss_ppm > 0` (loss is discrete — nonzero means real shards) raises the floor to
-/// [`FEC_BURNED_MIN`]. [`FEC_REEARN_WINDOWS`] clean windows re-earn 1 %; a re-burn before
-/// that step-down doubles the next requirement (to [`FEC_REEARN_MAX`]); surviving the
-/// horizon resets to base.
-#[derive(Debug)]
-struct FecFloor {
-    floor: u8,
-    clean_windows: u32,
-    reearn: u32,
-    /// Clean windows since the last step-down; `None` = no step-down on probation.
-    since_stepdown: Option<u32>,
-}
-
-impl Default for FecFloor {
-    fn default() -> Self {
-        Self {
-            floor: FEC_MIN,
-            clean_windows: 0,
-            reearn: FEC_REEARN_WINDOWS,
-            since_stepdown: None,
-        }
-    }
-}
-
-impl FecFloor {
-    /// One report window; returns the floor the adaptive target must not decay below.
-    fn on_report(&mut self, loss_ppm: u32) -> u8 {
-        if loss_ppm > 0 {
-            if let Some(w) = self.since_stepdown.take() {
-                if w < self.reearn {
-                    // Step-down did not survive — demand double.
-                    self.reearn = (self.reearn * 2).min(FEC_REEARN_MAX);
-                }
-            }
-            self.clean_windows = 0;
-            self.floor = FEC_BURNED_MIN;
-        } else {
-            self.clean_windows = self.clean_windows.saturating_add(1);
-            if let Some(w) = self.since_stepdown.as_mut() {
-                *w = w.saturating_add(1);
-                if *w >= self.reearn {
-                    // Step-down outlived probation — the link recovered.
-                    self.reearn = FEC_REEARN_WINDOWS;
-                    self.since_stepdown = None;
-                }
-            }
-            if self.floor > FEC_MIN && self.clean_windows >= self.reearn {
-                self.floor = FEC_MIN;
-                self.clean_windows = 0;
-                self.since_stepdown = Some(0);
-            }
-        }
-        self.floor
-    }
 }
 
 /// Per-frame send path: apply the adaptive-FEC target if it changed (relaxed load + compare).
@@ -2503,11 +2439,11 @@ mod tests {
 
     #[test]
     fn adapt_fec_maps_loss_to_recovery_band() {
-        // Clean window (0 loss) is FEC_MIN.
+        // Clean window (0 loss) is FEC_MIN; loss under ~2.8 % clamps to it.
         assert_eq!(adapt_fec(0), FEC_MIN);
-        // Any nonzero loss rounds up past FEC_MIN.
-        assert_eq!(adapt_fec(1), 2);
+        assert_eq!(adapt_fec(1), FEC_MIN);
         // FEC exceeds the loss it covers (×1.4 + 1 pt).
+        assert_eq!(adapt_fec(30_000), 6); // 3% → ceil(4.2)+1 = 6
         assert_eq!(adapt_fec(50_000), 8); // 5% → ceil(7)+1 = 8
         assert_eq!(adapt_fec(100_000), 15); // 10% → ceil(14)+1 = 15
         assert_eq!(adapt_fec(1_000_000), FEC_MAX); // 100% → clamped
@@ -2551,53 +2487,6 @@ mod tests {
         let burned = encoder_kbps_for_budget(20_000, 300, 5, 1408);
         let stormy = encoder_kbps_for_budget(20_000, 300, 50, 1408);
         assert!(calm > burned && burned > stormy);
-    }
-
-    #[test]
-    fn fec_floor_burns_reearns_and_doubles_on_early_reburn() {
-        let mut f = FecFloor::default();
-        // Untouched sessions decay to the 1 % floor.
-        assert_eq!(f.on_report(0), FEC_MIN);
-        // One lost shard = burned: 5 % floor, clean windows hold it.
-        assert_eq!(f.on_report(2_270), FEC_BURNED_MIN); // one packet at 5 Mbps
-        for _ in 0..FEC_REEARN_WINDOWS - 1 {
-            assert_eq!(f.on_report(0), FEC_BURNED_MIN);
-        }
-        // The 160th clean window re-earns 1 %.
-        assert_eq!(f.on_report(0), FEC_MIN);
-        // Re-burn inside probation doubles the next requirement.
-        assert_eq!(f.on_report(500), FEC_BURNED_MIN);
-        for _ in 0..2 * FEC_REEARN_WINDOWS - 1 {
-            assert_eq!(f.on_report(0), FEC_BURNED_MIN);
-        }
-        assert_eq!(f.on_report(0), FEC_MIN);
-        // Ceiling bounds the doubling ladder.
-        let mut g = FecFloor {
-            reearn: FEC_REEARN_MAX,
-            since_stepdown: Some(0),
-            ..FecFloor::default()
-        };
-        g.on_report(1);
-        assert_eq!(g.reearn, FEC_REEARN_MAX);
-        // Surviving probation resets the requirement to base.
-        let mut h = FecFloor::default();
-        h.on_report(1);
-        for _ in 0..FEC_REEARN_WINDOWS {
-            h.on_report(0);
-        }
-        assert_eq!(h.floor, FEC_MIN);
-        for _ in 0..FEC_REEARN_WINDOWS {
-            h.on_report(0);
-        }
-        assert_eq!(h.reearn, FEC_REEARN_WINDOWS);
-        assert!(
-            h.since_stepdown.is_none(),
-            "probation over — durable recovery"
-        );
-        // Burn after durable recovery is a fresh burn, not a double.
-        h.on_report(1);
-        assert_eq!(h.reearn, FEC_REEARN_WINDOWS);
-        assert_eq!(h.floor, FEC_BURNED_MIN);
     }
 
     #[test]
