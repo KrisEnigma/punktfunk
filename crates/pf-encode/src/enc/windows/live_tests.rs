@@ -1,8 +1,7 @@
 //! Live (`#[ignore]`-style, hardware-skipping) tests that pair a `pf_encode_win`
-//! backend with something only this crate links: libavcodec's AMF encoder for
-//! the native-vs-ffmpeg A/B, and pf-capture's real `HdrP010Converter` output
-//! for the QSV ingest path. Kept here so `pf-encode-win` has no dev-dependency
-//! on either.
+//! backend with something only this crate links: pf-capture's real
+//! `HdrP010Converter` output for the QSV ingest path. Kept here so
+//! `pf-encode-win` has no dev-dependency on it.
 
 #![allow(dead_code)]
 
@@ -143,114 +142,6 @@ fn drive_and_measure(
         }
     }
     samples
-}
-
-/// Native vs libavcodec-AMF submit→AU A/B on the same paced NV12 input. Opt-in
-/// (`PUNKTFUNK_AMF_BENCH=1`); gated on `amf-qsv`. Skips without the AMD runtime/GPU.
-#[cfg(feature = "amf-qsv")]
-#[test]
-fn amf_latency_ab_bench() {
-    if std::env::var("PUNKTFUNK_AMF_BENCH").as_deref() != Ok("1") {
-        eprintln!("skipping: set PUNKTFUNK_AMF_BENCH=1 to run the native-vs-ffmpeg latency A/B");
-        return;
-    }
-    let Some(device) = amd_d3d11_device() else {
-        eprintln!("skipping: no AMD adapter on this box");
-        return;
-    };
-    let (w, h, fps) = (1920u32, 1080u32, 60u32);
-    let bitrate = 20_000_000u64;
-    let frames = 180usize;
-    let tex = nv12_texture(&device, w, h);
-
-    let mut native = match amf::AmfEncoder::open(
-        Codec::H265,
-        PixelFormat::Nv12,
-        w,
-        h,
-        fps,
-        bitrate,
-        8,
-        ChromaFormat::Yuv420,
-        pf_gpu::resolve_render_adapter_luid(),
-    ) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("skipping: native AMF open declined ({e:#})");
-            return;
-        }
-    };
-    let mut native_us = drive_and_measure(
-        &mut native,
-        &device,
-        &tex,
-        w,
-        h,
-        fps,
-        PixelFormat::Nv12,
-        frames,
-    );
-    drop(native);
-
-    let mut ffmpeg = ffmpeg_win::FfmpegWinEncoder::open(
-        ffmpeg_win::WinVendor::Amf,
-        Codec::H265,
-        PixelFormat::Nv12,
-        w,
-        h,
-        fps,
-        bitrate,
-        8,
-        ChromaFormat::Yuv420,
-    )
-    .expect("libavcodec AMF open");
-    let mut ffmpeg_us = drive_and_measure(
-        &mut ffmpeg,
-        &device,
-        &tex,
-        w,
-        h,
-        fps,
-        PixelFormat::Nv12,
-        frames,
-    );
-    drop(ffmpeg);
-
-    let iv = 1_000_000u128 / fps as u128;
-    let (n50, n99, nc) = (
-        percentile(&mut native_us, 0.50),
-        percentile(&mut native_us, 0.99),
-        native_us.len(),
-    );
-    let (f50, f99, fc) = (
-        percentile(&mut ffmpeg_us, 0.50),
-        percentile(&mut ffmpeg_us, 0.99),
-        ffmpeg_us.len(),
-    );
-    eprintln!("=== native AMF vs libavcodec-AMF  encode_us A/B ===");
-    eprintln!("mode: {w}x{h}@{fps} HEVC, {frames} paced frames, frame period {iv} us");
-    eprintln!(
-        "native (direct SDK) : p50={n50} us  p99={n99} us  ({nc} AUs)  = {:.2} frame periods",
-        n50 as f64 / iv as f64
-    );
-    eprintln!(
-        "ffmpeg (libavcodec) : p50={f50} us  p99={f99} us  ({fc} AUs)  = {:.2} frame periods",
-        f50 as f64 / iv as f64
-    );
-    if n50 > 0 {
-        eprintln!(
-            "native p50 is {:.1}x lower than ffmpeg",
-            f50 as f64 / n50 as f64
-        );
-    }
-    assert!(
-        n50 < f50,
-        "native encode_us p50 ({n50}) must beat the libavcodec hold ({f50})"
-    );
-    assert!(
-        n50 < iv,
-        "native encode_us p50 ({n50} us) should collapse below one frame period ({iv} us)"
-    );
 }
 
 /// 1080p HEVC Main10 ingest through the real `HdrP010Converter` (RTV-written P010,

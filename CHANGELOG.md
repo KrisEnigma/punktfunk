@@ -23,6 +23,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
+- **The host links no FFmpeg.** libavcodec's NVENC and VAAPI backends and the Windows `amf-qsv`
+  path are gone: NVIDIA encodes through the direct SDK, AMD and Intel through the native VAAPI
+  session, Windows Intel through native QSV, and CPU frames are uploaded to the GPU instead of
+  handed to libav. Drop every `libav*` build and runtime dependency from a package, and give a
+  hand build for an NVIDIA box `--features punktfunk-host/nvenc` — without it there is no NVENC,
+  and the `libav-fallback`, `amf-qsv`, `PUNKTFUNK_VAAPI_NATIVE` and `PUNKTFUNK_NVENC_DIRECT`
+  escape hatches no longer exist.
 - **The game-library toggle is gone from Apple and Android too.** `DefaultsKey.libraryEnabled`
   and the Kotlin `Settings.libraryEnabled` follow the Rust `library_enabled` retired in 0.31:
   pairing is the only gate on every client now. A stored value is left where it is and never
@@ -47,11 +54,6 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
-- **`libav-fallback` feature on `pf-encode`, enabled by the Linux host.** The libavcodec NVENC
-  and VAAPI backends sit behind it; `punktfunk-host` turns it on through its Linux dependency
-  entry, and the bare crate — or a host with that entry's feature dropped — links no FFmpeg, the
-  native VAAPI session answering the codec probes itself. Packagers change nothing; the default
-  build links the FFmpeg it did.
 - **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
   and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
   rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.
@@ -290,8 +292,7 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **AMD and Intel Linux hosts encode H.264 and HEVC through the native VAAPI session.** It
   replaces the libavcodec path on radeonsi and iHD: a packet loss is answered on a P picture
   instead of a full IDR, a bitrate step lands in place, and HEVC Main 10 carries its HDR10
-  metadata. Nothing to do; `PUNKTFUNK_VAAPI_NATIVE=0` returns a host to the libav path, and a
-  native open that fails falls back to it on its own.
+  metadata. Nothing to do — it is the only VAAPI encoder now.
 - **The Windows driver's diagnostics reach `host.log`.** The encoder runs inside WUDFHost, so its
   backend rejections, bitrate retargets and wedges used to need `PFVD_DEBUG_LOG` and a file in
   LocalService's temp directory; the host now drains them over `IOCTL_DRAIN_LOG` at the keepalive

@@ -32,24 +32,22 @@
 # Windows checks the installer's signature via SmartScreen/UAC and driver catalogs via PnP, and never
 # requires a common signer. See packaging/windows/README.md for why that root-plant is still there.
 #
-# GPU backends: the host builds with --features nvenc,amf-qsv,qsv = all three vendors in one installer.
+# GPU backends: the host builds with --features nvenc,qsv = all three vendors in one installer.
 #  - NVENC (NVIDIA, direct SDK): nothing needed at build time — the entry points are resolved at
 #    RUNTIME from the driver's nvEncodeAPI64.dll (a link-time import would kill the binary on
 #    AMD/Intel-only boxes before main).
 #  - QSV native (Intel, VPL — design/native-qsv-encoder.md): the MIT dispatcher is built from the
 #    vendored tree (libvpl-sys, cmake+bindgen — LIBCLANG_PATH already in the runner env for
 #    pyrowave-sys) and statically linked; the GPU runtime comes from the Intel driver store at run
-#    time, so no new DLL ships and non-Intel boxes are unaffected. This is the Intel dispatch;
-#    the ffmpeg *_qsv path below stays as its open-failure fallback until Phase 4 deletes it.
-#  - AMF/QSV (AMD/Intel, libavcodec): link-imports the FFmpeg libs from FFMPEG_DIR (the BtbN lgpl-shared
-#    tree the client uses; includes the *_amf/*_qsv encoders) and bundles its DLLs into the installer.
-#    lgpl-shared (not gpl-shared) keeps those bundled DLLs LGPL (we never use the GPL-only x264/x265).
+#    time, so no new DLL ships and non-Intel boxes are unaffected.
+#  - AMF (AMD, native SDK): unconditional, no feature and no build-time env — pf-encode-win loads
+#    amfrt64.dll from the AMD driver at run time.
 # CI never launches the exe, so no GPU is needed here — this is build + Windows clippy coverage only.
 #
 # Two architectures from ONE x64 runner (#298), the client workflow's pattern: the x64 MSVC toolset
 # carries the ARM64 cross compiler and aarch64-pc-windows-msvc has host tools. The arm64 leg builds
-# `--no-default-features --features gamestream` — NVENC (cudarc), QSV (Intel dispatcher), AMF/QSV
-# (an x64 FFmpeg tree) and PyroWave (Granite has no MSVC-ARM64 SIMD path) do not exist there, and
+# `--no-default-features --features gamestream` — NVENC (cudarc), QSV (Intel dispatcher) and
+# PyroWave (Granite has no MSVC-ARM64 SIMD path) do not exist there, and
 # Media Foundation, which needs no feature, is its only encoder. Tests, the silent dry-run, the
 # Inno revert gate and winget stay x64: the arm64 binaries cannot run on this runner, and the arm64
 # installer ships to the `canary/` alias only until it has run on a Snapdragon box.
@@ -138,8 +136,8 @@ jobs:
           - arch: x64
             target: x86_64-pc-windows-msvc
             td: C:\t
-            host_flags: '--features nvenc,amf-qsv,qsv'
-            encode_flags: '--features nvenc,amf-qsv,qsv'
+            host_flags: '--features nvenc,qsv'
+            encode_flags: '--features nvenc,qsv'
             bun_ship_zip: bun-windows-x64.zip
             bun_ship_sha: 0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922
             suffix: ''
@@ -187,15 +185,9 @@ jobs:
           # observed on a clean build on this very runner (2026-07-17). No-op for compliant
           # projects (libvpl-sys pins 3.13+).
           "CMAKE_POLICY_VERSION_MINIMUM=3.5" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # FFMPEG_DIR: the BtbN lgpl-shared x64 tree, provisioned by
-          # scripts/ci/provision-windows-punktfunk-extras.ps1. The CLIENT used to link it too; since M10
-          # it links no libav* at all (windows-client.yml sets no FFMPEG_DIR), so this tree is the HOST's alone
-          # and the provisioning step keeps fetching it for that reason. The host's AMD/Intel AMF/QSV encode backend
-          # (--features amf-qsv) link-imports avcodec/avutil/swscale from it; pack-host-installer.ps1
-          # then bundles its bin\*.dll into the installer. LIBCLANG_PATH is in the runner daemon env.
-          if (-not $env:FFMPEG_DIR) {
-            "FFMPEG_DIR=C:\Users\Public\ffmpeg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          }
+          # No FFMPEG_DIR: neither the host nor the client links libav* any more. A runner
+          # provisioned before that still has the tree and the daemon env var; both are inert.
+          # LIBCLANG_PATH is in the runner daemon env.
           $pf = & "$env:GITHUB_WORKSPACE/scripts/ci/pf-version.ps1"   # single source of truth: base is one minor ahead of the latest stable tag
           $v = if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $env:GITHUB_REF_NAME -replace '^v', ''
@@ -230,7 +222,7 @@ jobs:
       - name: Build (release, host)
         shell: pwsh
         # x64 = all-vendor host: NVENC (NVIDIA, direct SDK) + native QSV (Intel, static VPL
-        # dispatcher) + AMF/QSV (AMD + the Intel ffmpeg fallback, libavcodec via FFMPEG_DIR).
+        # dispatcher) + native AMF (AMD, always compiled in).
         # arm64 = gamestream only; the driver's Media Foundation backend carries no feature.
         run: cargo build --release -p punktfunk-host ${{ matrix.host_flags }} --target ${{ matrix.target }}
 
@@ -265,12 +257,12 @@ jobs:
         # vehicle — `cargo test` with `nvenc` cannot LINK on MSVC: nvidia-video-codec-sdk
         # link-imports NvEncodeAPICreateInstance / NvEncodeAPIGetMaxSupportedVersion, which resolve
         # only against the driver's import lib. (On Linux the same crate dlopens them, so ci.yml can
-        # and does run the tests there.) Running them here would need an `--features amf-qsv,qsv`
-        # build without `nvenc`, i.e. a third full dep tree on a runner that already trips C1069 —
+        # and does run the tests there.) Running them here would need an `--features qsv` build
+        # without `nvenc`, i.e. a third full dep tree on a runner that already trips C1069 —
         # not worth it while ci.yml executes the same tests.
         #
         # That reasoning does NOT extend to pf-capture: it has no encoder dependency at all
-        # (`cargo tree -p pf-capture` lists no nvidia/ffmpeg/libvpl/pyrowave), so its test binary
+        # (`cargo tree -p pf-capture` lists no nvidia/libvpl/pyrowave), so its test binary
         # links against nothing this runner lacks, and it reuses the release artifacts the steps
         # above already built. Its Windows `#[test]`s — StallWatch, the f16 conversions, the cursor
         # truth table, the IDD generation masking — are Windows-only code that NO other job can
@@ -318,7 +310,7 @@ jobs:
         #
         # The link objection recorded for the host and pf-encode above does NOT apply here, for the
         # same reason it does not apply to pf-capture: `pf-encode` is `default = []`, and nothing in
-        # `-p pf-vdisplay`'s graph turns on `nvenc`/`amf-qsv`/`qsv`, so no nvidia/ffmpeg/libvpl
+        # `-p pf-vdisplay`'s graph turns on `nvenc`/`qsv`, so no nvidia/libvpl
         # import libs are ever asked for. Settled empirically before this step was added, to the
         # same standard as pf-capture's: the exact two commands were run on this runner against a
         # checkout at C:\temp\pf-vd-check — clippy clean, then 46 passed / 2 ignored in 0.19 s.
@@ -489,10 +481,6 @@ jobs:
             @{ n = 'bun runtime (BUN_SHIP_EXE)';      p = $env:BUN_SHIP_EXE;     f = '' }
             @{ n = 'plugin runner (SCRIPTING_BUNDLE)';p = $env:SCRIPTING_BUNDLE; f = '' }
           )
-          # The FFmpeg DLLs serve the x64-only amf-qsv feature; the arm64 installer never bundles them.
-          if ('${{ matrix.arch }}' -eq 'x64') {
-            $need += @{ n = 'FFmpeg DLLs (FFMPEG_DIR\bin)';    p = $env:FFMPEG_DIR;       f = 'bin' }
-          }
           $missing = @()
           foreach ($x in $need) {
             if (-not $x.p) { $missing += "$($x.n): env var not set"; continue }

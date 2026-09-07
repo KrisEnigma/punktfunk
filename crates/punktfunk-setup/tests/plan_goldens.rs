@@ -59,7 +59,6 @@ fn fresh(id: &str, family: Family) -> Facts {
         in_punktfunk_group: false,
         has_input_group: true,
         nvidia: Nvidia::Absent,
-        has_rpmfusion_ffmpeg: false,
         firewall: Firewall::None,
         systemd_pid1: true,
         user_manager: true,

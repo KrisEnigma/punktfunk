@@ -225,19 +225,18 @@ jobs:
       # through `--features punktfunk-host/...` would force punktfunk-host into the selection and
       # re-run its entire test suite a second time for no extra coverage.
       #
-      # `pyrowave` (the host's default) and `libav-fallback` (what the Linux host enables on its
-      # pf-encode entry) are listed explicitly: selecting only `-p pf-encode` takes the host out of
-      # the resolution, and pf-encode's own default is empty. Naming them keeps this the SHIPPED Linux feature set — deb.yml builds
+      # `pyrowave` (the host's default) is listed explicitly: selecting only `-p pf-encode` takes
+      # the host out of the resolution, and pf-encode's own default is empty. Naming it keeps this
+      # the SHIPPED Linux feature set — deb.yml builds
       # `--features punktfunk-host/nvenc,punktfunk-host/vulkan-encode` WITHOUT
-      # `--no-default-features`, so the .deb carries nvenc + vulkan-encode + pyrowave + libav
-      # together, and that combination is what deserves the lint. The bare crate is the FFmpeg-free
-      # build (native VAAPI only); it lints on its own.
+      # `--no-default-features`, so the .deb carries nvenc + vulkan-encode + pyrowave together, and
+      # that combination is what deserves the lint. The bare crate lints on its own.
       - name: Clippy + test the feature-gated Linux encode backends
         run: |
           cargo clippy -p pf-encode --all-targets --locked \
-            --features nvenc,vulkan-encode,pyrowave,libav-fallback -- -D warnings
+            --features nvenc,vulkan-encode,pyrowave -- -D warnings
           cargo clippy -p pf-encode --all-targets --locked -- -D warnings
-          cargo test -p pf-encode --locked --features nvenc,vulkan-encode,pyrowave,libav-fallback
+          cargo test -p pf-encode --locked --features nvenc,vulkan-encode,pyrowave
 
       - name: C ABI harness (standalone link proof)
         run: bash crates/punktfunk-core/tests/c/run.sh

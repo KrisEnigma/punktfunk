@@ -161,7 +161,7 @@ def extract_cfgs(attr_blob: str):
         res.append(attr_blob[start+1:i])
     return res
 
-FEATURES = ["nvenc", "amf-qsv", "qsv", "vulkan-encode", "pyrowave"]
+FEATURES = ["nvenc", "qsv", "vulkan-encode", "pyrowave"]
 
 def classify_cfg(preds):
     """Return (platform, features) from a list of cfg predicate strings."""

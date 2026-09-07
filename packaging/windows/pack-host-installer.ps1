@@ -47,7 +47,6 @@ param(
     [string]$AzureAccount = $env:AZURE_CODESIGNING_ACCOUNT,         # signing account name
     [string]$AzureProfile = $env:AZURE_CODESIGNING_PROFILE,         # certificate profile name
     [string]$AzureDlib = $env:AZURE_CODESIGNING_DLIB,               # path to Azure.CodeSigning.Dlib.dll
-    [string]$FfmpegDir = $env:FFMPEG_DIR,                           # bundle its bin\*.dll (amf-qsv build)
     [string]$WebDir = $env:WEB_OUTPUT_DIR,                          # built web .output tree -> bundle the mgmt console
     [string]$ScriptingBundle = $env:SCRIPTING_BUNDLE,              # built runner-cli.js -> bundle the plugin/script runner
     [string]$BunExe = $env:BUN_EXE,                                # portable bun.exe runtime for the console + runner
@@ -320,35 +319,6 @@ if (-not $NoDriver) {
 # audio endpoints from Steam's streaming drivers ("Punktfunk Speakers/Microphone"), so audio needs
 # Steam installed on the target box - never running - and no third-party cable. A user-installed
 # VB-CABLE keeps working as a fallback mic target.
-
-# --- stage the FFmpeg shared DLLs (AMD/Intel AMF/QSV build) ------------------------------------
-# A host built with --features amf-qsv link-imports avcodec/avutil/swscale/... so the shared DLLs
-# MUST sit next to the exe (it won't start otherwise). Bundle them from $FfmpegDir\bin - the same
-# BtbN lgpl-shared tree the build linked against. A nvenc/software-only build doesn't import them, so
-# this is a harmless extra there; skipped entirely when $FfmpegDir is unset. The ARM64 host has no
-# amf-qsv feature and the runner's tree is x64, so that arch never bundles them.
-$ffmpegBinSrc = if ($FfmpegDir -and $Arch -eq 'x64') { Join-Path $FfmpegDir 'bin' } else { $null }
-if ($ffmpegBinSrc -and (Test-Path $ffmpegBinSrc)) {
-    $dlls = Get-ChildItem -Path $ffmpegBinSrc -Filter '*.dll' -ErrorAction SilentlyContinue
-    if ($dlls) {
-        $ffmpegStage = Join-Path $OutDir 'ffmpeg'
-        New-Item -ItemType Directory -Force -Path $ffmpegStage | Out-Null
-        $dlls | ForEach-Object { Copy-Item $_.FullName -Destination $ffmpegStage -Force }
-        $defines += "/DFfmpegBin=$ffmpegStage"
-        Write-Host "bundling $($dlls.Count) FFmpeg DLL(s) from $ffmpegBinSrc"
-        # LGPL compliance: add FFmpeg's own license text (preserved in the BtbN tree root) + our
-        # attribution notice to the {app}\licenses payload so the conveyed installer carries the
-        # LGPLv2.1+ terms. FFmpeg is linked dynamically (separate, user-replaceable DLLs), which
-        # satisfies the LGPL relink requirement.
-        Copy-Item (Join-Path $here 'licenses\FFmpeg-LGPL-NOTICE.txt') -Destination $licStage -Force -ErrorAction SilentlyContinue
-        foreach ($lic in @('LICENSE.txt', 'LICENSE', 'COPYING.LGPLv2.1', 'COPYING.LGPLv3', 'COPYING.txt')) {
-            $p = Join-Path $FfmpegDir $lic
-            if (Test-Path $p) { Copy-Item $p -Destination (Join-Path $licStage "FFmpeg-$lic") -Force }
-        }
-        Write-Host "added FFmpeg license/notice to $licStage"
-    }
-}
-else { Write-Host "no FFMPEG_DIR\bin -> installer built WITHOUT FFmpeg DLLs (nvenc/software-only host)" }
 
 # --- stage the bun runtime + the two bun payloads (web console, plugin/script runner) --------------
 # Both the web console and the runner run on bun. Stage everything ISCC reads into $OutDir (the

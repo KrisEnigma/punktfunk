@@ -1,13 +1,11 @@
-//! The native VAAPI encoder behind [`Encoder`]: `pf_libva`'s session, no libavcodec.
+//! The VAAPI encoder behind [`Encoder`]: `pf_libva`'s session, and the only one.
 //!
-//! What the libav path structurally cannot do, this does: a loss is answered by
-//! predicting from a slot the client still has (`invalidate_ref_frames`), an ABR
-//! step retargets in place (`reconfigure_bitrate`), and HEVC Main 10 carries the
-//! HDR10 SEI. Synchronous: `submit` encodes and `poll` hands the AU straight
-//! back, as the libav path does at `async_depth=1`.
+//! A loss is answered by predicting from a slot the client still has
+//! (`invalidate_ref_frames`), an ABR step retargets in place
+//! (`reconfigure_bitrate`), and HEVC Main 10 carries the HDR10 SEI.
+//! Synchronous: `submit` encodes and `poll` hands the AU straight back.
 //!
-//! The default VAAPI arm for H.264 and HEVC; libav VAAPI is the fallback when an
-//! open fails, and the A/B oracle under `PUNKTFUNK_VAAPI_NATIVE=0`.
+//! H.264 and HEVC on AMD and Intel. AV1 there is Vulkan Video's.
 
 use std::os::fd::AsRawFd as _;
 
@@ -135,7 +133,6 @@ impl NativeVaapiEncoder {
 
 /// Whether the host's render node offers an encode entrypoint for `codec`
 /// at this depth — what a native open needs. AV1 is not a native path.
-#[cfg(not(feature = "libav-fallback"))]
 pub fn probe_can_encode(codec: Codec, ten_bit: bool) -> bool {
     use pf_vaapi::config::{VA_PROFILE_H264_HIGH, VA_PROFILE_HEVC_MAIN, VA_PROFILE_HEVC_MAIN10};
     use pf_vaapi::enc_h264::{VA_ENTRYPOINT_ENC_SLICE, VA_ENTRYPOINT_ENC_SLICE_LP};
@@ -444,7 +441,6 @@ mod tests {
     }
     /// The probe agrees with an open: H.264 and both HEVC depths yes, AV1 and
     /// ten-bit H.264 no.
-    #[cfg(not(feature = "libav-fallback"))]
     #[test]
     #[ignore = "needs a real VAAPI device"]
     fn native_probe_matches_open() {

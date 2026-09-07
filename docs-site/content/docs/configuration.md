@@ -267,7 +267,6 @@ notes for context.
 |---|---|---|
 | `PUNKTFUNK_PERF` | `1` | Log per-stage timing (capture, encode, send) — handy when tuning latency. |
 | `RUST_LOG` | `info` · `debug` · `trace` | Log verbosity. On Windows, logs land in `%ProgramData%\punktfunk\logs\` (size-capped: a file over 10 MB is rotated to `.old` at the next service/host start, one generation kept). |
-| `PUNKTFUNK_FFMPEG_DEBUG` | set | Verbose libavcodec/FFmpeg logging from the encoder. |
 | `PUNKTFUNK_VIDEO_DROP` | `N` (percent) | Deliberately drop N% of video packets to exercise FEC recovery. **Testing only.** |
 
 ## Client-side (native clients)

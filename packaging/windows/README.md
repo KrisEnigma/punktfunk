@@ -109,7 +109,7 @@ fresh install uses the generated random console password — read it from
 
 - A **GPU for hardware encode**: an NVIDIA GPU + driver (NVENC), an AMD GPU (native AMF), or an
   Intel GPU (native QSV via the statically linked VPL dispatcher; the runtime ships in the Intel
-  driver) — the CI exe is built `--features nvenc,amf-qsv,qsv`. Software H.264 is the GPU-less
+  driver) — the CI exe is built `--features nvenc,qsv`. Software H.264 is the GPU-less
   fallback.
 - **Virtual gamepads need no prerequisite.** The DualSense / DualShock 4 / Xbox 360 (XUSB) UMDF drivers
   are **bundled** in the installer (the *Install the virtual gamepad drivers* task) and

@@ -1,4 +1,4 @@
-//! Shared loss-recovery env parsing for the native NVENC/libav, AMF, and QSV
+//! Shared loss-recovery env parsing for the native NVENC, AMF, and QSV
 //! backends. Defaults stay with each backend (QSV LTR ~1/4 s, AMF ~1/2 s —
 //! tuning, not drift). API clamps stay at the call site (QSV `mfxU16` 8..=240).
 //! Sibling of `rfi.rs`, which owns the slot-recovery policy.

@@ -47,15 +47,6 @@ serde = { version = "1", features = ["derive"] }
 # Software H.264 (openh264, BSD-2) — the GPU-less encode path. Linux only: on Windows the
 # pf-vdisplay driver encodes, and it needs a render adapter to exist at all.
 openh264 = "0.9"
-# libavcodec (NVENC libav + VAAPI backends), behind `libav-fallback`. `ffmpeg-sys-next` auto-detects
-# the FFmpeg version, so this pin tracks the crate's own major (which shadows FFmpeg's): 9 = FFmpeg 9
-# (libavcodec 63, libavutil 61). Arch shipped FFmpeg 9 on 2026-08-08 and every soname moved with it;
-# the packaged host must be BUILT against the FFmpeg it will run on, and packaging/arch/PKGBUILD
-# derives a soname dep from that link so pacman can no longer walk an install across the break.
-# One name on every platform: Cargo refuses one package under two names in a feature-unified
-# resolve (`cargo metadata --all-features`, which cbindgen runs). The Linux host enables
-# `libav-fallback` on its dependency entry, so Windows never activates this copy.
-ffmpeg-next = { version = "9", optional = true }
 libc = "0.2"
 # Vulkan bindings for the raw Vulkan-Video encode + PyroWave compute backends (feature-gated below;
 # the dep stays unconditional to mirror the host's Linux target — unused-but-declared is harmless).
@@ -69,10 +60,8 @@ nvidia-video-codec-sdk = { version = "0.4", features = ["ci-check"], optional = 
 pyrowave-sys = { path = "../pyrowave-sys", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# AMD (AMF) + Intel (QSV) hardware encode via libavcodec (behind `amf-qsv`; link-imports FFmpeg).
-# The native NVENC/AMF/QSV/PyroWave backends and their SDK bindings live in pf-encode-win.
-ffmpeg-next = { version = "9", optional = true }
-# The libavcodec AMF/QSV path (D3D11 input) and the live tests' adapter walk.
+# The live tests' adapter walk. The native NVENC/AMF/QSV/PyroWave backends and their SDK
+# bindings live in pf-encode-win.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -83,22 +72,15 @@ windows = { version = "0.62", features = [
 
 [features]
 default = []
-# The libavcodec backends on Linux: libav NVENC for CPU/dmabuf frames on NVIDIA, and libav VAAPI
-# as the native session's fallback and A/B oracle (`PUNKTFUNK_VAAPI_NATIVE=0`). The Linux host
-# turns it on through its pf-encode dependency entry; the bare crate links no FFmpeg.
-libav-fallback = ["dep:ffmpeg-next"]
 # NVENC hardware encode (Linux CUDA + Windows D3D11); entry points resolved at runtime.
 nvenc = ["dep:nvidia-video-codec-sdk", "pf-encode-win/nvenc"]
-# AMD (AMF) + Intel (QSV) hardware encode on Windows via libavcodec.
-amf-qsv = ["dep:ffmpeg-next"]
 # Raw Vulkan-Video HEVC/AV1 encode on Linux (reuses the `ash` bindings; no new dep).
 vulkan-encode = ["pf-encode-win/vulkan-encode"]
 # PyroWave — the opt-in wired-LAN intra-only wavelet codec (Linux encode backend).
 pyrowave = ["dep:pyrowave-sys", "pf-encode-win/pyrowave"]
 # Native Intel QSV via the statically linked VPL dispatcher (Windows; runtime GPU
-# libs come from the Intel driver store). Supersedes the ffmpeg `amf-qsv` QSV path
-# (design/native-qsv-encoder.md). ⚠ Like `nvenc`: hand builds need this feature or
-# Intel boxes fall through to the ffmpeg path / software.
+# libs come from the Intel driver store; design/native-qsv-encoder.md). ⚠ Like `nvenc`: hand
+# builds need this feature or an Intel box has no QSV path.
 qsv = ["pf-encode-win/qsv"]
 
 [lints]

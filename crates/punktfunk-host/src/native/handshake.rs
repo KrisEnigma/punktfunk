@@ -235,7 +235,7 @@ pub(super) fn cursor_forward(
     }
     #[cfg(target_os = "linux")]
     {
-        // Same CUDA prediction `SessionPlan` makes: direct-SDK NVENC blends, libav NVENC does not.
+        // Same CUDA prediction `SessionPlan` makes: NVENC blends a CUDA payload only.
         let cuda_planned = !crate::encode::linux_zero_copy_is_vaapi() && crate::zerocopy::enabled();
         compositor.is_some_and(|c| c != crate::vdisplay::Compositor::Gamescope)
             && crate::encode::cursor_blend_capable(codec, cuda_planned, bit_depth == 10)

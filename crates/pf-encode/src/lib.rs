@@ -1,4 +1,4 @@
-//! Hardware video encode. Binds FFmpeg and vendor SDKs; never rewrites codecs.
+//! Hardware video encode. Binds the vendor SDKs; never rewrites codecs.
 //! Low-latency preset, B-frames off.
 //!
 //! One [`Encoder`] trait, selected in [`open_video`]. Per-GPU backends: NVENC
@@ -380,7 +380,7 @@ fn open_video_backend_linux(
         );
     }
     // Default VAAPI. With `vulkan-encode` + `PUNKTFUNK_VULKAN_ENCODE`, HEVC/AV1
-    // opens Vulkan Video (RFI VAAPI cannot express); a failed open falls back
+    // opens Vulkan Video first; a failed open falls back
     // so the stream does not die. `format`/`bit_depth`/`chroma` are VAAPI-only
     // — Vulkan imports the dmabuf and does its own CSC.
     let open_amd_intel = || -> Result<(Box<dyn Encoder>, &'static str)> {
@@ -411,77 +411,28 @@ fn open_video_backend_linux(
                     );
                     return Ok((Box::new(e) as Box<dyn Encoder>, "vulkan"));
                 }
-                // The native session imports two-plane NV12; libav would read it
-                // as packed RGB (silent garbage), so with native off die instead.
-                Err(e) if format == PixelFormat::Nv12 && !vaapi_native_enabled() => {
-                    return Err(e.context(
-                        "Vulkan Video open failed on a native-NV12 capture \
-                         — libav VAAPI cannot take it; set PUNKTFUNK_PIPEWIRE_NV12=0 to \
-                         restore the packed-RGB negotiation",
-                    ));
-                }
                 Err(e) => tracing::warn!(
                     error = %format!("{e:#}"),
                     "Vulkan Video encode open failed — falling back to VAAPI"
                 ),
             }
         }
-        // The native session takes every capture shape, NV12 dmabufs included, and
-        // is the only VAAPI arm with reference invalidation. H.264/HEVC open it
-        // first; a failed open falls back to libav, the pin does not.
-        let pinned = pref == "vaapi-native";
-        if pinned || (vaapi_native_enabled() && matches!(codec, Codec::H264 | Codec::H265)) {
-            match vaapi_native::NativeVaapiEncoder::open(
-                codec,
-                width,
-                height,
-                fps,
-                bitrate_bps,
-                bit_depth,
-                chroma,
-            ) {
-                Ok(e) => return Ok((Box::new(e) as Box<dyn Encoder>, "vaapi-native")),
-                Err(e) if pinned || cfg!(not(feature = "libav-fallback")) => return Err(e),
-                Err(e) => tracing::warn!(
-                    error = %format!("{e:#}"),
-                    "native VAAPI encode open failed — falling back to libav VAAPI"
-                ),
-            }
-        }
-        #[cfg(not(feature = "libav-fallback"))]
-        {
-            let _ = format;
-            anyhow::bail!(
-                "{codec:?} on AMD/Intel needs libav VAAPI, which this build left out \
-                 (`libav-fallback`); the native session takes H.264 and HEVC"
-            )
-        }
-        #[cfg(feature = "libav-fallback")]
-        {
-            // libav VAAPI cannot ingest native NV12 (Vulkan ineligible).
-            if format == PixelFormat::Nv12 {
-                anyhow::bail!(
-                    "native NV12 capture requires the Vulkan Video encoder (HEVC/AV1 \
-                     session, --features vulkan-encode, PUNKTFUNK_VULKAN_ENCODE not 0) — this \
-                     session resolved to libav VAAPI; set PUNKTFUNK_PIPEWIRE_NV12=0 to restore \
-                     the packed-RGB negotiation"
-                );
-            }
-            vaapi::VaapiEncoder::open(
-                codec,
-                format,
-                width,
-                height,
-                fps,
-                bitrate_bps,
-                bit_depth,
-                chroma,
-            )
-            .map(|e| (Box::new(e) as Box<dyn Encoder>, "vaapi"))
-        }
+        // The native session takes every capture shape, NV12 dmabufs included.
+        // H.264 and HEVC; AV1 on AMD/Intel is Vulkan Video's.
+        let _ = format;
+        vaapi_native::NativeVaapiEncoder::open(
+            codec,
+            width,
+            height,
+            fps,
+            bitrate_bps,
+            bit_depth,
+            chroma,
+        )
+        .map(|e| (Box::new(e) as Box<dyn Encoder>, "vaapi-native"))
     };
     let open_nvidia = || -> Result<(Box<dyn Encoder>, &'static str)> {
-        open_nvenc_probed(
+        open_nvenc(
             codec,
             format,
             width,
@@ -676,14 +627,11 @@ fn open_video_backend(
     }
 }
 
-/// Open NVENC, probing this GPU's real max bitrate. `avcodec_open2` returns
-/// EINVAL when the rate exceeds what this chip's codec level can express, and
-/// that ceiling is GPU/driver-specific. Open at the requested rate first; step
-/// down only if this GPU refuses. The codec's theoretical level is the first
-/// step-down candidate, not a blind cap.
+/// NVIDIA: the direct-SDK session (`--features nvenc`), which takes CUDA
+/// frames zero-copy and uploads CPU frames itself. Without it there is no NVENC.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
-fn open_nvenc_probed(
+fn open_nvenc(
     codec: Codec,
     format: PixelFormat,
     width: u32,
@@ -696,18 +644,10 @@ fn open_nvenc_probed(
     cursor_blend: bool,
     max_slices: u32,
 ) -> Result<Box<dyn Encoder>> {
-    #[cfg(not(feature = "nvenc"))]
-    let _ = (cursor_blend, max_slices);
-    // Default on NVIDIA, CUDADEVICEPTR only — CPU/dmabuf stays on libav.
-    // `PUNKTFUNK_NVENC_DIRECT=0` falls back. Self-clamps bitrate, so it skips
-    // the probe loop below.
     #[cfg(feature = "nvenc")]
-    if cuda && nvenc_direct_enabled() {
-        tracing::info!(
-            codec = codec.nvenc_name(),
-            "Linux direct-SDK NVENC (real RFI + recovery anchor) — set PUNKTFUNK_NVENC_DIRECT=0 for libav"
-        );
-        return Ok(Box::new(nvenc_cuda::NvencCudaEncoder::open(
+    {
+        tracing::info!(codec = codec.label(), cuda, "Linux direct-SDK NVENC");
+        Ok(Box::new(nvenc_cuda::NvencCudaEncoder::open(
             codec,
             format,
             width,
@@ -719,103 +659,32 @@ fn open_nvenc_probed(
             chroma,
             cursor_blend,
             max_slices,
-        )?) as Box<dyn Encoder>);
+        )?) as Box<dyn Encoder>)
     }
-    // Featureless build compiles the direct path out; a CUDA session then
-    // loses RFI and in-place bitrate reconfigure with no log. Skip the warn
-    // when the operator chose libav (`PUNKTFUNK_NVENC_DIRECT=0`).
     #[cfg(not(feature = "nvenc"))]
-    if cuda
-        && !std::env::var("PUNKTFUNK_NVENC_DIRECT")
-            .map(|v| matches!(v.trim(), "0" | "false" | "no" | "off"))
-            .unwrap_or(false)
     {
-        // Once per process: featureless builds rebuild on every bitrate step.
-        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            tracing::warn!(
-                "direct-SDK NVENC is NOT compiled into this build (`--features punktfunk-host/nvenc`) \
-                 — CUDA frames take the libav path: no RFI loss recovery, and every adaptive-bitrate \
-                 step costs an encoder rebuild + IDR"
-            );
-        }
-    }
-    #[cfg(not(feature = "libav-fallback"))]
-    {
-        let _ = (format, width, height, fps, bitrate_bps, bit_depth, chroma);
+        let _ = (
+            format,
+            width,
+            height,
+            fps,
+            bitrate_bps,
+            cuda,
+            bit_depth,
+            chroma,
+            cursor_blend,
+            max_slices,
+        );
         anyhow::bail!(
-            "{} on NVIDIA needs libav NVENC, which this build left out (`libav-fallback`); \
-             CUDA frames take the direct SDK with --features nvenc",
-            codec.nvenc_name()
+            "{} on NVIDIA needs the direct-SDK NVENC backend, which this build left out — \
+             build with --features punktfunk-host/nvenc",
+            codec.label()
         )
     }
-    #[cfg(feature = "libav-fallback")]
-    {
-        const MIN_PROBE_BPS: u64 = 50_000_000;
-        let mut candidates = vec![bitrate_bps];
-        let cap = codec.max_bitrate_bps();
-        if cap < bitrate_bps {
-            candidates.push(cap);
-        }
-        let mut b = bitrate_bps.min(cap);
-        while b > MIN_PROBE_BPS {
-            b = b * 3 / 4;
-            candidates.push(b);
-        }
-        let mut last: Option<anyhow::Error> = None;
-        for (i, &b) in candidates.iter().enumerate() {
-            match linux::NvencEncoder::open(
-                codec, format, width, height, fps, b, cuda, bit_depth, chroma,
-            ) {
-                Ok(enc) => {
-                    if i > 0 {
-                        tracing::warn!(
-                        requested_mbps = bitrate_bps / 1_000_000,
-                        opened_mbps = b / 1_000_000,
-                        codec = codec.nvenc_name(),
-                        "this GPU's NVENC refused the requested bitrate (EINVAL) — opened at the \
-                         highest rate it accepts; request AV1 or a lower bitrate for more"
-                    );
-                    }
-                    return Ok(Box::new(enc) as Box<dyn Encoder>);
-                }
-                // EINVAL = above this GPU's level ceiling → step down. Any other
-                // failure is real — do not mask it with bitrate retries.
-                Err(e) if nvenc_open_einval(&e) => last = Some(e),
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last.unwrap_or_else(|| anyhow::anyhow!("encoder open failed at every probed bitrate")))
-    }
-}
-
-/// Whether a libav NVENC open failed with EINVAL — the bitrate-ceiling signal
-/// [`open_nvenc_probed`]'s ladder steps down on. Match the root `ffmpeg::Error`
-/// through the `anyhow` chain; an English strerror match also fired on other
-/// wrapped EINVAL (CUDA-context errno) and stole the ladder.
-#[cfg(all(target_os = "linux", feature = "libav-fallback"))]
-fn nvenc_open_einval(e: &anyhow::Error) -> bool {
-    use ffmpeg_next as ffmpeg;
-    matches!(
-        e.downcast_ref::<ffmpeg::Error>(),
-        Some(ffmpeg::Error::Other {
-            errno: ffmpeg::util::error::EINVAL
-        })
-    )
-}
-
-/// Direct-SDK NVENC. Default on. `PUNKTFUNK_NVENC_DIRECT=0` (`false`/`no`/`off`)
-/// is the libav hatch. Consulted only for a CUDA payload with `--features nvenc`;
-/// the `cuda` gate in [`open_nvenc_probed`] keeps AMD/Intel on VAAPI.
-#[cfg(all(target_os = "linux", feature = "nvenc"))]
-fn nvenc_direct_enabled() -> bool {
-    std::env::var("PUNKTFUNK_NVENC_DIRECT")
-        .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
-        .unwrap_or(true)
 }
 
 /// Vulkan Video HEVC/AV1 on AMD/Intel. Default on.
-/// `PUNKTFUNK_VULKAN_ENCODE=0` (`false`/`no`/`off`) is the libav-VAAPI hatch.
+/// `PUNKTFUNK_VULKAN_ENCODE=0` (`false`/`no`/`off`) is the VAAPI hatch.
 /// A failed open falls back to VAAPI. See `design/linux-vulkan-video-encode.md`.
 #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
 fn vulkan_encode_enabled() -> bool {
@@ -824,46 +693,8 @@ fn vulkan_encode_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// libav NVENC's 4:4:4 answer, or `false` in a build without it.
-#[cfg(target_os = "linux")]
-fn libav_nvenc_can_encode_444(codec: Codec) -> bool {
-    #[cfg(feature = "libav-fallback")]
-    {
-        linux::probe_can_encode_444(codec)
-    }
-    #[cfg(not(feature = "libav-fallback"))]
-    {
-        let _ = codec;
-        false
-    }
-}
-
-/// libav NVENC's 10-bit answer, or `false` in a build without it.
-#[cfg(target_os = "linux")]
-fn libav_nvenc_can_encode_10bit(codec: Codec) -> bool {
-    #[cfg(feature = "libav-fallback")]
-    {
-        linux::probe_can_encode_10bit(codec)
-    }
-    #[cfg(not(feature = "libav-fallback"))]
-    {
-        let _ = codec;
-        false
-    }
-}
-
-/// The native VAAPI session on AMD/Intel. Default on. `PUNKTFUNK_VAAPI_NATIVE=0`
-/// (`false`/`no`/`off`) is the libav-VAAPI hatch, the A/B oracle. A failed open
-/// falls back to libav; `PUNKTFUNK_ENCODER=vaapi-native` forces it instead.
-#[cfg(target_os = "linux")]
-fn vaapi_native_enabled() -> bool {
-    std::env::var("PUNKTFUNK_VAAPI_NATIVE")
-        .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
-        .unwrap_or(true)
-}
-
 /// Whether this session can ingest producer-native NV12. Only Vulkan Video
-/// can; libav VAAPI would import the two-plane buffer as packed RGB.
+/// can; the VAAPI session takes RGB from the compositor.
 ///
 /// Once the producer has been asked for two-plane NV12 there is **no
 /// fallback**. [`open_video`] makes a failed Vulkan open fatal rather than
@@ -891,16 +722,13 @@ pub fn linux_native_nv12_ok(codec: Codec) -> bool {
 /// May an HDR capture stay zero-copy on NVIDIA (packed 10-bit PQ/BT.2020 CUDA)?
 ///
 /// Only direct-SDK NVENC can: it registers `ARGB10`/`ABGR10` and CSCs in the
-/// encoder. Libav HDR builds a P010 context; copying 2:10:10:10 words into
-/// that surface is garbage. When the direct path is compiled out or vetoed
-/// (`PUNKTFUNK_NVENC_DIRECT=0`), the capturer must not build the HDR importer.
+/// encoder. When it is compiled out, the capturer must not build the HDR
+/// importer.
 #[cfg(target_os = "linux")]
 pub fn linux_hdr_cuda_ok() -> bool {
     #[cfg(feature = "nvenc")]
     {
-        // Same terms [`open_nvenc_probed`] uses for the direct arm, minus `cuda`
-        // (the thing the caller is deciding).
-        nvenc_direct_enabled() && !linux_zero_copy_is_vaapi()
+        !linux_zero_copy_is_vaapi()
     }
     #[cfg(not(feature = "nvenc"))]
     {
@@ -913,7 +741,7 @@ pub fn linux_hdr_cuda_ok() -> bool {
 /// the compositor must embed the pointer.
 ///
 /// `cuda_planned` is the caller's CUDA-payload prediction; `ten_bit` the
-/// negotiated depth. A CPU payload keeps NVIDIA on libav NVENC (no blend).
+/// negotiated depth. A CPU payload is uploaded, and never blended.
 /// 10-bit keeps Vulkan Video only where the device advertises that profile
 /// (`vulkan_encode_available_at`, the same query the open makes).
 #[cfg(target_os = "linux")]
@@ -922,16 +750,7 @@ pub fn cursor_blend_capable(codec: Codec, cuda_planned: bool, ten_bit: bool) -> 
     if codec == Codec::PyroWave {
         return true;
     }
-    let direct_nvenc = {
-        #[cfg(feature = "nvenc")]
-        {
-            nvenc_direct_enabled()
-        }
-        #[cfg(not(feature = "nvenc"))]
-        {
-            false
-        }
-    };
+    let direct_nvenc = cfg!(feature = "nvenc");
     let vulkan_csc = {
         // Compute-CSC arm (the one that blends). Probe last: it opens a Vulkan instance.
         #[cfg(feature = "vulkan-encode")]
@@ -966,7 +785,8 @@ fn cursor_blend_capable_for(
 ) -> bool {
     match backend {
         Some(LinuxBackend::Pyrowave) => true,
-        // Direct-SDK only (VkSlotBlend), CUDA payloads only — CPU stays on libav.
+        // Direct-SDK only (VkSlotBlend), and only a CUDA payload: an uploaded
+        // CPU frame arrives after the blend point.
         Some(LinuxBackend::Nvenc) => cuda_planned && direct_nvenc,
         // Compute-CSC blends at either depth. Cursor sessions stay off native-NV12
         // / RGB-direct, so CSC eligibility (already carrying depth) is the answer.
@@ -1188,11 +1008,6 @@ pub fn vaapi_codec_support() -> CodecSupport {
     use std::sync::OnceLock;
     static CACHE: OnceLock<CodecSupport> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        // libav's answer covers both VAAPI arms (AV1 included); without it the
-        // native session answers for itself.
-        #[cfg(feature = "libav-fallback")]
-        let probe = vaapi::probe_can_encode;
-        #[cfg(not(feature = "libav-fallback"))]
         let probe = |c| vaapi_native::probe_can_encode(c, false);
         let caps = CodecSupport {
             h264: probe(Codec::H264),
@@ -1235,25 +1050,17 @@ pub fn can_encode_444(codec: Codec) -> bool {
         #[cfg(target_os = "linux")]
         {
             if linux_zero_copy_is_vaapi() {
-                // Neither VAAPI arm encodes 4:4:4: libav never wired it, the
-                // native session is 4:2:0 only.
+                // The native VAAPI session is 4:2:0 only.
                 false
             } else {
-                // Direct SDK: driver's `YUV444_ENCODE` cap. Never ffmpeg-open in
-                // a direct-SDK process — that wedges later opens with
-                // `NV_ENC_ERR_INVALID_VERSION` until restart. Libav probe only
-                // when the session will actually use libav.
+                // Direct SDK: the driver's `YUV444_ENCODE` cap.
                 #[cfg(feature = "nvenc")]
                 {
-                    if nvenc_direct_enabled() {
-                        nvenc_cuda::probe_support().hevc_444
-                    } else {
-                        libav_nvenc_can_encode_444(codec)
-                    }
+                    nvenc_cuda::probe_support().hevc_444
                 }
                 #[cfg(not(feature = "nvenc"))]
                 {
-                    libav_nvenc_can_encode_444(codec)
+                    false
                 }
             }
         }
@@ -1272,16 +1079,8 @@ pub fn can_encode_444(codec: Codec) -> bool {
                 }
                 // VCN hardware limit — no probe. See `design/native-amf-encoder.md`.
                 WindowsBackend::Amf => false,
-                WindowsBackend::Qsv => {
-                    #[cfg(feature = "amf-qsv")]
-                    {
-                        ffmpeg_win::probe_can_encode_444(ffmpeg_win::WinVendor::Qsv, codec)
-                    }
-                    #[cfg(not(feature = "amf-qsv"))]
-                    {
-                        false
-                    }
-                }
+                // VPL has no 4:4:4 encode query wired; stays an honest `false`.
+                WindowsBackend::Qsv => false,
                 // No MFT encodes 4:4:4 on any vendor.
                 WindowsBackend::MediaFoundation | WindowsBackend::Software => false,
             }
@@ -1338,31 +1137,21 @@ pub fn can_encode_10bit(codec: Codec) -> bool {
                         false
                     }
                 };
-                #[cfg(feature = "libav-fallback")]
-                let vaapi10 = vaapi::probe_can_encode_10bit(codec);
-                #[cfg(not(feature = "libav-fallback"))]
-                let vaapi10 = vaapi_native::probe_can_encode(codec, true);
-                vulkan10 || vaapi10
+                vulkan10 || vaapi_native::probe_can_encode(codec, true)
             } else {
-                // Same as the 4:4:4 arm: driver's `10BIT_ENCODE` cap, never an
-                // ffmpeg open in a direct-SDK process (`NV_ENC_ERR_INVALID_VERSION`
-                // wedges later opens). Libav probe only when the session uses libav.
+                // Same as the 4:4:4 arm: the driver's `10BIT_ENCODE` cap.
                 #[cfg(feature = "nvenc")]
                 {
-                    if nvenc_direct_enabled() {
-                        let t = nvenc_cuda::probe_support().ten_bit;
-                        match codec {
-                            Codec::H265 => t.h265,
-                            Codec::Av1 => t.av1,
-                            _ => false,
-                        }
-                    } else {
-                        libav_nvenc_can_encode_10bit(codec)
+                    let t = nvenc_cuda::probe_support().ten_bit;
+                    match codec {
+                        Codec::H265 => t.h265,
+                        Codec::Av1 => t.av1,
+                        _ => false,
                     }
                 }
                 #[cfg(not(feature = "nvenc"))]
                 {
-                    libav_nvenc_can_encode_10bit(codec)
+                    false
                 }
             }
         }
@@ -1382,8 +1171,8 @@ pub fn can_encode_10bit(codec: Codec) -> bool {
                 WindowsBackend::Amf => {
                     amf::probe_can_encode_10bit(codec, pf_gpu::resolve_render_adapter_luid())
                 }
-                // Native VPL Query. ffmpeg Main10 can silently encode 8-bit, so
-                // without the `qsv` feature this stays an honest `false`.
+                // Native VPL Query; without the `qsv` feature there is no QSV
+                // path, so this stays an honest `false`.
                 WindowsBackend::Qsv => {
                     #[cfg(feature = "qsv")]
                     {
@@ -1555,12 +1344,12 @@ pub fn resolved_backend_ingests_rgb_444() -> bool {
 
 /// True if the Windows codec advertisement comes from a real GPU probe
 /// ([`windows_codec_support`]) rather than the static superset. AMF always;
-/// QSV with `qsv` or `amf-qsv`; NVENC with `nvenc`.
+/// QSV with `qsv`; NVENC with `nvenc`.
 #[cfg(target_os = "windows")]
 pub fn windows_backend_is_probed() -> bool {
     match windows_resolved_backend() {
         WindowsBackend::Amf => true,
-        WindowsBackend::Qsv => cfg!(feature = "qsv") || cfg!(feature = "amf-qsv"),
+        WindowsBackend::Qsv => cfg!(feature = "qsv"),
         WindowsBackend::Nvenc => cfg!(feature = "nvenc"),
         // MFT enumeration is the probe, and it needs no feature.
         WindowsBackend::MediaFoundation => true,
@@ -1592,7 +1381,7 @@ fn windows_gpu_vendor() -> Option<GpuVendor> {
 /// [`windows_backend_is_probed`]. AV1 and HEVC must be probed, not assumed.
 ///
 /// AMD: native factory probe (the path the session opens). QSV: native VPL
-/// Query, else libavcodec. NVIDIA: driver GUID list — never an ffmpeg open.
+/// Query. NVIDIA: the driver's GUID list.
 #[cfg(target_os = "windows")]
 pub fn windows_codec_support() -> CodecSupport {
     use std::collections::HashMap;
@@ -1610,16 +1399,11 @@ pub fn windows_codec_support() -> CodecSupport {
                 amf::probe_can_encode(codec, pf_gpu::resolve_render_adapter_luid())
             }
             WindowsBackend::Qsv => {
-                // Libavcodec probe only on builds without native VPL.
                 #[cfg(feature = "qsv")]
                 {
                     qsv::probe_can_encode(codec, pf_gpu::resolve_render_adapter_luid())
                 }
-                #[cfg(all(not(feature = "qsv"), feature = "amf-qsv"))]
-                {
-                    ffmpeg_win::probe_can_encode(ffmpeg_win::WinVendor::Qsv, codec)
-                }
-                #[cfg(all(not(feature = "qsv"), not(feature = "amf-qsv")))]
+                #[cfg(not(feature = "qsv"))]
                 {
                     false
                 }
@@ -1672,27 +1456,11 @@ pub fn can_open_another_session() -> bool {
 
 // `#[path]` keeps `crate::*` names flat. The Windows backends and the shared
 // NVENC/RFI/policy/PyroWave-wire modules arrive through the `pf_encode_win` glob.
-// Only the two capability probes here are production users since the driver took the
-// Windows encode; `FfmpegWinEncoder` survives as the live tests' reference encoder.
-#[cfg(all(target_os = "windows", feature = "amf-qsv"))]
-#[cfg_attr(not(test), allow(dead_code))]
-#[path = "enc/windows/ffmpeg_win.rs"]
-mod ffmpeg_win;
-#[cfg(all(target_os = "linux", feature = "libav-fallback"))]
-#[path = "enc/linux/mod.rs"]
-mod linux;
 // Direct-SDK NVENC (CUDA). `.so` at runtime, so `--features nvenc` is safe
 // on a driver-less/AMD box. See `design/linux-direct-nvenc.md`.
 #[cfg(all(target_os = "linux", feature = "nvenc"))]
 #[path = "enc/linux/nvenc_cuda.rs"]
 mod nvenc_cuda;
-// Shared libavcodec glue (`pixel_to_av`, swscale consts) for the three libav backends.
-#[cfg(any(
-    all(target_os = "linux", feature = "libav-fallback"),
-    all(target_os = "windows", feature = "amf-qsv")
-))]
-#[path = "enc/libav.rs"]
-mod libav;
 // Software (openh264) H.264 — the GPU-less Linux path. Windows has none: the driver
 // needs a render adapter to exist at all (plan §9-1).
 #[cfg(target_os = "linux")]
@@ -1716,12 +1484,8 @@ pub fn open_software_h264(
     sw::OpenH264Encoder::open(format, width, height, fps, bitrate_bps.min(SW_BITRATE_CEIL))
         .map(|e| Box::new(e) as Box<dyn Encoder>)
 }
-#[cfg(all(target_os = "linux", feature = "libav-fallback"))]
-#[path = "enc/linux/vaapi.rs"]
-mod vaapi;
-// Native VAAPI, no libavcodec: reference invalidation, in-place retarget, HEVC
-// Main 10 with HDR10. The default VAAPI arm; `PUNKTFUNK_VAAPI_NATIVE=0` is the
-// libav hatch. `design/native-vaapi-encoder.md`.
+// Native VAAPI: reference invalidation, in-place retarget, HEVC Main 10 with
+// HDR10. `design/native-vaapi-encoder.md`.
 #[cfg(target_os = "linux")]
 #[path = "enc/linux/vaapi_native.rs"]
 mod vaapi_native;
@@ -1762,7 +1526,7 @@ mod pyrowave_remote;
 #[path = "enc/linux/worker.rs"]
 pub mod worker;
 // Live tests pairing a `pf_encode_win` backend with what only this crate has
-// (libavcodec AMF, pf-capture's P010 converter).
+// (pf-capture's P010 converter).
 #[cfg(all(test, target_os = "windows"))]
 #[path = "enc/windows/live_tests.rs"]
 mod live_tests;
@@ -1921,17 +1685,17 @@ mod tests {
         assert!(cursor_blend_capable_for(Some(Nvenc), true, true, false));
         assert!(
             !cursor_blend_capable_for(Some(Nvenc), false, true, false),
-            "a CPU payload stays on libav NVENC, which cannot blend"
+            "a CPU payload is uploaded, past the blend point"
         );
         assert!(
             !cursor_blend_capable_for(Some(Nvenc), true, false, false),
-            "PUNKTFUNK_NVENC_DIRECT=0 (or a build without the feature) is the libav path"
+            "a build without the `nvenc` feature has no NVENC at all"
         );
         assert!(cursor_blend_capable_for(Some(AmdIntel), false, false, true));
         assert!(
             !cursor_blend_capable_for(Some(AmdIntel), false, false, false),
             "no eligible Vulkan CSC arm (H.264, PUNKTFUNK_VULKAN_ENCODE=0, unsupported \
-             device) resolves to libav VAAPI, which cannot blend"
+             device) resolves to native VAAPI, which cannot blend"
         );
         assert!(cursor_blend_capable_for(Some(Vulkan), false, false, true));
         assert!(!cursor_blend_capable_for(Some(Software), false, true, true));
@@ -1992,34 +1756,6 @@ mod tests {
         // Reverse (impl fn absent from the trait) is a compile error; equality
         // guards a parse regression.
         assert_eq!(trait_fns, impl_fns);
-    }
-
-    /// Typed EINVAL must survive `with_context`. An eager `format!` between
-    /// `open_with` and the ladder would stop the step-down.
-    #[cfg(all(target_os = "linux", feature = "libav-fallback"))]
-    #[test]
-    fn nvenc_open_einval_survives_context_layers() {
-        use ffmpeg_next as ffmpeg;
-        let e = anyhow::Error::from(ffmpeg::Error::Other {
-            errno: ffmpeg::util::error::EINVAL,
-        })
-        .context("open hevc_nvenc (3840x2160@120, 400000000 bps)")
-        .context("outer");
-        assert!(nvenc_open_einval(&e));
-        // Other errno must not step the ladder.
-        let e = anyhow::Error::from(ffmpeg::Error::Other {
-            errno: ffmpeg::util::error::ENOSYS,
-        })
-        .context("open");
-        assert!(!nvenc_open_einval(&e));
-    }
-
-    /// Untyped English "Invalid argument" must not classify.
-    #[cfg(all(target_os = "linux", feature = "libav-fallback"))]
-    #[test]
-    fn nvenc_open_einval_ignores_untyped_text() {
-        let e = anyhow::anyhow!("driver said: Invalid argument (not a typed libav errno)");
-        assert!(!nvenc_open_einval(&e));
     }
 
     /// Resolver alias table. The panicking closure is the laziness contract:
@@ -2100,17 +1836,11 @@ mod tests {
         };
         assert!(err.to_string().contains("H.264"), "{err:#}");
     }
-    /// `auto` on an AMD/Intel box opens the native session, or libav under the
-    /// `PUNKTFUNK_VAAPI_NATIVE=0` hatch — whichever the shell asked for.
+    /// `auto` on an AMD/Intel box opens the native VAAPI session.
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "needs a real VAAPI device"]
     fn auto_opens_the_native_vaapi_session() {
-        let want = if vaapi_native_enabled() {
-            "vaapi-native"
-        } else {
-            "vaapi"
-        };
         let (enc, backend) = open_video_backend_linux(
             "auto",
             Codec::H264,
@@ -2126,7 +1856,7 @@ mod tests {
             32,
         )
         .expect("open");
-        assert_eq!(backend, want);
-        assert_eq!(enc.caps().supports_rfi, want == "vaapi-native");
+        assert_eq!(backend, "vaapi-native");
+        assert!(enc.caps().supports_rfi);
     }
 }

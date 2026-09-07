@@ -238,7 +238,6 @@ pub struct Facts {
     pub in_punktfunk_group: bool,
     pub has_input_group: bool,
     pub nvidia: Nvidia,
-    pub has_rpmfusion_ffmpeg: bool,
     pub firewall: Firewall,
     pub systemd_pid1: bool,
     pub user_manager: bool,
@@ -301,9 +300,6 @@ impl Facts {
                 .probe("getent", &["group", "input"])
                 .is_some_and(|o| o.ok()),
             nvidia: nvidia(paths, run),
-            has_rpmfusion_ffmpeg: run
-                .probe("rpm", &["-q", "ffmpeg-libs"])
-                .is_some_and(|o| o.ok()),
             firewall: firewall(paths, run),
             systemd_pid1: paths.run.join("systemd/system").is_dir(),
             user_manager: run
