@@ -1126,6 +1126,33 @@ pub mod encode {
         stash.filter(|s| queued == 0 && idle.contains(s))
     }
 
+    /// Where the drain worker's pass writes. A free slot always wins; with none left the
+    /// oldest queued frame is overwritten, so the encoder takes the freshest composed picture
+    /// under back-pressure rather than the incoming one being thrown away. `lost` is whether a
+    /// consumer was there to miss the recycled frame.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OfferSlot {
+        Free(usize),
+        Recycle { slot: usize, lost: bool },
+    }
+
+    /// [`OfferSlot`] for a pool with `free` (any free slot) and `oldest_full` (the front of the
+    /// queue), `live` while an encode thread is consuming. `None` means no slot at all.
+    ///
+    /// The driver's pool is Windows-only; the rule lives here so it is covered everywhere.
+    #[must_use]
+    pub fn offer_slot(
+        free: Option<usize>,
+        oldest_full: Option<usize>,
+        live: bool,
+    ) -> Option<OfferSlot> {
+        match (free, oldest_full) {
+            (Some(slot), _) => Some(OfferSlot::Free(slot)),
+            (None, Some(slot)) => Some(OfferSlot::Recycle { slot, lost: live }),
+            (None, None) => None,
+        }
+    }
+
     /// [`IOCTL_ENCODE_CTL`] input: one op against one monitor's live encoder. Unused `arg*` /
     /// `payload` bytes are zero. The ops are the `Encoder` trait calls the stream loop already
     /// makes locally on Linux, forwarded by a control proxy — so the wire shape is deliberately
@@ -3366,6 +3393,31 @@ mod tests {
         assert_eq!(republish_slot(Some(1), 0, &[2]), None);
         // Nothing was ever encoded on this pool.
         assert_eq!(republish_slot(None, 0, &[1, 2]), None);
+    }
+
+    #[test]
+    fn a_full_pool_recycles_the_oldest_frame_not_the_new_one() {
+        use encode::{offer_slot, OfferSlot};
+        // A free slot is always taken, whatever is queued behind it.
+        assert_eq!(offer_slot(Some(2), Some(0), true), Some(OfferSlot::Free(2)));
+        // No free slot: the oldest queued frame goes, and a consumer lost it.
+        assert_eq!(
+            offer_slot(None, Some(0), true),
+            Some(OfferSlot::Recycle {
+                slot: 0,
+                lost: true
+            })
+        );
+        // Between sessions nobody is reading, so the same recycle costs nothing.
+        assert_eq!(
+            offer_slot(None, Some(0), false),
+            Some(OfferSlot::Recycle {
+                slot: 0,
+                lost: false
+            })
+        );
+        // Every slot is out at the encoder: this frame has nowhere to land.
+        assert_eq!(offer_slot(None, None, true), None);
     }
 
     #[test]
