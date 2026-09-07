@@ -371,6 +371,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The native VAAPI session keeps a reference the loss report can still reach.** Its ring held
+  four pictures — 40 ms at 100 Hz — so a report that names a frame two frames back and spends a
+  round trip arriving always found every pre-loss picture evicted, and every single lost frame
+  cost a full IDR. The ring is now eight deep where the level's DPB allows it (11 at 1440p, 5 at
+  4K60), and a decline says so in the log.
 - **An Apple client accepts an RFI anchor as recovery.** Both video pumps kept asking for a
   keyframe every 100 ms after any lost frame until an IDR landed, so a host that had already
   repaired the picture with a `USER_FLAG_RECOVERY_ANCHOR` P-frame was forced into a full IDR
