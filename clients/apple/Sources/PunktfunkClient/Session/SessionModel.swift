@@ -751,15 +751,11 @@ final class SessionModel: ObservableObject {
                             + "request access again — the request expires after a few minutes."
                     } else {
                         self.errorMessage = pin != nil
-                            ? "Could not connect to \(host.displayName) — host unreachable, "
-                                + "not running, its identity no longer matches the pinned "
-                                + "fingerprint, or it requires pairing and no longer "
-                                + "recognizes this Mac (right-click the host card to pair "
-                                + "again)."
-                            : "Could not connect to \(host.displayName) — is punktfunk-host "
-                                + "running on \(host.address):\(host.port)? If it requires "
-                                + "pairing, right-click the host card and pair with its PIN "
-                                + "first."
+                            ? "Couldn't reach \(host.displayName) — it may be asleep, or its "
+                                + "identity changed since you paired. Pair with it again from "
+                                + "its host card."
+                            : "Couldn't reach \(host.displayName) — it may be asleep, or not "
+                                + "paired yet. Wake it, or pair with it from its host card."
                     }
                 }
             }
@@ -1171,15 +1167,15 @@ final class SessionModel: ObservableObject {
         case .hostEnded, .local:
             // Someone asked for this: an operator "End" on the host, or our own close racing in.
             // Say it plainly, without the error framing.
-            errorMessage = "\(name) ended the session."
+            errorMessage = "\(name) ended the session"
         case .hostError:
-            errorMessage = "\(name) ended the session with an error."
+            errorMessage = "\(name) ended the session with an error"
         case .lost:
-            errorMessage = "Lost the connection to \(name)."
+            errorMessage = "Lost the connection to \(name)"
         case .none:
             // No verdict (an older core, or the close raced the read): keep the wording this path
             // has always used rather than inventing one.
-            errorMessage = "Session ended by \(name)."
+            errorMessage = "Session ended by \(name)"
         }
     }
 

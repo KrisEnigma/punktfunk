@@ -77,9 +77,14 @@ pub fn run_speed_probe(
         Some(identity),
         Duration::from_secs(15),
     )
-    .map_err(|e| format!("connect: {e:?}"))?;
-    c.request_probe(TARGET_KBPS, BURST_MS)
-        .map_err(|e| format!("probe: {e:?}"))?;
+    .map_err(|e| {
+        tracing::warn!(error = ?e, "speed test connect");
+        "Couldn't start the speed test".to_string()
+    })?;
+    c.request_probe(TARGET_KBPS, BURST_MS).map_err(|e| {
+        tracing::warn!(error = ?e, "speed test probe request");
+        "The host didn't start the speed test".to_string()
+    })?;
     let deadline = Instant::now() + POLL_BUDGET;
     loop {
         std::thread::sleep(POLL_INTERVAL);
@@ -88,7 +93,7 @@ pub fn run_speed_probe(
             return Ok(c.probe_result());
         }
         if Instant::now() > deadline {
-            return Err("probe timed out".to_string());
+            return Err("The speed test didn't finish in time".to_string());
         }
     }
 }

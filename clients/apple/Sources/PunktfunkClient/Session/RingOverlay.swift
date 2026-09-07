@@ -270,7 +270,7 @@ private func spec(_ slot: SlotId, _ cfg: OverlayConfig, _ a: RingActions) -> Slo
         }
         return SlotSpec(id: "host:\(id)", label: act?.label ?? id, icon: icon,
                         enabled: act?.available == true,
-                        reason: act?.unavailableReason ?? "This host does not offer it",
+                        reason: act?.unavailableReason ?? "This host doesn't offer it",
                         armed: act?.danger ?? true)
     case .shortcut(let id):
         let s = cfg.shortcut(id)

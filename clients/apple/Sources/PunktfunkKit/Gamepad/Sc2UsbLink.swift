@@ -308,7 +308,7 @@ final class Sc2UsbLink {
     private func adopt(_ matched: IOHIDDevice) {
         guard started else { return }
         guard let id = Self.registryID(matched) else {
-            log.error("SC2 USB: matched collection has no registry id — cannot key it")
+            log.error("SC2 USB: matched collection has no registry id — dropping it")
             return
         }
         guard open[id] == nil else { return }
@@ -316,7 +316,7 @@ final class Sc2UsbLink {
         guard service != MACH_PORT_NULL,
               let device = IOHIDDeviceCreate(kCFAllocatorDefault, service)
         else {
-            log.error("SC2 USB: could not mint a device from the matched service")
+            log.error("SC2 USB: no device from the matched service")
             return
         }
         let rc = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))

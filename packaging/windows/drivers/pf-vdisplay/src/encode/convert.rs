@@ -494,7 +494,7 @@ impl Targets {
                 Ok(p) => self.blend = Some(p),
                 Err(e) => {
                     self.blend_failed = true;
-                    dbglog!("[pf-vd] encode: cursor blend pass failed to build: {e:#}");
+                    dbglog!("[pf-vd] encode: cursor blend pass did not build: {e:#}");
                 }
             }
         }

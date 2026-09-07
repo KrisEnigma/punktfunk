@@ -548,7 +548,7 @@ impl NativeVaapiDecoder {
                 Err(e) => tracing::warn!(
                     error = %e,
                     id = picture.id,
-                    "native VAAPI: a flushed picture could not be exported"
+                    "native VAAPI: flushed-picture export failed"
                 ),
             }
         }

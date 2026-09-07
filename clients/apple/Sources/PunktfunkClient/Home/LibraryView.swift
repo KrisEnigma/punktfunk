@@ -498,7 +498,7 @@ struct LibraryView: View {
             Image(systemName: "square.grid.2x2")
                 .font(.largeTitle)
                 .foregroundStyle(.secondary)
-            Text("No games found on this host.")
+            Text("No games found on this host")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -631,8 +631,11 @@ struct LibraryView: View {
                     // is asleep is precisely what this cache exists to prevent. The staleness note
                     // carries the situation instead.
                     if games.isEmpty {
-                        errorText = (error as? LibraryError)?.errorDescription
+                        // `LibraryError` reports a phrase; this state has no title of its
+                        // own, so it supplies the frame the console shells get for free.
+                        let why = (error as? LibraryError)?.errorDescription
                             ?? error.localizedDescription
+                        errorText = "Couldn't load the library — \(why)"
                     }
                     break
                 }

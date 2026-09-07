@@ -245,8 +245,8 @@ struct SpeedTestSheet: View {
                 await MainActor.run {
                     guard !token.cancelled else { return }
                     phase = .failed(
-                        "Could not connect to \(address):\(port) — is punktfunk-host "
-                        + "running and not mid-session?")
+                        "Couldn't reach \(address) — it may be asleep, or already "
+                        + "streaming to something else")
                 }
                 return
             }

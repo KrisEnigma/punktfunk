@@ -130,29 +130,21 @@ public enum LibraryError: LocalizedError {
     /// A library entry's art URL is not something we will fetch (only http/https).
     case badArtURL
 
+    /// A phrase, never a sentence. Every caller supplies the frame — the library
+    /// screen's "Couldn't load the library — ", `SendLogs`' "Couldn't send logs — ",
+    /// `HostPower`'s "\(label) failed — ". A sentence here reads as a second headline.
     public var errorDescription: String? {
         switch self {
         case .unauthorized:
-            return "The host didn't recognize this device. Pair with the host first — it "
-                + "authorizes paired clients by their certificate (no token needed)."
+            return "the host doesn't recognize this device — pair with it first"
         case .pinMismatch:
-            return "The host's certificate doesn't match the one this device paired with. "
-                + "If the host was reinstalled, forget it here and pair again."
+            return "the host's certificate isn't the one you paired with — pair again"
         case .http(let code):
-            return "The management API returned HTTP \(code)."
+            return "the host refused it (\(code))"
         case .badArtURL:
-            return "That title's artwork address isn't a web address."
+            return "that title's artwork address isn't a web address"
         case .unreachable(let why):
-            // The library rides a DIFFERENT port than the stream (the management API, 47990 by
-            // default; the stream is QUIC on 9777), so it can fail while streaming to the same
-            // host works perfectly — say that first, because the opposite assumption has sent
-            // more than one person hunting the wrong layer. Opening that URL in a browser is the
-            // fastest way to tell "port unreachable" apart from anything client-side.
-            return "Couldn't reach the host's management API: \(why). The library uses a "
-                + "different port than the stream (47990 by default), so streaming can work "
-                + "while this doesn't. Check that port is reachable from this device, and that "
-                + "the host isn't pinned to `--mgmt-bind 127.0.0.1`, which serves it to the "
-                + "host itself only."
+            return "couldn't reach the host — \(why)"
         }
     }
 }

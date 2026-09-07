@@ -372,7 +372,7 @@ public final class SessionAudio {
         do {
             try session.overrideOutputAudioPort(.speaker)
         } catch {
-            log.warning("could not move audio off the earpiece: \(error.localizedDescription)")
+            log.warning("speaker override refused: \(error.localizedDescription)")
         }
     }
 
@@ -1024,7 +1024,7 @@ public final class SessionAudio {
         }
         guard let format else {
             log.error(
-                "could not build \(channels)-channel \(rateHz) Hz audio format — audio disabled")
+                "no \(channels)-channel \(rateHz) Hz audio format — audio disabled")
             return nil
         }
         let scratch = ScratchBuffer() // block-owned; freed with the closure
@@ -1083,7 +1083,7 @@ public final class SessionAudio {
             if let dev = AudioDevices.deviceID(forUID: speakerUID),
                let unit = engine.outputNode.audioUnit {
                 if !Self.setDevice(dev, on: unit) {
-                    log.error("could not select speaker \(speakerUID) — using default")
+                    log.error("speaker \(speakerUID) not selectable — using default")
                 }
             } else {
                 log.warning("speaker \(speakerUID) not present — using default")
@@ -1280,7 +1280,7 @@ public final class SessionAudio {
         if !micUID.isEmpty {
             if let dev = AudioDevices.deviceID(forUID: micUID), let unit = input.audioUnit {
                 if !Self.setDevice(dev, on: unit) {
-                    log.error("could not select microphone \(micUID) — using default")
+                    log.error("microphone \(micUID) not selectable — using default")
                 }
             } else {
                 log.warning("microphone \(micUID) not present — using default")

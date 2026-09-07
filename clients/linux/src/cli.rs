@@ -144,10 +144,7 @@ pub fn headless_pair(pin: &str) -> glib::ExitCode {
             glib::ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!(
-                "pairing failed: {} ({e:?})",
-                crate::trust::pair_error_message(&e)
-            );
+            eprintln!("{}", crate::trust::pair_error_message(&e));
             glib::ExitCode::FAILURE
         }
     }
@@ -467,7 +464,7 @@ pub fn headless_forget_host(selector: &str) -> glib::ExitCode {
 /// a caller wanting a true factory reset removes those separately. Missing files are fine.
 pub fn headless_reset() -> glib::ExitCode {
     let Ok(dir) = crate::trust::config_dir() else {
-        eprintln!("reset: could not resolve config dir (HOME unset?)");
+        eprintln!("reset: no config dir (HOME unset?)");
         return glib::ExitCode::FAILURE;
     };
     let mut ok = true;
