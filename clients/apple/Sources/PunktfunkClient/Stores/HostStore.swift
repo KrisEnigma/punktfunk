@@ -49,6 +49,12 @@ extension HostDiscovery {
 
 @MainActor
 final class HostStore: ObservableObject {
+    /// The one store per process. Every mutation rewrites the whole array from THIS instance's
+    /// copy, so a second instance (macOS opens a window per Cmd+N) would persist its own stale
+    /// view over the first's — a host paired in one window loses its pin the moment the other
+    /// window writes, and the user has to pair again.
+    static let shared = HostStore()
+
     private static let key = DefaultsKey.hosts
 
     @Published var hosts: [StoredHost] {
