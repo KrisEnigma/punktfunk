@@ -340,6 +340,17 @@ final class AudioRing: @unchecked Sendable {
         frameUs = max(us, 1)
     }
 
+    /// Forget the largest render callback seen. The quantum belongs to the OUTPUT DEVICE, and the
+    /// ring deliberately outlives an engine rebuild, so a one-off large grant (iOS hands out an
+    /// 85 ms buffer while another app owns the hardware) would otherwise pin the target floor for
+    /// the rest of the session — the cap in `write` is `target + renderQuantum`, so nothing could
+    /// trim it back. Call it wherever the engine is rebuilt onto a live ring.
+    func forgetRenderQuantum() {
+        lock.lock()
+        defer { lock.unlock() }
+        renderQuantum = 0
+    }
+
     /// One frame in interleaved samples. Computed in µs so a sub-millisecond frame does not
     /// truncate: 2 500 µs at 48 kHz stereo is 240 samples, not the 192 that routing it through
     /// integer milliseconds first would give. Mirrors `JitterPolicy::frame_samples`; caller holds

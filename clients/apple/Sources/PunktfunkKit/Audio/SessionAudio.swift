@@ -169,6 +169,9 @@ public final class SessionAudio {
         if let mediaResetObserver {
             NotificationCenter.default.removeObserver(mediaResetObserver)
         }
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+        }
         #endif
     }
 
@@ -997,6 +1000,9 @@ public final class SessionAudio {
         // and fades across a whole one. Idempotent, so the rebuild path that reuses this very ring
         // simply sets it again.
         ring.setFrameUs(wireFrameUs)
+        // The device behind this engine may be a different one, or the same one with a different
+        // buffer grant. The largest callback the PREVIOUS engine saw is not a floor for this one.
+        ring.forgetRenderQuantum()
 
         // Engine-native deinterleaved float; the render block deinterleaves from the ring. Surround
         // uses an explicit wire-order channel layout; the mixer downmixes to the output device when
@@ -1219,11 +1225,18 @@ public final class SessionAudio {
                     // Half a second of tolerance on the reference: long enough to ride out a
                     // stalled or hitching present path, short enough that a backgrounded session
                     // (video decode dropped, audio still playing) stops steering almost at once.
-                    av.observe(AvSync.Observation(
+                    // Only steer on an observation the sync actually ACCEPTED. It declines when
+                    // the video reference is missing or too old, and the desired depth is derived
+                    // from the CURRENT depth plus the settled offset — so re-requesting it against
+                    // a frozen offset raises the target by the offset each packet, walking the ring
+                    // to its cap and inserting an audible duplicate every couple of seconds.
+                    let accepted = av.observe(AvSync.Observation(
                         ptsNs: pcm.ptsNs, nowLocalNs: nowNs,
                         clockOffsetNs: connection.clockOffsetNs, bufferedAhead: depth,
                         videoE2eNs: videoLatency.latestSample(asOfNs: nowNs, maxAgeMs: 500)))
-                    ring.setSyncTarget(av.desiredDepth(currentDepth: depth))
+                    if accepted != nil {
+                        ring.setSyncTarget(av.desiredDepth(currentDepth: depth))
+                    }
                     ring.noteAvOffset(av.offsetMS)
                 }
                 pcm.samples.withUnsafeBufferPointer { p in
@@ -1651,8 +1664,10 @@ public final class SessionAudio {
     static func micChain(
         rate: Double, frames: AVAudioFrameCount, to pcmFormat: AVAudioFormat
     ) -> MicChain? {
-        // `staging` holds the resampled 48 kHz mono, so it must fit the UPWARD ratio from `rate`
-        // (a 44.1 kHz quantum grows by ~1.088); +64 covers the converter's own slack.
+        // `staging` holds the resampled mono at the DESTINATION rate, so it must fit the upward
+        // ratio from `rate` (a 44.1 kHz quantum grows by ~1.088 into 48 kHz); +64 covers the
+        // converter's own slack. Sized from `pcmFormat`, never a literal: a destination rate the
+        // buffer was not sized for truncates silently and drifts the uplink's pitch.
         guard rate > 0, frames > 0,
               let monoFormat = AVAudioFormat(
                   commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1,
@@ -1662,7 +1677,7 @@ public final class SessionAudio {
               let staging = AVAudioPCMBuffer(
                   pcmFormat: pcmFormat,
                   frameCapacity: AVAudioFrameCount(
-                      (Double(frames) * 48_000 / rate).rounded(.up)) + 64)
+                      (Double(frames) * pcmFormat.sampleRate / rate).rounded(.up)) + 64)
         else { return nil }
         return MicChain(
             monoFormat: monoFormat, resampler: resampler, mono: mono, staging: staging)
