@@ -370,6 +370,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A Mac with no microphone connects instead of crashing.** The client decided a mic existed from
+  the input node's output format, which with no default input device reports the *output* side —
+  two channels of AirPlay on a Mac Studio — and a capture tap on that node raised an uncatchable
+  AVFAudio exception that aborted the app on every connect. Update the client; a session on such a
+  Mac now starts with the uplink disabled and one log line.
 - **A SteamOS host links its own carried FFmpeg, not the build box's.** The Debian-trixie build box
   no longer installs `libav*-dev` and `build-ffmpeg.sh` purges it off an older box, because with it
   present the linker resolved `-lavcodec` to the box's copy and left the host needing a soname its

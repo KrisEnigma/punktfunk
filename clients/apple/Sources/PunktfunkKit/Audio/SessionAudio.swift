@@ -1441,7 +1441,13 @@ public final class SessionAudio {
         on input: AVAudioInputNode, micUID: String, micChannel: Int
     ) -> Bool {
         let inFormat = input.outputFormat(forBus: 0)
-        guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
+        // The tap carries the node's OUTPUT format, but AVFAudio validates that against the input
+        // HARDWARE format and raises an uncatchable Objective-C exception when the two don't line
+        // up. With no default input device the hardware side reads 0 Hz / 0 ch while the output
+        // side still reports the default-device aggregate — 2 ch of AirPlay, seemingly recordable.
+        let hwFormat = input.inputFormat(forBus: 0)
+        guard inFormat.sampleRate > 0, inFormat.channelCount > 0,
+              hwFormat.sampleRate > 0, hwFormat.channelCount > 0 else {
             log.error("no usable input device — mic uplink disabled")
             return false
         }
@@ -1534,17 +1540,10 @@ public final class SessionAudio {
         var inputPeak: Float = 0
         var levelReported = false
 
-        // 480 frames = 10 ms, matching the packet duration. Advisory — CoreAudio delivers the
-        // device quantum whatever we ask (the old 2048 request came back as 42.7 ms bursts, most
-        // of the uplink's latency) — but where the system honors it, the tap fires per-packet.
-        // `format: nil` — NOT the format read above. `installTap` validates a non-nil format
-        // against the bus and raises an Objective-C exception on any mismatch; Swift cannot catch
-        // that, so it aborts the process (SIGABRT in `AVAudioEngineGraph::InstallTapOnNode`). The
-        // format was necessarily read a moment EARLIER, and on macOS the input can move underneath
-        // it — a device switch, a clock/rate change, or the `setDevice` swap `startCapture` itself
-        // performs two lines before this. `nil` means "whatever the bus emits", which is what the
-        // chain wants anyway, and the mismatch cannot arise by construction. The tap then follows
-        // the real format below.
+        // 480 frames = 10 ms, matching the packet duration — advisory, CoreAudio delivers the
+        // device quantum whatever we ask. `format: nil` (not the format read above) means
+        // "whatever the bus emits": a format read a moment earlier can go stale under a device
+        // switch or a rate change, and a stale one raises where nil follows the bus.
         input.installTap(onBus: 0, bufferSize: 480, format: nil) { buffer, _ in
             if flag.isStopped { return }
             let frames = Int(buffer.frameLength)
