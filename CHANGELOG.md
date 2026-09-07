@@ -56,6 +56,20 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`ConsoleCmd::SpeedTest` is the console shell's network speed test.** The gamepad host menu
+  grew a "Test network speed…" row on every surface `pf-console-ui` fronts — Android TV, the
+  Steam Deck and Linux console, webOS — reported back through the new
+  `ConsoleShared::advance_speed` and, on Android, `NativeBridge.nativeConsoleAdvanceSpeed`. An
+  embedder that drains the bus must handle the new variant, or the takeover the shell raises
+  never leaves "Connecting".
+- **`pf_client_core::speed` holds the one probe.** `run_speed_probe` and `recommended_kbps` are
+  now shared by the Windows shell and the session binary, so burst length and the 70 % headroom
+  cannot drift between two clients. `clients/windows`'s `probe::run_speed_probe` re-exports it;
+  nothing to change at a call site.
+- **`ProfileChip` carries `bitrate_kbps`.** The console reads it to tell a profile that *pins*
+  bitrate from one that inherits, because it writes the global default and applying there would
+  leave the tested host alone while retuning every other one. Producers that leave the field out
+  read as "inherits", so fill it in wherever a chip is built from a real profile.
 - **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
   and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
   rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.
@@ -398,11 +412,27 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **Windows NVENC sub-frame split arbitration reaches a verdict.** The chunked poll path is how a
   sub-frame session finishes and it never fed the arbiter, so on Windows the experiment the arbiter
   exists to run never concluded and the HEVC sub-frame incumbent was invisible to it. Nothing to do.
+- **The Nix packages carry every dlopen'd library in their RUNPATH.** A `buildInputs` entry only
+  reaches RUNPATH when something links it, and nothing links `libvulkan.so.1` or `libva.so.2`, so
+  on NixOS all Vulkan died at `Entry::load()` and native VAAPI was about to follow it the moment
+  the host stopped linking FFmpeg, which had been pulling libva in by accident. Rebuild the
+  packages; `/run/opengl-driver` carries the vendor ICD and the NVIDIA libraries, neither of these.
+- **The native VAAPI session keeps a reference the loss report can still reach.** Its ring held
+  four pictures — 40 ms at 100 Hz — so a report that names a frame two frames back and spends a
+  round trip arriving always found every pre-loss picture evicted, and every single lost frame
+  cost a full IDR. The ring is now eight deep where the level's DPB allows it (11 at 1440p, 5 at
+  4K60), and a decline says so in the log.
 - **An Apple client accepts an RFI anchor as recovery.** Both video pumps kept asking for a
   keyframe every 100 ms after any lost frame until an IDR landed, so a host that had already
   repaired the picture with a `USER_FLAG_RECOVERY_ANCHOR` P-frame was forced into a full IDR
   230 ms later, and its burst on Wi-Fi cost the next frame — a ~250 ms hitch per loss. Update
   the client; loss now goes through the shared re-anchor gate like the desktop client.
+- **A Hyprland session captures the compositor directly.** The screen-share portal
+  re-requested every frame on a millisecond timer with a 6 ms floor, which halved the rate
+  above about 140 Hz and left each frame ~3 ms older than the copy needed; the host now
+  drives `ext-image-copy-capture-v1` itself, measuring 165 fps at 165 Hz where the portal
+  gave 82. Nothing to do; `PUNKTFUNK_DIRECT_CAPTURE=0` restores the portal, and any
+  compositor without the protocol keeps using it.
 - **A GNOME 49+ virtual monitor paints when the host asks.** The capture stream now drives the
   PipeWire graph as a lazy driver, so Mutter composites a frame on a client's commit instead of
   on its own vblank timer, one paint per wire interval at most: no beat against the host's

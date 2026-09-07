@@ -371,6 +371,15 @@ public enum OverlayField {
         default: return false
         }
     }
+
+    /// Does this build model `field` at all? `clear` and `isOverridden` both answer "no override"
+    /// for a name they do not know, which is indistinguishable from "not overridden" — so a typo
+    /// in a settings row loses its marker and its Reset with nothing to report it. Callers that
+    /// take a field name from source rather than from data assert on this.
+    public static func isModelled(_ field: String) -> Bool {
+        var probe = SettingsOverlay()
+        return clear(field, in: &probe)
+    }
 }
 
 // MARK: - The profile

@@ -314,11 +314,14 @@ struct LibraryView: View {
         case "store": groupBy = .store
         default: groupBy = nil
         }
-        return LibraryCollation.collate(ordered, sort: LibrarySortKey(stored: sortRaw), groupBy: groupBy)
+        // One `ordered` for the whole build: it is a computed property that re-sorts the catalog
+        // on every read, and the group map below reads it once per entry.
+        let items = ordered
+        return LibraryCollation.collate(items, sort: LibrarySortKey(stored: sortRaw), groupBy: groupBy)
             .map { group in
                 // The ungrouped bucket names itself "All"; on this grid it has always been "Games".
                 let label = (groupBy == nil && group.key != .launchers) ? "Games" : group.label
-                return (label, group.indices.map { ordered[$0] })
+                return (label, group.indices.map { items[$0] })
             }
     }
 
