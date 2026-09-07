@@ -19,7 +19,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var model = SessionModel()
-    @StateObject private var store = HostStore()
+    @ObservedObject private var store = HostStore.shared
     /// The settings-profile catalog (design/client-settings-profiles.md §4.2) — read at every
     /// connect to resolve the session's `EffectiveSettings`, and edited by the settings surface.
     @ObservedObject private var profiles = ProfileStore.shared
@@ -48,6 +48,8 @@ struct ContentView: View {
     private var fullscreenForSession: Bool {
         model.connection != nil ? model.settings.fullscreenWhileStreaming : fullscreenWhileStreaming
     }
+    /// The window is in a fullscreen THIS app drove it into (FullscreenController owns it).
+    @State private var appDrivenFullscreen = false
     @State private var showAddHost = false
     /// A `punktfunk://` deep link (widget / Siri / Shortcuts) couldn't be honored — unknown host, or
     /// a live session is already up. Surfaced as an informational alert (distinct from the
@@ -510,7 +512,7 @@ struct ContentView: View {
         // safe-area handling below.
         .background(FullscreenController(
             active: fullscreenForSession && model.connection != nil,
-            isFullscreen: $isFullscreen))
+            isFullscreen: $isFullscreen, appDriven: $appDrivenFullscreen))
         #endif
         // A game launched from the library just exited, so the session ended on purpose: put the
         // player back in that host's library rather than on host selection. Set on the outer Group
@@ -743,15 +745,12 @@ struct ContentView: View {
     private var connectionErrorReady: Bool {
         guard model.errorMessage != nil else { return false }
         #if os(macOS)
-                // Defer the alert while a forced-fullscreen exit is still pending: a sheet
-                // attached to a fullscreen window makes AppKit drop `-toggleFullScreen:`, so
-                // presenting it now strands the window fullscreen on the home screen after a
-                // session error (a deliberate disconnect sets no `errorMessage`, which is why
-                // it never stuck). Tearing the session down already flipped `active`→false;
-                // once the window leaves fullscreen and `isFullscreen` flips, the alert shows
-                // over the windowed home UI. Not gated when fullscreen is the user's own manual
-                // choice (opt-out setting) — nothing is auto-exiting there to conflict with.
-        if fullscreenForSession && isFullscreen { return false }
+        // Defer the alert while a forced-fullscreen exit is still pending: a sheet attached to a
+        // fullscreen window makes AppKit drop `-toggleFullScreen:`, so presenting it now strands
+        // the window fullscreen on the home screen after a session error. Gated on a fullscreen
+        // WE drove, never on the setting: a window the user fullscreened themselves is never
+        // going to flip back, so the same gate would swallow the failure forever.
+        if appDrivenFullscreen && isFullscreen { return false }
         #endif
         return true
     }
