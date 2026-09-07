@@ -225,6 +225,10 @@ def check_blocks(
         if _waived(lines, start):
             continue
         kind = kinds.get((start, end), "line")
+        # Swift has no `//!`, so a file's opening `//` block IS its module doc and earns the doc
+        # budget. Anything below the header is an ordinary comment on the ordinary cap.
+        if kind == "line" and start == 0 and path.endswith(".swift"):
+            kind = "doc"
         length = end - start
         limit = DOC_COMMENT_FAIL if kind == "doc" else LINE_COMMENT_FAIL
         lead = lines[start].strip()[:80]
@@ -353,7 +357,7 @@ def git_merge_base() -> str | None:
 
 def changed_rs_lines(base: str) -> dict[str, set[int]]:
     diff = subprocess.check_output(
-        ["git", "diff", "-U0", f"{base}...HEAD", "--", "*.rs", ":!**/vendor/**"],
+        ["git", "diff", "-U0", f"{base}...HEAD", "--", "*.rs", "*.swift", ":!**/vendor/**"],
         cwd=ROOT,
         text=True,
     )
@@ -402,7 +406,7 @@ def check_repo() -> list[str]:
             changed[rel].update(lines_touched)
     try:
         wt = subprocess.check_output(
-            ["git", "diff", "-U0", "HEAD", "--", "*.rs", ":!**/vendor/**"],
+            ["git", "diff", "-U0", "HEAD", "--", "*.rs", "*.swift", ":!**/vendor/**"],
             cwd=ROOT,
             text=True,
         )
@@ -475,6 +479,14 @@ def self_test() -> int:
     expect("field report opened", any("field report" in e for e in err))
 
     doc_ok = ["//! m"] * 23 + ["pub fn z() {}"]
+    swift_header = ["// h"] * 10 + ["", "import Foundation"]
+    expect("swift file header gets the doc budget",
+           check_blocks("t.swift", swift_header, {1}) == [])
+    expect("same block in a .rs file does not",
+           check_blocks("t.rs", swift_header, {1}) != [])
+    swift_body = ["import Foundation", ""] + ["// c"] * 10
+    expect("swift comment below the header keeps the // cap",
+           check_blocks("t.swift", swift_body, {3}) != [])
     expect("23 //! pass", check_blocks("t.rs", doc_ok, None) == [])
 
     doc_bad = ["//! m"] * 24 + ["pub fn z() {}"]

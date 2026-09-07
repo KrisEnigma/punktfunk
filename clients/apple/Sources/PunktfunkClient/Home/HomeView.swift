@@ -352,7 +352,8 @@ struct HomeView: View {
             isBusy: model.isBusy,
             onConnect: { connect(host, selection) },
             onPair: { if !model.isBusy { pairingTarget = host } },
-            onSpeedTest: { if !model.isBusy { speedTestTarget = host } },
+            onSpeedTest: host.pinnedSHA256 != nil
+                ? { if !model.isBusy { speedTestTarget = host } } : nil,
             onForget: { store.forgetIdentity(host) },
             onRemove: { store.remove(host) },
             onBrowseLibrary: onBrowseLibrary,
