@@ -47,10 +47,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
-- **`libav-fallback` feature on `pf-encode`, on by default in `punktfunk-host`.** The libavcodec
-  NVENC and VAAPI backends sit behind it on Linux, so a `--no-default-features` host links no
-  FFmpeg and the native VAAPI session answers the codec probes itself. Packagers change nothing;
-  the default build links the FFmpeg it did.
+- **`libav-fallback` feature on `pf-encode`, enabled by the Linux host.** The libavcodec NVENC
+  and VAAPI backends sit behind it; `punktfunk-host` turns it on through its Linux dependency
+  entry, and the bare crate — or a host with that entry's feature dropped — links no FFmpeg, the
+  native VAAPI session answering the codec probes itself. Packagers change nothing; the default
+  build links the FFmpeg it did.
 - **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
   and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
   rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.
@@ -375,6 +376,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   live, and Mutter 50 dereferences that unassigned CRTC (GNOME/mutter#5007) — gnome-shell died
   and the session with it. Every other virtual monitor now stays in the config as a secondary.
   Nothing to do.
+- **The Windows driver reports NVENC's real capabilities.** NVENC builds its session on the
+  first frame, so the driver answered the host's one capability read with defaults and pinned
+  every session to `supports_rfi: false`, which turned every lost frame into a full IDR instead
+  of one re-referenced P frame. Update host and driver together; nothing to configure.
 - **The guided installer starts the web console it installs.** It enabled `punktfunk-web` only
   when the unit existed before the install ran, so a fresh box got a console that never answered
   on 47992 and a warning that it was "not installed". Nothing to do; a re-run enables it.

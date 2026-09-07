@@ -226,6 +226,11 @@ opus = "0.3"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# The libavcodec encode backends: NVENC for CPU frames, VAAPI as the native session's fallback
+# and its `PUNKTFUNK_VAAPI_NATIVE=0` oracle (design/native-vaapi-encoder.md, WP9). Enabled on
+# this entry, not in `default`: a default feature is platform-agnostic and would switch the
+# Windows `amf-qsv` FFmpeg on. Drop the feature here for an FFmpeg-free Linux host.
+pf-encode = { path = "../pf-encode", features = ["libav-fallback"] }
 # `screencast` gates the ScreenCast portal module; `remote_desktop` adds the RemoteDesktop
 # portal we use for libei input on KWin/GNOME; `tokio` is the default runtime.
 # `open_pipe_wire_remote` is unconditional, so ashpd's own `pipewire` feature is not
@@ -355,12 +360,8 @@ pf-driver-proto = { path = "../pf-driver-proto" }
 # GameStream ships in every default build too (still runtime-OPT-IN via --gamestream /
 # PUNKTFUNK_GAMESTREAM); building with `--no-default-features --features pyrowave` produces the
 # hardened NATIVE-ONLY host — no Moonlight-compat planes, no `rusty_enet` (transpiled C), no
-# `rsa` (rust-safety WP19), no FFmpeg. `serve --gamestream` on such a binary refuses to start, loudly.
-default = ["pyrowave", "gamestream", "libav-fallback"]
-# The libavcodec encode backends on Linux: NVENC for CPU frames, VAAPI as the native session's
-# fallback and its `PUNKTFUNK_VAAPI_NATIVE=0` oracle. ON by default; leaving it off links no
-# FFmpeg (design/native-vaapi-encoder.md, WP9).
-libav-fallback = ["pf-encode/libav-fallback"]
+# `rsa` (rust-safety WP19). `serve --gamestream` on such a binary refuses to start, loudly.
+default = ["pyrowave", "gamestream"]
 # The GameStream/Moonlight-compat planes (nvhttp pairing, RTSP, ENet control, `_nvstream` mDNS)
 # at COMPILE time — see the `default` note above for what leaving it off buys.
 gamestream = ["dep:rusty_enet", "dep:rsa"]

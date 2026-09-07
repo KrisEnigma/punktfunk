@@ -52,8 +52,10 @@ openh264 = "0.9"
 # (libavcodec 63, libavutil 61). Arch shipped FFmpeg 9 on 2026-08-08 and every soname moved with it;
 # the packaged host must be BUILT against the FFmpeg it will run on, and packaging/arch/PKGBUILD
 # derives a soname dep from that link so pacman can no longer walk an install across the break.
-# Its own dependency name: `dep:ffmpeg-next` would also switch on the Windows `amf-qsv` copy.
-ffmpeg-linux = { package = "ffmpeg-next", version = "9", optional = true }
+# One name on every platform: Cargo refuses one package under two names in a feature-unified
+# resolve (`cargo metadata --all-features`, which cbindgen runs). The Linux host enables
+# `libav-fallback` on its dependency entry, so Windows never activates this copy.
+ffmpeg-next = { version = "9", optional = true }
 libc = "0.2"
 # Vulkan bindings for the raw Vulkan-Video encode + PyroWave compute backends (feature-gated below;
 # the dep stays unconditional to mirror the host's Linux target — unused-but-declared is harmless).
@@ -82,9 +84,9 @@ windows = { version = "0.62", features = [
 [features]
 default = []
 # The libavcodec backends on Linux: libav NVENC for CPU/dmabuf frames on NVIDIA, and libav VAAPI
-# as the native session's fallback and A/B oracle (`PUNKTFUNK_VAAPI_NATIVE=0`). punktfunk-host
-# turns it on by default; a build without it links no FFmpeg.
-libav-fallback = ["dep:ffmpeg-linux"]
+# as the native session's fallback and A/B oracle (`PUNKTFUNK_VAAPI_NATIVE=0`). The Linux host
+# turns it on through its pf-encode dependency entry; the bare crate links no FFmpeg.
+libav-fallback = ["dep:ffmpeg-next"]
 # NVENC hardware encode (Linux CUDA + Windows D3D11); entry points resolved at runtime.
 nvenc = ["dep:nvidia-video-codec-sdk", "pf-encode-win/nvenc"]
 # AMD (AMF) + Intel (QSV) hardware encode on Windows via libavcodec.
