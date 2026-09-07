@@ -53,15 +53,10 @@ final class StreamPump {
             // Report the coded dims to the resize overlay only when they CHANGE (a new-mode IDR),
             // not on every loss-recovery IDR at the same size — so it fires once per real switch.
             var lastDecodedDims: CMVideoDimensions?
-            var lastFramesDropped = connection.framesDropped()
-            // Recovery is a persistent WANT, not a one-shot edge: set it on detected loss (or a
-            // decoder reset), retry the throttled request EVERY iteration, and clear it only when a
-            // fresh IDR actually re-anchors decode. The old code advanced `lastFramesDropped` on the
-            // same edge it fired the throttled request — so a request swallowed by the throttle (a
-            // second drop within the window, e.g. the lost recovery IDR itself being pruned) was
-            // never re-sent: the counter went flat, the climb never re-fired, and the picture stayed
-            // frozen for good while audio kept playing. The iPhone's lossy Wi-Fi hits this where the
-            // Mac's Ethernet never does.
+            // Persistent WANT for the two states only an IDR's parameter sets can end: no
+            // decodable format yet, or a decoder reset. Retried every iteration so a request
+            // the throttle swallowed is re-sent. Loss goes through the gate — an RFI anchor
+            // heals it, and asking on until an IDR turns every loss into one.
             var awaitingIDR = false
             var awaitingSince = Date.distantPast // when the current recovery began (for the resume log)
             var wasFailed = false
@@ -80,38 +75,20 @@ final class StreamPump {
                         _ = try connection.nextAU(timeoutMs: 100)
                         return true
                     }
-                    // Loss recovery (the primary path). Under the host's infinite GOP the only
-                    // recovery keyframe is one we request. The reassembler drops unrecoverable AUs
-                    // (framesDropped); the decoder then *conceals* the reference-missing deltas — a
-                    // frozen / garbage picture that never flips the layer to .failed — so key off the
-                    // drop count climbing, then keep asking (awaitingIDR) until an IDR lands. Polled
-                    // every iteration so a total-loss drought still recovers when packets resume.
-                    let dropped = connection.framesDropped()
-                    if dropped > lastFramesDropped {
-                        // Log only on the false→true transition (once per recovery cycle), not per
-                        // dropped AU, so heavy loss doesn't spam the log.
-                        if !awaitingIDR {
-                            awaitingSince = Date()
-                            pumpLog.notice(
-                                "video: unrecoverable drop (framesDropped=\(dropped, privacy: .public)) — requesting recovery IDR")
-                        }
-                        lastFramesDropped = dropped
-                        awaitingIDR = true
-                    }
                     if awaitingIDR { recovery.request() }
-                    // Freeze backstop: a drop-count climb arms the gate (should the frame-index gap
-                    // below be lost too), and an overdue freeze re-asks for the re-anchor.
-                    if gate.poll(framesDropped: dropped) { recovery.request() }
+                    // Loss recovery through the shared gate: a drop-count climb beyond the gap's
+                    // credit arms the freeze and asks (the decoder conceals reference-missing
+                    // deltas without flipping the layer to .failed), and an overdue freeze re-asks
+                    // for the re-anchor. Polled every iteration so a total-loss drought still
+                    // recovers when packets resume.
+                    if gate.poll(framesDropped: connection.framesDropped()) { recovery.request() }
 
                     guard let au = try connection.nextAU(timeoutMs: 100) else { return true }
-                    // Loss recovery (RFI): a forward frame-index gap fires a throttled reference-
-                    // frame-invalidation request so an RFI-capable host (AMD LTR / NVENC) recovers
-                    // with a cheap clean P-frame instead of a full IDR. The framesDropped-driven
-                    // recovery above stays the backstop for when the recovery frame itself is lost.
-                    // The same gap is the earliest, most precise signal to ARM the display freeze.
-                    // Credited arm: the gap width pre-covers the reassembler's ~120 ms-later
-                    // framesDropped climb for the same loss, so a fast RFI anchor that heals in
-                    // between isn't re-frozen by it (the double-arm race).
+                    // A forward frame-index gap fires a throttled RFI (a clean P-frame, no IDR)
+                    // and arms the freeze, credited with the gap width so the reassembler's
+                    // ~120 ms-later framesDropped climb for the same loss cannot re-freeze a
+                    // stream the anchor already healed. A lost anchor lapses into the gate's
+                    // overdue re-ask above.
                     let gapWidth = connection.noteFrameIndexGapWidth(au.frameIndex)
                     if gapWidth > 0 { gate.arm(expectingDrops: UInt64(gapWidth)) }
                     onFrame?(au)
