@@ -7,13 +7,13 @@
 # runs this spec; `cargo build` fetches crates over the network (COPR allows it).
 #
 # DEPENDENCIES NOT IN BASE FEDORA:
-#   * ffmpeg / ffmpeg-libs with NVENC — from RPM Fusion *nonfree*. Enable it in
-#     the COPR project (External Repositories) and on the target host.
 #   * The NVIDIA driver (libnvidia-encode / libEGL_nvidia) — present on Bazzite's
 #     -nvidia images; on plain Fedora install akmod-nvidia + xorg-x11-drv-nvidia-cuda.
+#   * mesa-va-drivers-freeworld (RPM Fusion) for full AMD/Intel VAAPI encode — Fedora's
+#     stock driver has HEVC and AV1 disabled.
 #
 # Bazzite already ships gamescope, PipeWire and the NVIDIA stack, so on Bazzite the
-# only new runtime bits are ffmpeg-libs (RPM Fusion) + opus + libei.
+# only new runtime bits are opus + libei.
 ################################################################################
 
 Name:           punktfunk
@@ -31,7 +31,7 @@ URL:            https://git.unom.io/unom/punktfunk
 # COPR SCM builds provide the checkout; for a tarball build, drop a git archive here:
 Source0:        %{name}-%{version}.tar.gz
 
-# punktfunk-host is Linux-only and links system FFmpeg/PipeWire/Opus. The HOST is x86_64 only —
+# punktfunk-host is Linux-only and links system PipeWire/Opus. The HOST is x86_64 only —
 # its encode stack is NVENC/QSV/AMF — but the CLIENT builds and runs fine on aarch64, so the spec
 # accepts both arches and `--without host` (below) selects the client-only build.
 ExclusiveArch:  x86_64 aarch64
@@ -80,22 +80,6 @@ BuildRequires:  pkgconfig(libspa-0.2)
 BuildRequires:  pkgconfig(wayland-client)
 BuildRequires:  pkgconfig(xkbcommon)
 BuildRequires:  pkgconfig(opus)
-# FFmpeg dev headers with NVENC — from RPM Fusion (ffmpeg-devel), NOT ffmpeg-free.
-# Version-agnostic: ffmpeg-sys-next auto-detects the installed FFmpeg, so this builds
-# against FFmpeg 7.x (libavcodec 61, e.g. Fedora 43 / Bazzite) or 8.x (libavcodec 62).
-# ALL SEVEN modules, not just the three we call directly: `ffmpeg-next` is pulled with default
-# features, so its `-sys` build script pkg-config-probes codec/device/filter/format/util/
-# resampling/scaling and panics on the first one missing. RPM Fusion's ffmpeg-devel ships the lot
-# in one package, which hid the gap — on a box where these resolve to Fedora's split
-# libav*-free-devel packages instead, dnf installed only the three named here and the build died
-# in ffmpeg-sys-next's build.rs on `libavfilter`.
-BuildRequires:  pkgconfig(libavcodec)
-BuildRequires:  pkgconfig(libavdevice)
-BuildRequires:  pkgconfig(libavfilter)
-BuildRequires:  pkgconfig(libavformat)
-BuildRequires:  pkgconfig(libavutil)
-BuildRequires:  pkgconfig(libswresample)
-BuildRequires:  pkgconfig(libswscale)
 # Zero-copy GPU path: src/zerocopy/ links libGL + libgbm (mesa) via hand-rolled FFI.
 BuildRequires:  pkgconfig(gl)
 BuildRequires:  pkgconfig(gbm)
@@ -130,9 +114,6 @@ Recommends:     pipewire-pulseaudio
 Recommends:     rtkit
 Requires:       opus
 Requires:       libei
-# FFmpeg runtime with NVENC (RPM Fusion). Weak-dep so the package installs even if
-# the user hasn't enabled RPM Fusion yet, but it WILL fail to encode without it.
-Recommends:     ffmpeg-libs
 # A compositor to drive. Bazzite ships gamescope; the others are user choice.
 Recommends:     gamescope
 Suggests:       kwin
@@ -141,7 +122,7 @@ Suggests:       mutter
 Recommends:     (xorg-x11-drv-nvidia-cuda if xorg-x11-drv-nvidia)
 # VAAPI encode drivers for AMD (radeonsi) / Intel (iHD) — the auto-selected VAAPI backend on a
 # non-NVIDIA GPU. NOTE: Fedora's stock mesa-va-drivers has HEVC/AV1 *disabled* (patents); full
-# encode needs mesa-va-drivers-freeworld from RPM Fusion (same nonfree repo as ffmpeg-libs).
+# encode needs mesa-va-drivers-freeworld from RPM Fusion.
 Recommends:     mesa-va-drivers
 Recommends:     intel-media-driver
 # The management web console (pairing + status) every user needs — a separate noarch subpackage.
@@ -236,18 +217,19 @@ export PUNKTFUNK_BUILD_VERSION="%{version}-%{release}"
 # --features punktfunk-host/nvenc: the direct-SDK NVENC path (real RFI + recovery anchor on Linux
 # NVIDIA; design/linux-direct-nvenc.md). AMD/Intel-safe — the NVENC/CUDA entry points are dlopen'd
 # at runtime (no link-time dep; __requires_exclude already drops libcuda), so the binary starts
-# driver-less; the encoder engages only on a CUDA frame (default on NVIDIA; PUNKTFUNK_NVENC_DIRECT=0
-# opts back to libav) — the `cuda` gate keeps AMD/Intel on VAAPI regardless.
+# driver-less; the encoder engages only on a CUDA frame, and the `cuda` gate keeps AMD/Intel on
+# VAAPI regardless. Without this feature an NVIDIA box has no NVENC at all.
 # --features punktfunk-host/vulkan-encode: the AMD/Intel twin — a raw VK_KHR_video_encode_h265 backend
 # with real RFI (clean P-frame recovery anchor via DPB reference slots; design/linux-vulkan-video-encode.md).
 # Pure Rust `ash` (no new lib / no link-time dep); default on for HEVC (PUNKTFUNK_VULKAN_ENCODE=0 opts
-# back to libav VAAPI), and a failed open falls back to VAAPI so unsupported devices degrade gracefully.
+# back to the native VAAPI session), and a failed open falls back to it so unsupported devices
+# degrade gracefully.
 # -p punktfunk-encode-worker: the capability-carrying PyroWave encode worker, shipped next to the
 # host in %%{_bindir} and granted cap_sys_nice=ep via %%caps in %%files. It MUST be a separate file
 # (the host can never carry a capability — KWin identification, see the note in %%files), and it
 # must ship in the SAME package: host and worker version-check each other over their socket and
 # fall back to the in-process encoder on any mismatch. Co-built in this one invocation on purpose —
-# v1 accepts that the worker links the same FFmpeg the host does (same package, same sonames, no
+# v1 accepts that the worker shares the host's dependency graph (same package, same sonames, no
 # new break class), so cargo's feature unification here is harmless.
 %if %{with host}
 cargo build --release --locked --features punktfunk-host/nvenc,punktfunk-host/vulkan-encode \
@@ -639,9 +621,9 @@ install -Dm0644 scripts/punktfunk-scripting.service %{buildroot}%{_userunitdir}/
 %endif
 
 %files client
-# The CLIENT-scoped notices, not the workspace-wide root file: the root one is the host's and still
-# carries ffmpeg-next plus the full FFmpeg licence text, while this subpackage links no FFmpeg at
-# all since M10. Same file the GTK shell shows on About → Legal (scripts/gen-third-party-notices.sh
+# The CLIENT-scoped notices, not the workspace-wide root file: the root one covers the host's
+# dependency graph, which is a superset of this subpackage's. Same file the GTK shell shows on
+# About → Legal (scripts/gen-third-party-notices.sh
 # generates both). `%%license` installs it under its basename, so the path stays the usual one.
 %license LICENSE-MIT LICENSE-APACHE clients/linux/THIRD-PARTY-NOTICES.txt
 %{_bindir}/punktfunk-client

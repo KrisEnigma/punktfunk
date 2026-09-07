@@ -29,7 +29,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   handed to libav. Drop every `libav*` build and runtime dependency from a package, and give a
   hand build for an NVIDIA box `--features punktfunk-host/nvenc` — without it there is no NVENC,
   and the `libav-fallback`, `amf-qsv`, `PUNKTFUNK_VAAPI_NATIVE` and `PUNKTFUNK_NVENC_DIRECT`
-  escape hatches no longer exist.
+  escape hatches no longer exist. Our own packages carry the change: the .deb bundles no FFmpeg,
+  the RPM needs no RPM Fusion to build, the Arch package pins no `libav*.so` soname, and the
+  Windows installer ships no libav DLLs.
 - **The game-library toggle is gone from Apple and Android too.** `DefaultsKey.libraryEnabled`
   and the Kotlin `Settings.libraryEnabled` follow the Rust `library_enabled` retired in 0.31:
   pairing is the only gate on every client now. A stored value is left where it is and never
@@ -298,11 +300,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   LocalService's temp directory; the host now drains them over `IOCTL_DRAIN_LOG` at the keepalive
   cadence and once after every encoder open. Nothing to do — the knob still adds the driver's own
   file and debug-string tee on top of it.
-- **The SteamOS host carries its own FFmpeg.** The on-device build now compiles the pinned LGPL
-  FFmpeg the .deb already bundles into `target-steamos/ffmpeg` and links it behind an absolute
-  rpath, because SteamOS's FFmpeg moves independently of any Debian release and a host linked
-  against the box's copy stops loading when it does. A first install takes about four minutes
-  longer and `update.sh` reuses the build until the pin moves; nothing else changes.
+- **The SteamOS host builds four minutes faster.** It no longer compiles an FFmpeg to link
+  against, because nothing links one. Delete `target-steamos/ffmpeg` after updating to reclaim
+  the space; `update.sh` never rebuilds it.
 - **A Windows host serves pref `10` as the wired Triton pad.** It used to degrade to the Xbox 360
   pad, because 28DE:1304 has no Windows synthesis; it now folds onto the same 28DE:1302 virtual
   pad a cabled SC2 mints, which Steam treats as the canonical controller. Nothing to do — a Puck

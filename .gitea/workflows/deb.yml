@@ -8,10 +8,9 @@
 #                       — the same client package for arm64, CROSS-compiled on the same amd64
 #                         runner in the rust-ci-arm64cross image. No host counterpart: the Linux
 #                         host's encode stack is x86 (NVENC/QSV/AMF).
-#   build-publish-host  — the HOST, on the Ubuntu 24.04 rust-ci-noble image with a from-source
-#                         FFmpeg 8 BUNDLED into the .deb. This lowers the host's glibc floor to 2.39
-#                         and removes the hard `Depends: libavcodec62`, so the ONE host .deb installs
-#                         on Ubuntu 24.04 LTS through 26.04 — and, for free, on Debian 13.
+#   build-publish-host  — the HOST, on the Ubuntu 24.04 rust-ci-noble image. That lowers the host's
+#                         glibc floor to 2.39, so the ONE host .deb installs on Ubuntu 24.04 LTS
+#                         through 26.04 — and, for free, on Debian 13.
 #                         (A 26.04-built host .deb is uninstallable on 24.04 — the reason this job
 #                         exists; see packaging/debian/README.md.)
 #   build-publish-gamescope
@@ -138,8 +137,6 @@ jobs:
           # dpkg-shlibdeps — which resolves DT_NEEDED sonames only — ever asks for it. The
           # client's `Depends: libvulkan1` is added by hand in packaging/debian/build-client-deb.sh
           # precisely because a dlopen is invisible to shlibdeps.
-          # No libav*-dev: the client links no FFmpeg since M10 (§6 of
-          # design/client-native-decode.md).
           apt-get install -y --no-install-recommends dpkg-dev python3 \
             libgtk-4-dev libadwaita-1-dev libsdl3-dev
 
@@ -185,7 +182,7 @@ jobs:
           # leaving punktfunk-cli out here made it fall over on `install: No such file or
           # directory`, because its build-if-missing guard only tested the first two and so decided
           # everything was already built. The HOST is built separately in the build-publish-host
-          # job (Ubuntu 24.04 image + bundled FFmpeg 8).
+          # job (Ubuntu 24.04 image).
           cargo build --release --locked \
             -p punktfunk-client-linux -p punktfunk-client-session -p punktfunk-cli -p pf-update
 
@@ -329,8 +326,8 @@ jobs:
           done
 
   # ---------------------------------------------------------------------------------------------
-  # The HOST .deb — built on Ubuntu 24.04 (noble) with a from-source FFmpeg 8 BUNDLED, so it installs
-  # on Ubuntu 24.04 LTS through 26.04 (see the file header + packaging/debian/README.md). Runs in
+  # The HOST .deb — built on Ubuntu 24.04 (noble), so it installs on Ubuntu 24.04 LTS through
+  # 26.04 (see the file header + packaging/debian/README.md). Runs in
   # parallel with build-publish and publishes to the SAME distribution/component; the version step is
   # byte-identical so host and clients share a version line.
   build-publish-host:
@@ -363,13 +360,13 @@ jobs:
           echo "DISTRIBUTION=$DIST" >> "$GITHUB_ENV"
           echo "host package version $V -> apt distribution '$DIST'"
 
-      # dpkg-shlibdeps/dpkg-deb + patchelf are baked into rust-ci-noble; python3 is for the
-      # release-attach helper. Re-install defensively so the job stays green against the PREVIOUS
-      # image on the same push (docker.yml bootstrap lag) — a no-op once the image ships them.
-      - name: dpkg-dev + patchelf + python3
+      # dpkg-shlibdeps/dpkg-deb are baked into rust-ci-noble; python3 is for the release-attach
+      # helper. Re-install defensively so the job stays green against the PREVIOUS image on the
+      # same push (docker.yml bootstrap lag) — a no-op once the image ships them.
+      - name: dpkg-dev + python3
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends dpkg-dev patchelf python3
+          apt-get install -y --no-install-recommends dpkg-dev python3
 
       - name: Cache keys
         run: echo "rustc=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_ENV"
@@ -398,8 +395,7 @@ jobs:
           git config --global --add safe.directory "$PWD"
           # Same features the old combined build used: --nvenc (direct-SDK NVENC, real RFI on NVIDIA;
           # NVENC/CUDA is dlopen'd — no link dep, so this image needs no libcuda stub) + --vulkan-encode
-          # (raw VK_KHR_video_encode_h265 on AMD/Intel, pure ash). ffmpeg-sys-next links the image's
-          # bundled FFmpeg 8 via PKG_CONFIG_PATH (set in rust-ci-noble).
+          # (raw VK_KHR_video_encode_h265 on AMD/Intel, pure ash).
           #
           # punktfunk-tray is deliberately NOT in this invocation — build-deb.sh builds it separately,
           # and that split is load-bearing (see the identical note in the RPM spec / Arch PKGBUILD):
@@ -413,16 +409,13 @@ jobs:
           # encode worker that ships next to the host in /usr/bin, and build-deb.sh only builds it
           # if the artifact is missing — building it here keeps it on the same sccache pass as the
           # host. Unlike the tray it shares the host's dependency graph by design (v1 accepts that
-          # the worker links the same FFmpeg), so feature unification here is harmless.
+          # the worker shares the host dependency graph), so feature unification here is harmless.
           cargo build --release --locked --features punktfunk-host/nvenc,punktfunk-host/vulkan-encode \
             -p punktfunk-host -p punktfunk-encode-worker
 
-      - name: Build host .deb (FFmpeg bundled)
-        # BUNDLE_FFMPEG=1 copies the image's /opt/ffmpeg libav* into the package and repoints the
-        # binary's rpath, so there is no `Depends: libavcodec62` to block install on 24.04. FFMPEG_PREFIX
-        # defaults to /opt/ffmpeg (the image's ENV also sets it).
+      - name: Build host .deb
         run: |
-          VERSION="$VERSION" BUNDLE_FFMPEG=1 bash packaging/debian/build-deb.sh
+          VERSION="$VERSION" bash packaging/debian/build-deb.sh
 
       # Visibility only — placed here, right after the last compile, rather than at the end of the
       # job: the gamescope gate below must stay the final step (see its own note).
@@ -592,10 +585,10 @@ jobs:
       # Shared compile cache (sccache -> RustFS S3 over the LAN). Baked into the builder
       # images; this heals the job while the running :latest predates the bake.
       #
-      # NOTE this job deliberately sets no CC_x86_64_unknown_linux_gnu: the cross image already
-      # points it at /usr/local/bin/pf-host-cc, which is what keeps ffmpeg-sys-next's HOST probe
-      # from picking up arm64 include dirs. The target-side compiles go through
-      # CC_aarch64_unknown_linux_gnu (also set by the image) and are not sccache-wrapped.
+      # NOTE this job deliberately sets no CC_x86_64_unknown_linux_gnu: the cross image points it
+      # at a wrapper that keeps host-side build-script probes off the arm64 include dirs. The
+      # target-side compiles go through CC_aarch64_unknown_linux_gnu (also set by the image) and
+      # are not sccache-wrapped.
       - name: sccache (no-op once the image bakes it)
         run: sh scripts/ci/ensure-sccache.sh
 

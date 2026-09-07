@@ -176,8 +176,7 @@
             ];
             buildInputs = [
               # host
-              pkgs.ffmpeg
-              pkgs.pipewire
+                pkgs.pipewire
               pkgs.libopus
               pkgs.wayland
               pkgs.libxkbcommon

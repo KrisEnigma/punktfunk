@@ -88,7 +88,7 @@ sudo bootc switch ghcr.io/<you>/bazzite-punktfunk && systemctl reboot
 Run on the Bazzite host. (Commands verbatim from `packaging/README.md`.)
 
 ```sh
-# 1. RPM Fusion (free + nonfree) — provides the NVENC-capable ffmpeg-libs.
+# 1. RPM Fusion (free + nonfree) — provides the freeworld VAAPI drivers.
 #    Usually already enabled on Bazzite; harmless to re-run.
 rpm-ostree install \
   https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
@@ -157,10 +157,8 @@ install paths. Don't restate it here; a fact stated twice is a fact that drifts 
 
 ## 3. Gotchas
 
-All user-facing ones live on the docs site now — the ffmpeg-libs weak dependency (NVENC fails at
-runtime without RPM Fusion's build:
-[Troubleshooting](https://docs.punktfunk.unom.io/docs/troubleshooting#no-video-on-fedora-nvenc-fails-ffmpeg-libs-is-missing))
-and the ds_inhibit SELinux storm with DualSense-type pads
+All user-facing ones live on the docs site now — the ds_inhibit SELinux storm with DualSense-type
+pads
 ([Troubleshooting](https://docs.punktfunk.unom.io/docs/troubleshooting#stream-lags-then-freezes-with-a-dualsense-pad-bazzite-selinux);
 the `dontaudit`-vs-`allow` rationale is the header of `punktfunk-ds-inhibit.cil`).
 
@@ -173,7 +171,7 @@ If `systemctl --user cat punktfunk-host` shows `ExecStart` pointing into a home 
 
 The COPR (`enricobuehler/punktfunk`) is **operator-run and may not be live**. If `rpm-ostree install
 punktfunk` can't find the package, build the RPM yourself on a **Fedora** machine/toolbox (not
-Debian/Ubuntu — the host links system FFmpeg/PipeWire and won't build there), per
+Debian/Ubuntu — the spec is Fedora's), per
 `packaging/README.md`:
 
 ```sh

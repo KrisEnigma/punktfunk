@@ -13,7 +13,7 @@ once in the COPR web UI (or with `copr-cli`):
 **Project settings**
 - Chroots: `fedora-43-x86_64`, `fedora-44-x86_64` (match your Bazzite Fedora base;
   `rpm -E %fedora` on the host tells you which). Add `aarch64` if needed.
-- External repositories (so `ffmpeg-devel` resolves at build time):
+- External repositories:
   `https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$releasever.noarch.rpm`
   and the matching `-free-` repo.
 - Enable network during build (cargo fetches crates from crates.io) — COPR allows this by
@@ -30,7 +30,7 @@ copr-cli buildscm punktfunk \
   --commit main --spec packaging/rpm/punktfunk.spec --method rpkg
 ```
 
-Note: COPR caps build time/RAM; a full `cargo build --release` of the host (FFmpeg/PipeWire
+Note: COPR caps build time/RAM; a full `cargo build --release` of the host (PipeWire
 sys-crates + aws-lc-rs) is heavy but within the default COPR limits. If a chroot OOMs, lower
 parallelism with `CARGO_BUILD_JOBS` in the spec's `%build`.
 
