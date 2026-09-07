@@ -1116,9 +1116,7 @@ mod tests {
         let mut fx = Outbox::default();
         run_action(&mut s, Action::MakeDefault, &mut fx);
         assert_eq!(
-            pf_client_core::trust::Settings::load()
-                .default_host
-                .as_deref(),
+            crate::store::file_store().load().default_host.as_deref(),
             Some("rec-1")
         );
         assert!(matches!(fx.nav, Some(Nav::Pop)));
@@ -1126,7 +1124,7 @@ mod tests {
         let mut fx = Outbox::default();
         run_action(&mut s, Action::MakeDefault, &mut fx);
         assert_eq!(
-            pf_client_core::trust::Settings::load().default_host,
+            crate::store::file_store().load().default_host,
             None,
             "the second press clears it"
         );
