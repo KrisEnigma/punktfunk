@@ -335,6 +335,8 @@ pub(super) enum PassthroughFallback {
     NoFourcc,
     /// `F_DUPFD_CLOEXEC` failed (fd-limit, not graphics).
     DupFailed,
+    /// A linear pitch off 64 bytes: iHD imports it at a rounded pitch and the picture shears.
+    UnalignedPitch,
 }
 
 impl PassthroughFallback {
@@ -344,6 +346,7 @@ impl PassthroughFallback {
             PassthroughFallback::NotDmabuf => 1 << 1,
             PassthroughFallback::NoFourcc => 1 << 2,
             PassthroughFallback::DupFailed => 1 << 3,
+            PassthroughFallback::UnalignedPitch => 1 << 4,
         }
     }
 
@@ -353,6 +356,9 @@ impl PassthroughFallback {
             PassthroughFallback::NotDmabuf => "the producer delivered an SHM/MemFd buffer",
             PassthroughFallback::NoFourcc => "the negotiated format has no DRM fourcc",
             PassthroughFallback::DupFailed => "F_DUPFD_CLOEXEC failed on the dmabuf fd",
+            PassthroughFallback::UnalignedPitch => {
+                "the dmabuf's pitch is not a multiple of 64 bytes"
+            }
         }
     }
 
@@ -375,6 +381,10 @@ impl PassthroughFallback {
                  should not have accepted it"
             }
             PassthroughFallback::DupFailed => "out of file descriptors — raise the host's NOFILE",
+            PassthroughFallback::UnalignedPitch => {
+                "the compositor pads linear buffers only for scanout, and iHD reads an odd pitch \
+                 rounded — this width streams through the CPU copy instead of the raw import"
+            }
         }
     }
 }
@@ -666,6 +676,27 @@ fn realtime_minus_monotonic_ns() -> i64 {
     rt - (ts.tv_sec * 1_000_000_000 + ts.tv_nsec)
 }
 
+/// The dmabuf's allocation as `fstat` reports it; 0 once the fd is gone.
+fn dmabuf_len(fd: i32) -> u64 {
+    // SAFETY: `stat` is plain data that `fstat` only writes.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is an integer; a closed fd fails the call and nothing is dereferenced.
+    if unsafe { libc::fstat(fd, &mut st) } == 0 {
+        st.st_size as u64
+    } else {
+        0
+    }
+}
+
+/// Whether the selected GPU's driver rounds a linear import pitch: iHD does; an unknown
+/// selection is treated as one, a CPU copy being the cheaper mistake.
+fn linear_pitch_rounds() -> bool {
+    static RULE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RULE.get_or_init(|| {
+        pf_gpu::selected_gpu().is_none_or(|g| g.info.vendor_id == pf_gpu::VENDOR_INTEL)
+    })
+}
+
 fn packed_frame_geometry(
     width: usize,
     height: usize,
@@ -882,6 +913,15 @@ fn consume_frame(
             } else {
                 None
             };
+            // iHD reads a linear import at a pitch rounded to 64 bytes, so an odd pitch shears
+            // the picture. Mutter's RENDERING-only GBM buffers pad only for SCANOUT. The
+            // de-pad copy below uploads through a driver-allocated surface instead.
+            if ud.modifier == 0
+                && linear_pitch_rounds()
+                && (stride % 64 != 0 || plane1.is_some_and(|(_, s)| s % 64 != 0))
+            {
+                break 'passthrough PassthroughFallback::UnalignedPitch;
+            }
             // Dup so the fd outlives SPA recycle. Content stability is `try_defer`; without a
             // hold (shallow pool / PUNKTFUNK_ZEROCOPY_HOLD=0) the pool depth must outrun encode.
 
@@ -917,11 +957,22 @@ fn consume_frame(
                 // native NV12 has none.
                 cursor: ud.cursor.overlay(),
             });
-            static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-            if ONCE.swap(false, Ordering::Relaxed) {
+            // Once per geometry, not once: a resize renegotiates the pool, and a stale
+            // stride against a new size is a sheared picture.
+            static LAST: std::sync::Mutex<(usize, usize, u32, u32)> =
+                std::sync::Mutex::new((0, 0, 0, 0));
+            let geometry = (w, h, offset, stride);
+            let changed = std::mem::replace(
+                &mut *LAST.lock().unwrap_or_else(|e| e.into_inner()),
+                geometry,
+            ) != geometry;
+            if changed {
                 tracing::info!(
                     w,
                     h,
+                    offset,
+                    stride,
+                    fd_size = dmabuf_len(dup),
                     modifier = ud.modifier,
                     fourcc = format_args!("{:#010x}", fourcc),
                     source = if fmt == PixelFormat::Nv12 {

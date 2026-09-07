@@ -42,6 +42,8 @@ pub struct NativeVaapiEncoder {
     pending: Option<EncodedFrame>,
     /// 24-bit CPU frames are repacked to 32 here.
     repack: Vec<u8>,
+    /// `PUNKTFUNK_VAAPI_DUMP=<file>`: every access unit, appended, for a decoder to look at.
+    dump: Option<std::fs::File>,
 }
 
 impl NativeVaapiEncoder {
@@ -99,6 +101,9 @@ impl NativeVaapiEncoder {
             frames: 0,
             pending: None,
             repack: Vec::new(),
+            dump: std::env::var("PUNKTFUNK_VAAPI_DUMP")
+                .ok()
+                .and_then(|p| std::fs::File::create(&p).ok()),
         };
         this.open_session()?;
         tracing::info!(
@@ -223,6 +228,10 @@ impl Encoder for NativeVaapiEncoder {
             None => session.encode(self.force_kf)?,
         };
         self.force_kf = false;
+        if let Some(f) = &mut self.dump {
+            use std::io::Write as _;
+            let _ = f.write_all(&pic.bytes);
+        }
         let pts_ns = self.frames * 1_000_000_000 / u64::from(self.params.fps_num.max(1));
         self.frames += 1;
         self.pending = Some(EncodedFrame {
