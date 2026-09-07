@@ -371,6 +371,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The Nix packages carry `vulkan-loader` in their RUNPATH.** Nothing links `libvulkan.so.1` —
+  ash and volk only dlopen it — so the `buildInputs` entry never reached the binaries and every
+  Vulkan path on NixOS died at `Entry::load()`: no Vulkan Video encode, no PyroWave in the encode
+  worker, no zero-copy dmabuf import, and a client that presented and decoded through neither.
+  Rebuild the packages; `/run/opengl-driver` never carried the loader, only the ICDs.
 - **The native VAAPI session keeps a reference the loss report can still reach.** Its ring held
   four pictures — 40 ms at 100 Hz — so a report that names a frame two frames back and spends a
   round trip arriving always found every pre-loss picture evicted, and every single lost frame

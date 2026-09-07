@@ -212,17 +212,21 @@ in
         install -Dm0644 api/openapi.json                      "$out/share/punktfunk-host/openapi.json"
       '';
 
-      # Run AFTER fixup (patchelf --shrink-rpath would otherwise drop /run/opengl-driver/lib, which is
-      # empty at build time): append the driver runpath so the runtime dlopen of libcuda.so.1 /
-      # libnvidia-encode.so.1 / libEGL.so.1 / the GPU's libvulkan ICD resolves from the running system.
+      # Run AFTER fixup, which drops /run/opengl-driver/lib (empty at build time) and every store
+      # path no DT_NEEDED resolves in. Two entries, two different files: the driver link carries the
+      # ICDs (libvulkan_radeon.so and friends), never the Khronos loader. Nothing links
+      # libvulkan.so.1 — ash and volk only dlopen it — so `buildInputs` alone never reaches RUNPATH
+      # and every Vulkan path dies at `Entry::load()`.
       postFixup = ''
-        # Only the host dlopens the GPU stack; the tray (its own derivation, copied in above) does not.
-        addDriverRunpath "$out/bin/punktfunk-host"
-        # The encode worker owns a Vulkan device of its own (PyroWave encodes through ash, which
-        # dlopens the loader and the vendor ICD), so it needs the same driver runpath. Without it
-        # the worker starts and then finds no usable device — the host falls back to the in-process
-        # encoder, so nothing breaks, but the GPU-priority lever this binary exists for is dead.
-        addDriverRunpath "$out/bin/punktfunk-encode-worker"
+        # Both binaries dlopen the GPU stack; the worker owns a Vulkan device of its own for
+        # PyroWave, and without it the host silently falls back to the in-process encoder at
+        # default priority. The tray (its own derivation, copied in above) does not.
+        for b in punktfunk-host punktfunk-encode-worker; do
+          addDriverRunpath "$out/bin/$b"
+          patchelf --add-rpath "${vulkan-loader}/lib" "$out/bin/$b"
+          patchelf --print-rpath "$out/bin/$b" | tr : '\n' | grep -qxF "${vulkan-loader}/lib" \
+            || { echo "$b: no vulkan-loader in RUNPATH — Entry::load() would fail"; exit 1; }
+        done
       '';
 
       meta = meta // {
@@ -285,9 +289,16 @@ in
       '';
 
       postFixup = ''
-        addDriverRunpath "$out/bin/punktfunk-client" "$out/bin/punktfunk-session"
+        # Same two runpath entries as the host: the driver link for the ICD, vulkan-loader for the
+        # dlopen'd libvulkan.so.1 the presenter and Vulkan-Video decode open through ash.
+        for b in punktfunk-client punktfunk-session; do
+          addDriverRunpath "$out/bin/$b"
+          patchelf --add-rpath "${vulkan-loader}/lib" "$out/bin/$b"
+          patchelf --print-rpath "$out/bin/$b" | tr : '\n' | grep -qxF "${vulkan-loader}/lib" \
+            || { echo "$b: no vulkan-loader in RUNPATH — Entry::load() would fail"; exit 1; }
+        done
         # Only the GTK shell needs the GApps wrapper (GSETTINGS_SCHEMA_DIR, icon themes, typelibs);
-        # the ash session binary is not a GTK app.
+        # the ash session binary is not a GTK app. Wrap last: it renames the ELF just patched.
         wrapGApp "$out/bin/punktfunk-client"
       '';
 
