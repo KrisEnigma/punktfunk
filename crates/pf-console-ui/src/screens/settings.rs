@@ -770,6 +770,23 @@ impl SettingsScreen {
         }
     }
 
+    /// What a screen reader speaks: the section while the strip holds focus, otherwise the
+    /// focused row's label and the value drawn beside it.
+    pub(crate) fn announcement(&self, ctx: &Ctx) -> Option<String> {
+        if self.strip_focus {
+            return Some(format!("{} section", TABS[self.tab].0));
+        }
+        let row = row_spec(
+            *self.row_ids(ctx).get(self.list.cursor)?,
+            ctx,
+            &self.profiles,
+        );
+        Some(match row.value {
+            Some(value) => format!("{}, {}", row.label, value),
+            None => row.label,
+        })
+    }
+
     pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         if self.custom_bitrate.is_some() {
             if ctx.deck {

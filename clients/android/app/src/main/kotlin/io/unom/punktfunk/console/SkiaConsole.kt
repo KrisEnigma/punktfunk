@@ -135,6 +135,9 @@ object SkiaConsole {
     private var onPadAction: ((String, String) -> Unit)? = null
     private var onPulse: ((String) -> Unit)? = null
 
+    /** The console's focus, in words, whenever it changes — the shell speaks it to TalkBack. */
+    private var onAnnounce: ((String) -> Unit)? = null
+
     /** The connect in flight, if any — cancelable through `OverlayAction::CancelConnect`. */
     private class Dial(val cancelled: AtomicBoolean = AtomicBoolean(false))
     private var dial: Dial? = null
@@ -345,6 +348,7 @@ object SkiaConsole {
         onPlatformScreen: (String) -> Unit,
         onPadAction: (String, String) -> Unit,
         onPulse: (String) -> Unit,
+        onAnnounce: (String) -> Unit,
     ) {
         this.onConnected = onConnected
         this.onSettingsChange = onSettingsChange
@@ -352,6 +356,7 @@ object SkiaConsole {
         this.onPlatformScreen = onPlatformScreen
         this.onPadAction = onPadAction
         this.onPulse = onPulse
+        this.onAnnounce = onAnnounce
         discovery?.restart()
         // The touch UI may have paired/forgotten/edited hosts or profiles while we were away.
         pushHosts()
@@ -366,6 +371,7 @@ object SkiaConsole {
         onPlatformScreen = null
         onPadAction = null
         onPulse = null
+        onAnnounce = null
     }
 
     /** The touch UI (or a link) changed settings: the console reads the new snapshot next. */
@@ -553,6 +559,9 @@ object SkiaConsole {
             ev.has("action") -> onAction(ev.get("action"))
             ev.has("pulse") -> onPulse?.invoke(ev.optString("pulse"))
             ev.has("editing") -> {} // the shell draws its own keyboard; nothing to raise here
+            // The Skia surface has no accessibility node tree, so the focused row is spoken
+            // instead. Already de-duplicated by the render thread: this fires only on a change.
+            ev.has("announce") -> onAnnounce?.invoke(ev.optString("announce"))
             ev.has("settings") -> onSettingsSaved(ev.getJSONObject("settings"))
             ev.has("gles") -> Log.i(TAG, "console: GLES ${ev.optInt("gles")}")
             ev.has("dead") -> {
