@@ -823,67 +823,23 @@ struct ContentView: View {
             deepLinkNotice = "Punktfunk links can't do “wake” yet."
             return
         }
-        // Resolve the one-off profile BEFORE anything happens: an unknown or ambiguous reference
-        // must refuse, not degrade to the host's binding (§10.6).
-        var selection = ProfileSelection.inherit
-        if let reference = link.profile {
-            let (profile, resolution) = profiles.catalog.resolve(reference)
-            switch resolution {
-            case .found:
-                selection = .profile(profile?.id ?? "")
-            case .notFound:
-                deepLinkNotice = "No settings profile called “\(reference)” on this device."
-                return
-            case .ambiguous:
-                deepLinkNotice = "More than one settings profile is called “\(reference)”. "
-                    + "Rename one, or link to it by its id."
-                return
-            }
-        }
-        let resolution = link.resolveHost(in: store.hosts)
-        switch resolution {
-        // A saved record. `.known` (named by its unguessable id) dials straight away; `.confirm`
-        // (named by its label or its address, which anything that can open a URL could guess)
-        // takes the same dial one tap later.
-        case .known(let host), .confirm(let host):
-            guard !link.pinConflict(with: host) else {
-                deepLinkNotice = "That link's fingerprint doesn't match the identity saved for "
-                    + "\(host.displayName). It's out of date, or it isn't pointing where it says."
-                return
-            }
-            guard model.phase == .idle else {
-                guard model.activeHost?.id == host.id else {
-                    let current = model.activeHost?.displayName ?? "a host"
-                    deepLinkNotice = "Already streaming \(current). End that session first."
-                    return
-                }
-                return // deep-linked to the host we're already on — nothing to do
-            }
-            if case .confirm = resolution {
-                deepLinkConfirm = DeepLinkConfirm(
-                    host: host, launch: link.launch, profile: selection, browse: false)
-                return
-            }
+        let session = DeepLinkRouter.SessionState(
+            isIdle: model.phase == .idle,
+            activeHostID: model.activeHost?.id,
+            activeHostName: model.activeHost?.displayName)
+        switch DeepLinkRouter.resolve(
+            link: link, hosts: store.hosts, catalog: profiles.catalog,
+            session: session, browse: false
+        ) {
+        case .notice(let text):
+            deepLinkNotice = text
+        case .alreadyHere:
+            break // deep-linked to the host we're already on — nothing to do
+        case .confirm(let host, let selection):
+            deepLinkConfirm = DeepLinkConfirm(
+                host: host, launch: link.launch, profile: selection, browse: false)
+        case .proceed(let host, let selection):
             connect(host, launchID: link.launch, profile: selection)
-        case .unknown(let address, let port, let name, let fp):
-            // Never a silent connect — an unsaved host is a trust decision, and a link is not
-            // where it gets made. This only NAMES what the link pointed at; adding the host is a
-            // deliberate trip to the + button, where the fingerprint is on screen. (Linux, Android
-            // and Windows instead pre-fill their trust prompt from the link; the outcome is the
-            // same — nothing connects until a person looks at it — but the sheet is not seeded
-            // here, so don't read this as doing that.)
-            guard model.phase == .idle else {
-                deepLinkNotice = "Already streaming. End that session first."
-                return
-            }
-            deepLinkNotice = "\(name ?? address) isn't saved on this device yet. "
-                + "Add it with the + button — the link points at \(address):\(String(port))"
-                + (fp == nil ? "." : ", and carries a fingerprint to verify it against.")
-        case .ambiguous:
-            deepLinkNotice = "More than one saved host is called “\(link.hostRef)”. "
-                + "Rename one, or link to it by its address."
-        case .unresolvable:
-            deepLinkNotice = "That host isn't saved on this device."
         }
     }
 
@@ -896,56 +852,23 @@ struct ContentView: View {
     /// host can't be browsed — the library fetch rides the paired mTLS identity, so there is
     /// nothing to show before the host is saved (the notice says what to do instead).
     private func openLibrary(from link: DeepLink) {
-        // A `profile=` on a browse link picks the shelf, exactly as it picks the settings on a
-        // connect link — and refuses the same way (§10.6): an unknown or ambiguous reference must
-        // never quietly degrade to the host's binding, which is a different shelf wearing the same
-        // host's name.
-        var selection = ProfileSelection.inherit
-        if let reference = link.profile {
-            let (profile, resolution) = profiles.catalog.resolve(reference)
-            switch resolution {
-            case .found:
-                selection = .profile(profile?.id ?? "")
-            case .notFound:
-                deepLinkNotice = "No settings profile called “\(reference)” on this device."
-                return
-            case .ambiguous:
-                deepLinkNotice = "More than one settings profile is called “\(reference)”. "
-                    + "Rename one, or link to it by its id."
-                return
-            }
-        }
-        let resolution = link.resolveHost(in: store.hosts)
-        switch resolution {
-        // Same rule as a connect link: only the record id opens on the link's own say-so.
-        case .known(let host), .confirm(let host):
-            guard !link.pinConflict(with: host) else {
-                deepLinkNotice = "That link's fingerprint doesn't match the identity saved for "
-                    + "\(host.displayName). It's out of date, or it isn't pointing where it says."
-                return
-            }
-            guard model.phase == .idle else {
-                guard model.activeHost?.id == host.id else {
-                    let current = model.activeHost?.displayName ?? "a host"
-                    deepLinkNotice = "Already streaming \(current). End that session first."
-                    return
-                }
-                return // browsing the host we're already streaming — nothing to do
-            }
-            if case .confirm = resolution {
-                deepLinkConfirm = DeepLinkConfirm(
-                    host: host, launch: nil, profile: selection, browse: true)
-                return
-            }
+        let session = DeepLinkRouter.SessionState(
+            isIdle: model.phase == .idle,
+            activeHostID: model.activeHost?.id,
+            activeHostName: model.activeHost?.displayName)
+        switch DeepLinkRouter.resolve(
+            link: link, hosts: store.hosts, catalog: profiles.catalog,
+            session: session, browse: true
+        ) {
+        case .notice(let text):
+            deepLinkNotice = text
+        case .alreadyHere:
+            break // browsing the host we're already streaming — nothing to do
+        case .confirm(let host, let selection):
+            deepLinkConfirm = DeepLinkConfirm(
+                host: host, launch: nil, profile: selection, browse: true)
+        case .proceed(let host, let selection):
             libraryTarget = LibraryTarget(host: host, profile: selection)
-        case .unknown(let address, _, let name, _):
-            deepLinkNotice = "\(name ?? address) isn't saved on this device yet. "
-                + "Add it with the + button first — a library can only be browsed on a saved host."
-        case .ambiguous:
-            deepLinkNotice = "More than one saved host is called “\(link.hostRef)”. "
-                + "Rename one, or link to it by its address."
-        case .unresolvable:
-            deepLinkNotice = "That host isn't saved on this device."
         }
     }
 

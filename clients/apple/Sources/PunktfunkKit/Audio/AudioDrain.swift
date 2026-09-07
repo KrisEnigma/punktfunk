@@ -29,16 +29,11 @@ enum AudioDrain {
         defer { done.signal() }
         var drained = 0
         var av = AvSync(channels: channels, rateHz: rateHz)
-        // WP-C1 — the drought half of concealment. Core heals a SEQ GAP, but only when a later
-        // packet arrives to reveal it; when the wire simply goes quiet nothing arrives to
-        // reveal anything, and the ring drains into an underrun and a de-prime whose re-prime
-        // is a longer artifact than the audio that was missing.
-        //
-        // Given the SESSION's frame, like the ring: this type spends a wall-clock budget one
-        // frame at a time, and each `conceal()` that says yes costs exactly one `audioPlc()`
-        // frame below — so if it assumed 5 ms, a 2 ms lossless session would spend the budget
-        // in two fifths of the time it promises and report `plc_ms` two and a half times too
-        // high. A 5.1 session, whose frame drops to ~1 ms, would be five times out.
+        // The drought half of concealment: core heals a gap only once a later packet reveals
+        // it, so a wire that simply goes quiet drains the ring into a de-prime whose re-prime is
+        // a longer artifact than the missing audio. Given the SESSION's frame, like the ring —
+        // it spends a wall-clock budget one frame at a time, and assuming 5 ms would misreport
+        // a 2 ms lossless session by two and a half times.
         var drought = DroughtConceal(maxMS: AudioRing.plcMaxMS, frameUs: frameUs)
         var lastPacketNs = DispatchTime.now().uptimeNanoseconds
         // Something has decoded, so there is both state to conceal from and continuity to
@@ -63,13 +58,9 @@ enum AudioDrain {
                 return false // session closed
             }
             guard let pcm, pcm.frameCount > 0 else {
-                // Nothing on the wire. If the ring is draining with it, conceal from the
-                // decoder's own state — the same libopus interpolation the loss path uses,
-                // bounded by this ring's de-prime fuse so a genuinely dead stream is not
-                // papered over. ONE frame per tick, not a burst: this arm runs every frame,
-                // which is the rate the callback drains at, so concealment keeps pace with
-                // playout instead of racing ahead of a depth reading it has already
-                // invalidated.
+                // Nothing on the wire: conceal from the decoder's own state, bounded by the
+                // de-prime fuse so a dead stream is not papered over. ONE frame per tick, so
+                // concealment keeps pace with playout instead of racing a stale depth reading.
                 guard decoded else { return true }
                 let quietMS = Int(
                     (DispatchTime.now().uptimeNanoseconds &- lastPacketNs) / 1_000_000)
@@ -122,15 +113,9 @@ enum AudioDrain {
                     ring.write(base, count: pcm.frameCount * pcm.channels)
                 }
             }
-            // Periodic vitals (~10 s at the protocol's 5 ms frames; proportionally sooner on a
-            // lossless plane, whose frames are 2–4 ms). The other three clients log buffer
-            // depth and underruns; without this an Apple audio report — latency or dropout —
-            // arrives with no numbers at all, which is the position every platform was in
-            // before the 2026-08 audio work. `plc_ms` rides along because a healthy
-            // `underruns` bought with a climbing `plc_ms` is a link in trouble, not a link
-            // that is fine. `rate_hz`/`frame_us` lead it so a field log says which plane the
-            // session was on, and on what frame the shed and target floor were sized, without
-            // needing the connect lines above it.
+            // Periodic vitals, so an audio report arrives with numbers. `plc_ms` rides along
+            // because healthy `underruns` bought with a climbing `plc_ms` is a link in trouble;
+            // `rate_hz`/`frame_us` lead so a log says which plane and frame it was sized on.
             drained += 1
             if drained % 2_000 == 0 {
                 let s = ring.stats
