@@ -402,6 +402,8 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   wheel click, so injecting a measured distance there spent one click per 10 px and scrolled
   roughly ten times too far; a precise delta now converts to clicks and a real detent sends one
   instead of one and a half. Nothing to do — wlroots, libei and Windows hosts are unchanged.
+- **Headless gamescope spawn enables the punktfunk WSI layer.** Nested games
+  get HDR10 swapchains from that layer. Nothing to configure.
 - **`THIRD-PARTY-NOTICES.txt` states every crate the host links.** The committed file recorded 564
   crates against the generator's 600, and the .deb, three RPM subpackages and the signed Windows
   host installer ship it verbatim as their licence file, so each under-attributed 36 permissively
