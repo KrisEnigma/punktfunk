@@ -1287,6 +1287,7 @@ pub fn pipewire_thread(
         expect_exact_dims,
         cursor_id0_hides,
         pool_min,
+        unpaced,
         ..
     } = opts;
     crate::pwinit::ensure_init();
@@ -1897,7 +1898,7 @@ pub fn pipewire_thread(
             ),
         )
     } else {
-        build_default_format_obj(preferred)
+        build_default_format_obj(preferred, unpaced)
     };
 
     // gamescope paints the Steam overlay into this node only when negotiated
@@ -1916,20 +1917,26 @@ pub fn pipewire_thread(
         // Order is the fix — see the NVIDIA note on `HDR_FORMAT_ORDER`. First compatible pod wins.
         HDR_FORMAT_ORDER
             .iter()
-            .map(|fmt| build_hdr_dmabuf_format(*fmt, preferred))
+            .map(|fmt| build_hdr_dmabuf_format(*fmt, preferred, unpaced))
             .collect::<Result<Vec<_>>>()?
     } else if want_dmabuf {
         let mut pods = Vec::with_capacity(if prefer_native_nv12 { 3 } else { 2 });
         if prefer_native_nv12 {
             // First compatible consumer pod wins. Pinning BT.709 limited selects gamescope's
             // RGB→NV12 shader with our bitstream colorimetry.
-            pods.push(build_dmabuf_format(VideoFormat::NV12, &[0], preferred)?);
+            pods.push(build_dmabuf_format(
+                VideoFormat::NV12,
+                &[0],
+                preferred,
+                unpaced,
+            )?);
         }
         if !modifiers.is_empty() {
             pods.push(build_dmabuf_format(
                 VideoFormat::BGRx,
                 &modifiers,
                 preferred,
+                unpaced,
             )?);
         }
         // xdph (Hyprland/sway) lists only BGRA on its dmabuf EnumFormat (BGRA+BGRx on SHM).
@@ -1941,6 +1948,7 @@ pub fn pipewire_thread(
                 VideoFormat::BGRA,
                 &modifiers_bgra,
                 preferred,
+                unpaced,
             )?);
         }
         pods

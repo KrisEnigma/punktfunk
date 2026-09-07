@@ -370,6 +370,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A KWin capture stream asks for no `maxFramerate` ceiling.** KWin schedules each screencast
+  frame on a QTimer whose wait it rounds up to a whole millisecond, so a 120 Hz output was
+  sampled at 9/8/8 ms and the cadence jittered against the real refresh; offering `0/1` zeroes
+  its `frameInterval()` and the frames follow the compositor's own signal. Nothing to do, and
+  `PUNKTFUNK_KWIN_PACED=1` restores the old throttle.
 - **A Mac with no microphone connects instead of crashing.** The client decided a mic existed from
   the input node's output format, which with no default input device reports the *output* side —
   two channels of AirPlay on a Mac Studio — and a capture tap on that node raised an uncatchable

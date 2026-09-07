@@ -56,6 +56,10 @@ struct CaptureOpts {
     /// Least dmabuf pool depth to ask for: [`crate::POOL_MIN`], or
     /// [`crate::KWIN_POOL_MIN`] so KWin's default of 3 cannot win.
     pool_min: i32,
+    /// Offer `maxFramerate = 0/1` so KWin records on its own frame signal
+    /// rather than a millisecond-rounded timer. KWin only; see
+    /// [`crate::unpaced_capture`].
+    unpaced: bool,
 }
 
 #[derive(Clone)]
@@ -236,6 +240,7 @@ impl PortalCapturer {
                 // one here yet (`from_virtual_output` carries the real flag).
                 cursor_id0_hides: false,
                 pool_min: crate::POOL_MIN,
+                unpaced: false,
             },
             policy,
         )?
@@ -260,6 +265,7 @@ impl PortalCapturer {
         expect_exact_dims: bool,
         cursor_id0_hides: bool,
         pool_min: i32,
+        unpaced: bool,
     ) -> Result<PortalCapturer> {
         tracing::info!(
             node_id,
@@ -269,6 +275,7 @@ impl PortalCapturer {
             expect_exact_dims,
             cursor_id0_hides,
             pool_min,
+            unpaced,
             "connecting PipeWire to virtual output"
         );
         // Virtual outputs are SDR-only except a gamescope node from our
@@ -285,6 +292,7 @@ impl PortalCapturer {
                 expect_exact_dims,
                 cursor_id0_hides,
                 pool_min,
+                unpaced,
             },
             policy,
         )?
