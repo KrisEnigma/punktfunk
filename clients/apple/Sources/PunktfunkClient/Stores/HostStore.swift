@@ -262,8 +262,8 @@ final class HostStore: ObservableObject {
     /// `.never`-refresh entries and rely on this push.
     private func reloadHostsWidget() {
         #if canImport(WidgetKit) && os(iOS)
-        WidgetCenter.shared.reloadTimelines(ofKind: "PunktfunkHosts")
-        WidgetCenter.shared.reloadTimelines(ofKind: "PunktfunkLibrary")
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.hosts)
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.library)
         #endif
     }
 }

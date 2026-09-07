@@ -50,7 +50,7 @@ struct HostsProvider: TimelineProvider {
 
 struct HostsWidget: Widget {
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "PunktfunkHosts", provider: HostsProvider()) { entry in
+        StaticConfiguration(kind: WidgetKind.hosts, provider: HostsProvider()) { entry in
             HostsWidgetView(entry: entry)
                 .containerBackground(.fill.tertiary, for: .widget)
         }
@@ -100,7 +100,7 @@ private struct SmallHostView: View {
                     .font(.headline)
                     .lineLimit(2)
                 if let last = host.lastConnected {
-                    Text(last, format: .relative(presentation: .named))
+                    Text("\(last, style: .relative) ago")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -133,7 +133,7 @@ private struct MediumHostsView: View {
                                 .lineLimit(1)
                             Spacer()
                             if let last = host.lastConnected {
-                                Text(last, format: .relative(presentation: .named))
+                                Text("\(last, style: .relative) ago")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
