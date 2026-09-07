@@ -212,11 +212,11 @@ in
         install -Dm0644 api/openapi.json                      "$out/share/punktfunk-host/openapi.json"
       '';
 
-      # Run AFTER fixup, which drops /run/opengl-driver/lib (empty at build time) and every store
-      # path no DT_NEEDED resolves in. Two entries, two different files: the driver link carries the
-      # ICDs (libvulkan_radeon.so and friends), never the Khronos loader. Nothing links
-      # libvulkan.so.1 — ash and volk only dlopen it — so `buildInputs` alone never reaches RUNPATH
-      # and every Vulkan path dies at `Entry::load()`.
+      # Run AFTER fixup. Two entries, two reasons: /run/opengl-driver/lib is empty at build time so
+      # fixup strips it, and libvulkan.so.1 is never DT_NEEDED (ash and volk only dlopen it) so the
+      # vulkan-loader buildInput never reaches RUNPATH at all. The driver link resolves libcuda.so.1
+      # / libnvidia-encode.so.1 / libEGL.so.1 and the vendor ICD from the running system; it never
+      # carries the Khronos loader, and without that ash dies at `Entry::load()`.
       postFixup = ''
         # Both binaries dlopen the GPU stack; the worker owns a Vulkan device of its own for
         # PyroWave, and without it the host silently falls back to the in-process encoder at
@@ -289,8 +289,8 @@ in
       '';
 
       postFixup = ''
-        # Same two runpath entries as the host: the driver link for the ICD, vulkan-loader for the
-        # dlopen'd libvulkan.so.1 the presenter and Vulkan-Video decode open through ash.
+        # Same two runpath entries as the host: the driver link for the vendor ICD and libEGL,
+        # vulkan-loader for the libvulkan.so.1 the presenter and Vulkan-Video decode dlopen.
         for b in punktfunk-client punktfunk-session; do
           addDriverRunpath "$out/bin/$b"
           patchelf --add-rpath "${vulkan-loader}/lib" "$out/bin/$b"
