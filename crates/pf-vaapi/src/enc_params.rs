@@ -135,7 +135,9 @@ impl SessionParams {
     }
 
     /// The most slots this level's DPB holds beside the current picture and the
-    /// gap placeholder (A.3.1 `MaxDpbMbs`), capped at four: 3 at 1080p, 4 at 4K.
+    /// gap placeholder (A.3.1 `MaxDpbMbs`): 3 at 1080p, 4 at 4K, 8 at 1440p.
+    /// The ceiling is the anchor's reach — a ring shallower than the client's
+    /// loss report has evicted every pre-loss picture by the time it lands.
     pub fn h264_max_slots(&self) -> u8 {
         let max_dpb_mbs: u64 = match self.h264_level() {
             Level::L4_1 => 32_768,
@@ -144,7 +146,51 @@ impl SessionParams {
             _ => 696_320,
         };
         let frames = (max_dpb_mbs / u64::from(self.mbs_per_picture())).min(16) as u8;
-        frames.saturating_sub(1).clamp(1, 4)
+        frames.saturating_sub(1).clamp(1, 8)
+    }
+
+    /// Coded luma samples per picture: the size the level ladders are read at.
+    fn coded_luma(&self) -> u64 {
+        u64::from(self.width_in_mbs())
+            * u64::from(self.height_in_mbs())
+            * u64::from(MB)
+            * u64::from(MB)
+    }
+
+    /// The smallest HEVC level (A.4) whose luma picture size and sample rate hold
+    /// this stream: 4.1 for 1080p60, 5.1 for 4K60, 6.1 above.
+    pub fn hevc_level_idc(&self) -> u8 {
+        let luma = self.coded_luma();
+        let rate = luma * u64::from(self.fps_num) / u64::from(self.fps_den.max(1));
+        if luma <= 2_228_224 && rate <= 133_693_440 {
+            123
+        } else if luma <= 8_912_896 && rate <= 534_773_760 {
+            153
+        } else {
+            183
+        }
+    }
+
+    /// The most slots this HEVC level's DPB holds beside the current picture
+    /// (A.4.2 `MaxDpbSize`, `maxDpbPicBuf` = 6): 5 at 1080p60 and 4K60, 11 at
+    /// 1440p100. The ceiling is how far back a recovery anchor can reach.
+    pub fn hevc_max_slots(&self) -> u8 {
+        let luma = self.coded_luma();
+        let max_luma_ps: u64 = match self.hevc_level_idc() {
+            123 => 2_228_224,
+            153 => 8_912_896,
+            _ => 35_651_584,
+        };
+        let dpb: u8 = if luma <= max_luma_ps >> 2 {
+            16
+        } else if luma <= max_luma_ps >> 1 {
+            12
+        } else if luma <= (3 * max_luma_ps) >> 2 {
+            8
+        } else {
+            6
+        };
+        dpb - 1
     }
 
     /// The PPS.
@@ -454,6 +500,40 @@ mod tests {
         };
         assert_eq!(small.h264_level() as u8, Level::L4_1 as u8);
         assert_eq!(small.sps().level_idc as u8, Level::L4_1 as u8);
+    }
+
+    /// The anchor's reach is the level's DPB. 1440p100 has the room a Wi-Fi loss
+    /// report needs; 4K60 sits just over `MaxLumaPs * 3/4`, where the level allows
+    /// five, and asking for eight there would write a non-conforming SPS.
+    #[test]
+    fn the_dpb_ceiling_follows_the_level() {
+        let qhd = SessionParams {
+            width: 2560,
+            height: 1440,
+            fps_num: 100,
+            ..params()
+        };
+        assert_eq!(qhd.hevc_level_idc(), 153, "1440p100 is level 5.1");
+        assert_eq!(qhd.hevc_max_slots(), 11);
+        assert_eq!(qhd.h264_max_slots(), 8, "clamped to the ring we ask for");
+
+        let uhd60 = SessionParams {
+            width: 3840,
+            height: 2160,
+            ..params()
+        };
+        assert_eq!(uhd60.hevc_level_idc(), 153, "4K60 is level 5.1");
+        assert_eq!(uhd60.hevc_max_slots(), 5);
+
+        let uhd120 = SessionParams {
+            fps_num: 120,
+            ..uhd60
+        };
+        assert_eq!(uhd120.hevc_level_idc(), 183, "4K120 needs 6.1");
+        assert_eq!(uhd120.hevc_max_slots(), 15);
+
+        assert_eq!(params().hevc_level_idc(), 123, "1080p60 is level 4.1");
+        assert_eq!(params().hevc_max_slots(), 5);
     }
 
     /// A one-frame VBV at 60 fps is a sixtieth of the rate, and the frame rate

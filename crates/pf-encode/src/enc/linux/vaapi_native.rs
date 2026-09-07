@@ -21,9 +21,11 @@ use pf_vaapi::vpp;
 use super::{ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
 use pf_encode_win::rfi::plan_slot_recovery;
 
-/// Slots a session keeps: how far back a recovery anchor may reach. Four is
-/// 66 ms at 60 fps, past a LAN loss report; the level's DPB may allow fewer.
-const SLOTS: u8 = 4;
+/// Slots a session keeps: how far back a recovery anchor may reach. A report
+/// names frames the client missed two frames ago and spends a round trip
+/// arriving, so the ring must still hold the picture before the loss — eight is
+/// 80 ms at 100 fps, past a Wi-Fi report. The level's DPB may allow fewer.
+const SLOTS: u8 = 8;
 
 pub struct NativeVaapiEncoder {
     /// `None` between a [`Encoder::reset`] and the submit that reopens.
@@ -87,7 +89,10 @@ impl NativeVaapiEncoder {
             initial_qp: 26,
             vbv_frames: super::vbv_frames_env() as f32,
         };
-        params.slots = SLOTS.min(params.h264_max_slots());
+        params.slots = SLOTS.min(match codec {
+            CodecParams::H264 => params.h264_max_slots(),
+            CodecParams::Hevc { .. } => params.hevc_max_slots(),
+        });
         let mut this = Self {
             session: None,
             params,
@@ -294,6 +299,15 @@ impl Encoder for NativeVaapiEncoder {
         let plan = plan_slot_recovery(&refs, first);
         session.distrust(plan.tainted);
         self.anchor = plan.anchor.map(|(slot, _)| slot);
+        if self.anchor.is_none() {
+            tracing::debug!(
+                first,
+                last,
+                slots = refs.len(),
+                "vaapi-native RFI declined: the ring holds no reference older than the loss — \
+                 caller falls back to its (coalesced) keyframe path"
+            );
+        }
         self.anchor.is_some()
     }
 

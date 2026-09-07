@@ -174,4 +174,34 @@ mod tests {
             "a re-marked slot is trusted again — the suppression is a few frames, not the session"
         );
     }
+
+    /// A report never arrives at the loss: the client waits for the next frame to
+    /// spot the gap, and the ask crosses the link. The ring keeps rolling. A ring
+    /// shallower than that latency has overwritten every pre-loss picture by the
+    /// time the ask lands, so it declines every loss and the session pays an IDR.
+    #[test]
+    fn the_ring_must_outlast_the_loss_report() {
+        // Slot `w % depth` holds wire `w`, the newest `depth` frames.
+        let ring = |depth: usize, newest: i64| -> Vec<(usize, i64)> {
+            (0..depth)
+                .map(|back| {
+                    let w = newest - back as i64;
+                    ((w as usize) % depth, w)
+                })
+                .collect()
+        };
+        // 1440p100 over Wi-Fi: frames 10213 and 10214 are lost, the client sees the
+        // gap at 10215, and the ask reaches the encoder around 10217.
+        let (loss, when_asked) = (10_213i64, 10_217i64);
+        assert_eq!(
+            pick_anchor(&ring(4, when_asked), loss),
+            None,
+            "four slots hold 10214..10217 — the anchor is already evicted"
+        );
+        assert_eq!(
+            pick_anchor(&ring(8, when_asked), loss),
+            Some(((10_212usize) % 8, 10_212)),
+            "eight slots still hold the picture before the loss"
+        );
+    }
 }

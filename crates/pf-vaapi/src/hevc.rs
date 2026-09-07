@@ -98,15 +98,7 @@ impl HevcParams {
     /// The smallest level (A.4) whose luma picture size and sample rate hold this
     /// stream: 4.1 for 1080p60, 5.1 for 4K60, 6.1 above.
     pub fn level_idc(&self) -> u8 {
-        let luma = u64::from(self.coded_width()) * u64::from(self.coded_height());
-        let rate = luma * u64::from(self.common.fps_num) / u64::from(self.common.fps_den.max(1));
-        if luma <= 2_228_224 && rate <= 133_693_440 {
-            123
-        } else if luma <= 8_912_896 && rate <= 534_773_760 {
-            153
-        } else {
-            183
-        }
+        self.common.hevc_level_idc()
     }
 
     /// The VPS: one layer, one sub-layer, the profile and level, and the DPB size.
