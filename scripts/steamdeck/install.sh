@@ -119,15 +119,16 @@ else
 fi
 
 log "Provisioning build dependencies in '$BOX' (idempotent; apt + rustup + bun)"
-# One non-interactive provisioning pass. APT deps mirror the Linux host build (FFmpeg/PipeWire/
-# DRM/EGL/VAAPI dev libs); rustup + bun are per-user under the shared $HOME.
+# One non-interactive provisioning pass. APT deps mirror the Linux host build (PipeWire/DRM/EGL/
+# VAAPI dev libs), minus libav*-dev on purpose: the host links its own carried FFmpeg, and a rival
+# libav*-dev makes the linker pick the box's copy first (build-ffmpeg.sh purges it if a re-run
+# added it). rustup + bun are per-user under the shared $HOME.
 distrobox enter "$BOX" -- bash -lc '
 set -e
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
 sudo apt-get install -y -qq --no-install-recommends \
     build-essential pkg-config clang cmake curl git ca-certificates \
-    libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libswscale-dev libavdevice-dev \
     libpipewire-0.3-dev libspa-0.2-dev \
     libgbm-dev libegl-dev libgl-dev libdrm-dev libva-dev \
     libxkbcommon-dev libudev-dev libssl-dev libopus-dev libsdl2-dev \
