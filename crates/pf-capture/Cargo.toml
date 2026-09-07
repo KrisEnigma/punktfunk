@@ -28,7 +28,8 @@ tracing = "0.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 # The xdg ScreenCast + RemoteDesktop portals, and the PipeWire consumer for the capture frames.
 ashpd = { version = "0.13", features = ["screencast", "remote_desktop"] }
-pipewire = "0.9"
+# `v0_3_49` (as pf-client-core): `Stream::is_driving`/`trigger_process` for the lazy driver.
+pipewire = { version = "0.9", features = ["v0_3_49"] }
 libc = "0.2"
 # ashpd 0.13 uses the tokio runtime for the one-time portal handshake (control plane).
 # `sync` is for the `tokio::sync::oneshot` quit channels in the portal/linux capture paths. It used

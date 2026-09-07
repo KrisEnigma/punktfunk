@@ -106,8 +106,9 @@ pub fn capture_virtual_output(
     _capture: crate::session_plan::CaptureBackend,
     // The output's compositor is KWin, derived from the backend that created
     // `vout` (a pooled display only ever matches its own backend). KWin rewrites
-    // `SPA_META_Cursor` on every buffer, so id-0 is an authoritative hide, and
-    // serves a 3-buffer pool unless asked for `KWIN_POOL_MIN`.
+    // `SPA_META_Cursor` on every buffer, so id-0 is an authoritative hide, serves
+    // a 3-buffer pool unless asked for `KWIN_POOL_MIN`, and paces delivery on a
+    // millisecond-rounded timer unless offered no `maxFramerate` ceiling.
     kwin: bool,
 ) -> Result<Box<dyn Capturer>> {
     // Portal negotiates its own pixel format, so `want.gpu` gates GPU zero-copy
@@ -139,6 +140,7 @@ pub fn capture_virtual_output(
         } else {
             pf_capture::POOL_MIN
         },
+        kwin && pf_capture::unpaced_capture(),
     )
 }
 

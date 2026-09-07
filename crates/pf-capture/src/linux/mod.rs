@@ -56,6 +56,14 @@ struct CaptureOpts {
     /// Least dmabuf pool depth to ask for: [`crate::POOL_MIN`], or
     /// [`crate::KWIN_POOL_MIN`] so KWin's default of 3 cannot win.
     pool_min: i32,
+    /// Offer `maxFramerate = 0/1` so KWin records on its own frame signal
+    /// rather than a millisecond-rounded timer. KWin only; see
+    /// [`crate::unpaced_capture`].
+    unpaced: bool,
+    /// Drive the producer as a PipeWire lazy driver when it emits RequestProcess
+    /// (Mutter ≥ 49 virtual monitors): it then paints when it asks, one paint per
+    /// wire interval at most. See [`crate::lazy_capture`].
+    lazy: bool,
 }
 
 #[derive(Clone)]
@@ -67,6 +75,9 @@ struct CaptureSignals {
     negotiated: Arc<AtomicBool>,
     /// Stream is `Streaming`. Distinguishes a static desktop from a dead source.
     streaming: Arc<AtomicBool>,
+    /// This stream drives the graph: the producer paints only in cycles the
+    /// loop thread's pacer starts on its requests. Cleared with `streaming`.
+    driving: Arc<AtomicBool>,
     /// GPU import is gone for this stream (worker death, or tiled imports
     /// failed — CPU fallback would de-pad scrambled tiles). Never cleared.
     broken: Arc<AtomicBool>,
@@ -89,6 +100,7 @@ impl CaptureSignals {
             active: Arc::new(AtomicBool::new(false)),
             negotiated: Arc::new(AtomicBool::new(false)),
             streaming: Arc::new(AtomicBool::new(false)),
+            driving: Arc::new(AtomicBool::new(false)),
             broken: Arc::new(AtomicBool::new(false)),
             hdr_negotiated: Arc::new(AtomicBool::new(false)),
             gpu_dmabuf_offer: Arc::new(AtomicBool::new(false)),
@@ -236,6 +248,9 @@ impl PortalCapturer {
                 // one here yet (`from_virtual_output` carries the real flag).
                 cursor_id0_hides: false,
                 pool_min: crate::POOL_MIN,
+                unpaced: false,
+                // A monitor mirror paints on the panel's own vblank; nothing to drive.
+                lazy: false,
             },
             policy,
         )?
@@ -260,6 +275,7 @@ impl PortalCapturer {
         expect_exact_dims: bool,
         cursor_id0_hides: bool,
         pool_min: i32,
+        unpaced: bool,
     ) -> Result<PortalCapturer> {
         tracing::info!(
             node_id,
@@ -269,6 +285,7 @@ impl PortalCapturer {
             expect_exact_dims,
             cursor_id0_hides,
             pool_min,
+            unpaced,
             "connecting PipeWire to virtual output"
         );
         // Virtual outputs are SDR-only except a gamescope node from our
@@ -285,6 +302,8 @@ impl PortalCapturer {
                 expect_exact_dims,
                 cursor_id0_hides,
                 pool_min,
+                unpaced,
+                lazy: crate::lazy_capture(),
             },
             policy,
         )?
@@ -472,7 +491,8 @@ impl Capturer for PortalCapturer {
 
     fn wait_arrival(&mut self, deadline: std::time::Instant) {
         // Must not consume: observe the slot, leave the frame for `try_latest`.
-        // Broken/ended: return; `try_latest` surfaces the error.
+        // Broken/ended: return; `try_latest` surfaces the error. A driven producer
+        // paints on its own requests (`pipewire::Pacer`), so this never triggers.
         if self.signals.broken.load(Ordering::Relaxed) {
             return;
         }

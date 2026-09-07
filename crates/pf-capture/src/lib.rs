@@ -20,6 +20,34 @@ pub const POOL_MIN: i32 = 2;
 /// negotiation outright.
 pub const KWIN_POOL_MIN: i32 = 4;
 
+/// Whether to ask a KWin output for unpaced delivery (`maxFramerate = 0/1`).
+///
+/// KWin schedules each screencast frame on a QTimer whose wait it rounds *up* to a whole
+/// millisecond, so an 8.333 ms frame is scheduled at 9 and the cadence jitters against the
+/// real refresh. Offering no ceiling zeroes its `frameInterval()`, and the timer then fires
+/// on the compositor's own frame signal. KWin 6.7+ accepts the value; older KWin floors at
+/// 1/1, rejects that pod, and fixates the plain twin listed behind it.
+///
+/// That timer also coalesces cursor-only records, which KWin schedules from
+/// `Cursors::positionChanged` — pointer cadence, not vblank. Uncapped, each such record
+/// takes a pool buffer, and KWin drops a frame outright when it finds none free.
+/// `PUNKTFUNK_KWIN_PACED=1` restores the throttle if that bites.
+pub fn unpaced_capture() -> bool {
+    !pf_host_config::env_on("PUNKTFUNK_KWIN_PACED").unwrap_or(false)
+}
+
+/// Whether a virtual output may be driven as a PipeWire lazy driver.
+///
+/// A producer that emits RequestProcess (Mutter ≥ 49 virtual monitors) paints only in a
+/// graph cycle the consumer starts, so the encode loop's slot is the one tick: no
+/// compositor timer to beat against, no throttle to lose frames in, no extra render.
+/// Producers without it are never driven. `PUNKTFUNK_LAZY_CAPTURE=0` restores the
+/// producer-driven stream.
+#[cfg(target_os = "linux")]
+pub fn lazy_capture() -> bool {
+    pf_host_config::env_on("PUNKTFUNK_LAZY_CAPTURE").unwrap_or(true)
+}
+
 /// A FATAL capture fault: retrying `try_latest` cannot help — the caller must rebuild the
 /// capture attachment or fail the session. Carried inside the `anyhow::Error` a capture call
 /// returns (downcast to route on it), so it can never collapse into an ordinary `Ok(None)`.
@@ -645,7 +673,8 @@ pub fn open_portal_monitor(
 /// `want_hdr` only when the output was brought up HDR — a PQ session cannot
 /// fall back to SDR. `cursor_id0_hides`: KWin rewrites `SPA_META_Cursor` on
 /// every buffer and treats `id == 0` as "pointer hidden". `pool_min`:
-/// [`POOL_MIN`], or [`KWIN_POOL_MIN`] for a KWin output.
+/// [`POOL_MIN`], or [`KWIN_POOL_MIN`] for a KWin output. `unpaced`:
+/// [`unpaced_capture`] for a KWin output, else `false`.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub fn open_virtual_output(
@@ -660,6 +689,7 @@ pub fn open_virtual_output(
     expect_exact_dims: bool,
     cursor_id0_hides: bool,
     pool_min: i32,
+    unpaced: bool,
 ) -> Result<Box<dyn Capturer>> {
     linux::PortalCapturer::from_virtual_output(
         remote_fd,
@@ -673,6 +703,7 @@ pub fn open_virtual_output(
         expect_exact_dims,
         cursor_id0_hides,
         pool_min,
+        unpaced,
     )
     .map(|c| Box::new(c) as Box<dyn Capturer>)
 }
