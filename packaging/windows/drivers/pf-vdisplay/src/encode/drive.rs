@@ -100,6 +100,7 @@ impl<'a> Drive<'a> {
             owed_since: None,
             ready_latch: false,
             timer: None,
+            report: Report::new(qpc_frequency()),
             state: au::ENCODER_OPEN,
             stop,
             live,
@@ -170,6 +171,7 @@ pub struct Drive<'a> {
     ready_latch: bool,
     /// The one timed wake ([`Drive::park`]); built on first use, `None` if the OS refused one.
     timer: Option<OwnedHandle>,
+    report: Report,
     state: u32,
     stop: HANDLE,
     live: &'a AtomicBool,
@@ -314,6 +316,7 @@ impl Drive<'_> {
             return true;
         }
         self.submit_failures = 0;
+        self.report.submits += 1;
         self.inflight.push_back((slot, qpc, seq));
         true
     }
@@ -462,6 +465,7 @@ impl Drive<'_> {
             }
             WEDGE_AFTER.as_millis() as u32
         };
+        self.report.parks += 1;
         // SAFETY: `stop` is the worker's stop event, alive until the worker joins or leaks; the
         // pool event lives as long as the pool the session's thread borrows; the completion event
         // belongs to the backend this loop owns; the timer is ours.
@@ -576,12 +580,75 @@ impl Drive<'_> {
             },
         );
         self.publish_seq = self.publish_seq.wrapping_add(1);
-        section.store_u64(offset_of!(AuHeader, last_au_qpc), qpc_now());
+        let now = qpc_now();
+        section.store_u64(offset_of!(AuHeader, last_au_qpc), now);
+        self.report.note_publish(qpc, now);
         section.publish_latest(FrameToken {
             generation: self.session.generation,
             seq: self.publish_seq,
             slot: slot as u8,
         });
         true
+    }
+}
+
+/// The loop's own ten-second line: how many access units went out, how old each was when it did,
+/// and how many submits and parks it took. AU age is `published_at − PresentDisplayQPCTime`, so
+/// it carries the compose-to-publish span the design pays for a frame — encode time once the
+/// loop stops fetching one AU on the next frame's submit. Cursor-only re-encodes carry no present
+/// stamp and are counted, not aged.
+struct Report {
+    hz: u64,
+    since: u64,
+    n: u64,
+    aged: u64,
+    sum_us: u64,
+    max_us: u64,
+    submits: u64,
+    parks: u64,
+}
+
+impl Report {
+    const EVERY_MS: u64 = 10_000;
+
+    fn new(hz: u64) -> Self {
+        Self {
+            hz,
+            since: 0,
+            n: 0,
+            aged: 0,
+            sum_us: 0,
+            max_us: 0,
+            submits: 0,
+            parks: 0,
+        }
+    }
+
+    /// One published chunk, stamped `qpc` at compose and `now` at publish.
+    fn note_publish(&mut self, qpc: u64, now: u64) {
+        if self.since == 0 {
+            self.since = now;
+        }
+        self.n += 1;
+        if qpc != 0 && now > qpc {
+            let us = (now - qpc) * 1_000_000 / self.hz;
+            self.aged += 1;
+            self.sum_us += us;
+            self.max_us = self.max_us.max(us);
+        }
+        let window_ms = (now - self.since) * 1_000 / self.hz;
+        if window_ms < Self::EVERY_MS {
+            return;
+        }
+        dbglog!(
+            "[pf-vd] drive: win_ms={window_ms} published={} submits={} parks={} au_age_us mean={} max={}",
+            self.n,
+            self.submits,
+            self.parks,
+            self.sum_us / self.aged.max(1),
+            self.max_us
+        );
+        *self = Self::new(self.hz);
+        self.since = now;
     }
 }

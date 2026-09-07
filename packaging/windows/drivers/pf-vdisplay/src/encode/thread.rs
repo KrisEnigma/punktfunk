@@ -326,7 +326,10 @@ pub fn open_backend(
         .and_then(|mut e| {
             // The drive loop parks on handles, so the session opens async and hands its
             // completion events out through `ready_event` — no retrieve thread, no sampling.
-            e.use_completion_events(true);
+            // `PFVD_NVENC_EVENTS=0` (machine environment, read per open) falls back to the sync
+            // session and the loop's bounded-poll arm: the A/B for a GPU whose async encode
+            // retires slower than its sync one.
+            e.use_completion_events(crate::log::knob("PFVD_NVENC_EVENTS").as_deref() != Some("0"));
             // NVENC alone defers its session to the first frame, and the host reads the caps in
             // our reply once per session: open it here or it caches the defaults.
             e.prepare_d3d11(device, format, w, h)?;
