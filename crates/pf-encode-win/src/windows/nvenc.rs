@@ -469,8 +469,12 @@ pub struct NvencD3d11Encoder {
     bitstreams: Vec<nv::NV_ENC_OUTPUT_PTR>,
     /// Async: completion event per pool bitstream (`HANDLE` as `usize`); empty in sync. Closed in `teardown`.
     events: Vec<usize>,
-    /// Async retrieve thread + channels. `None` = same-thread sync retrieve.
+    /// Async retrieve thread + channels. `None` = same-thread retrieve, sync or event-driven.
     async_rt: Option<AsyncRetrieve>,
+    /// Caller asked for completion events without a retrieve thread
+    /// ([`Self::use_completion_events`]). Survives a rebuild; the session honours it only when
+    /// the GPU advertises async encode and nobody asked for the two-thread mode.
+    want_events: bool,
     /// Capturer `pipeline_depth`. Encode is in-place, so this hard-caps async depth: the capturer
     /// rotates the ring regardless of encode completion. `None` = unknown, do not pipeline past the env cap.
     input_ring_depth: Option<usize>,
@@ -643,6 +647,7 @@ impl NvencD3d11Encoder {
             bitstreams: Vec::new(),
             events: Vec::new(),
             async_rt: None,
+            want_events: false,
             input_ring_depth: None,
             async_supported: false,
             subframe_cap: false,
@@ -745,6 +750,7 @@ impl NvencD3d11Encoder {
         self.pending.clear();
         self.chunk = None;
         self.subframe_chunks = false;
+        self.session_async = false;
         self.encoder = ptr::null_mut();
         self.inited = false;
         self.next = 0;
@@ -1138,7 +1144,11 @@ impl NvencD3d11Encoder {
             // disable it and retry; if bitrate itself is too high, bisect [FLOOR, requested].
             const CLAMP_TOL_BPS: u64 = 20_000_000; // stop bisecting within ~20 Mbps of the ceiling
 
-            let use_async = self.async_supported && async_retrieve_requested();
+            // Two async shapes share one init flag and one event per bitstream: the operator's
+            // two-thread retrieve, and the caller's event-driven same-thread retrieve. The
+            // retrieve thread is what separates them, and only the two-thread mode has one.
+            let two_thread = self.async_supported && async_retrieve_requested();
+            let use_async = two_thread || (self.async_supported && self.want_events);
 
             // Prior clamp already found this config's max — open at the ceiling
             // instead of binary-searching on every ABR overshoot.
@@ -1300,8 +1310,10 @@ impl NvencD3d11Encoder {
                     .map_err(|e| nvenc_status::call_err("create_bitstream_buffer", e))?;
                 self.bitstreams.push(cb.bitstreamBuffer);
             }
-            // One auto-reset completion event per pool bitstream, plus the retrieve thread.
-            // The thread only sees raw addresses; `teardown` joins it before any of them die.
+            // One auto-reset completion event per pool bitstream. In the two-thread mode the
+            // retrieve thread waits on them and only ever sees raw addresses (`teardown` joins
+            // it before any of them die); in the event mode the caller parks on them itself
+            // through [`Encoder::ready_event`] and this thread still does the lock/copy.
             if use_async {
                 for _ in 0..POOL {
                     let ev = CreateEventW(None, false, false, PCWSTR::null())
@@ -1318,6 +1330,8 @@ impl NvencD3d11Encoder {
                         .nv_ok()
                         .map_err(|e| nvenc_status::call_err("register_async_event", e))?;
                 }
+            }
+            if two_thread {
                 let (work_tx, work_rx) = mpsc::sync_channel::<RetrieveJob>(POOL);
                 let (done_tx, done_rx) = mpsc::channel::<RetrieveDone>();
                 let enc_addr = enc as usize;
@@ -1335,6 +1349,12 @@ impl NvencD3d11Encoder {
                     pool = POOL,
                     "NVENC async retrieve active (two-thread encode: submit here, \
                      lock_bitstream on the retrieve thread)"
+                );
+            } else if use_async {
+                tracing::info!(
+                    pool = POOL,
+                    "NVENC completion events active (single-thread: the caller parks on \
+                     ready_event, poll locks here)"
                 );
             }
             self.inited = true;
@@ -1401,6 +1421,17 @@ impl NvencD3d11Encoder {
     /// full IDR. `device` must be the one the frames will arrive on, or the first submit
     /// rebuilds the session.
     ///
+    /// Open the session in async mode and expose its per-bitstream completion events through
+    /// [`Encoder::ready_event`], with no retrieve thread: `poll` stays the same-thread lock/copy
+    /// the sync path uses, immediate once the event has fired. For a caller whose loop already
+    /// parks on handles (the Windows driver's encode thread) — a two-thread retrieve there would
+    /// only add a queue. Ignored on a GPU without `NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT`, and by
+    /// `PUNKTFUNK_NVENC_ASYNC=1`, which asks for the two-thread mode instead. Call before the
+    /// session opens.
+    pub fn use_completion_events(&mut self, on: bool) {
+        self.want_events = on;
+    }
+
     /// Idempotent: a repeat call with the same device, format and size keeps the session.
     pub fn prepare_d3d11(
         &mut self,
@@ -1818,6 +1849,18 @@ impl Encoder for NvencD3d11Encoder {
                 chunk_aligned: false,
             }))
         }
+    }
+
+    /// The completion event of the oldest in-flight encode, in the event mode only
+    /// ([`Self::use_completion_events`]). The two-thread mode owns its events, and a sync
+    /// session has none — both answer `None`, and their `poll` blocks as before.
+    fn ready_event(&self) -> Option<isize> {
+        if !self.session_async || self.async_rt.is_some() {
+            return None;
+        }
+        let (bs, ..) = self.pending.front()?;
+        let slot = self.bitstreams.iter().position(|b| b == bs)?;
+        self.events.get(slot).map(|&e| e as isize)
     }
 
     fn supports_chunked_poll(&self) -> bool {
