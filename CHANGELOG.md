@@ -385,6 +385,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The Nix packages carry every dlopen'd library in their RUNPATH.** A `buildInputs` entry only
+  reaches RUNPATH when something links it, and nothing links `libvulkan.so.1` or `libva.so.2`, so
+  on NixOS all Vulkan died at `Entry::load()` and native VAAPI was about to follow it the moment
+  the host stopped linking FFmpeg, which had been pulling libva in by accident. Rebuild the
+  packages; `/run/opengl-driver` carries the vendor ICD and the NVIDIA libraries, neither of these.
 - **The native VAAPI session keeps a reference the loss report can still reach.** Its ring held
   four pictures — 40 ms at 100 Hz — so a report that names a frame two frames back and spends a
   round trip arriving always found every pre-loss picture evicted, and every single lost frame
