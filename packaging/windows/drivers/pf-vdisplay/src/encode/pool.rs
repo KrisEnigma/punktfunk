@@ -246,14 +246,8 @@ impl Pool {
                 None => return self.drop_one(),
             };
             let blend = self.cursor.blends();
-            let passed = bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| {
-                st.targets.pass(&src, i, blend)?;
-                // Keep the clean source every frame, so the first pointer move after the client
-                // hands the cursor back already has a cursor-free plate that predates the blend.
-                // One copy at the compose rate; a still desktop reaches it barely.
-                let _ = st.targets.keep_plate(&src);
-                Ok(())
-            });
+            let passed =
+                bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| st.targets.pass(&src, i, blend));
             if passed.is_err() {
                 st.free.push(i);
                 return self.drop_one();
@@ -306,15 +300,15 @@ impl Pool {
     /// Yields nothing unless the slot is idle and no composed frame is queued
     /// ([`wire::republish_slot`]), and moves it out of `free` so no drain pass can overwrite
     /// the pixels the encoder is about to read. A blended pointer is re-drawn by `frame`, so
-    /// the slot is re-filled from the clean plate first or the old pointer stays under the new
-    /// one. QPC 0: the drive stamps the re-encode with now, not the stale present time.
+    /// the last blend is lifted off the slot first or the old pointer stays under the new one.
+    /// QPC 0: the drive stamps the re-encode with now, not the stale present time.
     pub fn republish(&self) -> Option<(usize, u64, u64)> {
         let mut st = lock(&self.state);
         let (slot, _, seq) = st.stash?;
         let queued = st.full.len();
         wire::republish_slot(Some(slot), queued, &st.free)?;
         if self.cursor.blends() {
-            st.targets.refill_from_plate(slot).ok()?;
+            st.targets.restore_under(slot).ok()?;
         }
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
@@ -340,7 +334,7 @@ impl Pool {
         let mut st = lock(&self.state);
         let (slot, ..) = st.stash?;
         wire::republish_slot(Some(slot), st.full.len(), &st.free)?;
-        st.targets.refill_from_plate(slot).ok()?;
+        st.targets.restore_under(slot).ok()?;
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
         let seq = self.source_seq.fetch_add(1, Ordering::Relaxed) + 1;

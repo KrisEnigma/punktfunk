@@ -2300,6 +2300,27 @@ pub mod cursor {
         pub hot_y: u32,
     }
 
+    /// The part of a `w`×`h` cursor shape drawn at `(x, y)` that lands on a `width`×`height`
+    /// target: `(x, y, w, h)` clipped to it, or `None` when none of it does. The shape's
+    /// top-left is in target coordinates and may be negative — the pointer half off an edge.
+    ///
+    /// What a save-under of the blend has to copy, and put back. The driver's blend is
+    /// Windows-only; the rule lives here so it is covered everywhere.
+    #[must_use]
+    pub fn clip_rect(
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let (x0, y0) = (i64::from(x).max(0), i64::from(y).max(0));
+        let x1 = (i64::from(x) + i64::from(w)).min(i64::from(width));
+        let y1 = (i64::from(y) + i64::from(h)).min(i64::from(height));
+        (x1 > x0 && y1 > y0).then(|| (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
+    }
+
     /// `(width, rows, pitch)` of the shape bytes a reader copies out for `hdr`, clamped to the
     /// section so a corrupt header can never index past it.
     #[must_use]
@@ -3418,6 +3439,39 @@ mod tests {
         );
         // Every slot is out at the encoder: this frame has nowhere to land.
         assert_eq!(offer_slot(None, None, true), None);
+    }
+
+    #[test]
+    fn a_cursor_save_under_covers_only_what_the_target_holds() {
+        use cursor::clip_rect;
+        // Wholly inside: the shape's own box.
+        assert_eq!(
+            clip_rect(100, 50, 32, 32, 1920, 1080),
+            Some((100, 50, 32, 32))
+        );
+        // Half off each edge in turn; the origin moves only where the shape starts negative.
+        assert_eq!(
+            clip_rect(-10, 50, 32, 32, 1920, 1080),
+            Some((0, 50, 22, 32))
+        );
+        assert_eq!(
+            clip_rect(100, -10, 32, 32, 1920, 1080),
+            Some((100, 0, 32, 22))
+        );
+        assert_eq!(
+            clip_rect(1900, 50, 32, 32, 1920, 1080),
+            Some((1900, 50, 20, 32))
+        );
+        assert_eq!(
+            clip_rect(100, 1060, 32, 32, 1920, 1080),
+            Some((100, 1060, 32, 20))
+        );
+        // Fully off, in both directions: nothing to save.
+        assert_eq!(clip_rect(-40, 50, 32, 32, 1920, 1080), None);
+        assert_eq!(clip_rect(1920, 50, 32, 32, 1920, 1080), None);
+        // A shape with no pixels covers nothing.
+        assert_eq!(clip_rect(100, 50, 0, 32, 1920, 1080), None);
+        assert_eq!(clip_rect(100, 50, 32, 0, 1920, 1080), None);
     }
 
     #[test]

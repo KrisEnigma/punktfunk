@@ -254,6 +254,10 @@ enum Planes {
 }
 
 /// The per-slot input targets for one backend, built once from the slot count.
+///
+/// GPU cost per composed frame: in forward mode (the client draws the pointer) exactly one pass
+/// and nothing cursor-related; in blend mode one save of at most 256², one quad, and — converter
+/// kinds — the scratch copy the deferred pass already makes.
 pub struct Targets {
     kind: InputKind,
     dev: d3d::ID3D11Device,
@@ -266,14 +270,20 @@ pub struct Targets {
     rgb: Vec<Option<(Tex, Srv)>>,
     /// Per slot: `rgb` holds the frame and the converter has not run yet.
     deferred: Vec<bool>,
+    /// Per slot: `rgb` holds this slot's picture. Unlike [`Self::deferred`] this survives the
+    /// convert in [`Self::frame`], because the scratch keeps the pixels — which is what lets a
+    /// cursor-only re-encode restore and re-blend without a compose.
+    scratch_holds_frame: Vec<bool>,
     /// The cursor quad, built on first use; `None` after a build failure, logged once.
     blend: Option<CursorBlendPass>,
     blend_failed: bool,
-    /// The newest source frame, cursor-free (DWM excludes the hardware cursor). A cursor-only
-    /// re-encode re-fills the stash slot from this so the pointer moves without a re-blend piling
-    /// onto the last one. Kept every composed frame so it predates the blend the client may flip
-    /// on at any moment. Source format; made on first keep.
-    plate: Option<Tex>,
+    /// What the last cursor blend covered, before it drew: `CURSOR_SHAPE_MAX` square, source
+    /// format, copies only. Made on first blend.
+    patch: Option<Tex>,
+    /// Which slot [`Self::patch`] belongs to and the clipped rectangle it holds. One patch, one
+    /// owner: a blend on another slot replaces it, and only the newest blended slot is ever
+    /// restored — it is the pool's stash.
+    under: Option<(usize, (u32, u32, u32, u32))>,
 }
 
 impl Targets {
@@ -365,40 +375,58 @@ impl Targets {
             planes,
             rgb: (0..slots).map(|_| None).collect(),
             deferred: vec![false; slots],
+            scratch_holds_frame: vec![false; slots],
             blend: None,
             blend_failed: false,
-            plate: None,
+            patch: None,
+            under: None,
         })
     }
 
-    /// Keep `src` as the clean plate for a later cursor-only re-encode: one copy of the source
-    /// frame, which carries no pointer because DWM excludes the declared hardware cursor. One
-    /// `CopyResource` per composed frame — a still desktop composes almost none.
-    pub fn keep_plate(&mut self, src: &Tex) -> Result<(), Fail> {
-        if self.plate.is_none() {
-            let bind = (d3d::D3D11_BIND_RENDER_TARGET.0 | d3d::D3D11_BIND_SHADER_RESOURCE.0) as u32;
-            self.plate = Some(make_tex62(
-                &self.dev,
-                (self.width, self.height),
-                source_format(self.kind),
-                bind,
-                0,
-            )?);
+    /// Undo the last cursor blend on slot `i`, so the next one draws the pointer onto a
+    /// pointer-free picture instead of piling onto the old one. Nothing saved means nothing to
+    /// put back — a slot no blend has touched is already clean.
+    ///
+    /// `Err` when a converter kind's slot has no frame in its RGB scratch: blending began after
+    /// the pass that filled the slot, so there is nothing to re-blend until the next compose.
+    /// The BGRA slot is its own scratch and is always restorable.
+    pub fn restore_under(&mut self, i: usize) -> Result<(), Fail> {
+        let converter = !matches!(self.planes, Planes::Bgra(_));
+        if converter && !self.scratch_holds_frame[i] {
+            return Err((-2, "scratch"));
         }
-        let plate = self.plate.as_ref().ok_or((-2, "plate"))?;
         let _ctx = lock(&CTX);
-        // SAFETY: `src` and `plate` are same-size, same-format textures on the same device whose
-        // immediate context is multithread-protected (`Direct3DDevice`).
-        unsafe { self.ctx.CopyResource(plate, src) };
+        if let Some((owner, (x, y, w, h))) = self.under
+            && owner == i
+        {
+            let dst = match &self.planes {
+                Planes::Bgra(slots) => slots[i].clone(),
+                _ => self.rgb[i].as_ref().ok_or((-2, "scratch"))?.0.clone(),
+            };
+            let patch = self.patch.as_ref().ok_or((-2, "patch"))?;
+            let region = d3d::D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: w,
+                bottom: h,
+                back: 1,
+            };
+            // SAFETY: `dst` is this slot's live RGB image and `patch` holds exactly `w`×`h` of
+            // it, saved at `(x, y)` from the same texture in `save_under`. Same device, whose
+            // immediate context is multithread-protected (`Direct3DDevice`).
+            unsafe {
+                self.ctx
+                    .CopySubresourceRegion(&dst, 0, x, y, 0, patch, 0, Some(&region));
+            }
+            self.under = None;
+        }
+        // The converter ran over the blended scratch in `frame`; it has to run again over the
+        // restored one, after the caller re-blends.
+        if converter {
+            self.deferred[i] = true;
+        }
         Ok(())
-    }
-
-    /// Re-fill slot `i` from the clean plate — the same path as a fresh [`Self::pass`], so the
-    /// following [`Self::frame`] blends the current cursor onto cursor-free pixels. `Err` if no
-    /// plate was kept (blending began before any frame composed).
-    pub fn refill_from_plate(&mut self, i: usize) -> Result<(), Fail> {
-        let plate = self.plate.clone().ok_or((-2, "plate"))?;
-        self.pass(&plate, i, true)
     }
 
     /// One GPU pass from `src` (BGRA or FP16, the pool's size) into slot `i`: a copy for BGRA,
@@ -409,6 +437,11 @@ impl Targets {
     pub fn pass(&mut self, src: &Tex, i: usize, defer: bool) -> Result<(), Fail> {
         let _ctx = lock(&CTX);
         self.deferred[i] = false;
+        self.scratch_holds_frame[i] = false;
+        // Fresh pixels: whatever the last blend on this slot covered is gone with them.
+        if self.under.is_some_and(|(owner, _)| owner == i) {
+            self.under = None;
+        }
         if let Planes::Bgra(slots) = &self.planes {
             // SAFETY: `src` and the slot are live same-size textures on the same device, whose
             // immediate context is multithread-protected (`Direct3DDevice`).
@@ -434,7 +467,56 @@ impl Targets {
         // SAFETY: as the BGRA copy — same size and format by construction, same device.
         unsafe { self.ctx.CopyResource(scratch, src) };
         self.deferred[i] = true;
+        self.scratch_holds_frame[i] = true;
         Ok(())
+    }
+
+    /// Keep what the cursor quad is about to cover, so a later pointer move can put the picture
+    /// back without a full-frame copy. At most `CURSOR_SHAPE_MAX` square, clipped to the target
+    /// ([`pf_driver_proto::cursor::clip_rect`]) — a pointer half off an edge saves only the half
+    /// the blend will actually write. Failure leaves nothing recorded, so no wrong restore.
+    fn save_under(&mut self, i: usize, dst: &Tex, cursor: &CursorImage) {
+        use pf_driver_proto::cursor::{CURSOR_SHAPE_MAX, clip_rect};
+        self.under = None;
+        // The shape came through `shape_rgba`, which clamps to the declared max; the patch is
+        // built for exactly that, so this is what keeps the copy inside it.
+        let (w, h) = (
+            cursor.w.min(CURSOR_SHAPE_MAX),
+            cursor.h.min(CURSOR_SHAPE_MAX),
+        );
+        let Some(rect) = clip_rect(cursor.x, cursor.y, w, h, self.width, self.height) else {
+            return;
+        };
+        if self.patch.is_none() {
+            self.patch = make_tex62(
+                &self.dev,
+                (CURSOR_SHAPE_MAX, CURSOR_SHAPE_MAX),
+                source_format(self.kind),
+                0,
+                0,
+            )
+            .ok();
+        }
+        let Some(patch) = self.patch.as_ref() else {
+            return;
+        };
+        let (x, y, w, h) = rect;
+        let region = d3d::D3D11_BOX {
+            left: x,
+            top: y,
+            front: 0,
+            right: x + w,
+            bottom: y + h,
+            back: 1,
+        };
+        // SAFETY: `dst` is the slot's live RGB image at this target's size and format; `region`
+        // is clipped to it and no wider than the patch. Same device, whose immediate context is
+        // multithread-protected (`Direct3DDevice`).
+        unsafe {
+            self.ctx
+                .CopySubresourceRegion(patch, 0, 0, 0, 0, dst, 0, Some(&region));
+        }
+        self.under = Some((i, rect));
     }
 
     /// The converter for slot `i` from `src`; `view` is its cached SRV, else one is made.
@@ -498,9 +580,12 @@ impl Targets {
                 }
             }
         }
-        let Some(pass) = self.blend.as_mut() else {
+        if self.blend.is_none() {
             return;
-        };
+        }
+        // Before the draw: what the quad covers is only recoverable now.
+        self.save_under(i, &dst, cursor);
+        let pass = self.blend.as_mut().expect("checked just above");
         let overlay = CursorOverlay {
             x: cursor.x,
             y: cursor.y,
