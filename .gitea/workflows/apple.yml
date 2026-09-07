@@ -264,10 +264,11 @@ jobs:
           dirname "$RUSTUP" >> "$GITHUB_PATH"
           "$RUSTUP" target add aarch64-apple-darwin x86_64-apple-darwin \
             aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-          # tvOS targets are tier-3 (no prebuilt std) — build-xcframework.sh compiles them with
-          # nightly + -Zbuild-std, so ensure nightly + rust-src are present.
-          "$RUSTUP" toolchain install nightly --profile minimal
-          "$RUSTUP" component add rust-src --toolchain nightly
+          # tvOS targets are tier-3 (no prebuilt std) — build-xcframework.sh compiles them with a
+          # PINNED nightly + -Zbuild-std. Read the date from the script so it lives in one place.
+          NIGHTLY="$(sed -n 's/^NIGHTLY=//p' scripts/build-xcframework.sh)"
+          "$RUSTUP" toolchain install "$NIGHTLY" --profile minimal
+          "$RUSTUP" component add rust-src --toolchain "$NIGHTLY"
 
       # The in-core Opus decode (surround) pulls audiopus_sys, which builds a vendored static libopus
       # via CMake — keep the xcframework self-contained (no runtime libopus.dylib on end-user devices).
@@ -702,10 +703,11 @@ jobs:
           dirname "$RUSTUP" >> "$GITHUB_PATH"
           "$RUSTUP" target add aarch64-apple-darwin x86_64-apple-darwin \
             aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-          # tvOS targets are tier-3 (no prebuilt std) — build-xcframework.sh compiles them with
-          # nightly + -Zbuild-std, so ensure nightly + rust-src are present (see the swift job).
-          "$RUSTUP" toolchain install nightly --profile minimal
-          "$RUSTUP" component add rust-src --toolchain nightly
+          # tvOS targets are tier-3 (no prebuilt std) — build-xcframework.sh compiles them with a
+          # PINNED nightly + -Zbuild-std; the date comes from the script (see the swift job).
+          NIGHTLY="$(sed -n 's/^NIGHTLY=//p' scripts/build-xcframework.sh)"
+          "$RUSTUP" toolchain install "$NIGHTLY" --profile minimal
+          "$RUSTUP" component add rust-src --toolchain "$NIGHTLY"
 
       # Shared compile cache. The script handles the macOS side (user-prefix install +
       # GITHUB_PATH, bsdtar globbing) — see scripts/ci/ensure-sccache.sh.
