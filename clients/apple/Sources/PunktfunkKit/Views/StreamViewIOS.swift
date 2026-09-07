@@ -866,10 +866,12 @@ public final class StreamViewController: StreamViewControllerBase {
         let size = CGSize(width: width, height: height)
         guard size.width > 0, size.height > 0, size != lastDecodedContentSize else { return }
         lastDecodedContentSize = size
+        #if os(tvOS)
         // A mid-stream flip to HDR reaches us as a new decoded format, and the display-criteria
         // request is otherwise only attempted from layout — which a full-screen tvOS session
         // never runs again, so the TV stayed in its SDR mode for the rest of the session.
         applyDisplayCriteriaIfNeeded()
+        #endif
         presenter.setContentSize(size)
         layoutMetalLayer()
     }
