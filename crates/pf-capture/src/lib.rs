@@ -25,7 +25,8 @@ pub const KWIN_POOL_MIN: i32 = 4;
 /// KWin schedules each screencast frame on a QTimer whose wait it rounds *up* to a whole
 /// millisecond, so an 8.333 ms frame is scheduled at 9 and the cadence jitters against the
 /// real refresh. Offering no ceiling zeroes its `frameInterval()`, and the timer then fires
-/// on the compositor's own frame signal.
+/// on the compositor's own frame signal. KWin 6.7+ accepts the value; older KWin floors at
+/// 1/1, rejects that pod, and fixates the plain twin listed behind it.
 ///
 /// That timer also coalesces cursor-only records, which KWin schedules from
 /// `Cursors::positionChanged` — pointer cadence, not vblank. Uncapped, each such record

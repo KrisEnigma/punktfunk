@@ -1898,28 +1898,41 @@ pub fn pipewire_thread(
             ),
         )
     } else {
-        build_default_format_obj(preferred, unpaced)
+        build_default_format_obj(preferred, false)
     };
 
     // gamescope paints the Steam overlay into this node only when negotiated
     // `gamescope_focus_appid` is 0 (the default). Do not advertise a non-zero focus-appid —
     // that is the Remote-Play branch, which drops the overlay.
 
-    // Zero-copy: offer only BGRx dmabuf with our EGL-importable modifiers (offering shm
-    // makes the compositor pick shm). Modifiers go out as MANDATORY `ChoiceEnum::Enum`;
-    // this is not the two-step DONT_FIXATE handshake (`ChoiceFlags` cannot express it).
-    let format_pods: Vec<Vec<u8>> = if want_hdr {
+    if want_hdr {
         tracing::info!(
             "HDR capture: offering xBGR_210LE/xRGB_210LE LINEAR dmabufs with MANDATORY \
              BT.2020 + SMPTE-2084 (PQ) colorimetry (GNOME 50+ monitor stream)"
         );
-        // Offering SDR alongside lets the producer pick it, and a timeout latches SDR downgrade.
-        // Order is the fix — see the NVIDIA note on `HDR_FORMAT_ORDER`. First compatible pod wins.
-        HDR_FORMAT_ORDER
-            .iter()
-            .map(|fmt| build_hdr_dmabuf_format(*fmt, preferred, unpaced))
-            .collect::<Result<Vec<_>>>()?
-    } else if want_dmabuf {
+    }
+    // Zero-copy: offer only BGRx dmabuf with our EGL-importable modifiers (offering shm
+    // makes the compositor pick shm). Modifiers go out as MANDATORY `ChoiceEnum::Enum`;
+    // this is not the two-step DONT_FIXATE handshake (`ChoiceFlags` cannot express it).
+    let build_pods = |unpaced: bool| -> Result<Vec<Vec<u8>>> {
+        if want_hdr {
+            // Offering SDR alongside lets the producer pick it, and a timeout latches SDR
+            // downgrade. Order is the fix — see the NVIDIA note on `HDR_FORMAT_ORDER`. First
+            // compatible pod wins.
+            return HDR_FORMAT_ORDER
+                .iter()
+                .map(|fmt| build_hdr_dmabuf_format(*fmt, preferred, unpaced))
+                .collect::<Result<Vec<_>>>();
+        }
+        if !want_dmabuf {
+            // The fixed bisect pod stays exactly what the operator typed.
+            let o = if unpaced && fixed_pod.is_none() {
+                build_default_format_obj(preferred, true)
+            } else {
+                obj.clone()
+            };
+            return Ok(vec![serialize_pod(o)?]);
+        }
         let mut pods = Vec::with_capacity(if prefer_native_nv12 { 3 } else { 2 });
         if prefer_native_nv12 {
             // First compatible consumer pod wins. Pinning BT.709 limited selects gamescope's
@@ -1951,10 +1964,14 @@ pub fn pipewire_thread(
                 unpaced,
             )?);
         }
-        pods
-    } else {
-        vec![serialize_pod(obj)?]
+        Ok(pods)
     };
+    // Unpaced pods first, the plain set behind them. A KWin before 6.7 floors `maxFramerate`
+    // at 1/1, so a fixed 0/1 fails every intersection and the plain set is what fixates.
+    let mut format_pods = build_pods(unpaced)?;
+    if unpaced {
+        format_pods.extend(build_pods(false)?);
+    }
     let buffers_values = if want_hdr || want_dmabuf {
         // Dmabuf-only. HDR: Mutter's SHM path paints 8-bit ARGB32 regardless of format, so a
         // MemFd buffer under a 10-bit format would carry mislabeled bytes.

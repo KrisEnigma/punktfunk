@@ -21,15 +21,15 @@ pub(super) fn serialize_pod(obj: pw::spa::pod::Object) -> Result<Vec<u8>> {
     .into_inner())
 }
 
-/// NV12 also pins BT.709 limited; packed RGB must not — it is not YUV.
 /// `maxFramerate = 0/1`: no ceiling, so the producer delivers on its own damage
 /// signal instead of a timer.
 ///
 /// KWin derives its screencast timer from the negotiated `maxFramerate` and rounds
 /// the wait up to a whole millisecond, so an 8.333 ms frame is scheduled at 9 and the
 /// cadence jitters. Zero makes its `frameInterval()` zero and the timer fires on the
-/// compositor's own frame signal. KWin offers `Range(refresh, 0/1, refresh)`, so this
-/// fixates; only ask it of a producer known to read the field this way.
+/// compositor's own frame signal. KWin 6.7+ offers `Range(refresh, 0/1, refresh)`, so
+/// this fixates; older KWin floors at 1/1 and rejects the pod, so the caller lists a
+/// plain twin behind it.
 fn unpaced_max_framerate() -> pw::spa::pod::Property {
     pw::spa::pod::Property {
         key: pw::spa::sys::SPA_FORMAT_VIDEO_maxFramerate,
@@ -38,6 +38,7 @@ fn unpaced_max_framerate() -> pw::spa::pod::Property {
     }
 }
 
+/// NV12 also pins BT.709 limited; packed RGB must not — it is not YUV.
 pub(super) fn build_dmabuf_format(
     format: VideoFormat,
     modifiers: &[u64],
