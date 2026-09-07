@@ -63,6 +63,13 @@ object ConnectErrors {
         // host from the couch reads as a crash.
         "host-power" ->
             "The host is going to sleep or shutting down — wake it when you want to play again."
+        // The host accepted the connection and then failed to bring the stream up: no encoder
+        // for the codec, pf-vdisplay missing, capture open failed. Everything host-side funnels
+        // here, so without this arm every one of those reads as a network problem on a host that
+        // answered and explained itself.
+        "setup-failed" ->
+            "The host accepted the connection but couldn't start the stream — the host's log " +
+                "(web console → Log) has the cause."
         else -> null
     }
 

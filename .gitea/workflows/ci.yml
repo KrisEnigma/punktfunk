@@ -259,6 +259,29 @@ jobs:
           git diff --exit-code include/punktfunk_core.h \
             || (echo "include/punktfunk_core.h is stale — commit the regenerated header" && exit 1)
 
+      - name: THIRD-PARTY-NOTICES drift gate
+        # Every other derived artifact here is gated — the OpenAPI spec and the cbindgen header
+        # above, sdk/src/gen, web/bun.nix. This one was not, and went 36 crates stale while three
+        # separate comments claimed something regenerated it. It is also the only one whose
+        # staleness is a compliance defect rather than a build annoyance: the .deb, three RPM
+        # subpackages and the signed Windows host installer ship it verbatim as their licence
+        # file, and both MIT and Apache-2.0 require the notice.
+        #
+        # Not in check-docs-drift.sh, whose stated budget is "no cargo": the generator reads
+        # `cargo metadata`. Its output is reproducible across machines — the same 600 crates and
+        # the same SHA-256 on macOS and on Linux with unrelated registry caches — so this compares
+        # bytes rather than the crate count.
+        run: |
+          bash scripts/gen-third-party-notices.sh
+          git config --global --add safe.directory "$PWD"
+          git diff --exit-code -- \
+            THIRD-PARTY-NOTICES.txt \
+            clients/linux/THIRD-PARTY-NOTICES.txt \
+            clients/windows/THIRD-PARTY-NOTICES.txt \
+            clients/apple/Sources/PunktfunkKit/Resources/THIRD-PARTY-NOTICES.txt \
+            clients/android/app/src/main/assets/THIRD-PARTY-NOTICES.txt \
+            || (echo "::error::attribution is stale — run scripts/gen-third-party-notices.sh and commit" && exit 1)
+
   # The client stack cross-checked for aarch64. NOT an artifact job — deb.yml ships those —
   # this exists so a portability defect fails here instead of surfacing in a release build or
   # on a user's board. It earns its runtime: the bug that motivated it (a Vulkan extension

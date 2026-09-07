@@ -385,6 +385,33 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **`THIRD-PARTY-NOTICES.txt` states every crate the host links.** The committed file recorded 564
+  crates against the generator's 600, and the .deb, three RPM subpackages and the signed Windows
+  host installer ship it verbatim as their licence file, so each under-attributed 36 permissively
+  licensed crates. Packagers need do nothing; a CI gate now regenerates and diffs it, the way the
+  OpenAPI spec and the generated C header are already gated.
+- **The console's refresh row keeps 144, 165 and 240 Hz.** Its table offered five rates where both
+  desktop shells offer eight, and a rate outside it has no index, so the first nudge of the row
+  snapped a 144 Hz setting back to Automatic with no message. Nothing to do; the console, Linux and
+  Windows tables now agree, and Apple's virtual-pad picker gains the Steam Deck type it was missing.
+- **Intel Arc, Linux iGPU, and older Windows GPUs check a recovery anchor before lifting the
+  freeze.** Only the Vulkan decode rung corroborated the host's anchor against its own reference
+  chain; the VAAPI and D3D11 rungs stayed silent, which the re-anchor gate reads as no objection,
+  so those clients could lift onto a grey picture and show 0.5 to 2 seconds of moving artifacts.
+  Nothing to do; all three native rungs now answer.
+- **A host-side setup failure reads as one on iOS and Android.** Both clients had no arm for the
+  `setup-failed` rejection, so "no encoder for this codec", "pf-vdisplay not installed" and
+  "capture open failed" all arrived as a generic network error — and on iOS the app answered a host
+  that had just explained itself by sending it Wake-on-LAN. Nothing to do; both now print the
+  desktop sentence and point at the host's log.
+- **A GameStream capture-loss rebuild no longer takes the SteamOS seat back.** The native plane
+  already held an attach-only probe for four seconds after a loss, because session detection can
+  still be stale and a rebuild acting on a stale answer restarts `gamescope-session.target`; the
+  GameStream plane never got it, nor the longer budget a gamescope relaunch needs. Nothing to do;
+  a Moonlight client switching Desktop to Game on SteamOS keeps its seat.
+- **Windows NVENC sub-frame split arbitration reaches a verdict.** The chunked poll path is how a
+  sub-frame session finishes and it never fed the arbiter, so on Windows the experiment the arbiter
+  exists to run never concluded and the HEVC sub-frame incumbent was invisible to it. Nothing to do.
 - **The Nix packages carry every dlopen'd library in their RUNPATH.** A `buildInputs` entry only
   reaches RUNPATH when something links it, and nothing links `libvulkan.so.1` or `libva.so.2`, so
   on NixOS all Vulkan died at `Entry::load()` and native VAAPI was about to follow it the moment
