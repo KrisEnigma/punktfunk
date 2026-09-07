@@ -47,7 +47,7 @@ $outDir = 'C:\Users\Public\parity-post'
 $probeDir = 'C:\Users\Public'
 $log = Join-Path 'C:\Users\Public' "live-$Tag.log"
 
-# The staged build first, then an installed host — ffprobe below still comes from the
+# The staged build first, then an installed host. ffprobe below still comes from the
 # runner's FFmpeg tree, which is a test tool here, not a dependency of the host.
 foreach ($d in @($stage, 'C:\Users\Public\ffmpeg\bin', 'C:\Program Files\Punktfunk')) {
     if (Test-Path $d) { $env:PATH = "$d;$env:PATH" }
