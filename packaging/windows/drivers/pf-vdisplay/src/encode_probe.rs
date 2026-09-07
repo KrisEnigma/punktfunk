@@ -367,7 +367,9 @@ fn drive(stop: HANDLE, req: &EncodeProbeRequest, shared: &Arc<Shared>) -> Result
     let mut targets = Targets::new(spec.kind, &dev62, &ctx62, (w, h), SLOTS)?;
 
     let t0 = Instant::now();
-    let mut enc = open_backend(&spec, &primed.adapter)?;
+    // `dev62` is the device the ring's slots live on, so NVENC opens its session against the
+    // one it will encode from; `open_us` therefore covers that session, not just the handle.
+    let mut enc = open_backend(&spec, &primed.adapter, &dev62)?;
     let open_us = t0.elapsed().as_micros() as u32;
     // The opened chroma, not the requested one: an input that cannot carry 4:4:4 reads false
     // here, which is the whole point of running the probe at 10-bit.
