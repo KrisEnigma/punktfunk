@@ -367,6 +367,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A GNOME host on Mutter 50 survives a mid-stream resize.** The exclusive monitor config the
+  host applies for the new virtual monitor omitted the outgoing one, whose screencast was still
+  live, and Mutter 50 dereferences that unassigned CRTC (GNOME/mutter#5007) — gnome-shell died
+  and the session with it. Every other virtual monitor now stays in the config as a secondary.
+  Nothing to do.
 - **The Windows driver reports NVENC's real capabilities.** NVENC builds its session on the
   first frame, so the driver answered the host's one capability read with defaults and pinned
   every session to `supports_rfi: false`, which turned every lost frame into a full IDR instead
