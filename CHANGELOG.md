@@ -367,6 +367,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The macOS desktop mouse model stops at the window edge.** A pointer that left the stream
+  window kept steering the host cursor, re-entering from the far side, because a mouse-moved
+  event with no window carries screen coordinates and the client read them as window
+  coordinates. Update the client; nothing to configure.
 - **An odd-width stream from an Intel host is no longer sheared.** A linear dmabuf whose pitch is
   not a multiple of 64 bytes (Mutter pads only for scanout; a 1084-wide window is 4336) went
   straight into iHD, which reads it at a rounded pitch, so every row drifted and the picture
