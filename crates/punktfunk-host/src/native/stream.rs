@@ -1179,8 +1179,9 @@ pub(super) struct SessionContext {
     pub(super) cursor_forward: bool,
     /// `true` = client draws; `false` = host composites. Always `true` (inert) for non-cap sessions.
     pub(super) cursor_client_draws: Arc<AtomicBool>,
+    /// Depth-1 latest-wins; see [`super::cursor_fwd::CursorForwarder::tick`].
     pub(super) cursor_shape_tx:
-        tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::CursorShape>,
+        tokio::sync::watch::Sender<Option<punktfunk_core::quic::CursorShape>>,
     /// Without this, a mid-session probe consumes video indexes the gap detector cannot see.
     pub(super) probe_seq: bool,
     pub(super) streamed_au: bool,
@@ -1808,6 +1809,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         game: game_shared,
         capture_health: capture_health.clone(),
     });
+    // Concurrent sessions interleave in one log; this stamps every line below with
+    // the id `/status` reports. Sync body, so the guard never straddles an await.
+    let _session_span = tracing::info_span!("session", id = _live_session.id).entered();
     // Capture-health publish cadence (WP18): `/status` polls at 2 s; twice a second is plenty
     // and keeps the report's clone off the per-frame path.
     let mut health_published_at = std::time::Instant::now();
