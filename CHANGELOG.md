@@ -397,6 +397,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Trackpad scrolling on a KDE host moves the page as far as the fingers went.** KWin's
+  `fake_input` carries a bare axis with no source, which every toolkit reads as ten units per
+  wheel click, so injecting a measured distance there spent one click per 10 px and scrolled
+  roughly ten times too far; a precise delta now converts to clicks and a real detent sends one
+  instead of one and a half. Nothing to do — wlroots, libei and Windows hosts are unchanged.
 - **`THIRD-PARTY-NOTICES.txt` states every crate the host links.** The committed file recorded 564
   crates against the generator's 600, and the .deb, three RPM subpackages and the signed Windows
   host installer ship it verbatim as their licence file, so each under-attributed 36 permissively
