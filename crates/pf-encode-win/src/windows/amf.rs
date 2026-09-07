@@ -740,6 +740,11 @@ struct Inner {
     dctx: ID3D11DeviceContext,
     ring: Vec<ID3D11Texture2D>,
     next: usize,
+    /// A reference to every texture AMF may still be reading, newest last, capped at [`RING`].
+    /// `CreateSurfaceFromDX11Native` wraps without owning, so nothing else keeps a caller's
+    /// texture alive for the encode; in-flight is never more than `RING`, so the last `RING`
+    /// entries always cover whatever the hardware is on. Encode thread only.
+    held: VecDeque<ID3D11Texture2D>,
     /// Last `*InHDRMetadata` pushed to this component — re-push on change or rebuild.
     hdr_pushed: Option<pf_frame::HdrMeta>,
     /// Gates the one-shot first-AU log. Absence after a context-created line is a VCN wedge.
@@ -820,6 +825,10 @@ pub struct AmfEncoder {
     pending_force: Option<usize>,
     /// `PUNKTFUNK_LTR_FORCE_AT=N`: self-trigger [`Encoder::invalidate_ref_frames`] at that index.
     ltr_test_force_at: Option<i64>,
+    /// What the caller promised through [`Encoder::set_input_ring_depth`]: how many frames may be
+    /// in flight before it reuses an input texture. `None` = never told, so the ring copy stays.
+    /// See [`AmfEncoder::in_place`].
+    input_ring_depth: Option<usize>,
     /// Resets with no AU since (cleared in `poll`). At 2, escalate past in-place re-Init: that
     /// reuses the same context and cannot clear a dead VCN session. Drop `inner` instead.
     resets_without_output: u32,
@@ -898,6 +907,7 @@ impl AmfEncoder {
             ltr_mark_interval: ltr_mark_interval(fps),
             pending_force: None,
             ltr_test_force_at: ltr_test_force_at(),
+            input_ring_depth: None,
             resets_without_output: 0,
         })
     }
@@ -1264,6 +1274,7 @@ impl AmfEncoder {
                 dctx,
                 ring,
                 next: 0,
+                held: VecDeque::new(),
                 hdr_pushed: None,
                 first_au_logged: false,
             });
@@ -1527,6 +1538,23 @@ unsafe fn drain_one_output(
 /// encode time, far under the session watchdog's ~2 s floor.
 const INPUT_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
 
+impl AmfEncoder {
+    /// Whether to hand AMF the caller's texture instead of copying it into [`Inner::ring`], and
+    /// how many frames may then be in flight.
+    ///
+    /// Encoding in place is always *sound* while in-flight stays inside the caller's declared
+    /// depth — that is what [`Encoder::set_input_ring_depth`] promises. It is only worth doing at
+    /// a depth of 2 or more: the copy is what decouples AMF's pipeline from the caller's ring, so
+    /// at depth 1 dropping it would serialise submit against the encode and cost more than the
+    /// copy does. An undeclared depth keeps the copy — a caller that never promised anything may
+    /// reuse its texture the moment `submit` returns.
+    fn in_place(&self) -> Option<usize> {
+        self.input_ring_depth
+            .filter(|&d| d >= 2)
+            .map(|d| d.min(RING))
+    }
+}
+
 impl Encoder for AmfEncoder {
     fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
         anyhow::ensure!(
@@ -1605,6 +1633,7 @@ impl Encoder for AmfEncoder {
                 mark_slot = Some(slot);
             }
         }
+        let in_place = self.in_place();
         let inner = self.inner.as_mut().expect("ensure_inner succeeded");
         // Re-push HDR metadata on change or rebuild. Best-effort: reject leaves the 0xCE datagram.
         if let Some(name) = self.props.hdr_metadata {
@@ -1627,11 +1656,13 @@ impl Encoder for AmfEncoder {
         // Bound in-flight below RING before reuse: AMF keeps reading a slot until its AU is
         // retrieved. Drain finished AUs into `ready` rather than overwrite or treat INPUT_FULL as
         // a wedge. No progress for the whole budget is a genuine wedge.
-        if inner.retrieve.in_flight() >= RING {
+        // In place, the caller's declared depth is the bound; copying, it is our own ring.
+        let cap = in_place.unwrap_or(RING);
+        if inner.retrieve.in_flight() >= cap {
             let deadline = std::time::Instant::now() + INPUT_DRAIN_BUDGET;
             // The retrieve thread is what frees a slot now; this only waits for it, and a whole
             // budget with no progress is the same wedge it always was.
-            while inner.retrieve.in_flight() >= RING {
+            while inner.retrieve.in_flight() >= cap {
                 {
                     let mut g = lock(&inner.retrieve.out);
                     if let Some(e) = g.err.take() {
@@ -1658,17 +1689,29 @@ impl Encoder for AmfEncoder {
         // `CreateSurfaceFromDX11Native` wraps without owning (null observer); the surface moves
         // into `OwnedData`. AMF AddRefs what it keeps, so our release does not free a buffer in flight.
         unsafe {
-            let src: ID3D11Resource = frame.texture.cast().context("texture -> resource")?;
-            let dst: ID3D11Resource = inner.ring[slot].cast().context("ring -> resource")?;
-            inner
-                .dctx
-                .CopySubresourceRegion(&dst, 0, 0, 0, 0, &src, 0, None);
+            // The texture the hardware will read: the caller's own when it declared a depth deep
+            // enough to leave it alone, else our copy of it.
+            let source = if in_place.is_some() {
+                frame.texture.clone()
+            } else {
+                let src: ID3D11Resource = frame.texture.cast().context("texture -> resource")?;
+                let dst: ID3D11Resource = inner.ring[slot].cast().context("ring -> resource")?;
+                inner
+                    .dctx
+                    .CopySubresourceRegion(&dst, 0, 0, 0, 0, &src, 0, None);
+                inner.ring[slot].clone()
+            };
+            // Nothing else keeps it alive for the encode (see `Inner::held`).
+            inner.held.push_back(source.clone());
+            while inner.held.len() > RING {
+                inner.held.pop_front();
+            }
 
             let mut surf: *mut sys::AmfData = ptr::null_mut();
             amf_ok(
                 ((*(*inner.ctx.0).vtbl).create_surface_from_dx11_native)(
                     inner.ctx.0,
-                    inner.ring[slot].as_raw(),
+                    source.as_raw(),
                     &mut surf,
                     ptr::null_mut(),
                 ),
@@ -1921,6 +1964,22 @@ impl Encoder for AmfEncoder {
         self.inner.as_ref().map(|i| i.retrieve.have.raw())
     }
 
+    /// Take the caller's promise about its own texture ring. At 2 or more this skips the
+    /// full-frame copy every submit makes and encodes the caller's texture where it lies
+    /// ([`AmfEncoder::in_place`]); the value also becomes the in-flight bound, since past it the
+    /// caller may write the picture the hardware is still reading.
+    fn set_input_ring_depth(&mut self, depth: usize) {
+        if self.input_ring_depth == Some(depth) {
+            return;
+        }
+        self.input_ring_depth = Some(depth);
+        tracing::debug!(
+            depth,
+            in_place = self.in_place().is_some(),
+            "AMF input ring depth declared"
+        );
+    }
+
     /// Stall recovery: Flush + Terminate + re-Init on the same context. Fail → drop `inner` so
     /// the next submit rebuilds lazily. Owed AUs forfeited; next frame is a forced IDR.
     /// In-place re-Init cannot clear a dead VCN session; at 2 no-output resets, tear the context down.
@@ -1951,6 +2010,7 @@ impl Encoder for AmfEncoder {
         // very component, and a re-Init under it would run against a terminated one.
         inner.retrieve.stop_and_join();
         inner.retrieve.reset_queues(); // owed AUs forfeited; rebuilt stream restarts at IDR
+        inner.held.clear(); // the joined thread proves nothing is reading them
         inner.hdr_pushed = None; // re-Init'd component needs HDR metadata again
                                  // SAFETY: live component, encode thread, no AMF call in flight. Flush/Terminate are
                                  // legal on a wedge (results ignored); apply_static_props + init rebuild it.

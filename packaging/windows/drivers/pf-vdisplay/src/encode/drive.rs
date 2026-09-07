@@ -29,8 +29,10 @@ use super::section::{Ctl, EncodeSession};
 use super::thread::{hdr_meta, qpc_frequency, qpc_now, qpc_to_ns};
 use crate::worker::OwnedHandle;
 
-/// Submits allowed ahead of the oldest AU — the host's pipeline depth.
-const MAX_INFLIGHT: usize = 2;
+/// Submits allowed ahead of the oldest AU — the host's pipeline depth. Also what the pool
+/// guarantees a backend that encodes an input texture where it lies: a slot handed to the
+/// encoder sits in `encoding` and no drain pass can take it back until the AU is published.
+pub(crate) const MAX_INFLIGHT: usize = 2;
 /// Polls that return nothing while an AU is owed, before the state word says WEDGED.
 const WEDGE_AFTER: Duration = Duration::from_secs(2);
 /// How often the loop re-enters `poll` for a backend with no completion event

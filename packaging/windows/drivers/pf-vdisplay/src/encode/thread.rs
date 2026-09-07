@@ -194,7 +194,7 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         Ok(d) => d,
         Err(f) => return fail(wire::SET_ENCODE_NO_DEVICE, f),
     };
-    let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter, &device) {
+    let (mut enc, spec, reply) = match open_listed(&ctx.session.request, &adapter, &device) {
         Ok(x) => x,
         Err(reply) => {
             let _ = ctx.opened.send(reply);
@@ -231,6 +231,10 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         if pool.bypass() { "bypass" } else { "pool" },
         ctx.session.request.target_id
     );
+    // What the pool guarantees, so a backend that can encode an input texture where it lies skips
+    // its own copy of every frame. A slot the encoder holds is in `encoding`, which no drain pass
+    // takes back until the AU is published.
+    enc.set_input_ring_depth(super::drive::MAX_INFLIGHT);
     section.store_u32(offset_of!(AuHeader, driver_status), DRV_STATUS_OPENED);
     section.store_u32(
         offset_of!(AuHeader, driver_status_detail),
