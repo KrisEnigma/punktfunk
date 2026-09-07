@@ -810,10 +810,9 @@ const APP_LICENSE: &str = concat!(
 /// scripts/gen-third-party-notices.sh; shown as a Legal section in the About dialog, and
 /// shipped as /usr/share/doc/punktfunk-client/THIRD-PARTY-NOTICES.txt by the packages).
 ///
-/// Deliberately the client-scoped file and not the workspace-wide one at the repo root:
-/// that root file is the HOST's, it still carries `ffmpeg-next` and the full FFmpeg licence
-/// text — and after M10 this app links no FFmpeg at all, which is exactly what the section
-/// below it claims.
+/// Deliberately the client-scoped file and not the workspace-wide one at the repo root: the
+/// root file covers the whole workspace, so it attributes crates this app never links, and
+/// the section below it claims exactly what is here.
 const THIRD_PARTY_NOTICES: &str = include_str!("../THIRD-PARTY-NOTICES.txt");
 
 /// The dynamically linked system libraries — not in the crate notices, since they aren't

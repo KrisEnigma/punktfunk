@@ -1,6 +1,6 @@
 # CI for punktfunk (Gitea Actions). Linux jobs run on the `ubuntu-24.04` fleet label; the
-# Rust job runs inside the prebuilt builder image (ci/rust-ci.Dockerfile — system FFmpeg 8,
-# PipeWire, GL/GBM, libcuda link stub, pinned-channel rustup) so the workspace links the
+# Rust job runs inside the prebuilt builder image (ci/rust-ci.Dockerfile — PipeWire, GL/GBM,
+# libcuda link stub, pinned-channel rustup) so the workspace links the
 # same libs as the dev boxes. Builder images come from the LAN registry on home-ci-core
 # (content-keyed, docker.yml) — never the WAN. Apple client CI lives in apple.yml (macOS
 # runner). The report-only benchmarks moved to bench.yml (nightly + dispatch) so they stop
@@ -56,11 +56,9 @@ jobs:
       # forwards it as -DCMAKE_C_COMPILER_LAUNCHER, so this covers both build-script styles.
       #
       # ⚠ JOB-scoped, NOT workflow-scoped, and it must stay that way: the `rust-arm64` job below
-      # runs in the cross image, which sets CC_x86_64_unknown_linux_gnu=/usr/local/bin/pf-host-cc
-      # (ci/rust-ci-arm64cross.Dockerfile) — a wrapper that strips arm64 include dirs off
-      # HOST-targeted compiles so ffmpeg-sys-next's probe resolves against the amd64 headers.
-      # Setting this at workflow level would silently overwrite that wrapper and break the cross
-      # build in a way that looks like a header mismatch, not a CI config error.
+      # runs in the cross image, whose own compiler env (ci/rust-ci-arm64cross.Dockerfile) a
+      # workflow-level value would silently overwrite — breaking the cross build in a way that
+      # looks like a header mismatch, not a CI config error.
       CC_x86_64_unknown_linux_gnu: sccache cc
       CXX_x86_64_unknown_linux_gnu: sccache c++
     steps:
@@ -225,19 +223,18 @@ jobs:
       # through `--features punktfunk-host/...` would force punktfunk-host into the selection and
       # re-run its entire test suite a second time for no extra coverage.
       #
-      # `pyrowave` (the host's default) and `libav-fallback` (what the Linux host enables on its
-      # pf-encode entry) are listed explicitly: selecting only `-p pf-encode` takes the host out of
-      # the resolution, and pf-encode's own default is empty. Naming them keeps this the SHIPPED Linux feature set — deb.yml builds
+      # `pyrowave` (the host's default) is listed explicitly: selecting only `-p pf-encode` takes
+      # the host out of the resolution, and pf-encode's own default is empty. Naming it keeps this
+      # the SHIPPED Linux feature set — deb.yml builds
       # `--features punktfunk-host/nvenc,punktfunk-host/vulkan-encode` WITHOUT
-      # `--no-default-features`, so the .deb carries nvenc + vulkan-encode + pyrowave + libav
-      # together, and that combination is what deserves the lint. The bare crate is the FFmpeg-free
-      # build (native VAAPI only); it lints on its own.
+      # `--no-default-features`, so the .deb carries nvenc + vulkan-encode + pyrowave together, and
+      # that combination is what deserves the lint. The bare crate lints on its own.
       - name: Clippy + test the feature-gated Linux encode backends
         run: |
           cargo clippy -p pf-encode --all-targets --locked \
-            --features nvenc,vulkan-encode,pyrowave,libav-fallback -- -D warnings
+            --features nvenc,vulkan-encode,pyrowave -- -D warnings
           cargo clippy -p pf-encode --all-targets --locked -- -D warnings
-          cargo test -p pf-encode --locked --features nvenc,vulkan-encode,pyrowave,libav-fallback
+          cargo test -p pf-encode --locked --features nvenc,vulkan-encode,pyrowave
 
       - name: C ABI harness (standalone link proof)
         run: bash crates/punktfunk-core/tests/c/run.sh

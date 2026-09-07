@@ -34,9 +34,8 @@
 #
 # NO FFmpeg here since M10 (design/client-native-decode.md §6): the client decodes with
 # pf-vkdecode / pf-dxvadec / openh264+rav1d and links no libav* at all, so this workflow sets
-# no FFMPEG_DIR, no PF_FFVK_VULKAN_INCLUDE and prepends nothing to PATH. The provisioning
-# script still fetches the FFmpeg trees because the HOST keeps FFmpeg — windows-host.yml's
-# `amf-qsv` leg link-imports them.
+# no FFMPEG_DIR, no PF_FFVK_VULKAN_INCLUDE and prepends nothing to PATH. Nor does the host
+# any more, so nothing provisions an FFmpeg tree.
 #
 # The MSVC/WinUI toolchain (cargo/rustup on ASCII paths, NASM, CMake, LLVM, CARGO_HOME,
 # CMAKE_POLICY_VERSION_MINIMUM, …) is baked into the runner's daemon env. Per-checkout / per-arch

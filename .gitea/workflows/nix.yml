@@ -284,7 +284,7 @@ jobs:
 
           # 1) Pick what to publish. PUBLISH ONLY OUR OWN PATHS — this is the difference between
           #    ~300 MB and several GB per run, and it is not a corner cut: a runtime closure here
-          #    is our binaries plus stock nixpkgs (ffmpeg, gtk4, glibc, …), and every stock path is
+          #    is our binaries plus stock nixpkgs (gtk4, glibc, …), and every stock path is
           #    already on cache.nixos.org, served by a real CDN. Mirroring them onto unom-1 would
           #    cost disk and home-to-cloud bandwidth to serve a WORSE copy of what users already
           #    have. Nothing in nixpkgs is named punktfunk, so the name filter is exact.

@@ -34,12 +34,10 @@ The Rust toolchain is **pinned exactly** in `rust-toolchain.toml`; rustup instal
 first time you build, so don't override it — a different rustc reformats files nobody touched.
 
 The workspace links real system libraries, so a bare `cargo build --workspace` fails on a stock
-machine. The authoritative list is what CI installs, in `ci/rust-ci.Dockerfile` — on **Ubuntu 26.04**,
-which is what gets you FFmpeg 8:
+machine. The authoritative list is what CI installs, in `ci/rust-ci.Dockerfile` — on **Ubuntu 26.04**:
 
 ```sh
 sudo apt install build-essential clang libclang-dev pkg-config cmake \
-  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libavdevice-dev \
   libpipewire-0.3-dev libopus-dev libwayland-dev libxkbcommon-dev \
   libgl-dev libegl-dev libgbm-dev \
   libgtk-4-dev libadwaita-1-dev libsdl3-dev \
@@ -48,7 +46,7 @@ sudo apt install build-essential clang libclang-dev pkg-config cmake \
 
 (The last two groups are the Linux client shell and the Vulkan session presenter; skip them only
 if you never build those crates. `libvulkan-dev` is for the LOADER's pkg-config/soname — ash
-dlopens it, and the client links no FFmpeg at all, so no libav*-dev appears here.
+dlopens it. Nothing in the workspace links FFmpeg, so no libav*-dev appears here.
 `scripts/bootstrap-ubuntu.sh` sets up an Ubuntu **capture-test host** — NVIDIA, Sway, PipeWire —
 and is not a substitute for the list above.)
 

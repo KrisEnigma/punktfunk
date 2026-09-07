@@ -56,18 +56,22 @@ impl SettingsStore for FileSettingsStore {
 pub static FILE_STORE: FileSettingsStore = FileSettingsStore;
 
 /// Default store when the host provides none.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(all(not(test), any(target_os = "linux", windows)))]
 pub fn file_store() -> &'static dyn SettingsStore {
     &FILE_STORE
 }
 
-/// The screen tests all build their screen around `file_store()`, and off the desktop there is no
-/// file to store into — so on those targets they get one in-memory store instead. Shared, which is
-/// safe here only because a target without a file store is also a target without test threads.
-#[cfg(all(test, not(any(target_os = "linux", windows))))]
+/// The screen tests all build their screen around `file_store()`, so this is what they get:
+/// one in-memory store per test thread. Never the file — a whole-file writer loses another
+/// test's save between its own load and save, and libtest runs them in parallel.
+/// Leaks one store per thread; only the test binary calls this.
+#[cfg(test)]
 pub fn file_store() -> &'static dyn SettingsStore {
-    static STORE: std::sync::OnceLock<SnapshotStore> = std::sync::OnceLock::new();
-    STORE.get_or_init(|| SnapshotStore::new(Settings::default(), Vec::new()))
+    thread_local! {
+        static STORE: &'static SnapshotStore =
+            Box::leak(Box::new(SnapshotStore::new(Settings::default(), Vec::new())));
+    }
+    STORE.with(|s| *s)
 }
 
 /// In-memory snapshot the host pushes and polls. `save` replaces it and bumps

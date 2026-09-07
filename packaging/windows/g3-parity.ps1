@@ -47,8 +47,8 @@ $outDir = 'C:\Users\Public\parity-post'
 $probeDir = 'C:\Users\Public'
 $log = Join-Path 'C:\Users\Public' "live-$Tag.log"
 
-# punktfunk-host link-imports avcodec/avutil/swscale, so it will not even load
-# without them. The stage carries its own copies; these are the fallbacks.
+# The staged build first, then an installed host — ffprobe below still comes from the
+# runner's FFmpeg tree, which is a test tool here, not a dependency of the host.
 foreach ($d in @($stage, 'C:\Users\Public\ffmpeg\bin', 'C:\Program Files\Punktfunk')) {
     if (Test-Path $d) { $env:PATH = "$d;$env:PATH" }
 }

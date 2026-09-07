@@ -49,11 +49,11 @@ on:
     # tags to `punktfunk` — separate repos, so neither channel can shadow the other.
     tags: ['v*']
   # REBUILDING A PUBLISHED RELEASE, because on a rolling distro the ground moves under one.
-  # Arch went FFmpeg 8 -> 9 (every libav soname +1) four minutes before v0.25.0 was tagged, so
-  # the release's punktfunk-host was linked in a builder image that still had 8 and shipped
-  # `libavcodec.so=62-64`. No up-to-date Arch box can satisfy that — and pacman prepares the
-  # whole transaction at once, so it did not merely block our package, it blocked those users'
-  # entire `pacman -Syu`. The repair is a rebuild of the SAME upstream version at a HIGHER
+  # Arch went FFmpeg 8 -> 9 (every libav soname +1) four minutes before v0.25.0 was tagged, and
+  # the release's punktfunk-host — which linked libav* back then — shipped a bound no up-to-date
+  # box could satisfy. pacman prepares the whole transaction at once, so it did not merely block
+  # our package, it blocked those users' entire `pacman -Syu`. The host links no libav* now, but
+  # any shared library can do this again. The repair is a rebuild of the SAME version at a HIGHER
   # pkgrel; nothing else reaches a box that already has the broken build recorded in its db.
   # The workflow file at the tag can never carry inputs added after it was tagged, so dispatch
   # this from `main`: it checks the tag's SOURCE out, publishes to the STABLE repo, and
@@ -113,7 +113,7 @@ jobs:
         run: |
           pacman -S --noconfirm --needed \
             git nodejs rust clang cmake ninja nasm pkgconf python vulkan-headers \
-            gtk4 libadwaita sdl3 ffmpeg pipewire wayland libxkbcommon opus libei \
+            gtk4 libadwaita sdl3 pipewire wayland libxkbcommon opus libei \
             mesa libglvnd unzip libarchive || echo "::warning::pacman guard failed (stale image db?) — proceeding with baked packages"
           # Arch ships bun in [extra], so the bootstrap takes the pacman-signed package instead of
           # piping bun.sh's installer into root's shell — this job builds and publishes the package,
@@ -122,46 +122,6 @@ jobs:
           # in pacman's db, so `--needed` cannot see it and would re-download bun on every run.
           command -v bun >/dev/null || pacman -S --noconfirm --needed bun
           bun --version
-
-      # THE BUILDER'S FFmpeg IS PART OF THE PACKAGE CONTRACT, not merely a build detail.
-      # packaging/arch/PKGBUILD binds punktfunk-host to the exact libav sonames it linked
-      # (`libavcodec.so=63-64` …), so a builder one FFmpeg major behind Arch emits a package
-      # that NOBODY can install — and takes the user's whole `pacman -Syu` down with it, since
-      # pacman prepares the transaction as a unit. That is exactly how v0.25.0 shipped: PR #108
-      # re-keyed this image for FFmpeg 9, the release tag fired four minutes later, and the job
-      # still got the FFmpeg-8 `:latest`. The image is a cache and is allowed to lag — but never
-      # on this one axis. So heal it in-job and shout, instead of building a dead package.
-      # (Runs BEFORE checkout: a stale image should be repaired before anything depends on it.)
-      - name: FFmpeg soname parity with today's Arch (heals a stale builder image)
-        run: |
-          export LC_ALL=C   # `Provides` is a localized field name
-          # Piped (never a TTY here) pacman prints each field on ONE line, unwrapped.
-          sonames() { sed -n 's/^Provides *: *//p' | tr ' ' '\n' | grep -E '^lib(av|sw)[a-z]*\.so=' | sort | tr '\n' ' '; }
-          # A SEPARATE --dbpath: this refreshes only a throwaway view of the repos, so the
-          # container's own db never enters the partial-upgrade state a bare `pacman -Sy` leaves.
-          mkdir -p /tmp/pf-archsync
-          if ! pacman -Sy --dbpath /tmp/pf-archsync --logfile /dev/null >/dev/null 2>&1; then
-            echo "::warning::could not refresh the Arch db — skipping the FFmpeg parity check"
-            exit 0
-          fi
-          HAVE="$(pacman -Qi ffmpeg | sonames)"
-          WANT="$(pacman -Si --dbpath /tmp/pf-archsync ffmpeg | sonames)"
-          echo "builder ffmpeg $(pacman -Q ffmpeg | cut -d' ' -f2): $HAVE"
-          echo "arch    ffmpeg $(pacman -Si --dbpath /tmp/pf-archsync ffmpeg | sed -n 's/^Version *: *//p'): $WANT"
-          if [ "$HAVE" = "$WANT" ]; then
-            echo "OK: the builder links the FFmpeg every up-to-date Arch box already has"
-            exit 0
-          fi
-          echo "::warning::arch-ci is stale ACROSS AN FFMPEG SONAME BUMP — upgrading it for this run."
-          echo "::warning::Bump the 'refreshed:' date in ci/arch-ci.Dockerfile so the IMAGE carries it."
-          pacman -Syu --noconfirm || true
-          HAVE="$(pacman -Qi ffmpeg | sonames)"
-          if [ "$HAVE" != "$WANT" ]; then
-            echo "::error::builder still links $HAVE while Arch ships $WANT."
-            echo "::error::Building on would publish a package no Arch box can install."
-            exit 1
-          fi
-          echo "healed: builder now links $HAVE"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -311,31 +271,6 @@ jobs:
             AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
             sccache --show-stats || true
 
-      # The host must ship a VERSIONED libav soname dep, and nothing else in this pipeline proves
-      # it. packaging/arch/PKGBUILD lists bare `libavcodec.so` etc. and relies on makepkg rewriting
-      # each into `libavcodec.so=<soname>-<arch>` from the built binary's DT_NEEDED; if that
-      # rewrite ever stops happening — Arch dropping the soname `provides`, someone "tidying" the
-      # entries out of `depends`, a makepkg change — the dep silently degrades to an unversioned
-      # name that ANY ffmpeg satisfies. That is precisely the 2026-08-08 state in which `pacman
-      # -Syu` walked every Arch/CachyOS install across the FFmpeg 8 -> 9 soname bump and left the
-      # host unable to start (exit 127 before main(), restart loop). The failure is invisible in a
-      # green build and only shows up as a bricked box weeks later, so assert it here.
-      - name: Assert the host pins the FFmpeg soname
-        run: |
-          PKG="$(ls "$GITHUB_WORKSPACE"/dist/punktfunk-host-*.pkg.tar.zst | head -1)"
-          DEPS="$(bsdtar -xOf "$PKG" .PKGINFO | sed -n 's/^depend = //p')"
-          echo "$DEPS" | sed 's/^/  depend = /'
-          for lib in libavcodec libavutil; do
-            echo "$DEPS" | grep -qE "^$lib\.so=[0-9]+-[0-9]+$" || {
-              echo "::error::punktfunk-host declares no VERSIONED $lib.so dependency."
-              echo "::error::makepkg did not expand the bare soname from DT_NEEDED, so pacman can"
-              echo "::error::upgrade FFmpeg across a soname break and brick the install."
-              echo "::error::See the depends comment in packaging/arch/PKGBUILD."
-              exit 1
-            }
-          done
-          echo "OK: $(echo "$DEPS" | grep -E '^libav|^libsw' | tr '\n' ' ')"
-
       # 0.26.0-1 setcap'd `cap_sys_nice=ep` on the host from this package's .INSTALL scriptlet and
       # killed desktop streaming on every KDE box — with a green board, because nothing here ever
       # looked at what the built package would DO. The lesson recorded then was "verify the
@@ -388,19 +323,17 @@ jobs:
             rm -rf dist-gamescope   # never cache a failed build (an empty path is not saved)
           fi
 
-      # THE GATE THIS PIPELINE WAS MISSING. The soname assert above proves the libav dep is
-      # VERSIONED; it cannot prove the version is one that EXISTS. v0.25.0 passed it and still
-      # shipped `libavcodec.so=62-64` to a world that had moved to 63 — every affected user got
-      # "unable to satisfy dependency … required by punktfunk-host", and because pacman prepares
-      # one transaction, their whole system upgrade stopped there. So ask the only question that
-      # matters before publishing: would a real, up-to-date Arch box install this?
+      # THE GATE THIS PIPELINE WAS MISSING. v0.25.0 shipped a soname bound the world had already
+      # moved past — every affected user got "unable to satisfy dependency … required by
+      # punktfunk-host", and because pacman prepares one transaction, their whole system upgrade
+      # stopped there. So ask the only question that matters before publishing: would a real,
+      # up-to-date Arch box install this?
       #
       # An empty --dbpath is what makes the answer honest. It means "nothing is installed", so
       # pacman must satisfy every dependency FROM THE REPOS exactly as a user's box does. Checking
-      # against the builder's own installed set instead would let a stale ffmpeg satisfy the stale
+      # against the builder's own installed set instead would let a stale package satisfy a stale
       # bound and hide the break completely — the very illusion that shipped v0.25.0. `--print`
-      # resolves and prints; it downloads nothing and installs nothing. Verified against the real
-      # broken artifact on an ffmpeg-9 box: it reproduces the user-visible failure verbatim.
+      # resolves and prints; it downloads nothing and installs nothing.
       - name: Assert every package installs on an up-to-date Arch box
         run: |
           export LC_ALL=C

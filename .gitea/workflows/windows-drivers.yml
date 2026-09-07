@@ -170,7 +170,7 @@ jobs:
       # retired that — see design/windows-build-and-packaging.md.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Ensure Windows toolchain (WDK, FFmpeg, Inno Setup, ARM64 target)
+      - name: Ensure Windows toolchain (WDK, Inno Setup, ARM64 target)
         # Shared self-provision step (also used by windows-client.yml/windows-host.yml) so
         # driver-build is self-sufficient on any windows-amd64 runner and never races a manually
         # dispatched provisioning workflow landing on a different one. Path is relative to the job

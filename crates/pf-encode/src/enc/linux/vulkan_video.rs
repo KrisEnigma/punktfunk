@@ -887,7 +887,7 @@ impl VulkanVideoEncoder {
             usage.p_next = &rgb_info as *const _ as *const c_void;
         }
         // A device that cannot encode 10-bit fails this query with
-        // VIDEO_PROFILE_FORMAT_NOT_SUPPORTED; a failed Vulkan open falls back to libav VAAPI.
+        // VIDEO_PROFILE_FORMAT_NOT_SUPPORTED; a failed Vulkan open falls back to VAAPI.
         // No separate probe, and no way to reach a half-configured session.
         let depth = component_depth(ten_bit);
         let mut profile = vk::VideoProfileInfoKHR::default()

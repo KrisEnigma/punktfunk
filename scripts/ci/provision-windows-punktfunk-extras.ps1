@@ -1,9 +1,9 @@
-# Layers punktfunk-specific tooling onto the shared unom Windows CI runner: FFmpeg (the HOST's
-# amf-qsv encode leg, x64 only), Inno Setup (the host installer), and the aarch64-pc-windows-msvc
+# Layers punktfunk-specific tooling onto the shared unom Windows CI runner: Inno Setup (the host
+# installer) and the aarch64-pc-windows-msvc
 # rustup target (windows-client.yml's ARM64 leg). The runner itself - act_runner, Node, rustup,
 # VS Build Tools/NASM/CMake/LLVM - is provisioned generically by unom/infra
 # (windows-runner/windows-runner.pkr.hcl + proxmox/windows-runner's Terraform clone); this script
-# is what punktfunk adds on top, since FFmpeg/Inno Setup/the ARM64 target aren't every project's
+# is what punktfunk adds on top, since Inno Setup and the ARM64 target aren't every project's
 # concern. See also provision-windows-wdk.ps1 for the driver-build toolchain (also punktfunk-only).
 #
 # Idempotent - safe to re-run. Run ELEVATED (admin) on the runner.
@@ -26,57 +26,10 @@ if (Test-Path $rustup) {
   Write-Warning "rustup not found at $rustup - has unom/infra's setup-gitea-runner-base.ps1 run on this box yet?"
 }
 
-# --- FFmpeg shared tree for the HOST's amf-qsv encode leg (windows-host.yml). BtbN **lgpl-shared**
-# builds: the AMD/Intel AMF + Intel QSV encoders, swscale, and the HEVC decoder are all present in
-# the LGPL build, and punktfunk never calls the GPL-only encoders (x264/x265 - software encode is
-# the separate BSD-2 openh264 crate; NVENC is the direct NVIDIA SDK). lgpl-shared keeps the
-# bundled DLLs LGPL-2.1+ (dynamic linking satisfies the relink duty) rather than GPL, so the
-# shipped installer/MSIX stay consistent with punktfunk's MIT OR Apache-2.0 posture.
-# ⚠ The CLIENT no longer links FFmpeg at all (M10, design/client-native-decode.md §6): it decodes
-# with pf-vkdecode / pf-dxvadec / openh264 + rav1d. windows-client.yml sets no
-# FFMPEG_DIR and the MSIX bundles no libav* DLLs, so only the x64 tree is fetched now - the ARM64
-# one existed solely for the ARM64 client leg. Delete a stale C:\Users\Public\ffmpeg-arm64 by
-# hand; this script does not remove what it no longer installs.
-# MIGRATION: a runner previously provisioned with the old *gpl-shared* tree must be
-# re-provisioned - delete C:\Users\Public\ffmpeg, then re-run.
-# These DLLs are bundled verbatim into the code-signed host installer/MSIX, so the download is
-# SHA-256-pinned (like VB-CABLE below): BtbN's `latest` tag is a ROLLING release whose assets are
-# re-uploaded over time, so an unverified fetch would let a hijacked/MITM'd upstream asset land
-# signed DLLs in users' installs. The pins below were captured 2026-07-10 from the then-current
-# n7.1 lgpl-shared build. When BtbN re-rolls `latest`, this fetch FAILS CLOSED (hash mismatch) —
-# that is intentional: re-download, re-verify the new archive, and update the two pins here.
-#
-# STILL n7.1 AFTER THE 2026-08-08 ffmpeg-next 8 -> 9 BUMP, on purpose. A crate major is a CEILING,
-# not a target (ffmpeg-sys-next 9 spans libavcodec 56..63), so 7.1 keeps compiling; and Windows has
-# no exposure to the soname break that forced the bump, because these DLLs are BUNDLED into the
-# signed installer/MSIX rather than resolved from a system that can upgrade underneath them. BtbN
-# publishes no FFmpeg 9 build at all right now (`latest` carries n7.1 and n8.1 only), so matching
-# Arch is not even available. Moving this pin would swap the DLLs inside a code-signed installer and
-# re-qualify AMF/QSV encode on real Intel/AMD hardware, which is its own change with its own on-glass
-# pass — not a side effect of a Cargo bump. ⚠ One consequence to keep in mind while it stays here:
-# 7.1's `AVD3D11VADeviceContext` is two UINTs shorter than 8/9's, which is why the mirror in
-# crates/pf-encode/src/enc/windows/ffmpeg_win.rs deliberately stops at the common prefix.
-#   Refresh a pin:  (Get-FileHash .\ffmpeg-<tag>.zip -Algorithm SHA256).Hash
-function Get-BtbnFfmpeg {
-  param([string]$Dir, [string]$ZipTag, [string]$Sha)   # ZipTag: 'win64' (x64); BtbN also publishes 'winarm64'
-  if (Test-Path (Join-Path $Dir 'lib\avcodec.lib')) { info "FFmpeg ($ZipTag) already present at $Dir"; return }
-  info "fetching FFmpeg ($ZipTag, BtbN lgpl-shared, SHA-256 pinned)"
-  $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-$ZipTag-lgpl-shared-7.1.zip"
-  $zip = "$Dir.zip"; $tmp = "$Dir-extract"
-  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-  $got = (Get-FileHash $zip -Algorithm SHA256).Hash
-  if ($got -ne $Sha) {
-    Remove-Item $zip -Force
-    throw "FFmpeg ($ZipTag) download hash mismatch (got $got, pinned $Sha). BtbN re-rolled the 'latest' build; re-verify the new archive and update the pinned SHA in this script before shipping."
-  }
-  if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-  Expand-Archive -Path $zip -DestinationPath $tmp -Force   # BtbN zips have one top-level folder
-  $inner = Get-ChildItem $tmp -Directory | Select-Object -First 1
-  if (Test-Path $Dir) { Remove-Item -Recurse -Force $Dir }
-  Move-Item -Path $inner.FullName -Destination $Dir
-  Remove-Item -Force $zip; Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-}
-Get-BtbnFfmpeg -Dir "C:\Users\Public\ffmpeg" -ZipTag 'win64' -Sha '89F3469706E5D53AEA5CF34AEE63E62CE746E6159D7AEE473D330B02A47558E6'
+# FFmpeg is no longer provisioned: nothing in punktfunk links libav* since the host's encode
+# backends went native (2026-09-07). Delete a stale C:\Users\Public\ffmpeg by hand; this script
+# does not remove what it no longer installs.
+
 
 # --- No Vulkan-Headers here any more: they existed only for pf-ffvk's bindgen over
 # libavutil/hwcontext_vulkan.h, and that crate is gone (M10). Nothing punktfunk builds on Windows
@@ -101,17 +54,14 @@ if (-not (Test-Path $isccPath) -or ($innoVer -and [version]$innoVer -lt [version
 # bundles a cable - the host mints its audio endpoints from Steam's streaming drivers on the
 # target box. A stale C:\Users\Public\vbcable on a runner is harmless and can be deleted.
 
-# --- Drop punktfunk's env vars into the generic runner's daemon wrapper extension point (see
-# unom/infra's scripts/setup-gitea-runner-base.ps1) so the act_runner daemon - and therefore every
-# job it runs - sees FFMPEG_DIR without unom/infra needing to know punktfunk exists.
-# FFMPEG_DIR + the PATH prepend are the HOST's (windows-host.yml amf-qsv: import libs at link time,
-# the DLLs at test time). The client workflows ignore both - they link no libav*. ---
+# --- The runner daemon's punktfunk env extension point (unom/infra's
+# scripts/setup-gitea-runner-base.ps1) is now empty: FFMPEG_DIR and its PATH prepend were the only
+# entries and nothing links FFmpeg any more. Clear a file an older run wrote. ---
 $projectEnv = "C:\Users\Public\act-runner\project-env.ps1"
-@'
-$env:FFMPEG_DIR = "C:\Users\Public\ffmpeg"
-$env:PATH = "C:\Users\Public\ffmpeg\bin;" + $env:PATH
-'@ | Set-Content -Encoding UTF8 $projectEnv
-info "wrote $projectEnv (FFMPEG_DIR) - restart the gitea-act-runner scheduled task to pick it up"
+if (Test-Path $projectEnv) {
+  Set-Content -Encoding UTF8 $projectEnv "# punktfunk needs no runner env vars"
+  info "cleared $projectEnv - restart the gitea-act-runner scheduled task to pick it up"
+}
 
 # --- Azure Artifact Signing (formerly Trusted Signing) toolchain, for the signing step in
 # windows-host.yml + windows-client.yml. Two pieces, neither of which the generic unom/infra image

@@ -3,9 +3,8 @@
 #
 # SteamOS is an immutable, read-only Arch base, so the host can't be a system package. Instead we
 # build it natively inside a Debian-trixie distrobox — the binary then runs natively on SteamOS —
-# and wire it up as proper systemd USER services. SteamOS's FFmpeg is not a fixed ABI target (the
-# preview channel is already past trixie's), so the host carries the pinned FFmpeg the .deb
-# bundles instead of linking the OS copy. AMD encode uses VAAPI; NVIDIA uses NVENC (auto-detected).
+# and wire it up as proper systemd USER services. AMD encode uses VAAPI; NVIDIA uses NVENC
+# (auto-detected).
 #
 # Run it on the Deck (Desktop Mode "Konsole", or over ssh). Idempotent — safe to re-run to update
 # config or pick up new options. To rebuild after pulling new source, use update.sh.
@@ -120,9 +119,7 @@ fi
 
 log "Provisioning build dependencies in '$BOX' (idempotent; apt + rustup + bun)"
 # One non-interactive provisioning pass. APT deps mirror the Linux host build (PipeWire/DRM/EGL/
-# VAAPI dev libs), minus libav*-dev on purpose: the host links its own carried FFmpeg, and a rival
-# libav*-dev makes the linker pick the box's copy first (build-ffmpeg.sh purges it if a re-run
-# added it). rustup + bun are per-user under the shared $HOME.
+# VAAPI dev libs). rustup + bun are per-user under the shared $HOME.
 distrobox enter "$BOX" -- bash -lc '
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -142,15 +139,11 @@ command -v bun >/dev/null 2>&1 || command -v ~/.bun/bin/bun >/dev/null 2>&1 || \
 '
 ok "build deps ready"
 
-# --- 1c. the FFmpeg the host carries ---------------------------------------
-FFMPEG_PREFIX="$TARGET_DIR/ffmpeg"
-bash "$SRC/scripts/steamdeck/build-ffmpeg.sh"
-
 # --- 2. build host (+ web) -------------------------------------------------
 log "Building punktfunk-host (release) — first build is slow (~10-15 min)"
 # vulkan-encode matches the packaged builds (deb/arch): the raw Vulkan Video HEVC/AV1 backend
-# (real RFI loss recovery). Pure-Rust ash — no extra system dep. A featureless hand build would
-# silently fall back to libav VAAPI.
+# (real RFI loss recovery). Pure-Rust ash — no extra system dep. A featureless hand build stays
+# on the native VAAPI session.
 #
 # punktfunk-encode-worker is built alongside: the capability-carrying PyroWave encode worker, a
 # SEPARATE binary that lands next to the host in $TARGET_DIR/release (which is how the host finds
@@ -159,11 +152,6 @@ log "Building punktfunk-host (release) — first build is slow (~10-15 min)"
 distrobox enter "$BOX" -- bash -lc "
 set -e
 export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR'
-# PKG_CONFIG_PATH is searched before the default dirs, so ffmpeg-sys-next takes the vendored
-# build while PipeWire, libva and the rest still come from the box. DT_RPATH is transitive and
-# survives AT_SECURE, which is what the setcap'd encode worker needs.
-export PKG_CONFIG_PATH='$FFMPEG_PREFIX/lib/pkgconfig'
-export RUSTFLAGS=\"-C link-arg=-Wl,-rpath,$FFMPEG_PREFIX/lib -C link-arg=-Wl,--disable-new-dtags\"
 cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/vulkan-encode
 "
 [ -x "$BIN" ] || die "build did not produce $BIN"
@@ -172,8 +160,7 @@ cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --featu
 # and leaves a binary the OS cannot load.
 MISSING="$({ ldd "$BIN" 2>/dev/null || true; } | awk '/not found/ {print $1}' | sort -u | tr '\n' ' ')"
 [ -z "$MISSING" ] || die "the host built, but SteamOS cannot load it. Missing: $MISSING
-     FFmpeg is carried with the host, so a missing libav* means the vendored build was skipped.
-     Anything else is a library the box has and SteamOS does not. Nothing was installed — please
+     That is a library the build box has and SteamOS does not. Nothing was installed — please
      report it with 'cat /etc/os-release': https://git.unom.io/unom/punktfunk/issues"
 ok "host binary: $BIN"
 # Not fatal if it is missing — an absent worker just means the in-process encoder at default GPU
@@ -241,7 +228,7 @@ if [ ! -f "$CONFIG/host.env" ]; then
 # Auto encoder: Vulkan Video (or VAAPI fallback) on the Deck's AMD GPU, NVENC on NVIDIA.
 PUNKTFUNK_ENCODER=auto
 # Van Gogh (LCD/OLED Deck) RADV still gates VK_KHR_video_encode_* behind this perftest flag;
-# without it the Vulkan backend can't open and sessions fall back to libav VAAPI. Harmless on
+# without it the Vulkan backend can't open and sessions fall back to VAAPI. Harmless on
 # GPUs where encode is exposed by default.
 RADV_PERFTEST=video_encode
 # The host auto-detects the live session (Game Mode gamescope / Desktop KDE) per connect.
@@ -508,7 +495,7 @@ sed 's|^ExecStart=.*|ExecStart=%h/.local/bin/punktfunk-scripting|' \
 ok "punktfunk-scripting.service (opt-in: systemctl --user enable --now punktfunk-scripting)"
 
 # Post-OS-update self-heal: SteamOS A/B updates can bump library sonames the host binary links
-# (FFmpeg/PipeWire/libva) — this oneshot probes the binary with ldd before punktfunk-host starts
+# (PipeWire, libva, …) — this oneshot probes the binary with ldd before punktfunk-host starts
 # and re-runs update.sh only when it actually stopped loading. Milliseconds on a normal boot.
 cat > "$UNITS/punktfunk-rebuild-check.service" <<EOF
 # Generated by scripts/steamdeck/install.sh — rebuild the host if a SteamOS update broke its libs.

@@ -17,8 +17,6 @@ if (-not $admin) { throw "Run elevated (Machine-scope env requires Administrator
 $vars = [ordered]@{
   'LIBCLANG_PATH'               = 'C:\Program Files\LLVM\bin'
   'CMAKE_POLICY_VERSION_MINIMUM' = '3.5'
-  # FFMPEG_DIR is only needed for the `amf-qsv` feature (libavcodec). The RTX box builds
-  # `--features nvenc`, which does NOT link FFmpeg, so it is intentionally left unset.
 }
 foreach ($k in $vars.Keys) {
   [Environment]::SetEnvironmentVariable($k, $vars[$k], 'Machine')

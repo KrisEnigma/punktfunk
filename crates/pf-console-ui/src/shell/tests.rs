@@ -132,18 +132,14 @@ fn hosts() -> Vec<HostRow> {
 }
 
 /// `ConsoleOptions::desktop` leaves `store` unset, and the shell then resolves it to the file
-/// store — which exists only on the desktop. Off it, hand the tests the in-memory one so they
-/// exercise the same screens rather than the "no settings store on this platform" bail.
+/// store — the developer's real settings on the desktop, and a bail off it. Every test gets its
+/// own in-memory store instead: same screens, and no shell racing another test's whole-file save.
 fn test_options() -> ConsoleOptions {
-    #[allow(unused_mut)]
     let mut opts = ConsoleOptions::desktop("deck".into(), false);
-    #[cfg(not(any(target_os = "linux", windows)))]
-    {
-        opts.store = Some(std::sync::Arc::new(crate::store::SnapshotStore::new(
-            pf_client_core::trust::Settings::default(),
-            Vec::new(),
-        )));
-    }
+    opts.store = Some(std::sync::Arc::new(crate::store::SnapshotStore::new(
+        pf_client_core::trust::Settings::default(),
+        Vec::new(),
+    )));
     opts
 }
 
@@ -1040,16 +1036,12 @@ fn reduce_motion_freezes_the_field_and_shortens_the_transition() {
     // Shader still draws at t = 0.
     s.render(surface.canvas(), w, h, &fonts, None, None, &pads);
 
-    // Persist through the settings file so a restart keeps it.
-    s.settings.save();
-    let back = pf_client_core::trust::Settings::load();
-    assert!(back.reduce_motion, "persisted");
+    // Persist through the store so a restart keeps it.
+    s.store.save(&s.settings);
+    assert!(s.store.load().reduce_motion, "persisted");
     s.settings.reduce_motion = false;
-    s.settings.save();
-    assert!(
-        !pf_client_core::trust::Settings::load().reduce_motion,
-        "and back off again"
-    );
+    s.store.save(&s.settings);
+    assert!(!s.store.load().reduce_motion, "and back off again");
 }
 
 /// Ignored eyeball dump. `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui --release -- --ignored dump`.
@@ -1644,7 +1636,7 @@ mod launch_hold {
             console,
             library.clone(),
             bus.clone(),
-            ConsoleOptions::desktop("deck".into(), false),
+            test_options(),
             vec![
                 Screen::Home(HomeScreen::new()),
                 Screen::Library(LibraryScreen::new(&hosts()[0], 0)),

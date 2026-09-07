@@ -1899,8 +1899,9 @@ pub(crate) mod tests {
         (Settings::default(), Vec::new())
     }
 
-    /// Throwaway config dir. `apply_row` rebases on the file, so a test against
-    /// the real profile would rewrite the developer's settings.
+    /// Throwaway config dir: the screens read the profile catalog and the known hosts
+    /// straight off it, and a test must not see the developer's own. Settings go through
+    /// `store::file_store`, which in tests is per-thread and in memory.
     ///
     /// Redirects `HOME` on unix, `APPDATA` on Windows (`trust::config_dir`).
     /// One `OnceLock` for the binary — a second copy races `set_var`.
@@ -2020,7 +2021,7 @@ pub(crate) mod tests {
         rendered(&mut s);
         let first = s.list.row_rect(0).expect("the list drew its rows");
         let (mut settings, pads) = ctx_parts();
-        settings.save(); // seat the fake HOME file — `apply_row` rebases on it
+        crate::store::file_store().save(&settings); // `apply_row` rebases on the store
         let library = crate::library::LibraryShared::default();
         let mut ctx = Ctx {
             hosts: &[],
@@ -2316,11 +2317,11 @@ pub(crate) mod tests {
     /// flip presentation intent while this screen is open.
     #[test]
     fn a_shrinking_list_pulls_the_cursor_back() {
-        // Seat the FILE with the shrunken list: `apply_row` rebases on it.
+        // Seat the STORE with the shrunken list: `apply_row` rebases on it.
         fake_home();
         let (mut settings, pads) = ctx_parts();
         settings.present_priority = "latency".into();
-        settings.save();
+        crate::store::file_store().save(&settings);
         settings.present_priority = "smooth".into();
         let library = crate::library::LibraryShared::default();
         let mut ctx = Ctx {

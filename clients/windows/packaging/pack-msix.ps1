@@ -167,8 +167,8 @@ Write-Host "VC++ runtime from $crt : $(($crtDlls | ForEach-Object Name) -join ',
 # dependency that is not there.
 #
 # For the same reason the notices come from clients/windows/ and NOT from the repo root: the root
-# file is workspace-wide, it is what the HOST ships out of, and it still lists ffmpeg-next plus the
-# full FFmpeg licence text. The client-scoped file (same generator, `--packages
+# file is workspace-wide, so it attributes crates this package never links. The client-scoped file
+# (same generator, `--packages
 # punktfunk-client-windows,punktfunk-client-session,punktfunk-cli`) is the one that describes what
 # is actually inside this .msix — and it is the same file the app's Licenses page shows.
 $licDir = Join-Path $layout 'licenses'

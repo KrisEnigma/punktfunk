@@ -31,7 +31,7 @@ pf-frame = { path = "../pf-frame" }
 # extracted to a leaf crate (plan §W6). Empty on non-Windows, so it lives in the main deps.
 pf-win-display = { path = "../pf-win-display" }
 # Video encode backends (NVENC/VAAPI/AMF/QSV/Vulkan-Video/PyroWave/openh264) behind one Encoder
-# trait, extracted to a subsystem crate (plan §W6). The host's nvenc/amf-qsv/vulkan-encode/pyrowave
+# trait, extracted to a subsystem crate (plan §W6). The host's nvenc/qsv/vulkan-encode/pyrowave
 # features forward here (see [features]); the heavy encoder deps (ffmpeg-next, the NVENC SDK,
 # openh264, pyrowave-sys) moved with it.
 pf-encode = { path = "../pf-encode" }
@@ -226,11 +226,6 @@ opus = "0.3"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# The libavcodec encode backends: NVENC for CPU frames, VAAPI as the native session's fallback
-# and its `PUNKTFUNK_VAAPI_NATIVE=0` oracle (design/native-vaapi-encoder.md, WP9). Enabled on
-# this entry, not in `default`: a default feature is platform-agnostic and would switch the
-# Windows `amf-qsv` FFmpeg on. Drop the feature here for an FFmpeg-free Linux host.
-pf-encode = { path = "../pf-encode", features = ["libav-fallback"] }
 # `screencast` gates the ScreenCast portal module; `remote_desktop` adds the RemoteDesktop
 # portal we use for libei input on KWin/GNOME; `tokio` is the default runtime.
 # `open_pipe_wire_remote` is unconditional, so ashpd's own `pipewire` feature is not
@@ -369,15 +364,11 @@ gamestream = ["dep:rusty_enet", "dep:rsa"]
 # RUNTIME from the driver DLL/so, so the same binary starts fine on AMD/Intel boxes. Build the GPU
 # host with `--features nvenc`.
 nvenc = ["pf-encode/nvenc"]
-# AMD/Intel hardware encode on Windows (AMF/QSV via ffmpeg-next). OFF by default: needs a `FFMPEG_DIR`
-# (BtbN lgpl-shared with `*_amf`/`*_qsv`) at build and bundles the FFmpeg DLLs at runtime. Build the
-# all-vendor GPU host with `--features nvenc,amf-qsv`.
-amf-qsv = ["pf-encode/amf-qsv"]
 # Native Intel QSV via the statically linked VPL dispatcher (Windows). OFF by default: needs
 # cmake + libclang at build (both already required by pyrowave); runtime GPU libs come from the
-# Intel driver store, so the same binary starts fine on NVIDIA/AMD boxes. Supersedes the ffmpeg
-# QSV path (design/native-qsv-encoder.md). ⚠ Like `nvenc`: hand builds for Intel boxes need
-# `--features qsv` or QSV falls back to ffmpeg (if `amf-qsv`) / software.
+# Intel driver store, so the same binary starts fine on NVIDIA/AMD boxes
+# (design/native-qsv-encoder.md). ⚠ Like `nvenc`: hand builds for Intel boxes need
+# `--features qsv` or the box has no QSV path.
 qsv = ["pf-encode/qsv"]
 # Raw Vulkan Video HEVC/AV1 encode on Linux (AMD/Intel) — real reference-frame-invalidation loss
 # recovery via explicit DPB reference slots (design/linux-vulkan-video-encode.md). OFF by default;
