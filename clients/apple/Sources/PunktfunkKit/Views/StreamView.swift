@@ -823,10 +823,14 @@ public final class StreamLayerView: NSView {
     /// (absolute) path. NSEvent.locationInWindow is window space, origin BOTTOM-left (+y up);
     /// we convert to this view's space, FLIP y to the host's top-left (+y down) convention,
     /// then aspect-fit-letterbox into the host mode exactly like the iOS touch/pointer path.
-    /// Returns nil for events in the letterbox bars (outside the video rect) so the host's
-    /// cursor isn't dragged onto a black edge, and until a mode is negotiated.
+    /// Only an event in this view's own window counts: with the OS pointer outside every window
+    /// of the app a mouse-moved event has a nil window and locationInWindow is in SCREEN
+    /// coordinates, which read as window space would put the host cursor back inside the video
+    /// and drag it along a pointer that has left the window. Returns nil for such events, for
+    /// events in the letterbox bars (outside the video rect) so the host's cursor isn't dragged
+    /// onto a black edge, and until a mode is negotiated.
     private func hostPoint(from event: NSEvent) -> HostPoint? {
-        guard let connection else { return nil }
+        guard let connection, let window, event.window === window else { return nil }
         let mode = connection.currentMode()
         guard mode.width > 0, mode.height > 0 else { return nil }
         // Window → view coords (non-flipped: origin bottom-left), then flip y into view-top-left.

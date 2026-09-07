@@ -368,6 +368,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A SteamOS host links its own carried FFmpeg, not the build box's.** The Debian-trixie build box
+  no longer installs `libav*-dev` and `build-ffmpeg.sh` purges it off an older box, because with it
+  present the linker resolved `-lavcodec` to the box's copy and left the host needing a soname its
+  rpath did not carry — an unloadable binary that failed `update.sh`'s ldd gate after the preview
+  channel moved FFmpeg ahead of trixie. Nothing to do; the next update relinks against the carried libraries.
+- **The macOS desktop mouse model stops at the window edge.** A pointer that left the stream
+  window kept steering the host cursor, re-entering from the far side, because a mouse-moved
+  event with no window carries screen coordinates and the client read them as window
+  coordinates. Update the client; nothing to configure.
 - **An odd-width stream from an Intel host is no longer sheared.** A linear dmabuf whose pitch is
   not a multiple of 64 bytes (Mutter pads only for scanout; a 1084-wide window is 4336) went
   straight into iHD, which reads it at a rounded pitch, so every row drifted and the picture
