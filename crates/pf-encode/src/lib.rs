@@ -18,11 +18,6 @@ use pf_frame::{CapturedFrame, PixelFormat};
 // backends share with them. One namespace: `pf_encode::*` is unchanged.
 pub use pf_encode_win::*;
 
-// The Linux libav dependency has its own name (Cargo.toml says why); the
-// shared libav modules keep addressing it as `ffmpeg_next`.
-#[cfg(all(target_os = "linux", feature = "libav-fallback"))]
-extern crate ffmpeg_linux as ffmpeg_next;
-
 /// `quic::CODEC_*` bit → [`Codec`]. Unknown / `0` maps to HEVC (pre-negotiation
 /// default). Inverse of [`codec_to_wire`].
 pub fn codec_from_wire(bit: u8) -> Codec {
