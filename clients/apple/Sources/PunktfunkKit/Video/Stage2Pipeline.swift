@@ -1397,9 +1397,9 @@ public final class Stage2Pipeline {
             // Report coded dims to the resize overlay only on a CHANGE (new-mode IDR), not per
             // loss-recovery IDR at the same size (see StreamPump).
             var lastDecodedDims: CMVideoDimensions?
-            var lastFramesDropped = connection.framesDropped()
-            // Persistent recovery WANT, not a one-shot edge (see StreamPump for the full rationale):
-            // keep asking until an IDR lands so a request swallowed by the throttle is re-sent.
+            // Persistent WANT for the two states only an IDR's parameter sets can end: no
+            // decodable format yet, or a decoder reset. Loss goes through the gate — an RFI
+            // anchor heals it, and asking on until an IDR turns every loss into one.
             var awaitingIDR = false
             // 4:4:4 backstop: a run of decode/create failures in a 4:4:4 session means this device can't
             // decode 4:4:4 at the negotiated resolution (the HW probe clears the common case but not a
@@ -1421,19 +1421,13 @@ public final class Stage2Pipeline {
                         _ = try connection.nextAU(timeoutMs: 100)
                         return true
                     }
-                    // Loss recovery (the primary path). The reassembler drops unrecoverable AUs and the
-                    // decoder conceals the reference-missing deltas — often WITHOUT an error callback —
-                    // so key off the drop count climbing, then keep asking (awaitingIDR) until a fresh
-                    // IDR re-anchors decode.
-                    let dropped = connection.framesDropped()
-                    if dropped > lastFramesDropped {
-                        lastFramesDropped = dropped
-                        awaitingIDR = true
-                    }
                     if awaitingIDR { recovery.request() }
-                    // Freeze backstop: a drop-count climb arms the gate (in case the frame-index gap
-                    // below was itself lost), and an overdue freeze re-asks for the re-anchor.
-                    if reanchorGate.poll(framesDropped: dropped) { recovery.request() }
+                    // Loss recovery through the shared gate: a drop-count climb beyond the gap's
+                    // credit arms the freeze and asks (the decoder conceals reference-missing
+                    // deltas without an error), and an overdue freeze re-asks for the re-anchor.
+                    if reanchorGate.poll(framesDropped: connection.framesDropped()) {
+                        recovery.request()
+                    }
                     // Drain HDR mastering metadata (0xCE) and hand it to the PRESENTER (→ CAEDRMetadata).
                     // Polled UNCONDITIONALLY (not gated on connection.isHDR, the fixed Welcome flag): the
                     // host sends 0xCE only for HDR, INCLUDING a mid-session SDR→HDR transition (a game
@@ -1443,15 +1437,11 @@ public final class Stage2Pipeline {
                         presenter.setHdrMeta(meta)
                     }
                     guard let au = try connection.nextAU(timeoutMs: 100) else { return true }
-                    // Loss recovery (RFI): a forward frame-index gap fires a throttled reference-
-                    // frame-invalidation request so an RFI-capable host (AMD LTR / NVENC) recovers
-                    // with a cheap clean P-frame instead of a full IDR. The framesDropped-driven
-                    // recovery above stays the backstop for when the recovery frame itself is lost.
-                    // The same gap is the earliest, most precise signal to ARM the display freeze —
-                    // the following concealed frames are withheld until a clean re-anchor.
-                    // Credited arm: the gap width pre-covers the reassembler's ~120 ms-later
-                    // framesDropped climb for the same loss, so a fast RFI anchor that heals in
-                    // between isn't re-frozen by it (the double-arm race).
+                    // A forward frame-index gap fires a throttled RFI (a clean P-frame, no IDR)
+                    // and arms the freeze, credited with the gap width so the reassembler's
+                    // ~120 ms-later framesDropped climb for the same loss cannot re-freeze a
+                    // stream the anchor already healed. A lost anchor lapses into the gate's
+                    // overdue re-ask above.
                     let gapWidth = connection.noteFrameIndexGapWidth(au.frameIndex)
                     if gapWidth > 0 { reanchorGate.arm(expectingDrops: UInt64(gapWidth)) }
                     onFrame?(au)

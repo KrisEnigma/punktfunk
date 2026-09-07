@@ -371,6 +371,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **An Apple client accepts an RFI anchor as recovery.** Both video pumps kept asking for a
+  keyframe every 100 ms after any lost frame until an IDR landed, so a host that had already
+  repaired the picture with a `USER_FLAG_RECOVERY_ANCHOR` P-frame was forced into a full IDR
+  230 ms later, and its burst on Wi-Fi cost the next frame — a ~250 ms hitch per loss. Update
+  the client; loss now goes through the shared re-anchor gate like the desktop client.
 - **A GNOME 49+ virtual monitor paints when the host asks.** The capture stream now drives the
   PipeWire graph as a lazy driver, so Mutter composites a frame on a client's commit instead of
   on its own vblank timer, one paint per wire interval at most: no beat against the host's
