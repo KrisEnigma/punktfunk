@@ -172,11 +172,13 @@ CI length caps are a backstop, not the style. A four-line war story is still wro
 - `//` : at most four lines (CI fails at six).
 - `//!` / `///` module map: what it is, the contract, how to pin it, where evidence lives.
   8–20 lines (CI fails at 24).
+- Swift has no `//!`, so a `.swift` file's OPENING `//` block is its module map and gets the
+  same budget. Every comment below the header is on the `//` cap.
 - Keep `// SAFETY:` and FFI/lifetime proofs exact.
 - A comment never enforces a trust boundary — a type, a test or an assertion does.
 
 CI counts comments this diff opened (the comment itself, or the comment above an item
-whose body changed). If it fails: shorten. Do not add `writing-ok` unless the extra
+whose body changed), in `.rs` and `.swift` alike. If it fails: shorten. Do not add `writing-ok` unless the extra
 lines are a SAFETY/lifetime trap.
 
 ### When you touch a function, rewrite its comment

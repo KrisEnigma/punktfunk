@@ -1222,14 +1222,9 @@ public final class SessionAudio {
                     var ts = timespec()
                     clock_gettime(CLOCK_REALTIME, &ts)
                     let nowNs = Int64(ts.tv_sec) * 1_000_000_000 + Int64(ts.tv_nsec)
-                    // Half a second of tolerance on the reference: long enough to ride out a
-                    // stalled or hitching present path, short enough that a backgrounded session
-                    // (video decode dropped, audio still playing) stops steering almost at once.
-                    // Only steer on an observation the sync actually ACCEPTED. It declines when
-                    // the video reference is missing or too old, and the desired depth is derived
-                    // from the CURRENT depth plus the settled offset — so re-requesting it against
-                    // a frozen offset raises the target by the offset each packet, walking the ring
-                    // to its cap and inserting an audible duplicate every couple of seconds.
+                    // Half a second of tolerance on the reference, and steer only on an
+                    // observation the sync ACCEPTED: the desired depth builds on the current one,
+                    // so re-requesting it against a frozen offset walks the ring to its cap.
                     let accepted = av.observe(AvSync.Observation(
                         ptsNs: pcm.ptsNs, nowLocalNs: nowNs,
                         clockOffsetNs: connection.clockOffsetNs, bufferedAhead: depth,
