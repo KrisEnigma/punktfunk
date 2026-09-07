@@ -60,6 +60,9 @@ final class StreamPump {
             var awaitingIDR = false
             var awaitingSince = Date.distantPast // when the current recovery began (for the resume log)
             var wasFailed = false
+            // Newest submitted frame index — a late partial (the reassembler's 30 ms fuse can
+            // deliver one behind a newer complete frame) must not travel back in time.
+            var newestIndex: UInt32?
             // Every iteration drains its own autorelease pool: this thread has no runloop, so
             // autoreleased CM/layer temporaries would otherwise accumulate until session end.
             // `false` = session over — exit the loop (the closure can't `break` across itself).
@@ -92,6 +95,14 @@ final class StreamPump {
                     let gapWidth = connection.noteFrameIndexGapWidth(au.frameIndex)
                     if gapWidth > 0 { gate.arm(expectingDrops: UInt64(gapWidth)) }
                     onFrame?(au)
+                    // Straggler: the core reports gap width 0 for one, so nothing else filters it.
+                    // Decoding it rewinds the DPB — H.264 reads a frame_num wrap, HEVC's RPS
+                    // unmarks the newer picture — corrupting the stream that already moved past it.
+                    if let newest = newestIndex,
+                       Int32(bitPattern: au.frameIndex &- newest) <= 0 {
+                        return true
+                    }
+                    newestIndex = au.frameIndex
                     let idrFormat = connection.videoCodec.formatDescription(fromKeyframe: au.data)
                     if let f = idrFormat {
                         format = f          // refreshed on every IDR (mode changes included)

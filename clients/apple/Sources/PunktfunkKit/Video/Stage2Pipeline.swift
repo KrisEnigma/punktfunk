@@ -1401,6 +1401,9 @@ public final class Stage2Pipeline {
             // decodable format yet, or a decoder reset. Loss goes through the gate — an RFI
             // anchor heals it, and asking on until an IDR turns every loss into one.
             var awaitingIDR = false
+            // Newest submitted frame index — a late partial (the reassembler's 30 ms fuse can
+            // deliver one behind a newer complete frame) must not travel back in time.
+            var newestIndex: UInt32?
             // 4:4:4 backstop: a run of decode/create failures in a 4:4:4 session means this device can't
             // decode 4:4:4 at the negotiated resolution (the HW probe clears the common case but not a
             // resolution-ceiling miss). End cleanly instead of looping on a black screen.
@@ -1445,6 +1448,14 @@ public final class Stage2Pipeline {
                     let gapWidth = connection.noteFrameIndexGapWidth(au.frameIndex)
                     if gapWidth > 0 { reanchorGate.arm(expectingDrops: UInt64(gapWidth)) }
                     onFrame?(au)
+                    // Straggler: the core reports gap width 0 for one, so nothing else filters it.
+                    // Decoding it rewinds the DPB — H.264 reads a frame_num wrap, HEVC's RPS
+                    // unmarks the newer picture — corrupting the stream that already moved past it.
+                    if let newest = newestIndex,
+                       Int32(bitPattern: au.frameIndex &- newest) <= 0 {
+                        return true
+                    }
+                    newestIndex = au.frameIndex
                     if let f = connection.videoCodec.formatDescription(fromKeyframe: au.data) {
                         format = f          // refreshed on every IDR (mode changes included)
                         let dims = CMVideoFormatDescriptionGetDimensions(f)
