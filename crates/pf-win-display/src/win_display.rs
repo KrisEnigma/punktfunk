@@ -614,12 +614,10 @@ pub fn set_active_mode_ccd(key: CcdTargetKey, mode: Mode) -> bool {
         tracing::warn!(target = %key, "ccd mode set: the path carries no source mode to rewrite");
         return false;
     }
-    // SAFETY: guarded by `infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE` immediately above —
-    // moving that guard makes this access unjustified.
-    unsafe {
-        modes[src_idx].Anonymous.sourceMode.width = mode.width;
-        modes[src_idx].Anonymous.sourceMode.height = mode.height;
-    }
+    // The `infoType` guard above is what makes `sourceMode` the live arm of this union; move it
+    // and these writes land on a target mode instead.
+    modes[src_idx].Anonymous.sourceMode.width = mode.width;
+    modes[src_idx].Anonymous.sourceMode.height = mode.height;
     // Supply the target timing too. Leaving it out makes the OS search for a workable one and
     // answer ERROR_BAD_CONFIGURATION (0x64a) when it cannot; these are the numbers the driver
     // advertises for this mode, so the search is not needed. `v_sync_freq_divider` is 1 for a
