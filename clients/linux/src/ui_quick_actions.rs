@@ -201,6 +201,17 @@ fn key_name(key: gdk::Key) -> Option<&'static str> {
     })
 }
 
+/// The name of the key at this physical position with NOTHING held, for a chord whose
+/// shifted symbol the grid cannot name — `Shift+1` arrives as `!` on a US layout, and the
+/// whole chord used to be dropped instead of read as Shift plus `1`.
+fn unshifted_key_name(keycode: u32) -> Option<&'static str> {
+    let entries = gdk::Display::default()?.map_keycode(keycode)?;
+    entries
+        .iter()
+        .find(|(k, _)| k.group() == 0 && k.level() == 0)
+        .and_then(|(_, keyval)| key_name(*keyval))
+}
+
 /// The modifiers held with a key, as the chord names them.
 fn held_modifiers(state: gdk::ModifierType) -> Vec<String> {
     let mut v = Vec::new();
@@ -534,16 +545,17 @@ fn build_ring(
         drag.set_content(Some(&gdk::ContentProvider::for_value(
             &(k as u32).to_value(),
         )));
-        {
-            let b = button.clone();
-            drag.connect_drag_begin(move |source, _| {
-                source.set_icon(
-                    Some(&gtk::WidgetPaintable::new(Some(&b))),
-                    (disc / 2.0) as i32,
-                    (disc / 2.0) as i32,
-                );
-            });
-        }
+        // The controller's own widget, not a captured clone: the closure is owned by the
+        // controller the button owns, so holding the button here is a cycle and the whole
+        // page leaks on every rebuild.
+        drag.connect_drag_begin(move |source, _| {
+            let Some(w) = source.widget() else { return };
+            source.set_icon(
+                Some(&gtk::WidgetPaintable::new(Some(&w))),
+                (disc / 2.0) as i32,
+                (disc / 2.0) as i32,
+            );
+        });
         button.add_controller(drag);
         let target = gtk::DropTarget::new(u32::static_type(), gdk::DragAction::MOVE);
         {
@@ -622,16 +634,10 @@ fn picker(button: &gtk::Button, k: usize, shared: &Shared, rebuild: Option<Rc<dy
             list.append(&row);
         }
     }
-    // No "Move" section: dragging one disc onto another is the swap, and a slot can always be
-    // set outright from the catalogue above — so the six "Swap with…" rows only lengthened the
-    // list with a second way to do what the list already does.
-    // ⚠ `min_content_width` does NOT hold this open: a ScrolledWindow whose horizontal policy is
-    // `Never` propagates its CHILD's minimum width and ignores that property. The child is a
-    // ListBox of AdwActionRows whose titles wrap, and a wrapping label's minimum width is one
-    // word — so the popover collapsed to a column a character or two wide, which is what it did
-    // for real. `set_size_request` is a true minimum GTK cannot ignore; the natural width then
-    // grows it to fit the rows, up to a ceiling so one long shortcut label cannot stretch the
-    // popover across the window.
+    // `min_content_width` is ignored here: a ScrolledWindow with hscroll `Never` propagates its
+    // child's minimum, and the ListBox's wrapping titles bottom out at one word. Only
+    // `set_size_request` is a minimum GTK cannot ignore; `max_content_width` caps how far the
+    // natural width lets one long label stretch the popover.
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_height(true)
@@ -915,11 +921,11 @@ fn shortcut_page(
             mod_buttons.clone(),
             key_buttons.clone(),
         );
-        key.connect_key_pressed(move |_, keyval, _, state| {
+        key.connect_key_pressed(move |_, keyval, keycode, state| {
             if !capture.is_active() {
                 return glib::Propagation::Proceed;
             }
-            let Some(name) = key_name(keyval) else {
+            let Some(name) = key_name(keyval).or_else(|| unshifted_key_name(keycode)) else {
                 // A lone modifier: keep waiting for the key.
                 return glib::Propagation::Stop;
             };
@@ -931,8 +937,11 @@ fn shortcut_page(
                 }
                 d.key = Some(name.to_string());
             }
+            // Copy out first: `set_active` emits `toggled` synchronously, and that handler
+            // takes the draft mutably — a borrow still live inside the call panics.
+            let mods = draft.borrow().mods;
             for (i, b) in mod_buttons.iter().enumerate() {
-                b.set_active(draft.borrow().mods[i]);
+                b.set_active(mods[i]);
             }
             for (n, b) in key_buttons.borrow().iter() {
                 if *n == name {
