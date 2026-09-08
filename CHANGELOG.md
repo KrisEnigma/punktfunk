@@ -423,6 +423,26 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A Windows pointer gesture no longer rests one step behind.** The driver spent the pointer's
+  move mark before checking that the stash slot was free, so a move landing while its access unit
+  was still owed was never re-encoded; the mark is now spent only when a slot is taken, and a
+  composed frame that draws the pointer spends it too, so the redundant re-encode after every
+  compose is gone. Nothing to do; install the driver.
+- **A QSV session ending with a frame in flight no longer frees the bitstream under the runtime.**
+  `Inner` dropped its retrieve queue, and with it the boxes the runtime was still writing into,
+  before the encoder was closed; the close now comes first, as `reset` already did it.
+- **An NVENC opening frame keeps its IDR flag across a transient first-submit failure.** The pool
+  counter advanced before the register/map/encode calls, so a retry lost `opening`, and with it the
+  in-band HDR SEI on the stream's first IDR; the counter now advances once the picture is queued, and
+  a forced IDR or anchor spent on a refused picture is carried to the retry.
+- **An AMF encoder rebuilt in place flags its first AU as the keyframe it is.** `reset` re-Inited
+  the component without zeroing the ring counter, so `opening` stayed false and a driver that
+  refuses `ForcePictureType` shipped the post-rebuild IDR as a P.
+- **The NVENC split arbiter refuses the completion-event session.** It only refused the two-thread
+  mode, but the driver's event mode keeps two frames in flight too, so `PUNKTFUNK_NVENC_SPLIT_ARBITRATE`
+  measured the newest submit against the oldest AU and cached a verdict on the wrong span.
+- **A detached driver encode thread no longer frees its successor's pool slot.** A poll failure
+  after the detach released the slot the new session was encoding into the free list.
 - **The audio ring no longer trims a delivery clump on sight.** A link that parks ~100 ms at
   once every ~100 ms had its clump cut at `target + headroom` ten and more times a second, then
   concealed the hole that audio would have bridged; the headroom line now trims only a sustained

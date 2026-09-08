@@ -364,7 +364,11 @@ impl Drive<'_> {
             Err(e) => {
                 dbglog!("[pf-vd] encode: poll failed: {e:#}");
                 self.set_state(au::ENCODER_WEDGED);
-                if let Some((slot, ..)) = self.inflight.pop_front() {
+                // A detached thread's slots were reclaimed by its successor; releasing one
+                // here would free a slot that successor is encoding.
+                if let Some((slot, ..)) = self.inflight.pop_front()
+                    && self.live.load(Ordering::Acquire)
+                {
                     self.pool.release(slot);
                 }
                 self.mid_au = false;
