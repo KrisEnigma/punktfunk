@@ -707,31 +707,6 @@ impl VdisplayDriver for PfVdisplayDriver {
             info.protocol_version,
             watchdog_s
         );
-        // Per-version gaps. Bumps since v3 are additive; a blanket `< PROTOCOL_VERSION` named
-        // the wrong missing capability (told a v4 driver it lacked a v4 feature).
-        if info.protocol_version < 4 {
-            tracing::warn!(
-                "pf-vdisplay protocol {}: driver lacks the in-place mid-stream resize \
-                 (IOCTL_UPDATE_MODES, added in v4) — every mid-stream resize costs a monitor \
-                 re-arrival (one hotplug per switch) until the driver is updated",
-                info.protocol_version
-            );
-        }
-        if info.protocol_version < 5 {
-            tracing::warn!(
-                "pf-vdisplay protocol {}: driver lacks the IddCx hardware-cursor channel (added in \
-                 v5) — the pointer stays composited into the captured frame",
-                info.protocol_version
-            );
-        }
-        if info.protocol_version < 6 {
-            tracing::info!(
-                "pf-vdisplay protocol {}: driver lacks the mid-stream cursor-forward flip \
-                 (IOCTL_SET_CURSOR_FORWARD, added in v6) — the cursor model declared at monitor ADD \
-                 stands for the whole session",
-                info.protocol_version
-            );
-        }
         // CLEAR_ALL needs sole ownership of the device. A reopen races sessions this process
         // still believes live, and under a seats reservation another host owns monitors here.
         if !reap_orphans {
