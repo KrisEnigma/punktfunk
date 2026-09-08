@@ -231,11 +231,15 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO build
 
+      # The same -skip* pair the tvOS archive below carries, and for the same reason: this is the
+      # one scheme that links swiftui-navigation-transitions, whose macros a headless xcodebuild
+      # can never be prompted to trust.
       - name: Build the tvOS app (type-check the os(tvOS) regions)
         working-directory: clients/apple
         run: |
           xcodebuild -project Punktfunk.xcodeproj -scheme Punktfunk-tvOS \
             -destination 'generic/platform=tvOS Simulator' \
+            -skipMacroValidation -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO build
 
       - name: sccache stats (visibility only)
