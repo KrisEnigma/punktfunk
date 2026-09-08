@@ -168,6 +168,10 @@ public enum DefaultsKey {
     /// On by default; only takes effect when the host also opted in to 4:4:4 (otherwise the stream
     /// stays 4:2:0). Sharper text/UI at the cost of more bandwidth.
     public static let enable444 = "punktfunk.enable444"
+    /// Advertise 10-bit WITHOUT HDR, so an SDR desktop arrives at Main10 instead of 8-bit.
+    /// Off by default, and subsumed by `hdrEnabled`, which already advertises the depth.
+    /// Asks nothing of the display: the panel shows the same SDR picture, banding aside.
+    public static let tenBitSdr = "punktfunk.tenBitSdr"
     public static let hosts = "punktfunk.hosts"
     /// How the host grid is ordered (a `HostSort` raw value) and what it's divided by (a
     /// `HostGrouping`). Per device, never per profile: it is this device's window on its own

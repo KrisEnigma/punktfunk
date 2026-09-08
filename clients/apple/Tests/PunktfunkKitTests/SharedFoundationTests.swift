@@ -406,12 +406,14 @@ final class SharedFoundationTests: XCTestCase {
         overlay.refreshHz = 120
         overlay.codec = "av1"
         overlay.enable444 = true
+        overlay.tenBitSdr = true
         overlay.modifierLayout = "windows"
         XCTAssertFalse(overlay.isEmpty)
         let out = base.applying(overlay)
         XCTAssertEqual([out.width, out.height, out.refreshHz], [3840, 2160, 120])
         XCTAssertEqual(out.codec, "av1")
         XCTAssertTrue(out.enable444)
+        XCTAssertTrue(out.tenBitSdr)
         XCTAssertEqual(out.modifierLayout, "windows")
         // Untouched fields keep following the base.
         XCTAssertEqual(out.bitrateKbps, 20_000)

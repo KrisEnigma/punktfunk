@@ -594,9 +594,14 @@ final class SessionModel: ObservableObject {
         // default (PUNKTFUNK_444, default on), so this toggle is the one real switch; the
         // hardware-decode probe below still gates what can actually be advertised.
         let want444 = effective.enable444
+        // 10-bit without HDR: an SDR desktop at Main10, which costs a little bandwidth and takes
+        // the banding out of gradients. `hdrCapable` already advertises the depth, so this only
+        // adds the arm where HDR is off or the display cannot show it.
+        let tenBit = hdrCapable || effective.tenBitSdr
         let connectLine = "connect \(host.displayName) \(host.address):\(host.port) "
             + "mode=\(width)x\(height)@\(hz) codec=\(effective.codec) bitrate=\(bitrateKbps)kbps "
-            + "hdr=\(hdrCapable) 444=\(want444) audio=\(audioChannels)ch/\(audioRateHz)Hz/\(audioBits)bit "
+            + "hdr=\(hdrCapable) 10bit=\(tenBit) 444=\(want444) "
+            + "audio=\(audioChannels)ch/\(audioRateHz)Hz/\(audioBits)bit "
             + "pinned=\(pin != nil) tofu=\(allowTofu) launch=\(launchID ?? "-")"
         sessionLog.info("\(connectLine, privacy: .public)")
         Task.detached(priority: .userInitiated) {
@@ -605,24 +610,16 @@ final class SessionModel: ObservableObject {
             // host recognizes this Mac (nil = anonymous, fine for hosts without
             // --require-pairing; Keychain/generation failure must not block connecting).
             let identity = (try? ClientIdentityStore.shared.load())?.identity
-            // Advertise 10-bit + HDR10 when enabled: the host upgrades to a BT.2020 PQ Main10 stream
-            // only for actual HDR content (its own gate); the VideoToolbox/Metal present path is
-            // HDR-capable (P010 + itur_2100_PQ + EDR). 0 keeps the 8-bit BT.709 SDR stream.
-            var videoCaps: UInt8 = hdrCapable
-                ? (PunktfunkConnection.videoCap10Bit | PunktfunkConnection.videoCapHDR)
-                : 0
-            // Advertise full-chroma 4:4:4 only when allowed AND this device can HARDWARE-decode it
-            // (software 4:4:4 is too slow for real-time). The host content-gates depth, so an
-            // HDR-advertised session can still receive an 8-bit 4:4:4 stream (SDR content) — require
-            // BOTH depths there. Otherwise a no-op (the host emits 4:4:4 only if it too opted in);
-            // `chromaFormat` on the connection reflects what was actually resolved.
+            // 4:4:4 is advertised only when allowed AND this device can HARDWARE-decode it —
+            // software 4:4:4 is too slow for real-time. The host content-gates depth, so a
+            // session that advertised 10-bit can still receive an 8-bit 4:4:4 stream: require
+            // BOTH depths there. `chromaFormat` reflects what was actually resolved.
             let canDecode444 =
-                hdrCapable
+                tenBit
                 ? (Stage444Probe.hwDecode444_8bit && Stage444Probe.hwDecode444_10bit)
                 : Stage444Probe.hwDecode444_8bit
-            if want444, canDecode444 {
-                videoCaps |= PunktfunkConnection.videoCap444
-            }
+            let videoCaps = PunktfunkConnection.videoCaps(
+                tenBit: tenBit, hdr: hdrCapable, chroma444: want444 && canDecode444)
             // This client's VideoToolbox path decodes H.264 and HEVC everywhere, and AV1 when
             // this device has an AV1 hardware decoder (M3-class Macs, A17 Pro-class iPhones —
             // VideoToolbox has no software AV1 decoder, so advertising it elsewhere would invite

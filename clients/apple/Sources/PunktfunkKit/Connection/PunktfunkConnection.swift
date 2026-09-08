@@ -1485,6 +1485,18 @@ public final class PunktfunkConnection: @unchecked Sendable {
     /// the host then emits 4:4:4 only if it too opted in. `chromaFormat` reflects the real value.
     public static let videoCap444: UInt8 = UInt8(PUNKTFUNK_VIDEO_CAP_444)
 
+    /// The capability byte for one session.
+    ///
+    /// Depth and HDR are separate asks: 10-bit without the HDR bit is an SDR Main10 desktop,
+    /// which is what `ten_bit_sdr` buys. The HDR bit always carries the depth with it, so a
+    /// caller cannot advertise HDR the decoder would be handed at 8-bit.
+    public static func videoCaps(tenBit: Bool, hdr: Bool, chroma444: Bool) -> UInt8 {
+        var caps: UInt8 = tenBit ? videoCap10Bit : 0
+        if hdr { caps |= videoCap10Bit | videoCapHDR }
+        if chroma444 { caps |= videoCap444 }
+        return caps
+    }
+
     /// Codec bits for `videoCodecs` / `preferredCodec` and the value `resolvedCodec` returns.
     public static let codecH264: UInt8 = UInt8(PUNKTFUNK_CODEC_H264)
     public static let codecHEVC: UInt8 = UInt8(PUNKTFUNK_CODEC_HEVC)

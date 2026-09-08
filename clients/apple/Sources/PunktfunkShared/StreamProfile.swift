@@ -133,6 +133,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
     public var fullscreenWhileStreaming: Bool?
     // Apple-only additions (design §3).
     public var enable444: Bool?
+    public var tenBitSdr: Bool?
     public var presentPriority: String?
     public var smoothBuffer: Int?
     public var vsync: Bool?
@@ -178,6 +179,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         case statsVerbosity = "stats_verbosity"
         case fullscreenWhileStreaming = "fullscreen_on_stream"
         case enable444 = "enable_444"
+        case tenBitSdr = "ten_bit_sdr"
         case presentPriority = "present_priority"
         case smoothBuffer = "smooth_buffer"
         case vsync
@@ -218,6 +220,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         statsVerbosity = str(.statsVerbosity)
         fullscreenWhileStreaming = bool(.fullscreenWhileStreaming)
         enable444 = bool(.enable444)
+        tenBitSdr = bool(.tenBitSdr)
         presentPriority = str(.presentPriority)
         smoothBuffer = int(.smoothBuffer)
         vsync = bool(.vsync)
@@ -262,6 +265,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         try c.encodeIfPresent(
             fullscreenWhileStreaming, forKey: AnyKey(Key.fullscreenWhileStreaming.rawValue))
         try c.encodeIfPresent(enable444, forKey: AnyKey(Key.enable444.rawValue))
+        try c.encodeIfPresent(tenBitSdr, forKey: AnyKey(Key.tenBitSdr.rawValue))
         try c.encodeIfPresent(presentPriority, forKey: AnyKey(Key.presentPriority.rawValue))
         try c.encodeIfPresent(smoothBuffer, forKey: AnyKey(Key.smoothBuffer.rawValue))
         try c.encodeIfPresent(vsync, forKey: AnyKey(Key.vsync.rawValue))
@@ -320,6 +324,7 @@ public enum OverlayField {
         case "stats_verbosity": overlay.statsVerbosity = nil
         case "fullscreen_on_stream": overlay.fullscreenWhileStreaming = nil
         case "enable_444": overlay.enable444 = nil
+        case "ten_bit_sdr": overlay.tenBitSdr = nil
         case "present_priority": overlay.presentPriority = nil
         case "smooth_buffer": overlay.smoothBuffer = nil
         case "vsync": overlay.vsync = nil
@@ -362,6 +367,7 @@ public enum OverlayField {
         case "stats_verbosity": return o.statsVerbosity != nil
         case "fullscreen_on_stream": return o.fullscreenWhileStreaming != nil
         case "enable_444": return o.enable444 != nil
+        case "ten_bit_sdr": return o.tenBitSdr != nil
         case "present_priority": return o.presentPriority != nil
         case "smooth_buffer": return o.smoothBuffer != nil
         case "vsync": return o.vsync != nil

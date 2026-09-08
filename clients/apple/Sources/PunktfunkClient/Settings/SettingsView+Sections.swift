@@ -236,6 +236,11 @@ extension SettingsView {
                 field: "enable_444") {
                 Toggle("Full chroma (4:4:4)", isOn: scoped(SettingsFields.enable444))
             }
+            described("Main10 for an SDR desktop, which costs a little bandwidth and takes the "
+                + "banding out of gradients. 10-bit HDR already asks for the depth.",
+                field: "ten_bit_sdr") {
+                Toggle("10-bit SDR", isOn: scoped(SettingsFields.tenBitSdr))
+            }
         }
     }
 
