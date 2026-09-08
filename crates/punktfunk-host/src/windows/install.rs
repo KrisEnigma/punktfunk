@@ -785,8 +785,15 @@ fn web_setup(args: &[String]) -> Result<()> {
     // pass, which would make a planted password look administrator-owned and keep it.
     quarantine_planted_secret(&pw_path);
     // `create_private_dir`, not `create_dir_all`: the next line writes the console password, and
-    // `create_dir_all` would inherit `%ProgramData%` (BUILTIN\Users can create files).
-    pf_paths::create_private_dir(&data_dir).ok();
+    // `create_dir_all` would inherit `%ProgramData%` (BUILTIN\Users can create files). The error
+    // is the junction refusal, and `write_secret_file` only rejects the FILE being a link — a
+    // junctioned parent still redirects the write, so refuse rather than continue.
+    pf_paths::create_private_dir(&data_dir).with_context(|| {
+        format!(
+            "lock down {} before writing the console password",
+            data_dir.display()
+        )
+    })?;
 
     set_web_password(&pw_path, pw_file.as_deref());
     // End + delete the legacy task (idempotent if absent). The installer disables it before the

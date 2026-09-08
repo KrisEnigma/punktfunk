@@ -1244,8 +1244,11 @@ fn ensure_default_host_env() -> Result<()> {
     }
     // Harden the dir first, before the `exists()` check — not only in the create-file branch.
     // `ProgramData` grants Users add-subdirectory + CREATOR OWNER; a planted dir must still lock.
+    // The error is the junction refusal: `write_secret_file` only rejects the FILE being a link,
+    // so a junctioned parent would still redirect this write. Refuse the install step instead.
     if let Some(dir) = path.parent() {
-        pf_paths::create_private_dir(dir).ok();
+        pf_paths::create_private_dir(dir)
+            .with_context(|| format!("lock down {} before writing host.env", dir.display()))?;
     }
     if path.exists() && !planted {
         // Re-lock the file: an owner can rewrite the DACL it inherited. `planted` files fall
