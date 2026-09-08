@@ -98,6 +98,16 @@ struct Slot {
     /// Cleared by [`H264Encoder::distrust`]; an untrusted slot is never predicted
     /// from again, and is replaced in its turn.
     trusted: bool,
+    /// Part-refreshed picture of an intra refresh wave: resident and predicted from by
+    /// the next wave frame, never an RFI anchor. The close is stored clean.
+    dirty: bool,
+}
+
+/// The intra stripe one wave picture carries, in the driver's row unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stripe {
+    pub first_row: u16,
+    pub rows: u16,
 }
 
 /// A live encode session. Owns its config, context, surfaces and coded buffer, and
@@ -406,13 +416,25 @@ impl Encoder {
         self.entrypoint == vah::VA_ENTRYPOINT_ENC_SLICE_LP
     }
 
-    /// The trusted references, as `(slot, wire)` — what `rfi::plan_slot_recovery`
-    /// takes.
+    /// Picture height in the driver's intra refresh row unit: macroblock rows for H.264;
+    /// for HEVC 32-px rows on Intel's VDEnc (`ceil(height / 32)` in the driver) and CTB rows
+    /// on AMD, whose firmware takes the stripe in CTBs.
+    pub fn wave_rows(&self) -> u32 {
+        let h = self.params.height;
+        match self.codec {
+            Codec::H264 => h.div_ceil(16),
+            Codec::Hevc(_) if self.low_power() => h.div_ceil(32),
+            Codec::Hevc(hevc) => h.div_ceil(8u32 << hevc.features.log2_ctb_minus3),
+        }
+    }
+
+    /// The anchor candidates, as `(slot, wire)` — what `rfi::plan_slot_recovery`
+    /// takes: trusted and fully refreshed.
     pub fn slots(&self) -> Vec<(usize, i64)> {
         self.slots
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.filter(|s| s.trusted).map(|s| (i, s.wire)))
+            .filter_map(|(i, s)| s.filter(|s| s.trusted && !s.dirty).map(|s| (i, s.wire)))
             .collect()
     }
 
@@ -564,27 +586,48 @@ impl Encoder {
             .max_by_key(|&(_, wire)| wire)
             .map(|(slot, _)| slot);
         let reference = if force_idr { None } else { newest };
-        self.encode_with(reference, false)
+        self.encode_with(reference, false, None, false)
     }
 
     /// Encode the picture predicting from `slot` — the recovery anchor a loss plan
     /// picked. Refuses a slot that is empty or distrusted.
     pub fn encode_anchored(&mut self, slot: usize) -> Result<EncodedPicture> {
         match self.slots.get(slot) {
-            Some(Some(s)) if s.trusted => self.encode_with(Some(slot), true),
+            Some(Some(s)) if s.trusted => self.encode_with(Some(slot), true, None, false),
             _ => bail!("slot {slot} holds no trusted reference"),
         }
     }
 
-    fn encode_with(&mut self, reference: Option<usize>, anchor: bool) -> Result<EncodedPicture> {
+    /// One frame of an intra refresh wave: `stripe` is coded intra, the rest predicts
+    /// from the previous picture whatever its trust, and the result is stored `dirty`
+    /// until the wave's close. An IDR when the session holds no picture at all.
+    pub fn encode_wave(&mut self, stripe: Stripe, dirty: bool) -> Result<EncodedPicture> {
+        let previous = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.map(|s| (i, s.wire)))
+            .max_by_key(|&(_, wire)| wire)
+            .map(|(slot, _)| slot);
+        self.encode_with(previous, false, Some(stripe), dirty)
+    }
+
+    fn encode_with(
+        &mut self,
+        reference: Option<usize>,
+        anchor: bool,
+        stripe: Option<Stripe>,
+        dirty: bool,
+    ) -> Result<EncodedPicture> {
         let is_idr = reference.is_none();
         let slot_count = self.slots.len();
         // HEVC names the kept pictures in every slice header, so a distrusted
         // picture is dropped by both sides now. H.264's long-term indices stay in
-        // step by replacement instead.
+        // step by replacement instead. A wave's first frame still predicts from the
+        // distrusted picture before it, so that one stays.
         if matches!(self.codec, Codec::Hevc(_)) {
-            for slot in self.slots.iter_mut() {
-                if slot.is_some_and(|s| !s.trusted) {
+            for (i, slot) in self.slots.iter_mut().enumerate() {
+                if slot.is_some_and(|s| !s.trusted) && reference != Some(i) {
                     self.free.push(slot.take().expect("checked").surface);
                 }
             }
@@ -619,8 +662,10 @@ impl Encoder {
 
         let mut owned: Vec<VaBufferId> = Vec::new();
         let result = match self.codec {
-            Codec::H264 => self.render_picture(&mut owned, &sps, &pps, recon, slice),
-            Codec::Hevc(hevc) => self.render_picture_hevc(&mut owned, &hevc, recon, poc, slice),
+            Codec::H264 => self.render_picture(&mut owned, &sps, &pps, recon, slice, stripe),
+            Codec::Hevc(hevc) => {
+                self.render_picture_hevc(&mut owned, &hevc, recon, poc, slice, stripe)
+            }
         }
         .and_then(|()| self.render_ids(&mut owned.clone()));
         if result.is_err() {
@@ -670,6 +715,7 @@ impl Encoder {
             wire: self.wire,
             poc,
             trusted: true,
+            dirty,
         };
         if let Some(old) = self.slots[usize::from(slice.slot)].replace(held) {
             self.free.push(old.surface);
@@ -700,6 +746,7 @@ impl Encoder {
         pps: &cros_codecs::codec::h264::parser::Pps,
         recon: VaSurfaceId,
         slice: PictureSlice,
+        stripe: Option<Stripe>,
     ) -> Result<()> {
         let is_idr = slice.is_idr;
         let seq = self.params.va_sequence(sps);
@@ -712,6 +759,7 @@ impl Encoder {
             vah::VA_ENC_MISC_PARAMETER_TYPE_FRAME_RATE,
             &frame_rate,
         )?;
+        self.render_stripe(owned, stripe)?;
 
         if is_idr {
             let (packed_sps, packed_pps) = pf_vaapi::enc_params::packed_parameter_sets(sps, pps);
@@ -786,6 +834,7 @@ impl Encoder {
         recon: VaSurfaceId,
         poc: i32,
         slice: PictureSlice,
+        stripe: Option<Stripe>,
     ) -> Result<()> {
         let is_idr = slice.is_idr;
         let seq = hevc.va_sequence();
@@ -798,6 +847,7 @@ impl Encoder {
             vah::VA_ENC_MISC_PARAMETER_TYPE_FRAME_RATE,
             &frame_rate,
         )?;
+        self.render_stripe(owned, stripe)?;
 
         if is_idr {
             let mut sets = hevc.vps();
@@ -890,6 +940,21 @@ impl Encoder {
         self.render_packed(owned, vah::VA_ENC_PACKED_HEADER_TYPE_SLICE, &header, bits)
     }
 
+    /// The wave's intra stripe for this picture, when it carries one. Both drivers
+    /// constrain the clean rows' prediction to clean rows themselves.
+    fn render_stripe(&self, owned: &mut Vec<VaBufferId>, stripe: Option<Stripe>) -> Result<()> {
+        let Some(stripe) = stripe.filter(|s| s.rows > 0) else {
+            return Ok(());
+        };
+        let rir = vah::VaEncMiscParameterRir {
+            rir_flags: vah::VA_RIR_ROW,
+            intra_insertion_location: stripe.first_row,
+            intra_insert_size: stripe.rows,
+            ..Default::default()
+        };
+        self.render_misc(owned, vah::VA_ENC_MISC_PARAMETER_TYPE_RIR, &rir)
+    }
+
     /// A misc buffer is a four-byte type tag with the payload inline after it, in
     /// one allocation.
     fn render_misc<T: Copy>(
@@ -900,8 +965,8 @@ impl Encoder {
     ) -> Result<()> {
         let mut bytes = Vec::with_capacity(4 + std::mem::size_of::<T>());
         bytes.extend_from_slice(&kind.to_ne_bytes());
-        // SAFETY: every `T` here is a `repr(C)` struct of `u32` fields with no
-        // padding, so all `size_of::<T>()` bytes are initialised.
+        // SAFETY: every `T` here is a `repr(C)` struct without implicit padding (the
+        // RIR struct pads itself), so all `size_of::<T>()` bytes are initialised.
         bytes.extend_from_slice(unsafe {
             std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
         });
