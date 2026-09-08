@@ -85,6 +85,13 @@ fn park_pointer(
     }
 }
 
+/// Which host-composite outcomes have been logged; each is said once per session.
+#[derive(Default)]
+pub(super) struct CompositeLog {
+    pub(super) saw_overlay: bool,
+    pub(super) saw_none: bool,
+}
+
 /// A relative-only session retries: the first park can hit a cold EIS whose devices have not
 /// resumed. One park for a client that steers absolutely — more is a yank to centre.
 #[cfg(target_os = "linux")]
@@ -147,8 +154,8 @@ impl StreamState {
     fn composite_live_cursor(&mut self, none_msg: &'static str) {
         match self.capturer.cursor() {
             Some(live) => {
-                if !self.composite_saw_overlay {
-                    self.composite_saw_overlay = true;
+                if !self.composite_log.saw_overlay {
+                    self.composite_log.saw_overlay = true;
                     tracing::info!(
                         x = live.x,
                         y = live.y,
@@ -161,8 +168,8 @@ impl StreamState {
                 self.frame.cursor = Some(live);
             }
             None => {
-                if !self.composite_saw_none {
-                    self.composite_saw_none = true;
+                if !self.composite_log.saw_none {
+                    self.composite_log.saw_none = true;
                     tracing::info!("{none_msg}");
                 }
             }

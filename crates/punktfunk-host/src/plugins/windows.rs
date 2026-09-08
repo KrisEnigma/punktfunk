@@ -347,3 +347,104 @@ fn is_elevated() -> bool {
         ok && is_member.as_bool()
     }
 }
+
+const TASK: &str = "PunktfunkScripting";
+
+pub(super) fn usage_note() {
+    eprintln!(
+        "    On Windows, `add`/`remove`/`enable`/`disable` need an ELEVATED prompt (the plugins\n    \
+         directory and the runner task are admin-owned)."
+    );
+}
+
+/// Bundled bun needs the runner script path as a leading arg.
+pub(super) fn runner_command() -> Result<(std::path::PathBuf, Vec<String>)> {
+    let app = std::env::current_exe()
+        .context("resolve current exe")?
+        .parent()
+        .context("resolve install dir")?
+        .to_path_buf();
+    let bun = app.join("bun").join("bun.exe");
+    let runner = app.join("scripting").join("runner-cli.js");
+    if !bun.exists() || !runner.exists() {
+        bail!(
+            "the plugin runner isn't installed (looked for {} and {}) — reinstall punktfunk \
+             with the scripting component",
+            bun.display(),
+            runner.display()
+        );
+    }
+    Ok((bun, vec![runner.to_string_lossy().into_owned()]))
+}
+
+/// Grant the runner READ on one directory the operator owns.
+///
+/// The Windows runner is `NT AUTHORITY\LocalService`, which holds no ACE anywhere inside a user
+/// profile — so a launcher installed there is invisible to every scanner plugin, and reads exactly
+/// like one that is not installed. This is that grant, without the operator hand-writing a SID.
+///
+/// It stays one directory: every service account holds "bypass traverse checking", so the locked
+/// parents above the target are never access-checked and the rest of the profile stays shut.
+pub(super) fn grant(dir: Option<&str>) -> Result<()> {
+    let Some(dir) = dir.map(str::trim).filter(|d| !d.is_empty()) else {
+        bail!("usage: punktfunk-host plugins grant <dir>");
+    };
+    // A typo must not report success — the ACE would land on a name nothing ever reads.
+    if !std::path::Path::new(dir).is_dir() {
+        bail!("'{dir}' is not a directory (grant the folder holding the launcher, not the .exe)");
+    }
+    let ok = Command::new(icacls_path())
+        .arg(dir)
+        .args(["/grant", &format!("{LOCAL_SERVICE_SID}:(OI)(CI)(RX)")])
+        .status()
+        .context("run icacls")?
+        .success();
+    if !ok {
+        bail!(
+            "icacls left '{dir}' unchanged: a folder's permissions are changed by its OWNER or \
+             an administrator - run this as the user who owns the folder, or from an elevated \
+             prompt"
+        );
+    }
+    println!(
+        "Granted the plugin runner read on {dir}. Re-run the plugin's detection to pick it up."
+    );
+    Ok(())
+}
+
+pub(super) fn runtime_status() -> RuntimeStatus {
+    let out = powershell_output(&format!(
+        "$t = Get-ScheduledTask -TaskName {TASK} -ErrorAction SilentlyContinue; \
+         if ($null -eq $t) {{ 'missing' }} else {{ \"$($t.State)|$($t.Principal.UserId)\" }}"
+    ));
+    match out.as_deref().map(str::trim) {
+        Some("missing") | None => RuntimeStatus {
+            installed: false,
+            enabled: false,
+            running: false,
+            unit: TASK,
+            principal: None,
+            detail: "reinstall punktfunk with the scripting component to get the plugin runner"
+                .into(),
+        },
+        Some(raw) => {
+            let (state, principal) = raw.split_once('|').unwrap_or((raw, ""));
+            RuntimeStatus {
+                installed: true,
+                enabled: !state.eq_ignore_ascii_case("Disabled"),
+                running: state.eq_ignore_ascii_case("Running"),
+                unit: TASK,
+                principal: (!principal.is_empty()).then(|| principal.to_string()),
+                detail: String::new(),
+            }
+        }
+    }
+}
+
+/// Stop then start: there is no `Restart-ScheduledTask`, and Start on a running task is a no-op.
+pub(super) fn restart_runtime() -> Result<()> {
+    powershell(&format!(
+        "Stop-ScheduledTask -TaskName {TASK} -ErrorAction SilentlyContinue; \
+         Start-ScheduledTask -TaskName {TASK} -ErrorAction Stop"
+    ))
+}

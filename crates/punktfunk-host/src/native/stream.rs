@@ -26,17 +26,12 @@ mod state;
 use self::phase_lock::{phase_lock_enabled, PhaseController};
 // `native.rs` builds it and `control.rs` holds it: the 0xCF ACK hold crosses the module.
 pub(crate) use self::phase_lock::PhaseCtl;
-#[cfg(target_os = "windows")]
-pub(super) use self::pipeline::prepare_display;
-pub(super) use self::pipeline::{PrepHandle, PreparedDisplay};
+pub(super) use self::pipeline::{prepare_display, PrepHandle, PreparedDisplay};
 use self::send::{send_loop, ChunkMsg, FrameMsg, SendMsg, SendStats};
 // `native.rs` asks before offering a mid-stream reconfig.
 pub(crate) use self::send::reconfig_allowed;
 use self::session_watch::{session_watch_enabled, session_watcher_loop, SessionSwitch};
 use self::state::StreamState;
-
-#[cfg(target_os = "windows")]
-const REJECTED_SLOT: &str = "pf-vdisplay refused this process's connector slot; see the log for the PUNKTFUNK_SEAT_DISPLAY_SLOT or reservation problem";
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn synthetic_stream(

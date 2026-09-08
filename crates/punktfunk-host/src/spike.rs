@@ -69,15 +69,7 @@ pub fn run(opts: Options) -> Result<()> {
             opts.codec
         );
     }
-    // On Windows the virtual source proves a seat can stream, so a software encoder is a
-    // failure rather than a fallback: the driver is what encodes, and it needs a GPU.
-    #[cfg(target_os = "windows")]
-    if opts.source == Source::Virtual && !encode::resolved_backend_is_gpu() {
-        anyhow::bail!(
-            "--source virtual is the Windows seat gate and needs a GPU encoder; the resolved \
-             backend is software"
-        );
-    }
+    plat::check_virtual_source(&opts)?;
     let bit_depth: u8 = if hdr { 10 } else { 8 };
 
     let mut capturer: Box<dyn Capturer> = match opts.source {
@@ -90,31 +82,7 @@ pub fn run(opts: Options) -> Result<()> {
             );
             Box::new(SyntheticCapturer::new(opts.width, opts.height, opts.fps))
         }
-        Source::SyntheticNv12 => {
-            #[cfg(target_os = "windows")]
-            {
-                tracing::info!(
-                    width = opts.width,
-                    height = opts.height,
-                    fps = opts.fps,
-                    "spike source: synthetic NV12 GPU texture (moving luma ramp)"
-                );
-                Box::new(
-                    capture::synthetic_nv12::SyntheticNv12Capturer::new(
-                        opts.width,
-                        opts.height,
-                        opts.fps,
-                    )
-                    .context("open synthetic NV12 capturer")?,
-                )
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                anyhow::bail!(
-                    "--source synthetic-nv12 is Windows-only (native AMF / D3D11 encoders)"
-                );
-            }
-        }
+        Source::SyntheticNv12 => plat::open_synthetic_nv12(&opts)?,
         Source::Portal => {
             // `PUNKTFUNK_SPIKE_HDR=1` asks the portal for 10-bit PQ dmabufs (GNOME HDR offer).
             let want_hdr = std::env::var("PUNKTFUNK_SPIKE_HDR").as_deref() == Ok("1");
@@ -126,10 +94,7 @@ pub fn run(opts: Options) -> Result<()> {
             capture::open_portal_monitor(want_hdr, false).context("open portal capturer")?
         }
         Source::Virtual => {
-            #[cfg(target_os = "windows")]
-            let compositor = crate::vdisplay::Compositor::Kwin;
-            #[cfg(not(target_os = "windows"))]
-            let compositor = crate::vdisplay::detect().context("detect compositor")?;
+            let compositor = plat::spike_compositor()?;
             tracing::info!(
                 width = opts.width,
                 height = opts.height,
@@ -176,41 +141,11 @@ pub fn run(opts: Options) -> Result<()> {
         bitrate_bps = opts.bitrate_bps,
         "opening video encoder"
     );
-    // Windows IDD-push keeps the pixels in the driver and hands this process access units,
-    // so the frame here carries no bytes and an in-process encoder would encode nothing. The
-    // driver encoder is the real path, and it is what the seat gate has to exercise.
-    #[cfg(target_os = "windows")]
-    let driver_encode = opts.source == Source::Virtual
-        && crate::session_plan::CaptureBackend::resolve()
-            == crate::session_plan::CaptureBackend::IddPush;
-    #[cfg(not(target_os = "windows"))]
-    let driver_encode = false;
-
-    let mut encoder = if driver_encode {
-        #[cfg(target_os = "windows")]
-        {
-            let plan = crate::session_plan::SessionPlan::resolve(
-                bit_depth,
-                hdr,
-                encode::ChromaFormat::Yuv420,
-                opts.codec,
-                false, // IDD composites the pointer
-                false, // no mid-stream cursor-forward flip in a spike
-                false, // no client decoder to slice for
-            );
-            capture::open_driver_encoder(
-                &plan,
-                capturer.as_ref(),
-                (w, h),
-                opts.fps,
-                opts.bitrate_bps,
-                bit_depth,
-                0,
-            )
-            .context("open the in-driver encoder")?
-        }
-        #[cfg(not(target_os = "windows"))]
-        unreachable!("the driver encoder is Windows-only")
+    let driver_encoder =
+        plat::open_driver_encoder(&opts, capturer.as_ref(), (w, h), bit_depth, hdr)?;
+    let driver_encode = driver_encoder.is_some();
+    let mut encoder = if let Some(enc) = driver_encoder {
+        enc
     } else {
         encode::open_video(
             opts.codec,
@@ -561,5 +496,106 @@ impl Loopback {
             bytes = self.bytes,
             "punktfunk-core loopback: AUs FEC-packetized → sent → reassembled & verified"
         );
+    }
+}
+
+/// What the spike does differently on Windows: the seat gate (`--source virtual` must reach
+/// a GPU encoder, and IDD-push keeps the pixels in the driver), and the NV12 GPU source.
+#[cfg(target_os = "windows")]
+mod plat {
+    use super::*;
+
+    /// The virtual source proves a seat can stream, so a software encoder is a failure
+    /// rather than a fallback: the driver is what encodes, and it needs a GPU.
+    pub(super) fn check_virtual_source(opts: &Options) -> Result<()> {
+        if opts.source == Source::Virtual && !encode::resolved_backend_is_gpu() {
+            anyhow::bail!(
+                "--source virtual is the Windows seat gate and needs a GPU encoder; the resolved \
+                 backend is software"
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn open_synthetic_nv12(opts: &Options) -> Result<Box<dyn Capturer>> {
+        tracing::info!(
+            width = opts.width,
+            height = opts.height,
+            fps = opts.fps,
+            "spike source: synthetic NV12 GPU texture (moving luma ramp)"
+        );
+        Ok(Box::new(
+            capture::synthetic_nv12::SyntheticNv12Capturer::new(opts.width, opts.height, opts.fps)
+                .context("open synthetic NV12 capturer")?,
+        ))
+    }
+
+    /// The Windows virtual display answers to the KWin name.
+    pub(super) fn spike_compositor() -> Result<crate::vdisplay::Compositor> {
+        Ok(crate::vdisplay::Compositor::Kwin)
+    }
+
+    /// IDD-push keeps the pixels in the driver and hands this process access units, so the
+    /// frame carries no bytes and an in-process encoder would encode nothing. The driver
+    /// encoder is the real path, and it is what the seat gate has to exercise.
+    pub(super) fn open_driver_encoder(
+        opts: &Options,
+        capturer: &dyn Capturer,
+        size: (u32, u32),
+        bit_depth: u8,
+        hdr: bool,
+    ) -> Result<Option<Box<dyn Encoder>>> {
+        let driver_encode = opts.source == Source::Virtual
+            && crate::session_plan::CaptureBackend::resolve()
+                == crate::session_plan::CaptureBackend::IddPush;
+        if !driver_encode {
+            return Ok(None);
+        }
+        let plan = crate::session_plan::SessionPlan::resolve(
+            bit_depth,
+            hdr,
+            encode::ChromaFormat::Yuv420,
+            opts.codec,
+            false, // IDD composites the pointer
+            false, // no mid-stream cursor-forward flip in a spike
+            false, // no client decoder to slice for
+        );
+        capture::open_driver_encoder(
+            &plan,
+            capturer,
+            size,
+            opts.fps,
+            opts.bitrate_bps,
+            bit_depth,
+            0,
+        )
+        .context("open the in-driver encoder")
+        .map(Some)
+    }
+}
+#[cfg(not(target_os = "windows"))]
+mod plat {
+    use super::*;
+
+    pub(super) fn check_virtual_source(_opts: &Options) -> Result<()> {
+        Ok(())
+    }
+
+    pub(super) fn open_synthetic_nv12(_opts: &Options) -> Result<Box<dyn Capturer>> {
+        anyhow::bail!("--source synthetic-nv12 is Windows-only (native AMF / D3D11 encoders)")
+    }
+
+    pub(super) fn spike_compositor() -> Result<crate::vdisplay::Compositor> {
+        crate::vdisplay::detect().context("detect compositor")
+    }
+
+    pub(super) fn open_driver_encoder(
+        _opts: &Options,
+        _capturer: &dyn Capturer,
+        _size: (u32, u32),
+        _bit_depth: u8,
+        _hdr: bool,
+    ) -> Result<Option<Box<dyn Encoder>>> {
+        Ok(None)
     }
 }

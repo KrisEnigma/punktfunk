@@ -56,7 +56,7 @@ pub(super) struct StreamState {
     /// A chunked AU's FIRST went out and its LAST has not: `au_seq` still names that frame.
     pub(super) wire_frame_open: bool,
     pub(super) capture_rebuilds: u32,
-    #[cfg(target_os = "windows")]
+    /// Topology re-assert generation this loop last saw. Only Windows IDD-push moves it.
     pub(super) seen_reassert_gen: u64,
     pub(super) encoder_resets: u32,
     pub(super) last_au_at: std::time::Instant,
@@ -73,10 +73,8 @@ pub(super) struct StreamState {
     pub(super) park_attempts: u32,
     #[cfg(target_os = "linux")]
     pub(super) next_park_at: std::time::Instant,
-    #[cfg(not(target_os = "windows"))]
-    pub(super) composite_saw_overlay: bool,
-    #[cfg(not(target_os = "windows"))]
-    pub(super) composite_saw_none: bool,
+    /// Each host-composite outcome is logged once.
+    pub(super) composite_log: super::cursor::CompositeLog,
     pub(super) last_forced_idr: Option<std::time::Instant>,
     /// Never re-anchors the IDR cooldown: sustained loss + RFI would swallow IDR pleas forever.
     pub(super) last_rfi: Option<std::time::Instant>,
@@ -346,8 +344,6 @@ impl StreamState {
             #[cfg(target_os = "linux")]
             inj_session_tx,
         } = ctx;
-        #[cfg(target_os = "windows")]
-        let _ = &gamescope_route;
         // Stamp before the display exists: a reading after launch would reject the process it is meant to find.
         let fresh_stamp = crate::gamelease::launch_clock();
         // Re-dial re-sends `Hello::launch` verbatim. Adopt against the original stamp or procscan refuses it.
@@ -442,29 +438,17 @@ impl StreamState {
                 vd.set_hdr(hdr);
                 vd.set_hw_cursor(cursor_forward || metadata_composite);
                 vd.set_quit_flag(quit.clone());
-                #[cfg(not(target_os = "windows"))]
                 vd.set_launch_command(launch.clone());
-                #[cfg(not(target_os = "windows"))]
                 vd.set_gamescope_route(gamescope_route.clone());
                 #[cfg(target_os = "linux")]
                 vd.set_session_isolation(isolation.clone());
                 // Slot-scoped: preempt only a prior session on THIS client's slot. Held before create.
-                #[cfg(target_os = "windows")]
-                let _idd_setup_guard = match plan.capture
-                    == crate::session_plan::CaptureBackend::IddPush
-                {
-                    false => None,
-                    true => {
-                        // A rejected slot means this host would drive a connector that belongs to
-                        // another one. Refusing the session beats attaching to someone else's display.
-                        let slot = crate::vdisplay::manager::slot_id_for(
-                            conn.peer_fingerprint(),
-                            (mode.width, mode.height),
-                        )
-                        .context(REJECTED_SLOT)?;
-                        Some(crate::vdisplay::manager::vdm().begin_idd_setup(slot, stop.clone()))
-                    }
-                };
+                let _idd_setup_guard = crate::windows::idd::setup_guard(
+                    plan.capture,
+                    conn.peer_fingerprint(),
+                    (mode.width, mode.height),
+                    &stop,
+                )?;
                 let pipe = build_pipeline_with_retry(
                     &mut vd,
                     mode,
@@ -585,8 +569,6 @@ impl StreamState {
             }
             None => None,
         };
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        let _ = (&launch, adopt_launch);
         if let Some(c) = launch_claim.as_ref() {
             if spawned_now {
                 c.launched();
@@ -855,8 +837,7 @@ impl StreamState {
             au_seq: 0,
             wire_frame_open: false,
             capture_rebuilds: 0,
-            #[cfg(target_os = "windows")]
-            seen_reassert_gen: crate::vdisplay::manager::topology_reassert_gen(),
+            seen_reassert_gen: crate::windows::idd::topology_reassert_gen(),
             encoder_resets: 0,
             last_au_at: now,
             last_hdr_meta: None,
@@ -871,10 +852,7 @@ impl StreamState {
             park_attempts: 0,
             #[cfg(target_os = "linux")]
             next_park_at: now,
-            #[cfg(not(target_os = "windows"))]
-            composite_saw_overlay: false,
-            #[cfg(not(target_os = "windows"))]
-            composite_saw_none: false,
+            composite_log: super::cursor::CompositeLog::default(),
             // Pipeline opened on an IDR — start the clock so the cold-GOP keyframe storm coalesces.
             last_forced_idr: Some(now),
             last_rfi: None,
@@ -931,7 +909,6 @@ impl StreamState {
         while !self.stop.load(Ordering::SeqCst) && std::time::Instant::now() < self.deadline {
             self.on_session_switch();
             self.on_mode_switch();
-            #[cfg(target_os = "windows")]
             self.on_topology_reassert()?;
             self.on_fec_moved();
             self.on_bitrate_request();

@@ -12,7 +12,6 @@
 
 use super::*;
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 use punktfunk_core::audio::pcm;
 
 /// Wire clock: `pts_ns` is an anchor plus a running total of interleaved samples.
@@ -26,7 +25,6 @@ use punktfunk_core::audio::pcm;
 /// wire), so a fast clock is never pulled back. Counting samples cannot drift. A running
 /// total also beats summing per-frame `frame_duration_ns` (~1 ns/frame remainder); this
 /// accumulates zero.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 struct PtsClock {
     base_ns: u64,
     samples: usize,
@@ -36,7 +34,6 @@ struct PtsClock {
     samples_per_sec: usize,
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl PtsClock {
     fn new(rate_hz: u32, channels: u8) -> PtsClock {
         PtsClock {
@@ -81,13 +78,11 @@ impl PtsClock {
 
 /// Opus encoder: stereo (`opus::Encoder`) or 5.1/7.1 multistream (`opus::MSEncoder`), both
 /// behind one `encode_float`. Surround uses the safe wrapper, not `audiopus_sys`.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 enum NativeAudioEnc {
     Stereo(opus::Encoder),
     Surround(opus::MSEncoder),
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl NativeAudioEnc {
     /// Encoder for `channels` (2/6/8) at `tier`, `LowDelay`, constrained VBR.
     ///
@@ -141,7 +136,6 @@ impl NativeAudioEnc {
 ///
 /// `plane` is the format `Welcome` stated — read back by the caller, never recomputed, so
 /// the promised wire and the sent wire cannot disagree.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(super) fn audio_thread(
     conn: super::link::SessionLink,
     stop: Arc<AtomicBool>,
@@ -655,22 +649,7 @@ pub(super) fn audio_thread(
     }
 }
 
-/// Stub: native audio needs Linux or Windows (capture + libopus). Other targets run
-/// the session without it, same as a capturer that fails to open.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub(super) fn audio_thread(
-    _conn: super::link::SessionLink,
-    _stop: Arc<AtomicBool>,
-    _audio_cap: AudioCapSlot,
-    _channels: u8,
-    _budget: punktfunk_core::audio::AudioBudget,
-    _plane: super::handshake::AudioPlane,
-    _sink: Option<String>,
-) {
-    tracing::warn!("punktfunk/1 audio requires Linux or Windows — session continues without it");
-}
-
-#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

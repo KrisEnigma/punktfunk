@@ -16,9 +16,7 @@
 //! 2 Reed–Solomon parity packets (`packetType = 127`). Clients consume in-order
 //! data immediately; missing parity only costs loss recovery.
 
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use crate::audio::SAMPLE_RATE;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 use {
     super::AUDIO_PORT,
     crate::audio::{self, AudioCapturer},
@@ -30,7 +28,6 @@ use {
     std::time::{Duration, Instant},
 };
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 
 /// moonlight-common-c `RtpAudioQueue.c`: `RTP_PAYLOAD_TYPE_AUDIO` / `RTP_PAYLOAD_TYPE_FEC`.
@@ -178,15 +175,10 @@ fn build_fec_rtp(
 
 /// Persistent capturer, reused across streams so the PipeWire thread is not leaked.
 /// A different channel count drops the cache and opens a new one.
-#[cfg(target_os = "linux")]
 pub type AudioCapSlot = Arc<std::sync::Mutex<Option<Box<dyn AudioCapturer>>>>;
-#[cfg(not(target_os = "linux"))]
-pub type AudioCapSlot =
-    std::sync::Arc<std::sync::Mutex<Option<Box<dyn crate::audio::AudioCapturer>>>>;
 
 /// Spawn the audio thread (idempotent via `running`). `gcm_key`/`rikeyid` are the
 /// `/launch` AES-CBC payload key — the name is GCM because video uses GCM.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[allow(clippy::too_many_arguments)] // one construction site (RTSP PLAY)
 pub fn start(
     running: Arc<AtomicBool>,
@@ -216,27 +208,6 @@ pub fn start(
         });
 }
 
-/// No capture backend on this target. Fail the same way the real thread exits:
-/// clear `running`, bump `media_exited`.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-#[allow(clippy::too_many_arguments)] // signature parity with the real implementation
-pub fn start(
-    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    _gcm_key: [u8; 16],
-    _rikeyid: i32,
-    _params: AudioParams,
-    _audio_cap: AudioCapSlot,
-    _on_lost: super::OnSessionLost,
-    _owner_ip: Option<std::net::IpAddr>,
-    _av_ping: [u8; super::AV_PING_LEN],
-    media_exited: std::sync::Arc<std::sync::atomic::AtomicU64>,
-) {
-    tracing::error!("GameStream audio requires Linux (PipeWire) or Windows (WASAPI) + libopus");
-    running.store(false, std::sync::atomic::Ordering::SeqCst);
-    media_exited.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[allow(clippy::too_many_arguments)] // one call site (`start`), which carries the same allow
 fn run(
     running: &AtomicBool,
@@ -289,13 +260,11 @@ fn run(
     result
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 enum SessionEncoder {
     Stereo(opus::Encoder),
     Surround(opus::MSEncoder),
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl SessionEncoder {
     fn new(layout: &'static OpusLayout) -> Result<SessionEncoder> {
         // LowDelay + hard CBR: FEC shards must be equal length, and the client
@@ -336,7 +305,6 @@ impl SessionEncoder {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[allow(clippy::too_many_arguments)]
 fn audio_body(
     cap: &mut dyn AudioCapturer,

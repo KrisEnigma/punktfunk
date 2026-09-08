@@ -28,7 +28,7 @@ pub(in crate::native) type PrepHandle = (
 );
 
 /// Build display + pipeline at Welcome time. Same setters as [`StreamState::new`]'s inline arm.
-#[cfg(target_os = "windows")]
+/// Windows-only by policy (`handshake.rs` never spawns it elsewhere), not by construction.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::native) fn prepare_display(
     compositor: crate::vdisplay::Compositor,
@@ -74,16 +74,12 @@ pub(in crate::native) fn prepare_display(
     vd.set_hdr(hdr);
     vd.set_hw_cursor(cursor_forward);
     vd.set_quit_flag(quit.clone());
-    let _idd_setup_guard = match plan.capture == crate::session_plan::CaptureBackend::IddPush {
-        false => None,
-        true => {
-            // A rejected slot is a configuration fault, not something to stream through.
-            let slot =
-                crate::vdisplay::manager::slot_id_for(client_identity, (mode.width, mode.height))
-                    .context(REJECTED_SLOT)?;
-            Some(crate::vdisplay::manager::vdm().begin_idd_setup(slot, stop.clone()))
-        }
-    };
+    let _idd_setup_guard = crate::windows::idd::setup_guard(
+        plan.capture,
+        client_identity,
+        (mode.width, mode.height),
+        stop,
+    )?;
     let pipeline = build_pipeline_with_retry(
         &mut vd,
         mode,
@@ -236,9 +232,8 @@ pub(super) fn open_session_encoder(
     bit_depth: u8,
     wire_seq_base: u32,
 ) -> Result<(Box<dyn crate::encode::Encoder>, (u32, u32))> {
-    #[cfg(target_os = "windows")]
     if plan.capture == crate::session_plan::CaptureBackend::IddPush {
-        return crate::capture::open_driver_encoder(
+        return crate::windows::idd::open_driver_encoder(
             plan,
             capturer,
             (frame.width, frame.height),
@@ -249,7 +244,6 @@ pub(super) fn open_session_encoder(
         )
         .map(|e| (e, (frame.width, frame.height)));
     }
-    let _ = wire_seq_base;
     let (mut enc, size) =
         crate::session_plan::open_encoder_fitted(frame, negotiated, |width, height| {
             crate::encode::open_video(

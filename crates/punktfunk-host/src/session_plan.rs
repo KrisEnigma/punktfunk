@@ -23,19 +23,12 @@ pub enum CaptureBackend {
 
 impl CaptureBackend {
     /// Shared by [`SessionPlan::resolve`] and the standalone callers (GameStream / spike).
-    #[cfg(target_os = "linux")]
     pub fn resolve() -> Self {
-        CaptureBackend::Portal
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn resolve() -> Self {
-        CaptureBackend::IddPush
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    pub fn resolve() -> Self {
-        CaptureBackend::Portal
+        if cfg!(target_os = "windows") {
+            CaptureBackend::IddPush
+        } else {
+            CaptureBackend::Portal
+        }
     }
 }
 
@@ -257,18 +250,16 @@ fn gamescope_needs_host_cursor(gamescope: bool) -> bool {
     gamescope && !pf_vdisplay::gamescope_composites_cursor()
 }
 
+/// No gamescope on Windows: the pointer is the driver's.
+#[cfg(target_os = "windows")]
+fn gamescope_needs_host_cursor(_gamescope: bool) -> bool {
+    false
+}
+
 /// Kept beside [`cursor_blend_for`] because the two must agree: reader without
 /// blend wastes an X11 connection; blend without reader streams no pointer.
 pub(crate) fn gamescope_cursor_for(gamescope: bool) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = gamescope;
-        false
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        gamescope_needs_host_cursor(gamescope)
-    }
+    gamescope_needs_host_cursor(gamescope)
 }
 
 #[cfg(target_os = "windows")]
