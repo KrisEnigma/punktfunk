@@ -149,7 +149,9 @@ fn rdpidd_transport(request: Request) {
 /// the driver owns the two handles from there — and only a malformed or unmatched one fails
 /// the IOCTL with nothing adopted (`SetEncodeReply` docs).
 fn set_encode(owner: u32, request: Request) {
-    use pf_driver_proto::encode::{SetEncodeReply, SetEncodeRequest, SET_ENCODE_REQUEST_LEGACY_SIZE};
+    use pf_driver_proto::encode::{
+        SET_ENCODE_REQUEST_LEGACY_SIZE, SetEncodeReply, SetEncodeRequest,
+    };
     let Some(req) = read_input_prefix::<SetEncodeRequest>(&request, SET_ENCODE_REQUEST_LEGACY_SIZE)
     else {
         request.complete(STATUS_INVALID_PARAMETER);

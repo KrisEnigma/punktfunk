@@ -97,6 +97,11 @@ pub struct GameEntry {
 /// shells that have no such tile simply never match it.
 pub const DESKTOP_ID: &str = "\0desktop";
 
+/// The mark that tile draws, as an [`icon`](GameEntry::icon) token. Not a brand mark: each
+/// shell resolves it through its own icon set — Lucide `monitor` on the three that carry
+/// [`crate::lucide`], the nearest system symbol on Apple and Android.
+pub const DESKTOP_ICON: &str = "monitor";
+
 /// Store id → display label. One table: the console, the GTK dialog and the WinUI dialog all
 /// drew this from a copy of their own, and a store added to one never reached the others.
 pub fn store_label(store: &str) -> &'static str {
