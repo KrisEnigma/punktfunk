@@ -54,7 +54,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import android.content.res.Configuration
@@ -75,8 +74,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.ImageLoader
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import io.unom.punktfunk.components.launcherIcon
 import io.unom.punktfunk.kit.link.DeepLinks
 import io.unom.punktfunk.kit.NativeBridge
@@ -769,38 +766,27 @@ private fun TouchPoster(
  */
 @Composable
 private fun TouchPosterArt(game: GameEntry, loader: ImageLoader) {
-    val candidates = game.art.posterCandidates
-    var idx by remember(game.id) { mutableIntStateOf(0) }
-    if (idx < candidates.size) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(candidates[idx]).build(),
-            imageLoader = loader,
-            contentDescription = game.title,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-            onError = { idx++ }, // this candidate failed — try the next, or fall to the placeholder
-        )
-        return
-    }
-    // A launcher ships no poster by design, so its brand mark IS the poster; falling back to the
-    // launcher's NAME says "opens Steam", where a title would read as "a cover that failed to load".
-    val mark = launcherIcon(game.iconToken)
-    if (mark != null) {
-        Icon(
-            imageVector = mark,
-            contentDescription = game.title,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.fillMaxSize(0.45f),
-        )
-    } else {
-        Text(
-            if (game.isLauncher) game.storeLabel else game.title,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(12.dp),
-        )
+    PosterArt(game, loader) {
+        // A launcher ships no poster by design, so its brand mark IS the poster; falling back to the
+        // launcher's NAME says "opens Steam", where a title would read as "a cover that failed to load".
+        val mark = launcherIcon(game.iconToken)
+        if (mark != null) {
+            Icon(
+                imageVector = mark,
+                contentDescription = game.title,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxSize(0.45f),
+            )
+        } else {
+            Text(
+                if (game.isLauncher) game.storeLabel else game.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(12.dp),
+            )
+        }
     }
 }
 
