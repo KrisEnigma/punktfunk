@@ -868,13 +868,13 @@ val MOUSE_MODE_OPTIONS = MouseMode.entries.map { it to it.label }
  * clients' picker shows.
  */
 val GAMEPAD_OPTIONS = listOf(
-    io.unom.punktfunk.kit.Gamepad.PREF_AUTO to "Automatic",
-    io.unom.punktfunk.kit.Gamepad.PREF_XBOX360 to "Xbox 360",
-    io.unom.punktfunk.kit.Gamepad.PREF_DUALSENSE to "DualSense",
-    io.unom.punktfunk.kit.Gamepad.PREF_XBOXONE to "Xbox One",
-    io.unom.punktfunk.kit.Gamepad.PREF_DUALSHOCK4 to "DualShock 4",
-    io.unom.punktfunk.kit.Gamepad.PREF_STEAMDECK to "Steam Deck",
-)
+    io.unom.punktfunk.kit.Gamepad.PREF_AUTO,
+    io.unom.punktfunk.kit.Gamepad.PREF_XBOX360,
+    io.unom.punktfunk.kit.Gamepad.PREF_DUALSENSE,
+    io.unom.punktfunk.kit.Gamepad.PREF_XBOXONE,
+    io.unom.punktfunk.kit.Gamepad.PREF_DUALSHOCK4,
+    io.unom.punktfunk.kit.Gamepad.PREF_STEAMDECK,
+).map { it to io.unom.punktfunk.kit.Gamepad.prefLabel(it) }
 
 /** (stored `system_buttons` value, label) — where the guide/share presses land while streaming. */
 val SYSTEM_BUTTON_OPTIONS = listOf(

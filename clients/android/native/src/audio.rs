@@ -582,7 +582,13 @@ fn open_any(ladder: &[OpenRung], ctx: &OpenCtx) -> Option<LiveStream> {
     log::warn!(
         "audio: no rung proved it was pulling — falling back to {rung:?} unproven; if this device is silent, this line is where to look"
     );
-    let live = try_open(rung, ctx).ok()?;
+    let live = match try_open(rung, ctx) {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!("audio: unproven {rung:?} did not open either: {e:?} — no playback");
+            return None;
+        }
+    };
     match arm(&live, ctx.fmt, ctx.counters, false) {
         Ok(()) => {
             log_started(&live, false);
@@ -755,21 +761,7 @@ fn supervise(
                 continue;
             }
             None => {
-                // Name the format, because at 96 kHz it is the likeliest cause and the cure is a
-                // setting rather than a rebuild. It should be near-unreachable — `connect` proves
-                // the rate is openable BEFORE the `Hello` (see `output_rate_is_openable`), so
-                // getting here on a hi-res session means the device changed underneath one that
-                // did open, and the reopen attempts above have already ridden out the settle.
-                log::error!(
-                    "audio: no AAudio configuration on the ladder could be opened and started at {} Hz / {} ch — audio disabled for this session (video unaffected){}",
-                    fmt.rate_hz,
-                    fmt.channels,
-                    if fmt.rate_hz == punktfunk_core::audio::SAMPLE_RATE_HZ {
-                        ""
-                    } else {
-                        "; this device would not give us the rate the host resolved — turn hi-res audio off in Settings to run this session at 48 kHz"
-                    },
-                );
+                log_no_configuration(fmt);
                 return;
             }
         };
@@ -838,72 +830,69 @@ fn nap(shutdown: &AtomicBool, total_ms: u64) {
     }
 }
 
-/// Open one ladder rung with fresh callback state.
-///
-/// `open_stream` consumes its builder and callback, so channels, buffering, and jitter policy are
-/// rebuilt on every attempt. Invalid callback pointer/length pairs stop before a slice is formed.
-fn try_open(rung: OpenRung, ctx: &OpenCtx) -> ndk::audio::Result<LiveStream> {
-    let OpenCtx {
-        fmt,
-        tuning,
-        hard_cap_max,
-        game_audio,
-        ..
-    } = *ctx;
-    let channels = fmt.channels;
-    let (tx, rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
-    // Recycle free-list: drained PCM buffers go BACK to the decode thread to be refilled, so
-    // the realtime callback never frees heap (Android's Scudo allocator has unbounded free()
-    // tail latency — a free on the audio thread is an XRun = a click) and the decode thread
-    // rarely allocates. Same depth as the data channel.
-    let (free_tx, free_rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
+/// The realtime consumer, owned by the AAudio data callback (FnMut) — no lock: AAudio calls it
+/// from a single high-priority thread, and the decode thread only touches `tx`/`free_rx`.
+struct Render {
+    counters: Arc<Counters>,
+    sync: Arc<punktfunk_core::audio::AudioSyncCell>,
+    rx: Receiver<Vec<f32>>,
+    free_tx: SyncSender<Vec<f32>>,
+    channels: usize,
+    ring: VecDeque<f32>,
+    policy: punktfunk_core::audio::JitterPolicy,
+    /// Callbacks since open (throttles the XRun grow check).
+    cb_count: u32,
+    /// Last AAudio XRun count we grew the buffer for.
+    last_xrun: i32,
+}
 
-    // Realtime consumer state, owned by the callback (FnMut) — no lock: AAudio calls it from
-    // a single high-priority thread, and the decode thread only touches `tx`/`free_rx`.
-    let cb_counters = ctx.counters.clone();
-    let cb_sync = ctx.sync.clone();
-    // Pre-reserve the ring so `extend` never reallocates on the realtime thread. Worst
-    // transient before the trim below = the hard cap plus one full channel of the plane's OWN
-    // frame — 5 ms on Opus (the protocol's fixed size, host `audio_thread`), the negotiated
-    // `audio_frame_us` on `0xD3`, which at 96 kHz/24-bit stereo is 2 ms and on 24-bit surround
-    // 1 ms. Sized from the resolved format — rate, depth AND channel count — rather than from a
-    // 5 ms constant: at 96 kHz a 5 ms reserve is DOUBLE what it should be, which is merely
-    // wasteful, but the same constant used the other way round (a plane whose frames were longer
-    // than the reserve, which a surround session's are per frame even while being shorter in time)
-    // would force a one-time realloc on the RT thread — asserted, not silently corrupted, in
-    // `decode_loop`.
-    let mut ring: VecDeque<f32> =
-        VecDeque::with_capacity(hard_cap_max + RING_CHUNKS * fmt.frame_samples());
-    // Shared de-jitter policy — prime depth, drift correction, de-prime hysteresis — told the
-    // RESOLVED format on both axes, because it is denominated in both:
-    //
-    // - `new_at_rate`: every depth, target, shed threshold and the `buffer_ms`/`target_ms` this
-    //   client reports are milliseconds converted to interleaved samples at the session's own rate
-    //   and layout, so a 96 kHz session's figures must be in 96-sample milliseconds or every one of
-    //   them is half what the tuning asked for. Core converts by multiplying first and dividing
-    //   last (as `SessionAudio` does), which is why the 44.1 kHz family can be passed here at all —
-    //   pre-dividing turned 44 100 Hz into 44 samples/ms and put all of them 2.3 % out.
-    // - `set_frame_us`: two of its decisions are denominated in FRAMES, not milliseconds — the
-    //   floor under the effective target (a device quantum plus one frame) and the smooth shed
-    //   (drop exactly one frame) — and both were written when 5 ms was the only frame this
-    //   protocol had. Left at the default a 96 kHz/24-bit session would shed 2.5 frames at a time
-    //   and crossfade across a whole one, which is not a crossfade.
-    //
-    // Microseconds throughout: the ladder has sub-millisecond rungs and `audio_frame_us` is the
-    // negotiated figure, so routing it through integer ms would truncate 2 500 µs to 2. An Opus
-    // session passes 5 000, which is the constructor's own default — so the ordinary session is
-    // bit-identical by construction rather than by a branch.
-    let mut policy =
-        punktfunk_core::audio::JitterPolicy::new_at_rate(tuning, channels as u8, fmt.rate_hz);
-    policy.set_frame_us(fmt.frame_us);
-    let mut cb_count: u32 = 0; // callbacks since open (throttles the XRun grow check)
-    let mut last_xrun: i32 = 0; // last AAudio XRun count we grew the buffer for
-    let callback = move |s: &AudioStream, data: *mut c_void, num_frames: i32| {
+impl Render {
+    fn new(ctx: &OpenCtx, rx: Receiver<Vec<f32>>, free_tx: SyncSender<Vec<f32>>) -> Render {
+        let OpenCtx {
+            fmt,
+            tuning,
+            hard_cap_max,
+            ..
+        } = *ctx;
+        let channels = fmt.channels;
+        // Pre-reserve the ring so `extend` never reallocates on the realtime thread. Worst
+        // transient before a trim = the hard cap plus one full channel of the plane's OWN frame,
+        // sized from the resolved format — rate, depth AND channel count — so a surround
+        // session's longer-per-frame chunks never force a one-time realloc on the RT thread
+        // (asserted in `decode_loop`).
+        let ring = VecDeque::with_capacity(hard_cap_max + RING_CHUNKS * fmt.frame_samples());
+        // The de-jitter policy is told the RESOLVED format on both axes: depths are milliseconds
+        // converted to samples at the session's rate (multiplying first, so 44.1 kHz stays
+        // exact), and the target floor plus the smooth shed are denominated in FRAMES, so a 2 ms
+        // lossless frame is shed and crossfaded as one frame. Microseconds: sub-ms rungs exist.
+        let mut policy =
+            punktfunk_core::audio::JitterPolicy::new_at_rate(tuning, channels as u8, fmt.rate_hz);
+        policy.set_frame_us(fmt.frame_us);
+        Render {
+            counters: ctx.counters.clone(),
+            sync: ctx.sync.clone(),
+            rx,
+            free_tx,
+            channels,
+            ring,
+            policy,
+            cb_count: 0,
+            last_xrun: 0,
+        }
+    }
+
+    fn callback(
+        &mut self,
+        s: &AudioStream,
+        data: *mut c_void,
+        num_frames: i32,
+    ) -> AudioCallbackResult {
         // Proof of life for `arm`'s start watchdog, and the one counter that separates
         // "the device never pulled" from "the device pulled silence": bumped before any
         // early-out, primed or not.
-        cb_counters.callbacks.fetch_add(1, Ordering::Relaxed);
-        let Some(want) = crate::audio_format::callback_sample_count(num_frames, channels) else {
+        self.counters.callbacks.fetch_add(1, Ordering::Relaxed);
+        let Some(want) = crate::audio_format::callback_sample_count(num_frames, self.channels)
+        else {
             return AudioCallbackResult::Continue;
         };
         if data.is_null() {
@@ -913,76 +902,119 @@ fn try_open(rung: OpenRung, ctx: &OpenCtx) -> ndk::audio::Result<LiveStream> {
         // `arm` verified the granted channel count and PCM_Float format; checked arithmetic above
         // rejected nonpositive or unrepresentable lengths before this slice was formed.
         let out = unsafe { std::slice::from_raw_parts_mut(data.cast::<f32>(), want) };
-        // Drain decoded chunks into the ring WITHOUT freeing on the RT thread: `drain(..)`
-        // empties each Vec but keeps its capacity, then the empty buffer is handed back for
-        // reuse. The only RT-thread free is the rare case where the recycle channel is
-        // momentarily full.
-        while let Ok(mut chunk) = rx.try_recv() {
-            ring.extend(chunk.drain(..));
-            let _ = free_tx.try_send(chunk);
+        self.fill(out, num_frames);
+        self.grow_on_xrun(s);
+        AudioCallbackResult::Continue
+    }
+
+    /// Drain the decoded chunks into the ring, run the jitter policy, and hand AAudio `out`.
+    fn fill(&mut self, out: &mut [f32], num_frames: i32) {
+        // Drain WITHOUT freeing on the RT thread: `drain(..)` empties each Vec but keeps its
+        // capacity, then the empty buffer is handed back for reuse. The only RT-thread free is
+        // the rare case where the recycle channel is momentarily full.
+        while let Ok(mut chunk) = self.rx.try_recv() {
+            self.ring.extend(chunk.drain(..));
+            let _ = self.free_tx.try_send(chunk);
         }
         // A/V sync: take whatever depth the decode thread's sync loop last asked for, and
-        // publish where the ring actually is so it can measure the result. The policy
-        // clamps the request between its own underrun floor and the hard cap — continuity
-        // outranks sync, always (see `JitterPolicy::set_sync_target`). Read AFTER the
-        // drain, so the depth is everything a frame queued right now must wait behind.
-        policy.set_sync_target(cb_sync.target());
-        cb_sync.publish_depth(ring.len());
-        // Jitter buffer: the shared policy decides prime/silence, trims a burst, and —
-        // new here — sheds ONE crossfaded frame when the depth average has sat above target
-        // long enough to be drift rather than jitter. Without that shed this ring had no
-        // way back down: it clamped at 120 ms and stayed pinned there. "One frame" is a
-        // REAL frame of this session, not a fixed 5 ms — `set_frame_us` above told the
-        // policy the negotiated length, and it also caps the seam crossfade at half of it,
-        // so a 2 ms lossless frame is not faded across its whole length.
-        let step = policy.step(ring.len(), want);
+        // publish where the ring actually is so it can measure the result. The policy clamps
+        // the request between its own underrun floor and the hard cap — continuity outranks
+        // sync. Read AFTER the drain, so the depth is everything a frame queued now waits behind.
+        self.policy.set_sync_target(self.sync.target());
+        self.sync.publish_depth(self.ring.len());
+        // The policy decides prime/silence, trims a burst, sheds ONE crossfaded frame when the
+        // depth has sat above target long enough to be drift, and — the mirror — duplicates one
+        // frame when the sync loop asked for a DEEPER ring. Inserts stay inside the ring's
+        // reserve: the policy only inserts below its target.
+        let step = self.policy.step(self.ring.len(), out.len());
         if step.drop_front > 0 {
-            punktfunk_core::audio::crossfade_drop(&mut ring, step.drop_front, step.crossfade);
+            punktfunk_core::audio::crossfade_drop(&mut self.ring, step.drop_front, step.crossfade);
         }
-        // The mirror: the sync loop asked for a DEEPER ring, answered with one duplicated,
-        // crossfaded frame instead of a de-prime (see `JitterStep::insert_front`). Stays inside
-        // the ring's reserve on this RT thread — `with_capacity` above leaves `RING_CHUNKS`
-        // frames past the hard cap, and the policy only inserts BELOW its target.
         if step.insert_front > 0 {
-            punktfunk_core::audio::crossfade_insert(&mut ring, step.insert_front, step.crossfade);
-            cb_counters.inserts.fetch_add(1, Ordering::Relaxed);
+            punktfunk_core::audio::crossfade_insert(
+                &mut self.ring,
+                step.insert_front,
+                step.crossfade,
+            );
+            self.counters.inserts.fetch_add(1, Ordering::Relaxed);
         }
         let mut ran_short = false;
         if !step.silence {
             for slot in out.iter_mut() {
-                *slot = ring.pop_front().unwrap_or_else(|| {
+                *slot = self.ring.pop_front().unwrap_or_else(|| {
                     ran_short = true;
                     0.0
                 });
             }
-            cb_counters
+            self.counters
                 .pcm_written
                 .fetch_add(num_frames as u64, Ordering::Relaxed);
         } else {
             out.fill(0.0);
-            cb_counters.underruns.fetch_add(1, Ordering::Relaxed);
+            self.counters.underruns.fetch_add(1, Ordering::Relaxed);
         }
         // No-op while un-primed, so a deliberate priming silence is never counted as an
         // underrun (which would otherwise drive the adaptive floor up for no reason).
-        policy.note_read(ran_short);
-        cb_counters
+        self.policy.note_read(ran_short);
+        self.counters
             .target_ms
-            .store(policy.target_ms() as u64, Ordering::Relaxed);
-        // Google's AAudio anti-glitch technique: when the device reports new XRuns, grow the
-        // HW buffer by one burst (up to capacity). getXRunCount + setBufferSizeInFrames are
-        // both callback-safe / non-blocking, and set clamps to capacity so it self-limits.
-        // Throttled.
-        cb_count = cb_count.wrapping_add(1);
-        if cb_count % XRUN_CHECK_EVERY == 0 {
-            let xr = s.x_run_count();
-            if xr > last_xrun {
-                last_xrun = xr;
-                let burst = s.frames_per_burst().max(1);
-                let grown = (s.buffer_size_in_frames() + burst).min(s.buffer_capacity_in_frames());
-                let _ = s.set_buffer_size_in_frames(grown);
-            }
+            .store(self.policy.target_ms() as u64, Ordering::Relaxed);
+    }
+
+    /// Google's AAudio anti-glitch technique: when the device reports new XRuns, grow the HW
+    /// buffer by one burst (up to capacity). Both calls are callback-safe and `set` clamps to
+    /// capacity, so it self-limits. Throttled to every `XRUN_CHECK_EVERY` callbacks.
+    fn grow_on_xrun(&mut self, s: &AudioStream) {
+        self.cb_count = self.cb_count.wrapping_add(1);
+        if self.cb_count % XRUN_CHECK_EVERY != 0 {
+            return;
         }
-        AudioCallbackResult::Continue
+        let xr = s.x_run_count();
+        if xr > self.last_xrun {
+            self.last_xrun = xr;
+            let burst = s.frames_per_burst().max(1);
+            let grown = (s.buffer_size_in_frames() + burst).min(s.buffer_capacity_in_frames());
+            let _ = s.set_buffer_size_in_frames(grown);
+        }
+    }
+}
+
+/// Every rung refused. Name the format, because at 96 kHz it is the likeliest cause and the
+/// cure is a setting rather than a rebuild. Near-unreachable — `connect` proves the rate is
+/// openable BEFORE the `Hello` — so getting here on a hi-res session means the device changed
+/// underneath one that did open.
+fn log_no_configuration(fmt: SessionAudio) {
+    log::error!(
+        "audio: no AAudio configuration on the ladder could be opened and started at {} Hz / {} ch — audio disabled for this session (video unaffected){}",
+        fmt.rate_hz,
+        fmt.channels,
+        if fmt.rate_hz == punktfunk_core::audio::SAMPLE_RATE_HZ {
+            ""
+        } else {
+            "; this device would not give us the rate the host resolved — turn hi-res audio off in Settings to run this session at 48 kHz"
+        },
+    );
+}
+
+/// Open one ladder rung with fresh callback state.
+///
+/// `open_stream` consumes its builder and callback, so channels, buffering, and jitter policy are
+/// rebuilt on every attempt. Invalid callback pointer/length pairs stop before a slice is formed.
+fn try_open(rung: OpenRung, ctx: &OpenCtx) -> ndk::audio::Result<LiveStream> {
+    let OpenCtx {
+        fmt, game_audio, ..
+    } = *ctx;
+    let channels = fmt.channels;
+    let (tx, rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
+    // Recycle free-list: drained PCM buffers go BACK to the decode thread to be refilled, so
+    // the realtime callback never frees heap (Android's Scudo allocator has unbounded free()
+    // tail latency — a free on the audio thread is an XRun = a click) and the decode thread
+    // rarely allocates. Same depth as the data channel.
+    let (free_tx, free_rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
+
+    let mut render = Render::new(ctx, rx, free_tx);
+    let callback = move |s: &AudioStream, data: *mut c_void, num_frames: i32| {
+        render.callback(s, data, num_frames)
     };
 
     let builder = AudioStreamBuilder::new()?
