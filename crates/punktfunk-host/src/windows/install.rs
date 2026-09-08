@@ -445,8 +445,41 @@ const WEB_TASK: &str = "PunktfunkWeb";
 pub fn web_main(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("setup") => web_setup(&args[1..]),
-        _ => bail!("usage: punktfunk-host web setup --app-dir <app> [--password-file <file>]"),
+        Some("password") => web_password(),
+        _ => bail!(
+            "usage: punktfunk-host web setup --app-dir <app> [--password-file <file>]\n       punktfunk-host web password"
+        ),
     }
+}
+
+/// Print the console login password, the one affordance a silent install leaves.
+///
+/// The file is ACL'd to Administrators + SYSTEM, so a non-elevated read fails on permission
+/// rather than absence. The two need different next moves, which is why this reads the file
+/// itself instead of the Option-returning `service::read_env_file_value`.
+fn web_password() -> Result<()> {
+    let path = pf_paths::config_dir().join("web-password");
+    let text = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
+            "Couldn't read the console password, which only Administrators may see. Run this from an elevated PowerShell."
+        ),
+        std::io::ErrorKind::NotFound => anyhow::anyhow!(
+            "This PC has no console password yet. It's written when the host installs, so reinstall the host to get one."
+        ),
+        _ => anyhow::anyhow!("Couldn't read the console password — {e}"),
+    })?;
+    // Same split as `service::read_env_file_value`: first non-empty line, value after the `=`.
+    let value = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .map(|l| l.split_once('=').map_or(l, |(_, v)| v).trim())
+        .filter(|v| !v.is_empty())
+        .context(
+            "The console password file is empty, so the console admits nobody. Put a PUNKTFUNK_UI_PASSWORD line back and restart the host service.",
+        )?;
+    println!("{value}");
+    Ok(())
 }
 
 fn web_setup(args: &[String]) -> Result<()> {

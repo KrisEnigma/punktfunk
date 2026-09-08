@@ -55,12 +55,15 @@ Agreements:
       PUNKTFUNK_HOST_CMD in %ProgramData%\punktfunk\host.env), followed by a service restart.
     AgreementUrl: https://docs.punktfunk.unom.io/docs/windows-host
 
-# Displayed after the install completes. The console password is generated per install, so it can
-# only be pointed at, never printed here — this text is fixed at publish time.
+# Displayed after the install completes. The console password is generated per install, so this
+# text — fixed at publish time — carries the command that prints it rather than the value. The
+# elevation note is load-bearing: the file is ACL'd to Administrators + SYSTEM, so a plain prompt
+# gets access denied, and that is the step a user is most likely to be missing here.
 InstallationNotes: |-
   Web management console:  https://<this-PC>:47992
-    The login password was generated during installation and is stored in
-    %ProgramData%\punktfunk\web-password  (edit that file to change it).
+    This install generated a login password and did not display it. Print it from an
+    ELEVATED PowerShell:   punktfunk-host web password
+    It is stored in %ProgramData%\punktfunk\web-password (edit that file to change it).
 
   Configuration:  %ProgramData%\punktfunk\host.env
   Logs:           %ProgramData%\punktfunk\logs\
