@@ -978,7 +978,7 @@ mod tests {
             }),
             ..fresh_facts()
         };
-        let choices = WinChoices::derive(&facts);
+        let choices = WinChoices::derive(&facts, Artifact::Host);
         let plan = plan::build(&facts, &choices, Artifact::Host, true);
         let (ui, _buf) = Plain::capture();
         let mut run = FakeRunner::new();

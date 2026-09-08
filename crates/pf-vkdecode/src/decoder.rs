@@ -1032,6 +1032,12 @@ impl VkH264Decoder {
         std::mem::take(&mut self.last_warnings)
     }
 
+    /// Forget the planner's unclean marks after a freeze lift on intra refresh marks
+    /// ([`pf_bitstream::clean::CleanLedger::clear`]).
+    pub fn forgive_unclean(&mut self) {
+        self.planner.forgive_unclean();
+    }
+
     /// Session generation stamped onto newly delivered frames.
     pub fn generation(&self) -> u64 {
         self.generation

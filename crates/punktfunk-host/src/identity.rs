@@ -34,18 +34,24 @@ pub fn load_or_adopt(np: &crate::native_pairing::NativePairing) -> Result<Native
     let dir = config_dir();
     let cert_path = dir.join("native-cert.pem");
     let key_path = dir.join("native-key.pem");
-    // Lock the config dir down before the first read so a pre-planted
-    // cert/key pair cannot be adopted out of a user-writable directory.
+    // Hardening the dir does not disown files already in it. Read the owners first — a pair
+    // planted before the first elevated run is the planter's, and adopting it gives them the
+    // host's TLS identity. `create_private_dir` re-owns contents, so this must come before it.
+    // Not `||`: both halves must be quarantined, and short-circuiting would skip the second.
+    let planted = crate::planted::quarantine_planted_secret(&cert_path)
+        | crate::planted::quarantine_planted_secret(&key_path);
     pf_paths::create_private_dir(&dir).ok();
-    if let (Ok(c), Ok(k)) = (
-        fs::read_to_string(&cert_path),
-        fs::read_to_string(&key_path),
-    ) {
-        if !c.trim().is_empty() && !k.trim().is_empty() {
-            return Ok(NativeIdentity {
-                cert_pem: c,
-                key_pem: k,
-            });
+    if !planted {
+        if let (Ok(c), Ok(k)) = (
+            fs::read_to_string(&cert_path),
+            fs::read_to_string(&key_path),
+        ) {
+            if !c.trim().is_empty() && !k.trim().is_empty() {
+                return Ok(NativeIdentity {
+                    cert_pem: c,
+                    key_pem: k,
+                });
+            }
         }
     }
     if np.list().is_empty() {
@@ -65,11 +71,14 @@ pub fn load_or_adopt(np: &crate::native_pairing::NativePairing) -> Result<Native
     // Live native pairings pinned the legacy RSA leaf (SHA-256 of DER).
     // Switching now strands them. PEM-only read: rustls can serve RSA
     // without linking the `rsa` crate (that crate stays behind `gamestream`).
+    // Same plant check as the P-256 pair: this path adopts too.
+    let legacy_planted = crate::planted::quarantine_planted_secret(&dir.join("cert.pem"))
+        | crate::planted::quarantine_planted_secret(&dir.join("key.pem"));
     if let (Ok(c), Ok(k)) = (
         fs::read_to_string(dir.join("cert.pem")),
         fs::read_to_string(dir.join("key.pem")),
     ) {
-        if !c.trim().is_empty() && !k.trim().is_empty() {
+        if !legacy_planted && !c.trim().is_empty() && !k.trim().is_empty() {
             tracing::info!(
                 "native identity: keeping the legacy RSA cert — paired native clients pinned it. \
                  To migrate to the P-256 identity: unpair ALL native clients, restart the host, \

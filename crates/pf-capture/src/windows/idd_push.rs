@@ -10,8 +10,8 @@
 
 use super::dxgi::WinCaptureTarget;
 use super::{CapturedFrame, Capturer, FramePayload, PixelFormat};
+use crate::cursor_witness::CursorWitness;
 use anyhow::{bail, Context, Result};
-use pf_driver_proto::encode;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,21 +44,6 @@ use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 const SECTION_MAP_RW: u32 = 0x0004 | 0x0002;
 /// Driver only `SetEvent`s; host keeps `SYNCHRONIZE` on its own handle.
 const EVENT_MODIFY_STATE: u32 = 0x0002;
-
-/// Stamped into every AU section so a publish an old encoder left behind is rejected.
-static IDD_GENERATION: AtomicU32 = AtomicU32::new(1);
-
-/// Masked to [`encode::FrameToken::GENERATION_MASK`] and never `0` — `0` is the
-/// cleared-`latest` sentinel a freshly created section carries.
-fn next_generation() -> u32 {
-    loop {
-        let g =
-            IDD_GENERATION.fetch_add(1, Ordering::Relaxed) & encode::FrameToken::GENERATION_MASK;
-        if g != 0 {
-            return g;
-        }
-    }
-}
 
 fn now_ns() -> u64 {
     SystemTime::now()
@@ -149,6 +134,33 @@ pub unsafe fn verify_is_wudfhost(process: HANDLE, wudf_pid: u32, what: &str) -> 
         );
     }
     Ok(())
+}
+
+/// Open `pid` as a handle-duplication target and prove it is the system WUDFHost.
+///
+/// The mask and the check travel together: `DUP_HANDLE` to place section handles,
+/// `QUERY_LIMITED_INFORMATION` for the image-path proof, `SYNCHRONIZE` so the
+/// retained handle doubles as the incumbent-liveness probe. `what` names the
+/// channel in the error. Brokers diverge after this point — what they duplicate
+/// and with which rights is theirs.
+pub fn open_wudfhost(pid: u32, what: &str) -> Result<OwnedHandle> {
+    if pid == 0 {
+        bail!("no WUDFHost pid for the {what} sections");
+    }
+    // SAFETY: `pid` is a copy. The handle (`?`-checked) is owned solely here and moved into
+    // `OwnedHandle` (single owner, closes on drop); `verify_is_wudfhost` borrows it for the
+    // synchronous check and forms no lasting alias.
+    unsafe {
+        let h = OpenProcess(
+            PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+        .with_context(|| format!("OpenProcess(PROCESS_DUP_HANDLE) on the {what} pid"))?;
+        let process = OwnedHandle::from_raw_handle(h.0 as _);
+        verify_is_wudfhost(HANDLE(process.as_raw_handle()), pid, what)?;
+        Ok(process)
+    }
 }
 
 // The frame-delivery endpoint: `try_consume` and the `Capturer` surface.
@@ -296,13 +308,10 @@ pub struct IddPushCapturer {
     stall_watch: StallWatch,
     /// The stalest drain heartbeat (µs) seen since the last fresh frame.
     max_hb_age_us: u64,
-    /// Damage witness for [`stall::StallEvidence::cursor_moved_px`]. Pending sample
-    /// is held one call so the stall-ending move is not counted into the gap it ended.
-    /// Sampled at most every [`Self::CURSOR_WITNESS_INTERVAL`]; user32, never the display-config lock.
-    cursor_last: Option<(i32, i32)>,
-    cursor_gap_px: u32,
-    cursor_pending_px: u32,
-    cursor_sampled_at: Instant,
+    /// Damage witness for [`stall::StallEvidence::cursor_moved_px`] and the recovery
+    /// classifier. user32 only, never the display-config lock; the rule itself is
+    /// [`crate::cursor_witness`].
+    cursor: CursorWitness,
     /// Micro-probe singleton; `None` unless [`diag_dir`] is on. A missing window reads as
     /// never-stalled, so a report never invents a leg.
     probes: Option<Arc<probes::ProbeEngine>>,
@@ -346,46 +355,6 @@ mod tests {
                 "packing diverged for LUID {high:#x}:{low:#x}"
             );
         }
-    }
-
-    /// The mint must stay inside the publish token's 24-bit generation field, and must skip 0.
-    ///
-    /// `IDD_GENERATION` is a full `u32` while `FrameToken` carries 24 bits and `unpack` MASKS
-    /// what it reads, so an unmasked generation stops matching any token past 2²⁴ opens and
-    /// every publish is rejected forever. The counter is parked just below the boundary here so
-    /// the wrap is what gets exercised.
-    #[test]
-    fn the_section_generation_survives_the_publish_token() {
-        IDD_GENERATION.store(encode::FrameToken::GENERATION_MASK - 2, Ordering::Relaxed);
-        let mut seen = Vec::new();
-        for _ in 0..8 {
-            let g = next_generation();
-            assert_ne!(g, 0, "0 also means the cleared-`latest` sentinel");
-            assert_eq!(
-                g & encode::FrameToken::GENERATION_MASK,
-                g,
-                "generation {g} does not fit the token's field"
-            );
-            let tok = encode::FrameToken {
-                generation: g,
-                seq: 12345,
-                slot: 2,
-            };
-            let back = encode::FrameToken::unpack(tok.pack());
-            assert_eq!(back.generation, g, "generation lost in the token");
-            assert_eq!(back.seq, 12345, "seq lost in the token");
-            assert_eq!(back.slot, 2, "slot lost in the token");
-            seen.push(g);
-        }
-        // Started 2 below the mask; wrap produced no duplicate 0.
-        assert!(
-            seen.contains(&encode::FrameToken::GENERATION_MASK),
-            "{seen:?}"
-        );
-        assert!(
-            seen.iter().any(|&g| g < 8),
-            "the counter should have wrapped: {seen:?}"
-        );
     }
 
     /// Feed [`StallWatch`] at `offsets_ms`; metronome is non-damage-idle, as `report` feeds it.

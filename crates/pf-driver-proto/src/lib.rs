@@ -263,9 +263,9 @@ pub mod control {
     pub struct EncodeProbeRequest {
         /// OS target of the monitor to tap; `0` = whichever drain worker offers first.
         pub target_id: u32,
-        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave, 5 Media Foundation.
+        /// A [`backend`](crate::encode::backend) id.
         pub backend: u32,
-        /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave (backend 4 only, and only with backend 4).
+        /// A [`codec`](crate::encode::codec) id. PyroWave pairs only with the PyroWave backend.
         pub codec: u32,
         /// `0` = the backend's own input for `flags`, as `SET_ENCODE` would choose it.
         /// `1` = force BGRA→NV12 on the video engine (the NVENC colour A/B); PyroWave ignores it.
@@ -722,6 +722,37 @@ pub mod vdisplay {
         }
     }
 
+    /// The list a monitor advertises: the requested mode first, then — for a host only — the
+    /// fallbacks and whatever the monitor already offered.
+    ///
+    /// A seat rides a remote-session adapter, which IddCx obliges to declare `USE_SMALLEST_MODE`,
+    /// so the OS drives the monitor at the SMALLEST mode on the list. A seat therefore offers
+    /// exactly what the client asked for: one fallback, or one stale larger entry surviving a
+    /// resize, pins that seat to the wrong resolution.
+    ///
+    /// `history` is the monitor's current list on a re-advertise, empty at create. The OS pins the
+    /// settable set at arrival, so a host's list may only grow — [`union_modes`] caps that growth.
+    #[must_use]
+    pub fn advertised_modes(requested: Mode, seat: bool, history: &[Mode]) -> Vec<Mode> {
+        let mut modes = vec![requested];
+        if !seat {
+            modes.extend(default_modes());
+        }
+        accumulate_modes(&mut modes, seat, history);
+        modes
+    }
+
+    /// Merge `history` into `into` — the accumulate half of [`advertised_modes`], for the caller
+    /// that only learns the history later (the registry resolves the monitor id under its lock).
+    ///
+    /// A seat never accumulates: every carried-over mode is one the OS can pick INSTEAD of the
+    /// size the client asked for.
+    pub fn accumulate_modes(into: &mut Vec<Mode>, seat: bool, history: &[Mode]) {
+        if !seat {
+            union_modes(into, history);
+        }
+    }
+
     /// Fallback modes appended after the requested mode, so a topology change still has options.
     #[must_use]
     pub fn default_modes() -> Vec<Mode> {
@@ -867,6 +898,59 @@ pub mod encode {
     use super::ctl_code;
     use bytemuck::{Pod, Zeroable};
 
+    /// Encoder backend ids, as they travel in [`SetEncodeRequest::backends`],
+    /// [`SetEncodeReply::backend_opened`] and
+    /// [`EncodeProbeRequest::backend`](crate::control::EncodeProbeRequest::backend).
+    ///
+    /// The host picks by these numbers, the driver opens by them and names them back, so both
+    /// sides read the table here rather than restating it. A doc that restated it had already
+    /// drifted: Media Foundation was missing from two of them while the host was sending it.
+    pub mod backend {
+        pub const NVENC: u32 = 1;
+        pub const AMF: u32 = 2;
+        pub const QSV: u32 = 3;
+        pub const PYROWAVE: u32 = 4;
+        pub const MEDIA_FOUNDATION: u32 = 5;
+
+        /// Indexed by `id - 1`; also the stage tag a `SET_ENCODE` reply carries.
+        pub const NAMES: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
+
+        #[must_use]
+        pub fn name(id: u32) -> Option<&'static str> {
+            NAMES.get(id.checked_sub(1)? as usize).copied()
+        }
+
+        /// Whether `id` may appear in [`SetEncodeRequest::backends`]. `0` terminates the list, so
+        /// it passes here and is simply never opened.
+        #[must_use]
+        pub const fn listed(id: u32) -> bool {
+            (id as usize) <= NAMES.len()
+        }
+    }
+
+    /// Codec ids for [`SetEncodeRequest::codec`] and
+    /// [`EncodeProbeRequest::codec`](crate::control::EncodeProbeRequest::codec). PyroWave is a
+    /// codec AND a backend, and only ever pairs with itself.
+    pub mod codec {
+        pub const H264: u32 = 1;
+        pub const HEVC: u32 = 2;
+        pub const AV1: u32 = 3;
+        pub const PYROWAVE: u32 = 4;
+
+        pub const NAMES: [&str; 4] = ["h264", "hevc", "av1", "pyrowave"];
+
+        #[must_use]
+        pub fn name(id: u32) -> Option<&'static str> {
+            NAMES.get(id.checked_sub(1)? as usize).copied()
+        }
+
+        /// Whether `id` names a codec. Unlike a backend list, `0` is not legal here.
+        #[must_use]
+        pub const fn valid(id: u32) -> bool {
+            id != 0 && (id as usize) <= NAMES.len()
+        }
+    }
+
     /// The publish cell of [`au::AuHeader::latest`]: `(generation << 40) | (seq << 8) | slot`,
     /// with `generation` 24-bit, `seq` 32-bit and `slot` 8-bit. `generation` is bumped on every
     /// [`IOCTL_SET_ENCODE`], so a publish an old encoder left behind is rejected, never consumed.
@@ -932,8 +1016,8 @@ pub mod encode {
         pub event: u64,
         /// Bytes the host allocated for the section — [`au::section_bytes`].
         pub section_bytes: u32,
-        /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave — the
-        /// [`EncodeProbeRequest`](crate::control::EncodeProbeRequest) numbering.
+        /// A [`codec`] id, the same numbering
+        /// [`EncodeProbeRequest`](crate::control::EncodeProbeRequest) uses.
         pub codec: u32,
         /// `0` = 4:2:0, `1` = 4:4:4. Not the H.264/HEVC `chroma_format_idc`.
         pub chroma: u32,
@@ -952,7 +1036,7 @@ pub mod encode {
         pub wire_chunk_bytes: u32,
         /// First `wire_seq` the driver stamps, so the host's `au_seq` domain survives a DriverCycle.
         pub wire_seq_base: u32,
-        /// Ordered preference, 0-terminated: 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave.
+        /// Ordered preference, 0-terminated. [`backend`] ids.
         pub backends: [u32; 4],
         /// Reserved; send `0`.
         pub flags: u32,
@@ -1064,7 +1148,7 @@ pub mod encode {
     pub struct SetEncodeReply {
         /// One of the `SET_ENCODE_*` codes.
         pub status: u32,
-        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave; `0` when `status` is non-zero.
+        /// The [`backend`] id that opened; `0` when `status` is non-zero.
         pub backend_opened: u32,
         /// What the opened backend can actually do.
         pub caps: EncoderCapsWire,
@@ -1240,6 +1324,9 @@ pub mod encode {
         /// The AU's chunks are cut on the codec's own window boundaries (PyroWave); the host
         /// forwards it as the wire's chunk-aligned user flag.
         pub const AU_CHUNK_ALIGNED: u32 = 1 << 4;
+        /// Start or close of an encoder-driven intra refresh wave; the host forwards it as the
+        /// wire's recovery-point user flag. A driver that never waves leaves it clear.
+        pub const AU_RECOVERY_POINT: u32 = 1 << 5;
 
         /// [`AuSlot::state`]: the encode thread may take this slot. There is no WRITING state —
         /// the encode thread fills the heap before it claims a slot.
@@ -2570,6 +2657,43 @@ mod tests {
         assert_eq!(partial[142], 0);
     }
 
+    /// The wire numbering, which the host writes and the driver dispatches on. A silent
+    /// renumber swaps one encoder for another on a shipped driver, so pin it here.
+    #[test]
+    fn backend_and_codec_ids_are_the_wire_numbering() {
+        use encode::{backend as be, codec as cc};
+        assert_eq!(
+            [
+                be::NVENC,
+                be::AMF,
+                be::QSV,
+                be::PYROWAVE,
+                be::MEDIA_FOUNDATION
+            ],
+            [1, 2, 3, 4, 5]
+        );
+        assert_eq!([cc::H264, cc::HEVC, cc::AV1, cc::PYROWAVE], [1, 2, 3, 4]);
+        // The driver indexes NAMES by `id - 1` and replies with the entry it found.
+        assert_eq!(be::name(be::MEDIA_FOUNDATION), Some("mf"));
+        assert_eq!(be::NAMES[be::NVENC as usize - 1], "nvenc");
+        assert_eq!(cc::name(cc::AV1), Some("av1"));
+        assert_eq!(be::name(0), None, "0 terminates a list, it names nothing");
+        assert_eq!(be::name(6), None);
+    }
+
+    /// `listed` guards a 0-terminated preference list; `valid` guards a single required field.
+    /// Reading either as the other would let a `SET_ENCODE` through with no codec at all.
+    #[test]
+    fn a_terminator_is_listable_but_never_a_valid_codec() {
+        use encode::{backend as be, codec as cc};
+        assert!(be::listed(0), "the list terminator");
+        assert!(be::listed(be::MEDIA_FOUNDATION), "the widest id");
+        assert!(!be::listed(6));
+        assert!(!cc::valid(0), "a codec field is required");
+        assert!(cc::valid(cc::PYROWAVE));
+        assert!(!cc::valid(5));
+    }
+
     /// One advertised resolution, spelled short enough for the mode-list tests to read.
     fn mode(width: u32, height: u32, refresh_rates: &[u32]) -> vdisplay::Mode {
         vdisplay::Mode {
@@ -2591,6 +2715,45 @@ mod tests {
             .map(|i| (i.width, i.height, i.refresh_rate))
             .collect();
         assert_eq!(flat, [(1920, 1080, 60), (1920, 1080, 120), (1280, 720, 60)]);
+    }
+
+    /// The `USE_SMALLEST_MODE` rule: the OS drives a seat at the smallest advertised mode, so a
+    /// seat must advertise its request alone. A fallback or a surviving larger entry would pin it.
+    #[test]
+    fn a_seat_advertises_only_what_the_client_asked_for() {
+        let asked = mode(2560, 1440, &[120]);
+        let history = vec![mode(3840, 2160, &[60]), mode(1024, 768, &[60])];
+
+        let seat = vdisplay::advertised_modes(asked.clone(), true, &history);
+        assert_eq!(seat, vec![asked.clone()], "a seat offers one mode");
+        let smallest = vdisplay::flatten(&seat)
+            .min_by_key(|i| i.width * i.height)
+            .expect("a non-empty list");
+        assert_eq!((smallest.width, smallest.height), (2560, 1440));
+
+        // A host keeps the request first, then the fallbacks, then its history — and 1024x768
+        // proves the history really does ride along.
+        let host = vdisplay::advertised_modes(asked.clone(), false, &history);
+        assert_eq!(host[0], asked);
+        assert!(host.contains(&mode(1280, 720, &[60])), "fallbacks");
+        assert!(host.contains(&mode(1024, 768, &[60])), "history");
+        assert!(
+            host.len() <= vdisplay::MODE_LIST_CAP,
+            "the union is capped: {}",
+            host.len()
+        );
+    }
+
+    /// Create passes no history; the seat rule still holds and the host still gets its fallbacks.
+    #[test]
+    fn advertised_modes_without_history_is_the_create_path() {
+        let asked = mode(800, 600, &[60]);
+        assert_eq!(
+            vdisplay::advertised_modes(asked.clone(), true, &[]),
+            vec![asked.clone()]
+        );
+        let host = vdisplay::advertised_modes(asked.clone(), false, &[]);
+        assert_eq!(host, [vec![asked], vdisplay::default_modes()].concat());
     }
 
     #[test]
@@ -3540,10 +3703,11 @@ mod tests {
             AU_KEYFRAME,
             AU_RECOVERY_ANCHOR,
             AU_CHUNK_ALIGNED,
+            AU_RECOVERY_POINT,
         ];
         println!("AU flags: {flags:?}; states: {FREE} {PUBLISHED} {READING}");
-        assert_eq!(flags, [1, 2, 4, 8, 16]);
-        assert_eq!(flags.iter().fold(0, |a, b| a | b), 0b1_1111);
+        assert_eq!(flags, [1, 2, 4, 8, 16, 32]);
+        assert_eq!(flags.iter().fold(0, |a, b| a | b), 0b11_1111);
         // A whole non-key AU is FIRST|LAST — the two must not alias.
         assert_eq!(AU_FIRST | AU_LAST, 3);
         assert_eq!([FREE, PUBLISHED, READING], [0, 1, 2]);

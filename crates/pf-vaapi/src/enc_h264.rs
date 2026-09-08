@@ -237,6 +237,25 @@ pub struct VaEncMiscParameterFrameRate {
     pub va_reserved: [u32; 4],
 }
 
+/// `VAEncMiscParameterTypeRIR`: rolling intra refresh, one stripe per picture.
+pub const VA_ENC_MISC_PARAMETER_TYPE_RIR: u32 = 7;
+/// `rir_flags.bits.enable_rir_row`.
+pub const VA_RIR_ROW: u32 = 0x2;
+
+/// `VAEncMiscParameterRIR`: the intra stripe this picture carries, in the driver's row unit
+/// (MB rows for H.264; 32-px rows on Intel's HEVC, CTB rows on AMD's). Explicit padding
+/// after the byte field so every byte the buffer copies is initialised.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VaEncMiscParameterRir {
+    pub rir_flags: u32,
+    pub intra_insertion_location: u16,
+    pub intra_insert_size: u16,
+    pub qp_delta_for_inserted_intra: u8,
+    pub padding: [u8; 3],
+    pub va_reserved: [u32; 4],
+}
+
 /// Precedes each packed header's bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -311,6 +330,11 @@ const _: () = {
     assert!(offset_of!(VaEncMiscParameterRateControl, va_reserved) == 44);
     assert!(size_of::<VaEncMiscParameterHrd>() == 24);
     assert!(size_of::<VaEncMiscParameterFrameRate>() == 24);
+    // layout-probe on the 780M: size 28, location 4, size 6, qp delta 8, reserved 12.
+    assert!(size_of::<VaEncMiscParameterRir>() == 28);
+    assert!(offset_of!(VaEncMiscParameterRir, intra_insert_size) == 6);
+    assert!(offset_of!(VaEncMiscParameterRir, qp_delta_for_inserted_intra) == 8);
+    assert!(offset_of!(VaEncMiscParameterRir, va_reserved) == 12);
     assert!(offset_of!(VaEncPackedHeaderParameterBuffer, bit_length) == 4);
     assert!(offset_of!(VaEncPackedHeaderParameterBuffer, has_emulation_bytes) == 8);
 

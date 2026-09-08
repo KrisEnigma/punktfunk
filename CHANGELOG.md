@@ -62,6 +62,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`EncodedFrame::recovery_point` marks an encoder-driven intra refresh wave.** Vulkan Video
+  (RADV), the native VAAPI session (AMD and Intel) and NVENC (Windows, Linux and the display
+  driver, whose AU flags gained `AU_RECOVERY_POINT`) answer a reference invalidation they cannot
+  anchor with a row-based wave instead of an IDR, tagging the wave's start and close AU
+  `USER_FLAG_RECOVERY_POINT` so the client's existing two-mark lift heals in one cycle without
+  the bitrate spike. Nothing changes on the wire or for a backend that leaves the field `false`;
+  `PUNKTFUNK_INTRA_REFRESH=0` restores the IDR, `PUNKTFUNK_IR_PERIOD_FRAMES` pins the cycle length
+  in frames. A client with a bitstream planner forgets its damaged-chain marks on such a lift
+  (`ReanchorGate::lifted_by_marks`), or every later host anchor would be refused until an IDR.
 - **`Console::focus_announcement` names the focused row for a screen reader.** The Skia console
   has no accessibility node tree, so the driver hands the host a string for home, the library and
   settings (`None` elsewhere) and Android speaks it through the new `{"announce": …}` event on
@@ -419,6 +428,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   and lifted every restriction mid-stream; it now ends the session as the native plane does, and
   a fresh launch is ungoverned as before. Nothing to do — a record still only exists once the
   console can create one for a Moonlight row.
+- **AV1 is offered again on AMD and Intel Linux hosts.** The advertisement asked only the native
+  VAAPI probe, which answers for H.264 and HEVC, so dropping libavcodec also dropped the AV1 bit
+  every packaged build can still open through Vulkan Video; the probe now covers both arms, caches
+  per selected GPU like its Windows twin, and feeds `/serverinfo` the same narrowed answer. Nothing
+  to configure — clients that prefer AV1 negotiate it again.
 - **Trackpad scrolling on a KDE host moves the page as far as the fingers went.** KWin's
   `fake_input` carries a bare axis with no source, which every toolkit reads as ten units per
   wheel click, so injecting a measured distance there spent one click per 10 px and scrolled
@@ -758,6 +772,29 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A monitor cleared while it was still being created no longer stays plugged in.** `CLEAR_ALL`
+  landing between the registry insert and the handle being stored skipped the departure, and the
+  monitor then arrived with nothing able to reach it. Nothing to do.
+- **A failed CCD query no longer reads as an empty desk.** The topology restore counted zero
+  connected displays and reported success, clearing the crash-recovery marker, and the
+  standby-sink pass nominated every inactive external display including the operator's own.
+  Nothing to do.
+- **A failed ADL unlock keeps its lease.** The journal was deleted either way, so one failed
+  unlock left a physical connector pinned to a dummy EDID with nothing left to retry from.
+  Nothing to do; the next host start retries.
+- **NVENC no longer pins a stream at the 10 Mbps floor.** When the bitrate search opened only
+  after split encode was disabled, the floor was cached as the codec's bitrate ceiling and
+  clamped every later open for the life of the process. Nothing to do.
+- **A refused AMF or QSV submit forces the next frame to an IDR.** The LTR mirror and a queued
+  force were committed before the encoder took the frame, so a failed surface left the mirror
+  claiming a mark the hardware never made, and AMF's drain could pair every later AU with the
+  wrong frame's pts. Nothing to do.
+- **A frame the FEC wire cannot address is dropped, not corrupted.** Past 255 data shards per
+  block `255 - k` underflowed and `fecInfo`'s 10-bit k truncated, which a large IDR at the
+  ANNOUNCE packetSize floor reaches. Raise the client's packetSize if the log names it.
+- **A timed-out virtual microphone stops leaking its render thread.** The open path returned an
+  error without setting the stop flag and built no owner to drop, so each retry left another
+  thread holding a render client. Nothing to do.
 - **`AVSampleBufferVideoRenderer` is the tvOS 17.4+ default for 4:2:0 streams, removing Metal's
   two-refresh reservation.** Older tvOS,
   4:4:4, PyroWave and Smoothness retain Metal; users need no setting changes.
@@ -779,6 +816,22 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **A conflicting fingerprint no longer matches by address.** Whoever inherited a sleeping host's
   DHCP lease was treated as that host and hid the real one, in both the hosts page and the
   in-session console. Nothing to do.
+- **A secret the host did not write is no longer adopted as its own.** `%ProgramData%` lets any
+  local account create files, so a `mgmt-token`, `plugin-token`, `native-key.pem` or `cert.pem`
+  planted before the first elevated run became the host's admin token or TLS identity; the owner
+  is now read before the directory is hardened, and a foreign one is renamed aside. Nothing to do
+  — a per-user `PUNKTFUNK_CONFIG_DIR` still keeps its own secrets.
+- **Elevated helpers are spawned by absolute path.** `certutil`, `pnputil`, `schtasks`, `sc` and
+  `icacls` were launched by bare name, and `CreateProcess` searches the working directory before
+  `%PATH%`. Nothing to do.
+- **`atiadlxx.dll` loads from System32 only.** The unqualified load searched the exe's directory,
+  the working directory and `%PATH%` first, in a process running as SYSTEM. Nothing to do.
+- **A planted web-console password is no longer kept.** `web setup` hardened the config directory
+  before testing the file's owner, and that pass re-owns the contents, so the check always passed.
+  Nothing to do; the installer now rotates to a fresh password instead.
+- **A GameStream pairing ceremony belongs to one peer.** Phases 2-4 were keyed on the
+  client-chosen `uniqueid` alone, so any host that saw one could re-roll the ceremony's secrets
+  and strand the real client. Nothing to do — the address is the one the PIN was already bound to.
 - **`GET /api/v1/local/summary` is never answered cross-origin.** It is admitted by loopback with
   no credential, so the same-origin policy was the only thing keeping a page off it, and the CORS
   layer now exempts every route authorised by network position. Nothing to do: a host that never

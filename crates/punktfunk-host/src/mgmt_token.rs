@@ -53,13 +53,17 @@ fn load_or_generate_impl(env_var: &str, file: &str) -> Result<String> {
         }
     }
     let dir = pf_paths::config_dir();
-    // Lock the dir (0700 / DACL) before the read. A world-writable config
-    // dir would let a local user plant the admin token this then adopts.
-    pf_paths::create_private_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(file);
-    if let Ok(contents) = fs::read_to_string(&path) {
-        if let Some(tok) = parse_token(&contents, env_var) {
-            return Ok(tok);
+    // Locking the dir does not disown a file already in it. Read the owner first: a token a
+    // local user planted before the first elevated run is theirs, and adopting it would hand
+    // them host admin. `create_private_dir` re-owns contents, so this must come before it.
+    let planted = crate::planted::quarantine_planted_secret(&path);
+    pf_paths::create_private_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+    if !planted {
+        if let Ok(contents) = fs::read_to_string(&path) {
+            if let Some(tok) = parse_token(&contents, env_var) {
+                return Ok(tok);
+            }
         }
     }
     let mut buf = [0u8; 32];

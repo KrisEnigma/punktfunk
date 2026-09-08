@@ -820,7 +820,13 @@ impl VirtualDisplayManager {
                         return Err(err).context("mid-stream resize re-arrival");
                     }
                     ReAdd::Lost(err) => {
-                        // Leave the slot empty so the next acquire ADDs cleanly.
+                        // Leave the slot empty so the next acquire ADDs cleanly — but if that
+                        // was the last slot, nothing else will ever restore the group: the
+                        // desktop stays isolated, the monitors PnP-disabled and the EDID
+                        // pinned, with the pinger still running against a monitor that is gone.
+                        if inner.slots.is_empty() {
+                            self.restore_group(&mut inner);
+                        }
                         return Err(err).context("mid-stream resize re-arrival (slot left empty)");
                     }
                 };
@@ -1379,24 +1385,32 @@ impl VirtualDisplayManager {
         // Gate on an opened device: the version is 0 until the handshake ran, and the capture
         // layer must not create a section nobody will publish into.
         let hw_cursor = hw_cursor && self.driver_proto.load(Ordering::Relaxed) != 0;
-        // PRE-MUTATION baseline for the standby-sink selector (immunity plan WP3a): which targets
-        // were part of the desktop before THIS acquire touches anything — the ADD's
-        // auto-activation, the resolve ladder's force-EXTEND (which can light a sleeping sink!),
-        // and the isolate all mutate the active set, so only a snapshot taken here can tell a
-        // pre-dark sink from a display we switched off (or lit) ourselves.
-        let baseline_active: Vec<CcdTargetKey> =
+        // PRE-MUTATION baseline for the standby-sink selector (immunity plan WP3a): the targets
+        // active before this acquire mutates the set. `None` is not an empty baseline — a target
+        // missing from one is a disable candidate, so a failed read would nominate the
+        // operator's own display, and the pass is skipped instead.
+        let baseline_active: Option<Vec<CcdTargetKey>> =
             if inner.slots.is_empty() && crate::policy::prefs().standby_sink_neutralise() {
-                // A FRESH read through the display actor (it runs the query, off this thread),
-                // falling back to the newest snapshot if the actor is slow or not running.
+                // A FRESH read through the display actor (it runs the query, off this thread).
+                // A re-stamped last-known-good carries `failures > 0` and is not a baseline.
                 pf_win_display::display_events::refresh_and_wait(Duration::from_millis(500))
-                    .unwrap_or_else(pf_win_display::display_events::snapshot_or_query)
-                    .targets
-                    .iter()
-                    .filter(|t| t.active)
-                    .map(|t| t.key)
-                    .collect()
+                    .filter(|s| s.is_fresh())
+                    .map(|s| {
+                        s.targets
+                            .iter()
+                            .filter(|t| t.active)
+                            .map(|t| t.key)
+                            .collect()
+                    })
+                    // Actor slow or not running: one direct query on this thread. Its `Err`
+                    // is the case that must not become an empty baseline.
+                    .or_else(|| {
+                        pf_win_display::win_display::target_inventory_checked()
+                            .ok()
+                            .map(|ts| ts.iter().filter(|t| t.active).map(|t| t.key).collect())
+                    })
             } else {
-                Vec::new()
+                None
             };
         // SAFETY: `create_monitor`'s own `# Safety` contract guarantees `dev` is the live control
         // handle; we forward it unchanged to `add_monitor`, whose precondition is exactly that.
@@ -1613,7 +1627,11 @@ impl VirtualDisplayManager {
                 // the deactivated-set selector misses. After settle so force-
                 // EXTEND physicals are not still mid-activation. First member
                 // only; Extend leaves active panels untouched by construction.
-                if first_member && crate::policy::prefs().standby_sink_neutralise() {
+                // No baseline ⇒ no pass: see `baseline_active`.
+                if let (true, Some(baseline_active)) = (
+                    first_member && crate::policy::prefs().standby_sink_neutralise(),
+                    baseline_active.as_deref(),
+                ) {
                     if let Some(rest) =
                         Duration::from_millis(1500).checked_sub(settle_start.elapsed())
                     {
@@ -1623,7 +1641,7 @@ impl VirtualDisplayManager {
                     keep.push(added_key);
                     for id in pf_win_display::monitor_devnode::disable_connected_inactive(
                         &keep,
-                        &baseline_active,
+                        baseline_active,
                         pf_win_display::topology_churn::generation(),
                     ) {
                         if !inner.group.pnp_disabled.contains(&id) {
@@ -1954,6 +1972,59 @@ impl VirtualDisplayManager {
         }
     }
 
+    /// Put the desktop back the way the group found it: stop the pinger and the exclusivity
+    /// watchdog, re-enable the monitors we PnP-disabled, restore the saved topology, clear the
+    /// crash journal, wake the panels, release the EDID lock.
+    ///
+    /// Called for the last slot's teardown AND by a re-arrival that lost its monitor. That path
+    /// empties the slot and returns, and without this the desktop stays isolated with the pinger
+    /// running, the monitors disabled and the EDID pinned, and nothing left to undo it.
+    fn restore_group(&self, inner: &mut MgrInner) {
+        // Last slot: stop the pinger first, then restore first-in/last-out.
+        self.stop_pinger();
+        // Watchdog must be gone before restore — it would read the restored
+        // topology as "lost exclusivity" and re-fight it.
+        self.stop_exclusive_watch();
+        // Re-enable PnP first and let them re-arrive, so CCD restore
+        // finds monitors that exist. Outside the ccd_saved gate: the
+        // connected-inactive sweep also runs in Extend/Primary.
+        let pnp_disabled = std::mem::take(&mut inner.group.pnp_disabled);
+        if !pnp_disabled.is_empty() {
+            pf_win_display::monitor_devnode::enable_instances(&pnp_disabled);
+            thread::sleep(Duration::from_millis(300));
+        }
+        // Re-attach detached displays BEFORE REMOVE so the box is never
+        // left with zero displays.
+        inner.group.ccd_exclusive = false;
+        if let Some(saved) = inner.group.ccd_saved.take() {
+            restore_displays_ccd(&saved);
+        }
+        // Clear the isolate crash journal even when there was no snapshot
+        // (failed isolate leaves `ccd_saved` None). The group is gone.
+        pf_win_display::win_display::isolate_journal::clear();
+        // DDC wake outside the `ccd_saved` gate: panels were commanded
+        // dark before isolate, which can return None. Nested in that arm
+        // the wake never ran and the live link never DPMS-wakes them.
+        // 300 ms lets re-activated paths show up in EnumDisplayMonitors.
+        if inner.group.ddc_panels_off > 0 {
+            thread::sleep(Duration::from_millis(300));
+            let woken = crate::ddc::panel_on_all();
+            tracing::info!(
+                commanded_off = inner.group.ddc_panels_off,
+                woken,
+                "DDC/CI: panel wake commands sent after topology restore"
+            );
+            inner.group.ddc_panels_off = 0;
+        }
+        // Unlock after CCD restore + DDC wake so the driver does not
+        // re-probe sinks mid-restore. Outside `ccd_saved` for the same
+        // reason as the DDC wake — lock ran before isolate.
+        if inner.group.edid_locked {
+            pf_win_display::adl_emul::unlock_after_stream();
+            inner.group.edid_locked = false;
+        }
+    }
+
     /// Tear down `mon`, already removed from `inner.slots`. Last member: stop
     /// the pinger and restore group topology. Non-last: re-issue isolate over
     /// the shrunk set. Then REMOVE. Consumes `mon`.
@@ -1984,49 +2055,7 @@ impl VirtualDisplayManager {
         }
         let last_member = inner.slots.is_empty();
         if last_member {
-            // Last slot: stop the pinger first, then restore first-in/last-out.
-            self.stop_pinger();
-            // Watchdog must be gone before restore — it would read the restored
-            // topology as "lost exclusivity" and re-fight it.
-            self.stop_exclusive_watch();
-            // Re-enable PnP first and let them re-arrive, so CCD restore
-            // finds monitors that exist. Outside the ccd_saved gate: the
-            // connected-inactive sweep also runs in Extend/Primary.
-            let pnp_disabled = std::mem::take(&mut inner.group.pnp_disabled);
-            if !pnp_disabled.is_empty() {
-                pf_win_display::monitor_devnode::enable_instances(&pnp_disabled);
-                thread::sleep(Duration::from_millis(300));
-            }
-            // Re-attach detached displays BEFORE REMOVE so the box is never
-            // left with zero displays.
-            inner.group.ccd_exclusive = false;
-            if let Some(saved) = inner.group.ccd_saved.take() {
-                restore_displays_ccd(&saved);
-            }
-            // Clear the isolate crash journal even when there was no snapshot
-            // (failed isolate leaves `ccd_saved` None). The group is gone.
-            pf_win_display::win_display::isolate_journal::clear();
-            // DDC wake outside the `ccd_saved` gate: panels were commanded
-            // dark before isolate, which can return None. Nested in that arm
-            // the wake never ran and the live link never DPMS-wakes them.
-            // 300 ms lets re-activated paths show up in EnumDisplayMonitors.
-            if inner.group.ddc_panels_off > 0 {
-                thread::sleep(Duration::from_millis(300));
-                let woken = crate::ddc::panel_on_all();
-                tracing::info!(
-                    commanded_off = inner.group.ddc_panels_off,
-                    woken,
-                    "DDC/CI: panel wake commands sent after topology restore"
-                );
-                inner.group.ddc_panels_off = 0;
-            }
-            // Unlock after CCD restore + DDC wake so the driver does not
-            // re-probe sinks mid-restore. Outside `ccd_saved` for the same
-            // reason as the DDC wake — lock ran before isolate.
-            if inner.group.edid_locked {
-                pf_win_display::adl_emul::unlock_after_stream();
-                inner.group.edid_locked = false;
-            }
+            self.restore_group(inner);
         } else {
             match shrink_action(inner.group.ccd_exclusive, inner.group.ccd_saved.is_some()) {
                 // Re-issue isolate over the shrunk set. Snapshot discarded;

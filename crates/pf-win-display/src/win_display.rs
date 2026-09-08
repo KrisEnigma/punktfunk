@@ -1964,10 +1964,21 @@ fn restore_displays_ccd_inner(saved: &SavedConfig) -> bool {
             );
         }
     }
-    // If every connected external is still dark after apply, force EXTEND.
-    // Internals do not count as lightable — a closed clamshell must stay off.
-    // rc=0 can still re-light nothing (snapshot taken while physicals were off).
-    let inventory = target_inventory();
+    // If every connected external is still dark after apply, force EXTEND. Internals do not
+    // count as lightable — a closed clamshell must stay off. rc=0 can still re-light nothing.
+    // Checked, because an unwrapped query failure reads as "nothing is connected" and skips
+    // the backstop; not-restored keeps the caller's recovery marker instead.
+    let inventory = match target_inventory_checked() {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                "display isolate (CCD): cannot read the target inventory after the restore — \
+                 leaving the desk unverified rather than assuming nothing is connected"
+            );
+            return false;
+        }
+    };
     let (connected, lit) = inventory
         .iter()
         .filter(|t| t.external_physical)

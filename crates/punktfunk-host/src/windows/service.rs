@@ -296,9 +296,13 @@ fn run_service() -> Result<()> {
     std::thread::spawn(warn_if_public_network);
     let result = supervise(stop, session);
 
+    // Report the truth: `running` carries Win32(0), so a failed `supervise` used to stop as
+    // cleanly as an operator-requested stop, and the SCM log — and any failure action keyed on
+    // a non-zero exit — never saw the difference.
     let _ = status_handle.set_service_status(ServiceStatus {
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(u32::from(result.is_err())),
         ..running
     });
     // Leave the OnceLock events open: the SCM handler can still fire until process exit.
@@ -1244,8 +1248,11 @@ fn ensure_default_host_env() -> Result<()> {
     }
     // Harden the dir first, before the `exists()` check — not only in the create-file branch.
     // `ProgramData` grants Users add-subdirectory + CREATOR OWNER; a planted dir must still lock.
+    // The error is the junction refusal: `write_secret_file` only rejects the FILE being a link,
+    // so a junctioned parent would still redirect this write. Refuse the install step instead.
     if let Some(dir) = path.parent() {
-        pf_paths::create_private_dir(dir).ok();
+        pf_paths::create_private_dir(dir)
+            .with_context(|| format!("lock down {} before writing host.env", dir.display()))?;
     }
     if path.exists() && !planted {
         // Re-lock the file: an owner can rewrite the DACL it inherited. `planted` files fall
@@ -1554,9 +1561,7 @@ fn set_fw_public_marker(allow_public: bool) {
 fn active_network_is_public() -> Option<bool> {
     // Full System32 path: CreateProcess searches the launching EXE's directory first, so a
     // planted `powershell.exe` next to the host would run as SYSTEM.
-    let ps = std::env::var("SystemRoot")
-        .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
-        .unwrap_or_else(|_| "powershell.exe".to_string());
+    let ps = crate::install::sys32(r"WindowsPowerShell\v1.0\powershell.exe");
     let out = std::process::Command::new(&ps)
         .args([
             "-NoProfile",
@@ -1591,8 +1596,10 @@ fn warn_if_public_network() {
 }
 
 /// `sc.exe` with output passed through (start/stop/status).
+///
+/// Absolute: `CreateProcess` searches the cwd before `%PATH%`, and this runs elevated.
 fn sc(args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("sc")
+    let status = std::process::Command::new(crate::install::resolve_tool("sc"))
         .args(args)
         .status()
         .context("run sc.exe")?;

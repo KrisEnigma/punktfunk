@@ -23,8 +23,31 @@ fn flag_val(args: &[String], name: &str) -> Option<String> {
 fn flag_present(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
+/// `%SystemRoot%\System32\<rel>` — the one place the System32 rule lives.
+///
+/// `CreateProcess` searches the calling process's directory and the working directory before
+/// `%PATH%`, and everything routed through here runs elevated or as SYSTEM: a `certutil.exe`
+/// planted beside the installer would otherwise win. `SystemRoot`, then `WINDIR`, then the
+/// literal default — never a bare name, which is the PATH search this exists to avoid.
+///
+/// `rel` may carry a subdirectory, as PowerShell does.
+pub(crate) fn sys32(rel: &str) -> String {
+    let root = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("WINDIR"))
+        .unwrap_or_else(|_| r"C:\Windows".to_string());
+    format!(r"{root}\System32\{rel}")
+}
+
+/// [`sys32`] for a bare tool name. A name that already carries a separator (the staged
+/// `nefconc.exe`) is its own path and passes through.
+pub(crate) fn resolve_tool(cmd: &str) -> String {
+    if cmd.contains('\\') || cmd.contains('/') {
+        return cmd.to_string();
+    }
+    sys32(&format!("{cmd}.exe"))
+}
 fn run_quiet(cmd: &str, args: &[&str]) -> bool {
-    Command::new(cmd)
+    Command::new(resolve_tool(cmd))
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -33,7 +56,7 @@ fn run_quiet(cmd: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 fn run_capture(cmd: &str, args: &[&str]) -> String {
-    Command::new(cmd)
+    Command::new(resolve_tool(cmd))
         .args(args)
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -278,6 +301,139 @@ pub(crate) fn is_admin_owned(path: &Path) -> Option<bool> {
         let _ = LocalFree(Some(HLOCAL(sd.0)));
     }
     verdict
+}
+
+/// SID of the account this process runs as, as plain bytes.
+///
+/// A per-user install (`PUNKTFUNK_CONFIG_DIR` into a profile) legitimately owns its own
+/// secrets; only a *foreign* unprivileged owner is a plant.
+#[cfg(windows)]
+fn current_user_sid() -> Option<Vec<u8>> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = HANDLE::default();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle needing no close; `token` is a live
+    // out-param, closed below on every path.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
+    let sid = (|| {
+        let mut len = 0u32;
+        // Sizing call: fails with ERROR_INSUFFICIENT_BUFFER and sets `len`.
+        // SAFETY: the null buffer with len 0 is the documented sizing form.
+        unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) }.ok();
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; len as usize];
+        // SAFETY: `buf` holds exactly the `len` bytes the sizing call asked for.
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                len,
+                &mut len,
+            )
+        }
+        .ok()?;
+        // SAFETY: on success `buf` starts with a TOKEN_USER whose Sid points inside it.
+        let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        if sid.is_invalid() {
+            return None;
+        }
+        // SAFETY: `sid` is valid; GetLengthSid measures exactly the readable bytes, which
+        // live until `buf` drops at the end of this closure.
+        let n = unsafe { GetLengthSid(sid) } as usize;
+        // SAFETY: `n` bytes at `sid` are readable and copied out before `buf` drops.
+        Some(unsafe { std::slice::from_raw_parts(sid.0 as *const u8, n) }.to_vec())
+    })();
+    // SAFETY: `token` came from OpenProcessToken and is not used after this.
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    sid
+}
+
+/// True when `path`'s owner is the account this process runs as.
+#[cfg(windows)]
+fn owned_by_current_user(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows::Win32::Security::{
+        EqualSid, IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    };
+
+    let Some(me) = current_user_sid() else {
+        return false;
+    };
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut owner = PSID::default();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the out-params are live locals;
+    // the returned descriptor is the single allocation, LocalFree'd below.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            &mut sd,
+        )
+    };
+    let same = rc.is_ok()
+        && !owner.is_invalid()
+        // SAFETY: `owner` points into the descriptor returned above; IsValidSid is the probe.
+        && unsafe { IsValidSid(owner) }.as_bool()
+        // SAFETY: both SIDs passed IsValidSid / GetLengthSid; `me` is an owned copy.
+        && unsafe { EqualSid(owner, PSID(me.as_ptr().cast_mut().cast())) }.is_ok();
+    // SAFETY: `sd` is the single LocalAlloc'd descriptor GetNamedSecurityInfoW returned.
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+    same
+}
+
+/// True when `path` holds a secret an unprivileged account owns, and renames it aside.
+///
+/// `%ProgramData%` grants Users add-subdirectory + CREATOR OWNER, so a token, key or cert
+/// dropped there before the first elevated run belongs to whoever dropped it. Adopting one
+/// hands that account the host's own credential.
+///
+/// Call BEFORE `pf_paths::create_private_dir`: its first pass re-owns the contents
+/// (`icacls /setowner /T`) and erases the only evidence. A `true` verdict must make the
+/// caller mint a fresh secret — the rename is best-effort, so never gate on it.
+#[cfg(windows)]
+pub(crate) fn quarantine_planted_secret(path: &Path) -> bool {
+    if !path.exists() || is_admin_owned(path) != Some(false) || owned_by_current_user(path) {
+        return false;
+    }
+    let mut aside = path.to_path_buf().into_os_string();
+    aside.push(".untrusted");
+    let aside = PathBuf::from(aside);
+    let _ = std::fs::remove_file(&aside);
+    match std::fs::rename(path, &aside) {
+        Ok(()) => tracing::warn!(
+            path = %path.display(), aside = %aside.display(),
+            "secret was owned by a non-admin account (planted before install) — renamed aside; minting a fresh one"
+        ),
+        Err(e) => tracing::error!(
+            error = %e, path = %path.display(),
+            "secret is non-admin-owned and could not be renamed aside — refusing to adopt it"
+        ),
+    }
+    true
 }
 
 /// Subject CN both signing certs carry. `certutil` matches CertId on subject, not a localized name.
@@ -634,11 +790,22 @@ fn web_setup(args: &[String]) -> Result<()> {
         PathBuf::from(flag_val(args, "--app-dir").context("web setup: --app-dir <app> required")?);
     let pw_file = flag_val(args, "--password-file");
     let data_dir = pf_paths::config_dir();
+    let pw_path = data_dir.join("web-password");
+    // Before the hardening, not after: `create_private_dir` re-owns the contents on its first
+    // pass, which would make a planted password look administrator-owned and keep it.
+    quarantine_planted_secret(&pw_path);
     // `create_private_dir`, not `create_dir_all`: the next line writes the console password, and
-    // `create_dir_all` would inherit `%ProgramData%` (BUILTIN\Users can create files).
-    pf_paths::create_private_dir(&data_dir).ok();
+    // `create_dir_all` would inherit `%ProgramData%` (BUILTIN\Users can create files). The error
+    // is the junction refusal, and `write_secret_file` only rejects the FILE being a link — a
+    // junctioned parent still redirects the write, so refuse rather than continue.
+    pf_paths::create_private_dir(&data_dir).with_context(|| {
+        format!(
+            "lock down {} before writing the console password",
+            data_dir.display()
+        )
+    })?;
 
-    set_web_password(&data_dir.join("web-password"), pw_file.as_deref());
+    set_web_password(&pw_path, pw_file.as_deref());
     // End + delete the legacy task (idempotent if absent). The installer disables it before the
     // file copy so it cannot respawn between service start and this delete.
     run_quiet("schtasks", &["/end", "/tn", WEB_TASK]);
@@ -730,27 +897,14 @@ fn set_web_password(pw_path: &Path, pw_file: Option<&str>) {
             }
         });
     if let Some(pw) = password {
-        // Empty file, lock DACL, then write: the secret must not sit on the inherited
-        // `%ProgramData%` (Users-readable) ACL even for the window before icacls.
-        if std::fs::write(pw_path, b"").is_err() {
-            eprintln!("warning: {} not created", pw_path.display());
-            return;
-        }
-        // Drop inheritance; Administrators (S-1-5-32-544) + SYSTEM (S-1-5-18) only.
-        let p = pw_path.to_string_lossy();
-        run_quiet(
-            "icacls",
-            &[
-                &p,
-                "/inheritance:r",
-                "/grant:r",
-                "*S-1-5-32-544:F",
-                "*S-1-5-18:F",
-            ],
-        );
-        // Truncate keeps the explicit DACL; write the secret into the already-locked file.
-        if std::fs::write(pw_path, format!("PUNKTFUNK_UI_PASSWORD={pw}\n")).is_err() {
-            eprintln!("warning: {} not written", pw_path.display());
+        // The shared writer, not a local copy of it: it refuses a reparse point (a junction
+        // planted here would redirect this SYSTEM write), and on a failed DACL lock it removes
+        // the file and reports the error instead of leaving the secret on the inherited,
+        // Users-readable `%ProgramData%` ACL.
+        if let Err(e) =
+            pf_paths::write_secret_file(pw_path, format!("PUNKTFUNK_UI_PASSWORD={pw}\n").as_bytes())
+        {
+            eprintln!("warning: {} not written: {e}", pw_path.display());
         }
     }
 }

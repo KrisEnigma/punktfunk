@@ -42,10 +42,7 @@ use windows::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
     FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
 };
-use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, SetEvent, WaitForSingleObject, PROCESS_DUP_HANDLE,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-};
+use windows::Win32::System::Threading::{GetCurrentProcess, SetEvent, WaitForSingleObject};
 
 /// `SECTION_MAP_READ | SECTION_MAP_WRITE` — what the pad driver maps. Granted in
 /// [`PadChannel::deliver_to`] instead of `DUPLICATE_SAME_ACCESS`, so the remote handle
@@ -108,7 +105,9 @@ impl Shm {
     /// that carries this process's access without re-checking the DACL (`design/idd-push-security.md`).
     pub(super) fn create_unnamed(size: usize) -> Result<Shm> {
         let sa = sddl_sa(w!("D:P(A;;GA;;;SY)"))?;
+        // Unnamed: nothing to collide with, so the flag is always false.
         Self::create_inner(&sa.sa, PCWSTR::null(), size)
+            .map(|(shm, _)| shm)
             .context("create unnamed gamepad DATA section")
     }
 
@@ -130,13 +129,13 @@ impl Shm {
             }
             // SAFETY: clearing the thread error slot so ERROR_ALREADY_EXISTS below is unambiguous.
             unsafe { SetLastError(WIN32_ERROR(0)) };
-            let shm = match Self::create_inner(&sa.sa, PCWSTR(name.as_ptr()), size) {
-                Ok(shm) => shm,
+            let (shm, existed) = match Self::create_inner(&sa.sa, PCWSTR(name.as_ptr()), size) {
+                Ok(pair) => pair,
                 Err(e) => return Err(classify_named_create_failure(name, e)),
             };
-            // SAFETY: read immediately after the create; windows-rs only touches the error slot on
-            // failure, so a success here preserves CreateFileMappingW's ALREADY_EXISTS signal.
-            if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            // The verdict comes from the create itself, not from a re-read of the error slot
+            // after the mapping call — and a section we merely opened was not zeroed.
+            if !existed {
                 return Ok(shm);
             }
             // `shm` drops here → unmap + close our handle to the foreign object, then retry.
@@ -149,7 +148,10 @@ impl Shm {
         .context(PadCreateFault::IndexOwnedElsewhere))
     }
 
-    fn create_inner(sa: &SECURITY_ATTRIBUTES, name: PCWSTR, size: usize) -> Result<Shm> {
+    /// `true` in the tuple means `CreateFileMappingW` OPENED an existing section rather than
+    /// creating one — the caller decides what to do about it. Read here, immediately after the
+    /// create, because the mapping call below can clobber the thread error slot.
+    fn create_inner(sa: &SECURITY_ATTRIBUTES, name: PCWSTR, size: usize) -> Result<(Shm, bool)> {
         // SAFETY: an anonymous (pagefile-backed) section of `size` bytes with the caller's SDDL; the
         // descriptor behind `sa` outlives this call (owned by the caller's `SecAttr`, freed only once
         // every create that borrows it has returned).
@@ -163,6 +165,8 @@ impl Shm {
                 name,
             )?
         };
+        // SAFETY: read before anything else can touch the thread error slot.
+        let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         // SAFETY: `map` is a fresh section handle we own; take ownership immediately so the early
         // return (and drop) closes it. `map` is `Copy`; `from_raw_handle` only copies the pointer.
         let handle = unsafe { OwnedHandle::from_raw_handle(map.0) };
@@ -172,9 +176,14 @@ impl Shm {
             // `handle` drops here → closes the section. No view to unmap.
             return Err(anyhow!("MapViewOfFile failed"));
         }
-        // SAFETY: `view` points at `size` writable bytes (just mapped).
-        unsafe { core::ptr::write_bytes(view.Value as *mut u8, 0, size) };
-        Ok(Shm { handle, view })
+        if !existed {
+            // Only ours. Windows zero-fills a new pagefile-backed section, so this is belt —
+            // but running it on a section we merely OPENED would wipe a live mailbox that
+            // belongs to another host instance, which the caller is about to back away from.
+            // SAFETY: `view` points at `size` writable bytes (just mapped).
+            unsafe { core::ptr::write_bytes(view.Value as *mut u8, 0, size) };
+        }
+        Ok((Shm { handle, view }, existed))
     }
 
     /// Mapped base. Stable for this `Shm`'s lifetime — `MapViewOfFile` pins the address.
@@ -288,7 +297,8 @@ pub(super) struct PadChannel {
     /// Must match the proof so a mis-resolved interface cannot cross-wire two pads.
     pad_index: u32,
     last_probe: Option<Instant>,
-    /// Last pid delivered or rejected — never retry the same value (hot-loop trap).
+    /// Last pid delivered or rejected — never retry the same value within a probe interval
+    /// (hot-loop trap). A failed delivery clears it so the next probe tries again.
     last_seen_pid: u32,
     attempts: u32,
     /// WUDFHost that holds the DATA handle. `Some` ⇒ no other process is served while it lives.
@@ -462,6 +472,10 @@ impl PadChannel {
                     error = %format!("{e:#}"),
                     "sealed gamepad channel delivery failed"
                 );
+                // `last_seen_pid` was stamped before the attempt, so leaving it set retires
+                // this pid for the pad's life and one transient failure strands the pad.
+                // Clearing it retries at the next probe; the attempt cap still bounds it.
+                self.last_seen_pid = 0;
             }
         }
     }
@@ -538,33 +552,15 @@ impl PadChannel {
         Some(pid)
     }
 
-    /// Duplicate the DATA section into `pid` after `verify_is_wudfhost`, then publish
-    /// handle value + owning pid, bumping `handle_seq` last. An unconsumed duplicate
-    /// dies with the target (nothing to reap after the duplication).
+    /// Duplicate the DATA section into a verified WUDFHost `pid`, then publish handle
+    /// value + owning pid, bumping `handle_seq` last. An unconsumed duplicate dies with
+    /// the target (nothing to reap after the duplication).
     ///
     /// Returns `(handle_seq, process)` — caller retains the handle so [`Self::pump`]
     /// can tell a UMDF host restart from a different claimant without trusting a pid.
+    /// The `SYNCHRONIZE` right that makes that probe work comes with the shared open.
     fn deliver_to(&self, pid: u32) -> Result<(u32, OwnedHandle)> {
-        // SAFETY: plain FFI; the handle (checked by `?`) is owned solely here and moved into the
-        // `OwnedHandle` (single owner, closes on drop); `verify_is_wudfhost` borrows it for the
-        // synchronous check and forms no lasting alias. `SYNCHRONIZE` is requested so the retained
-        // handle doubles as the incumbent-liveness probe ([`Delivered::exited`]) — the same thing the
-        // frame channel's `ChannelBroker` asks for.
-        let process = unsafe {
-            let h = OpenProcess(
-                PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                false,
-                pid,
-            )
-            .context("OpenProcess(PROCESS_DUP_HANDLE) on the mailbox-reported pid")?;
-            let process = OwnedHandle::from_raw_handle(h.0 as _);
-            pf_capture::verify_is_wudfhost(
-                HANDLE(process.as_raw_handle()),
-                pid,
-                "gamepad-channel",
-            )?;
-            process
-        };
+        let process = pf_capture::open_wudfhost(pid, "gamepad-channel")?;
         let mut remote = HANDLE::default();
         // SAFETY: `self.data.raw_handle()` is the live section handle this channel owns;
         // `process` is the live PROCESS_DUP_HANDLE target; `&mut remote` is a valid out-param.
@@ -913,6 +909,9 @@ fn cm_problem_hint(problem: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
 
     /// Pin [`Delivered::exited`] to the process object, not the pid.
     /// Alive refuses a takeover; exited still lets UMDF restart re-deliver.

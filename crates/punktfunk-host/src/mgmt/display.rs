@@ -373,7 +373,13 @@ pub(crate) async fn get_display_state() -> Json<DisplayStateResponse> {
 pub(crate) async fn release_display(
     ApiJson(req): ApiJson<ReleaseDisplayRequest>,
 ) -> Json<ReleaseDisplayResult> {
-    let released = crate::vdisplay::registry::release(req.slot);
+    // Teardown restores the topology: CCD commits, a driver IOCTL and, on the slow paths, a
+    // PowerShell shell-out — seconds of blocking work. Off the async worker, as the listing
+    // above already does.
+    let slot = req.slot;
+    let released = tokio::task::spawn_blocking(move || crate::vdisplay::registry::release(slot))
+        .await
+        .unwrap_or(0);
     tracing::info!(slot = ?req.slot, released, "management API: display release");
     Json(ReleaseDisplayResult { released })
 }

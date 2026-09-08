@@ -53,6 +53,11 @@ pub struct EncodedFrame {
     /// `punktfunk_core::packet::USER_FLAG_RECOVERY_ANCHOR`. After RFI the host
     /// suppresses IDR, so without this flag the freeze only lifts on a later IDR.
     pub recovery_anchor: bool,
+    /// Boundary of an encoder-driven intra refresh wave: its start AU and its close AU.
+    /// The pump tags `punktfunk_core::packet::USER_FLAG_RECOVERY_POINT`; the client lifts
+    /// its freeze on the second mark since a loss, so a wave that starts after the loss
+    /// heals in one cycle. Only the Vulkan backend sets it.
+    pub recovery_point: bool,
     /// Shard-aligned self-delimiting chunks ([`Encoder::set_wire_chunking`]).
     /// The session stamps `punktfunk_core::packet::USER_FLAG_CHUNK_ALIGNED`.
     /// Only PyroWave sets it.
@@ -71,6 +76,8 @@ pub struct AuChunk {
     pub keyframe: bool,
     /// Same meaning as [`EncodedFrame::recovery_anchor`].
     pub recovery_anchor: bool,
+    /// Same meaning as [`EncodedFrame::recovery_point`].
+    pub recovery_point: bool,
     /// Same meaning as [`EncodedFrame::chunk_aligned`].
     pub chunk_aligned: bool,
     pub first: bool,
@@ -87,6 +94,7 @@ impl AuChunk {
             pts_ns: f.pts_ns,
             keyframe: f.keyframe,
             recovery_anchor: f.recovery_anchor,
+            recovery_point: f.recovery_point,
             chunk_aligned: f.chunk_aligned,
             first: true,
             last: true,
@@ -482,6 +490,17 @@ pub fn clamp_to_engines(requested: u32, hw_max: u32, engines: u32) -> u32 {
     // Only named N-way modes are ordered; `hw_max` may be AUTO_FORCED (1) on
     // a >3-engine part, which is not less than TWO_FORCED and must not clamp.
     let named = |m: u32| (2..=3).contains(&m);
+    // One engine cannot split at all, and its ceiling is DISABLE — not a named mode, so the
+    // ordered test below never fires and the knob used to survive intact. `engines == 0` is
+    // "unreadable", whose ceiling is TWO_FORCED, so it does not land here.
+    if named(requested) && hw_max == SPLIT_DISABLE {
+        tracing::warn!(
+            requested,
+            engines,
+            "PUNKTFUNK_SPLIT_ENCODE asks for a split on a single-NVENC GPU — disabling it"
+        );
+        return SPLIT_DISABLE;
+    }
     if engines != 0 && named(requested) && named(hw_max) && requested > hw_max {
         tracing::warn!(
             requested,
@@ -574,6 +593,40 @@ pub fn validate_dimensions(codec: Codec, width: u32, height: u32) -> Result<()> 
 mod tests {
     use super::*;
 
+    /// The knob is held to what the hardware can deliver. One engine cannot split, and its
+    /// ceiling is `DISABLE` rather than a named mode, so the ordered comparison alone let an
+    /// operator's `=2`/`=3` through on a GPU that would then encode narrower in silence.
+    #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
+    #[test]
+    fn a_split_request_is_disabled_on_a_single_engine_gpu() {
+        for req in [SPLIT_TWO_FORCED, SPLIT_THREE_FORCED] {
+            assert_eq!(
+                clamp_to_engines(req, max_forced_split_mode(1), 1),
+                SPLIT_DISABLE,
+                "one engine cannot split"
+            );
+        }
+        // Two engines still clamp three down to two, and accept two.
+        assert_eq!(
+            clamp_to_engines(SPLIT_THREE_FORCED, max_forced_split_mode(2), 2),
+            SPLIT_TWO_FORCED
+        );
+        assert_eq!(
+            clamp_to_engines(SPLIT_TWO_FORCED, max_forced_split_mode(2), 2),
+            SPLIT_TWO_FORCED
+        );
+        // Unreadable (0) assumes a second engine and must not be disabled here.
+        assert_eq!(
+            clamp_to_engines(SPLIT_TWO_FORCED, max_forced_split_mode(0), 0),
+            SPLIT_TWO_FORCED
+        );
+        // A part with more engines than the enum names keeps AUTO as its ceiling.
+        assert_eq!(
+            clamp_to_engines(SPLIT_TWO_FORCED, max_forced_split_mode(8), 8),
+            SPLIT_TWO_FORCED
+        );
+    }
+
     /// Window VUIDs on `VkVideoEncodeRateControlInfoKHR`: window must be
     /// non-zero (high-refresh can round a sub-1 ms window to nothing) and
     /// initial fill ≤ window (`VUID-...-08358`). Env-free so it pins the
@@ -658,6 +711,7 @@ mod tests {
             pts_ns: 42,
             keyframe: true,
             recovery_anchor: true,
+            recovery_point: false,
             chunk_aligned: false,
         });
         assert_eq!(c.data, vec![0, 0, 0, 1, 0x40]);

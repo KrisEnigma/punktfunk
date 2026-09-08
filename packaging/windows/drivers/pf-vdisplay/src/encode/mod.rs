@@ -22,7 +22,7 @@ use pf_driver_proto::encode::{self as wire, EncodeCtlRequest, SetEncodeReply, Se
 use wdk_sys::NTSTATUS;
 
 use self::section::{AuSection, Ctl, EncodeSession};
-use self::thread::{BACKEND_NAMES, EncodeThread, ThreadCtx, fail_reply};
+use self::thread::{EncodeThread, ThreadCtx, fail_reply};
 use crate::monitor::Monitor;
 use crate::{STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS, registry};
 
@@ -73,17 +73,13 @@ pub fn backends_linked() -> &'static [&'static str] {
 /// clears the pool's `live` under its successor. The open runs on the new encode thread and
 /// this call waits [`OPEN_BOUND`] for its reply.
 pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
-    // The bound is the name table's length: `open_listed` indexes it by `backend - 1`, and a
-    // backend added there without widening this would be rejected here instead.
-    let listed = req.backends[0] != 0
-        && req
-            .backends
-            .iter()
-            .all(|&b| (b as usize) <= BACKEND_NAMES.len());
+    // `open_listed` indexes the name table by `backend - 1`, so the bound is that table's —
+    // widening it in the proto widens this with no edit here.
+    let listed = req.backends[0] != 0 && req.backends.iter().all(|&b| wire::backend::listed(b));
     let valid = req.target_id != 0
         && req.section != 0
         && req.event != 0
-        && (1..=4).contains(&req.codec)
+        && wire::codec::valid(req.codec)
         && req.width != 0
         && req.height != 0
         && listed;

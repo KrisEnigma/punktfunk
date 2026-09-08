@@ -119,8 +119,15 @@ impl WasapiVirtualMic {
                     join: Some(join),
                 })
             }
+            // The thread sent this and is already unwinding to its own `alive` store.
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(anyhow!("wasapi virtual-mic init timed out")),
+            Err(_) => {
+                // Nothing owns the thread on this path — no `WasapiVirtualMic` was built, so
+                // `Drop` never runs. Unset, it holds its render client forever and the pump's
+                // next retry spawns another. Detached: it exits at its next `stop` check.
+                stop.store(true, Ordering::SeqCst);
+                Err(anyhow!("wasapi virtual-mic init timed out"))
+            }
         }
     }
 }

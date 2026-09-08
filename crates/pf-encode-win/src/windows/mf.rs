@@ -616,6 +616,7 @@ fn process_output(shared: &Shared) -> Result<EncodedFrame> {
         pts_ns: meta.map_or(0, |m| m.pts_ns),
         keyframe,
         recovery_anchor: false,
+        recovery_point: false,
         chunk_aligned: false,
     })
 }
@@ -912,20 +913,38 @@ impl MfEncoder {
             device = %format_args!("{:#x}", dev_raw as usize),
             "Media Foundation encode active (async MFT, zero-copy D3D11 NV12)"
         );
-        let shared = Arc::new(Shared {
-            mft: mft.clone(),
-            events,
-            codec: self.codec,
-            out: Mutex::new(Out::default()),
-            have: Ready::new().context("Media Foundation: no completion event")?,
-        });
-        // Arm the event sink. From here the callback is the only reader of the generator, so
-        // every `NeedInput` and `HaveOutput` lands in `shared.out` rather than in a pump.
-        let sink = IMFAsyncCallback::from(EventSink(shared.clone()));
-        // SAFETY: `shared.events` is the live MFT's generator and `sink` is a callback that
-        // outlives the request (both this `Inner` and the generator hold a reference).
-        unsafe { shared.events.BeginGetEvent(&sink, None) }
-            .context("IMFMediaEventGenerator::BeginGetEvent")?;
+        // Everything from here to the `Inner` below can still fail, and until that value exists
+        // `Inner::drop` — the only thing that shuts the MFT down — is not armed. Bind the
+        // prelude so a failure gets the same `ShutdownObject` the activation arm above does;
+        // releasing an activated MFT without it leaks the vendor's worker threads and GPU
+        // allocations for the life of the process.
+        let armed = (|| -> Result<(Arc<Shared>, IMFAsyncCallback)> {
+            let shared = Arc::new(Shared {
+                mft: mft.clone(),
+                events,
+                codec: self.codec,
+                out: Mutex::new(Out::default()),
+                have: Ready::new().context("Media Foundation: no completion event")?,
+            });
+            // Arm the event sink. From here the callback is the only reader of the generator, so
+            // every `NeedInput` and `HaveOutput` lands in `shared.out` rather than in a pump.
+            let sink = IMFAsyncCallback::from(EventSink(shared.clone()));
+            // SAFETY: `shared.events` is the live MFT's generator and `sink` is a callback that
+            // outlives the request (both this `Inner` and the generator hold a reference).
+            unsafe { shared.events.BeginGetEvent(&sink, None) }
+                .context("IMFMediaEventGenerator::BeginGetEvent")?;
+            Ok((shared, sink))
+        })();
+        let (shared, sink) = match armed {
+            Ok(pair) => pair,
+            Err(e) => {
+                // SAFETY: the activation object is live; this is its last use on this path.
+                unsafe {
+                    let _ = activate.ShutdownObject();
+                }
+                return Err(e);
+            }
+        };
         self.inner = Some(Inner {
             shared,
             _sink: sink,
@@ -1013,20 +1032,27 @@ impl Encoder for MfEncoder {
                     );
                 }
             }
+            // The entry goes in BEFORE the MFT takes the frame: the event callback runs on the
+            // MFT's own thread and can pop for this frame the moment ProcessInput returns, so
+            // pushing after it races an empty queue and skews every later AU's pts by one frame.
+            // Both under one lock: the credit this submit spends, and the entry the callback
+            // pairs its next output with.
+            {
+                let mut g = lock(&inner.shared.out);
+                g.need_input = g.need_input.saturating_sub(1);
+                g.pending.push_back(PendingMeta {
+                    pts_ns: captured.pts_ns,
+                });
+            }
             inner.mft.ProcessInput(0, &sample, 0)
         };
         if let Err(e) = submitted {
+            // The MFT never took it, so take the entry back off.
+            lock(&inner.shared.out).pending.pop_back();
             self.force_kf = true;
             bail!("IMFTransform::ProcessInput: {e}");
         }
         inner.frames_submitted += 1;
-        // Both under one lock: the credit this submit spent, and the entry the callback pairs
-        // its next output with. The MFT owns the frame from here.
-        let mut g = lock(&inner.shared.out);
-        g.need_input = g.need_input.saturating_sub(1);
-        g.pending.push_back(PendingMeta {
-            pts_ns: captured.pts_ns,
-        });
         Ok(())
     }
 
@@ -1096,7 +1122,7 @@ impl Encoder for MfEncoder {
         }
         // SAFETY: the MFT is live on this thread; flush + stream restart is the documented
         // recovery order, and each message is a synchronous no-argument call.
-        let restarted = unsafe {
+        let stopped = unsafe {
             inner
                 .mft
                 .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)
@@ -1105,19 +1131,12 @@ impl Encoder for MfEncoder {
                         .mft
                         .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0)
                 })
-                .and_then(|()| {
-                    inner
-                        .mft
-                        .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-                })
-                .and_then(|()| {
-                    inner
-                        .mft
-                        .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-                })
         };
         // The flush voided every in-flight frame and the queued events that named them. The
-        // callback stays armed across it — the generator is the MFT's, not the stream's.
+        // callback stays armed across it — the generator is the MFT's, not the stream's — so
+        // this clear belongs BETWEEN the stop and the restart: re-arming issues fresh
+        // METransformNeedInput on the MFT's thread, and clearing afterwards discarded the
+        // input credit the restart had just granted.
         {
             let mut g = lock(&inner.shared.out);
             g.pending.clear();
@@ -1126,6 +1145,17 @@ impl Encoder for MfEncoder {
             g.err = None;
         }
         inner.shared.have.clear();
+        // SAFETY: as above — synchronous no-argument messages on a live MFT.
+        let restarted = stopped.and_then(|()| unsafe {
+            inner
+                .mft
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                .and_then(|()| {
+                    inner
+                        .mft
+                        .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                })
+        });
         inner.frames_submitted = 0;
         inner.first_au_logged = false;
         if let Err(e) = restarted {
@@ -1179,13 +1209,15 @@ impl Encoder for MfEncoder {
         let _ = wait_until(inner, "drain", |o| o.pending.is_empty());
         // End-of-stream zeroed the MFT's input credit and it issues no more until a fresh
         // start-of-stream, so without this a later submit stalls out its whole budget.
+        // Drop the stale count FIRST: the restart issues fresh METransformNeedInput on the
+        // MFT's thread, and zeroing afterwards threw away the credit it had just granted.
+        lock(&inner.shared.out).need_input = 0;
         // SAFETY: the MFT is live on this thread; a synchronous no-argument message.
         unsafe {
             let _ = inner
                 .mft
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
         }
-        lock(&inner.shared.out).need_input = 0;
         Ok(())
     }
 }

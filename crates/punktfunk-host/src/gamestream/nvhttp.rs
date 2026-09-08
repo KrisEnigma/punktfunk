@@ -478,14 +478,15 @@ async fn h_pair(
         .unwrap_or("?");
     tracing::info!(uniqueid, step, "pair request");
 
+    // Every phase is bound to it: phase 1 parks the PIN under it, 2-4 check it.
+    let peer_ip = addr
+        .as_ref()
+        .map_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |a| {
+            (a.0).0.ip()
+        });
     let result = if phrase == Some("getservercert") {
         match (q.get("salt"), q.get("clientcert")) {
             (Some(salt), Some(cc)) => {
-                let peer_ip = addr
-                    .as_ref()
-                    .map_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |a| {
-                        (a.0).0.ip()
-                    });
                 st.pairing
                     .getservercert(&st.identity, &uniqueid, salt, cc, peer_ip)
                     .await
@@ -502,11 +503,15 @@ async fn h_pair(
             Ok(pair_error_xml())
         }
     } else if let Some(v) = q.get("clientchallenge") {
-        st.pairing.clientchallenge(&st.identity, &uniqueid, v)
+        st.pairing
+            .clientchallenge(&st.identity, &uniqueid, v, peer_ip)
     } else if let Some(v) = q.get("serverchallengeresp") {
-        st.pairing.serverchallengeresp(&st.identity, &uniqueid, v)
+        st.pairing
+            .serverchallengeresp(&st.identity, &uniqueid, v, peer_ip)
     } else if let Some(v) = q.get("clientpairingsecret") {
-        let r = st.pairing.clientpairingsecret(&uniqueid, v, &st.paired);
+        let r = st
+            .pairing
+            .clientpairingsecret(&uniqueid, v, &st.paired, peer_ip);
         // First pairing: bring ENet control up now (idempotent). Moonlight connects control
         // before video; waiting would abort the session.
         if let Err(e) = super::sync_control(&st) {

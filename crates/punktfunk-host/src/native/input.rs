@@ -1026,6 +1026,7 @@ pub(super) fn input_thread(
     const MAX_HELD: usize = 256;
     let mut held_buttons: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut held_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut held_touch: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut pen = PenSession::new();
     loop {
         // Pen in range: wake at least every 100 ms so check_timeout can meet its 200 ms deadline.
@@ -1195,6 +1196,14 @@ pub(super) fn input_thread(
                             InputKind::KeyUp => {
                                 held_keys.remove(&ev.code);
                             }
+                            // A held contact is re-injected every 40 ms on purpose, which
+                            // defeats Windows' own staleness lift — so only an Up ends it.
+                            InputKind::TouchDown if held_touch.len() < MAX_HELD => {
+                                held_touch.insert(ev.code);
+                            }
+                            InputKind::TouchUp => {
+                                held_touch.remove(&ev.code);
+                            }
                             _ => {}
                         }
                         // Host-lifetime injector. Send error = service gone; input is lossy.
@@ -1294,11 +1303,12 @@ pub(super) fn input_thread(
     pen.release_all();
     // Injector (and Mutter's implicit grab) outlives this session. Matching ups
     // here, keyed off the session — that is where a client vanishes mid-press.
-    if !held_buttons.is_empty() || !held_keys.is_empty() {
+    if !held_buttons.is_empty() || !held_keys.is_empty() || !held_touch.is_empty() {
         tracing::debug!(
             buttons = held_buttons.len(),
             keys = held_keys.len(),
-            "input: releasing held buttons/keys at session end"
+            touch = held_touch.len(),
+            "input: releasing held buttons/keys/contacts at session end"
         );
     }
     for code in held_buttons {
@@ -1314,6 +1324,18 @@ pub(super) fn input_thread(
     for code in held_keys {
         let _ = inj_tx.send(InputEvent {
             kind: InputKind::KeyUp,
+            _pad: [0; 3],
+            code,
+            x: 0,
+            y: 0,
+            flags: 0,
+        });
+    }
+    // The touch device is host-lifetime and its refresher keeps re-injecting whatever is held,
+    // so a client that vanishes mid-touch leaves a finger down for every later session.
+    for code in held_touch {
+        let _ = inj_tx.send(InputEvent {
+            kind: InputKind::TouchUp,
             _pad: [0; 3],
             code,
             x: 0,

@@ -13,48 +13,34 @@
 //! slot in `Device Parameters\PunktfunkPadIndex`; the INF rewrites DeviceDesc.
 //! Stamp only description, name, PFDS container, and the 4 ch/48 kHz triplet.
 //! Hardware-id or devicepath writes make AudioEndpointBuilder delete and remint
-//! under a new GUID. [`PadLoopbackCapturer`] captures. [`set_visibility`] parks
+//! under a new GUID. [`super::pad_capture`] captures. [`set_visibility`] parks
 //! `DEVICE_STATE_DISABLED` with no client pad attached; idle libScePad titles
 //! stall on a visible DualSense-named speaker. Flips raise no PnP. Wiring-plan
 //! exclusion is [`is_pad_render_endpoint`]. COM objects stay on the thread
 //! that made them.
 
-use super::{audio_control, AudioCapturer, SAMPLE_RATE};
-use anyhow::{anyhow, bail, Context, Result};
-use std::collections::{HashSet, VecDeque};
-use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
-use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
-use windows::core::{w, GUID, PCWSTR, PWSTR};
-use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    SetupDiCreateDevRegKeyW, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW,
-    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-    SetupDiGetDeviceInstanceIdW, SetupDiGetDevicePropertyW, SetupDiGetDeviceRegistryPropertyW,
-    SetupDiOpenDevRegKey, SetupDiRegisterDeviceInfo, SetupDiSetDeviceRegistryPropertyW,
-    UpdateDriverForPlugAndPlayDevicesW, DICD_GENERATE_ID, DICS_FLAG_GLOBAL, DIREG_DEV,
-    GUID_DEVCLASS_MEDIA, HDEVINFO, SETUP_DI_GET_CLASS_DEVS_FLAGS, SPDRP_HARDWAREID,
-    SP_DEVINFO_DATA, UPDATEDRIVERFORPLUGANDPLAYDEVICES_FLAGS,
+use super::audio_control;
+use super::devnode_api::{
+    bind_driver, create_media_devnode, devinfo_data, devnode_inf_path, devnode_multi_sz_prop,
+    instance_id, media_class_devs, pv_blob, pv_bytes, pv_clsid, pv_guid, pv_lpwstr, pv_string,
+    read_devparam_dword, wide, write_devparam_dword, DevInfoSet,
 };
-use windows::Win32::Devices::Properties::{
-    DEVPKEY_Device_DriverInfPath, DEVPROPTYPE, DEVPROP_TYPE_STRING,
+use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+use windows::core::{GUID, PCWSTR, PWSTR};
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    SetupDiEnumDeviceInfo, SPDRP_HARDWAREID, SP_DEVINFO_DATA,
 };
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
     IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
 };
-use windows::Win32::System::Com::StructuredStorage::{
-    PropVariantClear, PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
-};
-use windows::Win32::System::Com::{CoCreateInstance, BLOB, CLSCTX_ALL, STGM_READ, STGM_READWRITE};
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegQueryValueExW, RegSetValueExW, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD,
-    REG_VALUE_TYPE,
-};
-use windows::Win32::System::Variant::{VT_BLOB, VT_CLSID, VT_LPWSTR};
+use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ, STGM_READWRITE};
+use windows::Win32::System::Registry::{RegCloseKey, KEY_QUERY_VALUE, KEY_SET_VALUE};
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
 /// Data1 of the per-pad container GUID. Must equal pf-inject's `container_tag`
@@ -229,19 +215,6 @@ fn active_stamps(pad_index: u8) -> Vec<Stamp> {
     }
 }
 
-pub(crate) fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn multi_sz_bytes(items: &[&str]) -> Vec<u8> {
-    let mut units: Vec<u16> = items
-        .iter()
-        .flat_map(|s| s.encode_utf16().chain(std::iter::once(0)))
-        .collect();
-    units.push(0);
-    units.iter().flat_map(|u| u.to_le_bytes()).collect()
-}
-
 fn sz_bytes(s: &str) -> Vec<u8> {
     wide(s).iter().flat_map(|u| u.to_le_bytes()).collect()
 }
@@ -322,300 +295,6 @@ pub(crate) fn endpoint_guid_part(endpoint_id: &str) -> Result<&str> {
 // CoTaskMemFree it. ManuallyDrop: never clear borrows. GetValue-owned
 // variants ARE cleared, in `stamp_served`.
 
-/// `VT_LPWSTR` borrowing `w`, which must outlive it and stay NUL-terminated.
-fn pv_lpwstr(w: &[u16]) -> ManuallyDrop<PROPVARIANT> {
-    ManuallyDrop::new(PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_LPWSTR,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    pwszVal: PWSTR(w.as_ptr().cast_mut()),
-                },
-            }),
-        },
-    })
-}
-
-/// `VT_CLSID` borrowing `g`, which must outlive it.
-fn pv_clsid(g: &GUID) -> ManuallyDrop<PROPVARIANT> {
-    ManuallyDrop::new(PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_CLSID,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    puuid: std::ptr::from_ref(g).cast_mut(),
-                },
-            }),
-        },
-    })
-}
-
-/// `VT_BLOB` borrowing `b`, which must outlive it.
-fn pv_blob(b: &[u8]) -> ManuallyDrop<PROPVARIANT> {
-    ManuallyDrop::new(PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_BLOB,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    blob: BLOB {
-                        cbSize: b.len() as u32,
-                        pBlobData: b.as_ptr().cast_mut(),
-                    },
-                },
-            }),
-        },
-    })
-}
-
-fn pv_string(pv: &PROPVARIANT) -> Option<String> {
-    // SAFETY: the variant is initialized (built by us or returned by GetValue); pwszVal is only
-    // read when vt says VT_LPWSTR, in which case it points at the variant's NUL-terminated
-    // string (or is null, which we check).
-    unsafe {
-        let inner = &pv.Anonymous.Anonymous;
-        if inner.vt != VT_LPWSTR {
-            return None;
-        }
-        let p = inner.Anonymous.pwszVal;
-        if p.is_null() {
-            return None;
-        }
-        p.to_string().ok()
-    }
-}
-
-fn pv_guid(pv: &PROPVARIANT) -> Option<GUID> {
-    // SAFETY: puuid is only dereferenced when vt == VT_CLSID and non-null.
-    unsafe {
-        let inner = &pv.Anonymous.Anonymous;
-        if inner.vt != VT_CLSID {
-            return None;
-        }
-        let p = inner.Anonymous.puuid;
-        if p.is_null() {
-            return None;
-        }
-        Some(*p)
-    }
-}
-
-fn pv_bytes(pv: &PROPVARIANT) -> Option<Vec<u8>> {
-    // SAFETY: the blob pointer/length pair is only read when vt == VT_BLOB and
-    // the pointer is non-null; the variant owns cbSize bytes there.
-    unsafe {
-        let inner = &pv.Anonymous.Anonymous;
-        if inner.vt != VT_BLOB {
-            return None;
-        }
-        let b = &inner.Anonymous.blob;
-        if b.pBlobData.is_null() {
-            return None;
-        }
-        Some(std::slice::from_raw_parts(b.pBlobData, b.cbSize as usize).to_vec())
-    }
-}
-
-pub(crate) struct DevInfoSet(pub(crate) HDEVINFO);
-impl Drop for DevInfoSet {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from SetupDiGetClassDevsW/SetupDiCreateDeviceInfoList and is
-        // destroyed exactly once (this owner's drop).
-        unsafe {
-            let _ = SetupDiDestroyDeviceInfoList(self.0);
-        }
-    }
-}
-
-pub(crate) fn media_class_devs() -> Result<DevInfoSet> {
-    // SAFETY: the class GUID is a static const; flags 0 (not DIGCF_PRESENT) so a created-but-
-    // never-installed phantom from a previous run is still found and reused, not duplicated.
-    let set = unsafe {
-        SetupDiGetClassDevsW(
-            Some(&GUID_DEVCLASS_MEDIA),
-            PCWSTR::null(),
-            None,
-            SETUP_DI_GET_CLASS_DEVS_FLAGS(0),
-        )
-    }
-    .context("SetupDiGetClassDevs(MEDIA)")?;
-    Ok(DevInfoSet(set))
-}
-
-pub(crate) fn devinfo_data() -> SP_DEVINFO_DATA {
-    SP_DEVINFO_DATA {
-        cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
-        ..Default::default()
-    }
-}
-
-pub(crate) fn instance_id(set: &DevInfoSet, did: &SP_DEVINFO_DATA) -> Option<String> {
-    let mut buf = [0u16; 200];
-    // SAFETY: live devinfo set + element; the buffer length travels with the slice.
-    unsafe { SetupDiGetDeviceInstanceIdW(set.0, did, Some(&mut buf), None) }.ok()?;
-    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(String::from_utf16_lossy(&buf[..len]))
-}
-
-pub(crate) fn devnode_multi_sz_prop(
-    set: &DevInfoSet,
-    did: &SP_DEVINFO_DATA,
-    prop: windows::Win32::Devices::DeviceAndDriverInstallation::SETUP_DI_REGISTRY_PROPERTY,
-) -> Vec<String> {
-    let mut buf = vec![0u8; 4096];
-    let mut req = 0u32;
-    // SAFETY: live set + element; the output buffer length travels with the slice.
-    if unsafe {
-        SetupDiGetDeviceRegistryPropertyW(set.0, did, prop, None, Some(&mut buf), Some(&mut req))
-    }
-    .is_err()
-    {
-        return Vec::new();
-    }
-    let units: Vec<u16> = buf[..(req as usize).min(buf.len())]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    units
-        .split(|&c| c == 0)
-        .filter(|s| !s.is_empty())
-        .map(String::from_utf16_lossy)
-        .collect()
-}
-
-/// Installed-driver INF (`DEVPKEY_Device_DriverInfPath`). Absent if the driver never installed.
-pub(crate) fn devnode_inf_path(set: &DevInfoSet, did: &SP_DEVINFO_DATA) -> Option<String> {
-    let mut ty = DEVPROPTYPE(0);
-    let mut buf = vec![0u8; 1024];
-    let mut req = 0u32;
-    // SAFETY: live set + element; the property key is a static const; the buffer length
-    // travels with the slice.
-    unsafe {
-        SetupDiGetDevicePropertyW(
-            set.0,
-            did,
-            &DEVPKEY_Device_DriverInfPath,
-            &mut ty,
-            Some(&mut buf),
-            Some(&mut req),
-            0,
-        )
-    }
-    .ok()?;
-    if ty != DEVPROP_TYPE_STRING {
-        return None;
-    }
-    let units: Vec<u16> = buf[..(req as usize).min(buf.len())]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    let len = units.iter().position(|&c| c == 0).unwrap_or(units.len());
-    (len > 0).then(|| String::from_utf16_lossy(&units[..len]))
-}
-
-/// REG_DWORD from `Device Parameters`. `None` = no key, no value, or wrong type — foreign.
-pub(crate) fn read_devparam_dword(
-    set: &DevInfoSet,
-    did: &SP_DEVINFO_DATA,
-    value_name: &str,
-) -> Option<u32> {
-    // SAFETY: live set + element; DIREG_DEV opens the devnode's Device Parameters key.
-    let hkey = unsafe {
-        SetupDiOpenDevRegKey(
-            set.0,
-            did,
-            DICS_FLAG_GLOBAL.0,
-            0,
-            DIREG_DEV,
-            KEY_QUERY_VALUE.0,
-        )
-    }
-    .ok()?;
-    let name = wide(value_name);
-    let mut data = [0u8; 4];
-    let mut len = data.len() as u32;
-    let mut ty = REG_VALUE_TYPE(0);
-    // SAFETY: the value name is NUL-terminated and outlives the call; data/len are live locals
-    // sized together.
-    let rc = unsafe {
-        RegQueryValueExW(
-            hkey,
-            PCWSTR(name.as_ptr()),
-            None,
-            Some(&mut ty),
-            Some(data.as_mut_ptr()),
-            Some(&mut len),
-        )
-    };
-    // SAFETY: closing the key opened above, exactly once.
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    (rc.is_ok() && ty == REG_DWORD && len == 4).then(|| u32::from_le_bytes(data))
-}
-
-/// Write side of [`read_devparam_dword`]; creates the key on a fresh devnode.
-pub(crate) fn write_devparam_dword(
-    set: &DevInfoSet,
-    did: &mut SP_DEVINFO_DATA,
-    value_name: &str,
-    value: u32,
-) -> Result<()> {
-    // SAFETY: live set + element; DIREG_DEV opens the devnode's Device Parameters key.
-    let opened = unsafe {
-        SetupDiOpenDevRegKey(
-            set.0,
-            did,
-            DICS_FLAG_GLOBAL.0,
-            0,
-            DIREG_DEV,
-            KEY_SET_VALUE.0,
-        )
-    };
-    let hkey = match opened {
-        Ok(k) => k,
-        // SAFETY: same set + element; a fresh devnode has no Device Parameters key yet, so
-        // create it (no INF association).
-        Err(_) => unsafe {
-            SetupDiCreateDevRegKeyW(
-                set.0,
-                did,
-                DICS_FLAG_GLOBAL.0,
-                0,
-                DIREG_DEV,
-                None,
-                PCWSTR::null(),
-            )
-        }
-        .with_context(|| format!("create the Device Parameters key for {value_name}"))?,
-    };
-    let name = wide(value_name);
-    // SAFETY: the value name is NUL-terminated and outlives the call; the DWORD bytes travel
-    // with the slice.
-    let rc = unsafe {
-        RegSetValueExW(
-            hkey,
-            PCWSTR(name.as_ptr()),
-            None,
-            REG_DWORD,
-            Some(&value.to_le_bytes()),
-        )
-    };
-    // SAFETY: closing the key opened/created above, exactly once.
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    rc.ok().with_context(|| format!("write {value_name}"))
-}
-
 fn devnode_pad_index(set: &DevInfoSet, did: &SP_DEVINFO_DATA) -> Option<u32> {
     read_devparam_dword(set, did, PAD_INDEX_VALUE)
 }
@@ -640,47 +319,6 @@ fn find_devnode(pad_index: u8) -> Result<Option<String>> {
         }
     }
     Ok(None)
-}
-
-/// Create + register a MEDIA-class root devnode carrying `hwid`, then `mark`
-/// writes the durable owner marker. DeviceDesc only survives until the INF
-/// installs. Shared by the pad provisioner and the `audio-probe` devtest.
-pub(crate) fn create_media_devnode(
-    desc: &str,
-    hwid: &str,
-    mark: impl FnOnce(&DevInfoSet, &mut SP_DEVINFO_DATA) -> Result<()>,
-) -> Result<String> {
-    // SAFETY: the class GUID is a static const.
-    let set = unsafe { SetupDiCreateDeviceInfoList(Some(&GUID_DEVCLASS_MEDIA), None) }
-        .context("SetupDiCreateDeviceInfoList(MEDIA)")?;
-    let set = DevInfoSet(set);
-    let mut did = devinfo_data();
-    let desc = wide(desc);
-    // SAFETY: name/class/description are live NUL-terminated buffers; DICD_GENERATE_ID makes
-    // PnP mint the ROOT\MEDIA\00NN instance id; `did` receives the element.
-    unsafe {
-        SetupDiCreateDeviceInfoW(
-            set.0,
-            w!("MEDIA"),
-            &GUID_DEVCLASS_MEDIA,
-            PCWSTR(desc.as_ptr()),
-            None,
-            DICD_GENERATE_ID,
-            Some(&mut did),
-        )
-    }
-    .context("SetupDiCreateDeviceInfo")?;
-    let hwid = multi_sz_bytes(&[hwid]);
-    // SAFETY: live set + element; the multi-sz property bytes travel with the slice.
-    unsafe { SetupDiSetDeviceRegistryPropertyW(set.0, &mut did, SPDRP_HARDWAREID, Some(&hwid)) }
-        .context("set SPDRP_HARDWAREID")?;
-    // NOT SetupDiCallClassInstaller(DIF_REGISTERDEVICE): needs an interactive
-    // window station and fails with 1459 from a service.
-    // SAFETY: live set + element; no compare callback.
-    unsafe { SetupDiRegisterDeviceInfo(set.0, &mut did, 0, None, None, None) }
-        .context("SetupDiRegisterDeviceInfo")?;
-    mark(&set, &mut did)?;
-    instance_id(&set, &did).context("read the new devnode's instance id")
 }
 
 fn create_devnode(pad_index: u8) -> Result<String> {
@@ -730,36 +368,6 @@ fn resolve_sss_inf() -> Result<String> {
         "no Steam Streaming Speakers INF found (no installed SSS devnode, and Steam's driver \
          directory is absent) — install Steam, whose Remote Play streaming drivers provide it"
     )
-}
-
-/// Bind `inf` to every unbound devnode carrying `hwid`. Idempotent: nothing
-/// needed an update is success. Shared with the `audio-probe` devtest.
-pub(crate) fn bind_driver(hwid: &str, inf: &str) -> Result<()> {
-    let inf_w = wide(inf);
-    let hwid_w = wide(hwid);
-    // SAFETY: both strings are NUL-terminated and outlive the call; a null parent HWND and no
-    // reboot-required out-param are documented as accepted.
-    let r = unsafe {
-        UpdateDriverForPlugAndPlayDevicesW(
-            None,
-            PCWSTR(hwid_w.as_ptr()),
-            PCWSTR(inf_w.as_ptr()),
-            UPDATEDRIVERFORPLUGANDPLAYDEVICES_FLAGS(0),
-            None,
-        )
-    };
-    match r {
-        Ok(()) => {
-            tracing::info!(hwid = %hwid, inf = %inf, "bound the driver to the unbound devnode(s)");
-            Ok(())
-        }
-        // ERROR_NO_MORE_ITEMS (0x80070103): every matching devnode already runs
-        // this (or a better) driver — idempotent reissue, not a failure.
-        Err(e) if e.code().0 as u32 == 0x8007_0103 => Ok(()),
-        Err(e) => {
-            Err(anyhow!(e)).with_context(|| format!("UpdateDriverForPlugAndPlayDevices({inf})"))
-        }
-    }
 }
 
 fn install_sss_driver() -> Result<()> {
@@ -843,7 +451,7 @@ pub(crate) fn open_wasapi_device(endpoint_id: &str) -> Result<wasapi::Device> {
 
 /// Log raw `IMMDevice::Activate` vs crate wrap, so a `0x80070002` names
 /// the layer (dead endpoint, process cannot activate, bad argument).
-fn probe_activation(endpoint_id: &str) {
+pub(super) fn probe_activation(endpoint_id: &str) {
     match open_mmdevice(endpoint_id) {
         Err(e) => tracing::error!(endpoint = %endpoint_id, error = %format!("{e:#}"),
             "activation probe: GetDevice failed"),
@@ -1202,8 +810,7 @@ pub fn ensure(pad_index: u8) -> Result<PadEndpoint> {
 /// Best-effort teardown (`pnputil /remove-device`). Tests and the
 /// `pad-endpoint remove` hatch only; endpoints are persistent.
 pub fn remove(pe: &PadEndpoint) {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
-    let pnputil = format!(r"{windir}\System32\pnputil.exe");
+    let pnputil = crate::install::sys32("pnputil.exe");
     match std::process::Command::new(&pnputil)
         .args(["/remove-device", &pe.device_instance])
         .output()
@@ -1361,7 +968,11 @@ static PROVISIONING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// one AEB+Audiosrv restart if a stamp is stored-but-not-served, then
 /// publishes for [`endpoint_for`]. Failure logs once and leaves the feature
 /// off — the pad still works, without audio.
-pub(crate) fn provision_at_startup() {
+///
+/// `startup` gates that restart. It bounces Audiosrv and AudioEndpointBuilder,
+/// which cuts every stream on the box, so only the pre-session call may do it —
+/// [`ensure_provisioned`] re-enters this from a live session.
+pub(crate) fn provision_at_startup(startup: bool) {
     if !pad_audio_enabled() {
         tracing::info!("pad audio disabled (PUNKTFUNK_PAD_AUDIO=0)");
         // Previous-run endpoints persist and stay visible; idle libScePad
@@ -1396,8 +1007,9 @@ pub(crate) fn provision_at_startup() {
                     }
                 }
             }
-            if eps.iter().any(|p| p.needs_aeb_kick) {
-                // One restart, at startup, before any session — never mid-flight.
+            // The restart cuts every stream on the box, so a mid-session retry leaves the
+            // stamps stored-but-not-served until the next host start instead.
+            if startup && eps.iter().any(|p| p.needs_aeb_kick) {
                 match restart_audio_endpoint_services() {
                     Ok(()) => {
                         for pe in &mut eps {
@@ -1448,7 +1060,7 @@ pub(crate) fn provisioned_endpoints() -> Option<Arc<Vec<PadEndpoint>>> {
 /// Recovers on the next connect, not the next reboot.
 pub(crate) fn ensure_provisioned() {
     if PROVISIONED.get().is_none() {
-        provision_at_startup();
+        provision_at_startup(false);
     }
 }
 
@@ -1557,355 +1169,11 @@ fn restart_audio_endpoint_services() -> Result<()> {
     }
 }
 
-pub const PAD_CHANNELS: u32 = 4;
-/// 4-ch pad layout (FL FR BL BR). Not `punktfunk_core::audio::wasapi_channel_mask`,
-/// which only speaks GameStream stereo/5.1/7.1.
-const PAD_CHANNEL_MASK: u32 = 0x33;
-const PAD_BLOCK_ALIGN: usize = PAD_CHANNELS as usize * 4;
-
-/// WASAPI loopback of one pad endpoint: interleaved 4-ch f32 at 48 kHz.
-/// Same COM discipline as [`super::wasapi_cap`]: WASAPI objects live on a
-/// dedicated thread; the struct holds channel + stop + join. A device error
-/// ends the thread — [`AudioCapturer::next_chunk`] returns `Err` and the caller reopens.
-pub struct PadLoopbackCapturer {
-    chunks: Receiver<Vec<f32>>,
-    stop: Arc<AtomicBool>,
-    join: Option<JoinHandle<()>>,
-}
-
-impl PadLoopbackCapturer {
-    pub fn open(endpoint_id: &str) -> Result<PadLoopbackCapturer> {
-        let (tx, rx) = sync_channel::<Vec<f32>>(64);
-        let stop = Arc::new(AtomicBool::new(false));
-        // Surface an open failure as Err (caller retries), never a silent dead thread.
-        let (ready_tx, ready_rx) = sync_channel::<Result<()>>(1);
-        let (stop_t, id) = (stop.clone(), endpoint_id.to_string());
-        let join = thread::Builder::new()
-            .name("punktfunk-pad-cap".into())
-            .spawn(move || {
-                if let Err(e) = pad_capture_thread(&id, tx, stop_t, ready_tx) {
-                    tracing::error!(error = %format!("{e:#}"), "pad loopback thread failed");
-                }
-            })
-            .context("spawn pad loopback thread")?;
-        match ready_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(())) => Ok(PadLoopbackCapturer {
-                chunks: rx,
-                stop,
-                join: Some(join),
-            }),
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                // Signal and reap. Dropping `join` leaked one WASAPI thread per
-                // ~2 s reopen. If it is stuck in a blocking call, fail rather
-                // than leak.
-                stop.store(true, Ordering::SeqCst);
-                match reap_with_timeout(join, Duration::from_secs(2)) {
-                    true => Err(anyhow!("pad loopback init timed out")),
-                    false => Err(anyhow!(
-                        "pad loopback init timed out and its thread did not exit — the audio \
-                         stack is wedged; not retrying into a thread leak"
-                    )),
-                }
-            }
-        }
-    }
-}
-
-fn reap_with_timeout(join: JoinHandle<()>, budget: Duration) -> bool {
-    let deadline = std::time::Instant::now() + budget;
-    while !join.is_finished() {
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = join.join();
-    true
-}
-
-/// Channel pair for [`render_test_tone`]. Front = pad speaker (FL FR);
-/// Back = voice coils (BL BR). Driving one pair and silencing the other
-/// is how a result names which kind the framer routed.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum TonePair {
-    Front,
-    Back,
-    Both,
-}
-
-impl TonePair {
-    /// `--pair` argument; anything unrecognised keeps the haptics (Back) default.
-    pub(crate) fn parse(s: &str) -> TonePair {
-        match s {
-            "front" | "speaker" => TonePair::Front,
-            "both" => TonePair::Both,
-            _ => TonePair::Back,
-        }
-    }
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            TonePair::Front => "FRONT pair (the pad's speaker)",
-            TonePair::Back => "BACK pair (the voice coils)",
-            TonePair::Both => "BOTH pairs (speaker + voice coils)",
-        }
-    }
-    fn carries(self, c: usize) -> bool {
-        match self {
-            TonePair::Front => c < 2,
-            TonePair::Back => c >= 2,
-            TonePair::Both => true,
-        }
-    }
-}
-
-/// Render a test tone into a pad endpoint. Default BACK (voice coils) so a
-/// pass is felt in the grips and cannot be the speaker; `--pair front` is
-/// the speaker kind without a game.
-pub(crate) fn render_test_tone(
-    endpoint_id: &str,
-    seconds: u32,
-    hz: f32,
-    pair: TonePair,
-) -> Result<()> {
-    wasapi::initialize_mta()
-        .ok()
-        .context("initialize COM (MTA) for the tone render")?;
-
-    probe_activation(endpoint_id);
-    // By id, never a default-device resolve: the question is whether THIS endpoint is heard.
-    let device = open_wasapi_device(endpoint_id)
-        .with_context(|| format!("pad endpoint {endpoint_id} not found"))?;
-    let mut audio_client = device.get_iaudioclient().context("IAudioClient")?;
-    // Same mask as the endpoint and loopback. `None` lets wasapi derive
-    // `(1 << 4) - 1` = 0x0F (FL FR FC LFE) instead of 0x33 (FL FR BL BR).
-    let desired = WaveFormat::new(
-        32,
-        32,
-        &SampleType::Float,
-        SAMPLE_RATE as usize,
-        PAD_CHANNELS as usize,
-        Some(PAD_CHANNEL_MASK),
-    );
-    let (default_period, _min) = audio_client.get_device_period().context("device period")?;
-    audio_client
-        .initialize_client(
-            &desired,
-            &Direction::Render,
-            &StreamMode::EventsShared {
-                autoconvert: true,
-                buffer_duration_hns: default_period,
-            },
-        )
-        .context("initialize render client")?;
-    let h_event = audio_client.set_get_eventhandle().context("event handle")?;
-    let render = audio_client
-        .get_audiorenderclient()
-        .context("IAudioRenderClient")?;
-    let buf_frames = audio_client.get_buffer_size().context("buffer size")? as usize;
-    let block = PAD_CHANNELS as usize * std::mem::size_of::<f32>();
-    // Start on silence so the stream opens without a glitch, as the mic pump does.
-    let _ = render.write_to_device(buf_frames, &vec![0u8; buf_frames * block], None);
-    audio_client.start_stream().context("start render stream")?;
-
-    let total = u64::from(SAMPLE_RATE) * u64::from(seconds.clamp(1, 60));
-    let step = std::f32::consts::TAU * hz / SAMPLE_RATE as f32;
-    let mut phase = 0.0f32;
-    let mut written = 0u64;
-    let mut bytes = vec![0u8; buf_frames * block];
-
-    while written < total {
-        if h_event.wait_for_event(1000).is_err() {
-            anyhow::bail!("render event timed out after {written} frames");
-        }
-        let free = audio_client
-            .get_available_space_in_frames()
-            .context("available space")? as usize;
-        let n = free.min((total - written) as usize);
-        if n == 0 {
-            continue;
-        }
-        for f in 0..n {
-            let s = phase.sin() * 0.5;
-            phase += step;
-            if phase >= std::f32::consts::TAU {
-                phase -= std::f32::consts::TAU;
-            }
-            for c in 0..PAD_CHANNELS as usize {
-                let v: f32 = if pair.carries(c) { s } else { 0.0 };
-                let at = (f * PAD_CHANNELS as usize + c) * 4;
-                bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
-            }
-        }
-        render
-            .write_to_device(n, &bytes[..n * block], None)
-            .context("write tone")?;
-        written += n as u64;
-    }
-    // Let the tail drain before tearing the stream down.
-    std::thread::sleep(Duration::from_millis(200));
-    let _ = audio_client.stop_stream();
-    Ok(())
-}
-
-/// Open the real loopback on a pad endpoint and report peaks by pair.
-/// Run with [`render_test_tone`]: BACK-only is the 0xD1 coil signal;
-/// front energy means pair routing is wrong; both silent means the
-/// endpoint carries no audio.
-pub(crate) fn capture_probe(endpoint_id: &str, seconds: u32) -> Result<()> {
-    let mut cap = PadLoopbackCapturer::open(endpoint_id)
-        .with_context(|| format!("open pad loopback on {endpoint_id}"))?;
-    let deadline = Instant::now() + Duration::from_secs(u64::from(seconds.clamp(1, 60)));
-    let (mut frames, mut peak_front, mut peak_back) = (0u64, 0f32, 0f32);
-    while Instant::now() < deadline {
-        let chunk = cap.next_chunk().context("read pad loopback")?;
-        for f in chunk.chunks_exact(PAD_CHANNELS as usize) {
-            frames += 1;
-            peak_front = peak_front.max(f[0].abs()).max(f[1].abs());
-            peak_back = peak_back.max(f[2].abs()).max(f[3].abs());
-        }
-    }
-    println!(
-        "pad-endpoint capture: {frames} frames over {seconds}s, peak_front={peak_front:.4} \
-         peak_back={peak_back:.4}"
-    );
-    // Report what arrived, not a haptics-shaped verdict: `--pair front` is a pass too.
-    const FLOOR: f32 = 0.0001;
-    match (frames, peak_front > FLOOR, peak_back > FLOOR) {
-        (0, _, _) => println!("  VERDICT: FAIL — the capture opened but delivered nothing."),
-        (_, false, false) => println!(
-            "  VERDICT: silent — capture works, but nothing was rendered. Run `pad-endpoint \
-             tone` against this endpoint at the same time."
-        ),
-        (_, false, true) => println!(
-            "  VERDICT: BACK pair only (the voice coils), front silent — channel-exact for \
-             haptics."
-        ),
-        (_, true, false) => println!(
-            "  VERDICT: FRONT pair only (the pad's speaker), back silent — channel-exact for \
-             the speaker."
-        ),
-        (_, true, true) => println!(
-            "  VERDICT: BOTH pairs carry signal — correct for `--pair both`, otherwise the pairs \
-             are leaking into each other."
-        ),
-    }
-    Ok(())
-}
-
-impl Drop for PadLoopbackCapturer {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
-    }
-}
-
-impl AudioCapturer for PadLoopbackCapturer {
-    fn next_chunk(&mut self) -> Result<Vec<f32>> {
-        match self.chunks.recv_timeout(Duration::from_secs(5)) {
-            Ok(c) => Ok(c),
-            // Quiet pad is not a failure — empty chunk, keep the capturer. Err
-            // is a dead capture thread (device invalidated); the caller reopens.
-            Err(RecvTimeoutError::Timeout) => Ok(Vec::new()),
-            Err(RecvTimeoutError::Disconnected) => Err(anyhow!("pad loopback thread ended")),
-        }
-    }
-    fn channels(&self) -> u32 {
-        PAD_CHANNELS
-    }
-    fn drain(&mut self) {
-        while self.chunks.try_recv().is_ok() {}
-    }
-}
-
-fn pad_capture_thread(
-    endpoint_id: &str,
-    tx: SyncSender<Vec<f32>>,
-    stop: Arc<AtomicBool>,
-    ready: SyncSender<Result<()>>,
-) -> Result<()> {
-    if let Err(e) = wasapi::initialize_mta()
-        .ok()
-        .context("CoInitializeEx (MTA)")
-    {
-        let _ = ready.send(Err(e));
-        return Ok(());
-    }
-    // By id, never a default-device resolve. Shared-mode autoconvert so the
-    // engine hands us 48 kHz 4-ch f32 regardless of mix format. Capture on a
-    // render device in shared mode is WASAPI loopback.
-    let setup = (|| -> Result<(wasapi::AudioClient, wasapi::AudioCaptureClient, wasapi::Handle)> {
-        let device = open_wasapi_device(endpoint_id)
-            .map_err(|e| anyhow!("open pad endpoint {endpoint_id}: {e:#}"))?;
-        let mut audio_client = device.get_iaudioclient().context("IAudioClient")?;
-        let desired = WaveFormat::new(
-            32,
-            32,
-            &SampleType::Float,
-            SAMPLE_RATE as usize,
-            PAD_CHANNELS as usize,
-            Some(PAD_CHANNEL_MASK),
-        );
-        let (default_period, _min) = audio_client.get_device_period().context("device period")?;
-        let mode = StreamMode::EventsShared {
-            autoconvert: true,
-            buffer_duration_hns: default_period,
-        };
-        audio_client
-            .initialize_client(&desired, &Direction::Capture, &mode)
-            .context("initialize pad loopback client")?;
-        let h_event = audio_client.set_get_eventhandle().context("event handle")?;
-        let capture_client = audio_client
-            .get_audiocaptureclient()
-            .context("IAudioCaptureClient")?;
-        audio_client.start_stream().context("start pad loopback")?;
-        Ok((audio_client, capture_client, h_event))
-    })();
-    let (audio_client, capture_client, h_event) = match setup {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = ready.send(Err(anyhow!("{e:#}")));
-            return Ok(());
-        }
-    };
-    let _ = ready.send(Ok(()));
-    tracing::info!(endpoint = %endpoint_id, "pad loopback capturing (4 ch / 48 kHz f32)");
-
-    // Endpoint invalidated or engine restart ends the thread; next_chunk Err, caller reopens.
-    let mut bytes: VecDeque<u8> = VecDeque::new();
-    while !stop.load(Ordering::Relaxed) {
-        // Loopback fires events only while a game renders; the timeout keeps `stop` responsive.
-        let _ = h_event.wait_for_event(100);
-        loop {
-            match capture_client.get_next_packet_size() {
-                Ok(Some(0)) | Ok(None) => break,
-                Ok(Some(_n)) => {
-                    capture_client
-                        .read_from_device_to_deque(&mut bytes)
-                        .context("read pad loopback")?;
-                }
-                Err(e) => return Err(anyhow!("get_next_packet_size: {e}")),
-            }
-        }
-        let whole = (bytes.len() / PAD_BLOCK_ALIGN) * PAD_BLOCK_ALIGN;
-        if whole > 0 {
-            let raw: Vec<u8> = bytes.drain(..whole).collect();
-            let mut samples = Vec::with_capacity(whole / 4);
-            for c in raw.chunks_exact(4) {
-                samples.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
-            }
-            let _ = tx.try_send(samples); // non-blocking, lossy — crate capture discipline
-        }
-    }
-    audio_client.stop_stream().ok();
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The blobs below encode the pad layout the capturer reads back.
+    use super::super::pad_capture::PAD_CHANNEL_MASK;
 
     #[test]
     fn registry_stamp_hive_follows_the_endpoint_direction() {

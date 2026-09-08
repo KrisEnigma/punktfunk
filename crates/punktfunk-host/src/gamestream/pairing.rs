@@ -155,6 +155,11 @@ impl PinGate {
 
 /// Pairing state carried across the four HTTP GETs.
 struct Session {
+    /// The phase-1 peer. Phases 2-4 are pre-auth and keyed on the client-chosen `uniqueid`,
+    /// which travels in a plaintext query string; without this any LAN host that sees one can
+    /// re-roll a ceremony's secrets and strand the real client. Same address the PIN is
+    /// bound to (`CeremonyId`), so it constrains nothing the operator flow did not already.
+    peer_ip: std::net::IpAddr,
     aes_key: [u8; 16],
     client_cert_der: Vec<u8>,
     client_cert_sig: Vec<u8>,
@@ -170,6 +175,26 @@ struct Session {
 pub struct Pairing {
     sessions: Mutex<HashMap<String, Session>>,
     pub pin: PinGate,
+}
+
+/// The `uniqueid`'s session, only for the address that opened it. Phases 2-4 carry no
+/// credential of their own, so this is what stops a bystander driving someone else's ceremony.
+fn session_of<'a>(
+    map: &'a mut HashMap<String, Session>,
+    uniqueid: &str,
+    peer_ip: std::net::IpAddr,
+) -> Result<&'a mut Session> {
+    let s = map
+        .get_mut(uniqueid)
+        .ok_or_else(|| anyhow!("no pairing session"))?;
+    if s.peer_ip != peer_ip {
+        tracing::warn!(
+            uniqueid, %peer_ip, expected = %s.peer_ip,
+            "pairing step from a different address than the one that started the ceremony — rejected"
+        );
+        bail!("pairing session belongs to another peer");
+    }
+    Ok(s)
 }
 
 impl Pairing {
@@ -219,6 +244,7 @@ impl Pairing {
         self.sessions.lock().unwrap().insert(
             uniqueid.to_string(),
             Session {
+                peer_ip,
                 aes_key,
                 client_cert_der: der,
                 client_cert_sig: sig,
@@ -245,11 +271,10 @@ impl Pairing {
         id: &ServerIdentity,
         uniqueid: &str,
         hexv: &str,
+        peer_ip: std::net::IpAddr,
     ) -> Result<String> {
         let mut map = self.sessions.lock().unwrap();
-        let s = map
-            .get_mut(uniqueid)
-            .ok_or_else(|| anyhow!("no pairing session"))?;
+        let s = session_of(&mut map, uniqueid, peer_ip)?;
         let enc = hex::decode(hexv).context("clientchallenge hex")?;
         let client_challenge = crypto::ecb_decrypt(&s.aes_key, &enc);
         if client_challenge.len() < 16 {
@@ -275,21 +300,22 @@ impl Pairing {
         id: &ServerIdentity,
         uniqueid: &str,
         hexv: &str,
+        peer_ip: std::net::IpAddr,
     ) -> Result<String> {
         let mut map = self.sessions.lock().unwrap();
-        let s = map
-            .get_mut(uniqueid)
-            .ok_or_else(|| anyhow!("no pairing session"))?;
+        let s = session_of(&mut map, uniqueid, peer_ip)?;
         let enc = hex::decode(hexv).context("serverchallengeresp hex")?;
         let client_hash = crypto::ecb_decrypt(&s.aes_key, &enc);
         if client_hash.len() < 32 {
             bail!("short challenge response");
         }
-        s.client_hash = client_hash[..32].to_vec();
+        // Latch first: a rejected repeat used to overwrite the stored hash on its way out,
+        // which fails phase 4 for the client that legitimately sent the first one.
         if s.responded {
             bail!("serverchallengeresp already answered for this pairing session");
         }
         s.responded = true;
+        s.client_hash = client_hash[..32].to_vec();
         let sig: Signature = id.signing_key.sign(&s.serversecret);
         let mut secret = Vec::with_capacity(16 + 256);
         secret.extend_from_slice(&s.serversecret);
@@ -303,11 +329,10 @@ impl Pairing {
         uniqueid: &str,
         hexv: &str,
         paired_store: &Mutex<Vec<Vec<u8>>>,
+        peer_ip: std::net::IpAddr,
     ) -> Result<String> {
         let mut map = self.sessions.lock().unwrap();
-        let s = map
-            .get_mut(uniqueid)
-            .ok_or_else(|| anyhow!("no pairing session"))?;
+        let s = session_of(&mut map, uniqueid, peer_ip)?;
         let data = hex::decode(hexv).context("clientpairingsecret hex")?;
         if data.len() < 16 {
             bail!("short pairing secret");

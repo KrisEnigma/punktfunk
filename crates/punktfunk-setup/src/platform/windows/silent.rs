@@ -66,7 +66,7 @@ pub fn run(
             args.unknown.join(" ")
         ));
     }
-    let mut choices = WinChoices::derive(facts);
+    let mut choices = WinChoices::derive(facts, artifact);
     for warning in choices.apply(args, env) {
         ui.warn(&warning);
     }

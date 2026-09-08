@@ -23,8 +23,13 @@
   Needs an ELEVATED shell.
 #>
 [CmdletBinding()]
+# `-Install` signs the contents of $Stage and installs them, so the staging directory must not
+# be one any user can write — C:\Users\Public was exactly that, and this script creates the
+# directory itself. Default to a fresh per-run temp dir, as stage-pf-vdisplay.ps1 does for its
+# own work dir. $Nefconc keeps its documented location: that binary is fetched and SHA-256
+# verified by stage-pf-vdisplay.ps1, and pass -Nefconc if you staged it elsewhere.
 param(
-    [string]$Stage      = 'C:\Users\Public\pfvd-stage-deploy',
+    [string]$Stage      = (Join-Path ([IO.Path]::GetTempPath()) ('pfvd-stage-' + [IO.Path]::GetRandomFileName())),
     [string]$Thumbprint = '6A52984E54376C45A1C236B1A2C8A746C5AB6131',
     [string]$Nefconc    = 'C:\Users\Public\nefcon\x64\nefconc.exe',   # pinned nefcon (stage-pf-vdisplay.ps1 fetches it)
     [switch]$Install

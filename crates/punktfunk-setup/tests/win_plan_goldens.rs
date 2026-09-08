@@ -116,7 +116,7 @@ fn host_plan(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
 #[test]
 fn golden_win11_fresh() {
     let facts = fresh();
-    let choices = WinChoices::derive(&facts);
+    let choices = WinChoices::derive(&facts, Artifact::Host);
     golden(
         "win-fresh",
         &render(&facts, &choices, Artifact::Host, false),
@@ -126,7 +126,7 @@ fn golden_win11_fresh() {
 #[test]
 fn golden_win11_upgrade() {
     let facts = upgrade();
-    let choices = WinChoices::derive(&facts);
+    let choices = WinChoices::derive(&facts, Artifact::Host);
     golden(
         "win-upgrade",
         &render(&facts, &choices, Artifact::Host, false),
@@ -136,7 +136,7 @@ fn golden_win11_upgrade() {
 #[test]
 fn golden_win11_sunshine() {
     let facts = sunshine();
-    let choices = WinChoices::derive(&facts);
+    let choices = WinChoices::derive(&facts, Artifact::Host);
     golden(
         "win-sunshine",
         &render(&facts, &choices, Artifact::Host, false),
@@ -146,7 +146,7 @@ fn golden_win11_sunshine() {
 #[test]
 fn golden_win11_public_all_three_branches() {
     let facts = public_network();
-    let mut choices = WinChoices::derive(&facts);
+    let mut choices = WinChoices::derive(&facts, Artifact::Host);
     golden(
         "win-public-skip",
         &render(&facts, &choices, Artifact::Host, false),
@@ -167,7 +167,7 @@ fn golden_win11_public_all_three_branches() {
 #[test]
 fn golden_win11_uninstall() {
     let facts = upgrade();
-    let choices = WinChoices::derive(&facts);
+    let choices = WinChoices::derive(&facts, Artifact::Host);
     golden(
         "win-uninstall",
         &render(&facts, &choices, Artifact::Host, true),
@@ -177,11 +177,30 @@ fn golden_win11_uninstall() {
 #[test]
 fn golden_client_fresh() {
     let facts = fresh();
-    let choices = WinChoices::derive(&facts);
+    let choices = WinChoices::derive(&facts, Artifact::Client);
     golden(
         "win-client-fresh",
         &render(&facts, &choices, Artifact::Client, false),
     );
+}
+
+/// Host and client are two products under two registry keys (D1). On a box where the HOST is
+/// installed and the client is not, deriving the client's choices must read the CLIENT key:
+/// `installed` is the host's, and taking it made the client a false upgrade pinned to
+/// `C:\Program Files\punktfunk\`. Fresh facts cannot catch this — both keys are empty there.
+#[test]
+fn a_client_install_does_not_inherit_the_hosts_directory() {
+    let facts = upgrade(); // host installed, client absent
+    let client = WinChoices::derive(&facts, Artifact::Client);
+    assert_eq!(
+        client.dir, None,
+        "client must not adopt the host's location"
+    );
+    let host = WinChoices::derive(&facts, Artifact::Host);
+    assert!(host.dir.is_some(), "the host still pre-fills its own");
+    // `upgrade` also drives the fresh-only defaults, so the client sees fresh ones.
+    assert_eq!(client.gamestream, Some(false));
+    assert_eq!(host.gamestream, None);
 }
 
 // WP3.2: the first upgrade over an Inno install retires Inno's uninstaller data AFTER our
@@ -190,7 +209,7 @@ fn golden_client_fresh() {
 #[test]
 fn an_upgrade_over_inno_retires_its_uninstaller_between_files_and_arp() {
     let facts = upgrade();
-    let plan = host_plan(&facts, &WinChoices::derive(&facts));
+    let plan = host_plan(&facts, &WinChoices::derive(&facts, Artifact::Host));
     let steps: Vec<&WinAction> = plan.steps().collect();
     let at = |pred: &dyn Fn(&WinAction) -> bool| steps.iter().position(|s| pred(s)).unwrap();
     let deploy = at(&|s| matches!(s, WinAction::DeployFiles { .. }));
@@ -212,9 +231,11 @@ fn an_upgrade_over_inno_retires_its_uninstaller_between_files_and_arp() {
         inno_uninstaller: false,
         ..upgrade()
     };
-    assert!(!host_plan(&ours, &WinChoices::derive(&ours))
-        .steps()
-        .any(|s| matches!(s, WinAction::DeleteFiles { .. })));
+    assert!(
+        !host_plan(&ours, &WinChoices::derive(&ours, Artifact::Host))
+            .steps()
+            .any(|s| matches!(s, WinAction::DeleteFiles { .. }))
+    );
 }
 
 // ------------------------------------------------------------------- named traps (§5, D11, D12)
@@ -223,7 +244,7 @@ fn an_upgrade_over_inno_retires_its_uninstaller_between_files_and_arp() {
 #[test]
 fn a_sunshine_box_coexists_by_moving_the_management_port() {
     let facts = sunshine();
-    let plan = host_plan(&facts, &WinChoices::derive(&facts));
+    let plan = host_plan(&facts, &WinChoices::derive(&facts, Artifact::Host));
     assert!(plan.steps().any(|s| matches!(
         s,
         WinAction::SetEnv { key, value }
@@ -237,7 +258,7 @@ fn an_operator_mgmt_bind_is_never_rewritten() {
         mgmt_bind_set: true,
         ..sunshine()
     };
-    let plan = host_plan(&facts, &WinChoices::derive(&facts));
+    let plan = host_plan(&facts, &WinChoices::derive(&facts, Artifact::Host));
     assert!(!plan
         .steps()
         .any(|s| matches!(s, WinAction::SetEnv { key, .. } if key == "PUNKTFUNK_MGMT_BIND")));
@@ -247,7 +268,7 @@ fn an_operator_mgmt_bind_is_never_rewritten() {
 #[test]
 fn silent_with_a_public_network_warns_but_never_touches_the_profile() {
     let facts = public_network();
-    let plan = host_plan(&facts, &WinChoices::derive(&facts));
+    let plan = host_plan(&facts, &WinChoices::derive(&facts, Artifact::Host));
     assert!(!plan
         .steps()
         .any(|s| matches!(s, WinAction::MakeNetworkPrivate { .. })));
@@ -258,7 +279,7 @@ fn silent_with_a_public_network_warns_but_never_touches_the_profile() {
 
 #[test]
 fn service_install_params_are_fresh_only_by_default() {
-    let fresh_cmds = host_plan(&fresh(), &WinChoices::derive(&fresh())).commands();
+    let fresh_cmds = host_plan(&fresh(), &WinChoices::derive(&fresh(), Artifact::Host)).commands();
     let install = fresh_cmds
         .iter()
         .find(|c| c.contains("service install"))
@@ -266,7 +287,7 @@ fn service_install_params_are_fresh_only_by_default() {
     assert!(install.contains("--gamestream=off"));
     assert!(install.contains("--allow-public-network=off"));
 
-    let up_cmds = host_plan(&upgrade(), &WinChoices::derive(&upgrade())).commands();
+    let up_cmds = host_plan(&upgrade(), &WinChoices::derive(&upgrade(), Artifact::Host)).commands();
     let install = up_cmds
         .iter()
         .find(|c| c.contains("service install"))
@@ -279,7 +300,7 @@ fn service_install_params_are_fresh_only_by_default() {
 #[test]
 fn an_explicit_public_fw_task_reaches_an_upgrade_plan() {
     let facts = upgrade();
-    let mut choices = WinChoices::derive(&facts);
+    let mut choices = WinChoices::derive(&facts, Artifact::Host);
     let args = InnoArgs::parse(&[r#"/MERGETASKS="allowpublicfw""#.to_string()]);
     choices.apply(&args, &Env::default());
     let cmds = host_plan(&facts, &choices).commands();
@@ -291,7 +312,13 @@ fn an_explicit_public_fw_task_reaches_an_upgrade_plan() {
 #[test]
 fn uninstall_order_is_service_tray_then_all_three_driver_legs() {
     let facts = upgrade();
-    let cmds = plan::build(&facts, &WinChoices::derive(&facts), Artifact::Host, true).commands();
+    let cmds = plan::build(
+        &facts,
+        &WinChoices::derive(&facts, Artifact::Host),
+        Artifact::Host,
+        true,
+    )
+    .commands();
     let pos = |needle: &str| {
         cmds.iter()
             .position(|c| c.contains(needle))
@@ -307,7 +334,7 @@ fn uninstall_order_is_service_tray_then_all_three_driver_legs() {
 #[test]
 fn restore_carries_the_pre_install_task_states() {
     let facts = upgrade();
-    let plan = host_plan(&facts, &WinChoices::derive(&facts));
+    let plan = host_plan(&facts, &WinChoices::derive(&facts, Artifact::Host));
     assert!(plan.steps().any(|s| matches!(
         s,
         WinAction::RestoreTasks {
@@ -315,7 +342,7 @@ fn restore_carries_the_pre_install_task_states() {
             scripting_enabled: Some(true),
         }
     )));
-    let fresh_plan = host_plan(&fresh(), &WinChoices::derive(&fresh()));
+    let fresh_plan = host_plan(&fresh(), &WinChoices::derive(&fresh(), Artifact::Host));
     assert!(!fresh_plan.steps().any(|s| matches!(
         s,
         WinAction::StopHostRuntime { .. } | WinAction::RestoreTasks { .. }
@@ -326,7 +353,7 @@ fn restore_carries_the_pre_install_task_states() {
 #[test]
 fn deselecting_tray_on_an_upgrade_deletes_the_run_key() {
     let facts = upgrade();
-    let mut choices = WinChoices::derive(&facts);
+    let mut choices = WinChoices::derive(&facts, Artifact::Host);
     choices.tray_autostart = false;
     let cmds = host_plan(&facts, &choices).commands();
     assert!(cmds
@@ -336,7 +363,7 @@ fn deselecting_tray_on_an_upgrade_deletes_the_run_key() {
 
 #[test]
 fn web_password_file_is_fresh_only() {
-    let plan = host_plan(&fresh(), &WinChoices::derive(&fresh()));
+    let plan = host_plan(&fresh(), &WinChoices::derive(&fresh(), Artifact::Host));
     assert!(plan.steps().any(|s| matches!(
         s,
         WinAction::WebSetup {
@@ -344,7 +371,7 @@ fn web_password_file_is_fresh_only() {
             ..
         }
     )));
-    let plan = host_plan(&upgrade(), &WinChoices::derive(&upgrade()));
+    let plan = host_plan(&upgrade(), &WinChoices::derive(&upgrade(), Artifact::Host));
     assert!(plan.steps().any(|s| matches!(
         s,
         WinAction::WebSetup {

@@ -458,10 +458,8 @@ impl DsWinPad {
             });
             std::ptr::write_unaligned(base as *mut u32, SHM_MAGIC);
         }
-        // On SwDeviceCreate failure keep the section and fall back to an out-of-band devnode
-        // (installer / devgen) — its persistent driver polls the same mailbox name.
         let inst = format!("{}_{index}", id.instance_prefix);
-        let (hsw, instance_id) = match create_swdevice(&SwDeviceProfile {
+        let (hsw, instance_id) = create_swdevice(&SwDeviceProfile {
             instance: &inst,
             container_tag: 0x5046_4453, // "PFDS"
             container_index: index,
@@ -469,13 +467,8 @@ impl DsWinPad {
             usb_vid_pid: id.usb_vid_pid,
             usb_mi: None, // single-interface USB devices (real DS/Edge have no MI_ token)
             description: id.description,
-        }) {
-            Ok((h, i)) => (Some(h), i),
-            Err(e) => {
-                tracing::warn!(error = %format!("{e:#}"), hwid = id.hwid, "SwDeviceCreate failed; falling back to an out-of-band devnode");
-                (None, None)
-            }
-        };
+        })?; // `?`: a swallowed fail latched a pad with no devnode; PadSlots never retried.
+        let (hsw, instance_id) = (Some(hsw), instance_id);
         // Duplicate into the process this devnode is serving, not the pid the LocalService-writable
         // mailbox names.
         channel.bind_devnode(
