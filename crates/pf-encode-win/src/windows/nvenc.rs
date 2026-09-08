@@ -1058,7 +1058,9 @@ impl NvencD3d11Encoder {
     }
 
     /// Arm a live split experiment. Same gates as Linux `arm_split_arbiter`; Windows also
-    /// refuses when `async_rt` is set — the submit→AU span then includes queue depth.
+    /// refuses any async session — the two-thread mode and the completion-event mode both
+    /// keep frames in flight, so `last_submit_at` names a newer submit than the AU it is
+    /// measured against and the span undercounts.
     fn arm_split_arbiter(&mut self) {
         if !matches!(
             std::env::var("PUNKTFUNK_NVENC_SPLIT_ARBITRATE").as_deref(),
@@ -1068,7 +1070,7 @@ impl NvencD3d11Encoder {
         }
         if std::env::var_os("PUNKTFUNK_SPLIT_ENCODE").is_some()
             || cached_split_verdict(&self.split_key()).is_some()
-            || self.async_rt.is_some()
+            || self.session_async
             || self.encoder_engines < 2
             || self.codec == Codec::H264
         {
@@ -1635,8 +1637,9 @@ impl Encoder for NvencD3d11Encoder {
             };
             self.absorb_done(done)?;
         }
+        // `next` advances only once the picture is queued: advanced first, a transient failure
+        // on the opening frame cost the retry its `opening` flag and the IDR its HDR SEI.
         let slot = self.next % POOL;
-        self.next += 1;
         // SAFETY: NVENC calls go through the loaded `EncodeApi` table against `self.encoder`
         // (live, non-null). `rr` (version set) registers `frame.texture` from the same
         // device the session opened against; the cloned texture in `regs` keeps it alive.
@@ -1805,8 +1808,12 @@ impl Encoder for NvencD3d11Encoder {
             if let Err(e) = (api().encode_picture)(self.encoder, &mut pic).nv_ok() {
                 // Nothing owns the mapping yet; left mapped, the slot's next map fails too.
                 let _ = (api().unmap_input_resource)(self.encoder, mp.mappedResource);
+                // The forced IDR and the anchor were spent on a picture that never went out.
+                self.force_kf |= flags != 0;
+                self.pending_anchor |= anchor;
                 return Err(nvenc_status::call_err("encode_picture", e));
             }
+            self.next += 1;
             self.pending.push_back((
                 self.bitstreams[slot],
                 mp.mappedResource,

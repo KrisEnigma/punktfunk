@@ -722,7 +722,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 struct Inner {
-    /// Joined before `session` closes under it.
+    /// Joined before `session` closes under it ([`Inner::drop`]).
     retrieve: Retrieve,
     /// Session must Close before the loader unloads the runtime (declaration drop order).
     session: Session,
@@ -734,6 +734,20 @@ struct Inner {
     first_au_logged: bool,
     /// Warn once if the runtime hands out array textures (subresource-0 copy would be wrong).
     array_warned: bool,
+}
+
+impl Drop for Inner {
+    /// Join, then Close, then the fields. Every `pending` entry owns a bitstream the runtime
+    /// may still be writing, and Close is what aborts those writes; field order alone freed
+    /// the boxes under the runtime whenever a session ended with a frame in flight.
+    fn drop(&mut self) {
+        self.retrieve.stop_and_join();
+        // SAFETY: the session is live and its sync thread joined; Close on an encoder in any
+        // state is legal and its result carries nothing here.
+        unsafe {
+            let _ = vpl::MFXVideoENCODE_Close(self.session.0);
+        }
+    }
 }
 
 impl Inner {

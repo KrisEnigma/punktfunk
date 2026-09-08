@@ -315,10 +315,18 @@ impl Pool {
         Some((slot, 0, seq))
     }
 
-    /// A blended pointer moved since the encode thread last looked — a peek that leaves the
-    /// mark, so the drive loop can rate-limit to the refresh before it re-encodes.
+    /// A blended pointer moved since the encode thread last looked AND the stash can be
+    /// re-encoded now — a peek that leaves the mark, so the drive loop can rate-limit to the
+    /// refresh. A stash whose access unit is still owed is not pending: the loop parks on that
+    /// AU instead of spinning on a timer, and the move is picked up once the slot comes back.
     pub fn cursor_pending(&self) -> bool {
-        !self.bypass && self.cursor.is_dirty()
+        if self.bypass || !self.cursor.is_dirty() {
+            return false;
+        }
+        let st = lock(&self.state);
+        st.stash.is_some_and(|(slot, ..)| {
+            wire::republish_slot(Some(slot), st.full.len(), &st.free).is_some()
+        })
     }
 
     /// Re-encode the stash with the pointer where it is NOW. DWM excludes the hardware cursor and
@@ -327,13 +335,21 @@ impl Pool {
     /// slot is taken like [`Self::republish`], and the source counter advances so the move reads
     /// as real progress. `None` unless a move is pending, a plate exists, the slot is idle and no
     /// composed frame is queued — a queued frame carries the current pointer itself.
+    ///
+    /// The mark is consumed only once the slot is taken: consumed on a busy slot, the last move
+    /// of a gesture was lost and the client's pointer rested one step behind.
     pub fn cursor_republish(&self) -> Option<(usize, u64, u64)> {
-        if !self.cursor.take_dirty() {
+        if !self.cursor.is_dirty() {
             return None;
         }
         let mut st = lock(&self.state);
         let (slot, ..) = st.stash?;
         wire::republish_slot(Some(slot), st.full.len(), &st.free)?;
+        if !self.cursor.take_dirty() {
+            return None;
+        }
+        // A slot with no clean plate has nothing to re-blend until the next compose, which
+        // carries the pointer itself; the mark is spent so the loop does not spin on it.
         st.targets.restore_under(slot).ok()?;
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
@@ -422,13 +438,19 @@ impl Pool {
     /// draws none (the planar pair signals its fence here). In bypass the frame is the held
     /// surface itself and carries no pointer: there is no driver-owned image to draw one on,
     /// so that mode is only honest for a client that takes the cursor plane.
+    ///
+    /// A blend draws the pointer where it is now, so it spends the move mark: left set, the
+    /// loop re-encoded the same picture once more right after a composed frame.
     pub fn frame(&self, slot: usize, pts_ns: u64) -> Result<CapturedFrame, Fail> {
-        let cursor = self.cursor.to_blend();
         let mut st = lock(&self.state);
         if self.bypass {
             let src = st.held.clone().ok_or((-2, "bypass"))?;
             return Ok(st.targets.direct_frame(&src, pts_ns));
         }
+        // Taken before the image is read: a move landing between the two is drawn now and
+        // re-encoded once more, never drawn now and forgotten.
+        let _ = self.cursor.take_dirty();
+        let cursor = self.cursor.to_blend();
         st.targets.frame(slot, pts_ns, cursor)
     }
 }

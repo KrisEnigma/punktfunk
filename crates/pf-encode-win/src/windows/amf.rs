@@ -2049,6 +2049,7 @@ impl Encoder for AmfEncoder {
         inner.retrieve.stop_and_join();
         inner.retrieve.reset_queues(); // owed AUs forfeited; rebuilt stream restarts at IDR
         inner.held.clear(); // the joined thread proves nothing is reading them
+        inner.next = 0; // the rebuilt component's first frame is `opening` again
         inner.hdr_pushed = None; // re-Init'd component needs HDR metadata again
                                  // SAFETY: live component, encode thread, no AMF call in flight. Flush/Terminate are
                                  // legal on a wedge (results ignored); apply_static_props + init rebuild it.
