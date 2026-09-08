@@ -309,6 +309,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **`pf_client_core::collate` is where library sort and grouping live now.** The module was
+  private to `pf-console-ui`, so the GTK and WinUI shelves could not reach it; it moves behind
+  a `Collatable` trait each shell implements for its own model, and `store_label` and
+  `DESKTOP_ID` move to `pf_client_core::library` beside `GameEntry`. Nothing to do unless you
+  named `pf_console_ui::collate` — the console's own paths still resolve through a re-export.
 - **Error messages follow one register rule across the stack (`docs/writing.md` §4).** Operator
   lines name the operation, screen text is a plain sentence with the next move, and the
   management API's `error` field is now screen text because the console shows it verbatim —

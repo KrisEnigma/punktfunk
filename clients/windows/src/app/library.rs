@@ -445,7 +445,11 @@ pub(crate) fn library_page(props: &LibraryProps, cx: &mut RenderCx) -> Element {
     // Responsive poster columns from the live window width (the hosts page's pattern).
     let window = cx.use_inner_size();
     // Shared `library_sort`: the same four orders the console's bar and the GTK dialog offer.
-    let (sort, set_sort) = cx.use_state(SortKey::parse(&Settings::load().library_sort));
+    // `use_state` evaluates its seed on every render and this page re-renders on each poster
+    // that lands, so the stored value is read once per process rather than once per frame.
+    static STORED_SORT: std::sync::OnceLock<SortKey> = std::sync::OnceLock::new();
+    let seed = *STORED_SORT.get_or_init(|| SortKey::parse(&Settings::load().library_sort));
+    let (sort, set_sort) = cx.use_state(seed);
     let content_w = (window.width - 64.0).clamp(POSTER_MIN_WIDTH, 1120.0);
     let cols =
         (((content_w + POSTER_GAP) / (POSTER_MIN_WIDTH + POSTER_GAP)).floor() as usize).clamp(2, 6);
