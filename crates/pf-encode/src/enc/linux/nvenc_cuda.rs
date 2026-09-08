@@ -26,13 +26,14 @@
 use super::nvenc_core::{
     apply_low_latency_config, build_init_params, cached_ceiling, cached_split_verdict, codec_guid,
     plan_range_recovery, resolve_slices, resolve_split_subframe, resolve_subframe, store_ceiling,
-    store_split_verdict, subframe_env_forced, ArbAction, CeilingKey, LowLatencyConfig, NvStatusExt,
-    RangePlan, SplitArbiter, SplitKey,
+    store_split_verdict, subframe_env_forced, wave_rows, ArbAction, CeilingKey, LowLatencyConfig,
+    NvStatusExt, RangePlan, SplitArbiter, SplitKey,
 };
 use super::nvenc_status;
 use super::{max_forced_split_mode, resolve_split_mode};
 use super::{AuChunk, ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
 use anyhow::{anyhow, bail, Context, Result};
+use pf_encode_win::rfi::Wave;
 use pf_frame::{CapturedFrame, FramePayload};
 use pf_zerocopy::cuda::{self, InputSurface};
 use pf_zerocopy::vkslot::{SlotFormat, VkSlotBlend, VkSlotRef};
@@ -627,7 +628,14 @@ pub struct NvencCudaEncoder {
     /// In-flight: (bitstream, mapped input, pts_ns, recovery-anchor, IDR-predicted).
     /// Fourth: first frame after a successful RFI. Fifth: submit-time IDR hint for chunks
     /// emitted before picture type is known (P-only + infinite GOP; finish lock checks).
-    pending: VecDeque<(nv::NV_ENC_OUTPUT_PTR, nv::NV_ENC_INPUT_PTR, u64, bool, bool)>,
+    pending: VecDeque<(
+        nv::NV_ENC_OUTPUT_PTR,
+        nv::NV_ENC_INPUT_PTR,
+        u64,
+        bool,
+        bool,
+        bool,
+    )>,
     /// Next `inputTimeStamp`. [`Encoder::submit_indexed`] pins it to the wire index so RFI
     /// timestamps stay 1:1 across rebuilds. Self-increments for un-indexed callers.
     frame_idx: i64,
@@ -635,6 +643,17 @@ pub struct NvencCudaEncoder {
     /// Armed by a successful RFI; next `submit` tags that AU as the recovery anchor (NVENC
     /// applies invalidation at the next `encode_picture`).
     pending_anchor: bool,
+    /// Intra refresh wave in flight: a declined RFI's answer instead of the IDR. The start
+    /// frame carries `forceIntraRefreshWithFrameCnt`; the driver sweeps from there.
+    wave: Option<Wave>,
+    /// Timestamps `[start, close)` of the latest wave: part-dirty pictures the driver would
+    /// otherwise serve as an RFI anchor. The close and everything after are clean.
+    wave_span: Option<(i64, i64)>,
+    /// A loss landed inside the wave in flight. The driver ignores a re-force mid-sweep, so
+    /// the sweep runs on with damage behind it: its close carries no mark, and a fresh wave
+    /// starts on the frame after it (`wave_queued`).
+    wave_spoiled: bool,
+    wave_queued: bool,
     inited: bool,
     /// `nvEncGetEncodeCaps` — probed once before configure.
     rfi_supported: bool,
@@ -767,6 +786,10 @@ impl NvencCudaEncoder {
             frame_idx: 0,
             force_kf: false,
             pending_anchor: false,
+            wave: None,
+            wave_span: None,
+            wave_spoiled: false,
+            wave_queued: false,
             vk_blend: None,
             blend_wanted: cursor_blend,
             cursor_tried: false,
@@ -853,7 +876,7 @@ impl NvencCudaEncoder {
                 let _ = j.join();
             }
         }
-        for (_, map, _, _, _) in &self.pending {
+        for (_, map, _, _, _, _) in &self.pending {
             if !map.is_null() {
                 let _ = (api().unmap_input_resource)(self.encoder, *map);
             }
@@ -897,6 +920,59 @@ impl NvencCudaEncoder {
         self.last_rfi_range = None;
         self.pending_anchor = false;
         self.distrusted = false;
+        self.wave = None;
+        self.wave_span = None;
+        self.wave_spoiled = false;
+        self.wave_queued = false;
+    }
+
+    /// A real loss with no clean frame old enough left: a wave heals without an anchor.
+    /// The client re-armed at this loss, so a wave under way restarts to give it a fresh
+    /// start and close. Nonsense and a range past the head stay the caller's keyframe.
+    fn start_wave(&mut self, first: i64, last: i64) -> bool {
+        let cycle = self.wave_cycle();
+        if cycle == 0 || first < 0 || first > last || first >= self.frame_idx {
+            return false;
+        }
+        if self.wave.is_some() {
+            // The driver ignores a re-force mid-sweep (measured on the RTX box): let this
+            // one run out unmarked and queue a fresh wave behind it.
+            self.wave_spoiled = true;
+            self.wave_queued = true;
+            tracing::debug!(
+                first,
+                last,
+                "nvenc RFI: loss mid-wave — wave queued behind it"
+            );
+            return true;
+        }
+        self.wave = Some(Wave::start(cycle));
+        tracing::debug!(
+            first,
+            last,
+            cycle,
+            "nvenc RFI: no clean anchor — intra refresh wave"
+        );
+        true
+    }
+
+    /// Whether the picture at `ts` is a part-dirty wave frame the driver must not anchor on.
+    fn wave_dirty(&self, ts: i64) -> bool {
+        self.wave_span
+            .is_some_and(|(start, close)| ts >= start && ts < close)
+    }
+
+    /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.
+    fn wave_cycle(&self) -> u32 {
+        if !crate::rfi::wave_enabled() {
+            return 0;
+        }
+        crate::rfi::wave_cycle(
+            wave_rows(self.height),
+            self.fps,
+            256,
+            crate::rfi::pinned_cycle(),
+        )
     }
 
     /// One `NV_ENC_CAPS` value; 0 on error (unqueryable = unsupported).
@@ -1088,6 +1164,7 @@ impl NvencCudaEncoder {
                 },
                 hdr: self.hdr,
                 rfi_supported: self.rfi_supported,
+                intra_refresh_cnt: self.wave_cycle(),
                 slices: self.slices,
             },
         );
@@ -1650,7 +1727,7 @@ impl NvencCudaEncoder {
     /// Absorb one retrieve completion: FIFO-check, unmap on the encode thread (retrieve never
     /// touches input resources), queue the AU.
     fn absorb_done(&mut self, done: RetrieveDone) -> Result<()> {
-        let Some((bs, map, pts_ns, anchor, _)) = self.pending.pop_front() else {
+        let Some((bs, map, pts_ns, anchor, _, mark)) = self.pending.pop_front() else {
             bail!("NVENC retrieve: completion with no in-flight frame (pairing bug)");
         };
         if bs as usize != done.bs {
@@ -1673,6 +1750,7 @@ impl NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: mark,
                 chunk_aligned: false,
             });
         Ok(())
@@ -1911,6 +1989,31 @@ impl NvencCudaEncoder {
             // First frame after RFI. A simultaneous forced IDR is itself the re-anchor — drop
             // the tag.
             let anchor = std::mem::take(&mut self.pending_anchor) && flags == 0;
+            // The wave: an IDR flushes it, queue and all; its start frame asks the driver
+            // for the sweep.
+            if flags != 0 {
+                self.wave = None;
+                self.wave_spoiled = false;
+                self.wave_queued = false;
+            }
+            let wave = self.wave;
+            let mark = wave.is_some_and(|w| w.marks() && !(w.closes() && self.wave_spoiled));
+            if let Some(w) = wave {
+                let ts = pts as i64;
+                if w.index == 0 {
+                    // A wave after a spoiled one keeps the spoiled pictures dirty too.
+                    let start = match self.wave_span {
+                        Some((s, _)) if self.wave_spoiled => s,
+                        _ => ts,
+                    };
+                    self.wave_span = Some((start, ts + i64::from(w.cycle) - 1));
+                    self.wave_spoiled = false;
+                }
+                self.wave = w.next();
+                if self.wave.is_none() && std::mem::take(&mut self.wave_queued) {
+                    self.wave = Some(Wave::start(w.cycle));
+                }
+            }
             let mut pic = nv::NV_ENC_PIC_PARAMS {
                 version: nv::NV_ENC_PIC_PARAMS_VER,
                 inputWidth: self.width,
@@ -1950,6 +2053,28 @@ impl NvencCudaEncoder {
                     });
                 }
             }
+
+            // The wave's start frame: the driver sweeps the picture over `cycle` frames from
+            // here, one union arm per codec. Zero on every other frame.
+            let force_cnt = wave.filter(|w| w.index == 0).map_or(0, |w| w.cycle);
+            match self.codec {
+                Codec::H265 => {
+                    pic.codecPicParams
+                        .hevcPicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::H264 => {
+                    pic.codecPicParams
+                        .h264PicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::Av1 => {
+                    pic.codecPicParams
+                        .av1PicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::PyroWave => unreachable!("PyroWave never opens the direct-NVENC backend"),
+            }
             if !sei.is_empty() {
                 match self.codec {
                     Codec::H265 => {
@@ -1981,6 +2106,7 @@ impl NvencCudaEncoder {
                 // Chunked-poll IDR hint = `is_idr`. P-only + infinite GOP: the driver never
                 // emits an IDR we did not ask for.
                 is_idr,
+                mark,
             ));
             // Arbiter stamp. One field, not a sixth `pending` slot: sync depth-1 has at most
             // one encode outstanding.
@@ -2095,8 +2221,13 @@ impl Encoder for NvencCudaEncoder {
                 self.pending_anchor = true;
                 true
             }
-            RangePlan::Decline => false,
+            RangePlan::Decline => self.start_wave(first, last),
             RangePlan::Invalidate { first, last } => {
+                // The driver would anchor on `first - 1`; a part-dirty wave picture there
+                // would lift the client onto damage, so wave again instead.
+                if self.wave_dirty(first - 1) {
+                    return self.start_wave(first, last);
+                }
                 // `inputTimeStamp` is the wire index (`submit_indexed`), so the client's lost
                 // range maps 1:1 onto the timestamps here.
                 // SAFETY: live session, encode thread. Each `ts` is clamped to
@@ -2142,7 +2273,7 @@ impl Encoder for NvencCudaEncoder {
                 .ready
                 .pop_front());
         }
-        let Some((bs, map, pts_ns, anchor, _)) = self.pending.pop_front() else {
+        let Some((bs, map, pts_ns, anchor, _, mark)) = self.pending.pop_front() else {
             return Ok(None);
         };
         // SAFETY: non-empty `pending` ⇒ live session (`teardown` clears both). Encode thread.
@@ -2185,6 +2316,7 @@ impl Encoder for NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: mark,
                 chunk_aligned: false,
             }))
         }
@@ -2200,7 +2332,7 @@ impl Encoder for NvencCudaEncoder {
         if !self.supports_chunked_poll() && self.chunk.is_none() {
             return Ok(self.poll()?.map(AuChunk::whole));
         }
-        let Some(&(bs, _, pts_ns, anchor, idr_hint)) = self.pending.front() else {
+        let Some(&(bs, _, pts_ns, anchor, idr_hint, mark)) = self.pending.front() else {
             return Ok(None);
         };
         // ~2 frame intervals of doNotWait; then the blocking lock. Worst case = sync `poll`.
@@ -2254,6 +2386,7 @@ impl Encoder for NvencCudaEncoder {
                             pts_ns,
                             keyframe: idr_hint,
                             recovery_anchor: anchor,
+                            recovery_point: mark,
                             chunk_aligned: false,
                             first,
                             last: false,
@@ -2271,7 +2404,7 @@ impl Encoder for NvencCudaEncoder {
 
         // One blocking lock — completion authority and wedge watchdog (depth-1: tail must
         // not ride a +1 tick). Emits whatever the sampler had not handed out.
-        let (bs, map, pts_ns, anchor, idr_hint) =
+        let (bs, map, pts_ns, anchor, idr_hint, mark) =
             self.pending.pop_front().expect("front() checked above");
         // SAFETY: same as `poll`: live session, encode thread, blocking lock. Reads (tail +
         // prefix check) before unlock. Unmap `map` exactly once.
@@ -2345,6 +2478,7 @@ impl Encoder for NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: mark,
                 chunk_aligned: false,
                 first: !cs.opened,
                 last: true,

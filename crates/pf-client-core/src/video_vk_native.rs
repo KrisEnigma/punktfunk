@@ -184,6 +184,14 @@ impl Codec {
         }
     }
 
+    fn forgive_unclean(&mut self) {
+        match self {
+            Codec::H264(d) => d.forgive_unclean(),
+            Codec::H265(d) => d.forgive_unclean(),
+            Codec::Av1(d) => d.forgive_unclean(),
+        }
+    }
+
     /// Return a delivered frame to its pool. `presented` is whether `value + 1` was enqueued.
     fn release_frame(
         &mut self,
@@ -712,6 +720,12 @@ impl NativeVulkanDecoder {
     /// and must not tick the decoder-demotion streak.
     pub(crate) fn take_recovery_request(&mut self) -> bool {
         std::mem::take(&mut self.want_recovery)
+    }
+
+    /// The gate lifted on intra refresh marks: the planner's damaged-chain marks are stale
+    /// (`CleanLedger::clear`).
+    pub(crate) fn forgive_unclean(&mut self) {
+        self.dec.forgive_unclean();
     }
 
     /// One complete access unit; at most one displayable frame out.

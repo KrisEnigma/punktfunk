@@ -567,6 +567,12 @@ impl H264Planner {
         })
     }
 
+    /// An intra refresh wave finished on a picture the freeze gate accepted: forget the
+    /// unclean marks, which a chain through half-refreshed pictures cannot clear itself.
+    pub fn forgive_unclean(&mut self) {
+        self.clean.clear();
+    }
+
     /// Drain the DPB and discard 8.2.1/8.2.5 state. Planning resumes only at
     /// an IDR ([`PlanError::AwaitingIdr`]). Parameter sets survive (7.4.1.2).
     pub fn flush(&mut self) -> DpbUpdate {

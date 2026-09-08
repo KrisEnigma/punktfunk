@@ -1566,6 +1566,10 @@ mod vk_av1_encode;
 #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
 #[path = "enc/linux/vk_valve_rgb.rs"]
 mod vk_valve_rgb;
+// Vendored `VK_KHR_video_encode_intra_refresh`. Same ash-pin. See `design/vulkan-intra-refresh.md`.
+#[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
+#[path = "enc/linux/vk_intra_refresh.rs"]
+mod vk_intra_refresh;
 // Shared ash helpers (dmabuf import, image/memory) for the Linux Vulkan backends.
 #[cfg(all(
     target_os = "linux",

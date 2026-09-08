@@ -1799,6 +1799,7 @@ impl PyroWaveEncoder {
             pts_ns: fr.pts_ns,
             keyframe: true,
             recovery_anchor: false,
+            recovery_point: false,
             chunk_aligned: fr.wire_chunk.is_some(),
         });
         self.note_encode_us(fr.t0.elapsed().as_micros() as u32);

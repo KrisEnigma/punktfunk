@@ -707,6 +707,7 @@ fn au_from(done: Pending) -> Result<(EncodedFrame, Box<BsBuf>)> {
         pts_ns: done.pts_ns,
         keyframe: key_flag || done.forced,
         recovery_anchor: done.recovery_anchor,
+        recovery_point: false,
         chunk_aligned: false,
     };
     let mut bs_box = done.bs;

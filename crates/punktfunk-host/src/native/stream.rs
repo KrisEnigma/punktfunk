@@ -2351,6 +2351,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         {
                             au_flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
                         }
+                        if c.recovery_point {
+                            au_flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
+                        }
                         if c.recovery_anchor {
                             au_flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_ANCHOR;
                         }
@@ -2458,6 +2461,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 && caps.intra_refresh_period > 0
                 && mark_recovery_boundary(&mut ir_wave_pos, au.keyframe, caps.intra_refresh_period)
             {
+                flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
+            }
+            if au.recovery_point {
                 flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
             }
             if au.recovery_anchor {

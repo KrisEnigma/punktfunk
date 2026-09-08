@@ -354,6 +354,13 @@ impl ReanchorGate {
     pub fn is_holding(&self) -> bool {
         self.awaiting
     }
+
+    /// The current lift came from intra refresh marks, not an IDR or an anchor. A client with
+    /// a bitstream planner forgets its damaged-chain marks on the frame this turns true: the
+    /// wave healed content by overwrite, which the chain cannot show.
+    pub fn lifted_by_marks(&self) -> bool {
+        !self.awaiting && self.mark_lift
+    }
 }
 
 #[cfg(test)]
@@ -398,6 +405,22 @@ mod tests {
     fn a_real_keyframe_lifts_immediately() {
         assert_eq!(lift_at(&[(true, false)]), Some(0));
         assert_eq!(lift_at(&[(false, true), (true, false)]), Some(1));
+    }
+
+    /// Only a lift by wave marks reports as one; an IDR lift and the next arm clear it.
+    #[test]
+    fn lifted_by_marks_names_a_wave_lift_only() {
+        let t = Instant::now();
+        let mut g = ReanchorGate::new(0);
+        g.arm(t);
+        g.on_decoded(USER_FLAG_RECOVERY_POINT, false, t);
+        assert!(!g.lifted_by_marks(), "still holding after one mark");
+        g.on_decoded(USER_FLAG_RECOVERY_POINT, false, t);
+        assert!(g.lifted_by_marks());
+        g.arm(t);
+        assert!(!g.lifted_by_marks(), "a new arm forgets the wave lift");
+        g.on_decoded(FLAG_SOF as u32, true, t);
+        assert!(!g.lifted_by_marks(), "an IDR lift is not a wave lift");
     }
 
     #[test]

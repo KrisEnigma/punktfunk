@@ -566,6 +566,7 @@ impl Drive<'_> {
             (chunk.keyframe, au::AU_KEYFRAME),
             (chunk.recovery_anchor, au::AU_RECOVERY_ANCHOR),
             (chunk.chunk_aligned, au::AU_CHUNK_ALIGNED),
+            (chunk.recovery_point, au::AU_RECOVERY_POINT),
         ]
         .into_iter()
         .fold(0, |acc, (on, bit)| if on { acc | bit } else { acc });

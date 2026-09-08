@@ -1185,6 +1185,7 @@ fn pump(
                             _ => image.local_recovery(),
                         };
                         if gate.on_local_recovery(local) {
+                            decoder.forgive_unclean();
                             tracing::debug!(
                                 "re-anchored on the stream's own recovery point SEI — no IDR needed"
                             );
@@ -1211,6 +1212,15 @@ fn pump(
                             evidence,
                             now,
                         ) == GateVerdict::Present;
+                        // A wave lift: the planner's damaged-chain marks are stale from here,
+                        // or every later host anchor is refused until an IDR.
+                        if was_holding && present && gate.lifted_by_marks() {
+                            decoder.forgive_unclean();
+                            tracing::debug!(
+                                "re-anchored on intra refresh marks — forgetting the damaged \
+                                 reference chain"
+                            );
+                        }
                         if !present && !was_holding {
                             tracing::debug!(
                                 "damaged reference chain reached an unfrozen gate — holding, \

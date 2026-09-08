@@ -623,5 +623,17 @@ int main(void) {
            VA_FOURCC_X2R10G10B10, VA_FOURCC_X2B10G10R10, VA_FOURCC_A2R10G10B10, VA_FOURCC_A2B10G10R10);
     printf("hex  VA_FOURCC_NV12 %#x P010 %#x\n", VA_FOURCC_NV12, VA_FOURCC_P010);
     printf("hex  VA_EXPORT_SURFACE_READ_WRITE %#x WRITE_ONLY %#x\n", VA_EXPORT_SURFACE_READ_WRITE, VA_EXPORT_SURFACE_WRITE_ONLY);
+    /* Rolling intra refresh (the on-demand wave): one misc buffer per picture. */
+    S(VAEncMiscParameterRIR);
+    O(VAEncMiscParameterRIR, intra_insertion_location);
+    O(VAEncMiscParameterRIR, intra_insert_size);
+    O(VAEncMiscParameterRIR, qp_delta_for_inserted_intra);
+    O(VAEncMiscParameterRIR, va_reserved);
+    printf("enum VAEncMiscParameterTypeRIR              %d\n", VAEncMiscParameterTypeRIR);
+    {
+        VAEncMiscParameterRIR r = {0};
+        r.rir_flags.bits.enable_rir_row = 1;
+        printf("bits rir_flags.enable_rir_row=1 -> value 0x%08x\n", r.rir_flags.value);
+    }
     return 0;
 }
