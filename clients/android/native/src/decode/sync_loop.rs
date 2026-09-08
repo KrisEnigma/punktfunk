@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use super::display::{
     hdr_dataspace, install_render_callback, release_render_callback, DisplayTracker,
 };
-use super::latency::{note_decoded_pts, now_realtime_ns, take_flags, Receipts};
+use super::latency::{note_decoded_pts, note_received_frame, now_realtime_ns, take_flags};
 use super::setup::{
     boost_hot_threads, boost_thread_priority, codec_mime, create_codec, hdr_static,
     low_latency_format, try_set_frame_rate,
@@ -173,7 +173,10 @@ pub(super) fn run_sync(
     // the decode signal (`measure_decode`) — the decoder-backlog bottleneck the network can't see.
     let measure_decode = client.wants_decode_latency();
     let mut in_flight: VecDeque<(u64, i128)> = VecDeque::new();
-    let mut receipts = Receipts::new();
+    // Phase-2 host/network split: received AUs awaiting their 0xCF host timing, as
+    // (pts_ns, capture→received µs). Only fed while the HUD is visible.
+    let mut pending_split: VecDeque<(u64, u64)> = VecDeque::new();
+    let mut last_phase_ack: Option<i32> = None;
     // The dataspace we've signalled on the Surface so far (None = default/SDR). Set reactively once
     // the decoder reports an HDR stream (see `drain`); avoids re-applying every format event.
     let mut applied_ds: Option<DataSpace> = None;
@@ -216,13 +219,18 @@ pub(super) fn run_sync(
                     // Receipt stamp for the `decode` stage pairing, whenever it's needed: the HUD
                     // being visible, or the ABR decode signal (`measure_decode`).
                     if stats.enabled() || measure_decode {
-                        receipts.note(
+                        let received_ns = note_received_frame(
                             &client,
                             &stats,
-                            clock_offset.load(Ordering::Relaxed),
-                            &mut in_flight,
                             &frame,
+                            clock_offset.load(Ordering::Relaxed),
+                            &mut pending_split,
+                            &mut last_phase_ack,
                         );
+                        in_flight.push_back((frame.pts_ns / 1000, received_ns));
+                        if in_flight.len() > IN_FLIGHT_CAP {
+                            in_flight.pop_front(); // stale — codec never echoed it back
+                        }
                     }
                     pending = Some(frame);
                 }

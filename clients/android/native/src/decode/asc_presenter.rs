@@ -53,8 +53,8 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use super::async_loop::DecodeEvent;
-use super::latency::now_realtime_ns;
-use super::presenter::{cadence_suffix, p50_max_ms, PresentPriority};
+use super::latency::{now_realtime_ns, p50_max_ms};
+use super::presenter::{cadence_suffix, PresentPriority};
 use super::surface_control::{Layer, PresentComplete};
 use super::vsync::now_monotonic_ns;
 

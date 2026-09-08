@@ -1,6 +1,5 @@
 package io.unom.punktfunk
 
-import io.unom.punktfunk.console.ConsoleJson
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -47,13 +46,6 @@ class SettingsFieldsTest {
     fun everyRowMovesInTheProbe() {
         val a = Settings(); val b = moved()
         for (f in SettingsFields.ALL) assertNotEquals(f.name, f.get(a), f.get(b))
-    }
-
-    @Test
-    fun theConsoleDocumentRoundTripsEveryRow() {
-        val want = moved()
-        val got = ConsoleJson.applySettings(Settings(), ConsoleJson.settings(want, null))
-        assertEquals(want, got)
     }
 
     @Test

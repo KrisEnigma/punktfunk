@@ -17,7 +17,9 @@ use super::display::{
     apply_hdr_dataspace, color_dataspace, hdr_dataspace, install_render_callback,
     release_render_callback, DisplayTracker,
 };
-use super::latency::{note_decoded_pts, now_realtime_ns, take_flags, take_stamp, Receipts};
+use super::latency::{
+    note_decoded_pts, note_received_frame, now_realtime_ns, take_flags, take_stamp,
+};
 use super::presenter::{presenter_disabled_by_sysprop, PresentMeter, PresentPriority, Presenter};
 use super::setup::{
     boost_hot_threads, boost_thread_priority, codec_mime, create_codec, hdr_static,
@@ -1096,7 +1098,10 @@ fn feeder_loop(
     shutdown: Arc<AtomicBool>,
     ev_tx: mpsc::Sender<DecodeEvent>,
 ) {
-    let mut receipts = Receipts::new();
+    // Received AUs awaiting their 0xCF host timing (Phase-2 split), as (pts_ns, capture→received µs).
+    let mut pending_split: VecDeque<(u64, u64)> = VecDeque::new();
+    // Last logged phase-lock ACK (the host's applied capture hold, from the 0xCF tail).
+    let mut last_phase_ack: Option<i32> = None;
     while !shutdown.load(Ordering::Relaxed) {
         match client.next_frame(Duration::from_millis(5)) {
             Ok(frame) => {
@@ -1113,16 +1118,21 @@ fn feeder_loop(
                 // Park the receipt stamp whenever the `decode` stage is consumed: the HUD, or the
                 // ABR decode signal (`measure_decode`).
                 if (stats.enabled() || measure_decode) && frame.complete {
+                    let received_ns = note_received_frame(
+                        &client,
+                        &stats,
+                        &frame,
+                        clock_offset.load(Ordering::Relaxed),
+                        &mut pending_split,
+                        &mut last_phase_ack,
+                    );
                     let mut g = in_flight
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    receipts.note(
-                        &client,
-                        &stats,
-                        clock_offset.load(Ordering::Relaxed),
-                        &mut g,
-                        &frame,
-                    );
+                    g.push_back((frame.pts_ns / 1000, received_ns));
+                    if g.len() > IN_FLIGHT_CAP {
+                        g.pop_front(); // stale — codec never echoed it back
+                    }
                 }
                 if ev_tx.send(DecodeEvent::Au(frame, gap)).is_err() {
                     break; // the decode loop is gone
