@@ -31,38 +31,20 @@ use pf_driver_proto::mouse::{
     MOUSE_PID, MOUSE_REPORT_ID, MOUSE_REPORT_LEN, MOUSE_VER, MOUSE_VID, MouseShm,
 };
 use pf_umdf_util::channel::{ChannelClient, ChannelConfig};
-use pf_umdf_util::nt_success;
+use pf_umdf_util::hid::{
+    IOCTL_HID_GET_DEVICE_ATTRIBUTES, IOCTL_HID_GET_DEVICE_DESCRIPTOR,
+    IOCTL_HID_GET_REPORT_DESCRIPTOR, IOCTL_HID_GET_STRING, IOCTL_HID_READ_REPORT,
+    IOCTL_HID_WRITE_REPORT, IOCTL_UMDF_HID_GET_INPUT_REPORT, IOCTL_UMDF_HID_SET_OUTPUT_REPORT,
+    declared_len, string_request_id,
+};
+use pf_umdf_util::skeleton::{self, STATUS_NOT_IMPLEMENTED, STATUS_SUCCESS};
 use pf_umdf_util::wdf::{self, Request};
+use pf_umdf_util::{dbglog, nt_success};
 use wdk_sys::{
-    NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, PWDFDEVICE_INIT, ULONG, WDF_DRIVER_CONFIG,
-    WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, WDF_OBJECT_ATTRIBUTES,
-    WDF_TIMER_CONFIG, WDFDEVICE, WDFDRIVER, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER,
+    NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, PWDFDEVICE_INIT, ULONG, WDF_NO_OBJECT_ATTRIBUTES,
+    WDFDEVICE, WDFDRIVER, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER,
     call_unsafe_wdf_function_binding,
 };
-
-// ---- NTSTATUS values ----
-const STATUS_SUCCESS: NTSTATUS = 0;
-const STATUS_NOT_IMPLEMENTED: NTSTATUS = 0xC000_0002u32 as NTSTATUS;
-
-// ---- HID minidriver IOCTLs: CTL_CODE(FILE_DEVICE_KEYBOARD=0x0b, id, METHOD_NEITHER=3, ANY) ----
-const fn hid_ctl(id: u32) -> u32 {
-    (0x0000_000b << 16) | (id << 2) | 3
-}
-const IOCTL_HID_GET_DEVICE_DESCRIPTOR: u32 = hid_ctl(0);
-const IOCTL_HID_GET_REPORT_DESCRIPTOR: u32 = hid_ctl(1);
-const IOCTL_HID_READ_REPORT: u32 = hid_ctl(2);
-const IOCTL_HID_WRITE_REPORT: u32 = hid_ctl(3);
-const IOCTL_HID_GET_DEVICE_ATTRIBUTES: u32 = hid_ctl(9);
-const IOCTL_HID_GET_STRING: u32 = hid_ctl(4);
-const IOCTL_UMDF_HID_SET_OUTPUT_REPORT: u32 = hid_ctl(22);
-const IOCTL_UMDF_HID_GET_INPUT_REPORT: u32 = hid_ctl(23);
-
-// ---- WDF enum values ----
-const WdfIoQueueDispatchParallel: i32 = 2;
-const WdfIoQueueDispatchManual: i32 = 3;
-const WdfUseDefault: i32 = 2; // WDF_TRI_STATE
-const WdfExecutionLevelInheritFromParent: i32 = 1; // WDF_EXECUTION_LEVEL
-const WdfSynchronizationScopeInheritFromParent: i32 = 1; // WDF_SYNCHRONIZATION_SCOPE
 
 // HID report descriptor (80 bytes): one application collection (Generic Desktop / Mouse), report
 // id 0x01 — 5 buttons, ABSOLUTE 15-bit X/Y (logical 0..=32767), relative wheel + AC-pan. Absolute
@@ -120,9 +102,6 @@ static HID_DESC: [u8; 9] = [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x50, 0x00
 // different places. Out of step they fail quietly: hidclass asks for `wReportLength` bytes and
 // parses whatever it gets, so the mouse enumerates truncated or not at all with nothing naming
 // the cause. Same compile-time pairing pf-gamepad uses.
-const fn declared_len(hid_desc: &[u8; 9]) -> usize {
-    (hid_desc[7] as usize) | ((hid_desc[8] as usize) << 8)
-}
 const _: () = assert!(declared_len(&HID_DESC) == MOUSE_RDESC.len());
 
 // HID_DEVICE_ATTRIBUTES (32 bytes): Size(u32)=32, VendorID, ProductID, VersionNumber, Reserved[11].
@@ -181,23 +160,10 @@ fn channel_cfg() -> ChannelConfig {
     }
 }
 
-/// The bring-up file log. OPT-IN — debug builds, or the `PFMOUSE_DEBUG_LOG` env var — so a RELEASE
-/// driver never writes the file and never traps into the debugger. The path and the sink live
-/// in [`pf_umdf_util::log`], one copy for all four drivers.
-static FILE_LOG: pf_umdf_util::log::FileLog =
-    pf_umdf_util::log::FileLog::new("pfmouse-driver.log", || {
-        cfg!(debug_assertions) || std::env::var_os("PFMOUSE_DEBUG_LOG").is_some()
-    });
-
-fn file_log_enabled() -> bool {
-    FILE_LOG.enabled()
-}
-
-fn log(s: &str) {
-    FILE_LOG.write(s);
-}
-// The `file_log_enabled()` pre-check skips the `format!` alloc too when logging is off.
-macro_rules! dbglog { ($($a:tt)*) => { if file_log_enabled() { log(&format!($($a)*)) } } }
+// The bring-up file log. OPT-IN — debug builds, or the `PFMOUSE_DEBUG_LOG` env var — so a RELEASE
+// driver never writes the file and never traps into the debugger. Path, sink and the gate live
+// in `pf_umdf_util::log`, one copy for all four drivers.
+pf_umdf_util::file_log!("pfmouse-driver.log", "PFMOUSE_DEBUG_LOG");
 
 #[unsafe(export_name = "DriverEntry")]
 pub unsafe extern "system" fn driver_entry(
@@ -205,22 +171,8 @@ pub unsafe extern "system" fn driver_entry(
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     log("[pf-mouse] DriverEntry");
-    // SAFETY: zeroed WDF_DRIVER_CONFIG is a valid all-null config; we then set Size + the callback.
-    let mut config: WDF_DRIVER_CONFIG = unsafe { core::mem::zeroed() };
-    config.Size = core::mem::size_of::<WDF_DRIVER_CONFIG>() as ULONG;
-    config.EvtDriverDeviceAdd = Some(evt_device_add);
-
-    // SAFETY: all pointers valid; driver/registry_path provided by the loader.
-    unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfDriverCreate,
-            driver,
-            registry_path,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &mut config,
-            WDF_NO_HANDLE.cast::<WDFDRIVER>()
-        )
-    }
+    // SAFETY: `driver`/`registry_path` are the loader's DriverEntry arguments.
+    unsafe { skeleton::driver_create(driver, registry_path, Some(evt_device_add)) }
 }
 
 extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
@@ -251,28 +203,9 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     dbglog!("[pf-mouse] shm index = {shm_idx}");
 
     // Default parallel queue handling all IOCTLs.
-    // SAFETY: zeroed config then fields set; Size matches the struct.
-    let mut qcfg: WDF_IO_QUEUE_CONFIG = unsafe { core::mem::zeroed() };
-    qcfg.Size = core::mem::size_of::<WDF_IO_QUEUE_CONFIG>() as ULONG;
-    qcfg.DispatchType = WdfIoQueueDispatchParallel;
-    qcfg.PowerManaged = WdfUseDefault;
-    qcfg.DefaultQueue = 1;
-    qcfg.EvtIoDeviceControl = Some(evt_io_device_control);
-    // WDF_IO_QUEUE_CONFIG_INIT sets this to (ULONG)-1 (unlimited); mem::zeroed left it 0,
-    // which on a parallel queue means present ZERO requests → EvtIoDeviceControl never fires.
-    qcfg.Settings.Parallel.NumberOfPresentedRequests = u32::MAX;
-    let mut default_queue: WDFQUEUE = core::ptr::null_mut();
-    // SAFETY: device + config valid; attributes null; queue receives the handle.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoQueueCreate,
-            device,
-            &mut qcfg,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &mut default_queue
-        )
-    };
-    if !nt_success(st) {
+    // SAFETY: `device` is the live device just created.
+    if let Err(st) = unsafe { skeleton::create_default_queue(device, Some(evt_io_device_control)) }
+    {
         dbglog!(
             "[pf-mouse] default WdfIoQueueCreate failed 0x{:08x}",
             st as u32
@@ -281,60 +214,28 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     }
 
     // Manual queue: pended READ_REPORT requests are completed by the timer on fresh host input.
-    // SAFETY: zeroed config then fields set.
-    let mut mcfg: WDF_IO_QUEUE_CONFIG = unsafe { core::mem::zeroed() };
-    mcfg.Size = core::mem::size_of::<WDF_IO_QUEUE_CONFIG>() as ULONG;
-    mcfg.DispatchType = WdfIoQueueDispatchManual;
-    mcfg.PowerManaged = WdfUseDefault;
-    let mut manual_queue: WDFQUEUE = core::ptr::null_mut();
-    // SAFETY: device + config valid; attributes null; queue receives the handle.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoQueueCreate,
-            device,
-            &mut mcfg,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &mut manual_queue
-        )
+    // SAFETY: `device` is the live device just created.
+    let manual_queue = match unsafe { skeleton::create_manual_queue(device) } {
+        Ok(q) => q,
+        Err(st) => {
+            dbglog!(
+                "[pf-mouse] manual WdfIoQueueCreate failed 0x{:08x}",
+                st as u32
+            );
+            return st;
+        }
     };
-    if !nt_success(st) {
-        dbglog!(
-            "[pf-mouse] manual WdfIoQueueCreate failed 0x{:08x}",
-            st as u32
-        );
-        return st;
-    }
     MANUAL_QUEUE.store(manual_queue, Ordering::SeqCst);
 
     // Periodic timer (parent = manual queue): sealed-channel pump + health marks + event-driven
     // READ_REPORT completion. 8 ms — the proven pf-gamepad cadence; the mouse is presence-first
     // (SendInput injects), so a 125 Hz ceiling on the validation/report path is fine.
-    // SAFETY: zeroed config then fields set.
-    let mut tcfg: WDF_TIMER_CONFIG = unsafe { core::mem::zeroed() };
-    tcfg.Size = core::mem::size_of::<WDF_TIMER_CONFIG>() as ULONG;
-    tcfg.EvtTimerFunc = Some(evt_timer);
-    tcfg.Period = 8; // ms
-    tcfg.AutomaticSerialization = 1; // TRUE — UMDF requires a serialized timer (vhidmini2 pattern)
-    // SAFETY: a zeroed WDF_OBJECT_ATTRIBUTES is a valid all-null attributes struct; we set Size + the
-    // fields we use below.
-    let mut tattr: WDF_OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
-    tattr.Size = core::mem::size_of::<WDF_OBJECT_ATTRIBUTES>() as ULONG;
-    tattr.ParentObject = manual_queue.cast();
-    // mem::zeroed leaves these at 0 (Invalid) → set them like WDF_OBJECT_ATTRIBUTES_INIT
-    // (matches the working vhidmini2 UMDF timer setup; avoids 0xc0200209 / 0xc00000bb).
-    tattr.ExecutionLevel = WdfExecutionLevelInheritFromParent;
-    tattr.SynchronizationScope = WdfSynchronizationScopeInheritFromParent;
-    let mut timer: WDFTIMER = core::ptr::null_mut();
-    // SAFETY: config + attributes valid; timer receives the handle.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(WdfTimerCreate, &mut tcfg, &mut tattr, &mut timer)
-    };
-    if !nt_success(st) {
+    // SAFETY: `manual_queue` is the live queue just created.
+    let timer = unsafe { skeleton::create_periodic_timer(manual_queue.cast(), Some(evt_timer), 8) };
+    if let Err(st) = timer {
         dbglog!("[pf-mouse] WdfTimerCreate failed 0x{:08x}", st as u32);
         return st;
     }
-    // SAFETY: timer valid; -80000 == 8ms relative due time (100ns units, negative = relative).
-    let _started = unsafe { call_unsafe_wdf_function_binding!(WdfTimerStart, timer, -80000i64) };
 
     log("[pf-mouse] device ready (HID mouse 5046:4D4F)");
     STATUS_SUCCESS
@@ -397,12 +298,7 @@ fn on_get_string(request: &Request) -> NTSTATUS {
         Ok(v) => v,
         Err(st) => return st,
     };
-    let id_val: u32 = if bytes.len() >= 4 {
-        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-    } else {
-        0
-    };
-    let string_id = id_val & 0xFFFF;
+    let (_, string_id) = string_request_id(&bytes);
     let s: String = match string_id {
         0 | 0x000E => "Punktfunk".into(),
         // (2) The SERIAL carries the channel proof — the one transport measured to reach a UMDF HID
@@ -413,12 +309,7 @@ fn on_get_string(request: &Request) -> NTSTATUS {
         2 | 0x0010 => ChannelProof::new(CHANNEL.index(), std::process::id()).to_hid_string(),
         _ => "Punktfunk Virtual Mouse".into(),
     };
-    let mut wide: Vec<u8> = Vec::with_capacity(s.len() * 2 + 2);
-    for u in s.encode_utf16() {
-        wide.extend_from_slice(&u.to_le_bytes());
-    }
-    wide.extend_from_slice(&[0, 0]); // NUL terminator (UTF-16)
-    request.copy_to_output(&wide)
+    request.copy_utf16z_to_output(&s)
 }
 
 extern "C" fn evt_timer(timer: WDFTIMER) {
