@@ -18,9 +18,15 @@ private let launcherIconTokensShipped: Set<String> = [
     "steam", "lutris", "heroic", "playnite", "epic", "gog", "xbox",
 ]
 
-/// The brand mark for a library entry's `icon` token, or nil — no view at all — when the entry
-/// carries no token or names one this client ships no art for.
+/// Tokens that are not brands: a UI mark the other shells take from Lucide, which here is the
+/// nearest SF Symbol. `monitor` is the desktop tile's (`LibraryCollation.desktopIcon`).
+private let systemSymbolForToken: [String: String] = ["monitor": "desktopcomputer"]
+
+/// The mark for a library entry's `icon` token, or nil — no view at all — when the entry carries
+/// no token or names one this client ships no art for.
 public func launcherIconImage(for token: String?) -> Image? {
-    guard let token, launcherIconTokensShipped.contains(token) else { return nil }
+    guard let token else { return nil }
+    if let symbol = systemSymbolForToken[token] { return Image(systemName: symbol) }
+    guard launcherIconTokensShipped.contains(token) else { return nil }
     return Image("launcher-\(token)", bundle: .module)
 }

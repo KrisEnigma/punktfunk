@@ -66,6 +66,7 @@ mod tests {
             "gamepad-2",
             "keyboard",
             "maximize",
+            pf_client_core::library::DESKTOP_ICON,
             "plus",
             "refresh-cw",
             "rotate-cw",

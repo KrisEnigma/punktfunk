@@ -131,10 +131,14 @@ public enum LibraryCollation {
     /// Presentation only. It is never persisted, never fetched, and never grouped.
     public static let desktopID = "\u{0}desktop"
 
-    /// The synthetic tile itself. `nil` art and an empty store: the shelf draws its monogram,
-    /// and nothing tries to fetch a poster for it.
+    /// The mark that tile draws (`pf-client-core`'s `DESKTOP_ICON`). A Lucide name on the shells
+    /// that carry that set; `launcherIconImage` maps it to this platform's own symbol.
+    public static let desktopIcon = "monitor"
+
+    /// The synthetic tile itself. No art and an empty store: nothing tries to fetch a poster for
+    /// it, and the shelf draws the mark above instead of a monogram.
     public static func desktopEntry(title: String = "Desktop") -> GameEntry {
-        GameEntry(id: desktopID, store: "", title: title, art: Artwork())
+        GameEntry(id: desktopID, store: "", title: title, art: Artwork(), icon: desktopIcon)
     }
 
     /// Fold a title down to something sortable: lowercase, diacritics relaxed to their base
