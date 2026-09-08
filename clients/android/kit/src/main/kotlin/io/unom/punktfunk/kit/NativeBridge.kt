@@ -25,85 +25,10 @@ object NativeBridge {
     external fun nativeGenerateIdentity(): String
 
     /**
-     * Connect, presenting [certPem]/[keyPem] (both empty = anonymous) and pinning [pinHex] (empty =
-     * trust-on-first-use — read [nativeHostFingerprint] after; else 64-hex host SHA-256, mismatch →
-     * `0`). [width]/[height]/[refreshHz] are the requested virtual-output mode (the host streams at
-     * exactly this); [bitrateKbps] 0 = host default; [compositorPref]/[gamepadPref] are the
-     * `CompositorPref`/`GamepadPref` wire bytes (0 = Auto). [timeoutMs] is the handshake budget — the
-     * normal path passes a short value, the no-PIN "request access" path a long one (≥ the host's
-     * approval-park window) so a slow operator approval lands on this same parked connection. Returns
-     * an opaque session handle, or `0` on failure. Pair with exactly one [nativeClose].
+     * Connect as [ConnectRequest.toJson] describes. Returns an opaque session handle, or `0` on
+     * failure ([nativeTakeLastError] says why). Pair with exactly one [nativeClose].
      */
-    external fun nativeConnect(
-        host: String,
-        port: Int,
-        width: Int,
-        height: Int,
-        refreshHz: Int,
-        certPem: String,
-        keyPem: String,
-        pinHex: String,
-        bitrateKbps: Int,
-        compositorPref: Int,
-        gamepadPref: Int,
-        hdrEnabled: Boolean,
-        /** Ask for 10-bit WITHOUT HDR — Main10 at BT.709, for banding-free gradients on an
-         *  ordinary panel. Ignored while [hdrEnabled] is set, which already implies 10-bit. */
-        tenBitSdr: Boolean,
-        /** Every decoder this device would use tolerates multi-slice AUs
-         *  ([VideoDecoders.multiSliceTolerant]) — advertises `VIDEO_CAP_MULTI_SLICE`; false keeps
-         *  the host at single-slice frames (the safe pre-0.17 wire shape). */
-        multiSliceOk: Boolean,
-        /** Every decoder this device would use accepts partial-frame input
-         *  ([VideoDecoders.partialFrameCapable]) — opts into slice-progressive delivery (the
-         *  decode loop then feeds slices with `BUFFER_FLAG_PARTIAL_FRAME` as they arrive). */
-        framePartsOk: Boolean,
-        audioChannels: Int,
-        /** Requested audio sample rate: **`0` (with [audioBits] `0`) for the legacy Opus plane**, or
-         *  any rung of the lossless ladder — `44100`, `48000`, `88200`, `96000`, `176400`, both rate
-         *  families.
-         *
-         *  ⚠⚠ **`48000`/`16` is NOT "the default" — it is the cheapest lossless rung.** Core sets
-         *  `CLIENT_CAP_AUDIO_HIRES` when either field is non-zero (it keys on "a format was
-         *  specified", so that 48/16 lossless is requestable at all), and the host's gate accepts
-         *  48 kHz/16-bit as a supported format. Passing it as a stand-in for "unset" opts every
-         *  session into the `0xD3` plane on every host that has not deliberately opted out — which
-         *  since 2026-08-17 is all of them, the host gate having gone default-ON. Send `0`/`0`.
-         *
-         *  A request on BOTH counts. The host runs its gate (its own `PUNKTFUNK_AUDIO_HIRES` switch
-         *  among them — now an opt-OUT, so it declines only at `=0` — plus whether a frame of this
-         *  format fits one datagram at all) and may answer
-         *  Opus; and the native side first proves THIS device can open the rate — AAudio grants an
-         *  explicit rate or fails the open, and there is no recovery once the wire is negotiated —
-         *  walking a fallback ladder and downgrading the request if it cannot. */
-        audioRateHz: Int,
-        /** Requested audio sample depth: `0` alongside a `0` [audioRateHz] for the legacy Opus
-         *  plane, else `16` or `24`. See [audioRateHz] for why `16` is a request rather than a
-         *  default; 24-bit is where lossless earns its bandwidth. */
-        audioBits: Int,
-        /** `quic::CODEC_*` bitfield of codecs this device decodes ([VideoDecoders.decodableCodecBits]);
-         *  `0` falls back to H.264|HEVC. The host resolves the emitted codec from this ∩ its GPU. */
-        videoCodecs: Int,
-        /** Preferred video codec as a `quic::CODEC_*` bit (`0` = auto). Soft — the host falls back. */
-        preferredCodec: Int,
-        timeoutMs: Int,
-        /** Store-qualified library id (`steam:<appid>` / `custom:<id>`) to boot straight into a game,
-         *  or `null`/empty for a plain desktop connect. Rides the Hello as `launch`. */
-        launch: String?,
-        /** This device's display name (rides the Hello as `name`) — what the host's pending-approval
-         *  list and trust store show for it, same convention as [nativePair]'s `name`. `null`/blank ⇒
-         *  the host falls back to a fingerprint-derived "device abcd1234" label. */
-        deviceName: String?,
-        /** Advertise `CLIENT_CAP_PAD_AUDIO` — the SESSION-level negotiation for the 0xD1 per-pad
-         *  DualSense plane. Without it the host never sets `HOST_CAP_PAD_AUDIO` and emits nothing,
-         *  so a captured pad's own render capabilities would have nothing to gate. */
-        padAudioOk: Boolean,
-        /** Advertise `CLIENT_CAP_KEEP_HOST_AUDIO` — ask the host to tap its default playback
-         *  device instead of parking it on a silent endpoint, so the host PC's own speakers keep
-         *  playing. REQUEST-only (no host-cap echo): an older host ignores it and goes quiet
-         *  exactly as it always did. */
-        keepHostAudio: Boolean,
-    ): Long
+    external fun nativeConnect(requestJson: String): Long
 
     /** 64-hex SHA-256 of the cert the host presented on [handle]; valid after a successful connect. */
     external fun nativeHostFingerprint(handle: Long): String
@@ -301,8 +226,8 @@ object NativeBridge {
      * entirely in Rust (NDK AMediaCodec → ANativeWindow) — no per-frame JNI. [decoderName] is the
      * decoder Kotlin ranked from `MediaCodecList` (`""` = let the platform resolve the default for
      * the MIME — what the pre-overhaul client always did); [lowLatencyMode] is the user's
-     * "Low-latency mode" master toggle (ON by default: async loop + per-SoC tuning; off runs the
-     * original synchronous pipeline as the per-device escape hatch); [lowLatencyFeature] is whether
+     * "Low-latency mode" master toggle (ON by default: per-SoC tuning + thread boosts; off runs
+     * the same loop with plain keys, the per-device escape hatch); [lowLatencyFeature] is whether
      * [decoderName] advertised `FEATURE_LowLatency` (HUD label only). [isTv] drives an active HDMI
      * mode switch to the stream refresh on TV boxes when the toggle is on (vs. the softer seamless
      * hint otherwise). [presentPriority]/[smoothBuffer] are the timeline presenter's intent

@@ -79,6 +79,9 @@ mac_address = "1"
 # turns it on by unification anyway, and `wake_macs` should not enumerate a different set of NICs
 # depending on which other crates share the build.
 if-addrs = { version = "0.15", features = ["link-local"] }
+# `SO_EXCLUSIVEADDRUSE` on the TCP listeners (gamestream/tls.rs): std's bind leaves a
+# wildcard-held port open to a same-account specific bind on Windows.
+socket2 = "0.6"
 tokio = { version = "1", features = ["full"] }
 # GameStream-only (behind the `gamestream` feature): the Moonlight RSA-2048 identity generator +
 # pairing signer (cert.rs, pairing.rs) and the legacy-client-cert leniency verifier (tls.rs).
@@ -282,6 +285,10 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     # Session-local user launches (interactive.rs) and the service's active-console host selection.
     "Win32_System_RemoteDesktop",
+    # Who listens on a plugin's registered loopback port (plugins/windows.rs): the launch dial
+    # carries the UI secret, so the listener must still be the LocalService runner.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     "Win32_System_Threading",
     "Win32_System_Environment",
     # Module-path crash records and the System32-scoped AVRT loader.

@@ -1,5 +1,6 @@
 package io.unom.punktfunk.kit.library
 
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -187,6 +188,7 @@ data class RunningGame(
 }
 
 object LibraryClient {
+    private const val TAG = "LibraryClient"
     /**
      * `GET https://<address>:<mgmtPort>/api/v1/library`, authenticated by mTLS. [fpHex] is the pinned
      * host-cert SHA-256 (64 hex, from the paired [io.unom.punktfunk.kit.security.KnownHost]); a blank
@@ -208,7 +210,8 @@ object LibraryClient {
         val client = try {
             mtlsHttpClient(certPem, keyPem, address, fpHex)
         } catch (e: Exception) {
-            return LibraryResult.Error("couldn't set up a secure connection — ${e.message}")
+            Log.w(TAG, "mTLS client for $address", e)
+            return LibraryResult.Error("couldn't set up a secure connection to the host")
         }
         val base = "https://$address:$mgmtPort"
         val req = Request.Builder().url("$base/api/v1/library").build()
@@ -223,7 +226,8 @@ object LibraryClient {
                 }
             }
         } catch (e: Exception) {
-            LibraryResult.Error("couldn't reach the host — ${e.message}")
+            Log.w(TAG, "library fetch from $base", e)
+            LibraryResult.Error("couldn't reach the host — check that it's on and on this network")
         }
     }
 

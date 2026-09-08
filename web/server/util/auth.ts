@@ -119,6 +119,66 @@ export function mgmtToken(): string {
 	return process.env.PUNKTFUNK_MGMT_TOKEN ?? "";
 }
 
+/** Bun's per-request `tls` for the loopback hop to the management API, or `undefined` to
+ * verify normally (a non-loopback `PUNKTFUNK_MGMT_URL` must present a real chain).
+ *
+ * Loopback is pinned, not relaxed: the host's identity certs are the CA and the name check is
+ * off, since the legacy cert carries no SAN. Whatever answers on the port must hold the host's
+ * private key, so a squatter on 127.0.0.1 never sees the bearer token. When neither cert is
+ * readable the old relaxation stays, with one warning, rather than a console that cannot load. */
+export function loopbackTls(base: string): { tls: object } | undefined {
+	if (!isLoopbackUrl(base)) return undefined;
+	const ca = hostIdentityCerts();
+	if (ca.length === 0) {
+		if (!warnedUnpinned) {
+			warnedUnpinned = true;
+			console.warn(
+				"[punktfunk-web] PUNKTFUNK_UI_TLS_CERT names no readable host cert — the loopback hop to the management API is not pinned",
+			);
+		}
+		return { tls: { rejectUnauthorized: false } };
+	}
+	return {
+		tls: {
+			ca,
+			rejectUnauthorized: true,
+			checkServerIdentity: () => undefined,
+		},
+	};
+}
+let warnedUnpinned = false;
+
+/** The host's identity cert PEMs, the one the management API serves FIRST: the
+ * `native-cert.pem` sibling of the `cert.pem` the launcher names when it exists (a host that
+ * took the identity split serves it; see nitro-entry/tls-paths.mjs), then the legacy cert.
+ * Bun's fetch honours only the first `ca` entry (1.3.14, probed against a live host), so the
+ * order is the pin. Re-read every few seconds so a re-minted identity is picked up without a
+ * restart. */
+function hostIdentityCerts(): string[] {
+	const now = Date.now();
+	if (now - certCache.at < CERT_CACHE_MS) return certCache.pems;
+	const pems: string[] = [];
+	const legacy = process.env.PUNKTFUNK_UI_TLS_CERT?.trim();
+	if (legacy) {
+		const dir = legacy.endsWith("cert.pem")
+			? legacy.slice(0, -"cert.pem".length)
+			: null;
+		for (const p of [dir === null ? null : `${dir}native-cert.pem`, legacy]) {
+			if (!p) continue;
+			try {
+				const pem = readFileSync(p, "utf8");
+				if (pem.includes("-----BEGIN CERTIFICATE-----")) pems.push(pem);
+			} catch {
+				// unreadable: skip
+			}
+		}
+	}
+	certCache = { at: now, pems };
+	return pems;
+}
+const CERT_CACHE_MS = 10_000;
+let certCache: { at: number; pems: string[] } = { at: 0, pems: [] };
+
 /** Whether `url`'s host is a loopback address — the only place the proxy relaxes TLS verification
  * for the host's self-signed cert. IPv4 127.0.0.0/8, IPv6 ::1, and the `localhost` name. */
 export function isLoopbackUrl(url: string): boolean {

@@ -118,7 +118,24 @@ pub struct Monitor {
     /// and the encoder open on this device, the one the drain worker acquires from.
     render_luid: std::sync::atomic::AtomicI64,
     gone: AtomicBool,
+    /// DDI calls in flight against `object` or the cursor event, held by [`DdiGuard`].
+    /// [`teardown`](Self::teardown) waits for zero before closing the event, and the
+    /// departure that follows finds no caller still inside IddCx with the handle.
+    ddi_inflight: AtomicU32,
 }
+
+/// One DDI call against a monitor's handle or cursor event; see [`Monitor::ddi`].
+pub struct DdiGuard<'a>(&'a Monitor);
+
+impl Drop for DdiGuard<'_> {
+    fn drop(&mut self) {
+        self.0.ddi_inflight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// How long [`Monitor::teardown`] waits for in-flight DDI calls. A DDI can re-enter the mode
+/// callbacks, which take the registry lock the caller has already released, so it completes.
+const DDI_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 
 /// Take a slot's value with its guard already released, so the caller drops it lock-free.
 fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
@@ -156,7 +173,20 @@ impl Monitor {
             encode_gen: AtomicU32::new(0),
             render_luid: std::sync::atomic::AtomicI64::new(0),
             gone: AtomicBool::new(false),
+            ddi_inflight: AtomicU32::new(0),
         }
+    }
+
+    /// Hold while calling a DDI against this monitor's handle or its cursor event. `None`
+    /// once [`teardown`](Self::teardown) has started: the increment lands before the `gone`
+    /// read, so a teardown that saw zero cannot be passed by a caller that saw `!gone`.
+    pub fn ddi(&self) -> Option<DdiGuard<'_>> {
+        self.ddi_inflight.fetch_add(1, Ordering::AcqRel);
+        if self.gone.load(Ordering::Acquire) {
+            self.ddi_inflight.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(DdiGuard(self))
     }
 
     /// Whether [`teardown`](Self::teardown) has run; a waiter stops rather than block on a
@@ -327,10 +357,13 @@ impl Monitor {
     /// mode on an adapter that never declared, whose software cursor is the point; once any
     /// target declared, the pointer is excluded for good and the worker's shape is the only
     /// one the pool can blend. The event value is copied out under the guard and the DDI runs
-    /// after it: the DDI can re-enter the mode callbacks, and the event stays open because
-    /// this monitor closes it only after joining the worker.
+    /// after it: the DDI can re-enter the mode callbacks, and the event stays open because the
+    /// [`ddi`](Self::ddi) guard holds teardown off until the call returns.
     pub fn resetup_cursor(&self) {
         let Some(object) = self.object() else {
+            return;
+        };
+        let Some(_ddi) = self.ddi() else {
             return;
         };
         let excluded = registry::any_declared();
@@ -359,6 +392,19 @@ impl Monitor {
     pub fn teardown(&self) {
         self.gone.store(true, Ordering::Release);
         let started = Instant::now();
+        // Every DDI caller took its guard before reading `gone`; wait the live ones out before
+        // closing the event they were handed and before the handle departs.
+        while self.ddi_inflight.load(Ordering::Acquire) != 0 {
+            if started.elapsed() > DDI_DRAIN_BUDGET {
+                dbglog!(
+                    "[pf-vd] monitor teardown: {} DDI call(s) still in flight after {} ms",
+                    self.ddi_inflight.load(Ordering::Acquire),
+                    DDI_DRAIN_BUDGET.as_millis()
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let (worker, event) = {
             let mut c = lock(&self.cursor);
             (c.worker.take(), c.data_event.take())
@@ -509,6 +555,9 @@ pub fn set_cursor_channel(
     let Some(object) = m.object() else {
         return Err(ch);
     };
+    let Some(_ddi) = m.ddi() else {
+        return Err(ch);
+    };
     let excluded = registry::any_declared();
     let (declare, old_worker, old_event, cell) = {
         let mut c = lock(&m.cursor);
@@ -580,7 +629,7 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
     }
     let excluded = registry::any_declared();
     // Only a present worker gets the immediate declare DDI call.
-    let mut declare_on: Option<(Option<iddcx::IDDCX_MONITOR>, Option<isize>)> = None;
+    let mut declare_on: Option<(Arc<Monitor>, Option<isize>)> = None;
     let (mut had_worker, mut blend_now) = (false, false);
     for m in &matching {
         let mut c = lock(&m.cursor);
@@ -590,19 +639,25 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
         blend_now |= c.cell.blends();
         if c.worker.is_some() {
             declare_on = Some((
-                m.object(),
+                Arc::clone(m),
                 c.data_event.as_ref().map(|h| h.as_raw().0 as isize),
             ));
         }
     }
-    let (object, worker_ev) = declare_on.unwrap_or((None, None));
-    match (enable, object, worker_ev) {
-        (true, Some(object), Some(ev)) => {
-            // Enable declares immediately against the live worker's event (works any time).
-            let st = crate::cursor_worker::setup_hardware_cursor(object, ev);
-            dbglog!("[pf-vd] cursor: forward flip enable=1 (declare) -> {st:#x}");
-            if wdk_iddcx::nt_success(st) {
-                registry::mark_declared(target_id);
+    let (declare_m, worker_ev) = match declare_on {
+        Some((m, ev)) => (Some(m), ev),
+        None => (None, None),
+    };
+    match (enable, declare_m, worker_ev) {
+        (true, Some(m), Some(ev)) => {
+            // Enable declares immediately against the live worker's event (works any time),
+            // under the DDI guard so a teardown cannot close that event underneath it.
+            if let (Some(object), Some(_ddi)) = (m.object(), m.ddi()) {
+                let st = crate::cursor_worker::setup_hardware_cursor(object, ev);
+                dbglog!("[pf-vd] cursor: forward flip enable=1 (declare) -> {st:#x}");
+                if wdk_iddcx::nt_success(st) {
+                    registry::mark_declared(target_id);
+                }
             }
         }
         (false, _, _) => {
@@ -788,6 +843,9 @@ pub fn update_monitor_modes(
     let Some(object) = m.object() else {
         return crate::STATUS_NOT_FOUND; // created but not yet arrived — nothing to update
     };
+    let Some(_ddi) = m.ddi() else {
+        return crate::STATUS_NOT_FOUND; // torn down under us
+    };
     let (old_modes, new_modes) = {
         let mut modes = lock(&m.modes);
         let new_modes = vdisplay::advertised_modes(
@@ -813,9 +871,9 @@ pub fn update_monitor_modes(
     in_args.Reason = iddcx::IDDCX_UPDATE_REASON::IDDCX_UPDATE_REASON_OTHER;
     in_args.TargetModeCount = targets.len() as u32;
     in_args.pTargetModes = targets.as_mut_ptr();
-    // SAFETY: `object` is a live IddCx monitor handle (arrived — checked above; a concurrent REMOVE
-    // is serialized by the host, which only ever resizes a monitor its own session holds a lease
-    // on). `in_args` points at valid local storage (`targets` outlives the synchronous DDI call).
+    // SAFETY: `object` is a live IddCx monitor handle (arrived — checked above) and `_ddi` holds
+    // its teardown and departure off until this call returns. `in_args` points at valid local
+    // storage (`targets` outlives the synchronous DDI call).
     let st = unsafe { wdk_iddcx::IddCxMonitorUpdateModes2(object, &in_args) };
     dbglog!(
         "[pf-vd] IddCxMonitorUpdateModes2(session={session_id}, {width}x{height}@{refresh}) -> {st:#x}"

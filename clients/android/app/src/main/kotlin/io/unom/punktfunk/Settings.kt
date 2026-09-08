@@ -172,16 +172,12 @@ data class Settings(
      */
     val uiPalette: String = "violet",
     /**
-     * "Low-latency mode" — the master switch over the latency pipeline: the async decode loop
-     * (native; burst-feed + present-newest-per-vsync, the Apple client's discipline), decoder ranking
-     * + per-SoC vendor keys, pipeline thread boosts + ADPF max-performance, game-tagged AAudio, DSCP
-     * marking on the media sockets, HDMI ALLM, and the forced TV mode switch. (The Wi-Fi locks are NOT
-     * part of this — both are always held while streaming; see StreamScreen.) On (default): the fast
-     * pipeline. Off restores the original synchronous decode loop byte-for-byte, kept as a per-device
-     * escape hatch. Promoted to default once the receive-side latency ratchet the overhaul interacted
-     * badly with was fixed in the shared core — the pump now jumps to live on a standing backlog
-     * instead of accumulating it (see `punktfunk-core` `FrameChannel`), so the async loop no longer
-     * feeds a queue that only grows.
+     * "Low-latency mode" — the master switch over the fast pipeline: decoder ranking + per-SoC
+     * vendor keys, slice-progressive delivery, pipeline thread boosts + ADPF max-performance,
+     * game-tagged AAudio, DSCP marking on the media sockets, HDMI ALLM, and the forced TV mode
+     * switch. (The Wi-Fi locks are NOT part of this — both are always held while streaming; see
+     * StreamScreen.) Off keeps the same decode loop and presenter — so [presentPriority] applies
+     * either way — with plain keys and no boosts: the per-device escape hatch.
      */
     val lowLatencyMode: Boolean = true,
     /**
@@ -347,175 +343,12 @@ class SettingsStore(context: Context) {
     private val prefs =
         context.applicationContext.getSharedPreferences("punktfunk_settings", Context.MODE_PRIVATE)
 
-    fun load(): Settings = Settings(
-        width = prefs.getInt(K_W, 0),
-        height = prefs.getInt(K_H, 0),
-        hz = prefs.getInt(K_HZ, 0),
-        bitrateKbps = prefs.getInt(K_BITRATE, 0),
-        renderScale = prefs.getFloat(K_RENDER_SCALE, 1.0f).toDouble(),
-        hdrEnabled = prefs.getBoolean(K_HDR, true),
-        tenBitSdr = prefs.getBoolean(K_TEN_BIT_SDR, false),
-        compositor = prefs.getInt(K_COMPOSITOR, 0),
-        gamepad = prefs.getInt(K_GAMEPAD, 0),
-        gamepadForwarding = prefs.getBoolean(K_GAMEPAD_FORWARDING, true),
-        systemButtons = prefs.getString(K_SYSTEM_BUTTONS, "auto") ?: "auto",
-        guideGesture = prefs.getString(K_GUIDE_GESTURE, "auto") ?: "auto",
-        audioChannels = prefs.getInt(K_AUDIO_CH, 2),
-        audioFormat = prefs.getString(K_AUDIO_FORMAT, AUDIO_FORMAT_OPUS) ?: AUDIO_FORMAT_OPUS,
-        codec = prefs.getString(K_CODEC, "auto") ?: "auto",
-        micEnabled = prefs.getBoolean(K_MIC, false),
-        echoCancel = prefs.getBoolean(K_ECHO_CANCEL, true),
-        keepHostAudio = prefs.getBoolean(K_KEEP_HOST_AUDIO, false),
-        statsVerbosity = prefs.getString(K_STATS_VERBOSITY, null)
-            ?.let { name -> StatsVerbosity.entries.firstOrNull { it.name == name } }
-            // Migration from the pre-tier Boolean "stats_hud_enabled": an explicit OFF stays off;
-            // everyone else (incl. fresh installs) lands on NORMAL — the old always-full HUD toned
-            // down to the new default, which is the whole point of adding tiers.
-            ?: if (prefs.contains(K_HUD) && !prefs.getBoolean(K_HUD, true)) {
-                StatsVerbosity.OFF
-            } else {
-                StatsVerbosity.NORMAL
-            },
-        touchMode = prefs.getString(K_TOUCH_MODE, null)
-            ?.let { name -> TouchMode.entries.firstOrNull { it.name == name } }
-            // Migration: the pre-enum Boolean "trackpad_mode" (true = trackpad, false = direct).
-            ?: if (prefs.getBoolean(K_TRACKPAD, true)) TouchMode.TRACKPAD else TouchMode.POINTER,
-        gamepadUiEnabled = prefs.getBoolean(K_GAMEPAD_UI, true),
-        reduceUiResolution = prefs.getBoolean(K_REDUCE_UI_RES, false),
-        gamepadUiMode = prefs.getString(K_GAMEPAD_UI_MODE, GAMEPAD_UI_WHEN_CONNECTED)
-            ?: GAMEPAD_UI_WHEN_CONNECTED,
-        uiPalette = prefs.getString(K_UI_PALETTE, "violet") ?: "violet",
-        lowLatencyMode = prefs.getBoolean(K_LOW_LATENCY, true),
-        presentPriority = prefs.getString(K_PRESENT_PRIORITY, "latency") ?: "latency",
-        smoothBuffer = prefs.getInt(K_SMOOTH_BUFFER, 0),
-        autoWakeEnabled = prefs.getBoolean(K_AUTO_WAKE, true),
-        rumbleOnPhone = prefs.getBoolean(K_RUMBLE_ON_PHONE, false),
-        gyroOnPhone = prefs.getBoolean(K_GYRO_ON_PHONE, false),
-        sc2Capture = prefs.getBoolean(K_SC2_CAPTURE, true),
-        dsCapture = prefs.getBoolean(K_DS_CAPTURE, true),
-        padHaptics = prefs.getBoolean(K_PAD_HAPTICS, true),
-        padSpeaker = prefs.getBoolean(K_PAD_SPEAKER, false),
-        mouseMode = prefs.getString(K_MOUSE_MODE, null)
-            ?.let { name -> MouseMode.entries.firstOrNull { it.storedName == name } }
-            // Migration: the pre-enum Boolean "pointer_capture" (true = lock the pointer). Its
-            // default was false, which IS `desktop` — so an install that never touched the toggle
-            // lands where it already was.
-            ?: if (prefs.getBoolean(K_POINTER_CAPTURE, false)) MouseMode.CAPTURE else MouseMode.DESKTOP,
-        invertScroll = prefs.getBoolean(K_INVERT_SCROLL, false),
-        overlayActions = prefs.getString(K_OVERLAY_ACTIONS, "") ?: "",
-        startIn = prefs.getString(K_START_IN, "") ?: "",
-        defaultHost = prefs.getString(K_DEFAULT_HOST, null),
-    )
+    fun load(): Settings = SettingsFields.ALL.fold(Settings()) { s, f -> f.load(s, prefs) }
 
     fun save(s: Settings) {
-        prefs.edit()
-            .putInt(K_W, s.width)
-            .putInt(K_H, s.height)
-            .putInt(K_HZ, s.hz)
-            .putInt(K_BITRATE, s.bitrateKbps)
-            .putFloat(K_RENDER_SCALE, s.renderScale.toFloat())
-            .putBoolean(K_HDR, s.hdrEnabled)
-            .putBoolean(K_TEN_BIT_SDR, s.tenBitSdr)
-            .putInt(K_COMPOSITOR, s.compositor)
-            .putInt(K_GAMEPAD, s.gamepad)
-            .putBoolean(K_GAMEPAD_FORWARDING, s.gamepadForwarding)
-            .putString(K_SYSTEM_BUTTONS, s.systemButtons)
-            .putString(K_GUIDE_GESTURE, s.guideGesture)
-            .putInt(K_AUDIO_CH, s.audioChannels)
-            .putString(K_AUDIO_FORMAT, s.audioFormat)
-            .putString(K_CODEC, s.codec)
-            .putBoolean(K_MIC, s.micEnabled)
-            .putBoolean(K_ECHO_CANCEL, s.echoCancel)
-            .putBoolean(K_KEEP_HOST_AUDIO, s.keepHostAudio)
-            .putString(K_STATS_VERBOSITY, s.statsVerbosity.name)
-            .putString(K_TOUCH_MODE, s.touchMode.name)
-            .putBoolean(K_GAMEPAD_UI, s.gamepadUiEnabled)
-            .putBoolean(K_REDUCE_UI_RES, s.reduceUiResolution)
-            .putString(K_GAMEPAD_UI_MODE, s.gamepadUiMode)
-            .putString(K_UI_PALETTE, s.uiPalette)
-            .putBoolean(K_LOW_LATENCY, s.lowLatencyMode)
-            .putString(K_PRESENT_PRIORITY, s.presentPriority)
-            .putInt(K_SMOOTH_BUFFER, s.smoothBuffer)
-            .putBoolean(K_AUTO_WAKE, s.autoWakeEnabled)
-            .putBoolean(K_RUMBLE_ON_PHONE, s.rumbleOnPhone)
-            .putBoolean(K_GYRO_ON_PHONE, s.gyroOnPhone)
-            .putBoolean(K_SC2_CAPTURE, s.sc2Capture)
-            .putBoolean(K_DS_CAPTURE, s.dsCapture)
-            .putBoolean(K_PAD_HAPTICS, s.padHaptics)
-            .putBoolean(K_PAD_SPEAKER, s.padSpeaker)
-            .putString(K_MOUSE_MODE, s.mouseMode.storedName)
-            .putBoolean(K_INVERT_SCROLL, s.invertScroll)
-            .putString(K_OVERLAY_ACTIONS, s.overlayActions)
-            .putString(K_START_IN, s.startIn)
-            .putString(K_DEFAULT_HOST, s.defaultHost)
-            .apply()
-    }
-
-    private companion object {
-        const val K_W = "width"
-        const val K_H = "height"
-        const val K_HZ = "hz"
-        const val K_BITRATE = "bitrate_kbps"
-        const val K_RENDER_SCALE = "render_scale"
-        const val K_HDR = "hdr_enabled"
-        const val K_TEN_BIT_SDR = "ten_bit_sdr"
-        const val K_COMPOSITOR = "compositor"
-        const val K_GAMEPAD = "gamepad"
-        const val K_GAMEPAD_FORWARDING = "gamepad_forwarding"
-        const val K_SYSTEM_BUTTONS = "system_buttons"
-        const val K_GUIDE_GESTURE = "guide_gesture"
-        const val K_AUDIO_CH = "audio_channels"
-        const val K_AUDIO_FORMAT = "audio_format"
-        const val K_CODEC = "codec"
-        const val K_MIC = "mic_enabled"
-        const val K_ECHO_CANCEL = "echo_cancel"
-        const val K_KEEP_HOST_AUDIO = "keep_host_audio"
-        const val K_STATS_VERBOSITY = "stats_verbosity"
-
-        /** Pre-tier Boolean the [K_STATS_VERBOSITY] enum replaced — read once for migration, never
-         * written. */
-        const val K_HUD = "stats_hud_enabled"
-        const val K_TOUCH_MODE = "touch_mode"
-        const val K_GAMEPAD_UI = "gamepad_ui_enabled"
-        const val K_REDUCE_UI_RES = "reduce_ui_resolution"
-        const val K_GAMEPAD_UI_MODE = "gamepad_ui_mode"
-        // RETIRED: "library_enabled", the game-library switch. Pairing is the only gate now, on
-        // every client. A stored value is left where it is and never read again.
-        const val K_UI_PALETTE = "ui_palette"
-
-        /**
-         * Bumped AGAIN to restart every install at the new default (ON). History: the original
-         * `"low_latency_mode"` shipped default-ON; `"low_latency_mode_experimental"` restarted
-         * everyone at OFF after the overhaul regressed on some phones. That regression was the
-         * receive-side latency ratchet the async loop fed (a standing queue that only grew) — now
-         * fixed in the shared core (`punktfunk-core` `FrameChannel`: the pump jumps to live on a
-         * standing backlog instead of accumulating it), so the fast pipeline is the default again. A
-         * fresh key re-defaults every install — including ones persisted OFF under the old key — to
-         * on; both stale keys are abandoned unread. The toggle stays as a per-device escape hatch.
-         */
-        const val K_LOW_LATENCY = "low_latency_mode_v2"
-        const val K_PRESENT_PRIORITY = "present_priority"
-        const val K_SMOOTH_BUFFER = "smooth_buffer"
-        const val K_AUTO_WAKE = "auto_wake_enabled"
-        const val K_RUMBLE_ON_PHONE = "rumble_on_phone"
-        const val K_GYRO_ON_PHONE = "gyro_on_phone"
-        const val K_SC2_CAPTURE = "sc2_capture"
-        const val K_DS_CAPTURE = "ds_capture"
-        const val K_PAD_HAPTICS = "pad_haptics"
-        const val K_PAD_SPEAKER = "pad_speaker"
-        const val K_MOUSE_MODE = "mouse_mode"
-
-        /** Legacy Boolean the [K_MOUSE_MODE] enum replaced — read once for migration, never written. */
-        const val K_POINTER_CAPTURE = "pointer_capture"
-        const val K_INVERT_SCROLL = "invert_scroll"
-        const val K_OVERLAY_ACTIONS = "overlay_actions"
-
-        /** Cross-client start-screen keys; the console writes the same two names. */
-        const val K_START_IN = "start_in"
-        const val K_DEFAULT_HOST = "default_host"
-
-        /** Legacy Boolean the enum replaced — read once as the migration default, never written. */
-        const val K_TRACKPAD = "trackpad_mode"
+        val e = prefs.edit()
+        SettingsFields.ALL.forEach { it.save(e, s) }
+        e.apply()
     }
 }
 
@@ -1031,13 +864,13 @@ val MOUSE_MODE_OPTIONS = MouseMode.entries.map { it to it.label }
  * clients' picker shows.
  */
 val GAMEPAD_OPTIONS = listOf(
-    io.unom.punktfunk.kit.Gamepad.PREF_AUTO to "Automatic",
-    io.unom.punktfunk.kit.Gamepad.PREF_XBOX360 to "Xbox 360",
-    io.unom.punktfunk.kit.Gamepad.PREF_DUALSENSE to "DualSense",
-    io.unom.punktfunk.kit.Gamepad.PREF_XBOXONE to "Xbox One",
-    io.unom.punktfunk.kit.Gamepad.PREF_DUALSHOCK4 to "DualShock 4",
-    io.unom.punktfunk.kit.Gamepad.PREF_STEAMDECK to "Steam Deck",
-)
+    io.unom.punktfunk.kit.Gamepad.PREF_AUTO,
+    io.unom.punktfunk.kit.Gamepad.PREF_XBOX360,
+    io.unom.punktfunk.kit.Gamepad.PREF_DUALSENSE,
+    io.unom.punktfunk.kit.Gamepad.PREF_XBOXONE,
+    io.unom.punktfunk.kit.Gamepad.PREF_DUALSHOCK4,
+    io.unom.punktfunk.kit.Gamepad.PREF_STEAMDECK,
+).map { it to io.unom.punktfunk.kit.Gamepad.prefLabel(it) }
 
 /** (stored `system_buttons` value, label) — where the guide/share presses land while streaming. */
 val SYSTEM_BUTTON_OPTIONS = listOf(

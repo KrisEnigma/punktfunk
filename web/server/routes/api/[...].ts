@@ -11,7 +11,7 @@ import {
 	setResponseStatus,
 } from "h3";
 import {
-	isLoopbackUrl,
+	loopbackTls,
 	mgmtToken,
 	mgmtUrl,
 	normalizePath,
@@ -53,11 +53,9 @@ export default defineEventHandler((event) => {
 	// outbound TLS the process ever makes still verifies normally (the global env unverified
 	// everything). If the operator points PUNKTFUNK_MGMT_URL at a NON-loopback host, we do NOT relax:
 	// a remote mgmt API must present a valid chain, which is stricter than the old blanket accept.
-	const fetchOptions = isLoopbackUrl(base)
-		? // `tls` is a Bun.fetch extension (the console runs on bun — Bun.serve/`bun .output/...`), not
-			// in the standard RequestInit type, so cast through unknown.
-			({ tls: { rejectUnauthorized: false } } as unknown as RequestInit)
-		: undefined;
+	// `tls` is a Bun.fetch extension (the console runs on bun — Bun.serve/`bun .output/...`), not
+	// in the standard RequestInit type, so cast through unknown.
+	const fetchOptions = loopbackTls(base) as unknown as RequestInit | undefined;
 
 	return proxyRequest(event, target, {
 		fetchOptions,

@@ -47,7 +47,7 @@ final class AudioRingDriftTests: XCTestCase {
     /// harsher than real hardware (tens of ppm).
     func testDriftDoesNotRatchetLatencyToTheCeiling() {
         let (final, peak, silent) = simulate(ms: 5 * 60 * 1_000, quantumMS: 5, driftPPM: 200)
-        // Must settle inside the headroom band (target 20 + headroom 30), never near the 90 ms cap.
+        // Must settle inside the headroom band (target 20 + headroom 30), never near the 180 ms cap.
         XCTAssertLessThanOrEqual(final, 50, "settled at \(final) ms — that is the ratchet")
         XCTAssertLessThanOrEqual(peak, 50, "peaked at \(peak) ms")
         XCTAssertEqual(silent, 0, "drift correction must never starve the callback")
@@ -294,6 +294,37 @@ final class AudioRingDriftTests: XCTestCase {
             "after adapting, the last 3 s must play through the bunching without a dropout")
     }
 
+    /// A link that parks ~100 ms at once every ~100 ms delivers exactly the audio that bridges
+    /// the next hole. Trimming the clump on sight deleted it and then concealed the gap it made
+    /// — ten and more trims a second. The clump fits under the hard cap and drains before the
+    /// average ever crosses the headroom line, so nothing is cut. Mirrors core's
+    /// `a_clumping_link_keeps_its_clump`.
+    func testAClumpingLinkKeepsItsClump() {
+        let ring = AudioRing(seconds: 1, channels: channels, rateHz: 48_000)
+        let want = 5 * perMS
+        var scratch = [Float](repeating: 0, count: want)
+        let feed = [Float](repeating: 0.5, count: 200 * perMS)
+        var pending = 0, carry = 0, silentTail = 0, peak = 0
+        let steps = 12_000 // 60 s in 5 ms callbacks
+        for step in 0..<steps {
+            // The host produces 5 ms per callback, 50 ppm fast; the link withholds for 90 ms
+            // of every 100 and then delivers the lot.
+            carry += want * 50
+            let extra = carry / 1_000_000
+            carry -= extra * 1_000_000
+            pending += want + extra
+            if step % 20 >= 18 {
+                feed.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: pending) }
+                pending = 0
+            }
+            scratch.withUnsafeMutableBufferPointer { ring.read(into: $0.baseAddress!, count: want) }
+            peak = max(peak, ring.bufferedMS)
+            if step >= steps / 2, scratch.allSatisfy({ $0 == 0 }) { silentTail += 1 }
+        }
+        XCTAssertEqual(silentTail, 0, "the clump was trimmed and the hole it bridged went silent")
+        XCTAssertLessThanOrEqual(peak, 180, "the hard cap still bounds the depth on sight")
+    }
+
     // MARK: - A/V sync (audio latency overhaul, W6)
     //
     // The second half of the same story. Depth alone is not correctness: a ring can be exactly as
@@ -446,7 +477,7 @@ final class AudioRingDriftTests: XCTestCase {
         primeQuantum(ring, quantumMS: 5)
         XCTAssertEqual(ring.stats.targetMS, 20, "base target (JitterTuning.COREAUDIO)")
 
-        // Audio 30 ms EARLY at a 20 ms depth ⇒ aim 50 ms deep: above the floor, under the 90 ms
+        // Audio 30 ms EARLY at a 20 ms depth ⇒ aim 50 ms deep: above the floor, under the 180 ms
         // cap, so the ring has no reason to refuse.
         var s = AvSync(channels: channels, rateHz: 48_000)
         settle(&s, offsetMS: -30, depth: 20 * perMS, count: 400)
@@ -496,7 +527,7 @@ final class AudioRingDriftTests: XCTestCase {
         XCTAssertEqual(ring.stats.targetMS, floor)
         // And it may not blow past the hard cap either — added latency stays bounded.
         ring.setSyncTarget(Int.max / 2)
-        XCTAssertLessThanOrEqual(ring.stats.targetMS, 90, "sync pushed the target past the hard cap")
+        XCTAssertLessThanOrEqual(ring.stats.targetMS, 180, "sync pushed the target past the hard cap")
     }
 
     /// A device whose callback quantum alone exceeds the hard cap puts the continuity floor ABOVE
@@ -1253,14 +1284,14 @@ final class AudioRingDriftTests: XCTestCase {
         func fadeLength(frameUs: Int?) -> Int {
             let ring = AudioRing(seconds: 1, channels: channels, rateHz: 48_000)
             if let frameUs { ring.setFrameUs(frameUs) }
-            // A fresh ring's cap is target(20) + headroom(30) = 50 ms, so 60 ms of audio trims
-            // exactly 10 ms off the front — comfortably more than any fade under test.
-            var feed = [Float](repeating: 1, count: 60 * perMS)
+            // The hard cap trims on sight at 180 ms, so 190 ms of audio trims exactly 10 ms off
+            // the front — comfortably more than any fade under test.
+            var feed = [Float](repeating: 1, count: 190 * perMS)
             for i in 0..<(10 * perMS) { feed[i] = 0 }
             feed.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: feed.count) }
 
             // Read one 5 ms callback: small enough to stay primed (the floor needs quantum + a
-            // frame ≤ the 50 ms banked), large enough to contain any fade under test.
+            // frame ≤ the 180 ms banked), large enough to contain any fade under test.
             var out = [Float](repeating: -1, count: 5 * perMS)
             out.withUnsafeMutableBufferPointer {
                 ring.read(into: $0.baseAddress!, count: $0.count)
@@ -1289,7 +1320,7 @@ final class AudioRingDriftTests: XCTestCase {
         func targetAfterLeaving(_ leftover: Int, frameUs: Int?) -> Int {
             let ring = AudioRing(seconds: 1, channels: channels, rateHz: 48_000)
             if let frameUs { ring.setFrameUs(frameUs) }
-            // Bank 25 ms — over the 20 ms base target, under the 50 ms hard cap, so nothing trims.
+            // Bank 25 ms — over the 20 ms base target, under the 180 ms hard cap, so nothing trims.
             let feed = [Float](repeating: 0.5, count: 25 * perMS)
             feed.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: feed.count) }
             // A 5 ms callback primes the ring and leaves 20 ms — nowhere near any margin.
@@ -1353,15 +1384,13 @@ final class AudioRingDriftTests: XCTestCase {
                     ring.stats.targetMS, 20,
                     "\(rateHz) Hz / \(channels)ch: the target is denominated in ms, not samples")
 
-                // …and the SAMPLES behind it must be the honest ones. 88 200 interleaved samples
-                // is one second at the shallowest layout on the ladder (44.1 kHz stereo) and a
-                // whole number of frames at 2/6/8 channels, so one figure over-fills every ring
-                // here and the hard cap trims each to its own `target + headroom`.
-                let flood = [Float](repeating: 0.5, count: 88_200)
+                // …and the SAMPLES behind it must be the honest ones. One second at this layout
+                // over-fills the ring and the hard cap trims it to its own 180 ms.
+                let flood = [Float](repeating: 0.5, count: rateHz * channels)
                 flood.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: flood.count) }
                 XCTAssertEqual(
                     ring.bufferedSamples,
-                    honest(20, rateHz, channels) + honest(30, rateHz, channels),
+                    honest(180, rateHz, channels),
                     "\(rateHz) Hz / \(channels)ch: the hard cap sits where ms × rate × ch / 1000 "
                         + "puts it — a leading divide by 1 000 truncates 44.1 kHz to 44 samples/ms "
                         + "and lands every figure 2.3 % low")

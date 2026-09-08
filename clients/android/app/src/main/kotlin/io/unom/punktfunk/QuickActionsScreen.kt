@@ -259,7 +259,7 @@ private fun RingStage(cfg: OverlayConfig, editing: RingEditing) {
                 .matchParentSize()
                 .pointerInput(Unit) {
                     streamTouchInput(
-                        handle = 0L, stylus = null, videoAspect = 1f, trackpad = true, invertScroll = false,
+                        sink = NativeTouchSink(0L), stylus = null, videoAspect = 1f, trackpad = true, invertScroll = false,
                         // Only the twist is this stage's: a lone finger keeps scrolling the
                         // settings page under the card (dialOnly's whole point).
                         dialOnly = true,

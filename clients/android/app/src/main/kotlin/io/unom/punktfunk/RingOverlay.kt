@@ -79,6 +79,7 @@ import androidx.compose.ui.unit.sp
 import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.RingNav
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.atan2
@@ -370,46 +371,7 @@ fun RingOverlay(
     LaunchedEffect(Unit) { if (state.nativeMode == null) state.nativeMode = actions.currentMode() }
     val rows = if (state.sheet) sheetRows(state, cfg, actions, haptics) { textDialog = true } else emptyList()
 
-    // The haptic vocabulary: a tap per press, a firm "no" on a dimmed button, a warning when a
-    // destructive slot arms, and the confirm on the commit (StreamScreen fires that one).
-    fun fire(s: SlotSpec, slot: SlotId) {
-        state.touch()
-        if (!s.enabled) {
-            haptics.boundary()
-            state.armed = null
-            state.hint = s.reason
-            return
-        }
-        if (s.armed && state.armed != s.id) {
-            haptics.boundary()
-            state.armed = s.id
-            state.hint = "${s.label}? Tap again"
-            return
-        }
-        haptics.tick()
-        state.armed = null
-        state.hint = null
-        when (slot) {
-            SlotId.EndStream -> { state.close(); actions.endStream() }
-            SlotId.DisconnectLinger -> { state.close(); actions.disconnectLinger() }
-            SlotId.TouchMode -> actions.cycleTouchMode()
-            SlotId.Keyboard -> { state.close(); actions.keyboard() }
-            SlotId.Stats -> actions.cycleStats()
-            SlotId.Mic -> actions.toggleMic()
-            SlotId.Pad -> actions.togglePad()
-            SlotId.SendText -> textDialog = true
-            // The host's own overlay is taking the screen: close first, like End stream.
-            SlotId.Guide -> { state.close(); actions.tapPadButton(Gamepad.BTN_GUIDE) }
-            SlotId.Qam -> { state.close(); actions.tapPadButton(Gamepad.BTN_MISC1) }
-            is SlotId.Host -> {
-                actions.hostActions().firstOrNull { it.id == slot.actionId }?.let { state.close(); actions.invokeHost(it) }
-            }
-            is SlotId.Shortcut -> {
-                cfg.shortcut(slot.shortcutId)?.let { state.close(); actions.sendShortcut(it.keys) }
-            }
-        }
-        if (s.toggle) state.hint = spec(slot, cfg, actions).let { "${it.label}: ${it.state}" }
-    }
+    val fire = { s: SlotSpec, slot: SlotId -> fireSlot(s, slot, state, cfg, actions, haptics) { textDialog = true } }
 
     // The pad (design §2.6): the left stick AIMS — its sector is the highlight, so the ring
     // follows the thumb — while the D-pad steps, Right clockwise, Left anticlockwise, Up to 12
@@ -419,36 +381,7 @@ fun RingOverlay(
         val n = state.pendingNav ?: return@LaunchedEffect
         state.pendingNav = null
         state.touch()
-        if (state.sheet) {
-            // A sheet is a list, not a dial: the six sectors fold onto its four directions.
-            val ev = if (n is RingNav.Sector) sheetDir(n.slot) ?: return@LaunchedEffect else n
-            when (ev) {
-                RingNav.Up -> { state.sheetCursor = (state.sheetCursor - 1).coerceAtLeast(0); haptics.tick() }
-                RingNav.Down -> { state.sheetCursor = (state.sheetCursor + 1).coerceAtMost(rows.lastIndex.coerceAtLeast(0)); haptics.tick() }
-                RingNav.Left -> rows.getOrNull(state.sheetCursor)?.onAdjust?.let { it(-1); haptics.tick() } ?: haptics.boundary()
-                RingNav.Right -> rows.getOrNull(state.sheetCursor)?.onAdjust?.let { it(1); haptics.tick() } ?: haptics.boundary()
-                RingNav.Confirm -> rows.getOrNull(state.sheetCursor)?.let { if (it.enabled) haptics.tick() else haptics.boundary(); it.onTap() }
-                RingNav.Back -> { state.sheet = false; haptics.tick() }
-                RingNav.Centre, is RingNav.Sector -> {}
-            }
-            return@LaunchedEffect
-        }
-        val h = state.highlight ?: 6
-        when (n) {
-            // The weapon-wheel idiom: the thumb's sector is the slot, neutral is the centre.
-            is RingNav.Sector -> (n.slot ?: 6).let {
-                if (state.highlight != it) { state.highlight = it; haptics.tick() }
-            }
-            RingNav.Right -> { state.highlight = if (h >= 6) 0 else (h + 1) % 6; haptics.tick() }
-            RingNav.Left -> { state.highlight = if (h >= 6) 5 else (h + 5) % 6; haptics.tick() }
-            RingNav.Up -> { state.highlight = 0; haptics.tick() }
-            RingNav.Down -> { state.highlight = 3; haptics.tick() }
-            RingNav.Centre -> { state.highlight = 6; haptics.tick() }
-            RingNav.Confirm -> if (h >= 6) { haptics.tick(); state.sheetCursor = 0; state.sheet = true } else {
-                cfg.ring[h]?.let { fire(spec(it, cfg, actions), it) } ?: haptics.boundary()
-            }
-            RingNav.Back -> state.close()
-        }
+        navigate(n, state, rows, cfg, actions, haptics, fire)
     }
 
     Box(
@@ -471,13 +404,7 @@ fun RingOverlay(
             ),
     ) {
         val slotHalf = slotPx / 2
-        // The disc under an editing drag and how far it has been carried.
-        var drag by remember { mutableStateOf<Pair<Int, Offset>?>(null) }
-        // Editing: which slot each disc is drawn in. Identity except while a swap plays: the
-        // two discs travel to each other's slots on a spring, then the blob is written and
-        // this snaps back to identity with the contents swapped — nothing visible moves then.
-        var order by remember { mutableStateOf((0 until 6).toList()) }
-        var swapping by remember { mutableStateOf(false) }
+        val edit = remember { SlotDrag() }
         val scope = rememberCoroutineScope()
         cfg.ring.forEachIndexed { k, slot ->
             val q = ((shown.value - k * SLOT_LAG) / (1f - 5 * SLOT_LAG)).coerceIn(0f, 1f)
@@ -485,58 +412,18 @@ fun RingOverlay(
             // Slot k sits at 12, 2, 4… o'clock; it travels out along a short spiral that turns
             // the way the hand turns. `order` redirects a disc to another slot while a swap plays.
             val turn = if (state.clockwise) -40f else 40f
-            val deg = -90f + 60f * order[k] + (1f - q) * turn
+            val deg = -90f + 60f * edit.order[k] + (1f - q) * turn
             val rad = Math.toRadians(deg.toDouble())
-            val carried = drag?.takeIf { it.first == k }?.second ?: Offset.Zero
+            val carried = edit.carried(k)
             val targetX = cx + radiusPx * q * cos(rad).toFloat() - slotHalf + carried.x
             val targetY = cy + radiusPx * q * sin(rad).toFloat() - slotHalf + carried.y
             // Only a swap animates the position; the twist and a drag follow the finger.
-            val swapSpring = if (swapping) spring<Float>(dampingRatio = 0.82f, stiffness = Spring.StiffnessMedium) else snap()
+            val swapSpring = if (edit.swapping) spring<Float>(dampingRatio = 0.82f, stiffness = Spring.StiffnessMedium) else snap()
             val x by animateFloatAsState(targetX, swapSpring, label = "slotX")
             val y by animateFloatAsState(targetY, swapSpring, label = "slotY")
             val s = slot?.let { spec(it, cfg, actions) }
-            // Editing: a disc dragged onto another slot swaps the two (§3.3); released near the
-            // centre or over its own slot, nothing changes. The drag consumes past touch slop,
-            // which is what keeps the tap from also firing.
             val dragModifier = if (editing != null) {
-                Modifier.pointerInput(k, editing) {
-                    detectDragGestures(
-                        onDragStart = { drag = k to Offset.Zero },
-                        onDragEnd = {
-                            val d = drag
-                            drag = null
-                            if (d == null || d.first != k) return@detectDragGestures
-                            val home = Math.toRadians(-90.0 + 60.0 * k)
-                            val px = radiusPx * cos(home).toFloat() + d.second.x
-                            val py = radiusPx * sin(home).toFloat() + d.second.y
-                            if (hypot(px, py) <= radiusPx / 2) return@detectDragGestures
-                            val angle = Math.toDegrees(atan2(py, px).toDouble()) + 90.0
-                            val target = (((angle / 60.0).roundToInt() % 6) + 6) % 6
-                            if (target == k || swapping) return@detectDragGestures
-                            // The two discs travel to each other's slots; once they land the
-                            // blob is written and `order` resets with the spring off, so the
-                            // swap of contents draws nothing.
-                            swapping = true
-                            order = order.toMutableList().also { o ->
-                                val t = o[k]
-                                o[k] = o[target]
-                                o[target] = t
-                            }
-                            // Past the spring's settle: a reset while the discs still move
-                            // jumped them the last few pixels as the contents swapped.
-                            scope.launch {
-                                delay(650)
-                                swapping = false
-                                order = (0 until 6).toList()
-                                editing.swap(k, target)
-                            }
-                        },
-                        onDragCancel = { drag = null },
-                    ) { change, delta ->
-                        change.consume()
-                        drag = (drag?.takeIf { it.first == k } ?: (k to Offset.Zero)).let { it.first to it.second + delta }
-                    }
-                }
+                Modifier.slotDrag(k, editing, edit, radiusPx, scope)
             } else {
                 Modifier
             }
@@ -594,17 +481,183 @@ fun RingOverlay(
     }
 
     if (textDialog) {
-        var text by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { textDialog = false },
-            title = { Text("Send text") },
-            text = { OutlinedTextField(text, { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
-            confirmButton = {
-                TextButton(onClick = { textDialog = false; state.close(); actions.sendText(text) }) { Text("Send") }
-            },
-            dismissButton = { TextButton(onClick = { textDialog = false }) { Text("Cancel") } },
-        )
+        SendTextDialog(onDismiss = { textDialog = false }) { text ->
+            textDialog = false
+            state.close()
+            actions.sendText(text)
+        }
     }
+}
+
+/**
+ * The haptic vocabulary: a tap per press, a firm "no" on a dimmed button, a warning when a
+ * destructive slot arms, and the confirm on the commit (StreamScreen fires that one).
+ */
+private fun fireSlot(
+    s: SlotSpec,
+    slot: SlotId,
+    state: RingState,
+    cfg: OverlayConfig,
+    actions: RingActions,
+    haptics: ConsoleHaptics,
+    onSendText: () -> Unit,
+) {
+    state.touch()
+    if (!s.enabled) {
+        haptics.boundary()
+        state.armed = null
+        state.hint = s.reason
+        return
+    }
+    if (s.armed && state.armed != s.id) {
+        haptics.boundary()
+        state.armed = s.id
+        state.hint = "${s.label}? Tap again"
+        return
+    }
+    haptics.tick()
+    state.armed = null
+    state.hint = null
+    when (slot) {
+        SlotId.EndStream -> { state.close(); actions.endStream() }
+        SlotId.DisconnectLinger -> { state.close(); actions.disconnectLinger() }
+        SlotId.TouchMode -> actions.cycleTouchMode()
+        SlotId.Keyboard -> { state.close(); actions.keyboard() }
+        SlotId.Stats -> actions.cycleStats()
+        SlotId.Mic -> actions.toggleMic()
+        SlotId.Pad -> actions.togglePad()
+        SlotId.SendText -> onSendText()
+        // The host's own overlay is taking the screen: close first, like End stream.
+        SlotId.Guide -> { state.close(); actions.tapPadButton(Gamepad.BTN_GUIDE) }
+        SlotId.Qam -> { state.close(); actions.tapPadButton(Gamepad.BTN_MISC1) }
+        is SlotId.Host -> {
+            actions.hostActions().firstOrNull { it.id == slot.actionId }?.let { state.close(); actions.invokeHost(it) }
+        }
+        is SlotId.Shortcut -> {
+            cfg.shortcut(slot.shortcutId)?.let { state.close(); actions.sendShortcut(it.keys) }
+        }
+    }
+    if (s.toggle) state.hint = spec(slot, cfg, actions).let { "${it.label}: ${it.state}" }
+}
+
+/**
+ * The pad (design §2.6): the left stick AIMS — its sector is the highlight, so the ring follows
+ * the thumb — while the D-pad steps, Right clockwise, Left anticlockwise, Up to 12 o'clock, Down
+ * to 6; Y returns the highlight to the centre, A fires it (the centre opens the sheet), B closes.
+ * In the sheet, Up/Down walk the rows and Left/Right adjust one.
+ */
+private fun navigate(
+    n: RingNav,
+    state: RingState,
+    rows: List<SheetRowSpec>,
+    cfg: OverlayConfig,
+    actions: RingActions,
+    haptics: ConsoleHaptics,
+    fire: (SlotSpec, SlotId) -> Unit,
+) {
+    if (state.sheet) {
+        // A sheet is a list, not a dial: the six sectors fold onto its four directions.
+        val ev = if (n is RingNav.Sector) sheetDir(n.slot) ?: return else n
+        when (ev) {
+            RingNav.Up -> { state.sheetCursor = (state.sheetCursor - 1).coerceAtLeast(0); haptics.tick() }
+            RingNav.Down -> { state.sheetCursor = (state.sheetCursor + 1).coerceAtMost(rows.lastIndex.coerceAtLeast(0)); haptics.tick() }
+            RingNav.Left -> rows.getOrNull(state.sheetCursor)?.onAdjust?.let { it(-1); haptics.tick() } ?: haptics.boundary()
+            RingNav.Right -> rows.getOrNull(state.sheetCursor)?.onAdjust?.let { it(1); haptics.tick() } ?: haptics.boundary()
+            RingNav.Confirm -> rows.getOrNull(state.sheetCursor)?.let { if (it.enabled) haptics.tick() else haptics.boundary(); it.onTap() }
+            RingNav.Back -> { state.sheet = false; haptics.tick() }
+            RingNav.Centre, is RingNav.Sector -> {}
+        }
+        return
+    }
+    val h = state.highlight ?: 6
+    when (n) {
+        // The weapon-wheel idiom: the thumb's sector is the slot, neutral is the centre.
+        is RingNav.Sector -> (n.slot ?: 6).let {
+            if (state.highlight != it) { state.highlight = it; haptics.tick() }
+        }
+        RingNav.Right -> { state.highlight = if (h >= 6) 0 else (h + 1) % 6; haptics.tick() }
+        RingNav.Left -> { state.highlight = if (h >= 6) 5 else (h + 5) % 6; haptics.tick() }
+        RingNav.Up -> { state.highlight = 0; haptics.tick() }
+        RingNav.Down -> { state.highlight = 3; haptics.tick() }
+        RingNav.Centre -> { state.highlight = 6; haptics.tick() }
+        RingNav.Confirm -> if (h >= 6) { haptics.tick(); state.sheetCursor = 0; state.sheet = true } else {
+            cfg.ring[h]?.let { fire(spec(it, cfg, actions), it) } ?: haptics.boundary()
+        }
+        RingNav.Back -> state.close()
+    }
+}
+
+/**
+ * Editing: which disc is under a drag and how far it has been carried, and which slot each disc
+ * is drawn in — identity except while a swap plays: the two discs travel to each other's slots
+ * on a spring, then the blob is written and `order` snaps back to identity with the contents
+ * swapped, so nothing visible moves then.
+ */
+private class SlotDrag {
+    var drag by mutableStateOf<Pair<Int, Offset>?>(null)
+    var order by mutableStateOf((0 until 6).toList())
+    var swapping by mutableStateOf(false)
+
+    fun carried(k: Int): Offset = drag?.takeIf { it.first == k }?.second ?: Offset.Zero
+}
+
+/**
+ * A disc dragged onto another slot swaps the two (§3.3); released near the centre or over its
+ * own slot, nothing changes. The drag consumes past touch slop, which is what keeps the tap from
+ * also firing.
+ */
+private fun Modifier.slotDrag(
+    k: Int,
+    editing: RingEditing,
+    edit: SlotDrag,
+    radiusPx: Float,
+    scope: CoroutineScope,
+): Modifier = pointerInput(k, editing) {
+    detectDragGestures(
+        onDragStart = { edit.drag = k to Offset.Zero },
+        onDragEnd = {
+            val d = edit.drag
+            edit.drag = null
+            if (d == null || d.first != k) return@detectDragGestures
+            val home = Math.toRadians(-90.0 + 60.0 * k)
+            val px = radiusPx * cos(home).toFloat() + d.second.x
+            val py = radiusPx * sin(home).toFloat() + d.second.y
+            if (hypot(px, py) <= radiusPx / 2) return@detectDragGestures
+            val angle = Math.toDegrees(atan2(py, px).toDouble()) + 90.0
+            val target = (((angle / 60.0).roundToInt() % 6) + 6) % 6
+            if (target == k || edit.swapping) return@detectDragGestures
+            edit.swapping = true
+            edit.order = edit.order.toMutableList().also { o ->
+                val t = o[k]
+                o[k] = o[target]
+                o[target] = t
+            }
+            // Past the spring's settle: a reset while the discs still move jumped them the
+            // last few pixels as the contents swapped.
+            scope.launch {
+                delay(650)
+                edit.swapping = false
+                edit.order = (0 until 6).toList()
+                editing.swap(k, target)
+            }
+        },
+        onDragCancel = { edit.drag = null },
+    ) { change, delta ->
+        change.consume()
+        edit.drag = (edit.drag?.takeIf { it.first == k } ?: (k to Offset.Zero)).let { it.first to it.second + delta }
+    }
+}
+
+@Composable
+private fun SendTextDialog(onDismiss: () -> Unit, onSend: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Send text") },
+        text = { OutlinedTextField(text, { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
+        confirmButton = { TextButton(onClick = { onSend(text) }) { Text("Send") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** One round translucent button — the in-stream pill family's surface, in a circle. */

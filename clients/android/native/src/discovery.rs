@@ -106,13 +106,12 @@ impl Discovery {
                     match event {
                         ServiceEvent::ServiceResolved(info) => {
                             if let Some(host) = resolve(&info) {
-                                map.lock()
-                                    .unwrap()
+                                crate::session::lock_recover(&map)
                                     .insert(info.get_fullname().to_string(), host);
                             }
                         }
                         ServiceEvent::ServiceRemoved(_ty, fullname) => {
-                            map.lock().unwrap().remove(&fullname);
+                            crate::session::lock_recover(&map).remove(&fullname);
                         }
                         _ => {}
                     }
@@ -139,10 +138,7 @@ impl Discovery {
     /// Current resolved-host set, newline-joined (empty string = none). Sorted for a stable order
     /// across polls; Kotlin re-sorts by display name.
     fn snapshot(&self) -> String {
-        let mut records: Vec<String> = self
-            .hosts
-            .lock()
-            .unwrap()
+        let mut records: Vec<String> = crate::session::lock_recover(&self.hosts)
             .values()
             .map(Host::encode)
             .collect();

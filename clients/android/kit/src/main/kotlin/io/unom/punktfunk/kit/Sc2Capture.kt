@@ -63,8 +63,7 @@ class Sc2Capture(
 
     // Typed-mirror diff state (wire units).
     private val state = Sc2Device.State()
-    private var wireButtons = 0
-    private val lastAxis = IntArray(6) { Int.MIN_VALUE }
+    private var mirror = TypedMirror()
 
     /** Report ids seen so far — each logged once, for remote diagnosis of what the pad emits. */
     private val seenIds = HashSet<Int>()
@@ -225,28 +224,10 @@ class Sc2Capture(
     }
 
     /** Diff the parsed state onto the per-transition plane (buttons + axes, on change only). */
-    private fun mirrorTyped(p: GamepadRouter.ExternalPad) {
-        val wired = Sc2Device.wireButtons(state.buttons)
-        var changed = wired xor wireButtons
-        while (changed != 0) {
-            val bit = changed and -changed // lowest changed bit
-            p.button(bit, wired and bit != 0)
-            changed = changed and bit.inv()
-        }
-        wireButtons = wired
-        axis(p, Gamepad.AXIS_LS_X, state.lsX)
-        axis(p, Gamepad.AXIS_LS_Y, state.lsY)
-        axis(p, Gamepad.AXIS_RS_X, state.rsX)
-        axis(p, Gamepad.AXIS_RS_Y, state.rsY)
-        axis(p, Gamepad.AXIS_LT, state.lt)
-        axis(p, Gamepad.AXIS_RT, state.rt)
-    }
-
-    private fun axis(p: GamepadRouter.ExternalPad, id: Int, v: Int) {
-        if (lastAxis[id] == v) return
-        lastAxis[id] = v
-        p.axis(id, v)
-    }
+    private fun mirrorTyped(p: GamepadRouter.ExternalPad) = mirror.push(
+        p, Sc2Device.wireButtons(state.buttons),
+        state.lsX, state.lsY, state.rsX, state.rsY, state.lt, state.rt,
+    )
 
     /**
      * UI mode: edge-detect the parsed state into navigation key transitions. Buttons map to
@@ -316,8 +297,7 @@ class Sc2Capture(
     private fun releaseSlot() {
         pad?.close()
         pad = null
-        wireButtons = 0
-        lastAxis.fill(Int.MIN_VALUE)
+        mirror = TypedMirror()
         pendingWirelessLen = 0
         // Every teardown funnels through here (stop, link drop, Puck power-off), so whatever
         // connects next re-proves its IMU live before the block passes through again.
