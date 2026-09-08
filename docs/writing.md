@@ -70,7 +70,7 @@ The Gitea PR title is the merge subject. Write it as the conventional subject.
 ## 2. Changelogs
 
 Voice and shape below. Procedure — git log, when to retitle `## Unreleased`,
-who runs the skill — is `.grok/skills/write-release-notes/SKILL.md`.
+who runs the skill — is `.agents/skills/write-release-notes/SKILL.md`.
 
 ### `docs/releases/vX.Y.Z.md` — people who stream
 

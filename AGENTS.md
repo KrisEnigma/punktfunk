@@ -22,8 +22,8 @@ Good: `fix(host/hyprland): keep topology restore across pipeline retries`
 
 Do not edit `CHANGELOG.md` on ordinary PRs. Commits are the log.
 If the reader must act, add a `BREAKING CHANGE:` footer.
-Release notes are written at version bump: skill `write-release-notes`,
-rules in `docs/writing.md` §2.
+Release notes are written at version bump: skill `write-release-notes`
+(`.agents/skills/write-release-notes/SKILL.md`), rules in `docs/writing.md` §2.
 
 ### Comments
 
@@ -60,6 +60,9 @@ Both: `Couldn't` / `can't`, never `Could not` / `cannot` / `unable to`. Append
 the cause once — ` — ` in prose, `: ` in operator lines. Never a bare code.
 
 ## Agent skills
+
+Project SKILL.md files live in `.agents/skills/`. A harness that only
+scans its own vendor dir still finds them via this file.
 
 ### Issue tracker
 
