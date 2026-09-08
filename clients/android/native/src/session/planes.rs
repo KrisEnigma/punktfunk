@@ -454,17 +454,19 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeStartAudio(
     low_latency_mode: jboolean,
     is_tv: jboolean,
 ) {
-    let Some(h) = get_session(handle) else {
-        return;
-    };
-    let mut guard = lock_recover(&h.audio);
-    if guard.is_some() {
-        return; // already playing
-    }
-    match crate::audio::AudioPlayback::start(h.client.clone(), low_latency_mode, is_tv) {
-        Some(p) => *guard = Some(p),
-        None => log::error!("nativeStartAudio: playback init failed (video unaffected)"),
-    }
+    jni_guard((), || {
+        let Some(h) = get_session(handle) else {
+            return;
+        };
+        let mut guard = lock_recover(&h.audio);
+        if guard.is_some() {
+            return; // already playing
+        }
+        match crate::audio::AudioPlayback::start(h.client.clone(), low_latency_mode, is_tv) {
+            Some(p) => *guard = Some(p),
+            None => log::error!("nativeStartAudio: playback init failed (video unaffected)"),
+        }
+    })
 }
 
 /// `NativeBridge.nativeStopAudio(handle)` — stop + join the audio thread and close AAudio (without
@@ -499,26 +501,28 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeStartMic(
     handle: jlong,
     echo_cancel: jboolean,
 ) -> jni::sys::jint {
-    let Some(h) = get_session(handle) else {
-        return 0;
-    };
-    let mut guard = lock_recover(&h.mic);
-    if let Some(m) = guard.as_ref() {
-        return m.session_id(); // already capturing — same stream, same session
-    }
-    // The capture SHARES the session's mute flag, so one started while muted stays muted (and
-    // sends nothing) from its very first frame — see `SessionHandle::mic_muted`.
-    match crate::mic::MicCapture::start(h.client.clone(), echo_cancel, h.mic_muted.clone()) {
-        Some(m) => {
-            let session_id = m.session_id();
-            *guard = Some(m);
-            session_id
+    jni_guard(0, || {
+        let Some(h) = get_session(handle) else {
+            return 0;
+        };
+        let mut guard = lock_recover(&h.mic);
+        if let Some(m) = guard.as_ref() {
+            return m.session_id(); // already capturing — same stream, same session
         }
-        None => {
-            log::error!("nativeStartMic: mic init failed (RECORD_AUDIO? — session unaffected)");
-            0
+        // The capture SHARES the session's mute flag, so one started while muted stays muted (and
+        // sends nothing) from its very first frame — see `SessionHandle::mic_muted`.
+        match crate::mic::MicCapture::start(h.client.clone(), echo_cancel, h.mic_muted.clone()) {
+            Some(m) => {
+                let session_id = m.session_id();
+                *guard = Some(m);
+                session_id
+            }
+            None => {
+                log::error!("nativeStartMic: mic init failed (RECORD_AUDIO? — session unaffected)");
+                0
+            }
         }
-    }
+    })
 }
 
 /// `NativeBridge.nativeStopMic(handle)` — stop + join the mic thread and close the AAudio input

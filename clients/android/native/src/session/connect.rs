@@ -34,7 +34,7 @@ fn note_error(e: &punktfunk_core::error::PunktfunkError) {
         E::Io(_) => "io",
         _ => "error",
     };
-    *LAST_ERROR.lock().unwrap() = token.to_string();
+    *lock_recover(&LAST_ERROR) = token.to_string();
 }
 
 /// `NativeBridge.nativeTakeLastError(): String` — the machine token of the most recent failed
@@ -80,7 +80,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSetLowLaten
     _this: JObject,
     enabled: jboolean,
 ) {
-    punktfunk_core::transport::set_dscp_default(enabled);
+    jni_guard((), || {
+        punktfunk_core::transport::set_dscp_default(enabled);
+    })
 }
 
 /// `debug.punktfunk.force_parts` = 1: arm slice-progressive parts delivery even when the
