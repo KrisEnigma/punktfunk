@@ -780,11 +780,15 @@ fn web_setup(args: &[String]) -> Result<()> {
         PathBuf::from(flag_val(args, "--app-dir").context("web setup: --app-dir <app> required")?);
     let pw_file = flag_val(args, "--password-file");
     let data_dir = pf_paths::config_dir();
+    let pw_path = data_dir.join("web-password");
+    // Before the hardening, not after: `create_private_dir` re-owns the contents on its first
+    // pass, which would make a planted password look administrator-owned and keep it.
+    quarantine_planted_secret(&pw_path);
     // `create_private_dir`, not `create_dir_all`: the next line writes the console password, and
     // `create_dir_all` would inherit `%ProgramData%` (BUILTIN\Users can create files).
     pf_paths::create_private_dir(&data_dir).ok();
 
-    set_web_password(&data_dir.join("web-password"), pw_file.as_deref());
+    set_web_password(&pw_path, pw_file.as_deref());
     // End + delete the legacy task (idempotent if absent). The installer disables it before the
     // file copy so it cannot respawn between service start and this delete.
     run_quiet("schtasks", &["/end", "/tn", WEB_TASK]);
@@ -876,27 +880,14 @@ fn set_web_password(pw_path: &Path, pw_file: Option<&str>) {
             }
         });
     if let Some(pw) = password {
-        // Empty file, lock DACL, then write: the secret must not sit on the inherited
-        // `%ProgramData%` (Users-readable) ACL even for the window before icacls.
-        if std::fs::write(pw_path, b"").is_err() {
-            eprintln!("warning: {} not created", pw_path.display());
-            return;
-        }
-        // Drop inheritance; Administrators (S-1-5-32-544) + SYSTEM (S-1-5-18) only.
-        let p = pw_path.to_string_lossy();
-        run_quiet(
-            "icacls",
-            &[
-                &p,
-                "/inheritance:r",
-                "/grant:r",
-                "*S-1-5-32-544:F",
-                "*S-1-5-18:F",
-            ],
-        );
-        // Truncate keeps the explicit DACL; write the secret into the already-locked file.
-        if std::fs::write(pw_path, format!("PUNKTFUNK_UI_PASSWORD={pw}\n")).is_err() {
-            eprintln!("warning: {} not written", pw_path.display());
+        // The shared writer, not a local copy of it: it refuses a reparse point (a junction
+        // planted here would redirect this SYSTEM write), and on a failed DACL lock it removes
+        // the file and reports the error instead of leaving the secret on the inherited,
+        // Users-readable `%ProgramData%` ACL.
+        if let Err(e) =
+            pf_paths::write_secret_file(pw_path, format!("PUNKTFUNK_UI_PASSWORD={pw}\n").as_bytes())
+        {
+            eprintln!("warning: {} not written: {e}", pw_path.display());
         }
     }
 }
