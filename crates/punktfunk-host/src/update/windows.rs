@@ -152,14 +152,37 @@ fn download(url: &str, part: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Resu
         .into();
 
     let existing = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
-    let mut req = agent.get(url);
-    if existing > 0 {
-        req = req.header("Range", &format!("bytes={existing}-"));
-    }
-    let resp = req.call().map_err(|e| match e {
-        ureq::Error::StatusCode(code) => format!("download returned HTTP {code}"),
-        other => format!("download failed: {other}"),
-    })?;
+    let ranged = |from: u64| {
+        let mut req = agent.get(url);
+        if from > 0 {
+            req = req.header("Range", &format!("bytes={from}-"));
+        }
+        req.call()
+    };
+    // A resume that the server refuses is usually a `.part` at or past the object's length —
+    // 416 says so outright. The file is never touched on this path, so without a restart every
+    // later attempt at this version replays the same refusal forever. Drop it and retry whole,
+    // once, so a wedged leftover costs one download rather than the update.
+    let resp = match ranged(existing) {
+        Ok(resp) => resp,
+        Err(e) if existing > 0 => {
+            tracing::warn!(
+                error = %e,
+                "update: resuming the partial download was refused — starting it again from scratch"
+            );
+            let _ = std::fs::remove_file(part);
+            ranged(0).map_err(|e| match e {
+                ureq::Error::StatusCode(code) => format!("download returned HTTP {code}"),
+                other => format!("download failed: {other}"),
+            })?
+        }
+        Err(e) => {
+            return Err(match e {
+                ureq::Error::StatusCode(code) => format!("download returned HTTP {code}"),
+                other => format!("download failed: {other}"),
+            })
+        }
+    };
 
     let resumed = resp.status() == 206;
     let content_len: Option<u64> = resp
