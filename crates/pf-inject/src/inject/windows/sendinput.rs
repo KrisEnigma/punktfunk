@@ -144,14 +144,18 @@ impl SendInputInjector {
         if n as usize == inputs.len() {
             return Ok(());
         }
-        // Short write → the input desktop likely changed. Reattach + retry once.
+        // Short write → the input desktop likely changed. Reattach + retry the TAIL: the first
+        // `n` events were injected, and re-sending them duplicates real input — a repeated
+        // character on the text path, a second click on the pointer one.
         self.reattach_input_desktop();
-        // SAFETY: same as the first `SendInput` — `inputs` is the identical live slice outliving the
-        // call and `cbSize == size_of::<INPUT>()`; only re-issued after reattaching the input desktop.
-        let n = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
-        if n as usize != inputs.len() {
+        let rest = &inputs[n as usize..];
+        // SAFETY: same as the first `SendInput` — `rest` borrows the identical live slice, which
+        // outlives the call, and `cbSize == size_of::<INPUT>()`.
+        let n2 = unsafe { SendInput(rest, size_of::<INPUT>() as i32) };
+        if n2 as usize != rest.len() {
             anyhow::bail!(
-                "SendInput injected {n}/{} events (blocked desktop?)",
+                "SendInput injected {}/{} events (blocked desktop?)",
+                n as usize + n2 as usize,
                 inputs.len()
             );
         }
