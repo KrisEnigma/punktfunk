@@ -120,3 +120,34 @@ mod tests {
         assert!(rest.starts_with(':'), "separator: {s:?}");
     }
 }
+
+/// The driver's one [`FileLog`] plus the two helpers every driver wrote around it: `log(s)`
+/// writes unconditionally through the gate, and [`dbglog!`](crate::dbglog) formats only when
+/// the log is on. `$env` is the driver's own opt-in variable; a debug build is always on.
+#[macro_export]
+macro_rules! file_log {
+    ($file:literal, $env:literal) => {
+        static FILE_LOG: $crate::log::FileLog = $crate::log::FileLog::new($file, || {
+            cfg!(debug_assertions) || std::env::var_os($env).is_some()
+        });
+
+        fn file_log_enabled() -> bool {
+            FILE_LOG.enabled()
+        }
+
+        fn log(s: &str) {
+            FILE_LOG.write(s);
+        }
+    };
+}
+
+/// Format and write one line, only when the driver's [`file_log!`](crate::file_log) is on: the
+/// gate runs before `format!`, so a release driver pays nothing per line.
+#[macro_export]
+macro_rules! dbglog {
+    ($($a:tt)*) => {
+        if file_log_enabled() {
+            log(&format!($($a)*))
+        }
+    };
+}

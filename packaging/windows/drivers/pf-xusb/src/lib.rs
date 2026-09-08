@@ -26,19 +26,15 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use pf_driver_proto::gamepad::XusbShm;
 use pf_umdf_util::channel::{ChannelClient, ChannelConfig};
-use pf_umdf_util::nt_success;
 use pf_umdf_util::section::MappedView;
+use pf_umdf_util::skeleton::{self, STATUS_INVALID_DEVICE_REQUEST, STATUS_SUCCESS};
 use pf_umdf_util::wdf::{self, Request};
+use pf_umdf_util::{dbglog, nt_success};
 use wdk_sys::{
-    GUID, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, PWDFDEVICE_INIT, ULONG, WDF_DRIVER_CONFIG,
-    WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, WDF_OBJECT_ATTRIBUTES,
-    WDF_TIMER_CONFIG, WDFDEVICE, WDFDRIVER, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER,
+    GUID, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, PWDFDEVICE_INIT, ULONG,
+    WDF_NO_OBJECT_ATTRIBUTES, WDFDEVICE, WDFDRIVER, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER,
     call_unsafe_wdf_function_binding,
 };
-
-// ---- NTSTATUS ----
-const STATUS_SUCCESS: NTSTATUS = 0;
-const STATUS_INVALID_DEVICE_REQUEST: NTSTATUS = 0xC000_0010u32 as NTSTATUS;
 
 // GUID_DEVINTERFACE_XUSB {EC87F1E3-C13B-4100-B5F7-8B84D54260CB} — what xinput1_4 enumerates + opens.
 const GUID_DEVINTERFACE_XUSB: GUID = GUID {
@@ -74,10 +70,6 @@ const XUSB_VID: u16 = 0x045E;
 const XUSB_PID: u16 = 0x028E;
 const XUSB_VERSION: u16 = 0x0103;
 
-// ---- WDF enum values ----
-const WdfIoQueueDispatchParallel: i32 = 2;
-const WdfIoQueueDispatchManual: i32 = 3;
-
 /// Manual queue holding pended [`IOCTL_XUSB_WAIT_FOR_INPUT`] requests; the periodic timer completes
 /// them when the host publishes a new packet. See [`evt_timer`].
 static WAIT_QUEUE: AtomicPtr<WDFQUEUE__> = AtomicPtr::new(core::ptr::null_mut());
@@ -85,10 +77,6 @@ static WAIT_QUEUE: AtomicPtr<WDFQUEUE__> = AtomicPtr::new(core::ptr::null_mut())
 /// a waiter is only released when the state actually MOVED (that is the contract of an async wait;
 /// completing it unconditionally would spin the caller at timer rate).
 static WAIT_LAST_PACKET: AtomicU32 = AtomicU32::new(0);
-const WdfUseDefault: i32 = 2; // WDF_TRI_STATE
-const WdfExecutionLevelInheritFromParent: i32 = 1; // WDF_EXECUTION_LEVEL
-const WdfSynchronizationScopeInheritFromParent: i32 = 1; // WDF_SYNCHRONIZATION_SCOPE
-
 // ---- the sealed host channel: layouts + offsets from pf_driver_proto (drift = compile error) ----
 const SHM_MAGIC: u32 = pf_driver_proto::gamepad::XUSB_MAGIC; // "PFXU"
 const SHM_SIZE: usize = core::mem::size_of::<XusbShm>();
@@ -133,23 +121,10 @@ fn channel_cfg() -> ChannelConfig {
     }
 }
 
-/// The bring-up file log. OPT-IN — debug builds, or the `PFXUSB_DEBUG_LOG` env var — so a RELEASE
-/// driver never writes the file and never traps into the debugger. The path and the sink live
-/// in [`pf_umdf_util::log`], one copy for all four drivers.
-static FILE_LOG: pf_umdf_util::log::FileLog =
-    pf_umdf_util::log::FileLog::new("pfxusb-driver.log", || {
-        cfg!(debug_assertions) || std::env::var_os("PFXUSB_DEBUG_LOG").is_some()
-    });
-
-fn file_log_enabled() -> bool {
-    FILE_LOG.enabled()
-}
-
-fn log(s: &str) {
-    FILE_LOG.write(s);
-}
-// The `file_log_enabled()` pre-check skips the `format!` alloc too when logging is off.
-macro_rules! dbglog { ($($a:tt)*) => { if file_log_enabled() { log(&format!($($a)*)) } } }
+// The bring-up file log. OPT-IN — debug builds, or the `PFXUSB_DEBUG_LOG` env var — so a RELEASE
+// driver never writes the file and never traps into the debugger. Path, sink and the gate live
+// in `pf_umdf_util::log`, one copy for all four drivers.
+pf_umdf_util::file_log!("pfxusb-driver.log", "PFXUSB_DEBUG_LOG");
 
 #[unsafe(export_name = "DriverEntry")]
 pub unsafe extern "system" fn driver_entry(
@@ -157,21 +132,8 @@ pub unsafe extern "system" fn driver_entry(
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     log("[pf-xusb] DriverEntry");
-    // SAFETY: a zeroed WDF_DRIVER_CONFIG is a valid all-null config; we then set Size + the callback.
-    let mut config: WDF_DRIVER_CONFIG = unsafe { core::mem::zeroed() };
-    config.Size = core::mem::size_of::<WDF_DRIVER_CONFIG>() as ULONG;
-    config.EvtDriverDeviceAdd = Some(evt_device_add);
-    // SAFETY: `driver`/`registry_path` are the loader-provided pointers; the config is valid.
-    unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfDriverCreate,
-            driver,
-            registry_path,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &mut config,
-            WDF_NO_HANDLE.cast::<WDFDRIVER>()
-        )
-    }
+    // SAFETY: `driver`/`registry_path` are the loader's DriverEntry arguments.
+    unsafe { skeleton::driver_create(driver, registry_path, Some(evt_device_add)) }
 }
 
 extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
@@ -217,29 +179,15 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     }
 
     // Default parallel queue: all the XUSB IOCTLs land here.
-    // SAFETY: a zeroed WDF_IO_QUEUE_CONFIG is valid; we then set Size + the fields we use.
-    let mut qcfg: WDF_IO_QUEUE_CONFIG = unsafe { core::mem::zeroed() };
-    qcfg.Size = core::mem::size_of::<WDF_IO_QUEUE_CONFIG>() as ULONG;
-    qcfg.DispatchType = WdfIoQueueDispatchParallel;
-    qcfg.PowerManaged = WdfUseDefault;
-    qcfg.DefaultQueue = 1;
-    qcfg.EvtIoDeviceControl = Some(evt_io_device_control);
-    qcfg.Settings.Parallel.NumberOfPresentedRequests = u32::MAX;
-    let mut queue: WDFQUEUE = core::ptr::null_mut();
-    // SAFETY: `device` + `qcfg` are valid; attributes null; `queue` receives the handle.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoQueueCreate,
-            device,
-            &mut qcfg,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &mut queue
-        )
+    // SAFETY: `device` is the live device just created.
+    let queue = match unsafe { skeleton::create_default_queue(device, Some(evt_io_device_control)) }
+    {
+        Ok(q) => q,
+        Err(st) => {
+            dbglog!("[pf-xusb] WdfIoQueueCreate failed 0x{:08x}", st as u32);
+            return st;
+        }
     };
-    if !nt_success(st) {
-        dbglog!("[pf-xusb] WdfIoQueueCreate failed 0x{:08x}", st as u32);
-        return st;
-    }
 
     // Manual queue for the ASYNC input wait (`IOCTL_XUSB_WAIT_FOR_INPUT`), completed by the timer.
     //
@@ -248,26 +196,14 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     // WGI/GameInput: those poll asynchronously, so to them the decline is not a fallback but a
     // refusal, and the device is never admitted. Measured 2026-08-09 on .173 — the pad reaches
     // XInput slot 1 with live data while WGI/GameInput never see it at all.
-    // SAFETY: a zeroed WDF_IO_QUEUE_CONFIG is valid; we then set Size + the fields we use.
-    let mut wcfg: WDF_IO_QUEUE_CONFIG = unsafe { core::mem::zeroed() };
-    wcfg.Size = core::mem::size_of::<WDF_IO_QUEUE_CONFIG>() as ULONG;
-    wcfg.DispatchType = WdfIoQueueDispatchManual;
-    wcfg.PowerManaged = WdfUseDefault;
-    let mut wait_queue: WDFQUEUE = core::ptr::null_mut();
-    // SAFETY: `device` + `wcfg` are valid; attributes null; `wait_queue` receives the handle.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoQueueCreate,
-            device,
-            &mut wcfg,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &mut wait_queue
-        )
+    // SAFETY: `device` is the live device just created.
+    let wait_queue = match unsafe { skeleton::create_manual_queue(device) } {
+        Ok(q) => q,
+        Err(st) => {
+            dbglog!("[pf-xusb] wait WdfIoQueueCreate failed 0x{:08x}", st as u32);
+            return st;
+        }
     };
-    if !nt_success(st) {
-        dbglog!("[pf-xusb] wait WdfIoQueueCreate failed 0x{:08x}", st as u32);
-        return st;
-    }
     WAIT_QUEUE.store(wait_queue, Ordering::SeqCst);
 
     // Run the sealed-channel handshake on a worker (must NOT block EvtDeviceAdd): publish our pid in
@@ -294,32 +230,11 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     // Periodic sealed-channel tick (the pf-gamepad timer pattern, parented to the default queue):
     // owns the mailbox pump — adoption, re-delivery, host-gone — so the XInput IOCTL path never
     // re-opens the mailbox (see `evt_io_device_control`).
-    // SAFETY: zeroed config then fields set.
-    let mut tcfg: WDF_TIMER_CONFIG = unsafe { core::mem::zeroed() };
-    tcfg.Size = core::mem::size_of::<WDF_TIMER_CONFIG>() as ULONG;
-    tcfg.EvtTimerFunc = Some(evt_timer);
-    tcfg.Period = 8; // ms
-    tcfg.AutomaticSerialization = 1; // TRUE — UMDF requires a serialized timer (vhidmini2 pattern)
-    // SAFETY: a zeroed WDF_OBJECT_ATTRIBUTES is a valid all-null attributes struct; we set Size + the
-    // fields we use below.
-    let mut tattr: WDF_OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
-    tattr.Size = core::mem::size_of::<WDF_OBJECT_ATTRIBUTES>() as ULONG;
-    tattr.ParentObject = queue.cast();
-    // mem::zeroed leaves these at 0 (Invalid) → set them like WDF_OBJECT_ATTRIBUTES_INIT
-    // (matches the working vhidmini2 UMDF timer setup; avoids 0xc0200209 / 0xc00000bb).
-    tattr.ExecutionLevel = WdfExecutionLevelInheritFromParent;
-    tattr.SynchronizationScope = WdfSynchronizationScopeInheritFromParent;
-    let mut timer: WDFTIMER = core::ptr::null_mut();
-    // SAFETY: config + attributes valid; timer receives the handle.
-    let st = unsafe {
-        call_unsafe_wdf_function_binding!(WdfTimerCreate, &mut tcfg, &mut tattr, &mut timer)
-    };
-    if !nt_success(st) {
+    // SAFETY: `queue` is the live default queue just created.
+    if let Err(st) = unsafe { skeleton::create_periodic_timer(queue.cast(), Some(evt_timer), 8) } {
         dbglog!("[pf-xusb] WdfTimerCreate failed 0x{:08x}", st as u32);
         return st;
     }
-    // SAFETY: timer valid; -80000 == 8ms relative due time (100ns units, negative = relative).
-    let _started = unsafe { call_unsafe_wdf_function_binding!(WdfTimerStart, timer, -80000i64) };
 
     log("[pf-xusb] device ready (XUSB interface registered)");
     STATUS_SUCCESS
@@ -559,11 +474,10 @@ fn on_set_state(request: &Request, data: Option<&MappedView>) -> NTSTATUS {
     if let Ok((bytes, len)) = request.input_bytes(8)
         && len >= 2
     {
-        let mut hex = String::new();
-        for b in &bytes {
-            hex.push_str(&format!("{b:02x} "));
-        }
-        dbglog!("[pf-xusb] SET_STATE len={len} data: {hex}");
+        dbglog!(
+            "[pf-xusb] SET_STATE len={len} data: {}",
+            pf_umdf_util::hid::hex_dump(&bytes, bytes.len())
+        );
         // Observed 5-byte form {00, led, largeMotor, smallMotor, subcmd}: subcmd 0x02 = rumble
         // (large/low-freq at [2], small/high-freq at [3]); 0x01 = player-LED set (ignored).
         // 4-byte = raw XINPUT_VIBRATION → the two motor hi bytes.

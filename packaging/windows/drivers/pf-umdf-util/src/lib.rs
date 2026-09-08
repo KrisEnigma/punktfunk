@@ -16,7 +16,9 @@
 //!   `pf_mouse` tell the host which process serves this devnode, over the device stack rather
 //!   than the LocalService-writable bootstrap mailbox.
 //! * [`log`] — [`log::FileLog`]: the opt-in bring-up file log, so the path decision behind it
-//!   lands once for all four drivers.
+//!   lands once for all four drivers; [`file_log!`] and [`dbglog!`] are the trio around it.
+//! * [`skeleton`] — `DriverEntry`, the default and manual queues and the periodic timer the
+//!   three HID drivers stand up identically.
 //!
 //! Lint gates (workspace-wide, enforced by the drivers CI clippy step): `unsafe_op_in_unsafe_fn`
 //! + `clippy::undocumented_unsafe_blocks` — every `unsafe {}` carries a `// SAFETY:` proof.
@@ -25,6 +27,7 @@ pub mod channel;
 pub mod hid;
 pub mod log;
 pub mod section;
+pub mod skeleton;
 pub mod wdf;
 
 /// `NT_SUCCESS` — an NTSTATUS is an error iff negative.
