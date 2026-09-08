@@ -1,8 +1,9 @@
-// Verifies legacy console handoff tickets minted by pre-0.35 hosts. Current launchers open the
-// ordinary login page because putting a bearer URL in browser argv exposes it to other local users.
-// The route stays for rolling upgrades and accepts only management-token HMACs.
+// Verifies the console handoff ticket `punktfunk-host ctl console-url` mints, keyed by the
+// management token both sides already hold. The ticket never enters browser argv, where
+// /proc/<pid>/cmdline would expose it to other local users: the host writes it into a 0600 page
+// under $XDG_RUNTIME_DIR and the browser is launched at that file.
 
-/** Legacy ticket validity window, retained for rolling upgrades. */
+/** How long a ticket may be redeemed. Minting happens at click time, so a browser has seconds. */
 export const HANDOFF_TTL_MS = 60_000;
 
 export type HandoffVerdict =

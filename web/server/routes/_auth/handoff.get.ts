@@ -1,5 +1,5 @@
-// Rolling-upgrade endpoint for management-token HMAC tickets minted by older host builds.
-// Current launchers use the ordinary login page so no bearer URL enters process arguments.
+// Redeems the management-token HMAC ticket a local launcher minted, so opening the console from
+// the desktop lands logged in. The ticket reaches the browser inside a 0600 file, never in argv.
 import {
 	createError,
 	defineEventHandler,
