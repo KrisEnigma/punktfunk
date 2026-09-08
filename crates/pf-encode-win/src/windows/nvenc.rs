@@ -2683,6 +2683,9 @@ mod tests {
                 None,
             )
             .expect("NVENC open");
+            // Caps, RFI included, exist only once the session is prepared on a device.
+            enc.prepare_d3d11(&device, PixelFormat::Bgra, W, H)
+                .expect("prepare");
             assert!(
                 enc.caps().supports_rfi,
                 "the RTX box invalidates references"
