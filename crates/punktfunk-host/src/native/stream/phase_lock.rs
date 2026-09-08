@@ -3,7 +3,7 @@
 //! [`PhaseCtl`] is the control-task → encode-loop bridge (latest-wins, drained ~1 Hz);
 //! [`PhaseController`] is the loop that turns a report into a submit offset. Lifted out of the
 //! frame loop so the controller reads on its own terms — it is a feedback loop, and a feedback
-//! loop buried in a 4700-line file is one nobody re-derives.
+//! loop buried in the frame loop is one nobody re-derives.
 
 use super::*;
 
