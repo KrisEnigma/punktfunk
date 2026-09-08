@@ -47,14 +47,22 @@ fn refused(code: u32, what: &'static str) -> anyhow::Error {
 ///
 /// The permit is the same pool the native plane draws from: a browser holds a session slot, not
 /// a browser slot. It is taken before the first read so a slow handshake never lets a host that
-/// is full accept a fifth encoder.
+/// is full accept a fifth encoder — which is why every pre-auth read is bounded: an idle peer
+/// must give the slot back.
 pub(crate) async fn run(
     conn: Connection,
     serving: Arc<Serving>,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<Served> {
-    let (mut tx, mut rx) = conn.accept_bi().await.context("accept control stream")?;
-    let first = read_msg(&mut rx).await.context("read the first message")?;
+    const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let (mut tx, mut rx) = tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.accept_bi())
+        .await
+        .context("control stream: handshake timeout")?
+        .context("accept control stream")?;
+    let first = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_msg(&mut rx))
+        .await
+        .context("first message: handshake timeout")?
+        .context("read the first message")?;
 
     // A `PairRequest` ends the session either way — pairing is its own connection, as on the
     // native plane, so a browser reconnects to stream.
@@ -72,7 +80,10 @@ pub(crate) async fn run(
         write_msg(&mut tx, &AuthChallenge { nonce }.encode())
             .await
             .context("write AuthChallenge")?;
-        let answer = read_msg(&mut rx).await.context("read AuthResponse")?;
+        let answer = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_msg(&mut rx))
+            .await
+            .context("AuthResponse: handshake timeout")?
+            .context("read AuthResponse")?;
         let auth = AuthResponse::decode(&answer).map_err(|_| {
             refused(
                 punktfunk_core::reject::PAIR_NO_IDENTITY_CLOSE_CODE,

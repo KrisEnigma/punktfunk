@@ -408,7 +408,7 @@ fn probe_matches(p: &str) -> bool {
         use std::os::windows::process::CommandExt;
         // `reg.exe query`, not a registry crate — no extra dep under LocalService.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        return std::process::Command::new("reg.exe")
+        return std::process::Command::new(crate::install::sys32("reg.exe"))
             .args(["query", &format!("HKLM\\{key}")])
             .creation_flags(CREATE_NO_WINDOW)
             .stdout(std::process::Stdio::null())

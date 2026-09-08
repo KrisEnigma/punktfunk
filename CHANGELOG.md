@@ -833,6 +833,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **A frame the FEC wire cannot address is dropped, not corrupted.** Past 255 data shards per
   block `255 - k` underflowed and `fecInfo`'s 10-bit k truncated, which a large IDR at the
   ANNOUNCE packetSize floor reaches. Raise the client's packetSize if the log names it.
+- **A browser that opens a session and never speaks gives its slot back.** The WebTransport
+  handshake reads were unbounded while holding a session permit, so four idle connections blocked
+  every native session; they now time out after 10 s like the native plane. Nothing to do.
 - **One client stalling its handshake no longer holds every other client off.** The accept loop
   waited for each connection's handshake before taking the next, so a stalled peer blocked
   connects for up to 8 s; the handshake now runs per session. Nothing to do.
@@ -890,6 +893,23 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **A planted web-console password is no longer kept.** `web setup` hardened the config directory
   before testing the file's owner, and that pass re-owns the contents, so the check always passed.
   Nothing to do; the installer now rotates to a fresh password instead.
+- **A planted secret that cannot be moved aside fails the install instead of receiving the new
+  one.** A file held open by its planter blocked the rename and the fresh token was written into
+  it; the write now unlinks and creates new, and the pairing stores and `hooks.json` get the same
+  owner check. Nothing to do.
+- **Hardening a planted directory resets its own ACL.** An explicit `Everyone` grant survived the
+  inheritance strip, and the update staging directory was created with default rights, so a
+  pre-planted `updates\` stayed writable to whoever made it; SYSTEM now re-checks that directory
+  before running an installer from it, on apply and on rollback. Nothing to do.
+- **The installer resolves every system tool to System32.** The setup engine and the service's
+  firewall step still spawned `netsh`, `taskkill`, `reg`, `schtasks` and `curl` by bare name while
+  elevated, and the Windows App Runtime download runs only after its Microsoft signature checks.
+  Nothing to do.
+- **A plugin can no longer have SYSTEM end a process outside the streamed session.** The provider
+  liveness report accepted any pid and the end-of-session ladder terminated it as SYSTEM. Nothing
+  to do.
+- **Games and hooks no longer inherit the admin token.** A `PUNKTFUNK_MGMT_TOKEN` or UI password
+  set in `host.env` was copied into every session-user child's environment. Nothing to do.
 - **A GameStream pairing ceremony belongs to one peer.** Phases 2-4 were keyed on the
   client-chosen `uniqueid` alone, so any host that saw one could re-roll the ceremony's secrets
   and strand the real client. Nothing to do — the address is the one the PIN was already bound to.

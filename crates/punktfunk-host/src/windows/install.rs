@@ -105,7 +105,7 @@ fn driver_install(args: &[String]) -> Result<()> {
 ///
 /// Reads the security descriptor; `icacls` output uses localized account names.
 #[cfg(windows)]
-fn ensure_admin_only_source(dir: &Path) -> Result<()> {
+pub(crate) fn ensure_admin_only_source(dir: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
@@ -413,10 +413,12 @@ fn owned_by_current_user(path: &Path) -> bool {
 ///
 /// Call BEFORE `pf_paths::create_private_dir`: its first pass re-owns the contents
 /// (`icacls /setowner /T`) and erases the only evidence. A `true` verdict must make the
-/// caller mint a fresh secret — the rename is best-effort, so never gate on it.
+/// caller mint a fresh secret through `write_secret_file`, which unlinks and creates new:
+/// a planted file the planter still holds open fails that mint instead of receiving it.
+/// An unreadable owner counts as planted.
 #[cfg(windows)]
 pub(crate) fn quarantine_planted_secret(path: &Path) -> bool {
-    if !path.exists() || is_admin_owned(path) != Some(false) || owned_by_current_user(path) {
+    if !path.exists() || is_admin_owned(path) == Some(true) || owned_by_current_user(path) {
         return false;
     }
     let mut aside = path.to_path_buf().into_os_string();
