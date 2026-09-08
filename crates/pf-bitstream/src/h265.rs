@@ -660,6 +660,12 @@ impl H265Planner {
         })
     }
 
+    /// An intra refresh wave finished on a picture the freeze gate accepted: forget the
+    /// unclean marks, which a chain through half-refreshed pictures cannot clear itself.
+    pub fn forgive_unclean(&mut self) {
+        self.clean.clear();
+    }
+
     /// Drain the DPB: every still-buffered picture becomes display-ready and
     /// every id is released. Session calls this at teardown or a discontinuity.
     ///

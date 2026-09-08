@@ -68,7 +68,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   and close AU `USER_FLAG_RECOVERY_POINT` so the client's existing two-mark lift heals in one
   cycle without the bitrate spike. Nothing changes on the wire or for a backend that leaves the
   field `false`; `PUNKTFUNK_VK_INTRA_REFRESH=0` restores the IDR, `PUNKTFUNK_VK_IR_CYCLE` pins
-  the cycle length in frames.
+  the cycle length in frames. A client with a bitstream planner forgets its damaged-chain marks
+  on such a lift (`ReanchorGate::lifted_by_marks`), or every later host anchor would be refused
+  until an IDR.
 - **`Console::focus_announcement` names the focused row for a screen reader.** The Skia console
   has no accessibility node tree, so the driver hands the host a string for home, the library and
   settings (`None` elsewhere) and Android speaks it through the new `{"announce": …}` event on

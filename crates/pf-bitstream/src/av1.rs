@@ -322,6 +322,12 @@ impl Av1Planner {
         self.slots.iter().flatten().copied().collect()
     }
 
+    /// An intra refresh wave finished on a picture the freeze gate accepted: forget the
+    /// unclean marks, which a chain through half-refreshed pictures cannot clear itself.
+    pub fn forgive_unclean(&mut self) {
+        self.clean.clear();
+    }
+
     /// Plan one temporal unit. May carry several frames, so this returns a `Vec`
     /// where the H.264/H.265 siblings return one plan.
     ///

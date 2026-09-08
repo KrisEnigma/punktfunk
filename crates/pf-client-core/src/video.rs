@@ -1487,6 +1487,21 @@ impl Decoder {
         Ok(())
     }
 
+    /// The freeze gate lifted on intra refresh marks. The wave healed the picture by
+    /// overwrite, so the planner's damaged-chain marks are stale: without this, every later
+    /// host anchor that descends from the wave is refuted until an IDR. Lanes without a
+    /// planner have nothing to forget.
+    pub fn forgive_unclean(&mut self) {
+        match &mut self.backend {
+            Backend::NativeVulkan(n) => n.forgive_unclean(),
+            #[cfg(target_os = "linux")]
+            Backend::NativeVaapi(v) => v.forgive_unclean(),
+            #[cfg(windows)]
+            Backend::NativeD3d11va(d) => d.forgive_unclean(),
+            _ => {}
+        }
+    }
+
     /// Feed one access unit (hosts are one-in/one-out). Hardware errors
     /// re-request an IDR; only a persistent streak demotes. `want_keyframe` is
     /// set either way — the infinite GOP has no other resync.
