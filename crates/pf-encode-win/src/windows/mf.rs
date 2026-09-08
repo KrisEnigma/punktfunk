@@ -912,20 +912,38 @@ impl MfEncoder {
             device = %format_args!("{:#x}", dev_raw as usize),
             "Media Foundation encode active (async MFT, zero-copy D3D11 NV12)"
         );
-        let shared = Arc::new(Shared {
-            mft: mft.clone(),
-            events,
-            codec: self.codec,
-            out: Mutex::new(Out::default()),
-            have: Ready::new().context("Media Foundation: no completion event")?,
-        });
-        // Arm the event sink. From here the callback is the only reader of the generator, so
-        // every `NeedInput` and `HaveOutput` lands in `shared.out` rather than in a pump.
-        let sink = IMFAsyncCallback::from(EventSink(shared.clone()));
-        // SAFETY: `shared.events` is the live MFT's generator and `sink` is a callback that
-        // outlives the request (both this `Inner` and the generator hold a reference).
-        unsafe { shared.events.BeginGetEvent(&sink, None) }
-            .context("IMFMediaEventGenerator::BeginGetEvent")?;
+        // Everything from here to the `Inner` below can still fail, and until that value exists
+        // `Inner::drop` — the only thing that shuts the MFT down — is not armed. Bind the
+        // prelude so a failure gets the same `ShutdownObject` the activation arm above does;
+        // releasing an activated MFT without it leaks the vendor's worker threads and GPU
+        // allocations for the life of the process.
+        let armed = (|| -> Result<(Arc<Shared>, IMFAsyncCallback)> {
+            let shared = Arc::new(Shared {
+                mft: mft.clone(),
+                events,
+                codec: self.codec,
+                out: Mutex::new(Out::default()),
+                have: Ready::new().context("Media Foundation: no completion event")?,
+            });
+            // Arm the event sink. From here the callback is the only reader of the generator, so
+            // every `NeedInput` and `HaveOutput` lands in `shared.out` rather than in a pump.
+            let sink = IMFAsyncCallback::from(EventSink(shared.clone()));
+            // SAFETY: `shared.events` is the live MFT's generator and `sink` is a callback that
+            // outlives the request (both this `Inner` and the generator hold a reference).
+            unsafe { shared.events.BeginGetEvent(&sink, None) }
+                .context("IMFMediaEventGenerator::BeginGetEvent")?;
+            Ok((shared, sink))
+        })();
+        let (shared, sink) = match armed {
+            Ok(pair) => pair,
+            Err(e) => {
+                // SAFETY: the activation object is live; this is its last use on this path.
+                unsafe {
+                    let _ = activate.ShutdownObject();
+                }
+                return Err(e);
+            }
+        };
         self.inner = Some(Inner {
             shared,
             _sink: sink,
