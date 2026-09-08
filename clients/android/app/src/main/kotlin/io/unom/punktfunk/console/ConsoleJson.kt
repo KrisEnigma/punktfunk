@@ -2,11 +2,10 @@ package io.unom.punktfunk.console
 
 import android.view.InputDevice
 import io.unom.punktfunk.HostActions
-import io.unom.punktfunk.MouseMode
 import io.unom.punktfunk.Settings
+import io.unom.punktfunk.SettingsFields
 import io.unom.punktfunk.StatsVerbosity
 import io.unom.punktfunk.StreamProfile
-import io.unom.punktfunk.TouchMode
 import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.library.DEFAULT_MGMT_PORT
@@ -330,12 +329,6 @@ internal object ConsoleJson {
 
     // ---- settings (`trust::Settings`) -------------------------------------------------------
 
-    private val GAMEPAD_NAMES = listOf(
-        "auto", "xbox360", "dualsense", "xboxone", "dualshock4", "steamcontroller", "steamdeck",
-        "dualsenseedge", "switchpro", "steamcontroller2", "steamcontroller2puck", "xboxelite",
-    )
-    private val COMPOSITOR_NAMES = listOf("auto", "kwin", "wlroots", "mutter", "gamescope")
-
     /**
      * The console's settings document: [base] is the last snapshot the console saved (it owns
      * keys Android has no field for — `library_sort`, `library_view`, `reduce_motion`, …), and
@@ -344,53 +337,12 @@ internal object ConsoleJson {
      */
     fun settings(s: Settings, base: JSONObject?): JSONObject {
         val j = base?.let { JSONObject(it.toString()) } ?: JSONObject()
-        j.put("width", s.width)
-        j.put("height", s.height)
-        j.put("refresh_hz", s.hz)
-        j.put("bitrate_kbps", s.bitrateKbps)
-        j.put("render_scale", s.renderScale)
-        j.put("gamepad", GAMEPAD_NAMES.getOrElse(s.gamepad) { "auto" })
-        j.put("gamepad_forwarding", s.gamepadForwarding)
-        j.put("system_buttons", s.systemButtons)
-        j.put("guide_gesture", s.guideGesture)
-        j.put("compositor", COMPOSITOR_NAMES.getOrElse(s.compositor) { "auto" })
-        j.put("touch_mode", s.touchMode.name.lowercase())
-        j.put("mouse_mode", s.mouseMode.storedName)
-        j.put("mic_enabled", s.micEnabled)
-        j.put("echo_cancel", s.echoCancel)
-        j.put("keep_host_audio", s.keepHostAudio)
-        j.put("audio_channels", s.audioChannels)
-        j.put("audio_format", s.audioFormat)
-        j.put("codec", s.codec)
-        j.put("hdr_enabled", s.hdrEnabled)
-        j.put("ten_bit_sdr", s.tenBitSdr)
-        j.put("present_priority", s.presentPriority)
-        j.put("smooth_buffer", s.smoothBuffer)
+        // Every row, both shells' keys included: carrying `start_in`/`default_host` in `base`
+        // alone would work until the touch UI wrote one, at which point the next push would
+        // paste the console's older copy back over it. The `android.*` rows ride
+        // `Settings::extra`, which is `#[serde(flatten)]` — TOP-LEVEL keys, never nested.
+        SettingsFields.ALL.forEach { it.consoleWrite(j, s) }
         j.put("show_stats", s.statsVerbosity != StatsVerbosity.OFF)
-        j.put("stats_verbosity", s.statsVerbosity.name.lowercase())
-        j.put("ui_palette", s.uiPalette)
-        j.put("auto_wake", s.autoWakeEnabled)
-        j.put("invert_scroll", s.invertScroll)
-        j.put("overlay_actions", s.overlayActions)
-        j.put("pad_haptics", s.padHaptics)
-        j.put("pad_speaker", if (s.padSpeaker) "pad" else "off")
-        // Both shells write these, so both must be mapped in BOTH directions: carrying them in
-        // `base` alone would work until the touch UI wrote one, at which point the next push
-        // would paste the console's older copy back over it.
-        j.put("start_in", s.startIn)
-        if (s.defaultHost != null) j.put("default_host", s.defaultHost) else j.remove("default_host")
-        // Android-only rows ride `Settings::extra`, which is `#[serde(flatten)]` — so they are
-        // TOP-LEVEL keys of this document, not a nested `extra` object. Nesting them put the
-        // whole object into the map under the literal key "extra", where no console row could
-        // read it and every value the console wrote came straight back as the one we had sent.
-        j.put("android.low_latency", s.lowLatencyMode)
-        j.put("android.rumble_on_phone", s.rumbleOnPhone)
-        j.put("android.gyro_on_phone", s.gyroOnPhone)
-        j.put("android.sc2_capture", s.sc2Capture)
-        j.put("android.ds_capture", s.dsCapture)
-        j.put("gamepad_ui_mode", s.gamepadUiMode)
-        j.put("gamepad_ui_enabled", s.gamepadUiEnabled)
-        j.put("android.reduce_ui_resolution", s.reduceUiResolution)
         // A store written by the nesting build carries the stale wrapper; drop it rather than
         // round-trip a copy of these keys that nothing reads for the life of the install.
         j.remove("extra")
@@ -401,65 +353,6 @@ internal object ConsoleJson {
      * The console saved [j]: fold every key Android owns back into [s]. Unknown values snap to
      * the field's current value — a newer console's spelling must never corrupt the store.
      */
-    fun applySettings(s: Settings, j: JSONObject): Settings {
-        fun str(k: String, cur: String) = j.optString(k, cur).ifEmpty { cur }
-        // The `android.*` keys are TOP-LEVEL here, not nested: `Settings::extra` is
-        // `#[serde(flatten)]`, so the console writes them beside `width` and `codec`.
-        return s.copy(
-            width = j.optInt("width", s.width),
-            height = j.optInt("height", s.height),
-            hz = j.optInt("refresh_hz", s.hz),
-            bitrateKbps = j.optInt("bitrate_kbps", s.bitrateKbps),
-            renderScale = j.optDouble("render_scale", s.renderScale),
-            gamepad = GAMEPAD_NAMES.indexOf(str("gamepad", "")).takeIf { it >= 0 } ?: s.gamepad,
-            gamepadForwarding = j.optBoolean("gamepad_forwarding", s.gamepadForwarding),
-            systemButtons = str("system_buttons", s.systemButtons),
-            guideGesture = str("guide_gesture", s.guideGesture),
-            compositor = COMPOSITOR_NAMES.indexOf(str("compositor", "")).takeIf { it >= 0 }
-                ?: s.compositor,
-            touchMode = TouchMode.entries.firstOrNull { it.name.lowercase() == j.optString("touch_mode") }
-                ?: s.touchMode,
-            mouseMode = MouseMode.entries.firstOrNull { it.storedName == j.optString("mouse_mode") }
-                ?: s.mouseMode,
-            micEnabled = j.optBoolean("mic_enabled", s.micEnabled),
-            echoCancel = j.optBoolean("echo_cancel", s.echoCancel),
-            keepHostAudio = j.optBoolean("keep_host_audio", s.keepHostAudio),
-            audioChannels = j.optInt("audio_channels", s.audioChannels),
-            audioFormat = str("audio_format", s.audioFormat),
-            codec = str("codec", s.codec),
-            hdrEnabled = j.optBoolean("hdr_enabled", s.hdrEnabled),
-            tenBitSdr = j.optBoolean("ten_bit_sdr", s.tenBitSdr),
-            presentPriority = str("present_priority", s.presentPriority),
-            smoothBuffer = j.optInt("smooth_buffer", s.smoothBuffer),
-            statsVerbosity = StatsVerbosity.entries
-                .firstOrNull { it.name.lowercase() == j.optString("stats_verbosity") }
-                ?: s.statsVerbosity,
-            uiPalette = str("ui_palette", s.uiPalette),
-            autoWakeEnabled = j.optBoolean("auto_wake", s.autoWakeEnabled),
-            invertScroll = j.optBoolean("invert_scroll", s.invertScroll),
-            overlayActions = str("overlay_actions", s.overlayActions),
-            padHaptics = j.optBoolean("pad_haptics", s.padHaptics),
-            // `"mix"` is off, not on: it is unimplemented everywhere and
-            // `pad_audio::speaker_active` renders it as off, so a profile carrying it must not
-            // open the pad's speaker here alone.
-            padSpeaker = when (j.optString("pad_speaker", "")) {
-                "pad" -> true
-                "mix", "off" -> false
-                else -> s.padSpeaker
-            },
-            lowLatencyMode = j.optBoolean("android.low_latency", s.lowLatencyMode),
-            rumbleOnPhone = j.optBoolean("android.rumble_on_phone", s.rumbleOnPhone),
-            gyroOnPhone = j.optBoolean("android.gyro_on_phone", s.gyroOnPhone),
-            sc2Capture = j.optBoolean("android.sc2_capture", s.sc2Capture),
-            dsCapture = j.optBoolean("android.ds_capture", s.dsCapture),
-            gamepadUiMode = j.optString("gamepad_ui_mode", s.gamepadUiMode)
-                .ifEmpty { s.gamepadUiMode },
-            gamepadUiEnabled = j.optBoolean("gamepad_ui_enabled", s.gamepadUiEnabled),
-            reduceUiResolution = j.optBoolean("android.reduce_ui_resolution", s.reduceUiResolution),
-            startIn = str("start_in", s.startIn),
-            // An absent key CLEARS this one, unlike every field above: the console omits it when
-            // no host is chosen (`skip_serializing_if`), and that absence is the value.
-            defaultHost = j.optString("default_host", "").ifEmpty { null },
-        )
-    }
+    fun applySettings(s: Settings, j: JSONObject): Settings =
+        SettingsFields.ALL.fold(s) { acc, f -> f.consoleRead(j, acc) }
 }

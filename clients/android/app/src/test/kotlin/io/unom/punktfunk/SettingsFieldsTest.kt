@@ -1,0 +1,72 @@
+package io.unom.punktfunk
+
+import io.unom.punktfunk.console.ConsoleJson
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Test
+
+/**
+ * The field table is the one list every settings walk loops over, so the two things that can
+ * still drift are a property without a row and a row that does not round-trip. Both are checked
+ * here without naming a single field, which is what makes the next field's forgetting loud.
+ */
+class SettingsFieldsTest {
+    /** The data class's instance properties (statics are the companion's constants). */
+    private fun properties(c: Class<*>) = c.declaredFields
+        .filter { !java.lang.reflect.Modifier.isStatic(it.modifiers) }
+        .map { it.name }
+        .filter { it != "extra" }
+        .toSet()
+
+    @Test
+    fun everySettingsPropertyHasARow() {
+        assertEquals(properties(Settings::class.java), SettingsFields.ALL.map { it.name }.toSet())
+    }
+
+    @Test
+    fun everyOverlayPropertyHasAProfileRow() {
+        assertEquals(properties(SettingsOverlay::class.java), SettingsFields.PROFILE.map { it.name }.toSet())
+    }
+
+    /** A value that differs from the default in every row, so a dropped row shows as a mismatch. */
+    private fun moved(): Settings = Settings(
+        width = 3840, height = 2160, hz = 120, bitrateKbps = 40_000, renderScale = 0.5,
+        hdrEnabled = false, tenBitSdr = true, compositor = 2, gamepad = 3, gamepadForwarding = false,
+        systemButtons = "host", guideGesture = "off", audioChannels = 6, audioFormat = AUDIO_FORMAT_LOSSLESS_96,
+        codec = "av1", micEnabled = true, echoCancel = false, keepHostAudio = true,
+        statsVerbosity = StatsVerbosity.DETAILED, touchMode = TouchMode.TOUCH, gamepadUiEnabled = false,
+        reduceUiResolution = true, gamepadUiMode = GAMEPAD_UI_ALWAYS, uiPalette = "ember",
+        lowLatencyMode = false, presentPriority = "smooth", smoothBuffer = 2, autoWakeEnabled = false,
+        rumbleOnPhone = true, gyroOnPhone = true, sc2Capture = false, dsCapture = false,
+        padHaptics = false, padSpeaker = true, mouseMode = MouseMode.CAPTURE, invertScroll = true,
+        overlayActions = "{\"ring\":[]}", startIn = "library", defaultHost = "desk",
+    )
+
+    @Test
+    fun everyRowMovesInTheProbe() {
+        val a = Settings(); val b = moved()
+        for (f in SettingsFields.ALL) assertNotEquals(f.name, f.get(a), f.get(b))
+    }
+
+    @Test
+    fun theConsoleDocumentRoundTripsEveryRow() {
+        val want = moved()
+        val got = ConsoleJson.applySettings(Settings(), ConsoleJson.settings(want, null))
+        assertEquals(want, got)
+    }
+
+    @Test
+    fun theProfileOverlayRoundTripsEveryRow() {
+        val want = moved()
+        val overlay = SettingsOverlay().absorb(Settings(), want)
+        assertEquals(SettingsFields.PROFILE_KEYS, overlay.overridden() - SettingsOverlay.FIELD_RESOLUTION + setOf("width", "height"))
+        val back = SettingsOverlay.fromJson(JSONObject(overlay.toJson().toString()))
+        assertEquals(overlay, back)
+        for (f in SettingsFields.PROFILE) assertEquals(f.name, f.get(want), f.get(back.apply(Settings())))
+        // Clearing every override by key leaves nothing — including keys a stale KNOWN list once missed.
+        val cleared = SettingsFields.PROFILE.fold(back) { o, f -> o.clear(f.key) }
+        assertEquals(emptySet<String>(), cleared.overridden())
+        assertEquals(0, cleared.toJson().length())
+    }
+}
