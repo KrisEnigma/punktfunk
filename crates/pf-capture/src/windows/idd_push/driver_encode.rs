@@ -160,8 +160,10 @@ struct AuSection {
 }
 
 impl AuSection {
-    /// Create the sealed section + auto-reset event and stamp the header, magic last. The
-    /// host's `generation` is the seed the driver bumps at `SET_ENCODE`.
+    /// Create the sealed section + auto-reset event and stamp the header, magic last.
+    ///
+    /// `generation` is the DRIVER's word: `EncodeSession::new` stores its own over whatever
+    /// is here, and `published_for_us` reads that. The host does not seed it.
     fn create(heap_bytes: u32, wire_seq_base: u32) -> Result<Self> {
         let bytes = au::section_bytes(heap_bytes) as usize;
         // SAFETY: as the ring's section in `open.rs`: every create is `?`-checked, `sa` lives
@@ -197,7 +199,6 @@ impl AuSection {
             (*header).heap_bytes = heap_bytes;
             (*header).slot_table_offset = au::SLOT_TABLE_OFFSET as u32;
             (*header).slot_count = au::AU_SLOTS;
-            (*header).generation = next_generation();
             (*header).wire_seq_base = wire_seq_base;
             let event = CreateEventW(Some(sa.as_ptr()), false, false, PCWSTR::null())
                 .context("CreateEvent(AU section)")?;

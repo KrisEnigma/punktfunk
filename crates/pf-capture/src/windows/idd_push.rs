@@ -11,7 +11,6 @@
 use super::dxgi::WinCaptureTarget;
 use super::{CapturedFrame, Capturer, FramePayload, PixelFormat};
 use anyhow::{bail, Context, Result};
-use pf_driver_proto::encode;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,21 +43,6 @@ use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 const SECTION_MAP_RW: u32 = 0x0004 | 0x0002;
 /// Driver only `SetEvent`s; host keeps `SYNCHRONIZE` on its own handle.
 const EVENT_MODIFY_STATE: u32 = 0x0002;
-
-/// Stamped into every AU section so a publish an old encoder left behind is rejected.
-static IDD_GENERATION: AtomicU32 = AtomicU32::new(1);
-
-/// Masked to [`encode::FrameToken::GENERATION_MASK`] and never `0` — `0` is the
-/// cleared-`latest` sentinel a freshly created section carries.
-fn next_generation() -> u32 {
-    loop {
-        let g =
-            IDD_GENERATION.fetch_add(1, Ordering::Relaxed) & encode::FrameToken::GENERATION_MASK;
-        if g != 0 {
-            return g;
-        }
-    }
-}
 
 fn now_ns() -> u64 {
     SystemTime::now()
@@ -346,46 +330,6 @@ mod tests {
                 "packing diverged for LUID {high:#x}:{low:#x}"
             );
         }
-    }
-
-    /// The mint must stay inside the publish token's 24-bit generation field, and must skip 0.
-    ///
-    /// `IDD_GENERATION` is a full `u32` while `FrameToken` carries 24 bits and `unpack` MASKS
-    /// what it reads, so an unmasked generation stops matching any token past 2²⁴ opens and
-    /// every publish is rejected forever. The counter is parked just below the boundary here so
-    /// the wrap is what gets exercised.
-    #[test]
-    fn the_section_generation_survives_the_publish_token() {
-        IDD_GENERATION.store(encode::FrameToken::GENERATION_MASK - 2, Ordering::Relaxed);
-        let mut seen = Vec::new();
-        for _ in 0..8 {
-            let g = next_generation();
-            assert_ne!(g, 0, "0 also means the cleared-`latest` sentinel");
-            assert_eq!(
-                g & encode::FrameToken::GENERATION_MASK,
-                g,
-                "generation {g} does not fit the token's field"
-            );
-            let tok = encode::FrameToken {
-                generation: g,
-                seq: 12345,
-                slot: 2,
-            };
-            let back = encode::FrameToken::unpack(tok.pack());
-            assert_eq!(back.generation, g, "generation lost in the token");
-            assert_eq!(back.seq, 12345, "seq lost in the token");
-            assert_eq!(back.slot, 2, "slot lost in the token");
-            seen.push(g);
-        }
-        // Started 2 below the mask; wrap produced no duplicate 0.
-        assert!(
-            seen.contains(&encode::FrameToken::GENERATION_MASK),
-            "{seen:?}"
-        );
-        assert!(
-            seen.iter().any(|&g| g < 8),
-            "the counter should have wrapped: {seen:?}"
-        );
     }
 
     /// Feed [`StallWatch`] at `offsets_ms`; metronome is non-damage-idle, as `report` feeds it.
