@@ -119,6 +119,22 @@ unsafe extern "system" fn enum_close(hwnd: HWND, lparam: LPARAM) -> windows::cor
     true.into() // keep enumerating — a game can own several windows
 }
 
+/// Whether `pid` runs in this process's session. A pid a plugin reported may name anything;
+/// SYSTEM must never terminate a service or another session's process on its word.
+pub fn in_our_session(pid: u32) -> bool {
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    let mut ours = 0u32;
+    let mut theirs = 0u32;
+    // SAFETY: both out-params are live locals; the calls read a session id by pid and touch
+    // no memory of ours. A failed lookup (pid gone, no access) leaves the default and fails.
+    unsafe {
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut ours).is_ok()
+            && ProcessIdToSessionId(pid, &mut theirs).is_ok()
+            && ours == theirs
+    }
+}
+
 /// Caller must have re-verified start time ([`crate::procscan::Scanner::alive`]) immediately
 /// before: Windows recycles pids.
 pub fn kill(pids: &[u32]) -> usize {

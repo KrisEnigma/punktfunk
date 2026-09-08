@@ -180,9 +180,10 @@ impl CursorShared {
                 }
             }
             let shape = self.cached.as_ref()?;
+            // Driver-written i32s: saturate rather than trust them to stay in range.
             return Some(pf_frame::CursorOverlay {
-                x: hdr.x - self.origin.0,
-                y: hdr.y - self.origin.1,
+                x: hdr.x.saturating_sub(self.origin.0),
+                y: hdr.y.saturating_sub(self.origin.1),
                 w: shape.w,
                 h: shape.h,
                 rgba: shape.rgba.clone(),

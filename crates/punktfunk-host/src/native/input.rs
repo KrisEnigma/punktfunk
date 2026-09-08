@@ -105,11 +105,44 @@ impl PadState {
 /// Highest wire pad index (`flags` / snapshot `pad`). The uinput manager caps creation separately.
 const MAX_WIRE_PADS: usize = punktfunk_core::input::MAX_PADS;
 
-/// Linux UHID/usbip or Windows UMDF Triton backend. One alias so SC2 sites share a spelling.
+/// The per-OS virtual-pad backends. Off Linux and Windows a pad is Xbox360 or nothing.
 #[cfg(target_os = "linux")]
-type Sc2Manager = pf_inject::steam_controller2::Triton2Manager;
+#[path = "input/linux.rs"]
+mod backends;
 #[cfg(target_os = "windows")]
-type Sc2Manager = pf_inject::triton_windows::TritonWindowsManager;
+#[path = "input/windows.rs"]
+mod backends;
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+mod backends {
+    #[derive(Default)]
+    pub(super) struct PadBackends;
+    impl PadBackends {
+        pub(super) fn route_handle(
+            &mut self,
+            _kind: super::GamepadPref,
+            _ev: &punktfunk_core::input::GamepadEvent,
+        ) -> bool {
+            false
+        }
+        pub(super) fn apply_rich(
+            &mut self,
+            _kind: super::GamepadPref,
+            _rich: punktfunk_core::quic::RichInput,
+        ) {
+        }
+        pub(super) fn sc2_active(&self) -> bool {
+            false
+        }
+        pub(super) fn pump(
+            &mut self,
+            _rumble: &mut impl FnMut(u16, u16, u16, u16, u16),
+            _hidout: &mut impl FnMut(punktfunk_core::quic::HidOutput),
+        ) {
+        }
+        pub(super) fn heartbeat(&mut self) {}
+    }
+}
+use backends::PadBackends;
 
 /// Per-pad virtual-gamepad router. Each index uses the kind declared in
 /// [`InputKind::GamepadArrival`]; undeclared pads keep the Hello session default.
@@ -134,44 +167,8 @@ struct Pads {
     /// never duplicated and removal always hits the manager that owns it.
     owner: [Option<GamepadPref>; MAX_WIRE_PADS],
     xbox360: Option<crate::inject::gamepad::GamepadManager>,
-    #[cfg(target_os = "linux")]
-    xboxone: Option<crate::inject::gamepad::GamepadManager>,
-    #[cfg(target_os = "linux")]
-    dualsense: Option<crate::inject::dualsense::DualSenseManager>,
-    #[cfg(target_os = "linux")]
-    dualsense_edge: Option<crate::inject::dualsense::DualSenseEdgeManager>,
-    #[cfg(target_os = "linux")]
-    dualshock4: Option<crate::inject::dualshock4::DualShock4Manager>,
-    #[cfg(target_os = "linux")]
-    steamdeck: Option<crate::inject::steam_controller::SteamControllerManager>,
-    #[cfg(target_os = "linux")]
-    switchpro: Option<crate::inject::switch_pro::SwitchProManager>,
-    #[cfg(target_os = "linux")]
-    steamctrl: Option<crate::inject::steam_controller::SteamCtrlManager>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    steamctrl2: Option<Sc2Manager>,
-    #[cfg(target_os = "linux")]
-    steamctrl2_puck: Option<crate::inject::steam_controller2::Triton2Manager>,
-    #[cfg(target_os = "windows")]
-    dualsense_win: Option<crate::inject::dualsense_windows::DualSenseWindowsManager>,
-    /// HID Xbox pad ([`crate::inject::xbox_windows`]), used instead of `xbox360`'s
-    /// XUSB companion when [`super::gamepad::windows_xbox_hid`] is set. Never both:
-    /// two devices for one wire pad is "the game sees two controllers".
-    ///
-    /// Three managers — one identity each (Wireless / One S / Elite), bound at
-    /// construction — so a mixed session can present different Xbox pads at once.
-    #[cfg(target_os = "windows")]
-    xbox_hid: Option<crate::inject::xbox_windows::XboxWindowsManager>,
-    #[cfg(target_os = "windows")]
-    xbox_one_hid: Option<crate::inject::xbox_windows::XboxWindowsManager>,
-    #[cfg(target_os = "windows")]
-    xbox_elite_hid: Option<crate::inject::xbox_windows::XboxWindowsManager>,
-    #[cfg(target_os = "windows")]
-    dualsense_edge_win: Option<crate::inject::dualsense_edge_windows::DualSenseEdgeWindowsManager>,
-    #[cfg(target_os = "windows")]
-    dualshock4_win: Option<crate::inject::dualshock4_windows::DualShock4WindowsManager>,
-    #[cfg(target_os = "windows")]
-    steamdeck_win: Option<crate::inject::steam_deck_windows::SteamDeckWindowsManager>,
+    /// Every other identity, per OS.
+    backends: PadBackends,
 }
 
 impl Pads {
@@ -188,38 +185,7 @@ impl Pads {
             kinds: [default; MAX_WIRE_PADS],
             owner: [None; MAX_WIRE_PADS],
             xbox360: None,
-            #[cfg(target_os = "linux")]
-            xboxone: None,
-            #[cfg(target_os = "linux")]
-            dualsense: None,
-            #[cfg(target_os = "linux")]
-            dualsense_edge: None,
-            #[cfg(target_os = "linux")]
-            dualshock4: None,
-            #[cfg(target_os = "linux")]
-            steamdeck: None,
-            #[cfg(target_os = "linux")]
-            switchpro: None,
-            #[cfg(target_os = "linux")]
-            steamctrl: None,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            steamctrl2: None,
-            #[cfg(target_os = "linux")]
-            steamctrl2_puck: None,
-            #[cfg(target_os = "windows")]
-            dualsense_win: None,
-            #[cfg(target_os = "windows")]
-            xbox_hid: None,
-            #[cfg(target_os = "windows")]
-            xbox_one_hid: None,
-            #[cfg(target_os = "windows")]
-            xbox_elite_hid: None,
-            #[cfg(target_os = "windows")]
-            dualsense_edge_win: None,
-            #[cfg(target_os = "windows")]
-            dualshock4_win: None,
-            #[cfg(target_os = "windows")]
-            steamdeck_win: None,
+            backends: PadBackends::default(),
         }
     }
 
@@ -340,114 +306,10 @@ impl Pads {
     }
 
     fn route_handle(&mut self, kind: GamepadPref, ev: &punktfunk_core::input::GamepadEvent) {
-        match kind {
-            #[cfg(target_os = "linux")]
-            GamepadPref::DualSense => self
-                .dualsense
-                .get_or_insert_with(crate::inject::dualsense::DualSenseManager::new)
-                .handle(ev),
-            #[cfg(target_os = "linux")]
-            GamepadPref::DualSenseEdge => self
-                .dualsense_edge
-                .get_or_insert_with(crate::inject::dualsense::DualSenseEdgeManager::new)
-                .handle(ev),
-            #[cfg(target_os = "linux")]
-            GamepadPref::DualShock4 => self
-                .dualshock4
-                .get_or_insert_with(crate::inject::dualshock4::DualShock4Manager::new)
-                .handle(ev),
-            #[cfg(target_os = "linux")]
-            GamepadPref::SteamDeck => self
-                .steamdeck
-                .get_or_insert_with(crate::inject::steam_controller::SteamControllerManager::new)
-                .handle(ev),
-            #[cfg(target_os = "linux")]
-            GamepadPref::SwitchPro => self
-                .switchpro
-                .get_or_insert_with(crate::inject::switch_pro::SwitchProManager::new)
-                .handle(ev),
-            #[cfg(target_os = "linux")]
-            GamepadPref::SteamController => self
-                .steamctrl
-                .get_or_insert_with(crate::inject::steam_controller::SteamCtrlManager::new)
-                .handle(ev),
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            GamepadPref::SteamController2 => self
-                .steamctrl2
-                .get_or_insert_with(Sc2Manager::new)
-                .handle(ev),
-            #[cfg(target_os = "linux")]
-            GamepadPref::SteamController2Puck => self
-                .steamctrl2_puck
-                .get_or_insert_with(|| {
-                    crate::inject::steam_controller2::Triton2Manager::with_backend(
-                        crate::inject::steam_controller2::TritonProto::puck(),
-                    )
-                })
-                .handle(ev),
-            #[cfg(target_os = "linux")]
-            GamepadPref::XboxOne => self
-                .xboxone
-                .get_or_insert_with(|| {
-                    crate::inject::gamepad::GamepadManager::with_identity(
-                        crate::inject::gamepad::PadIdentity::xbox_one(),
-                    )
-                })
-                .handle(ev),
-            #[cfg(target_os = "windows")]
-            GamepadPref::DualSense => self
-                .dualsense_win
-                .get_or_insert_with(crate::inject::dualsense_windows::DualSenseWindowsManager::new)
-                .handle(ev),
-            #[cfg(target_os = "windows")]
-            GamepadPref::DualSenseEdge => self
-                .dualsense_edge_win
-                .get_or_insert_with(
-                    crate::inject::dualsense_edge_windows::DualSenseEdgeWindowsManager::new,
-                )
-                .handle(ev),
-            #[cfg(target_os = "windows")]
-            GamepadPref::DualShock4 => self
-                .dualshock4_win
-                .get_or_insert_with(
-                    crate::inject::dualshock4_windows::DualShock4WindowsManager::new,
-                )
-                .handle(ev),
-            #[cfg(target_os = "windows")]
-            GamepadPref::SteamDeck => self
-                .steamdeck_win
-                .get_or_insert_with(crate::inject::steam_deck_windows::SteamDeckWindowsManager::new)
-                .handle(ev),
-            // HID Xbox (default; `PUNKTFUNK_XBOX_BACKEND=xusb` reverts). Guard on each arm:
-            // with the hatch set, `degrade_xbox_identity` has already folded One/Elite to
-            // Xbox360, so only Xbox360 reaches here and must fall through to XUSB below.
-            #[cfg(target_os = "windows")]
-            GamepadPref::Xbox360 if super::gamepad::windows_xbox_hid() => self
-                .xbox_hid
-                .get_or_insert_with(crate::inject::xbox_windows::XboxWindowsManager::new)
-                .handle(ev),
-            #[cfg(target_os = "windows")]
-            GamepadPref::XboxOne if super::gamepad::windows_xbox_hid() => self
-                .xbox_one_hid
-                .get_or_insert_with(|| {
-                    crate::inject::xbox_windows::XboxWindowsManager::with_backend(
-                        crate::inject::xbox_windows::XboxWinProto::one_s(),
-                    )
-                })
-                .handle(ev),
-            #[cfg(target_os = "windows")]
-            GamepadPref::XboxElite if super::gamepad::windows_xbox_hid() => self
-                .xbox_elite_hid
-                .get_or_insert_with(|| {
-                    crate::inject::xbox_windows::XboxWindowsManager::with_backend(
-                        crate::inject::xbox_windows::XboxWinProto::elite(),
-                    )
-                })
-                .handle(ev),
-            _ => self
-                .xbox360
+        if !self.backends.route_handle(kind, ev) {
+            self.xbox360
                 .get_or_insert_with(crate::inject::gamepad::GamepadManager::new)
-                .handle(ev),
+                .handle(ev);
         }
     }
 
@@ -469,92 +331,13 @@ impl Pads {
             .flatten()
             .or_else(|| self.kinds.get(idx).copied())
             .unwrap_or(GamepadPref::Xbox360);
-        match kind {
-            #[cfg(target_os = "linux")]
-            GamepadPref::DualSense => {
-                if let Some(m) = &mut self.dualsense {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "linux")]
-            GamepadPref::DualSenseEdge => {
-                if let Some(m) = &mut self.dualsense_edge {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "linux")]
-            GamepadPref::DualShock4 => {
-                if let Some(m) = &mut self.dualshock4 {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "linux")]
-            GamepadPref::SteamDeck => {
-                if let Some(m) = &mut self.steamdeck {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "linux")]
-            GamepadPref::SwitchPro => {
-                if let Some(m) = &mut self.switchpro {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "linux")]
-            GamepadPref::SteamController => {
-                if let Some(m) = &mut self.steamctrl {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            GamepadPref::SteamController2 => {
-                if let Some(m) = &mut self.steamctrl2 {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "linux")]
-            GamepadPref::SteamController2Puck => {
-                if let Some(m) = &mut self.steamctrl2_puck {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "windows")]
-            GamepadPref::DualSense => {
-                if let Some(m) = &mut self.dualsense_win {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "windows")]
-            GamepadPref::DualSenseEdge => {
-                if let Some(m) = &mut self.dualsense_edge_win {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "windows")]
-            GamepadPref::DualShock4 => {
-                if let Some(m) = &mut self.dualshock4_win {
-                    m.apply_rich(rich)
-                }
-            }
-            #[cfg(target_os = "windows")]
-            GamepadPref::SteamDeck => {
-                if let Some(m) = &mut self.steamdeck_win {
-                    m.apply_rich(rich)
-                }
-            }
-            _ => {}
-        }
+        self.backends.apply_rich(kind, rich);
     }
 
     /// Triton USB OUT is 1 kHz; poll haptics at 1 ms so trackpad pulses do not sit 4 ms
     /// then burst. Other backends stay at 4 ms to avoid idle churn.
     fn feedback_poll_interval(&self) -> std::time::Duration {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let sc2_active = self.steamctrl2.is_some();
-        #[cfg(target_os = "linux")]
-        let sc2_active = sc2_active || self.steamctrl2_puck.is_some();
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if sc2_active {
+        if self.backends.sc2_active() {
             return std::time::Duration::from_millis(1);
         }
         std::time::Duration::from_millis(4)
@@ -586,12 +369,6 @@ impl Pads {
                 rumble(wire as u16, low, high, lt, rt);
             }
         };
-        // Every pump() that takes it is Linux or Windows; on any other host the closure is dead
-        // and both `mut` and the binding itself draw a lint. The parameter it shadows is then
-        // unused too, so name it there rather than renaming it for every caller.
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        let _ = &mut hidout;
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let mut hidout = |h: punktfunk_core::quic::HidOutput| {
             if let Some(wire) = wire_of.get(h.pad() as usize).copied().flatten() {
                 hidout(h.with_pad(wire as u16));
@@ -600,114 +377,14 @@ impl Pads {
         if let Some(m) = &mut self.xbox360 {
             m.pump_rumble(&mut rumble); // Xbox has no rich-feedback plane
         }
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(m) = &mut self.xboxone {
-                m.pump_rumble(&mut rumble);
-            }
-            if let Some(m) = &mut self.dualsense {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.dualsense_edge {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.dualshock4 {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.steamdeck {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.switchpro {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.steamctrl {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.steamctrl2_puck {
-                m.pump(&mut rumble, &mut hidout);
-            }
-        }
-        // SC2 lives on both OSes (`Sc2Manager`); keep its pump outside the per-OS blocks.
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(m) = &mut self.steamctrl2 {
-            m.pump(&mut rumble, &mut hidout);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            // All three HID Xbox identities. Rumble only (no rich plane). Missing
-            // one is silent: the pad works and never rumbles.
-            for m in [
-                &mut self.xbox_hid,
-                &mut self.xbox_one_hid,
-                &mut self.xbox_elite_hid,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.dualsense_win {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.dualsense_edge_win {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.dualshock4_win {
-                m.pump(&mut rumble, &mut hidout);
-            }
-            if let Some(m) = &mut self.steamdeck_win {
-                m.pump(&mut rumble, &mut hidout);
-            }
-        }
+        self.backends.pump(&mut rumble, &mut hidout);
     }
 
     /// Re-emit HID reports so kernel/SDL do not drop a held-steady UHID/UMDF pad.
     /// Xbox evdev holds last-known state — no heartbeat. Cadence is each manager's
     /// gap timer, not this per-tick call.
     fn heartbeat(&mut self) {
-        #[cfg(target_os = "linux")]
-        {
-            let gap = std::time::Duration::from_millis(8);
-            if let Some(m) = &mut self.dualsense {
-                m.heartbeat(gap);
-            }
-            if let Some(m) = &mut self.dualsense_edge {
-                m.heartbeat(gap);
-            }
-            if let Some(m) = &mut self.dualshock4 {
-                m.heartbeat(gap);
-            }
-            if let Some(m) = &mut self.steamdeck {
-                m.heartbeat(gap);
-            }
-            if let Some(m) = &mut self.switchpro {
-                m.heartbeat(gap);
-            }
-            if let Some(m) = &mut self.steamctrl {
-                m.heartbeat(gap);
-            }
-        }
-        // SC2 lives on both OSes; same 8 ms gap as the per-OS blocks.
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(m) = &mut self.steamctrl2 {
-            m.heartbeat(std::time::Duration::from_millis(8));
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let gap = std::time::Duration::from_millis(8);
-            if let Some(m) = &mut self.dualsense_win {
-                m.heartbeat(gap);
-            }
-            if let Some(m) = &mut self.dualsense_edge_win {
-                m.heartbeat(gap);
-            }
-            if let Some(m) = &mut self.dualshock4_win {
-                m.heartbeat(gap);
-            }
-            if let Some(m) = &mut self.steamdeck_win {
-                m.heartbeat(gap);
-            }
-        }
+        self.backends.heartbeat();
     }
 }
 

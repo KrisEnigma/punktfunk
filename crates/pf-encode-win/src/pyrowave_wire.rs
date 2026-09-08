@@ -221,12 +221,7 @@ fn stream_armed() -> bool {
     static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // Latched once: `supports_chunked_poll` is re-queried per AU; a live knob
     // would flip the wire shape under an open `StreamedAu`.
-    *ARMED.get_or_init(|| {
-        matches!(
-            std::env::var("PUNKTFUNK_PYROWAVE_STREAMED_AU").as_deref(),
-            Ok("1")
-        )
-    })
+    *ARMED.get_or_init(|| crate::knobs::get().pyrowave_streamed_au == 1)
 }
 
 /// Never below one window: a target of 0 would yield an empty chunk that spins.
@@ -248,13 +243,11 @@ pub fn stream_chunk_step(wire_chunk: Option<usize>) -> Option<usize> {
         return None;
     }
     static TARGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let target = *TARGET.get_or_init(|| {
-        std::env::var("PUNKTFUNK_PYROWAVE_CHUNK_KIB")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|k| (STREAM_CHUNK_MIN_KIB..=STREAM_CHUNK_MAX_KIB).contains(k))
-            .map(|k| k * 1024)
-            .unwrap_or(STREAM_CHUNK_TARGET_BYTES)
+    let target = *TARGET.get_or_init(|| match crate::knobs::get().pyrowave_chunk_64kib {
+        0 => STREAM_CHUNK_TARGET_BYTES,
+        // 64 KiB steps; the floor rounds down to the encoder's own minimum.
+        steps => (usize::from(steps) * 64 * 1024)
+            .clamp(STREAM_CHUNK_MIN_KIB * 1024, STREAM_CHUNK_MAX_KIB * 1024),
     });
     Some(chunk_step(window, target))
 }

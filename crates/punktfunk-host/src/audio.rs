@@ -131,76 +131,32 @@ impl CaptureRate {
 /// Blocking (Windows endpoint enum + `IAudioClient` activate; Linux PipeWire registry
 /// round-trip). Callers on the async path run it off the reactor. Ordinary 48 kHz
 /// sessions must not pay this.
-#[cfg(target_os = "linux")]
 pub fn probe_capture_rate() -> CaptureRate {
-    linux::probe_capture_rate()
+    plat::probe_capture_rate()
 }
 
-#[cfg(target_os = "windows")]
-pub fn probe_capture_rate() -> CaptureRate {
-    audio_control::probe_capture_rate()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub fn probe_capture_rate() -> CaptureRate {
-    // No capture backend — `open_audio_capture` bails here, so there is no rate to promise.
-    CaptureRate::Unknown
-}
-
-/// Open a live capturer for system output. Default: host-owned stream sink claimed as
-/// the default, advertising `channels` so apps can produce real surround.
-/// `PUNKTFUNK_STREAM_SINK=0`: default-sink monitor, missing positions filled with
-/// silence. `rate_hz` is a request; the grant is [`AudioCapturer::sample_rate`].
-#[cfg(target_os = "linux")]
+/// Open a live capturer for system output. Linux: a host-owned stream sink (or the default
+/// sink's monitor under `PUNKTFUNK_STREAM_SINK=0`). Windows: WASAPI loopback of the wiring
+/// plan's sink. `rate_hz` is a request; the grant is [`AudioCapturer::sample_rate`].
 pub fn open_audio_capture(channels: u32, rate_hz: u32) -> Result<Box<dyn AudioCapturer>> {
-    linux::PwAudioCapturer::open(channels, rate_hz).map(|c| Box::new(c) as Box<dyn AudioCapturer>)
+    plat::open_audio_capture(channels, rate_hz)
 }
 
 /// [`open_audio_capture`] pinned to a sink `node.name` (`design/gamescope-multiuser.md`):
 /// gamescope apps get `PULSE_SINK` and we capture that sink's monitor. `None` =
 /// [`open_audio_capture`]. Non-Linux ignores the name.
-#[cfg(target_os = "linux")]
 pub fn open_audio_capture_named(
     channels: u32,
     rate_hz: u32,
     sink: Option<&str>,
 ) -> Result<Box<dyn AudioCapturer>> {
-    linux::PwAudioCapturer::open_named(channels, rate_hz, sink)
-        .map(|c| Box::new(c) as Box<dyn AudioCapturer>)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn open_audio_capture_named(
-    channels: u32,
-    rate_hz: u32,
-    _sink: Option<&str>,
-) -> Result<Box<dyn AudioCapturer>> {
-    open_audio_capture(channels, rate_hz)
+    plat::open_audio_capture_named(channels, rate_hz, sink)
 }
 
 /// Whether this host can mint a per-session sink. Linux stream/null-sink only;
 /// monitor mode and other platforms share the default output.
 pub fn per_session_sink_possible() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        linux::sink_capture_active()
-    }
-    #[cfg(not(target_os = "linux"))]
-    false
-}
-
-#[cfg(target_os = "windows")]
-pub fn open_audio_capture(channels: u32, rate_hz: u32) -> Result<Box<dyn AudioCapturer>> {
-    // Capture thread runs `audio_control::wire_now` before resolving the endpoint — a
-    // fresh plan per open, Windows endpoints churn — and parks default playback on the
-    // plan's loopback sink (silent on the host) until this capturer is dropped.
-    wasapi_cap::WasapiLoopbackCapturer::open(channels, rate_hz)
-        .map(|c| Box::new(c) as Box<dyn AudioCapturer>)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub fn open_audio_capture(_channels: u32, _rate_hz: u32) -> Result<Box<dyn AudioCapturer>> {
-    anyhow::bail!("audio capture requires Linux + PipeWire or Windows + WASAPI")
+    plat::per_session_sink_possible()
 }
 
 /// Park a capturer at session end. Linux: persist so the next session reuses the
@@ -279,85 +235,70 @@ pub(crate) fn mic_legacy_buffer() -> bool {
 }
 
 /// Open a virtual mic (1 or 2 channels). Linux: PipeWire `Audio/Source`. Windows:
-/// render into a virtual device whose capture side apps see as a mic ([`wasapi_mic`]).
-#[cfg(target_os = "linux")]
+/// render into a virtual device whose capture side apps see as a mic.
 pub fn open_virtual_mic(channels: u32) -> Result<Box<dyn VirtualMic>> {
-    open_virtual_mic_named(channels, None)
+    plat::open_virtual_mic(channels)
 }
 
 /// [`open_virtual_mic`] pinned to a source `node.name` (`design/gamescope-multiuser.md`:
 /// `punktfunk-mic-{id}`, gamescope `PULSE_SOURCE`). `None` = shared `punktfunk-mic`.
 /// Other platforms ignore the name.
-#[cfg(target_os = "linux")]
 pub fn open_virtual_mic_named(channels: u32, source: Option<&str>) -> Result<Box<dyn VirtualMic>> {
-    linux::PwMicSource::open_named(channels, source).map(|m| Box::new(m) as Box<dyn VirtualMic>)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn open_virtual_mic_named(channels: u32, _source: Option<&str>) -> Result<Box<dyn VirtualMic>> {
-    open_virtual_mic(channels)
+    plat::open_virtual_mic_named(channels, source)
 }
 
 #[cfg(target_os = "windows")]
-pub fn open_virtual_mic(channels: u32) -> Result<Box<dyn VirtualMic>> {
-    // Render thread runs `audio_control::wire_now` so the plan both resolves the
-    // endpoint and, via default-device changes, reserves it.
-    wasapi_mic::WasapiVirtualMic::open(channels).map(|m| Box::new(m) as Box<dyn VirtualMic>)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub fn open_virtual_mic(_channels: u32) -> Result<Box<dyn VirtualMic>> {
-    anyhow::bail!("virtual mic requires Linux + PipeWire or Windows + a virtual audio device")
-}
-
+mod windows;
 #[cfg(target_os = "windows")]
-#[path = "audio/windows/audio_control.rs"]
-mod audio_control;
+use self::windows as plat;
+// Flat names for the session, the devtests and the installer: `crate::audio::pad_endpoint`.
+#[cfg(target_os = "windows")]
+pub(crate) use self::windows::{audio_probe, devnode_cleanup, minted, pad_capture, pad_endpoint};
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+use self::linux as plat;
 // DualSense pad-audio sink + capture (Linux analogue of `pad_endpoint`): session
-// mints per-pad sinks; CLI `pad-sink-test`.
+// mints per-pad sinks; CLI `pad-sink-test`. USB DualSense: capture the isochronous
+// endpoint instead of minting a PipeWire node.
 #[cfg(target_os = "linux")]
-pub(crate) use linux::pad_sink;
-// USB DualSense: capture the isochronous endpoint instead of minting a PipeWire node.
-#[cfg(target_os = "linux")]
-pub(crate) use linux::pad_usb;
-// DualSense pad-audio endpoint + loopback (design: pad haptics/audio). Session
-// queries by pad index; CLI `pad-endpoint`.
-// SetupAPI + PROPVARIANT plumbing under every audio devnode we mint. Shared by pad_endpoint,
-// minted, audio_probe and devnode_cleanup — only one of which provisions pads.
-#[cfg(target_os = "windows")]
-#[path = "audio/windows/devnode_api.rs"]
-pub(crate) mod devnode_api;
-#[cfg(target_os = "windows")]
-#[path = "audio/windows/pad_endpoint.rs"]
-pub(crate) mod pad_endpoint;
-// WASAPI loopback of a minted pad endpoint, plus the tone/probe devtests. Capturing is a
-// different job from provisioning, and the same one `wasapi_cap` does for the desktop.
-#[cfg(target_os = "windows")]
-#[path = "audio/windows/pad_capture.rs"]
-pub(crate) mod pad_capture;
-// `audio-probe` devtest: mint Steam-driver instances and measure render→capture /
-// loopback paths for the Windows audio-substrate design.
-#[cfg(target_os = "windows")]
-#[path = "audio/windows/audio_probe.rs"]
-pub(crate) mod audio_probe;
-// Minted "Punktfunk Speakers/Microphone": our instances of Valve's streaming-audio
-// drivers. Wiring-plan tier-0.
-#[cfg(target_os = "windows")]
-#[path = "audio/windows/minted.rs"]
-pub(crate) mod minted;
-// Uninstall sweep of every audio devnode the providers (and the probe) mint.
-// `driver uninstall --audio` / installer [UninstallRun].
-#[cfg(target_os = "windows")]
-#[path = "audio/windows/devnode_cleanup.rs"]
-pub(crate) mod devnode_cleanup;
-#[cfg(target_os = "windows")]
-#[path = "audio/windows/wasapi_cap.rs"]
-mod wasapi_cap;
-#[cfg(target_os = "windows")]
-#[path = "audio/windows/wasapi_mic.rs"]
-mod wasapi_mic;
+pub(crate) use linux::{pad_sink, pad_usb};
+/// No capture backend: `open_audio_capture` bails, so there is no rate to promise either.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+mod plat {
+    use super::*;
+    pub(super) fn probe_capture_rate() -> CaptureRate {
+        CaptureRate::Unknown
+    }
+    pub(super) fn open_audio_capture(
+        _channels: u32,
+        _rate_hz: u32,
+    ) -> Result<Box<dyn AudioCapturer>> {
+        anyhow::bail!("audio capture requires Linux + PipeWire or Windows + WASAPI")
+    }
+    pub(super) fn open_audio_capture_named(
+        channels: u32,
+        rate_hz: u32,
+        _sink: Option<&str>,
+    ) -> Result<Box<dyn AudioCapturer>> {
+        open_audio_capture(channels, rate_hz)
+    }
+    pub(super) fn per_session_sink_possible() -> bool {
+        false
+    }
+    pub(super) fn open_virtual_mic(_channels: u32) -> Result<Box<dyn VirtualMic>> {
+        anyhow::bail!("virtual mic requires Linux + PipeWire or Windows + a virtual audio device")
+    }
+    pub(super) fn open_virtual_mic_named(
+        channels: u32,
+        _source: Option<&str>,
+    ) -> Result<Box<dyn VirtualMic>> {
+        open_virtual_mic(channels)
+    }
+    pub(super) fn wiring_snapshot() -> Option<wiring_plan::Wiring> {
+        None
+    }
+}
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[path = "audio/wiring_plan.rs"]
 pub(crate) mod wiring_plan;
@@ -373,11 +314,6 @@ pub use mic_pump::{MicFrame, MicPump};
 
 /// Last wiring-pass assignment on Windows; `None` elsewhere or before the first pass.
 /// Read-only for the status API — never triggers a pass.
-#[cfg(target_os = "windows")]
 pub(crate) fn wiring_snapshot() -> Option<wiring_plan::Wiring> {
-    audio_control::last_wiring()
-}
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn wiring_snapshot() -> Option<wiring_plan::Wiring> {
-    None
+    plat::wiring_snapshot()
 }

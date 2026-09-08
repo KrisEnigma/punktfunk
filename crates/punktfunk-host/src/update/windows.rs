@@ -48,7 +48,9 @@ pub(super) fn run_apply(
     stage: &dyn Fn(&'static str),
 ) -> Result<(), (&'static str, String)> {
     let dir = staging_dir();
-    std::fs::create_dir_all(&dir)
+    // Secret-dir, not `create_dir_all`: the installer runs from here as SYSTEM, and a
+    // pre-planted `updates\` keeps whoever made it as owner until it is re-owned.
+    pf_paths::create_secret_dir(&dir)
         .map_err(|e| ("downloading", format!("create staging dir: {e}")))?;
 
     let final_path = dir.join(format!("punktfunk-host-setup-{target_version}.exe"));
@@ -99,6 +101,10 @@ pub(super) fn run_apply(
     // 2 s: the 202 and the console's next status poll must leave before the
     // installer stops this service.
     std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Last look before SYSTEM executes from here: the hardening above is best-effort.
+    crate::install::ensure_admin_only_source(&dir)
+        .map_err(|e| ("applying", format!("staging dir {}: {e:#}", dir.display())))?;
 
     let spawned = {
         use std::os::windows::process::CommandExt as _;

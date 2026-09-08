@@ -31,6 +31,7 @@ import androidx.compose.foundation.pager.PageSize
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
@@ -791,7 +792,10 @@ private fun TouchPosterArt(game: GameEntry, loader: ImageLoader) {
     PosterArt(game, loader) {
         // A launcher ships no poster by design, so its brand mark IS the poster; falling back to the
         // launcher's NAME says "opens Steam", where a title would read as "a cover that failed to load".
+        // The desktop tile is not a brand, so its mark comes from Material rather than the brand
+        // table — the same job the Lucide `monitor` does on the shells that carry that set.
         val mark = launcherIcon(game.iconToken)
+            ?: Icons.Filled.DesktopWindows.takeIf { game.isDesktop }
         if (mark != null) {
             Icon(
                 imageVector = mark,

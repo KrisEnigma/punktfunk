@@ -720,6 +720,7 @@ fn pump(
 
 /// Conceal whatever the sequence numbers say is missing, then decode what arrived, into the
 /// mixer. An empty payload is DTX silence: the tracker has already accounted for the sequence.
+#[cfg(target_os = "android")]
 fn decode_into(
     st: &mut KindStream,
     frame: &punktfunk_core::quic::PadAudioFrame,
@@ -763,6 +764,7 @@ fn decode_into(
 /// success: the tail cannot be retried without unbounded buffering (the mixer's whole point is to
 /// stay ahead of the device), so it is dropped but COUNTED — the difference between a
 /// diagnosable stall and a mystery.
+#[cfg(target_os = "android")]
 fn write_out(
     playback: &mut uac_host::Playback<'_>,
     out: &[i16],
@@ -787,6 +789,7 @@ fn write_out(
 /// Periodic accounting. Without it the only way to tell "the host is sending nothing" from
 /// "frames arrive but render silently" is to guess, and those two have completely different
 /// causes — one is host-side routing, the other is here.
+#[cfg(target_os = "android")]
 struct Tally {
     frames_in: u64,
     samples_in: u64,
@@ -798,6 +801,7 @@ struct Tally {
     st_short_logged: std::time::Instant,
 }
 
+#[cfg(target_os = "android")]
 impl Tally {
     fn new() -> Tally {
         let now = std::time::Instant::now();

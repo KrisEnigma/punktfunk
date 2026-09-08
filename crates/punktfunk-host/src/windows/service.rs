@@ -552,7 +552,7 @@ unsafe fn spawn_host(
     let _ = unsafe { CreateEnvironmentBlock(&mut env_block, Some(primary), false) };
     // SAFETY: `env_block` is either still null (the call above failed) or the double-null-terminated
     // UTF-16 block `CreateEnvironmentBlock` just wrote — exactly the two states the helper accepts.
-    let merged = unsafe { crate::interactive::merged_env_block(env_block as *const u16) };
+    let merged = unsafe { crate::interactive::merged_env_block(env_block as *const u16, false) };
     if !env_block.is_null() {
         // SAFETY: `env_block` is the live block from the call above, destroyed exactly once and not
         // read after — `merged` owns its own copy of the parsed entries.
@@ -1228,15 +1228,11 @@ fn ensure_default_host_env() -> Result<()> {
     // Non-admin-owned host.env was planted before this elevated install (`ProgramData` grants
     // Users add-subdirectory + CREATOR OWNER). Check before `create_private_dir` re-owns the
     // dir and erases that signal. Administrators-owned files from a prior install pass.
-    let planted = path.exists() && crate::install::is_admin_owned(&path) == Some(false);
+    let planted = pf_paths_win::planted_by_non_admin(&path);
     if planted {
         // Rename-aside is best-effort; the guarantee is the `!planted` skip overwrites anyway.
-        let mut aside = path.clone().into_os_string();
-        aside.push(".untrusted");
-        let aside = std::path::PathBuf::from(aside);
-        let _ = std::fs::remove_file(&aside);
-        match std::fs::rename(&path, &aside) {
-            Ok(()) => tracing::warn!(
+        match pf_paths_win::rename_aside(&path) {
+            Ok(aside) => tracing::warn!(
                 path = %path.display(), aside = %aside.display(),
                 "host.env was owned by a non-admin account (planted before install) — renamed aside; writing the default"
             ),
@@ -1609,8 +1605,9 @@ fn sc(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// System32 path for a bare tool: `service install` runs elevated.
 fn run_quiet(cmd: &str, args: &[&str]) -> bool {
-    std::process::Command::new(cmd)
+    std::process::Command::new(crate::install::resolve_tool(cmd))
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1672,7 +1669,14 @@ fn maybe_boot_loop_rollback(restarts: u32, attempted: &mut bool) {
         );
         return;
     };
-    // Downloaded file was hash/publisher-verified and is DACL-protected. This re-check is signature only.
+    // The re-check is signature only, so the directory must still be admin-only: a planted
+    // `updates\` would otherwise make a self-signed exe the rollback target.
+    if let Some(dir) = previous.parent() {
+        if let Err(e) = crate::install::ensure_admin_only_source(dir) {
+            tracing::error!(dir = %dir.display(), error = %format!("{e:#}"), "not rolling back");
+            return;
+        }
+    }
     if let Err(e) = crate::update::windows::verify_authenticode(&previous, &[], None) {
         tracing::error!(
             installer = %previous.display(),

@@ -3248,6 +3248,7 @@ dependencies = [
  "anyhow",
  "libvpl-sys",
  "nvidia-video-codec-sdk",
+ "pf-driver-proto",
  "pf-frame",
  "pyrowave-sys",
  "tracing",
@@ -3332,6 +3333,14 @@ name = "pf-paths"
 version = "0.35.0"
 dependencies = [
  "tracing",
+]
+
+[[package]]
+name = "pf-paths-win"
+version = "0.34.0"
+dependencies = [
+ "tracing",
+ "windows 0.62.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -3831,6 +3840,7 @@ dependencies = [
  "pf-host-config",
  "pf-inject",
  "pf-paths",
+ "pf-paths-win",
  "pf-update-check",
  "pf-vdisplay",
  "pf-win-display",
@@ -3899,6 +3909,8 @@ dependencies = [
 name = "punktfunk-setup-win"
 version = "0.35.0"
 dependencies = [
+ "pf-paths",
+ "pf-paths-win",
  "punktfunk-setup",
  "serde",
  "serde_json",

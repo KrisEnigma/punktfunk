@@ -88,6 +88,7 @@ mod tests {
             "gamepad-2",
             "plus",
             "ellipsis",
+            pf_client_core::library::DESKTOP_ICON,
         ] {
             assert!(
                 pf_client_core::lucide::path(name).is_some(),

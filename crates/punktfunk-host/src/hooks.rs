@@ -206,9 +206,13 @@ impl HooksStore {
         Some((meta.modified().ok()?, meta.len()))
     }
 
-    /// Same lenient contract as [`Self::load_from`]: missing or invalid ⇒ no hooks.
+    /// Same lenient contract as [`Self::load_from`]: missing, invalid, or planted by a
+    /// non-admin before the first elevated run ⇒ no hooks. Hooks run commands.
     fn read_disk(path: &PathBuf) -> (Option<HooksConfig>, Option<(std::time::SystemTime, u64)>) {
         let file_id = Self::file_identity(path);
+        if crate::planted::quarantine_planted_secret(path) {
+            return (None, file_id);
+        }
         let cfg = match std::fs::read(path) {
             Ok(bytes) => match serde_json::from_slice::<HooksConfig>(&bytes) {
                 Ok(c) => {

@@ -12,7 +12,7 @@ use crate::ui_hosts::ConnectRequest;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use pf_client_core::collate::{self, SortKey};
-use pf_client_core::library::store_label;
+use pf_client_core::library::{store_label, DESKTOP_ICON, DESKTOP_ID};
 use relm4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -419,25 +419,31 @@ const LAUNCHER_ICON_TOKENS: &[&str] = &[
     "steam", "lutris", "heroic", "playnite", "epic", "gog", "xbox",
 ];
 
-/// The poster-sized brand mark for an entry, or `None` when it carries no token, names one we
-/// don't ship, or already has real artwork (a plugin that sent a cover has out-voted the token).
+/// The poster-sized mark for an entry, or `None` when it carries no token, names one nothing
+/// here draws, or already has real artwork (a plugin that sent a cover has out-voted the token).
 ///
-/// Symbolic, so it recolors with the Adwaita theme like every other glyph in the shell.
-fn launcher_icon_image(game: &GameEntry) -> Option<gtk::Image> {
+/// A brand token takes the symbolic art above; anything else is looked up in the shell's Lucide
+/// set, which is where the desktop tile's `monitor` comes from. Both take their ink from the
+/// theme's foreground, so the two rungs read as one design.
+fn poster_mark(game: &GameEntry) -> Option<gtk::Widget> {
     if !game.art.is_empty() {
         return None;
     }
     let token = game.icon_token()?;
-    if !LAUNCHER_ICON_TOKENS.contains(&token) {
+    let mark: gtk::Widget = if LAUNCHER_ICON_TOKENS.contains(&token) {
+        let img = gtk::Image::from_icon_name(&format!("pf-launcher-{token}-symbolic"));
+        img.set_pixel_size(72);
+        img.upcast()
+    } else if pf_client_core::lucide::path(token).is_some() {
+        crate::lucide::icon(token, 56).upcast()
+    } else {
         return None;
-    }
-    let img = gtk::Image::from_icon_name(&format!("pf-launcher-{token}-symbolic"));
-    img.set_pixel_size(72);
-    img.add_css_class("pf-poster-launcher-mark");
-    img.set_halign(gtk::Align::Center);
-    img.set_valign(gtk::Align::Center);
-    img.set_vexpand(true);
-    Some(img)
+    };
+    mark.add_css_class("pf-poster-launcher-mark");
+    mark.set_halign(gtk::Align::Center);
+    mark.set_valign(gtk::Align::Center);
+    mark.set_vexpand(true);
+    Some(mark)
 }
 
 /// One poster tile: 2:3 art (~150×225 logical) over the title, with a store badge and a
@@ -449,7 +455,7 @@ fn game_card(state: &Rc<State>, game: &GameEntry) -> gtk::FlowBoxChild {
     // neutral face would say "a game whose cover didn't load", which is why games keep it.
     let launcher = game.is_launcher();
     let placeholder = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    if let Some(mark) = launcher_icon_image(game) {
+    if let Some(mark) = poster_mark(game) {
         placeholder.append(&mark);
     } else {
         let monogram = if launcher {
@@ -562,17 +568,14 @@ fn game_card(state: &Rc<State>, game: &GameEntry) -> gtk::FlowBoxChild {
     child
 }
 
-/// The synthetic tile every shelf leads with — the host's own desktop. Shares its id with the
-/// console's (`pf-console-ui`'s `DESKTOP_ID`), which is a NUL nothing on the wire can carry.
-const DESKTOP_ID: &str = "\0desktop";
-
 fn is_desktop(game: &GameEntry) -> bool {
     game.id == DESKTOP_ID
 }
 
 /// Streaming the desktop was the host card's click, two pages back from a shelf. This puts it
 /// on the shelf, so the library is never a dead end for the desktop-only user and a host with
-/// no plugins still has one card to press. Never fetched, never cached: built here.
+/// no plugins still has one card to press. Never fetched, never cached: built here — the id and
+/// the mark come from `pf-client-core` so this card is the same one on every shell.
 fn desktop_entry() -> GameEntry {
     GameEntry {
         id: DESKTOP_ID.into(),
@@ -584,7 +587,7 @@ fn desktop_entry() -> GameEntry {
         release_year: None,
         genres: Vec::new(),
         role: None,
-        icon: None,
+        icon: Some(DESKTOP_ICON.into()),
     }
 }
 

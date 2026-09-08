@@ -620,8 +620,22 @@ impl WinExecutor<'_> {
         let url =
             format!("https://aka.ms/windowsappsdk/2.2/latest/windowsappruntimeinstall-{arch}.exe");
         let file = format!("{}\\windowsappruntimeinstall.exe", self.subst.temp);
-        let steps: [Vec<&str>; 2] = [
+        // `latest` cannot be hash-pinned, so the elevated run is gated on Microsoft's
+        // Authenticode signature instead of TLS alone.
+        let signed = format!(
+            "$s = Get-AuthenticodeSignature -LiteralPath '{file}'; \
+             exit [int](-not ($s.Status -eq 'Valid' -and \
+             $s.SignerCertificate.Subject -like '*O=Microsoft Corporation*'))"
+        );
+        let steps: [Vec<&str>; 3] = [
             vec!["curl", "-fsSL", "-o", &file, &url],
+            vec![
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &signed,
+            ],
             vec![&file, "--quiet"],
         ];
         for argv in steps {

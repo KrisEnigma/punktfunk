@@ -225,9 +225,9 @@ fn icacls_path() -> String {
 }
 
 /// Default `%ProgramData%` lets `BUILTIN\Users` create and become
-/// `CREATOR OWNER`. Re-owns to Administrators, strips inheritance, grants
-/// SYSTEM/Administrators `(OI)(CI)(F)`. `users_read` adds Users `(OI)(CI)(RX)`
-/// so the tray can read non-secret config. Hard-coded SIDs; never fatal.
+/// `CREATOR OWNER`. Re-owns to Administrators, resets the dir's own ACL, strips
+/// inheritance, grants SYSTEM/Administrators `(OI)(CI)(F)`. `users_read` adds Users
+/// `(OI)(CI)(RX)` so the tray can read non-secret config. Hard-coded SIDs; never fatal.
 #[cfg(windows)]
 fn restrict_dir_to_system_admins(dir: &std::path::Path, deep: bool, users_read: bool) {
     let icacls = icacls_path();
@@ -241,6 +241,15 @@ fn restrict_dir_to_system_admins(dir: &std::path::Path, deep: bool, users_read: 
         own.args(["/T", "/C", "/Q"]); // recurse, continue on error, quiet
     }
     let _ = own
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    // `/inheritance:r` drops inherited ACEs only. A planted dir keeps an explicit
+    // `Everyone:(F)` through it, so reset the dir's own ACL first (not `/T`: the
+    // plugin runner's grants live on children and are re-applied only by `enable`).
+    let _ = std::process::Command::new(&icacls)
+        .arg(dir.as_os_str())
+        .args(["/reset", "/C", "/Q"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
@@ -282,8 +291,16 @@ pub fn write_secret_file(path: &std::path::Path, contents: &[u8]) -> std::io::Re
     // Never write a secret through a link: the bytes would land on the attacker's target.
     #[cfg(windows)]
     reject_reparse_point(path)?;
+    // Unlink, then create-new. A planted file another account still holds open (no
+    // share-delete) refuses the unlink, so the write fails closed instead of landing the
+    // fresh secret in a file that account reads through its handle.
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

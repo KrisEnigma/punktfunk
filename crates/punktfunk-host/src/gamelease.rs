@@ -852,7 +852,8 @@ fn terminate_blocking(shared: &LeaseShared) {
 ///
 /// [`LeaseKind::Reported`] has nothing for the matcher; without this, End
 /// has no target. Rule 1 applies: this pid arrives from a plugin, so a
-/// start before [`LeaseShared::launch_stamp`] is never a target.
+/// start before [`LeaseShared::launch_stamp`] is never a target, and on
+/// Windows neither is a process outside this host's session.
 #[cfg(any(target_os = "linux", windows))]
 fn reported_proc(shared: &LeaseShared) -> Option<crate::procscan::ProcRef> {
     let pid = shared
@@ -868,6 +869,11 @@ fn reported_proc(shared: &LeaseShared) -> Option<crate::procscan::ProcRef> {
         if started + crate::procscan::START_SLACK_SECS < min {
             return None; // predates this launch (rule 1)
         }
+    }
+    // The report comes from a LocalService plugin; the kill runs as SYSTEM.
+    #[cfg(windows)]
+    if !crate::game_term::in_our_session(pid) {
+        return None;
     }
     Some(proc)
 }

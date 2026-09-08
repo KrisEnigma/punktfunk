@@ -354,6 +354,20 @@ fn poster_tile(
             .background(ThemeRef::SubtleFill)
             .height(poster_h)
             .into(),
+            // The desktop tile's mark is not a brand, so it comes from the shell's UI icon set
+            // rather than `launcher_icons` — which here means Lucide's font, the one form this
+            // shell can size and tint (see `lucide`).
+            None if game.id == DESKTOP_ID => border(
+                text_block(lucide::glyph(library::DESKTOP_ICON))
+                    .font_family(lucide::FAMILY)
+                    .font_size(poster_h * 0.3)
+                    .foreground(ThemeRef::SecondaryText)
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .vertical_alignment(VerticalAlignment::Center),
+            )
+            .background(ThemeRef::SubtleFill)
+            .height(poster_h)
+            .into(),
             None => border(
                 text_block(if game.launcher {
                     store_label(&game.store).to_string()

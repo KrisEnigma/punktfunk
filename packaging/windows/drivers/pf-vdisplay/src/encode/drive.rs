@@ -98,7 +98,7 @@ impl<'a> Drive<'a> {
             want_republish: false,
             qpc_hz: qpc_frequency(),
             frame_interval: Duration::from_micros(1_000_000 / u64::from(fps.max(1))),
-            last_cursor: None,
+            last_frame: None,
             owed_since: None,
             ready_latch: false,
             timer: None,
@@ -113,23 +113,22 @@ impl<'a> Drive<'a> {
         }
     }
 
-    /// A cursor-only frame when the pointer moved but nothing composed, capped to the refresh so
-    /// a 1 kHz mouse cannot outrun the encoder — between caps the mark coalesces to the latest
-    /// position. `None` when no move is pending, the cap has not elapsed, or the re-encode was
-    /// pre-empted by a queued composed frame.
+    /// A cursor-only frame when the pointer moved and a whole period passed with no frame of
+    /// any kind, so the stream never exceeds the refresh — a 1 kHz mouse over a desktop that
+    /// composes at refresh adds nothing, and between caps the mark coalesces to the latest
+    /// position. `None` when no move is pending, the period has not elapsed, or the re-encode
+    /// was pre-empted by a queued composed frame.
     fn cursor_frame(&mut self) -> Option<(usize, u64, u64)> {
         if !self.pool.cursor_pending() {
             return None;
         }
         if self
-            .last_cursor
+            .last_frame
             .is_some_and(|t| t.elapsed() < self.frame_interval)
         {
             return None;
         }
-        let framed = self.pool.cursor_republish()?;
-        self.last_cursor = Some(Instant::now());
-        Some(framed)
+        self.pool.cursor_republish()
     }
 }
 
@@ -161,10 +160,11 @@ pub struct Drive<'a> {
     /// A keyframe was asked for; if nothing composes, re-encode the stash instead of waiting.
     want_republish: bool,
     qpc_hz: u64,
-    /// The display's frame period — the floor between cursor-only re-encodes.
+    /// The display's frame period — the gap a cursor-only re-encode may fill.
     frame_interval: Duration,
-    /// When the last cursor-only frame went out; `None` before the first.
-    last_cursor: Option<Instant>,
+    /// When the last frame of any kind was taken; `None` before the first. A compose at
+    /// refresh resets this every period, so the pointer rides the composed frames alone.
+    last_frame: Option<Instant>,
     /// Since when an AU has been owed with nothing produced; cleared by every chunk. The wedge
     /// clock, kept across parks so a stream of composed frames cannot re-arm it forever.
     owed_since: Option<Instant>,
@@ -267,7 +267,8 @@ impl Drive<'_> {
 
     /// The next frame to submit: a composed one, else the stash for a keyframe request nothing
     /// composed for, else a cursor-only re-encode. The request survives a turn that found the
-    /// stash slot busy — the AU owed on it is about to free it.
+    /// stash slot busy — the AU owed on it is about to free it. Every frame taken stamps
+    /// `last_frame`: that is the clock the cursor-only cap runs on.
     fn take_next(&mut self) -> Option<(usize, u64, u64)> {
         let next = self
             .pool
@@ -276,6 +277,7 @@ impl Drive<'_> {
             .or_else(|| self.cursor_frame());
         if next.is_some() {
             self.want_republish = false;
+            self.last_frame = Some(Instant::now());
         }
         next
     }
@@ -389,12 +391,12 @@ impl Drive<'_> {
         }
     }
 
-    /// When the loop must wake without a signal: what is left of the cursor-only re-encode's
-    /// refresh cap, or the re-entry cadence of a backend that owes an AU and signals nothing.
-    /// `None` = park on the handles alone.
+    /// When the loop must wake without a signal: what is left of the period since the last
+    /// frame when a cursor move is pending, or the re-entry cadence of a backend that owes an
+    /// AU and signals nothing. `None` = park on the handles alone.
     fn timer_due(&self) -> Option<Duration> {
         let cursor = self.pool.cursor_pending().then(|| {
-            self.last_cursor
+            self.last_frame
                 .map(|t| self.frame_interval.saturating_sub(t.elapsed()))
                 .unwrap_or_default()
         });
