@@ -386,7 +386,9 @@ fn registry_steps(facts: &WinFacts, choices: &WinChoices, app: &str) -> Vec<WinA
             "/t",
             "REG_SZ",
             "/d",
-            &format!("{app}\\punktfunk-tray.exe"),
+            // Quoted: an unquoted Run value with a space in the path lets Windows try each
+            // prefix in turn, so `C:\Program Files\…` first looks for `C:\Program.exe`.
+            &format!("\"{app}\\punktfunk-tray.exe\""),
             "/f",
         ]));
     } else if facts.tray_autostart {
