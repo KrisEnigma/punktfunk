@@ -571,8 +571,7 @@ fn grant_runner_secret_reads() {
     // than needing another `plugins enable`.
     for name in RUNNER_UNIT_DIRS {
         let dir = cfg.join(name);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("warning: {} not created: {e}", dir.display());
+        if !create_runner_dir(&dir) {
             continue;
         }
         let ok = Command::new(icacls_path())
@@ -592,8 +591,7 @@ fn grant_runner_secret_reads() {
     }
     for name in RUNNER_STATE_DIRS {
         let dir = cfg.join(name);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("warning: {} not created: {e}", dir.display());
+        if !create_runner_dir(&dir) {
             continue;
         }
         let ok = Command::new(icacls_path())
@@ -613,8 +611,7 @@ fn grant_runner_secret_reads() {
     }
     for name in RUNNER_INGEST_DIRS {
         let dir = cfg.join(name);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("warning: {} not created: {e}", dir.display());
+        if !create_runner_dir(&dir) {
             continue;
         }
         let ok = Command::new(icacls_path())
@@ -649,6 +646,22 @@ fn grant_runner_secret_reads() {
                  start (bun exits EPERM on its own entry script)",
                 dir.display()
             );
+        }
+    }
+}
+
+/// Create a runner directory that the grants below re-ACL, refusing a reparse point.
+///
+/// `icacls` follows a junction, so a link planted here before the config dir was hardened would
+/// move the grant — `BUILTIN\Users:(M)` for the ingest inbox — onto whatever it points at.
+/// `create_private_dir` rejects one and locks the DACL first; the grant then adds its own ACE.
+#[cfg(target_os = "windows")]
+fn create_runner_dir(dir: &std::path::Path) -> bool {
+    match pf_paths::create_private_dir(dir) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("warning: {} not created: {e}", dir.display());
+            false
         }
     }
 }
