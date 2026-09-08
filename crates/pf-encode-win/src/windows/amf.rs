@@ -2152,19 +2152,6 @@ impl Encoder for AmfEncoder {
                 "AMF Drain returned non-OK at flush"
             );
         }
-        // Drain puts the component at end-of-stream; Flush takes it back out, the same re-arm
-        // Media Foundation does with START_OF_STREAM. Belt: measured on a Radeon (2026-09-08),
-        // this driver keeps accepting input after a bare Drain, so it is not a fix for an
-        // observed hang — it stops the contract depending on that.
-        // SAFETY: same live component and owning thread as the drain above.
-        let r = unsafe { ((*(*inner.comp.0).vtbl).flush)(inner.comp.0) };
-        if r != sys::AMF_OK {
-            tracing::debug!(
-                result = result_name(r),
-                amf_code = r,
-                "AMF Flush returned non-OK at flush"
-            );
-        }
         Ok(())
     }
 }
