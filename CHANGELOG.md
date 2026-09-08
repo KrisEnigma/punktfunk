@@ -439,6 +439,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   every packaged build can still open through Vulkan Video; the probe now covers both arms, caches
   per selected GPU like its Windows twin, and feeds `/serverinfo` the same narrowed answer. Nothing
   to configure — clients that prefer AV1 negotiate it again.
+- **`Select+A` opens the Android client's quick-action ring on any controller.** The chord keyed on
+  the hold-Select guide gesture's pending timer, which is off by default there, so the one shortcut
+  the start banner promises every pad user did nothing — and a gamepad-only session, with no
+  touchscreen twist and Back forwarded to the host, had no route to the ring at all. Nothing to do;
+  the buttons the chord swallowed no longer strand themselves down on the host either.
+- **An Android profile's 10-bit SDR override resets.** `ten_bit_sdr` was missing from the overlay's
+  known-key set, so the load filed it under "a newer build wrote this" as well as into its own
+  field and wrote it straight back out — resetting that row to inherited never survived a reload.
+  Reset it once more and it stays; every other profile field was already correct.
 - **Trackpad scrolling on a KDE host moves the page as far as the fingers went.** KWin's
   `fake_input` carries a bare axis with no source, which every toolkit reads as ten units per
   wheel click, so injecting a measured distance there spent one click per 10 px and scrolled
