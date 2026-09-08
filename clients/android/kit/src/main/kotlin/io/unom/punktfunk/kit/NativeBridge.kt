@@ -128,6 +128,13 @@ object NativeBridge {
     external fun nativeDiscoveryStart(): Long
 
     /**
+     * Put a fresh query on the wire for [handle] and reset the doubling re-query backoff, keeping
+     * the daemon. This is the rescan: rebuilding the daemon re-binds :5353 and re-joins the
+     * multicast groups, and a rebuild that fails leaves the device with no discovery at all.
+     */
+    external fun nativeDiscoveryRescan(handle: Long)
+
+    /**
      * The current resolved-host snapshot for [handle]: newline-joined records, each
      * `key␟name␟addr␟port␟fp␟pair␟mac` (`␟` = U+001F). Empty string = no hosts / `0` handle. Poll ~1 Hz;
      * cheap (a lock + string build), safe to call on the main thread.

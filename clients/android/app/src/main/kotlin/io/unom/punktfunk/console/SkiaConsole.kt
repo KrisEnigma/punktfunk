@@ -357,7 +357,7 @@ object SkiaConsole {
         this.onPadAction = onPadAction
         this.onPulse = onPulse
         this.onAnnounce = onAnnounce
-        discovery?.restart()
+        discovery?.rescan()
         // The touch UI may have paired/forgotten/edited hosts or profiles while we were away.
         pushHosts()
         pushKnownHosts()
@@ -401,7 +401,7 @@ object SkiaConsole {
     fun sessionEnded(reason: String?) {
         if (handle == 0L) return
         NativeBridge.nativeConsoleSessionPhase(handle, 3, reason.orEmpty())
-        discovery?.restart()
+        discovery?.rescan()
     }
 
     /** Re-root the console on a host's shelf (a game launched from it just exited; a deep link). */
@@ -592,7 +592,7 @@ object SkiaConsole {
                     // A cancel after the dial landed still has a session to let go of.
                     pendingSession?.let { s -> ioPool.execute { NativeBridge.nativeClose(s.handle) } }
                     pendingSession = null
-                    discovery?.restart()
+                    discovery?.rescan()
                 }
                 // The console's launch hold is done — the game is up, or the player asked to
                 // see. Only now does the stream view replace it.
@@ -697,7 +697,7 @@ object SkiaConsole {
                     NativeBridge.nativeConsoleSessionPhase(
                         handle, 2, ConnectErrors.connectMessage(token, requestAccess),
                     )
-                    discovery?.restart()
+                    discovery?.rescan()
                 }
             }
         }
@@ -711,7 +711,7 @@ object SkiaConsole {
             when (val c = arr.opt(i)) {
                 is String -> when (c) {
                     "CancelWake" -> { wakeGen.incrementAndGet(); NativeBridge.nativeConsoleSetWake(handle, "null") }
-                    "Probe" -> { discovery?.restart(); pushHosts() }
+                    "Probe" -> { discovery?.rescan(); pushHosts() }
                 }
                 is JSONObject -> {
                     c.optJSONObject("FetchLibrary")?.let { fetchLibrary(it, refreshOnly = false) }

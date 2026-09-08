@@ -108,6 +108,9 @@ class HostDiscovery(context: Context) {
     private var nativeHandle = 0L
     private var running = false
     private var last: List<DiscoveredHost> = emptyList()
+    /** Failed [start] calls since the last good one; see [MAX_START_ATTEMPTS]. */
+    private var attempt = 0
+    private val retry = Runnable { start() }
 
     private val poll = object : Runnable {
         override fun run() {
@@ -121,17 +124,30 @@ class HostDiscovery(context: Context) {
         }
     }
 
+    /**
+     * Spin the browse up, retrying a failed daemon on a short cadence. A start can fail for a
+     * reason that is over in a second — its :5353 bind losing a race with the daemon we just tore
+     * down — and giving up on it once left the device with no discovery for the rest of the run.
+     */
     fun start() {
         if (running) return
+        handler.removeCallbacks(retry)
         acquireMulticastLock()
         val h = runCatching { NativeBridge.nativeDiscoveryStart() }
             .onFailure { Log.e(TAG, "nativeDiscoveryStart threw", it) }
             .getOrDefault(0L)
         if (h == 0L) {
-            Log.e(TAG, "native mDNS discovery failed to start")
             releaseMulticastLock()
+            if (attempt < MAX_START_ATTEMPTS) {
+                attempt++
+                Log.w(TAG, "native mDNS discovery failed to start — retry $attempt")
+                handler.postDelayed(retry, RETRY_MS)
+            } else {
+                Log.e(TAG, "native mDNS discovery failed to start")
+            }
             return
         }
+        attempt = 0
         nativeHandle = h
         running = true
         last = emptyList()
@@ -139,17 +155,31 @@ class HostDiscovery(context: Context) {
     }
 
     /**
-     * Tear the browse down and start a fresh one. This is the manual rescan, and the recovery path
-     * for a browse that started while blocked (permission not yet granted, multicast filtered) or
-     * that never started at all ([start] gives up when `nativeDiscoveryStart` returns 0, and
-     * nothing else would ever retry it).
+     * Ask again, keeping the daemon: `mdns-sd` re-queries on a doubling backoff that caps at an
+     * hour, so a long-lived browse is effectively passive — a host that appeared since, or whose
+     * announcement was lost to multicast, may never be asked for again. This is the default
+     * refresh; it costs one PTR and keeps the sockets, the multicast memberships and the cache.
      *
-     * It also puts a query back on the wire: `mdns-sd` re-queries on a doubling backoff that caps
-     * at an hour, so a long-lived browse is effectively passive — a host that appeared since, or
-     * whose announcement was lost to multicast, may never be asked for again.
+     * A browse that is not running is built instead, since there is nothing to ask with.
+     */
+    fun rescan() {
+        val h = nativeHandle
+        if (!running || h == 0L) {
+            restart()
+            return
+        }
+        runCatching { NativeBridge.nativeDiscoveryRescan(h) }
+            .onFailure { Log.e(TAG, "nativeDiscoveryRescan threw", it) }
+    }
+
+    /**
+     * Tear the browse down and build a fresh one. Only for a browse whose sockets are wrong rather
+     * than merely quiet — one that started before the local-network grant, so its sends were
+     * refused and its group joins never took. [rescan] covers every other refresh: a rebuild
+     * re-binds :5353 and re-joins the groups, and one that fails leaves the device blind.
      *
-     * The currently-shown host set is left alone across the swap (rather than blinking empty via
-     * [stop]'s notification); the first poll of the new browse publishes the fresh set.
+     * The shown host set is left alone across the swap (rather than blinking empty via [stop]'s
+     * notification); the first poll of the new browse publishes the fresh set.
      */
     fun restart() {
         val keep = onChange
@@ -160,6 +190,8 @@ class HostDiscovery(context: Context) {
     }
 
     fun stop() {
+        handler.removeCallbacks(retry)
+        attempt = 0 // the next start is a new lifetime, with its own retries
         if (!running && nativeHandle == 0L) return
         running = false
         handler.removeCallbacks(poll)
@@ -204,5 +236,7 @@ class HostDiscovery(context: Context) {
 
     private companion object {
         const val POLL_MS = 1000L
+        const val RETRY_MS = 2000L
+        const val MAX_START_ATTEMPTS = 5
     }
 }

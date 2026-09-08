@@ -189,11 +189,10 @@ fun ConnectScreen(
                         lnpPrompt = false
                         discovery.restart()
                     } else if (wasPaused) {
-                        // Coming back from the background: the browse may have been sitting idle
-                        // (or had its multicast socket torn out from under it) while we were away,
-                        // and its own re-query interval has kept doubling. Re-arm and ask again,
+                        // Coming back from the background: the browse has been sitting idle while
+                        // we were away and its own re-query interval has kept doubling. Ask again,
                         // so returning to the screen is enough — no app restart.
-                        discovery.restart()
+                        discovery.rescan()
                     }
                     wasPaused = false
                 }
@@ -906,7 +905,7 @@ fun ConnectScreen(
         onBrowseLibrary = { kh, pin -> onOpenLibrary(kh, pin?.id) },
         defaultHost = settings.defaultHost,
         onMakeDefault = { kh, on -> setDefaultHost(kh, on) },
-        onRescan = { discovery.restart() },
+        onRescan = { discovery.rescan() },
         onAddHost = { showManualSheet = true },
     )
 
