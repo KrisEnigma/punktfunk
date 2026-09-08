@@ -693,6 +693,25 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A monitor cleared while it was still being created no longer stays plugged in.** `CLEAR_ALL`
+  landing between the registry insert and the handle being stored skipped the departure, and the
+  monitor then arrived with nothing able to reach it. Nothing to do.
+- **A failed CCD query no longer reads as an empty desk.** The topology restore counted zero
+  connected displays and reported success, clearing the crash-recovery marker, and the
+  standby-sink pass nominated every inactive external display including the operator's own.
+  Nothing to do.
+- **A failed ADL unlock keeps its lease.** The journal was deleted either way, so one failed
+  unlock left a physical connector pinned to a dummy EDID with nothing left to retry from.
+  Nothing to do; the next host start retries.
+- **NVENC no longer pins a stream at the 10 Mbps floor.** When the bitrate search opened only
+  after split encode was disabled, the floor was cached as the codec's bitrate ceiling and
+  clamped every later open for the life of the process. Nothing to do.
+- **A frame the FEC wire cannot address is dropped, not corrupted.** Past 255 data shards per
+  block `255 - k` underflowed and `fecInfo`'s 10-bit k truncated, which a large IDR at the
+  ANNOUNCE packetSize floor reaches. Raise the client's packetSize if the log names it.
+- **A timed-out virtual microphone stops leaking its render thread.** The open path returned an
+  error without setting the stop flag and built no owner to drop, so each retry left another
+  thread holding a render client. Nothing to do.
 - **`AVSampleBufferVideoRenderer` is the tvOS 17.4+ default for 4:2:0 streams, removing Metal's
   two-refresh reservation.** Older tvOS,
   4:4:4, PyroWave and Smoothness retain Metal; users need no setting changes.
@@ -703,6 +722,22 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Security
 
+- **A secret the host did not write is no longer adopted as its own.** `%ProgramData%` lets any
+  local account create files, so a `mgmt-token`, `plugin-token`, `native-key.pem` or `cert.pem`
+  planted before the first elevated run became the host's admin token or TLS identity; the owner
+  is now read before the directory is hardened, and a foreign one is renamed aside. Nothing to do
+  — a per-user `PUNKTFUNK_CONFIG_DIR` still keeps its own secrets.
+- **Elevated helpers are spawned by absolute path.** `certutil`, `pnputil`, `schtasks`, `sc` and
+  `icacls` were launched by bare name, and `CreateProcess` searches the working directory before
+  `%PATH%`. Nothing to do.
+- **`atiadlxx.dll` loads from System32 only.** The unqualified load searched the exe's directory,
+  the working directory and `%PATH%` first, in a process running as SYSTEM. Nothing to do.
+- **A planted web-console password is no longer kept.** `web setup` hardened the config directory
+  before testing the file's owner, and that pass re-owns the contents, so the check always passed.
+  Nothing to do; the installer now rotates to a fresh password instead.
+- **A GameStream pairing ceremony belongs to one peer.** Phases 2-4 were keyed on the
+  client-chosen `uniqueid` alone, so any host that saw one could re-roll the ceremony's secrets
+  and strand the real client. Nothing to do — the address is the one the PIN was already bound to.
 - **`GET /api/v1/local/summary` is never answered cross-origin.** It is admitted by loopback with
   no credential, so the same-origin policy was the only thing keeping a page off it, and the CORS
   layer now exempts every route authorised by network position. Nothing to do: a host that never
