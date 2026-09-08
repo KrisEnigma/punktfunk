@@ -54,7 +54,11 @@ fn extract_and_run(exe: &Path, data: &[u8], payload: &[u8]) -> Result<ExitCode, 
     // Administrators. Best-effort — the per-user client root cannot and need not be re-owned.
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("icacls")
+        // Absolute: `CreateProcess` searches the cwd before `%PATH%`, and setup runs elevated.
+        let icacls = std::env::var("SystemRoot")
+            .map(|r| format!("{r}\\System32\\icacls.exe"))
+            .unwrap_or_else(|_| "icacls".to_string());
+        let _ = std::process::Command::new(icacls)
             .arg(&root)
             .args(["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"])
             .stdout(std::process::Stdio::null())

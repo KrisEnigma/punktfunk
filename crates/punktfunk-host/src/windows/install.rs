@@ -23,8 +23,21 @@ fn flag_val(args: &[String], name: &str) -> Option<String> {
 fn flag_present(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
+/// Absolute `%SystemRoot%\System32` path for a bare tool name; a name that already carries a
+/// separator (the staged `nefconc.exe`) is its own path and passes through.
+///
+/// `CreateProcess` searches the calling process's directory and cwd before `%PATH%`. These run
+/// elevated, so a `certutil.exe` planted beside the installer would run with its privileges.
+fn resolve_tool(cmd: &str) -> String {
+    if cmd.contains('\\') || cmd.contains('/') {
+        return cmd.to_string();
+    }
+    std::env::var("SystemRoot")
+        .map(|r| format!("{r}\\System32\\{cmd}.exe"))
+        .unwrap_or_else(|_| cmd.to_string())
+}
 fn run_quiet(cmd: &str, args: &[&str]) -> bool {
-    Command::new(cmd)
+    Command::new(resolve_tool(cmd))
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -33,7 +46,7 @@ fn run_quiet(cmd: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 fn run_capture(cmd: &str, args: &[&str]) -> String {
-    Command::new(cmd)
+    Command::new(resolve_tool(cmd))
         .args(args)
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

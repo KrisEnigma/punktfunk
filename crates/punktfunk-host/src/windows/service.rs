@@ -1591,8 +1591,13 @@ fn warn_if_public_network() {
 }
 
 /// `sc.exe` with output passed through (start/stop/status).
+///
+/// Absolute: `CreateProcess` searches the cwd before `%PATH%`, and this runs elevated.
 fn sc(args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("sc")
+    let sc_exe = std::env::var("SystemRoot")
+        .map(|r| format!("{r}\\System32\\sc.exe"))
+        .unwrap_or_else(|_| "sc".to_string());
+    let status = std::process::Command::new(sc_exe)
         .args(args)
         .status()
         .context("run sc.exe")?;
