@@ -701,7 +701,15 @@ fn retrieve_loop(
                 // Under the lock, so it cannot race the clear `poll` does when it empties.
                 have.set();
             }
-            Ok(DrainOutcome::Eof) => lock(&out).pending.clear(),
+            Ok(DrainOutcome::Eof) => {
+                lock(&out).pending.clear();
+                // Once drained, every later call returns EOF, and the loop only exits on `stop`
+                // — without this the thread spins a core until the session ends. Same interval
+                // the NotReady arm uses; a re-armed component surfaces its next AU one tick on.
+                if !blocking {
+                    std::thread::sleep(std::time::Duration::from_micros(250));
+                }
+            }
             Ok(DrainOutcome::NotReady) => {
                 // Without `QueryTimeout` the call is a poll; keep the old sampling interval,
                 // which now costs this thread rather than the encode thread.
@@ -2144,6 +2152,18 @@ impl Encoder for AmfEncoder {
                 "AMF Drain returned non-OK at flush"
             );
         }
+        // Drain leaves the component at end-of-stream, where it accepts no further input. Flush
+        // takes it back out, so a session that flushes can encode again — the same re-arm the
+        // Media Foundation backend does with START_OF_STREAM after its own drain.
+        // SAFETY: same live component and owning thread as the drain above.
+        let r = unsafe { ((*(*inner.comp.0).vtbl).flush)(inner.comp.0) };
+        if r != sys::AMF_OK {
+            tracing::debug!(
+                result = result_name(r),
+                amf_code = r,
+                "AMF Flush returned non-OK at flush"
+            );
+        }
         Ok(())
     }
 }
@@ -2298,6 +2318,73 @@ mod tests {
             (at_open.supports_rfi, at_open.intra_refresh),
             (after.supports_rfi, after.intra_refresh),
             "the host reads these once, before the first frame"
+        );
+    }
+
+    /// `flush` drains the component, which leaves it at end-of-stream where it takes no more
+    /// input. Without the Flush that follows, a session that flushed never encoded again — and
+    /// the retrieve thread spun on EOF for the rest of its life.
+    #[test]
+    fn amf_encodes_again_after_a_flush_live() {
+        if let Err(e) = try_factory() {
+            eprintln!("skipping: AMF runtime unavailable ({e})");
+            return;
+        }
+        let Some(device) = amd_d3d11_device() else {
+            eprintln!("skipping: no AMD adapter on this box");
+            return;
+        };
+        let (w, h, fps) = (640u32, 480u32, 60u32);
+        let tex = nv12_texture(&device, w, h);
+        let mut enc = match AmfEncoder::open(
+            Codec::H264,
+            PixelFormat::Nv12,
+            w,
+            h,
+            fps,
+            2_000_000,
+            8,
+            ChromaFormat::Yuv420,
+            None,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipping: native AMF open declined ({e:#})");
+                return;
+            }
+        };
+        enc.prepare(&device).expect("prepare");
+        let run = |enc: &mut AmfEncoder, base: u64| {
+            let mut aus = 0usize;
+            for i in 0..8 {
+                let frame = CapturedFrame {
+                    provenance: Default::default(),
+                    width: w,
+                    height: h,
+                    pts_ns: base + i,
+                    format: PixelFormat::Nv12,
+                    payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
+                        texture: tex.clone(),
+                        device: device.clone(),
+                        pyro: None,
+                    }),
+                    cursor: None,
+                };
+                enc.submit(&frame).expect("submit");
+                if enc.poll().expect("poll").is_some() {
+                    aus += 1;
+                }
+            }
+            aus
+        };
+        let before = run(&mut enc, 1);
+        assert!(before > 0, "the encoder produced nothing before the flush");
+        enc.flush().expect("flush");
+        let after = run(&mut enc, 1000);
+        eprintln!("AMF AUs before flush: {before}, after: {after}");
+        assert!(
+            after > 0,
+            "the encoder accepted no input after a flush — it is still at end-of-stream"
         );
     }
 
