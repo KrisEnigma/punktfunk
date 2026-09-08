@@ -816,6 +816,9 @@ pub struct QsvEncoder {
     ltr_mark_interval: i64,
     pending_force: Option<usize>,
     ltr_test_force_at: Option<i64>,
+    /// Refuse this frame after the LTR decision, as a failed surface fetch would.
+    #[cfg(test)]
+    fail_submit_at: Option<i64>,
     /// Resets with no AU since. At 2, drop `inner` instead of Close+Init on a dead session.
     resets_without_output: u32,
 }
@@ -888,6 +891,8 @@ impl QsvEncoder {
             ltr_mark_interval: ltr_mark_interval(fps),
             pending_force: None,
             ltr_test_force_at: ltr_test_force_at(),
+            #[cfg(test)]
+            fail_submit_at: None,
             resets_without_output: 0,
         })
     }
@@ -1080,8 +1085,11 @@ impl QsvEncoder {
     }
 }
 
-impl Encoder for QsvEncoder {
-    fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
+impl QsvEncoder {
+    /// [`Encoder::submit`] without the failure rule: the LTR mirror and a queued force are
+    /// committed before the runtime takes the frame, so a refusal leaves them one frame ahead
+    /// of the hardware. Only the wrapper's forced IDR resets both.
+    fn try_submit(&mut self, captured: &CapturedFrame) -> Result<()> {
         anyhow::ensure!(
             captured.width == self.width && captured.height == self.height,
             "captured frame {}x{} != encoder {}x{}",
@@ -1156,6 +1164,10 @@ impl Encoder for QsvEncoder {
                 mark_slot = Some(slot);
             }
         }
+        #[cfg(test)]
+        if self.fail_submit_at == Some(cur_idx) {
+            bail!("test hook: frame {cur_idx} refused after the LTR decision");
+        }
         let ltr_slots = self.ltr_slots;
         let reject_ok = self.codec != Codec::Av1;
         let inner = self.inner.as_mut().expect("ensure_inner succeeded");
@@ -1165,11 +1177,9 @@ impl Encoder for QsvEncoder {
             let deadline = std::time::Instant::now() + BUSY_BUDGET;
             while inner.retrieve.in_flight() >= IN_FLIGHT_MAX {
                 if let Some(e) = lock(&inner.retrieve.out).err.take() {
-                    self.force_kf = true;
                     bail!("{e}");
                 }
                 if std::time::Instant::now() >= deadline {
-                    self.force_kf = true;
                     bail!(
                         "QSV produced no output for {} ms with {} frame(s) in flight — \
                          wedged (escalating to reset)",
@@ -1327,22 +1337,18 @@ impl Encoder for QsvEncoder {
                 };
                 match sts {
                     s if s == vpl::MFX_WRN_DEVICE_BUSY => {
-                        self.force_kf = true;
                         bail!("QSV EncodeFrameAsync stayed DEVICE_BUSY past the drain budget");
                     }
                     // GopRefDist=1 owes one AU per submit; MORE_DATA would desync the FIFO.
                     vpl::MFX_ERR_MORE_DATA => {
-                        self.force_kf = true;
                         bail!("QSV EncodeFrameAsync returned MORE_DATA with GopRefDist=1");
                     }
                     s if s < vpl::MFX_ERR_NONE => {
-                        self.force_kf = true;
                         bail!("QSV EncodeFrameAsync failed: {} ({s})", sts_name(s));
                     }
                     _ => {}
                 }
                 if syncp.is_null() {
-                    self.force_kf = true;
                     bail!("QSV EncodeFrameAsync returned no sync point");
                 }
                 lock(&inner.retrieve.out).pending.push_back(Pending {
@@ -1361,6 +1367,18 @@ impl Encoder for QsvEncoder {
             submit_result?;
         }
         Ok(())
+    }
+}
+
+impl Encoder for QsvEncoder {
+    fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
+        let submitted = self.try_submit(captured);
+        // A frame the runtime never took: the next one is an IDR, which resets the LTR
+        // mirror and any queued force to what the hardware holds.
+        if submitted.is_err() {
+            self.force_kf = true;
+        }
+        submitted
     }
 
     /// Pin `frame_idx` to the wire index so LTR slots and FrameOrder stay in the wire domain.
@@ -1791,6 +1809,7 @@ mod tests {
     }
 
     struct AuMeta {
+        pts_ns: u64,
         keyframe: bool,
         recovery_anchor: bool,
         annexb_start: bool,
@@ -1917,6 +1936,7 @@ mod tests {
         let mut aus = Vec::new();
         let mut push = |au: EncodedFrame| {
             aus.push(AuMeta {
+                pts_ns: au.pts_ns,
                 keyframe: au.keyframe,
                 recovery_anchor: au.recovery_anchor,
                 annexb_start: au.data.starts_with(&[0, 0, 0, 1]) || au.data.starts_with(&[0, 0, 1]),
@@ -1938,7 +1958,10 @@ mod tests {
                 }),
                 cursor: None,
             };
-            enc.submit_indexed(&frame, i).expect("submit");
+            match enc.submit_indexed(&frame, i) {
+                Ok(()) => assert_ne!(enc.fail_submit_at, Some(i as i64), "frame {i} not refused"),
+                Err(e) => assert_eq!(enc.fail_submit_at, Some(i as i64), "submit {i}: {e:#}"),
+            }
             if let Some(au) = enc.poll().expect("poll") {
                 push(au);
             }
@@ -1996,8 +2019,6 @@ mod tests {
         assert_stream_shape(&aus, 30, false);
     }
 
-    /// Mid-stream invalidate must emit a `recovery_anchor` P-frame, not an IDR.
-    #[test]
     /// The driver answers SET_ENCODE — where the host latches these caps for the session —
     /// before any frame is submitted, so what `caps()` says then must be what the encoder
     /// negotiated. LTR and intra-refresh are decided in `ensure_inner`, which used to run only
@@ -2027,6 +2048,7 @@ mod tests {
         );
     }
 
+    /// Mid-stream invalidate must emit a `recovery_anchor` P-frame, not an IDR.
     #[test]
     fn qsv_live_ltr_rfi() {
         let mut rfi_answered = false;
@@ -2083,6 +2105,67 @@ mod tests {
             !aus.iter().any(|a| a.recovery_anchor),
             "no recovery_anchor AU may ship when the sweep left no clean LTR"
         );
+    }
+
+    /// A submit refused after the LTR decision — surface fetch, native handle — must not leave
+    /// the mirror claiming a mark the hardware never made, nor eat a queued force: the next
+    /// frame is an IDR, which resets both. Refuses one mark frame and one recovery frame; the
+    /// mirror checks skip when the driver declines LTR.
+    #[test]
+    fn qsv_live_refused_submit_forces_idr() {
+        let mut ltr = false;
+        let mut refused = (0u32, 0u32);
+        let Some(aus) = drive_live(Codec::H264, false, 60, |enc, i| {
+            if i == 0 {
+                ltr = enc.caps().supports_rfi;
+                let mark = enc.ltr_mark_interval as u32;
+                assert!(
+                    mark >= 4,
+                    "mark interval {mark} leaves no room for a loss window"
+                );
+                refused = (mark, 2 * mark);
+            }
+            if i == refused.0 {
+                enc.fail_submit_at = Some(i as i64);
+            }
+            if i == refused.1 {
+                if ltr {
+                    // The IDR after the refused mark is the pre-loss anchor.
+                    assert!(
+                        enc.invalidate_ref_frames(i as i64 - 2, i as i64 - 1),
+                        "no pre-loss LTR to force"
+                    );
+                }
+                enc.fail_submit_at = Some(i as i64);
+            }
+            if i == 59 && ltr {
+                assert!(
+                    !enc.ltr_slots.contains(&Some(refused.0 as i64)),
+                    "mirror claims a mark the hardware never made: {:?}",
+                    enc.ltr_slots
+                );
+            }
+        }) else {
+            return;
+        };
+        assert_stream_shape(&aus, 58, true);
+        let au = |i: u32| {
+            aus.iter()
+                .find(|a| a.pts_ns == i as u64 * 33_333_333)
+                .unwrap_or_else(|| panic!("no AU for frame {i}"))
+        };
+        for r in [refused.0, refused.1] {
+            assert!(
+                aus.iter().all(|a| a.pts_ns != r as u64 * 33_333_333),
+                "refused frame {r} produced an AU"
+            );
+            assert!(
+                au(r + 1).keyframe,
+                "frame {} after refused frame {r} must be an IDR",
+                r + 1
+            );
+        }
+        eprintln!("live QSV refused-submit: {} AUs, ltr={ltr}", aus.len());
     }
 
     /// Mid-stream `reconfigure_bitrate` must accept and must not emit a keyframe.

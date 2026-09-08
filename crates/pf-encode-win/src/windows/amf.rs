@@ -689,8 +689,14 @@ fn retrieve_loop(
         match unsafe { drain_one_output(comp, odt, output_key_max) } {
             Ok(DrainOutcome::Frame { data, key_prop }) => {
                 let mut g = lock(&out);
-                let (pts_ns, forced, recovery_anchor) =
-                    g.pending.pop_front().unwrap_or((0, false, false));
+                // An AU with no submit behind it would pair every later AU with the wrong
+                // pts, keyframe flag and anchor; that is a reset, never a renumbering.
+                let Some((pts_ns, forced, recovery_anchor)) = g.pending.pop_front() else {
+                    g.err
+                        .get_or_insert_with(|| "AMF produced an AU with no submit pending".into());
+                    have.set();
+                    return;
+                };
                 g.ready.push_back(EncodedFrame {
                     data,
                     pts_ns,
@@ -702,11 +708,10 @@ fn retrieve_loop(
                 // Under the lock, so it cannot race the clear `poll` does when it empties.
                 have.set();
             }
+            // `flush` owns the queue across a drain; a clear here could land on a frame queued
+            // behind the Drain. EOF repeats on every call while the component sits drained and
+            // the loop only exits on `stop`, so pace it like NotReady.
             Ok(DrainOutcome::Eof) => {
-                lock(&out).pending.clear();
-                // EOF repeats on every call while the component sits drained, and the loop only
-                // exits on `stop`, so this arm was a busy spin for as long as that lasts. Same
-                // interval the NotReady arm uses; the next AU surfaces one tick later.
                 if !blocking {
                     std::thread::sleep(std::time::Duration::from_micros(250));
                 }
@@ -834,6 +839,9 @@ pub struct AmfEncoder {
     pending_force: Option<usize>,
     /// `PUNKTFUNK_LTR_FORCE_AT=N`: self-trigger [`Encoder::invalidate_ref_frames`] at that index.
     ltr_test_force_at: Option<i64>,
+    /// Refuse this frame after the LTR decision, as a failed surface creation would.
+    #[cfg(test)]
+    fail_submit_at: Option<i64>,
     /// What the caller promised through [`Encoder::set_input_ring_depth`]: how many frames may be
     /// in flight before it reuses an input texture. `None` = never told, so the ring copy stays.
     /// See [`AmfEncoder::in_place`].
@@ -916,6 +924,8 @@ impl AmfEncoder {
             ltr_mark_interval: ltr_mark_interval(fps),
             pending_force: None,
             ltr_test_force_at: ltr_test_force_at(),
+            #[cfg(test)]
+            fail_submit_at: None,
             input_ring_depth: None,
             resets_without_output: 0,
         })
@@ -1572,8 +1582,11 @@ impl AmfEncoder {
     }
 }
 
-impl Encoder for AmfEncoder {
-    fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
+impl AmfEncoder {
+    /// [`Encoder::submit`] without the failure rule: the LTR mirror and a queued force are
+    /// committed before the component takes the frame, so a refusal leaves them one frame ahead
+    /// of the hardware. Only the wrapper's forced IDR resets both.
+    fn try_submit(&mut self, captured: &CapturedFrame) -> Result<()> {
         anyhow::ensure!(
             captured.width == self.width && captured.height == self.height,
             "captured frame {}x{} != encoder {}x{}",
@@ -1650,6 +1663,10 @@ impl Encoder for AmfEncoder {
                 mark_slot = Some(slot);
             }
         }
+        #[cfg(test)]
+        if self.fail_submit_at == Some(cur_idx) {
+            bail!("test hook: frame {cur_idx} refused after the LTR decision");
+        }
         let in_place = self.in_place();
         let inner = self.inner.as_mut().expect("ensure_inner succeeded");
         // Re-push HDR metadata on change or rebuild. Best-effort: reject leaves the 0xCE datagram.
@@ -1680,15 +1697,10 @@ impl Encoder for AmfEncoder {
             // The retrieve thread is what frees a slot now; this only waits for it, and a whole
             // budget with no progress is the same wedge it always was.
             while inner.retrieve.in_flight() >= cap {
-                {
-                    let mut g = lock(&inner.retrieve.out);
-                    if let Some(e) = g.err.take() {
-                        self.force_kf = true;
-                        bail!("{e}");
-                    }
+                if let Some(e) = lock(&inner.retrieve.out).err.take() {
+                    bail!("{e}");
                 }
                 if std::time::Instant::now() >= deadline {
-                    self.force_kf = true;
                     bail!(
                         "AMF produced no output for {} ms with {} frame(s) in flight — \
                          wedged (escalating to reset)",
@@ -1824,6 +1836,12 @@ impl Encoder for AmfEncoder {
                     }
                 }
             }
+            // Queued before the component takes the frame: the retrieve thread can pop for it the
+            // moment SubmitInput returns, so a push after that races an empty queue. A refusal
+            // below takes the entry back off.
+            lock(&inner.retrieve.out)
+                .pending
+                .push_back((captured.pts_ns, forced, recovery_anchor));
             let mut r = ((*(*inner.comp.0).vtbl).submit_input)(inner.comp.0, surf.0);
             // AMF_INPUT_FULL is "busy, drain and retry", not a wedge. Re-submit the same surface.
             if r == sys::AMF_INPUT_FULL {
@@ -1838,25 +1856,28 @@ impl Encoder for AmfEncoder {
                     }
                 }
             }
-            match r {
-                // NEED_MORE_INPUT = accepted; no AU owed for this submit alone.
-                sys::AMF_OK | sys::AMF_NEED_MORE_INPUT => {}
-                sys::AMF_INPUT_FULL => {
-                    self.force_kf = true; // retried frame stays an IDR candidate
+            // NEED_MORE_INPUT = accepted; no AU owed for this submit alone.
+            if !matches!(r, sys::AMF_OK | sys::AMF_NEED_MORE_INPUT) {
+                lock(&inner.retrieve.out).pending.pop_back();
+                if r == sys::AMF_INPUT_FULL {
                     bail!("AMF SubmitInput stayed AMF_INPUT_FULL past the drain budget — wedged");
                 }
-                other => {
-                    self.force_kf = true;
-                    bail!("AMF SubmitInput failed: {} ({other})", result_name(other));
-                }
+                bail!("AMF SubmitInput failed: {} ({r})", result_name(r));
             }
         }
-        // Recorded after the submit took, so the retrieve thread can never pair an AU with a
-        // frame the component refused.
-        lock(&inner.retrieve.out)
-            .pending
-            .push_back((captured.pts_ns, forced, recovery_anchor));
         Ok(())
+    }
+}
+
+impl Encoder for AmfEncoder {
+    fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
+        let submitted = self.try_submit(captured);
+        // A frame the component never took: the next one is an IDR, which resets the LTR
+        // mirror and any queued force to what the hardware holds.
+        if submitted.is_err() {
+            self.force_kf = true;
+        }
+        submitted
     }
 
     /// Pin `frame_idx` to the wire index so LTR slots compare against client frame numbers across
@@ -2153,6 +2174,17 @@ impl Encoder for AmfEncoder {
                 "AMF Drain returned non-OK at flush"
             );
         }
+        // The owed AUs surface on the retrieve thread; wait for the last of them here so no
+        // frame submitted after this can be paired with one. Past the budget the component is
+        // at end-of-stream, so what is still owed never comes: those entries are stale.
+        let deadline = std::time::Instant::now() + INPUT_DRAIN_BUDGET;
+        while inner.retrieve.in_flight() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_micros(250));
+        }
+        let stale = std::mem::take(&mut lock(&inner.retrieve.out).pending).len();
+        if stale > 0 {
+            tracing::warn!(stale, "AMF drain left frames without an AU");
+        }
         Ok(())
     }
 }
@@ -2311,8 +2343,8 @@ mod tests {
     }
 
     /// `flush` drains the component, which leaves it at end-of-stream where it takes no more
-    /// input. Without the Flush that follows, a session that flushed never encoded again — and
-    /// the retrieve thread spun on EOF for the rest of its life.
+    /// input. A session that flushed must encode again, and every AU on both sides of the
+    /// flush must carry the pts of the frame it encodes.
     #[test]
     fn amf_encodes_again_after_a_flush_live() {
         if let Err(e) = try_factory() {
@@ -2344,7 +2376,7 @@ mod tests {
         };
         enc.prepare(&device).expect("prepare");
         let run = |enc: &mut AmfEncoder, base: u64| {
-            let mut aus = 0usize;
+            let mut pts = Vec::new();
             for i in 0..8 {
                 let frame = CapturedFrame {
                     provenance: Default::default(),
@@ -2360,20 +2392,34 @@ mod tests {
                     cursor: None,
                 };
                 enc.submit(&frame).expect("submit");
-                if enc.poll().expect("poll").is_some() {
-                    aus += 1;
+                if let Some(au) = enc.poll().expect("poll") {
+                    pts.push(au.pts_ns);
                 }
             }
-            aus
+            pts
         };
         let before = run(&mut enc, 1);
-        assert!(before > 0, "the encoder produced nothing before the flush");
+        assert!(
+            !before.is_empty(),
+            "the encoder produced nothing before the flush"
+        );
         enc.flush().expect("flush");
         let after = run(&mut enc, 1000);
-        eprintln!("AMF AUs before flush: {before}, after: {after}");
+        eprintln!("AMF AUs before flush: {before:?}, after: {after:?}");
+        let resumed: Vec<u64> = after.iter().copied().filter(|p| *p >= 1000).collect();
         assert!(
-            after > 0,
+            !resumed.is_empty(),
             "the encoder accepted no input after a flush — it is still at end-of-stream"
+        );
+        assert!(
+            after
+                .iter()
+                .all(|p| (1..=8).contains(p) || (1000..1008).contains(p)),
+            "an AU after the flush carries a pts nobody submitted: {after:?}"
+        );
+        assert!(
+            resumed.windows(2).all(|w| w[1] == w[0] + 1),
+            "AUs after the flush are paired off by one: {resumed:?}"
         );
     }
 
@@ -2490,6 +2536,118 @@ mod tests {
                 first_run[0].data.len()
             );
         }
+    }
+
+    /// A submit refused after the LTR decision — surface creation, a property set — must not
+    /// leave the mirror claiming a mark the hardware never made, nor eat a queued force: the
+    /// next frame is an IDR, which resets both. Refuses one mark frame and one recovery frame.
+    /// Skips without AMD; the mirror checks skip when the driver declines LTR.
+    #[test]
+    fn amf_refused_submit_forces_idr_live() {
+        if let Err(e) = try_factory() {
+            eprintln!("skipping: AMF runtime unavailable ({e})");
+            return;
+        }
+        let Some(device) = amd_d3d11_device() else {
+            eprintln!("skipping: no AMD adapter on this box");
+            return;
+        };
+        let (w, h) = (640u32, 480u32);
+        let tex = nv12_texture(&device, w, h);
+        let mut enc = match AmfEncoder::open(
+            Codec::H264,
+            PixelFormat::Nv12,
+            w,
+            h,
+            30,
+            2_000_000,
+            8,
+            ChromaFormat::Yuv420,
+            None,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipping: native AMF open declined ({e:#})");
+                return;
+            }
+        };
+        enc.prepare(&device).expect("prepare");
+        let ltr = enc.caps().supports_rfi;
+        let mark = enc.ltr_mark_interval as u32;
+        assert!(
+            mark >= 4,
+            "mark interval {mark} leaves no room for a loss window"
+        );
+        let (refused_mark, refused_force) = (mark, 2 * mark);
+        let mut aus: Vec<EncodedFrame> = Vec::new();
+        for i in 0..4 * mark {
+            if i == refused_mark {
+                enc.fail_submit_at = Some(i as i64);
+            }
+            if i == refused_force {
+                if ltr {
+                    // The IDR after the refused mark is the pre-loss anchor.
+                    assert!(
+                        enc.invalidate_ref_frames(i as i64 - 2, i as i64 - 1),
+                        "no pre-loss LTR to force"
+                    );
+                }
+                enc.fail_submit_at = Some(i as i64);
+            }
+            let frame = CapturedFrame {
+                provenance: Default::default(),
+                width: w,
+                height: h,
+                pts_ns: i as u64,
+                format: PixelFormat::Nv12,
+                payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
+                    texture: tex.clone(),
+                    device: device.clone(),
+                    pyro: None,
+                }),
+                cursor: None,
+            };
+            match enc.submit_indexed(&frame, i) {
+                Ok(()) => assert_ne!(enc.fail_submit_at, Some(i as i64), "frame {i} not refused"),
+                Err(e) => assert_eq!(enc.fail_submit_at, Some(i as i64), "submit {i}: {e:#}"),
+            }
+            if let Some(au) = enc.poll().expect("poll") {
+                aus.push(au);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(au) = enc.poll().expect("drain") {
+            aus.push(au);
+        }
+        let au = |i: u32| {
+            aus.iter()
+                .find(|a| a.pts_ns == i as u64)
+                .unwrap_or_else(|| panic!("no AU for frame {i}"))
+        };
+        assert!(au(0).keyframe, "first AU must be a keyframe");
+        for refused in [refused_mark, refused_force] {
+            assert!(
+                aus.iter().all(|a| a.pts_ns != refused as u64),
+                "refused frame {refused} produced an AU"
+            );
+            assert!(
+                au(refused + 1).keyframe,
+                "frame {} after refused frame {refused} must be an IDR",
+                refused + 1
+            );
+        }
+        if ltr {
+            assert!(
+                !enc.ltr_slots.contains(&Some(refused_mark as i64)),
+                "mirror claims a mark the hardware never made: {:?}",
+                enc.ltr_slots
+            );
+        }
+        eprintln!(
+            "live AMF refused-submit: {} AUs, ltr={ltr}, mirror {:?}",
+            aus.len(),
+            enc.ltr_slots
+        );
     }
 
     /// Live `applied_bitrate_bps`: None before lazy open, open rate after submit, new rate after
