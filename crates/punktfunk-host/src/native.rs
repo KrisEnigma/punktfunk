@@ -368,7 +368,7 @@ pub(crate) async fn serve(
     // once. A stored-but-not-served stamp triggers one Audiosrv restart before any session.
     // Failure logs once and leaves pads working without pad audio.
     #[cfg(target_os = "windows")]
-    crate::audio::pad_endpoint::provision_at_startup();
+    crate::audio::pad_endpoint::provision_at_startup(true);
     // Windows: mint "Punktfunk Speakers/Microphone" (Valve streaming drivers). Best-effort;
     // without Steam's drivers the wiring plan keeps its name-based ladder.
     #[cfg(target_os = "windows")]

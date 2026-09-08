@@ -1361,7 +1361,11 @@ static PROVISIONING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// one AEB+Audiosrv restart if a stamp is stored-but-not-served, then
 /// publishes for [`endpoint_for`]. Failure logs once and leaves the feature
 /// off — the pad still works, without audio.
-pub(crate) fn provision_at_startup() {
+///
+/// `startup` gates that restart. It bounces Audiosrv and AudioEndpointBuilder,
+/// which cuts every stream on the box, so only the pre-session call may do it —
+/// [`ensure_provisioned`] re-enters this from a live session.
+pub(crate) fn provision_at_startup(startup: bool) {
     if !pad_audio_enabled() {
         tracing::info!("pad audio disabled (PUNKTFUNK_PAD_AUDIO=0)");
         // Previous-run endpoints persist and stay visible; idle libScePad
@@ -1396,8 +1400,9 @@ pub(crate) fn provision_at_startup() {
                     }
                 }
             }
-            if eps.iter().any(|p| p.needs_aeb_kick) {
-                // One restart, at startup, before any session — never mid-flight.
+            // The restart cuts every stream on the box, so a mid-session retry leaves the
+            // stamps stored-but-not-served until the next host start instead.
+            if startup && eps.iter().any(|p| p.needs_aeb_kick) {
                 match restart_audio_endpoint_services() {
                     Ok(()) => {
                         for pe in &mut eps {
@@ -1448,7 +1453,7 @@ pub(crate) fn provisioned_endpoints() -> Option<Arc<Vec<PadEndpoint>>> {
 /// Recovers on the next connect, not the next reboot.
 pub(crate) fn ensure_provisioned() {
     if PROVISIONED.get().is_none() {
-        provision_at_startup();
+        provision_at_startup(false);
     }
 }
 
