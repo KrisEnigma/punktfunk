@@ -16,7 +16,7 @@ short; the version-bump commit retitles it. Older sections stay as they are.
 
 ## v0.35.0
 
-932 commits since v0.34.0. Wire stays 2. C ABI stays 28. **Driver protocol floor 8.**
+962 commits since v0.34.0. Wire stays 2. C ABI stays 28. **Driver protocol floor 8.**
 Deep dive: `git log v0.34.0..v0.35.0`
 
 ### Versions
@@ -27,7 +27,7 @@ Deep dive: `git log v0.34.0..v0.35.0`
 | C ABI | 28 | **28** | unchanged |
 | Rust edition | 2024 | **2024** | unchanged |
 | MSRV (`rust-version`) | 1.85 | **1.85** | unchanged |
-| Workspace crate dirs | 27 | **31** | `pf-encode-win`, `pf-libva`, `pf-vaapi`, `punktfunk-setup`, `punktfunk-setup-win`; `pf-vaadec` gone |
+| Workspace crate dirs | 27 | **32** | `pf-encode-win`, `pf-libva`, `pf-paths-win`, `pf-vaapi`, `punktfunk-setup`, `punktfunk-setup-win`; `pf-vaadec` gone |
 | Virtual-display driver protocol | 6 | **8** | Floor equals current. Matching host+driver — Breaking |
 | Windows virtual-gamepad channel | 3 | **3** | unchanged |
 | Plugin index schema | 1 | **1** | unchanged |
