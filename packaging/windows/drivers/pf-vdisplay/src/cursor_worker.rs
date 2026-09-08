@@ -156,16 +156,9 @@ pub fn setup_and_spawn(
         return None;
     }
 
-    // One caps definition for initial setup AND the per-mode-commit re-setup — see
-    // `setup_hardware_cursor`. `declare = false` (a delivery landing while the session is in the
-    // COMPOSITE render mode) skips the declaration: the worker spawns anyway so a later
-    // enable-flip has an event to declare against; its queries just fail NOT_SUPPORTED until
-    // then (logged once, harmless).
-    // Spawn BEFORE declaring. A declaration names `data_event`, and the caller closes that event
-    // when this returns `None` — so declaring first and then failing to spawn left IddCx holding
-    // a hardware cursor against a closed handle. Spawning first is already a supported shape:
-    // the `declare = false` path below does exactly that.
-    //
+    // Spawn BEFORE declaring: a declaration names `data_event`, which the caller closes when
+    // this returns `None`. `declare = false` (a delivery landing in COMPOSITE render mode)
+    // already spawns undeclared, so a later enable-flip has an event to declare against.
     // The IddCx monitor handle is a raw pointer; the view carries its own `Send` wrapper.
     let monitor_v = monitor as usize;
     let view = Sendable(view);
