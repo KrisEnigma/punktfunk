@@ -8,17 +8,19 @@
 use super::pad_endpoint::{open_wasapi_device, probe_activation};
 use super::{AudioCapturer, SAMPLE_RATE};
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
+use windows::Win32::Media::Audio::IAudioClient;
 
 pub const PAD_CHANNELS: u32 = 4;
 /// 4-ch pad layout (FL FR BL BR). Not `punktfunk_core::audio::wasapi_channel_mask`,
 /// which only speaks GameStream stereo/5.1/7.1.
-const PAD_CHANNEL_MASK: u32 = 0x33;
+pub(super) const PAD_CHANNEL_MASK: u32 = 0x33;
 const PAD_BLOCK_ALIGN: usize = PAD_CHANNELS as usize * 4;
 
 /// WASAPI loopback of one pad endpoint: interleaved 4-ch f32 at 48 kHz.

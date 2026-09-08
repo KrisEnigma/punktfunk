@@ -1175,6 +1175,8 @@ fn restart_audio_endpoint_services() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The blobs below encode the pad layout the capturer reads back.
+    use super::super::pad_capture::PAD_CHANNEL_MASK;
 
     #[test]
     fn registry_stamp_hive_follows_the_endpoint_direction() {

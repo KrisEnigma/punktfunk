@@ -49,7 +49,7 @@ pub(crate) fn wide(s: &str) -> Vec<u16> {
 }
 
 /// `VT_LPWSTR` borrowing `w`, which must outlive it and stay NUL-terminated.
-fn pv_lpwstr(w: &[u16]) -> ManuallyDrop<PROPVARIANT> {
+pub(crate) fn pv_lpwstr(w: &[u16]) -> ManuallyDrop<PROPVARIANT> {
     ManuallyDrop::new(PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
             Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
@@ -66,7 +66,7 @@ fn pv_lpwstr(w: &[u16]) -> ManuallyDrop<PROPVARIANT> {
 }
 
 /// `VT_CLSID` borrowing `g`, which must outlive it.
-fn pv_clsid(g: &GUID) -> ManuallyDrop<PROPVARIANT> {
+pub(crate) fn pv_clsid(g: &GUID) -> ManuallyDrop<PROPVARIANT> {
     ManuallyDrop::new(PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
             Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
@@ -83,7 +83,7 @@ fn pv_clsid(g: &GUID) -> ManuallyDrop<PROPVARIANT> {
 }
 
 /// `VT_BLOB` borrowing `b`, which must outlive it.
-fn pv_blob(b: &[u8]) -> ManuallyDrop<PROPVARIANT> {
+pub(crate) fn pv_blob(b: &[u8]) -> ManuallyDrop<PROPVARIANT> {
     ManuallyDrop::new(PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
             Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
@@ -102,7 +102,7 @@ fn pv_blob(b: &[u8]) -> ManuallyDrop<PROPVARIANT> {
     })
 }
 
-fn pv_string(pv: &PROPVARIANT) -> Option<String> {
+pub(crate) fn pv_string(pv: &PROPVARIANT) -> Option<String> {
     // SAFETY: the variant is initialized (built by us or returned by GetValue); pwszVal is only
     // read when vt says VT_LPWSTR, in which case it points at the variant's NUL-terminated
     // string (or is null, which we check).
@@ -119,7 +119,7 @@ fn pv_string(pv: &PROPVARIANT) -> Option<String> {
     }
 }
 
-fn pv_guid(pv: &PROPVARIANT) -> Option<GUID> {
+pub(crate) fn pv_guid(pv: &PROPVARIANT) -> Option<GUID> {
     // SAFETY: puuid is only dereferenced when vt == VT_CLSID and non-null.
     unsafe {
         let inner = &pv.Anonymous.Anonymous;
@@ -134,7 +134,7 @@ fn pv_guid(pv: &PROPVARIANT) -> Option<GUID> {
     }
 }
 
-fn pv_bytes(pv: &PROPVARIANT) -> Option<Vec<u8>> {
+pub(crate) fn pv_bytes(pv: &PROPVARIANT) -> Option<Vec<u8>> {
     // SAFETY: the blob pointer/length pair is only read when vt == VT_BLOB and
     // the pointer is non-null; the variant owns cbSize bytes there.
     unsafe {
