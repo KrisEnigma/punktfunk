@@ -439,9 +439,12 @@ internal object ConsoleJson {
             invertScroll = j.optBoolean("invert_scroll", s.invertScroll),
             overlayActions = str("overlay_actions", s.overlayActions),
             padHaptics = j.optBoolean("pad_haptics", s.padHaptics),
+            // `"mix"` is off, not on: it is unimplemented everywhere and
+            // `pad_audio::speaker_active` renders it as off, so a profile carrying it must not
+            // open the pad's speaker here alone.
             padSpeaker = when (j.optString("pad_speaker", "")) {
-                "pad", "mix" -> true
-                "off" -> false
+                "pad" -> true
+                "mix", "off" -> false
                 else -> s.padSpeaker
             },
             lowLatencyMode = j.optBoolean("android.low_latency", s.lowLatencyMode),
