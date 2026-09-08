@@ -838,6 +838,9 @@ pub struct AmfEncoder {
     pending_force: Option<usize>,
     /// `PUNKTFUNK_LTR_FORCE_AT=N`: self-trigger [`Encoder::invalidate_ref_frames`] at that index.
     ltr_test_force_at: Option<i64>,
+    /// Refuse this frame after the LTR decision, as a failed surface creation would.
+    #[cfg(test)]
+    fail_submit_at: Option<i64>,
     /// What the caller promised through [`Encoder::set_input_ring_depth`]: how many frames may be
     /// in flight before it reuses an input texture. `None` = never told, so the ring copy stays.
     /// See [`AmfEncoder::in_place`].
@@ -920,6 +923,8 @@ impl AmfEncoder {
             ltr_mark_interval: ltr_mark_interval(fps),
             pending_force: None,
             ltr_test_force_at: ltr_test_force_at(),
+            #[cfg(test)]
+            fail_submit_at: None,
             input_ring_depth: None,
             resets_without_output: 0,
         })
@@ -1576,8 +1581,11 @@ impl AmfEncoder {
     }
 }
 
-impl Encoder for AmfEncoder {
-    fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
+impl AmfEncoder {
+    /// [`Encoder::submit`] without the failure rule: the LTR mirror and a queued force are
+    /// committed before the component takes the frame, so a refusal leaves them one frame ahead
+    /// of the hardware. Only the wrapper's forced IDR resets both.
+    fn try_submit(&mut self, captured: &CapturedFrame) -> Result<()> {
         anyhow::ensure!(
             captured.width == self.width && captured.height == self.height,
             "captured frame {}x{} != encoder {}x{}",
@@ -1654,6 +1662,10 @@ impl Encoder for AmfEncoder {
                 mark_slot = Some(slot);
             }
         }
+        #[cfg(test)]
+        if self.fail_submit_at == Some(cur_idx) {
+            bail!("test hook: frame {cur_idx} refused after the LTR decision");
+        }
         let in_place = self.in_place();
         let inner = self.inner.as_mut().expect("ensure_inner succeeded");
         // Re-push HDR metadata on change or rebuild. Best-effort: reject leaves the 0xCE datagram.
@@ -1685,11 +1697,9 @@ impl Encoder for AmfEncoder {
             // budget with no progress is the same wedge it always was.
             while inner.retrieve.in_flight() >= cap {
                 if let Some(e) = lock(&inner.retrieve.out).err.take() {
-                    self.force_kf = true;
                     bail!("{e}");
                 }
                 if std::time::Instant::now() >= deadline {
-                    self.force_kf = true;
                     bail!(
                         "AMF produced no output for {} ms with {} frame(s) in flight — \
                          wedged (escalating to reset)",
@@ -1848,7 +1858,6 @@ impl Encoder for AmfEncoder {
             // NEED_MORE_INPUT = accepted; no AU owed for this submit alone.
             if !matches!(r, sys::AMF_OK | sys::AMF_NEED_MORE_INPUT) {
                 lock(&inner.retrieve.out).pending.pop_back();
-                self.force_kf = true;
                 if r == sys::AMF_INPUT_FULL {
                     bail!("AMF SubmitInput stayed AMF_INPUT_FULL past the drain budget — wedged");
                 }
@@ -1856,6 +1865,18 @@ impl Encoder for AmfEncoder {
             }
         }
         Ok(())
+    }
+}
+
+impl Encoder for AmfEncoder {
+    fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
+        let submitted = self.try_submit(captured);
+        // A frame the component never took: the next one is an IDR, which resets the LTR
+        // mirror and any queued force to what the hardware holds.
+        if submitted.is_err() {
+            self.force_kf = true;
+        }
+        submitted
     }
 
     /// Pin `frame_idx` to the wire index so LTR slots compare against client frame numbers across
@@ -2514,6 +2535,118 @@ mod tests {
                 first_run[0].data.len()
             );
         }
+    }
+
+    /// A submit refused after the LTR decision — surface creation, a property set — must not
+    /// leave the mirror claiming a mark the hardware never made, nor eat a queued force: the
+    /// next frame is an IDR, which resets both. Refuses one mark frame and one recovery frame.
+    /// Skips without AMD; the mirror checks skip when the driver declines LTR.
+    #[test]
+    fn amf_refused_submit_forces_idr_live() {
+        if let Err(e) = try_factory() {
+            eprintln!("skipping: AMF runtime unavailable ({e})");
+            return;
+        }
+        let Some(device) = amd_d3d11_device() else {
+            eprintln!("skipping: no AMD adapter on this box");
+            return;
+        };
+        let (w, h) = (640u32, 480u32);
+        let tex = nv12_texture(&device, w, h);
+        let mut enc = match AmfEncoder::open(
+            Codec::H264,
+            PixelFormat::Nv12,
+            w,
+            h,
+            30,
+            2_000_000,
+            8,
+            ChromaFormat::Yuv420,
+            None,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipping: native AMF open declined ({e:#})");
+                return;
+            }
+        };
+        enc.prepare(&device).expect("prepare");
+        let ltr = enc.caps().supports_rfi;
+        let mark = enc.ltr_mark_interval as u32;
+        assert!(
+            mark >= 4,
+            "mark interval {mark} leaves no room for a loss window"
+        );
+        let (refused_mark, refused_force) = (mark, 2 * mark);
+        let mut aus: Vec<EncodedFrame> = Vec::new();
+        for i in 0..4 * mark {
+            if i == refused_mark {
+                enc.fail_submit_at = Some(i as i64);
+            }
+            if i == refused_force {
+                if ltr {
+                    // The IDR after the refused mark is the pre-loss anchor.
+                    assert!(
+                        enc.invalidate_ref_frames(i as i64 - 2, i as i64 - 1),
+                        "no pre-loss LTR to force"
+                    );
+                }
+                enc.fail_submit_at = Some(i as i64);
+            }
+            let frame = CapturedFrame {
+                provenance: Default::default(),
+                width: w,
+                height: h,
+                pts_ns: i as u64,
+                format: PixelFormat::Nv12,
+                payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
+                    texture: tex.clone(),
+                    device: device.clone(),
+                    pyro: None,
+                }),
+                cursor: None,
+            };
+            match enc.submit_indexed(&frame, i) {
+                Ok(()) => assert_ne!(enc.fail_submit_at, Some(i as i64), "frame {i} not refused"),
+                Err(e) => assert_eq!(enc.fail_submit_at, Some(i as i64), "submit {i}: {e:#}"),
+            }
+            if let Some(au) = enc.poll().expect("poll") {
+                aus.push(au);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(au) = enc.poll().expect("drain") {
+            aus.push(au);
+        }
+        let au = |i: u32| {
+            aus.iter()
+                .find(|a| a.pts_ns == i as u64)
+                .unwrap_or_else(|| panic!("no AU for frame {i}"))
+        };
+        assert!(au(0).keyframe, "first AU must be a keyframe");
+        for refused in [refused_mark, refused_force] {
+            assert!(
+                aus.iter().all(|a| a.pts_ns != refused as u64),
+                "refused frame {refused} produced an AU"
+            );
+            assert!(
+                au(refused + 1).keyframe,
+                "frame {} after refused frame {refused} must be an IDR",
+                refused + 1
+            );
+        }
+        if ltr {
+            assert!(
+                !enc.ltr_slots.contains(&Some(refused_mark as i64)),
+                "mirror claims a mark the hardware never made: {:?}",
+                enc.ltr_slots
+            );
+        }
+        eprintln!(
+            "live AMF refused-submit: {} AUs, ltr={ltr}, mirror {:?}",
+            aus.len(),
+            enc.ltr_slots
+        );
     }
 
     /// Live `applied_bitrate_bps`: None before lazy open, open rate after submit, new rate after

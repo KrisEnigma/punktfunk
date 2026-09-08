@@ -706,6 +706,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **NVENC no longer pins a stream at the 10 Mbps floor.** When the bitrate search opened only
   after split encode was disabled, the floor was cached as the codec's bitrate ceiling and
   clamped every later open for the life of the process. Nothing to do.
+- **A refused AMF or QSV submit forces the next frame to an IDR.** The LTR mirror and a queued
+  force were committed before the encoder took the frame, so a failed surface left the mirror
+  claiming a mark the hardware never made, and AMF's drain could pair every later AU with the
+  wrong frame's pts. Nothing to do.
 - **A frame the FEC wire cannot address is dropped, not corrupted.** Past 255 data shards per
   block `255 - k` underflowed and `fecInfo`'s 10-bit k truncated, which a large IDR at the
   ANNOUNCE packetSize floor reaches. Raise the client's packetSize if the log names it.
