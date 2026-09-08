@@ -109,17 +109,19 @@ fn reap_ghost_monitors() -> u32 {
     let ps = std::env::var("SystemRoot")
         .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
         .unwrap_or_else(|_| "powershell.exe".to_string());
-    match std::process::Command::new(&ps)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            REAP_PS,
-        ])
-        .output()
-    {
+    // Bounded: this runs under the manager's `device` mutex (driver open) and under its `state`
+    // lock (the ADD slot-exhaustion retry), so a wedged Get-PnpDevice would block every acquire,
+    // release and `/display/state`. `output_within` kills the whole tree on the deadline.
+    let mut cmd = std::process::Command::new(&ps);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        REAP_PS,
+    ]);
+    match crate::proc::output_within(&mut cmd, std::time::Duration::from_secs(30)) {
         Ok(o) => {
             let raw = String::from_utf8_lossy(&o.stdout);
             let Some((found, removed)) = parse_reap_output(&raw) else {
@@ -213,21 +215,22 @@ fn reload_vdisplay_adapter() -> AdapterCycle {
         .clone()
         .unwrap_or_default();
     let script = format!("$pin='{}'; {CYCLE_PS}", pin.replace('\'', "''"));
-    let out = match std::process::Command::new(&ps)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &script,
-        ])
-        .output()
-    {
+    // Bounded: this holds the RECOVERY mutex, so a wedged Disable-PnpDevice would stall the whole
+    // recovery ladder. The script's own sleeps total ~6-8 s on the happy path.
+    let mut cmd = std::process::Command::new(&ps);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &script,
+    ]);
+    let out = match crate::proc::output_within(&mut cmd, std::time::Duration::from_secs(60)) {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Err(e) => {
-            tracing::warn!(error = %e, "pf-vdisplay: adapter reload could not spawn powershell");
-            return AdapterCycle::Refused(format!("powershell did not spawn: {e}"));
+            tracing::warn!(error = %e, "pf-vdisplay: adapter reload did not complete");
+            return AdapterCycle::Refused(format!("powershell did not complete: {e}"));
         }
     };
     let outcome = classify_reload_output(&out);
