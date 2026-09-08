@@ -13,7 +13,7 @@
 //! Every verb is scoped to the calling process (v8): a monitor answers only to the owner whose
 //! ADD created it, and CLEAR_ALL departs the caller's own. Two hosts on one box never meet.
 
-use bytemuck::{Pod, Zeroable};
+use bytemuck::Pod;
 use pf_driver_proto::control;
 use pf_driver_proto::vdisplay::valid_mode;
 use pf_umdf_util::wdf::Request;
