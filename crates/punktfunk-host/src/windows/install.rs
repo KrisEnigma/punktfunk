@@ -40,7 +40,7 @@ pub(crate) fn sys32(rel: &str) -> String {
 
 /// [`sys32`] for a bare tool name. A name that already carries a separator (the staged
 /// `nefconc.exe`) is its own path and passes through.
-fn resolve_tool(cmd: &str) -> String {
+pub(crate) fn resolve_tool(cmd: &str) -> String {
     if cmd.contains('\\') || cmd.contains('/') {
         return cmd.to_string();
     }
