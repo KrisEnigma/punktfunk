@@ -20,6 +20,11 @@
 //! that made them.
 
 use super::audio_control;
+use super::devnode_api::{
+    bind_driver, create_media_devnode, devinfo_data, devnode_inf_path, devnode_multi_sz_prop,
+    instance_id, media_class_devs, pv_blob, pv_bytes, pv_clsid, pv_guid, pv_lpwstr, pv_string,
+    read_devparam_dword, wide, write_devparam_dword, DevInfoSet,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashSet;
 use std::mem::ManuallyDrop;
@@ -29,30 +34,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::{w, GUID, PCWSTR, PWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    SetupDiCreateDevRegKeyW, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW,
-    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-    SetupDiGetDeviceInstanceIdW, SetupDiGetDevicePropertyW, SetupDiGetDeviceRegistryPropertyW,
-    SetupDiOpenDevRegKey, SetupDiRegisterDeviceInfo, SetupDiSetDeviceRegistryPropertyW,
-    UpdateDriverForPlugAndPlayDevicesW, DICD_GENERATE_ID, DICS_FLAG_GLOBAL, DIREG_DEV,
-    GUID_DEVCLASS_MEDIA, HDEVINFO, SETUP_DI_GET_CLASS_DEVS_FLAGS, SPDRP_HARDWAREID,
-    SP_DEVINFO_DATA, UPDATEDRIVERFORPLUGANDPLAYDEVICES_FLAGS,
-};
-use windows::Win32::Devices::Properties::{
-    DEVPKEY_Device_DriverInfPath, DEVPROPTYPE, DEVPROP_TYPE_STRING,
+    SetupDiEnumDeviceInfo, SPDRP_HARDWAREID, SP_DEVINFO_DATA,
 };
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
     IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
 };
-use windows::Win32::System::Com::StructuredStorage::{
-    PropVariantClear, PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
-};
-use windows::Win32::System::Com::{CoCreateInstance, BLOB, CLSCTX_ALL, STGM_READ, STGM_READWRITE};
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegQueryValueExW, RegSetValueExW, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD,
-    REG_VALUE_TYPE,
-};
-use windows::Win32::System::Variant::{VT_BLOB, VT_CLSID, VT_LPWSTR};
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ, STGM_READWRITE};
+use windows::Win32::System::Registry::{RegCloseKey, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD};
+use windows::Win32::System::Variant::{VT_BLOB, VT_CLSID};
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
 /// Data1 of the per-pad container GUID. Must equal pf-inject's `container_tag`
@@ -227,19 +218,6 @@ fn active_stamps(pad_index: u8) -> Vec<Stamp> {
     }
 }
 
-pub(crate) fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn multi_sz_bytes(items: &[&str]) -> Vec<u8> {
-    let mut units: Vec<u16> = items
-        .iter()
-        .flat_map(|s| s.encode_utf16().chain(std::iter::once(0)))
-        .collect();
-    units.push(0);
-    units.iter().flat_map(|u| u.to_le_bytes()).collect()
-}
-
 fn sz_bytes(s: &str) -> Vec<u8> {
     wide(s).iter().flat_map(|u| u.to_le_bytes()).collect()
 }
@@ -320,300 +298,6 @@ pub(crate) fn endpoint_guid_part(endpoint_id: &str) -> Result<&str> {
 // CoTaskMemFree it. ManuallyDrop: never clear borrows. GetValue-owned
 // variants ARE cleared, in `stamp_served`.
 
-/// `VT_LPWSTR` borrowing `w`, which must outlive it and stay NUL-terminated.
-fn pv_lpwstr(w: &[u16]) -> ManuallyDrop<PROPVARIANT> {
-    ManuallyDrop::new(PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_LPWSTR,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    pwszVal: PWSTR(w.as_ptr().cast_mut()),
-                },
-            }),
-        },
-    })
-}
-
-/// `VT_CLSID` borrowing `g`, which must outlive it.
-fn pv_clsid(g: &GUID) -> ManuallyDrop<PROPVARIANT> {
-    ManuallyDrop::new(PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_CLSID,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    puuid: std::ptr::from_ref(g).cast_mut(),
-                },
-            }),
-        },
-    })
-}
-
-/// `VT_BLOB` borrowing `b`, which must outlive it.
-fn pv_blob(b: &[u8]) -> ManuallyDrop<PROPVARIANT> {
-    ManuallyDrop::new(PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_BLOB,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    blob: BLOB {
-                        cbSize: b.len() as u32,
-                        pBlobData: b.as_ptr().cast_mut(),
-                    },
-                },
-            }),
-        },
-    })
-}
-
-fn pv_string(pv: &PROPVARIANT) -> Option<String> {
-    // SAFETY: the variant is initialized (built by us or returned by GetValue); pwszVal is only
-    // read when vt says VT_LPWSTR, in which case it points at the variant's NUL-terminated
-    // string (or is null, which we check).
-    unsafe {
-        let inner = &pv.Anonymous.Anonymous;
-        if inner.vt != VT_LPWSTR {
-            return None;
-        }
-        let p = inner.Anonymous.pwszVal;
-        if p.is_null() {
-            return None;
-        }
-        p.to_string().ok()
-    }
-}
-
-fn pv_guid(pv: &PROPVARIANT) -> Option<GUID> {
-    // SAFETY: puuid is only dereferenced when vt == VT_CLSID and non-null.
-    unsafe {
-        let inner = &pv.Anonymous.Anonymous;
-        if inner.vt != VT_CLSID {
-            return None;
-        }
-        let p = inner.Anonymous.puuid;
-        if p.is_null() {
-            return None;
-        }
-        Some(*p)
-    }
-}
-
-fn pv_bytes(pv: &PROPVARIANT) -> Option<Vec<u8>> {
-    // SAFETY: the blob pointer/length pair is only read when vt == VT_BLOB and
-    // the pointer is non-null; the variant owns cbSize bytes there.
-    unsafe {
-        let inner = &pv.Anonymous.Anonymous;
-        if inner.vt != VT_BLOB {
-            return None;
-        }
-        let b = &inner.Anonymous.blob;
-        if b.pBlobData.is_null() {
-            return None;
-        }
-        Some(std::slice::from_raw_parts(b.pBlobData, b.cbSize as usize).to_vec())
-    }
-}
-
-pub(crate) struct DevInfoSet(pub(crate) HDEVINFO);
-impl Drop for DevInfoSet {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from SetupDiGetClassDevsW/SetupDiCreateDeviceInfoList and is
-        // destroyed exactly once (this owner's drop).
-        unsafe {
-            let _ = SetupDiDestroyDeviceInfoList(self.0);
-        }
-    }
-}
-
-pub(crate) fn media_class_devs() -> Result<DevInfoSet> {
-    // SAFETY: the class GUID is a static const; flags 0 (not DIGCF_PRESENT) so a created-but-
-    // never-installed phantom from a previous run is still found and reused, not duplicated.
-    let set = unsafe {
-        SetupDiGetClassDevsW(
-            Some(&GUID_DEVCLASS_MEDIA),
-            PCWSTR::null(),
-            None,
-            SETUP_DI_GET_CLASS_DEVS_FLAGS(0),
-        )
-    }
-    .context("SetupDiGetClassDevs(MEDIA)")?;
-    Ok(DevInfoSet(set))
-}
-
-pub(crate) fn devinfo_data() -> SP_DEVINFO_DATA {
-    SP_DEVINFO_DATA {
-        cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
-        ..Default::default()
-    }
-}
-
-pub(crate) fn instance_id(set: &DevInfoSet, did: &SP_DEVINFO_DATA) -> Option<String> {
-    let mut buf = [0u16; 200];
-    // SAFETY: live devinfo set + element; the buffer length travels with the slice.
-    unsafe { SetupDiGetDeviceInstanceIdW(set.0, did, Some(&mut buf), None) }.ok()?;
-    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(String::from_utf16_lossy(&buf[..len]))
-}
-
-pub(crate) fn devnode_multi_sz_prop(
-    set: &DevInfoSet,
-    did: &SP_DEVINFO_DATA,
-    prop: windows::Win32::Devices::DeviceAndDriverInstallation::SETUP_DI_REGISTRY_PROPERTY,
-) -> Vec<String> {
-    let mut buf = vec![0u8; 4096];
-    let mut req = 0u32;
-    // SAFETY: live set + element; the output buffer length travels with the slice.
-    if unsafe {
-        SetupDiGetDeviceRegistryPropertyW(set.0, did, prop, None, Some(&mut buf), Some(&mut req))
-    }
-    .is_err()
-    {
-        return Vec::new();
-    }
-    let units: Vec<u16> = buf[..(req as usize).min(buf.len())]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    units
-        .split(|&c| c == 0)
-        .filter(|s| !s.is_empty())
-        .map(String::from_utf16_lossy)
-        .collect()
-}
-
-/// Installed-driver INF (`DEVPKEY_Device_DriverInfPath`). Absent if the driver never installed.
-pub(crate) fn devnode_inf_path(set: &DevInfoSet, did: &SP_DEVINFO_DATA) -> Option<String> {
-    let mut ty = DEVPROPTYPE(0);
-    let mut buf = vec![0u8; 1024];
-    let mut req = 0u32;
-    // SAFETY: live set + element; the property key is a static const; the buffer length
-    // travels with the slice.
-    unsafe {
-        SetupDiGetDevicePropertyW(
-            set.0,
-            did,
-            &DEVPKEY_Device_DriverInfPath,
-            &mut ty,
-            Some(&mut buf),
-            Some(&mut req),
-            0,
-        )
-    }
-    .ok()?;
-    if ty != DEVPROP_TYPE_STRING {
-        return None;
-    }
-    let units: Vec<u16> = buf[..(req as usize).min(buf.len())]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    let len = units.iter().position(|&c| c == 0).unwrap_or(units.len());
-    (len > 0).then(|| String::from_utf16_lossy(&units[..len]))
-}
-
-/// REG_DWORD from `Device Parameters`. `None` = no key, no value, or wrong type — foreign.
-pub(crate) fn read_devparam_dword(
-    set: &DevInfoSet,
-    did: &SP_DEVINFO_DATA,
-    value_name: &str,
-) -> Option<u32> {
-    // SAFETY: live set + element; DIREG_DEV opens the devnode's Device Parameters key.
-    let hkey = unsafe {
-        SetupDiOpenDevRegKey(
-            set.0,
-            did,
-            DICS_FLAG_GLOBAL.0,
-            0,
-            DIREG_DEV,
-            KEY_QUERY_VALUE.0,
-        )
-    }
-    .ok()?;
-    let name = wide(value_name);
-    let mut data = [0u8; 4];
-    let mut len = data.len() as u32;
-    let mut ty = REG_VALUE_TYPE(0);
-    // SAFETY: the value name is NUL-terminated and outlives the call; data/len are live locals
-    // sized together.
-    let rc = unsafe {
-        RegQueryValueExW(
-            hkey,
-            PCWSTR(name.as_ptr()),
-            None,
-            Some(&mut ty),
-            Some(data.as_mut_ptr()),
-            Some(&mut len),
-        )
-    };
-    // SAFETY: closing the key opened above, exactly once.
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    (rc.is_ok() && ty == REG_DWORD && len == 4).then(|| u32::from_le_bytes(data))
-}
-
-/// Write side of [`read_devparam_dword`]; creates the key on a fresh devnode.
-pub(crate) fn write_devparam_dword(
-    set: &DevInfoSet,
-    did: &mut SP_DEVINFO_DATA,
-    value_name: &str,
-    value: u32,
-) -> Result<()> {
-    // SAFETY: live set + element; DIREG_DEV opens the devnode's Device Parameters key.
-    let opened = unsafe {
-        SetupDiOpenDevRegKey(
-            set.0,
-            did,
-            DICS_FLAG_GLOBAL.0,
-            0,
-            DIREG_DEV,
-            KEY_SET_VALUE.0,
-        )
-    };
-    let hkey = match opened {
-        Ok(k) => k,
-        // SAFETY: same set + element; a fresh devnode has no Device Parameters key yet, so
-        // create it (no INF association).
-        Err(_) => unsafe {
-            SetupDiCreateDevRegKeyW(
-                set.0,
-                did,
-                DICS_FLAG_GLOBAL.0,
-                0,
-                DIREG_DEV,
-                None,
-                PCWSTR::null(),
-            )
-        }
-        .with_context(|| format!("create the Device Parameters key for {value_name}"))?,
-    };
-    let name = wide(value_name);
-    // SAFETY: the value name is NUL-terminated and outlives the call; the DWORD bytes travel
-    // with the slice.
-    let rc = unsafe {
-        RegSetValueExW(
-            hkey,
-            PCWSTR(name.as_ptr()),
-            None,
-            REG_DWORD,
-            Some(&value.to_le_bytes()),
-        )
-    };
-    // SAFETY: closing the key opened/created above, exactly once.
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    rc.ok().with_context(|| format!("write {value_name}"))
-}
-
 fn devnode_pad_index(set: &DevInfoSet, did: &SP_DEVINFO_DATA) -> Option<u32> {
     read_devparam_dword(set, did, PAD_INDEX_VALUE)
 }
@@ -638,47 +322,6 @@ fn find_devnode(pad_index: u8) -> Result<Option<String>> {
         }
     }
     Ok(None)
-}
-
-/// Create + register a MEDIA-class root devnode carrying `hwid`, then `mark`
-/// writes the durable owner marker. DeviceDesc only survives until the INF
-/// installs. Shared by the pad provisioner and the `audio-probe` devtest.
-pub(crate) fn create_media_devnode(
-    desc: &str,
-    hwid: &str,
-    mark: impl FnOnce(&DevInfoSet, &mut SP_DEVINFO_DATA) -> Result<()>,
-) -> Result<String> {
-    // SAFETY: the class GUID is a static const.
-    let set = unsafe { SetupDiCreateDeviceInfoList(Some(&GUID_DEVCLASS_MEDIA), None) }
-        .context("SetupDiCreateDeviceInfoList(MEDIA)")?;
-    let set = DevInfoSet(set);
-    let mut did = devinfo_data();
-    let desc = wide(desc);
-    // SAFETY: name/class/description are live NUL-terminated buffers; DICD_GENERATE_ID makes
-    // PnP mint the ROOT\MEDIA\00NN instance id; `did` receives the element.
-    unsafe {
-        SetupDiCreateDeviceInfoW(
-            set.0,
-            w!("MEDIA"),
-            &GUID_DEVCLASS_MEDIA,
-            PCWSTR(desc.as_ptr()),
-            None,
-            DICD_GENERATE_ID,
-            Some(&mut did),
-        )
-    }
-    .context("SetupDiCreateDeviceInfo")?;
-    let hwid = multi_sz_bytes(&[hwid]);
-    // SAFETY: live set + element; the multi-sz property bytes travel with the slice.
-    unsafe { SetupDiSetDeviceRegistryPropertyW(set.0, &mut did, SPDRP_HARDWAREID, Some(&hwid)) }
-        .context("set SPDRP_HARDWAREID")?;
-    // NOT SetupDiCallClassInstaller(DIF_REGISTERDEVICE): needs an interactive
-    // window station and fails with 1459 from a service.
-    // SAFETY: live set + element; no compare callback.
-    unsafe { SetupDiRegisterDeviceInfo(set.0, &mut did, 0, None, None, None) }
-        .context("SetupDiRegisterDeviceInfo")?;
-    mark(&set, &mut did)?;
-    instance_id(&set, &did).context("read the new devnode's instance id")
 }
 
 fn create_devnode(pad_index: u8) -> Result<String> {
@@ -728,36 +371,6 @@ fn resolve_sss_inf() -> Result<String> {
         "no Steam Streaming Speakers INF found (no installed SSS devnode, and Steam's driver \
          directory is absent) — install Steam, whose Remote Play streaming drivers provide it"
     )
-}
-
-/// Bind `inf` to every unbound devnode carrying `hwid`. Idempotent: nothing
-/// needed an update is success. Shared with the `audio-probe` devtest.
-pub(crate) fn bind_driver(hwid: &str, inf: &str) -> Result<()> {
-    let inf_w = wide(inf);
-    let hwid_w = wide(hwid);
-    // SAFETY: both strings are NUL-terminated and outlive the call; a null parent HWND and no
-    // reboot-required out-param are documented as accepted.
-    let r = unsafe {
-        UpdateDriverForPlugAndPlayDevicesW(
-            None,
-            PCWSTR(hwid_w.as_ptr()),
-            PCWSTR(inf_w.as_ptr()),
-            UPDATEDRIVERFORPLUGANDPLAYDEVICES_FLAGS(0),
-            None,
-        )
-    };
-    match r {
-        Ok(()) => {
-            tracing::info!(hwid = %hwid, inf = %inf, "bound the driver to the unbound devnode(s)");
-            Ok(())
-        }
-        // ERROR_NO_MORE_ITEMS (0x80070103): every matching devnode already runs
-        // this (or a better) driver — idempotent reissue, not a failure.
-        Err(e) if e.code().0 as u32 == 0x8007_0103 => Ok(()),
-        Err(e) => {
-            Err(anyhow!(e)).with_context(|| format!("UpdateDriverForPlugAndPlayDevices({inf})"))
-        }
-    }
 }
 
 fn install_sss_driver() -> Result<()> {

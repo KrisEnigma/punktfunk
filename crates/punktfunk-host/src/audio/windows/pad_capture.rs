@@ -7,7 +7,7 @@
 
 use super::pad_endpoint::{open_wasapi_device, probe_activation};
 use super::{AudioCapturer, SAMPLE_RATE};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;

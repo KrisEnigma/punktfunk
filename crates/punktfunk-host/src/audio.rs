@@ -324,6 +324,11 @@ pub(crate) use linux::pad_sink;
 pub(crate) use linux::pad_usb;
 // DualSense pad-audio endpoint + loopback (design: pad haptics/audio). Session
 // queries by pad index; CLI `pad-endpoint`.
+// SetupAPI + PROPVARIANT plumbing under every audio devnode we mint. Shared by pad_endpoint,
+// minted, audio_probe and devnode_cleanup — only one of which provisions pads.
+#[cfg(target_os = "windows")]
+#[path = "audio/windows/devnode_api.rs"]
+pub(crate) mod devnode_api;
 #[cfg(target_os = "windows")]
 #[path = "audio/windows/pad_endpoint.rs"]
 pub(crate) mod pad_endpoint;
