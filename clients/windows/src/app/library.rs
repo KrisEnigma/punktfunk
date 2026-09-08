@@ -19,7 +19,9 @@ use super::connect::{initiate_launch, initiate_waking};
 use super::lucide;
 use super::style::*;
 use super::{AppCtx, Screen, Svc};
-use pf_client_core::library;
+use pf_client_core::collate::{self, Collatable, SortKey};
+use pf_client_core::library::{self, store_label, DESKTOP_ID};
+use pf_client_core::trust::Settings;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -43,15 +45,14 @@ pub(crate) struct Game {
     /// design D4. Reduced from the wire's `role` by `GameEntry::is_launcher`, so "anything that
     /// isn't `launcher` is a game" is decided in one place for every client.
     pub(crate) launcher: bool,
+    /// Host free-form display string (`"PC"`, `"PS2"`, …). Carried so this shelf can sort and
+    /// bucket by it like every other client — dropping it here was why Platform sorted flat.
+    pub(crate) platform: Option<String>,
     /// The `file:///` URI of this entry's brand mark, already resolved by
     /// [`super::launcher_icons::uri`] — `None` when the entry names no mark or one we don't ship.
     /// Resolved at decode time rather than per render: the shelf re-renders on every art arrival.
     pub(crate) icon_uri: Option<String>,
 }
-
-/// The synthetic tile every shelf leads with — the host's own desktop. Shares its id with the
-/// console's (`pf-console-ui`'s `DESKTOP_ID`), a NUL prefix nothing on the wire can carry.
-pub(crate) const DESKTOP_ID: &str = "\0desktop";
 
 /// Streaming the desktop was the host tile's click, two pages back from a shelf. Built here
 /// rather than fetched: it is presentation, never persisted and never cached.
@@ -61,7 +62,27 @@ fn desktop_entry() -> Game {
         title: "Desktop".into(),
         store: String::new(),
         launcher: false,
+        platform: None,
         icon_uri: None,
+    }
+}
+
+/// This shelf sorts its own reduced model; the policy is `pf_client_core::collate`.
+impl Collatable for Game {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn store(&self) -> &str {
+        &self.store
+    }
+    fn platform(&self) -> Option<&str> {
+        self.platform.as_deref()
+    }
+    fn is_launcher(&self) -> bool {
+        self.launcher
     }
 }
 
@@ -163,6 +184,7 @@ pub(crate) fn start_fetch(ctx: &Arc<AppCtx>, set_library: &AsyncSetState<Library
                         title: g.title.clone(),
                         store: g.store.clone(),
                         launcher: g.is_launcher(),
+                        platform: g.platform.clone(),
                         icon_uri: super::launcher_icons::uri(g.icon_token()),
                     })
                     .collect(),
@@ -221,19 +243,6 @@ fn file_uri(p: &Path) -> String {
 }
 
 /// The store badge text — shared spelling with the GTK page and the console UI's posters.
-fn store_label(store: &str) -> &'static str {
-    match store {
-        "steam" => "Steam",
-        "custom" => "Custom",
-        "heroic" => "Heroic",
-        "lutris" => "Lutris",
-        "epic" => "Epic",
-        "gog" => "GOG",
-        "xbox" => "Xbox",
-        _ => "Game",
-    }
-}
-
 /// Monogram for the placeholder poster: the first letters of the first two words.
 fn initials(title: &str) -> String {
     title
@@ -277,6 +286,34 @@ fn game_link(target: &super::Target, game_id: &str) -> Option<String> {
 
 /// A small group label above a tile grid ("Launchers" / "Games"). Only drawn when the page shows
 /// both groups — a single unlabelled grid is what every launcher-less library looked like before.
+/// The shelf's sort picker. Presentation only, like the console's bar: it writes the shared
+/// `library_sort` and re-renders what is already fetched — nothing is refetched, and no other
+/// setting on the page is touched, so a load-modify-save of the whole file is honest here.
+fn sort_row(current: SortKey, on_pick: impl Fn(SortKey) + 'static) -> Element {
+    let names: Vec<String> = SortKey::ALL.iter().map(|k| k.label().to_string()).collect();
+    let index = SortKey::ALL.iter().position(|k| *k == current).unwrap_or(0);
+    hstack((
+        text_block("Sort")
+            .font_size(12.0)
+            .foreground(ThemeRef::SecondaryText),
+        ComboBox::new(names)
+            .selected_index(index as i32)
+            .on_selection_changed(move |i: i32| {
+                let key = SortKey::ALL
+                    .get(i.max(0) as usize)
+                    .copied()
+                    .unwrap_or_default();
+                let mut settings = Settings::load();
+                settings.library_sort = key.id().to_string();
+                settings.save();
+                on_pick(key);
+            }),
+    ))
+    .spacing(8.0)
+    .margin(edges(2.0, 8.0, 2.0, 2.0))
+    .into()
+}
+
 fn group_heading(text: &str) -> Element {
     text_block(text)
         .font_size(12.0)
@@ -407,6 +444,8 @@ pub(crate) fn library_page(props: &LibraryProps, cx: &mut RenderCx) -> Element {
 
     // Responsive poster columns from the live window width (the hosts page's pattern).
     let window = cx.use_inner_size();
+    // Shared `library_sort`: the same four orders the console's bar and the GTK dialog offer.
+    let (sort, set_sort) = cx.use_state(SortKey::parse(&Settings::load().library_sort));
     let content_w = (window.width - 64.0).clamp(POSTER_MIN_WIDTH, 1120.0);
     let cols =
         (((content_w + POSTER_GAP) / (POSTER_MIN_WIDTH + POSTER_GAP)).floor() as usize).clamp(2, 6);
@@ -493,16 +532,26 @@ pub(crate) fn library_page(props: &LibraryProps, cx: &mut RenderCx) -> Element {
                 )
             };
             // Design D4: launcher entries get their own shelf above the titles, never
-            // interleaved. `partition` is stable, so the host's title order survives in each
-            // group. Headings appear only when both groups exist, so a library without launcher
-            // entries renders exactly as it did before.
-            let (launchers, titles): (Vec<&Game>, Vec<&Game>) =
-                games.iter().partition(|g| g.launcher);
+            // interleaved. `collate` is the shared policy — launchers lead as their own group
+            // and the sort applies inside a group, never across. Headings appear only when
+            // both groups exist, so a launcher-less library renders as it did before.
+            let groups = collate::collate(&games[..], sort, None);
+            let of_group = |key: collate::GroupKey| -> Vec<&Game> {
+                groups
+                    .iter()
+                    .find(|g| g.key == key)
+                    .map(|g| g.games.iter().map(|&i| &games[i]).collect())
+                    .unwrap_or_default()
+            };
+            let launchers = of_group(collate::GroupKey::Launchers);
+            // Ungrouped collation puts every title in one bucket whose label is never drawn.
+            let titles = of_group(collate::GroupKey::Platform("All".to_string()));
             // The desktop leads the launcher band: both open something rather than play a
             // title, and it means the shelf is never a dead end for the desktop-only user.
             let desktop = desktop_entry();
             let leading: Vec<&Game> = std::iter::once(&desktop).chain(launchers).collect();
             {
+                body.push(sort_row(sort, move |k| set_sort.call(k)));
                 body.push(group_heading(if leading.len() == 1 {
                     "Host"
                 } else {
