@@ -300,6 +300,16 @@ pub fn open_driver_encoder(
     let view = section.view();
     let header = view.header();
     if !au::au_readable(&header) {
+        // SET_ENCODE already succeeded, so the driver holds an open encode session — and no
+        // `EncoderProxy` exists yet to close it on drop. Send the same CLOSE that `Drop` does,
+        // or the session stays open on a section nobody will ever drain.
+        let _ = encode_ctl(&EncodeCtlRequest {
+            target_id: endpoint.target_id,
+            op: encode::ENCODE_CTL_CLOSE,
+            arg0: header.generation,
+            arg1: 0,
+            payload: [0; 28],
+        });
         bail!("AU section header failed its layout gate after SET_ENCODE: {header:?}");
     }
     let caps = caps_from_wire(&reply.caps);
