@@ -325,6 +325,8 @@ pub(super) struct Presenter {
     vsync_tick: bool,
     // -- 1 Hz pf-present window, always on --
     released: u64,
+    /// `released` of the last flushed window — the glass follower's offered rate.
+    released_last: u64,
     paced_drops: u64,
     no_budget: u64,
     forced: u64,
@@ -396,6 +398,7 @@ impl Presenter {
             inflight: None,
             vsync_tick: false,
             released: 0,
+            released_last: 0,
             paced_drops: 0,
             no_budget: 0,
             forced: 0,
@@ -676,6 +679,11 @@ impl Presenter {
     /// Returns this window's CIRCULAR latch statistics `(vector-mean latch ns mod panel period,
     /// coherence ‰)` when a window actually flushed — the phase-lock reporter's v2 error signal
     /// (design/phase-locked-capture.md §6; the v1 median was immovable under jitter).
+    /// Frames released to glass in the last flushed second.
+    pub(super) fn released_last_second(&self) -> u64 {
+        self.released_last
+    }
+
     pub(super) fn flush_log(
         &mut self,
         meter: &PresentMeter,
@@ -737,6 +745,7 @@ impl Presenter {
             panel_ns as f64 / 1e6,
             cadence,
         );
+        self.released_last = self.released;
         self.released = 0;
         // Margin adaptation, off the MEASURED latch. A release targets the first grid point past
         // `now + margin`, so a frame that makes its vsync is on glass within one panel period of
