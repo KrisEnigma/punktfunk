@@ -12,10 +12,12 @@
 //! rebuilds the encoder (IDR); silence after [`MAX_UNACKED`] unanswered requests.
 //!
 //! Caps are learned: two identical short host acks latch `host_cap_kbps`; two
-//! similar decode-driven backoffs latch `decode_cap_kbps`. Both re-probe on
-//! [`CAP_REPROBE_WINDOWS_MIN`]. Climbs require utilization (delivered ≈ target)
-//! and stay within ×1.5 of the windowed proven mark. Tests in this module pin
-//! the contract.
+//! similar decode-driven backoffs latch `decode_cap_kbps`, and so does decode
+//! headroom on a clean window (park at 80 % of the frame budget, retreat a
+//! notch at 90 %, each step kept only if the decoder's latency follows the
+//! rate). Both re-probe on [`CAP_REPROBE_WINDOWS_MIN`]. Climbs require
+//! utilization (delivered ≈ target) and stay within ×1.5 of the windowed
+//! proven mark. Tests in this module pin the contract.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -64,13 +66,33 @@ const RECOVERY_KF_SEVERE: u32 = 4;
 /// One-way-delay rise above the rolling baseline that counts as queue growth.
 /// 25 ms is far beyond jitter at any streamable frame rate.
 const OWD_RISE_US: i64 = 25_000;
-/// Decode-stage rise (hand-off → output) that marks the decoder falling
-/// behind. Loss/OWD never see a queue inside the decoder; 15 ms of standing
-/// decode queue is unambiguous at any streamable frame rate.
+/// Decode-stage rise (received → decoded) that marks the decoder falling
+/// behind, when no frame budget is known. With one, half a budget: the stage
+/// includes the queue, so that is half a frame of standing backlog.
 const DECODE_RISE_US: i64 = 15_000;
-/// Decode-stage rise that is severe (one window). 45 ms is several frames of
-/// backlog; waiting a second window is 750 ms more of visible damage.
+/// Severe decode rise without a frame budget. With one, 1.5 budgets: several
+/// frames of backlog, and a second window is 750 ms more of visible damage.
 const DECODE_SEVERE_US: i64 = 45_000;
+/// Decode headroom, judged on clean full-rate windows against the frame
+/// budget. Received → decoded includes the queue wait, so a mean near the
+/// period is a decoder with no slack: the next jitter is a missed vsync. At
+/// 80 % climbs park; at 90 % the rate retreats a notch, and the decoder's
+/// answer decides whether the retreat stands.
+const DECODE_HOLD_PCT: i64 = 80;
+const DECODE_RETREAT_PCT: i64 = 90;
+/// A retreat or a cap lift is answered when the decode mean moves by this
+/// much of the budget over [`DECODE_VERDICT_WINDOWS`] clean windows at the
+/// new rate. A pipelined decoder sits above the period with no queue; its
+/// latency does not follow the rate, and the headroom driver stands down.
+const DECODE_ANSWER_PCT: i64 = 5;
+const DECODE_VERDICT_WINDOWS: u32 = 2;
+/// Windows a step may wait for its new rate before the verdict is dropped.
+const DECODE_PROBE_MAX_AGE: u32 = 16;
+/// A window is full-rate for the headroom judgement at ≥ ¾ of the refresh's
+/// frames. Fewer frames share the same bits, so a low-fps decode mean
+/// overstates the full-rate load.
+const DECODE_FULL_RATE_NUM: i64 = 3;
+const DECODE_FULL_RATE_DEN: i64 = 4;
 /// Climb credit requires `actual × DEN ≥ target × NUM` (¾ of target). Below
 /// that the encoder was not constrained, so the window proves nothing.
 const UTILIZATION_NUM: u64 = 3;
@@ -215,6 +237,27 @@ fn score_baseline(
     (over(rise_us), over(severe_us))
 }
 
+/// A headroom step awaiting the decoder's answer at its new rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DecodeProbe {
+    kind: DecodeProbeKind,
+    /// Rate before the step; restored when the step proves nothing or hurts.
+    from_kbps: u32,
+    /// Decode mean at `from_kbps`.
+    ref_us: i64,
+    /// Clean full-rate windows at the new rate, and their decode sum.
+    windows: u32,
+    sum_us: i64,
+    /// Windows since the step, at any rate. Bounds a lift the climb never took.
+    age: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodeProbeKind {
+    Retreat,
+    Lift,
+}
+
 /// One decision per report window; `Some(kbps)` = send a [`crate::quic::SetBitrate`].
 pub(crate) struct BitrateController {
     /// `false` = permanently off (explicit bitrate, old host, or ack silence).
@@ -284,6 +327,14 @@ pub(crate) struct BitrateController {
     climb_since_backoff: bool,
     decode_cap_probe_windows: u32,
     decode_cap_reprobe_after: u32,
+    /// A retreat or a cap lift waiting for the decoder's answer.
+    decode_probe: Option<DecodeProbe>,
+    /// Decode latency did not follow the rate: hold and retreat stand down
+    /// until a clean run re-probes them. Same shape as the encode stand-down.
+    decode_headroom_disarmed: bool,
+    decode_headroom_clean_windows: u32,
+    decode_headroom_reprobe_after: u32,
+    decode_headroom_rearmed: bool,
     /// Highest clean delivered rate of the current/previous
     /// [`PROVEN_BUCKET_WINDOWS`] buckets. Shrinking capacity is the reactive
     /// decode signal's job.
@@ -348,6 +399,11 @@ impl BitrateController {
             climb_since_backoff: true,
             decode_cap_probe_windows: 0,
             decode_cap_reprobe_after: CAP_REPROBE_WINDOWS_MIN,
+            decode_probe: None,
+            decode_headroom_disarmed: false,
+            decode_headroom_clean_windows: 0,
+            decode_headroom_reprobe_after: CAP_REPROBE_WINDOWS_MIN,
+            decode_headroom_rearmed: false,
             proven_cur_kbps: 0,
             proven_prev_kbps: 0,
             proven_bucket_windows: 0,
@@ -417,6 +473,165 @@ impl BitrateController {
             Some(budget) => (budget / 2, budget * 3 / 2),
             None => (ENCODE_RISE_US, ENCODE_SEVERE_US),
         }
+    }
+
+    /// Decode `(rise, severe)` in the same budgets. The stage includes the
+    /// queue, so half a budget of rise is half a frame of standing backlog at
+    /// any refresh; the absolute defaults stand until a budget is known.
+    fn decode_thresholds(&self) -> (i64, i64) {
+        match self.frame_budget_us {
+            Some(budget) => (budget / 2, budget * 3 / 2),
+            None => (DECODE_RISE_US, DECODE_SEVERE_US),
+        }
+    }
+
+    /// A cap lift that lost the decoder its headroom: back to the cap, and
+    /// the next lift waits twice as long.
+    fn undo_decode_lift(&mut self, p: DecodeProbe, decode_us: i64) {
+        self.decode_cap_reprobe_after = self
+            .decode_cap_reprobe_after
+            .saturating_mul(2)
+            .min(CAP_REPROBE_WINDOWS_MAX);
+        self.decode_cap_kbps = Some(p.from_kbps);
+        self.decode_cap_probe_windows = 0;
+        tracing::info!(
+            cap_kbps = p.from_kbps,
+            decode_us,
+            was_us = p.ref_us,
+            reprobe_after_windows = self.decode_cap_reprobe_after,
+            "adaptive bitrate: decode cap lift undone — the decoder lost its headroom"
+        );
+    }
+
+    /// Decode headroom on a clean full-rate window. First the verdict on a
+    /// step in flight, then the bands: park at [`DECODE_HOLD_PCT`], retreat a
+    /// notch at [`DECODE_RETREAT_PCT`]. `Some` is a rate to request.
+    fn judge_decode_headroom(&mut self, mean_us: i64, budget_us: i64, now: Instant) -> Option<u32> {
+        let answer_us = budget_us * DECODE_ANSWER_PCT / 100;
+        if let Some(mut p) = self.decode_probe {
+            let at_new_rate = match p.kind {
+                DecodeProbeKind::Retreat => self.current_kbps < p.from_kbps,
+                DecodeProbeKind::Lift => self.current_kbps > p.from_kbps,
+            };
+            p.age += 1;
+            if at_new_rate {
+                p.windows += 1;
+                p.sum_us += mean_us;
+            }
+            self.decode_probe = Some(p);
+            if p.windows < DECODE_VERDICT_WINDOWS {
+                if p.age >= DECODE_PROBE_MAX_AGE {
+                    self.decode_probe = None; // the step never reached its rate
+                }
+                return None;
+            }
+            self.decode_probe = None;
+            let mean = p.sum_us / i64::from(p.windows);
+            match p.kind {
+                DecodeProbeKind::Retreat if p.ref_us - mean >= answer_us => {
+                    tracing::info!(
+                        from_kbps = p.from_kbps,
+                        at_kbps = self.current_kbps,
+                        decode_us = mean,
+                        was_us = p.ref_us,
+                        "adaptive bitrate: decode latency followed the rate down — retreat kept"
+                    );
+                    // Fresh evidence; the bands below judge this window too.
+                }
+                DecodeProbeKind::Retreat => {
+                    // Latency is not a function of the rate here: pipelined
+                    // decoder, or something else on the SoC. Give the rate
+                    // back and stand down; the cap ladder still probes up.
+                    self.decode_headroom_disarmed = true;
+                    self.decode_headroom_clean_windows = 0;
+                    self.decode_headroom_reprobe_after = if self.decode_headroom_rearmed {
+                        self.decode_headroom_reprobe_after
+                            .saturating_mul(2)
+                            .min(CAP_REPROBE_WINDOWS_MAX)
+                    } else {
+                        CAP_REPROBE_WINDOWS_MIN
+                    };
+                    self.decode_cap_kbps = Some(p.from_kbps);
+                    self.decode_cap_probe_windows = 0;
+                    tracing::info!(
+                        restore_kbps = p.from_kbps,
+                        decode_us = mean,
+                        was_us = p.ref_us,
+                        rearm_after_windows = self.decode_headroom_reprobe_after,
+                        "adaptive bitrate: decode latency did not follow the rate — restoring it \
+                         and standing the headroom driver down (a pipelined decoder sits above \
+                         the period with no queue)"
+                    );
+                    self.ceiling_ask_kbps = p.from_kbps;
+                    return self.request(p.from_kbps, now);
+                }
+                DecodeProbeKind::Lift => {
+                    let worse = mean - p.ref_us >= answer_us
+                        || mean * 100 / budget_us >= DECODE_RETREAT_PCT;
+                    if worse {
+                        self.undo_decode_lift(p, mean);
+                        self.ceiling_ask_kbps = p.from_kbps;
+                        return self.request(p.from_kbps, now);
+                    }
+                    tracing::info!(
+                        at_kbps = self.current_kbps,
+                        decode_us = mean,
+                        was_us = p.ref_us,
+                        "adaptive bitrate: decode cap lift held — the decoder kept its headroom"
+                    );
+                }
+            }
+        }
+        if self.decode_headroom_disarmed {
+            self.decode_headroom_clean_windows += 1;
+            if self.decode_headroom_clean_windows >= self.decode_headroom_reprobe_after {
+                self.decode_headroom_disarmed = false;
+                self.decode_headroom_rearmed = true;
+                self.decode_headroom_clean_windows = 0;
+                tracing::debug!(
+                    after_windows = self.decode_headroom_reprobe_after,
+                    "adaptive bitrate: re-arming the decode headroom driver after a clean run"
+                );
+            }
+            return None;
+        }
+        let pct = mean_us * 100 / budget_us;
+        if pct >= DECODE_RETREAT_PCT && self.current_kbps > self.floor_kbps {
+            let from = self.current_kbps;
+            let next = (from - from / 8).max(self.floor_kbps);
+            self.decode_cap_kbps = Some(next);
+            self.decode_cap_probe_windows = 0;
+            self.decode_probe = Some(DecodeProbe {
+                kind: DecodeProbeKind::Retreat,
+                from_kbps: from,
+                ref_us: mean_us,
+                windows: 0,
+                sum_us: 0,
+                age: 0,
+            });
+            tracing::info!(
+                from_kbps = from,
+                to_kbps = next,
+                decode_us = mean_us,
+                budget_us,
+                "adaptive bitrate: the decoder has no headroom — retreating a notch, kept only \
+                 if its latency follows"
+            );
+            self.ceiling_ask_kbps = next;
+            return self.request(next, now);
+        }
+        if pct >= DECODE_HOLD_PCT && self.decode_cap_kbps.is_none_or(|c| c > self.current_kbps) {
+            self.decode_cap_kbps = Some(self.current_kbps);
+            self.decode_cap_probe_windows = 0;
+            tracing::info!(
+                cap_kbps = self.current_kbps,
+                decode_us = mean_us,
+                budget_us,
+                "adaptive bitrate: decode headroom exhausted — parking here (re-probed after a \
+                 clean run)"
+            );
+        }
+        None
     }
 
     /// Host [`crate::quic::BitrateChanged`]: the clamp is authoritative, and any
@@ -500,6 +715,12 @@ impl BitrateController {
         self.streak_decode_windows = 0;
         self.climb_since_backoff = true;
         self.decode_cap_probe_windows = 0;
+        self.decode_cap_reprobe_after = CAP_REPROBE_WINDOWS_MIN;
+        self.decode_probe = None;
+        self.decode_headroom_disarmed = false;
+        self.decode_headroom_clean_windows = 0;
+        self.decode_headroom_reprobe_after = CAP_REPROBE_WINDOWS_MIN;
+        self.decode_headroom_rearmed = false;
         self.owd_means.clear();
         self.decode_means.clear();
         self.encode_means.clear();
@@ -583,12 +804,13 @@ impl BitrateController {
         // damage, so it always takes the two-window path.
         let (owd_bad, _) = score_baseline(&mut self.owd_means, owd_mean_us, OWD_RISE_US, i64::MAX);
         // Decode rise ends slow start immediately; a far-past-baseline
-        // excursion is severe (one window).
+        // excursion is severe (one window). Sized in frame budgets.
+        let (decode_rise_us, decode_severe_us) = self.decode_thresholds();
         let (decode_bad, decode_severe) = score_baseline(
             &mut self.decode_means,
             decode_mean_us,
-            DECODE_RISE_US,
-            DECODE_SEVERE_US,
+            decode_rise_us,
+            decode_severe_us,
         );
         // Starved: encode_us is not a measurement here. `current_kbps` does
         // not move in this function, so the backoff block reads the same value.
@@ -633,6 +855,14 @@ impl BitrateController {
                 self.streak_decode_windows += 1;
             }
             self.clean_windows = 0;
+            self.decode_headroom_clean_windows = 0;
+            // A lift that ran into damage failed; a retreat learns nothing here.
+            match self.decode_probe.take() {
+                Some(p) if p.kind == DecodeProbeKind::Lift && self.current_kbps > p.from_kbps => {
+                    self.undo_decode_lift(p, decode_mean_us.unwrap_or(p.ref_us));
+                }
+                _ => {}
+            }
             // Any congestion ends slow start until a later idle-onset re-arm.
             self.probing = false;
         } else if idle {
@@ -682,6 +912,15 @@ impl BitrateController {
                             "adaptive bitrate: re-probing above the learned decode cap"
                         );
                         self.decode_cap_kbps = Some(lifted);
+                        // The decoder's answer above the cap decides the lift.
+                        self.decode_probe = decode_mean_us.map(|ref_us| DecodeProbe {
+                            kind: DecodeProbeKind::Lift,
+                            from_kbps: cap,
+                            ref_us,
+                            windows: 0,
+                            sum_us: 0,
+                            age: 0,
+                        });
                     }
                 }
             }
@@ -835,6 +1074,22 @@ impl BitrateController {
             self.bad_windows = 0;
             self.streak_decode_windows = 0;
             return self.request(next, now);
+        }
+        // Decode headroom: a clean, loaded, full-rate window with the signal.
+        // Loss, flush and starvation are the link's story, not the decoder's.
+        let full_rate = match (active_frames, self.frame_budget_us) {
+            (Some(n), Some(budget_us)) if budget_us > 0 => {
+                i64::from(n) * DECODE_FULL_RATE_DEN
+                    >= (WINDOW_US / budget_us) * DECODE_FULL_RATE_NUM
+            }
+            _ => true,
+        };
+        if let (Some(mean_us), Some(budget_us)) = (decode_mean_us, self.frame_budget_us) {
+            if budget_us > 0 && !bad && !idle && !starved && full_rate {
+                if let Some(kbps) = self.judge_decode_headroom(mean_us, budget_us, now) {
+                    return Some(kbps);
+                }
+            }
         }
         // Climbs need a utilized clean window and stay within ×1.5 of proven.
         // Frame-driven sources never reach ¾ of the wall-clock target, so the
@@ -3665,5 +3920,180 @@ mod tests {
             i += 1;
         }
         assert_eq!(sent, MAX_UNACKED);
+    }
+    /// One clean, utilized, full-rate 120 Hz window with a given decode mean.
+    fn loaded(c: &mut BitrateController, at: Instant, decode_us: i64) -> Option<u32> {
+        c.on_window(
+            at,
+            0,
+            0,
+            Some(10_000),
+            Some(decode_us),
+            None,
+            c.current_kbps,
+            false,
+            0,
+            Some(90),
+        )
+    }
+
+    /// A 120 Hz controller with room to climb and seeded baselines.
+    fn seeded_120(start_kbps: u32) -> (BitrateController, Instant, u32) {
+        let mut c = BitrateController::new(start_kbps);
+        c.set_ceiling(400_000);
+        c.set_frame_budget(120);
+        let start = Instant::now();
+        let mut t = 0;
+        for _ in 0..4 {
+            calm_window(&mut c, ticks(start, t));
+            t += 1;
+        }
+        (c, start, t)
+    }
+
+    /// Clean windows at `decode_us` until the controller asks for a rate, acked.
+    fn until_request(
+        c: &mut BitrateController,
+        start: Instant,
+        t: &mut u32,
+        decode_us: i64,
+        max: u32,
+    ) -> Option<u32> {
+        for _ in 0..max {
+            let r = loaded(c, ticks(start, *t), decode_us);
+            *t += 1;
+            if let Some(k) = r {
+                c.on_ack(k);
+                return Some(k);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn decode_headroom_parks_a_clean_climb() {
+        // 7 000 µs of 8 333: 84 % — inside the hold band. No climb, cap at the rate.
+        let (mut c, start, mut t) = seeded_120(100_000);
+        for _ in 0..12 {
+            assert_eq!(
+                loaded(&mut c, ticks(start, t), 7_000),
+                None,
+                "window {t} climbed"
+            );
+            t += 1;
+        }
+        assert_eq!(c.decode_cap_kbps, Some(100_000));
+        assert_eq!(c.current_kbps, 100_000);
+    }
+
+    #[test]
+    fn a_lifted_decode_cap_is_held_when_headroom_stays() {
+        let (mut c, start, mut t) = seeded_120(100_000);
+        for _ in 0..4 {
+            assert_eq!(loaded(&mut c, ticks(start, t), 7_000), None);
+            t += 1;
+        }
+        // The ladder lifts the parked cap +12.5 % and the climb takes it.
+        let lift = until_request(&mut c, start, &mut t, 7_000, 40).expect("ladder lift");
+        assert_eq!(lift, 112_500);
+        // Flat latency above the old cap: the lift stands.
+        assert_eq!(until_request(&mut c, start, &mut t, 7_000, 6), None);
+        assert_eq!(c.current_kbps, 112_500);
+        assert_eq!(c.decode_cap_kbps, Some(112_500));
+        assert!(c.decode_probe.is_none(), "verdict must have been reached");
+    }
+
+    #[test]
+    fn a_lift_is_undone_when_the_decoder_loses_headroom() {
+        let (mut c, start, mut t) = seeded_120(100_000);
+        for _ in 0..4 {
+            assert_eq!(loaded(&mut c, ticks(start, t), 7_000), None);
+            t += 1;
+        }
+        assert_eq!(
+            until_request(&mut c, start, &mut t, 7_000, 40),
+            Some(112_500)
+        );
+        // 7 700 µs: +700 over the reference (≥ 5 % of the budget) and 92 %.
+        let back = until_request(&mut c, start, &mut t, 7_700, 6).expect("lift undone");
+        assert_eq!(back, 100_000);
+        assert_eq!(c.decode_cap_kbps, Some(100_000));
+        assert_eq!(c.decode_cap_reprobe_after, CAP_REPROBE_WINDOWS_MIN * 2);
+    }
+
+    #[test]
+    fn a_decoder_without_headroom_retreats_and_keeps_it_when_latency_follows() {
+        let (mut c, start, mut t) = seeded_120(100_000);
+        // 7 800 µs: 93 % — retreat one notch, not the ×0.7 congestion backoff.
+        let r = loaded(&mut c, ticks(start, t), 7_800).expect("retreat");
+        t += 1;
+        assert_eq!(r, 87_500);
+        assert_eq!(c.decode_cap_kbps, Some(87_500));
+        c.on_ack(r);
+        // Latency followed (−1 300 µs): the retreat stands, nothing else moves.
+        assert_eq!(until_request(&mut c, start, &mut t, 6_500, 8), None);
+        assert_eq!(c.current_kbps, 87_500);
+        assert!(!c.decode_headroom_disarmed);
+    }
+
+    #[test]
+    fn a_flat_decoder_gets_its_rate_back_and_the_driver_stands_down() {
+        let (mut c, start, mut t) = seeded_120(100_000);
+        let r = loaded(&mut c, ticks(start, t), 7_800).expect("retreat");
+        t += 1;
+        c.on_ack(r);
+        // Same latency at the lower rate: not a function of the rate.
+        let restore = until_request(&mut c, start, &mut t, 7_800, 6).expect("restore");
+        assert_eq!(restore, 100_000);
+        assert!(c.decode_headroom_disarmed);
+        assert_eq!(c.decode_cap_kbps, Some(100_000));
+        // Stood down: the same 93 % no longer retreats.
+        assert_eq!(until_request(&mut c, start, &mut t, 7_800, 10), None);
+        assert_eq!(c.current_kbps, 100_000);
+    }
+
+    #[test]
+    fn decode_thresholds_follow_the_frame_budget() {
+        // +6 000 µs over the baseline: half a 120 Hz budget (4 166) is a rise,
+        // the 15 ms no-budget default is not.
+        let mut hz120 = BitrateController::new(100_000);
+        hz120.set_frame_budget(120);
+        let mut plain = BitrateController::new(100_000);
+        let start = Instant::now();
+        for i in 0..5 {
+            assert_eq!(loaded(&mut hz120, ticks(start, i), 3_000), None);
+            assert_eq!(loaded(&mut plain, ticks(start, i), 3_000), None);
+        }
+        loaded(&mut hz120, ticks(start, 5), 9_000);
+        loaded(&mut plain, ticks(start, 5), 9_000);
+        assert!(!hz120.probing, "a budget-sized rise ends slow start");
+        assert!(plain.probing, "below the absolute default it is not a rise");
+    }
+
+    #[test]
+    fn frame_driven_windows_do_not_judge_headroom() {
+        // 30 of 90 expected frames: bigger frames per budget, so 93 % here
+        // says nothing about the full-rate load. Climbs are still allowed.
+        let (mut c, start, mut t) = seeded_120(100_000);
+        for _ in 0..6 {
+            let r = c.on_window(
+                ticks(start, t),
+                0,
+                0,
+                Some(10_000),
+                Some(7_800),
+                None,
+                c.current_kbps,
+                false,
+                0,
+                Some(30),
+            );
+            t += 1;
+            if let Some(k) = r {
+                assert!(k > c.current_kbps, "only climbs, never a retreat");
+                c.on_ack(k);
+            }
+        }
+        assert_eq!(c.decode_cap_kbps, None);
     }
 }
