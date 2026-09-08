@@ -200,6 +200,35 @@ impl MappedView {
             self.byte(off + index).store(byte, Ordering::Relaxed);
         }
     }
+
+    /// A 4-aligned word as the atomic it is, for a protocol field the caller owns end to end
+    /// (compare-exchange, Acquire/Release pairs). Bounds- and alignment-checked once; not under
+    /// the local lock, so never mix it with the locked accessors on the same field.
+    #[inline]
+    pub fn atomic_u32(&self, off: usize) -> &AtomicU32 {
+        self.check(off, 4, 4);
+        // SAFETY: `check` proved the word is in the live mapping and 4-aligned; every bit
+        // pattern is a valid u32.
+        unsafe { &*(self.base.add(off) as *const AtomicU32) }
+    }
+
+    /// [`Self::atomic_u32`] for an 8-aligned u64.
+    #[inline]
+    pub fn atomic_u64(&self, off: usize) -> &AtomicU64 {
+        self.check(off, 8, 8);
+        // SAFETY: as `atomic_u32`, with 8-byte size and alignment checked.
+        unsafe { &*(self.base.add(off) as *const AtomicU64) }
+    }
+
+    /// One `memcpy` of `src` into `off..`, for a region with a single writer whose readers only
+    /// look after a later Release store names it (the AU heap). Bounds-checked once; the
+    /// per-byte atomic path is [`Self::write_bytes`].
+    pub fn copy_from_slice(&self, off: usize, src: &[u8]) {
+        self.check(off, src.len(), 1);
+        // SAFETY: `check` proved the range is in the live mapping; the caller's protocol keeps
+        // every reader off it until the publishing store.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.base.add(off), src.len()) }
+    }
 }
 
 impl Drop for MappedView {

@@ -14,17 +14,18 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use pf_driver_proto::encode::au::{self, AuHeader, AuSlot};
 use pf_driver_proto::encode::{FrameToken, SetEncodeRequest};
+use pf_umdf_util::section::{self, MappedView};
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::System::Memory::{FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile};
 use windows::Win32::System::Threading::SetEvent;
 
 use super::convert::Fail;
 use super::thread::EncodeThread;
-use crate::worker::{OwnedHandle, OwnedView};
+use crate::worker::OwnedHandle;
 
-/// The mapped section and the ready event, owned.
+/// The mapped section and the ready event, owned. The view is bounds-checked
+/// ([`MappedView`]); the section handle is closed once the view holds the section.
 pub struct AuSection {
-    view: OwnedView,
+    view: MappedView,
     event: OwnedHandle,
     /// Host-stamped heap bounds, validated once at map time.
     heap_offset: u32,
@@ -41,48 +42,35 @@ impl AuSection {
     /// Map `section` and adopt both handles. `Err` means NOTHING was adopted: the values are
     /// left for the host to reap alongside the IOCTL's failure status.
     pub fn map(section: u64, event: u64, section_bytes: u32) -> Result<Self, Fail> {
-        let map = HANDLE(section as usize as *mut core::ffi::c_void);
-        // SAFETY: `map` is the section handle the host duplicated into this process; the byte
-        // count is what the host declared, so a smaller section fails here instead of faulting
-        // on a later write. The null `view.Value` is checked below.
-        let view = unsafe {
-            MapViewOfFile(
-                map,
-                FILE_MAP_READ | FILE_MAP_WRITE,
-                0,
-                0,
-                section_bytes as usize,
-            )
-        };
-        if view.Value.is_null() {
+        // The header read below needs the whole fixed layout to be there: a short section is
+        // refused before anything is mapped, not faulted on.
+        if (section_bytes as usize) < au::HEAP_OFFSET {
+            dbglog!("[pf-vd] encode: AU section of {section_bytes} B is shorter than its layout");
+            return Err((-9, "section"));
+        }
+        let Some(view) = MappedView::from_handle_value(section, section_bytes as usize) else {
             dbglog!(
                 "[pf-vd] encode: MapViewOfFile({section_bytes} B) failed: {:?}",
                 windows::core::Error::from_win32()
             );
             return Err((-9, "map"));
-        }
-        // SAFETY: the view is at least `section_bytes` long (the map above), which the check
-        // below proves covers the header; `read` copies the Pod header out.
-        let header = unsafe { core::ptr::read(view.Value.cast::<AuHeader>()) };
-        let fits = section_bytes as usize >= au::HEAP_OFFSET
-            && au::au_readable(&header)
-            && au::section_bytes(header.heap_bytes) <= section_bytes;
+        };
+        let mut raw = [0u8; au::AU_HEADER_SIZE];
+        view.read_bytes(0, &mut raw);
+        let header: AuHeader = bytemuck::pod_read_unaligned(&raw);
+        let fits =
+            au::au_readable(&header) && au::section_bytes(header.heap_bytes) <= section_bytes;
         if !fits {
             dbglog!("[pf-vd] encode: AU section unreadable: {header:?} in {section_bytes} B");
-            // SAFETY: our own mapping of `view`, unmapped once here; the handles stay the host's.
-            unsafe {
-                let _ = windows::Win32::System::Memory::UnmapViewOfFile(view);
-            }
+            // Dropping `view` unmaps; the handles stay the host's to reap with the failure.
             return Err((-9, "section"));
         }
-        // SAFETY: `view`/`map` are the live mapping and section handle adopted above; `event`
-        // is the duplicated ready event. Each value becomes the sole closer of its handle.
-        let (view, event) = unsafe {
-            (
-                OwnedView::from_raw(view.Value, OwnedHandle::from_raw(map)),
-                OwnedHandle::from_raw(HANDLE(event as usize as *mut core::ffi::c_void)),
-            )
-        };
+        // The view keeps the section alive, so the duplicated handle can close now; the event
+        // stays open for `publish_latest`.
+        section::close_handle_value(section);
+        // SAFETY: `event` is the duplicated ready event; this value is its sole closer.
+        let event =
+            unsafe { OwnedHandle::from_raw(HANDLE(event as usize as *mut core::ffi::c_void)) };
         Ok(Self {
             view,
             event,
@@ -97,14 +85,11 @@ impl AuSection {
     }
 
     fn u32_at(&self, off: usize) -> &AtomicU32 {
-        // SAFETY: `off` is an `offset_of!` of a naturally-aligned u32 inside the header or the
-        // slot table, both inside the mapping `map` validated; the view lives as long as `self`.
-        unsafe { &*self.view.base().cast::<u8>().add(off).cast::<AtomicU32>() }
+        self.view.atomic_u32(off)
     }
 
     fn u64_at(&self, off: usize) -> &AtomicU64 {
-        // SAFETY: as `u32_at`, for an 8-aligned u64 field.
-        unsafe { &*self.view.base().cast::<u8>().add(off).cast::<AtomicU64>() }
+        self.view.atomic_u64(off)
     }
 
     /// Slot `i`'s state word.
@@ -141,15 +126,8 @@ impl AuSection {
         if start < self.heap_offset as usize || end > heap_end {
             return false;
         }
-        // SAFETY: the range is inside the heap (checked), which is inside the mapping; the
-        // encode thread is the only writer and the host reads only slots it Acquire-loaded.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                self.view.base().cast::<u8>().add(start),
-                bytes.len(),
-            );
-        }
+        // The encode thread is the only writer; the host reads only slots it Acquire-loaded.
+        self.view.copy_from_slice(start, bytes);
         true
     }
 
