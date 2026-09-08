@@ -14,7 +14,7 @@ impl IddPushCapturer {
     /// Feed [`CursorWitness`] the one thing it cannot read for itself. The rule — the one-call
     /// lag, the rate limit, the kick blind spot — lives there and is tested there.
     pub(super) fn sample_cursor_witness(&mut self) {
-        let kicked = self.last_kick.elapsed() < cursor_witness::KICK_BLIND;
+        let kicked = self.last_kick.elapsed() < crate::cursor_witness::KICK_BLIND;
         self.cursor.sample(Instant::now(), kicked, || {
             let mut pos = POINT::default();
             // SAFETY: plain FFI; `pos` is a valid out-param for this synchronous call.
