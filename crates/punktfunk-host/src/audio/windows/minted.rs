@@ -14,6 +14,7 @@
 //! Endpoints persist across host restarts and re-resolve by marker. Evidence:
 //! `design/windows-audio-endpoints-and-vbcable.md`. Probe: `punktfunk-host audio-probe mint`.
 
+use super::devnode_api as da;
 use super::pad_endpoint as pe;
 use super::{audio_control, wiring_plan};
 use anyhow::{bail, Context, Result};
@@ -354,14 +355,14 @@ fn ensure_role(
                 Some(inst) => inst,
                 None => {
                     let inst =
-                        pe::create_media_devnode(identity.role_desc(role), &hwid, |set, did| {
+                        da::create_media_devnode(identity.role_desc(role), &hwid, |set, did| {
                             // The role remains the ownership marker even if the seat write fails —
                             // and the node is already registered, so failing here would orphan
                             // one nothing can find again per retry.
-                            pe::write_devparam_dword(set, did, ROLE_MARKER, role.value())?;
+                            da::write_devparam_dword(set, did, ROLE_MARKER, role.value())?;
                             if let Some(marker) = identity.seat_marker()
                                 && let Err(e) =
-                                    pe::write_devparam_dword(set, did, SEAT_MARKER, marker)
+                                    da::write_devparam_dword(set, did, SEAT_MARKER, marker)
                             {
                                 tracing::warn!(error = %format!("{e:#}"),
                                     "audio devnode: seat marker not written — the node binds \
@@ -376,7 +377,7 @@ fn ensure_role(
             }
         }
     };
-    pe::bind_driver(&hwid, &inf)?;
+    da::bind_driver(&hwid, &inf)?;
 
     let render = wait_for(&devnode, false)?;
     let capture = match role {
@@ -573,9 +574,9 @@ fn wait_for(devnode: &str, capture: bool) -> Result<String> {
 
 /// Finds the devnode carrying this identity's exact role and optional seat marker pair.
 fn find_role_devnode(identity: &AudioIdentity, role: Role) -> Result<Option<String>> {
-    let set = pe::media_class_devs()?;
+    let set = da::media_class_devs()?;
     for i in 0.. {
-        let mut did = pe::devinfo_data();
+        let mut did = da::devinfo_data();
         // SAFETY: live set; `did` is a live out-param with cbSize set.
         if unsafe {
             windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiEnumDeviceInfo(
@@ -589,10 +590,10 @@ fn find_role_devnode(identity: &AudioIdentity, role: Role) -> Result<Option<Stri
         if markers_match(
             identity,
             role,
-            pe::read_devparam_dword(&set, &did, ROLE_MARKER),
-            pe::read_devparam_dword(&set, &did, SEAT_MARKER),
+            da::read_devparam_dword(&set, &did, ROLE_MARKER),
+            da::read_devparam_dword(&set, &did, SEAT_MARKER),
         ) {
-            if let Some(inst) = pe::instance_id(&set, &did) {
+            if let Some(inst) = da::instance_id(&set, &did) {
                 return Ok(Some(inst));
             }
         }
@@ -606,20 +607,20 @@ fn adopt_console_orphan_devnode(role: Role, hwid: &str) -> Result<Option<String>
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         SetupDiEnumDeviceInfo, SPDRP_HARDWAREID,
     };
-    let set = pe::media_class_devs()?;
+    let set = da::media_class_devs()?;
     for i in 0.. {
-        let mut did = pe::devinfo_data();
+        let mut did = da::devinfo_data();
         // SAFETY: live set; `did` is a live out-param with cbSize set.
         if unsafe { SetupDiEnumDeviceInfo(set.0, i, &mut did) }.is_err() {
             break; // ERROR_NO_MORE_ITEMS
         }
-        let Some(inst) = pe::instance_id(&set, &did) else {
+        let Some(inst) = da::instance_id(&set, &did) else {
             continue;
         };
         if !inst.to_ascii_uppercase().starts_with("ROOT\\MEDIA\\") {
             continue;
         }
-        if !pe::devnode_multi_sz_prop(&set, &did, SPDRP_HARDWAREID)
+        if !da::devnode_multi_sz_prop(&set, &did, SPDRP_HARDWAREID)
             .iter()
             .any(|h| h.eq_ignore_ascii_case(hwid))
         {
@@ -627,11 +628,11 @@ fn adopt_console_orphan_devnode(role: Role, hwid: &str) -> Result<Option<String>
         }
         if super::devnode_cleanup::OWNER_MARKERS
             .iter()
-            .any(|m| pe::read_devparam_dword(&set, &did, m).is_some())
+            .any(|m| da::read_devparam_dword(&set, &did, m).is_some())
         {
             continue;
         }
-        pe::write_devparam_dword(&set, &mut did, ROLE_MARKER, role.value())?;
+        da::write_devparam_dword(&set, &mut did, ROLE_MARKER, role.value())?;
         tracing::warn!(
             seat = "console",
             role = role.label(),
@@ -656,20 +657,20 @@ pub(crate) fn discover_driver(needle: &str, inf_name: &str) -> Result<(String, S
             .to_string();
         std::path::Path::new(&s).exists().then_some(s)
     };
-    let set = pe::media_class_devs()?;
+    let set = da::media_class_devs()?;
     for i in 0.. {
-        let mut did = pe::devinfo_data();
+        let mut did = da::devinfo_data();
         // SAFETY: live set; `did` is a live out-param with cbSize set.
         if unsafe { SetupDiEnumDeviceInfo(set.0, i, &mut did) }.is_err() {
             break;
         }
-        let Some(hwid) = pe::devnode_multi_sz_prop(&set, &did, SPDRP_HARDWAREID)
+        let Some(hwid) = da::devnode_multi_sz_prop(&set, &did, SPDRP_HARDWAREID)
             .into_iter()
             .find(|h| h.to_lowercase().contains(needle))
         else {
             continue;
         };
-        if let Some(inf) = pe::devnode_inf_path(&set, &did) {
+        if let Some(inf) = da::devnode_inf_path(&set, &did) {
             let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
             let full = format!(r"{windir}\INF\{inf}");
             if std::path::Path::new(&full).exists() {

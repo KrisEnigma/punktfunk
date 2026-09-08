@@ -398,13 +398,14 @@ pub fn open_driver_encoder(
                 )
             }
         });
+    use pf_driver_proto::encode::{backend as be, codec as cc};
     let backend = match plan.codec {
-        Codec::PyroWave => 4,
+        Codec::PyroWave => be::PYROWAVE,
         _ => match crate::encode::windows_resolved_backend() {
-            WindowsBackend::Nvenc => 1,
-            WindowsBackend::Amf => 2,
-            WindowsBackend::Qsv => 3,
-            WindowsBackend::MediaFoundation => 5,
+            WindowsBackend::Nvenc => be::NVENC,
+            WindowsBackend::Amf => be::AMF,
+            WindowsBackend::Qsv => be::QSV,
+            WindowsBackend::MediaFoundation => be::MEDIA_FOUNDATION,
             WindowsBackend::Software => anyhow::bail!(
                 "driver encode: the resolved backend is software, which the driver cannot run"
             ),
@@ -414,13 +415,14 @@ pub fn open_driver_encoder(
     // declined native open would otherwise end, but only inside its 8-bit 4:2:0 ceiling: the
     // plan is already negotiated here, so a wider one would open and then refuse every frame.
     let mf_fits = !plan.hdr && !plan.chroma.is_444() && bit_depth <= 8;
-    let fallback = u32::from(!matches!(backend, 4 | 5) && mf_fits) * 5;
+    let fallback = u32::from(!matches!(backend, be::PYROWAVE | be::MEDIA_FOUNDATION) && mf_fits)
+        * be::MEDIA_FOUNDATION;
     let params = pf_capture::DriverEncodeParams {
         codec: match plan.codec {
-            Codec::H264 => 1,
-            Codec::H265 => 2,
-            Codec::Av1 => 3,
-            Codec::PyroWave => 4,
+            Codec::H264 => cc::H264,
+            Codec::H265 => cc::HEVC,
+            Codec::Av1 => cc::AV1,
+            Codec::PyroWave => cc::PYROWAVE,
         },
         chroma: u32::from(plan.chroma.is_444()),
         bit_depth: u32::from(bit_depth),

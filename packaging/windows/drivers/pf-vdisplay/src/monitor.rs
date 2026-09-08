@@ -626,18 +626,6 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
     true
 }
 
-/// The modes a monitor advertises. A seat rides a remote-session adapter, which IddCx obliges to
-/// declare `USE_SMALLEST_MODE`, and the OS then drives the monitor at the SMALLEST mode on the
-/// list — so a seat offers exactly what the client asked for and nothing else. Adding the usual
-/// fallbacks there pins every seat to the smallest of those instead of the client's resolution.
-fn advertised_modes(requested: Mode) -> Vec<Mode> {
-    let mut modes = vec![requested];
-    if !crate::adapter::is_seat_role() {
-        modes.extend(vdisplay::default_modes());
-    }
-    modes
-}
-
 /// The seat placeholder's owner and session. Pid 0 is never a requestor, so the pair cannot
 /// collide with a host's. It stays for the session's life: it holds the only display path the
 /// remoting stack commits, and a monitor arriving into an empty topology gets none of its own.
@@ -680,11 +668,15 @@ pub fn create_monitor(
         );
         remove_monitor(owner, session_id);
     }
-    let modes = advertised_modes(Mode {
-        width,
-        height,
-        refresh_rates: vec![refresh],
-    });
+    let modes = vdisplay::advertised_modes(
+        Mode {
+            width,
+            height,
+            refresh_rates: vec![refresh],
+        },
+        crate::adapter::is_seat_role(),
+        &[],
+    );
     let monitor = registry::insert(owner, session_id, hw_cursor, preferred_id, modes);
     let id = monitor.id;
 
@@ -747,6 +739,18 @@ pub fn create_monitor(
         return None;
     }
 
+    // A clear that landed while the create was in flight found the entry with no handle set,
+    // so `depart` skipped it and dropped it from the registry. The monitor has now arrived and
+    // nothing can reach it: it would stay plugged in for the device's life. Undo it here.
+    // `reap_owner`'s grace already covers the reaper; this covers CLEAR_ALL, which has none.
+    if !registry::find(|m| m.id == id).is_some_and(|m| Arc::ptr_eq(&m, &monitor)) {
+        dbglog!("[pf-vd] create_monitor(id={id}): cleared mid-create — departing the new monitor");
+        // SAFETY: `object` arrived successfully just above, which is what makes departure legal.
+        unsafe { wdk_iddcx::IddCxMonitorDeparture(object) };
+        monitor.teardown();
+        return None;
+    }
+
     let arrival = Arrival {
         target_id: arrival_out.OsTargetId,
         luid_low: arrival_out.OsAdapterLuid.LowPart,
@@ -786,14 +790,15 @@ pub fn update_monitor_modes(
     };
     let (old_modes, new_modes) = {
         let mut modes = lock(&m.modes);
-        let mut new_modes = advertised_modes(Mode {
-            width,
-            height,
-            refresh_rates: vec![refresh],
-        });
-        if !crate::adapter::is_seat_role() {
-            vdisplay::union_modes(&mut new_modes, &modes);
-        }
+        let new_modes = vdisplay::advertised_modes(
+            Mode {
+                width,
+                height,
+                refresh_rates: vec![refresh],
+            },
+            crate::adapter::is_seat_role(),
+            &modes,
+        );
         (
             core::mem::replace(&mut *modes, new_modes.clone()),
             new_modes,

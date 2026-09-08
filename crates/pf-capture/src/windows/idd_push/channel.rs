@@ -18,27 +18,11 @@ pub(super) struct ChannelBroker {
 
 impl ChannelBroker {
     /// Open the WUDFHost duplication target. `wudf_pid == 0` is a driver that
-    /// predates the sealed channel. [`verify_is_wudfhost`] runs before any
-    /// section handle is duplicated into it: a spoofed ADD pid (same interface
+    /// predates the sealed channel. [`open_wudfhost`] proves the image path before
+    /// any section handle is duplicated into it: a spoofed ADD pid (same interface
     /// GUID, different process) would otherwise receive the stream.
     pub(super) fn open(wudf_pid: u32) -> Result<Self> {
-        if wudf_pid == 0 {
-            bail!("driver reported no WUDFHost pid for the sealed sections");
-        }
-        // SAFETY: `wudf_pid` is a copy. The handle (`?`-checked) is owned solely here and
-        // moved into `OwnedHandle`; `verify_is_wudfhost` borrows it for this call and forms
-        // no lasting alias.
-        let process = unsafe {
-            let h = OpenProcess(
-                PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                false,
-                wudf_pid,
-            )
-            .context("OpenProcess(PROCESS_DUP_HANDLE) on the driver's WUDFHost")?;
-            let process = OwnedHandle::from_raw_handle(h.0 as _);
-            verify_is_wudfhost(HANDLE(process.as_raw_handle()), wudf_pid, "driver-channel")?;
-            process
-        };
+        let process = open_wudfhost(wudf_pid, "driver-channel")?;
         Ok(Self { process, wudf_pid })
     }
 

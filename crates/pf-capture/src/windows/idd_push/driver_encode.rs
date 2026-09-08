@@ -64,14 +64,7 @@ impl std::fmt::Display for DriverEncodeOpenError {
 impl std::error::Error for DriverEncodeOpenError {}
 
 fn backend_name(b: u32) -> &'static str {
-    match b {
-        1 => "nvenc",
-        2 => "amf",
-        3 => "qsv",
-        4 => "pyrowave",
-        5 => "mf",
-        _ => "?",
-    }
+    pf_driver_proto::encode::backend::name(b).unwrap_or("?")
 }
 
 fn nul_tag(name: &[u8; 32]) -> String {
@@ -160,8 +153,10 @@ struct AuSection {
 }
 
 impl AuSection {
-    /// Create the sealed section + auto-reset event and stamp the header, magic last. The
-    /// host's `generation` is the seed the driver bumps at `SET_ENCODE`.
+    /// Create the sealed section + auto-reset event and stamp the header, magic last.
+    ///
+    /// `generation` is the DRIVER's word: `EncodeSession::new` stores its own over whatever
+    /// is here, and `published_for_us` reads that. The host does not seed it.
     fn create(heap_bytes: u32, wire_seq_base: u32) -> Result<Self> {
         let bytes = au::section_bytes(heap_bytes) as usize;
         // SAFETY: as the ring's section in `open.rs`: every create is `?`-checked, `sa` lives
@@ -197,7 +192,6 @@ impl AuSection {
             (*header).heap_bytes = heap_bytes;
             (*header).slot_table_offset = au::SLOT_TABLE_OFFSET as u32;
             (*header).slot_count = au::AU_SLOTS;
-            (*header).generation = next_generation();
             (*header).wire_seq_base = wire_seq_base;
             let event = CreateEventW(Some(sa.as_ptr()), false, false, PCWSTR::null())
                 .context("CreateEvent(AU section)")?;
@@ -300,6 +294,16 @@ pub fn open_driver_encoder(
     let view = section.view();
     let header = view.header();
     if !au::au_readable(&header) {
+        // SET_ENCODE already succeeded, so the driver holds an open encode session — and no
+        // `EncoderProxy` exists yet to close it on drop. Send the same CLOSE that `Drop` does,
+        // or the session stays open on a section nobody will ever drain.
+        let _ = encode_ctl(&EncodeCtlRequest {
+            target_id: endpoint.target_id,
+            op: encode::ENCODE_CTL_CLOSE,
+            arg0: header.generation,
+            arg1: 0,
+            payload: [0; 28],
+        });
         bail!("AU section header failed its layout gate after SET_ENCODE: {header:?}");
     }
     let caps = caps_from_wire(&reply.caps);

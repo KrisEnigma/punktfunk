@@ -1238,6 +1238,9 @@ impl NvencD3d11Encoder {
                             }
                         }
                     }
+                    // Only a bisection result, or a floor that opened at the split we asked for,
+                    // isolates the bitrate as the constraint. See the split fallback below.
+                    let mut bitrate_is_the_constraint = true;
                     if best.is_null() {
                         // Nothing in (FLOOR, requested] accepted — try the floor, also split-disabled
                         // in case forced split (not bitrate) is the blocker.
@@ -1264,6 +1267,9 @@ impl NvencD3d11Encoder {
                                     "NVENC initialize_encoder rejected even at the floor bitrate",
                                 )?;
                                 used_split = no_split;
+                                // Dropping split is what opened it, so the floor says nothing
+                                // about the bitrate this GPU accepts.
+                                bitrate_is_the_constraint = false;
                                 e
                             }
                         };
@@ -1274,7 +1280,12 @@ impl NvencD3d11Encoder {
                         clamped_mbps = best_bps / 1_000_000,
                         "NVENC: requested bitrate above the GPU codec-level ceiling — clamped to the max accepted"
                     );
-                    store_ceiling(self.ceiling_key(used_split), best_bps);
+                    // A ceiling is remembered for the process lifetime and clamps every later
+                    // open and reconfigure. Only record one the search actually attributed to
+                    // the bitrate; otherwise the split fallback would pin this key at the floor.
+                    if bitrate_is_the_constraint {
+                        store_ceiling(self.ceiling_key(used_split), best_bps);
+                    }
                     self.bitrate_bps = best_bps;
                     best
                 }

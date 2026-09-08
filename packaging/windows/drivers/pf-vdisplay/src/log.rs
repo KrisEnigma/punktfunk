@@ -1,19 +1,13 @@
 //! Minimal driver logger. Every line lands in the ring the host drains over
 //! [`IOCTL_DRAIN_LOG`](pf_driver_proto::control::IOCTL_DRAIN_LOG) — the encoder runs inside
 //! WUDFHost, so that ring is how its backend rejections, retargets and wedges reach `host.log`.
-//! The syscall sinks stay gated on [`file_log_enabled`] (debug builds, or the `PFVD_DEBUG_LOG`
-//! env var): `OutputDebugStringA` traps into a global-serializing debugger call, and the file tee
-//! (WUDFHost temp dir, not world-writable — audit §4.4) takes a knob plus a device restart to
-//! reach. Best-effort; ignores all errors.
+//! The syscall sinks — the debugger string and the file tee — are [`pf_umdf_util::log`]'s, gated
+//! on [`file_log_enabled`]. Best-effort; ignores all errors.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
 use pf_driver_proto::control;
-
-unsafe extern "system" {
-    fn OutputDebugStringA(s: *const u8);
-}
 
 /// Lines the host has not drained yet. Bounded, because a per-frame failure loop must cost a
 /// fixed ceiling rather than the WUDFHost: the oldest goes and `dropped` counts it, so a flood
@@ -81,13 +75,18 @@ pub fn drain(cap: usize) -> Vec<u8> {
     out
 }
 
-/// Whether the syscall sinks (debug string + bring-up file) are enabled (resolved once). Off in
-/// release builds unless the `PFVD_DEBUG_LOG` knob is set. The host's drain ring does not ride
-/// this gate; only these two do, and so does whether `DEBUG` events are kept at all.
+/// The bring-up file log. Off in release builds unless the `PFVD_DEBUG_LOG` knob is set; the
+/// gate is [`knob`], not plain `std::env`, so a `setx /M` takes effect on a device restart. The
+/// path and the sink live in [`pf_umdf_util::log`], one copy for all four drivers.
+static FILE_LOG: pf_umdf_util::log::FileLog =
+    pf_umdf_util::log::FileLog::new("pfvd-driver.log", || {
+        cfg!(debug_assertions) || knob("PFVD_DEBUG_LOG").is_some()
+    });
+
+/// Whether the syscall sinks (debug string + bring-up file) are on. The host's drain ring does
+/// not ride this gate; only those two do, and so does whether `DEBUG` events are kept at all.
 pub(crate) fn file_log_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| cfg!(debug_assertions) || knob("PFVD_DEBUG_LOG").is_some())
+    FILE_LOG.enabled()
 }
 
 /// A driver knob: the process environment first, then the MACHINE environment in the registry
@@ -132,32 +131,6 @@ fn machine_env(name: &str) -> Option<String> {
     )
 }
 
-/// Process-lifetime append handle to the bring-up log, opened ONCE (by whichever thread logs first) and
-/// shared via a `Mutex` — so the swap-chain WORKER thread's writes land too. Per-call open/append raced
-/// the control thread and/or could fail under the worker's restricted token, hiding exactly the
-/// swap-chain-processor lines a game-break repro needs (game-capture bug S3). `flush` after each line so a
-/// crash/stall doesn't lose the tail.
-fn file_appender() -> Option<&'static std::sync::Mutex<std::fs::File>> {
-    use std::sync::OnceLock;
-    static APPENDER: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
-    APPENDER
-        .get_or_init(|| {
-            if !file_log_enabled() {
-                return None;
-            }
-            // WUDFHost's own (LocalService) temp dir — NOT world-writable/readable `C:\Users\Public`,
-            // where a non-admin could pre-create/hold the file or read the diagnostics
-            // (security-review 2026-07-17). Opt-in/debug only.
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(std::env::temp_dir().join("pfvd-driver.log"))
-                .ok()
-                .map(std::sync::Mutex::new)
-        })
-        .as_ref()
-}
-
 /// One line at `INFO`; see [`log_at`].
 pub fn log(s: &str) {
     log_at(control::LOG_INFO, s);
@@ -167,37 +140,7 @@ pub fn log(s: &str) {
 /// bring-up file.
 pub(crate) fn log_at(level: u8, s: &str) {
     push(level, s);
-    if !file_log_enabled() {
-        return;
-    }
-    if let Ok(c) = std::ffi::CString::new(s) {
-        // SAFETY: `c` is a valid NUL-terminated string for the duration of the call.
-        unsafe { OutputDebugStringA(c.as_ptr().cast()) };
-    }
-    use std::io::Write;
-    if let Some(m) = file_appender()
-        && let Ok(mut f) = m.lock()
-    {
-        let _ = writeln!(f, "{} {s}", utc_hms_millis());
-        let _ = f.flush();
-    }
-}
-
-/// `HH:MM:SS.mmm` UTC for the file line. The host logs RFC3339 UTC, and without a shared clock
-/// on both sides a driver line cannot be placed against the host event it explains — which is
-/// the whole question when frames stop. Date-free: same-day alignment is what a session needs.
-fn utc_hms_millis() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs() % 86_400;
-    format!(
-        "{:02}:{:02}:{:02}.{:03}",
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60,
-        now.subsec_millis()
-    )
+    FILE_LOG.write(s);
 }
 
 // Always formats: the line is the host's only view of this process. One `String` per event costs

@@ -701,7 +701,15 @@ fn retrieve_loop(
                 // Under the lock, so it cannot race the clear `poll` does when it empties.
                 have.set();
             }
-            Ok(DrainOutcome::Eof) => lock(&out).pending.clear(),
+            Ok(DrainOutcome::Eof) => {
+                lock(&out).pending.clear();
+                // EOF repeats on every call while the component sits drained, and the loop only
+                // exits on `stop`, so this arm was a busy spin for as long as that lasts. Same
+                // interval the NotReady arm uses; the next AU surfaces one tick later.
+                if !blocking {
+                    std::thread::sleep(std::time::Duration::from_micros(250));
+                }
+            }
             Ok(DrainOutcome::NotReady) => {
                 // Without `QueryTimeout` the call is a poll; keep the old sampling interval,
                 // which now costs this thread rather than the encode thread.
@@ -1144,6 +1152,14 @@ impl AmfEncoder {
     }
 
     /// Build or rebuild the AMF context + component on the capturer's device, plus the input ring.
+    /// Open the session now instead of at the first submit, so `caps()` reports the LTR and
+    /// intra-refresh the encoder actually negotiated. The host latches those once per session
+    /// and gates reference-frame invalidation on them — read early, every lost frame costs a
+    /// full IDR for the whole session.
+    pub fn prepare(&mut self, device: &ID3D11Device) -> Result<()> {
+        self.ensure_inner(device)
+    }
+
     fn ensure_inner(&mut self, device: &ID3D11Device) -> Result<()> {
         let dev_raw = device.as_raw() as isize;
         if self.inner.is_some() && self.bound_device == dev_raw {
@@ -2227,6 +2243,139 @@ mod tests {
 
     /// Live [`Encoder`] smoke per codec: submit/poll, native `reset()`, second batch, flush-drain.
     /// Asserts Annex-B (or AV1 OBU), IDR at start and after reset, FIFO pts. Skips without AMD.
+    /// The driver answers SET_ENCODE — where the host latches these caps for the session — before
+    /// any frame is submitted, so what `caps()` says at that moment must be what the encoder
+    /// negotiated. LTR and intra-refresh are decided in `ensure_inner`, which used to run only at
+    /// the first submit: the host therefore latched `supports_rfi: false` and never sent a
+    /// reference-frame invalidation, costing a full IDR per lost frame.
+    ///
+    /// Hardware-independent: it compares the two reads rather than demanding LTR, so a GPU that
+    /// genuinely declines still passes (and the printed values say which happened).
+    #[test]
+    fn amf_caps_do_not_change_at_the_first_submit_live() {
+        if let Err(e) = try_factory() {
+            eprintln!("skipping: AMF runtime unavailable ({e})");
+            return;
+        }
+        let Some(device) = amd_d3d11_device() else {
+            eprintln!("skipping: no AMD adapter on this box");
+            return;
+        };
+        let (w, h, fps) = (640u32, 480u32, 60u32);
+        let tex = nv12_texture(&device, w, h);
+        let mut enc = match AmfEncoder::open(
+            Codec::H264,
+            PixelFormat::Nv12,
+            w,
+            h,
+            fps,
+            2_000_000,
+            8,
+            ChromaFormat::Yuv420,
+            None,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipping: native AMF open declined ({e:#})");
+                return;
+            }
+        };
+        enc.prepare(&device).expect("prepare");
+        let at_open = enc.caps();
+        let frame = CapturedFrame {
+            provenance: Default::default(),
+            width: w,
+            height: h,
+            pts_ns: 1,
+            format: PixelFormat::Nv12,
+            payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
+                texture: tex.clone(),
+                device: device.clone(),
+                pyro: None,
+            }),
+            cursor: None,
+        };
+        enc.submit(&frame).expect("submit");
+        let _ = enc.poll().expect("poll");
+        let after = enc.caps();
+        eprintln!(
+            "AMF caps at open: rfi={} ir={} | after first submit: rfi={} ir={}",
+            at_open.supports_rfi, at_open.intra_refresh, after.supports_rfi, after.intra_refresh
+        );
+        assert_eq!(
+            (at_open.supports_rfi, at_open.intra_refresh),
+            (after.supports_rfi, after.intra_refresh),
+            "the host reads these once, before the first frame"
+        );
+    }
+
+    /// `flush` drains the component, which leaves it at end-of-stream where it takes no more
+    /// input. Without the Flush that follows, a session that flushed never encoded again — and
+    /// the retrieve thread spun on EOF for the rest of its life.
+    #[test]
+    fn amf_encodes_again_after_a_flush_live() {
+        if let Err(e) = try_factory() {
+            eprintln!("skipping: AMF runtime unavailable ({e})");
+            return;
+        }
+        let Some(device) = amd_d3d11_device() else {
+            eprintln!("skipping: no AMD adapter on this box");
+            return;
+        };
+        let (w, h, fps) = (640u32, 480u32, 60u32);
+        let tex = nv12_texture(&device, w, h);
+        let mut enc = match AmfEncoder::open(
+            Codec::H264,
+            PixelFormat::Nv12,
+            w,
+            h,
+            fps,
+            2_000_000,
+            8,
+            ChromaFormat::Yuv420,
+            None,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipping: native AMF open declined ({e:#})");
+                return;
+            }
+        };
+        enc.prepare(&device).expect("prepare");
+        let run = |enc: &mut AmfEncoder, base: u64| {
+            let mut aus = 0usize;
+            for i in 0..8 {
+                let frame = CapturedFrame {
+                    provenance: Default::default(),
+                    width: w,
+                    height: h,
+                    pts_ns: base + i,
+                    format: PixelFormat::Nv12,
+                    payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
+                        texture: tex.clone(),
+                        device: device.clone(),
+                        pyro: None,
+                    }),
+                    cursor: None,
+                };
+                enc.submit(&frame).expect("submit");
+                if enc.poll().expect("poll").is_some() {
+                    aus += 1;
+                }
+            }
+            aus
+        };
+        let before = run(&mut enc, 1);
+        assert!(before > 0, "the encoder produced nothing before the flush");
+        enc.flush().expect("flush");
+        let after = run(&mut enc, 1000);
+        eprintln!("AMF AUs before flush: {before}, after: {after}");
+        assert!(
+            after > 0,
+            "the encoder accepted no input after a flush — it is still at end-of-stream"
+        );
+    }
+
     #[test]
     fn amf_encode_live_smoke() {
         if let Err(e) = try_factory() {

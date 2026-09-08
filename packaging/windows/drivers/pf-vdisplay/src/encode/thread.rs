@@ -29,7 +29,7 @@ use crate::direct_3d_device::Direct3DDevice;
 use crate::monitor::Monitor;
 use crate::worker::{Mmcss, Worker};
 
-pub(crate) const BACKEND_NAMES: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
+pub(crate) use pf_driver_proto::encode::backend::NAMES as BACKEND_NAMES;
 
 /// A failed `SET_ENCODE` as the wire reply: `status` from the driver's domain, the stage tag
 /// in `name`.
@@ -334,20 +334,26 @@ pub fn open_backend(
             // session and the loop's bounded-poll arm: the A/B for a GPU whose async encode
             // retires slower than its sync one.
             e.use_completion_events(crate::log::knob("PFVD_NVENC_EVENTS").as_deref() != Some("0"));
-            // NVENC alone defers its session to the first frame, and the host reads the caps in
-            // our reply once per session: open it here or it caches the defaults.
+            // All three of these defer their session to the first frame, and the host reads the
+            // caps in our reply once per session: open it here or it caches the defaults.
             e.prepare_d3d11(device, format, w, h)?;
             Ok(Box::new(e) as Box<dyn Encoder>)
         }),
         2 => pf_encode_win::amf::AmfEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
-        .map(|e| Box::new(e) as Box<dyn Encoder>),
+        .and_then(|mut e| {
+            e.prepare(device)?;
+            Ok(Box::new(e) as Box<dyn Encoder>)
+        }),
         #[cfg(target_arch = "x86_64")]
         3 => pf_encode_win::qsv::QsvEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
-        .map(|e| Box::new(e) as Box<dyn Encoder>),
+        .and_then(|mut e| {
+            e.prepare(device)?;
+            Ok(Box::new(e) as Box<dyn Encoder>)
+        }),
         #[cfg(target_arch = "x86_64")]
         4 => {
             // Layers were disabled at `driver_entry`; doing it here would race the live threads.

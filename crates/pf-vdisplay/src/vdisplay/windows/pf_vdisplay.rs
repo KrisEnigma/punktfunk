@@ -109,17 +109,19 @@ fn reap_ghost_monitors() -> u32 {
     let ps = std::env::var("SystemRoot")
         .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
         .unwrap_or_else(|_| "powershell.exe".to_string());
-    match std::process::Command::new(&ps)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            REAP_PS,
-        ])
-        .output()
-    {
+    // Bounded: this runs under the manager's `device` mutex (driver open) and under its `state`
+    // lock (the ADD slot-exhaustion retry), so a wedged Get-PnpDevice would block every acquire,
+    // release and `/display/state`. `output_within` kills the whole tree on the deadline.
+    let mut cmd = std::process::Command::new(&ps);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        REAP_PS,
+    ]);
+    match crate::proc::output_within(&mut cmd, std::time::Duration::from_secs(30)) {
         Ok(o) => {
             let raw = String::from_utf8_lossy(&o.stdout);
             let Some((found, removed)) = parse_reap_output(&raw) else {
@@ -213,21 +215,22 @@ fn reload_vdisplay_adapter() -> AdapterCycle {
         .clone()
         .unwrap_or_default();
     let script = format!("$pin='{}'; {CYCLE_PS}", pin.replace('\'', "''"));
-    let out = match std::process::Command::new(&ps)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &script,
-        ])
-        .output()
-    {
+    // Bounded: this holds the RECOVERY mutex, so a wedged Disable-PnpDevice would stall the whole
+    // recovery ladder. The script's own sleeps total ~6-8 s on the happy path.
+    let mut cmd = std::process::Command::new(&ps);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &script,
+    ]);
+    let out = match crate::proc::output_within(&mut cmd, std::time::Duration::from_secs(60)) {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Err(e) => {
-            tracing::warn!(error = %e, "pf-vdisplay: adapter reload could not spawn powershell");
-            return AdapterCycle::Refused(format!("powershell did not spawn: {e}"));
+            tracing::warn!(error = %e, "pf-vdisplay: adapter reload did not complete");
+            return AdapterCycle::Refused(format!("powershell did not complete: {e}"));
         }
     };
     let outcome = classify_reload_output(&out);
@@ -704,31 +707,6 @@ impl VdisplayDriver for PfVdisplayDriver {
             info.protocol_version,
             watchdog_s
         );
-        // Per-version gaps. Bumps since v3 are additive; a blanket `< PROTOCOL_VERSION` named
-        // the wrong missing capability (told a v4 driver it lacked a v4 feature).
-        if info.protocol_version < 4 {
-            tracing::warn!(
-                "pf-vdisplay protocol {}: driver lacks the in-place mid-stream resize \
-                 (IOCTL_UPDATE_MODES, added in v4) — every mid-stream resize costs a monitor \
-                 re-arrival (one hotplug per switch) until the driver is updated",
-                info.protocol_version
-            );
-        }
-        if info.protocol_version < 5 {
-            tracing::warn!(
-                "pf-vdisplay protocol {}: driver lacks the IddCx hardware-cursor channel (added in \
-                 v5) — the pointer stays composited into the captured frame",
-                info.protocol_version
-            );
-        }
-        if info.protocol_version < 6 {
-            tracing::info!(
-                "pf-vdisplay protocol {}: driver lacks the mid-stream cursor-forward flip \
-                 (IOCTL_SET_CURSOR_FORWARD, added in v6) — the cursor model declared at monitor ADD \
-                 stands for the whole session",
-                info.protocol_version
-            );
-        }
         // CLEAR_ALL needs sole ownership of the device. A reopen races sessions this process
         // still believes live, and under a seats reservation another host owns monitors here.
         if !reap_orphans {

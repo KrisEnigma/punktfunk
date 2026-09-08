@@ -210,6 +210,12 @@ pub fn hdr_p010_selftest_at(w: u32, h: u32, vendor: Option<u32>) -> Result<()> {
     if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
         bail!("hdr-p010-selftest needs even non-zero dimensions, got {w}x{h}");
     }
+    // The eight 16x16 flats are laid out in a `w / 16` grid. Below one block wide that divisor
+    // is zero, and too short to hold the rows the width implies puts the sample points past the
+    // surface — a divide-by-zero or an out-of-range index rather than an error. Refuse instead.
+    if w < 16 || h < 16 || 8u32.div_ceil(w / 16) * 16 > h {
+        bail!("hdr-p010-selftest needs room for its 8 16x16 blocks, got {w}x{h}");
+    }
     // 16×16 flats: each 2×2 chroma footprint is uniform, so Cb/Cr can match exactly.
     #[allow(non_snake_case)]
     let (W, H) = (w, h);

@@ -57,6 +57,8 @@ pub struct VideoPacketizer {
     /// `/launch` rikey when `SS_ENC_VIDEO` is on; `None` is the plaintext wire.
     enc_key: Option<[u8; 16]>,
     pool: Vec<Vec<u8>>,
+    /// Latched by the oversize-frame drop so a 120 fps stream logs it once, not per frame.
+    oversize_logged: bool,
     /// One block's data shards while parity encode borrows them; shell allocation is one-time.
     data_scratch: Vec<Vec<u8>>,
     parity_scratch: Vec<Vec<u8>>,
@@ -89,6 +91,7 @@ impl VideoPacketizer {
             coder: Gf8Coder::default(),
             enc_key: None,
             pool: Vec::new(),
+            oversize_logged: false,
             data_scratch: Vec::new(),
             parity_scratch: Vec::new(),
         }
@@ -175,6 +178,24 @@ impl VideoPacketizer {
         };
         let n_blocks = total_data.div_ceil(max_data).clamp(1, MAX_FEC_BLOCKS);
         let per_block = total_data.div_ceil(n_blocks);
+        // The clamp caps the block COUNT, not the shards per block, so k can still exceed 255:
+        // `255 - k` then underflows and `fecInfo`'s 10-bit k truncates. A large IDR at the
+        // ANNOUNCE packetSize floor reaches it. Overshooting `max_data` alone is fine — it
+        // only costs parity, since `m` is already `min(255 - k)`.
+        if per_block > MAX_DATA_SHARDS_PER_BLOCK {
+            if !self.oversize_logged {
+                self.oversize_logged = true;
+                tracing::warn!(
+                    total_data,
+                    per_block,
+                    pps,
+                    packet_size = self.packet_size,
+                    "frame needs more FEC shards than the wire format can address — dropping it \
+                     (raise the client's packetSize)"
+                );
+            }
+            return;
+        }
 
         out.reserve(total_data + total_data * pct / 100 + n_blocks);
         for b in 0..n_blocks {
@@ -404,6 +425,43 @@ mod tests {
         for (i, p) in pkts.iter().enumerate() {
             assert_eq!(u16::from_be_bytes(p[2..4].try_into().unwrap()), i as u16);
         }
+    }
+
+    /// `255 - k` is a `usize` and `fecInfo` carries k in 10 bits, so a block over 255 data
+    /// shards underflows and truncates. The ANNOUNCE floor (packetSize 64 ⇒ 48 B of payload)
+    /// reaches it with a frame `MAX_FEC_BLOCKS · 255 · 48` bytes and up.
+    #[test]
+    fn a_frame_too_large_to_address_is_dropped_not_corrupted() {
+        let mut pk = VideoPacketizer::new(64, 20, 2);
+        let pps = pk.payload_per_shard;
+        // One shard past what four full blocks can carry.
+        let au = vec![0u8; (MAX_FEC_BLOCKS * MAX_DATA_SHARDS_PER_BLOCK + 1) * pps];
+        assert!(pk.packetize(&au, FrameType::Idr, 0, None).is_empty());
+
+        // Just inside the limit still ships, and every block stays addressable.
+        let mut pk = VideoPacketizer::new(64, 20, 2);
+        let au = vec![0u8; MAX_FEC_BLOCKS * MAX_DATA_SHARDS_PER_BLOCK * pps - FRAME_HEADER];
+        let pkts = pk.packetize(&au, FrameType::Idr, 0, None);
+        assert!(!pkts.is_empty());
+        for p in &pkts {
+            let k = u32::from_le_bytes(p[28..32].try_into().unwrap()) >> 22;
+            assert!(
+                k <= MAX_DATA_SHARDS_PER_BLOCK as u32,
+                "k={k} truncates on the wire"
+            );
+        }
+    }
+
+    /// Overshooting `max_data` is not the same failure: k stays under 255, so the block is
+    /// valid and only carries less FEC than requested. It must still be sent.
+    #[test]
+    fn a_block_over_the_fec_ratio_still_ships() {
+        let mut pk = VideoPacketizer::new(1024, 20, 2);
+        let pps = pk.payload_per_shard;
+        // 900 shards over four blocks is 225 each: past max_data (212) but under 255.
+        let au = vec![0u8; 900 * pps - FRAME_HEADER];
+        let pkts = pk.packetize(&au, FrameType::Idr, 0, None);
+        assert!(!pkts.is_empty(), "a sendable block must not be dropped");
     }
 
     #[test]

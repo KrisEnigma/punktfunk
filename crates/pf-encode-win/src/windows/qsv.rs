@@ -1002,6 +1002,14 @@ impl QsvEncoder {
         Ok((ltr_active, ir_active, bs_bytes))
     }
 
+    /// Open the session now instead of at the first submit, so `caps()` reports the LTR and
+    /// intra-refresh the encoder actually negotiated. The host latches those once per session
+    /// and gates reference-frame invalidation on them — read early, every lost frame costs a
+    /// full IDR for the whole session.
+    pub fn prepare(&mut self, device: &ID3D11Device) -> Result<()> {
+        self.ensure_inner(device)
+    }
+
     fn ensure_inner(&mut self, device: &ID3D11Device) -> Result<()> {
         let dev_raw = device.as_raw() as isize;
         if self.inner.is_some() && self.bound_device == dev_raw {
@@ -1899,6 +1907,9 @@ mod tests {
             None,
         )
         .expect("open");
+        // What the driver's encode thread does, so the harness reads the caps the host would:
+        // the session is opened here rather than at the first submit.
+        enc.prepare(&device).expect("prepare");
         if ten_bit {
             enc.set_hdr_meta(Some(test_hdr_meta()));
         }
@@ -1985,6 +1996,36 @@ mod tests {
     }
 
     /// Mid-stream invalidate must emit a `recovery_anchor` P-frame, not an IDR.
+    #[test]
+    /// The driver answers SET_ENCODE — where the host latches these caps for the session —
+    /// before any frame is submitted, so what `caps()` says then must be what the encoder
+    /// negotiated. LTR and intra-refresh are decided in `ensure_inner`, which used to run only
+    /// at the first submit: the host latched `supports_rfi: false` and never sent a
+    /// reference-frame invalidation, costing a full IDR per lost frame.
+    ///
+    /// Compares the two reads rather than demanding LTR, so a GPU that genuinely declines still
+    /// passes; the printed values say which happened.
+    #[test]
+    fn qsv_caps_do_not_change_at_the_first_submit_live() {
+        let (mut at_open, mut later) = (None, None);
+        let Some(_) = drive_live(Codec::H264, false, 4, |enc, i| {
+            // `drive_live` prepares at open, as the driver does; i == 0 runs before any submit.
+            if i == 0 {
+                at_open = Some((enc.caps().supports_rfi, enc.caps().intra_refresh));
+            }
+            if i == 3 {
+                later = Some((enc.caps().supports_rfi, enc.caps().intra_refresh));
+            }
+        }) else {
+            return;
+        };
+        eprintln!("QSV caps at open: {at_open:?} | after submits: {later:?}");
+        assert_eq!(
+            at_open, later,
+            "the host reads these once, before the first frame"
+        );
+    }
+
     #[test]
     fn qsv_live_ltr_rfi() {
         let mut rfi_answered = false;

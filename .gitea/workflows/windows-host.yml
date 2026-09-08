@@ -218,13 +218,21 @@ jobs:
         # Cheap, needs no compile, and the Linux lane cannot see these crates' Windows modules.
         run: cargo fmt -p punktfunk-host -p pf-encode -p pf-encode-win -p pf-capture -p pf-vdisplay -p pf-win-display -p pf-inject -p punktfunk-tray --check
 
-      - name: Test (pf-capture + pf-vdisplay, Windows)
-        # The two crates whose Windows test binaries link against nothing this runner lacks —
+      - name: Test (pf-capture + pf-vdisplay + pf-win-display, Windows)
+        # The crates whose Windows test binaries link against nothing this runner lacks —
         # settled empirically when the package job's equivalents were added. The host and
         # pf-encode(-win) stay clippy-only: nvidia-video-codec-sdk cannot link on MSVC.
+        #
+        # pf-win-display joins them for the same reason as pf-capture: its manifest is
+        # punktfunk-core (default-features off), pf-paths, tracing and windows — no encoder in
+        # the tree, so the link objection does not apply. Its 29 tests are the CCD path/mode
+        # array transforms (keep_only_supplied, remap_mode_idx, anchor_kept_sources_at_origin,
+        # prune_saved_config_for_targets) — pure code that decides what the operator's desktop
+        # looks like, compiled by clippy here and executed nowhere until now.
         run: |
           cargo test --release --locked -p pf-capture --target x86_64-pc-windows-msvc; if ($LASTEXITCODE) { throw "pf-capture tests" }
           cargo test --release --locked -p pf-vdisplay --target x86_64-pc-windows-msvc; if ($LASTEXITCODE) { throw "pf-vdisplay tests" }
+          cargo test --release --locked -p pf-win-display --target x86_64-pc-windows-msvc; if ($LASTEXITCODE) { throw "pf-win-display tests" }
 
   package:
     runs-on: windows-amd64
@@ -408,6 +416,9 @@ jobs:
         # cleanly, building in ~51 s off an existing release target dir.
         run: |
           cargo test --release --locked -p pf-capture --target ${{ matrix.target }}; if ($LASTEXITCODE) { throw "pf-capture tests" }
+          # Same argument, same tree shape: pf-win-display has no encoder dependency either, and
+          # its 29 CCD path/mode transform tests were compiled by clippy and run nowhere.
+          cargo test --release --locked -p pf-win-display --target ${{ matrix.target }}; if ($LASTEXITCODE) { throw "pf-win-display tests" }
 
       - name: Test (pf-vdisplay, Windows)
         if: matrix.arch == 'x64'
