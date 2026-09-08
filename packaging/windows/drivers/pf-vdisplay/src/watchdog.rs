@@ -21,6 +21,7 @@ use wdk_sys::{
 };
 
 use crate::registry::lock;
+use crate::worker::Sendable;
 
 /// The host must send an IOCTL within this window (it PINGs on a `timeout/3` timer) or the
 /// watchdog treats it as gone and reaps its monitors. Reported to the host via `IOCTL_GET_INFO`.
@@ -46,10 +47,7 @@ static OWNERS: Mutex<Vec<Owner>> = Mutex::new(Vec::new());
 static HANDLES: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
 
 /// The timer handle, from [`create`] until [`stop`] hands the device back to the framework.
-struct SendTimer(WDFTIMER);
-// SAFETY: an opaque WDF handle, only ever passed by value to WDF DDIs (themselves the
-// synchronisation point) and never dereferenced in Rust, so sharing it across threads is sound.
-unsafe impl Send for SendTimer {}
+type SendTimer = Sendable<WDFTIMER>;
 static TIMER: Mutex<Option<SendTimer>> = Mutex::new(None);
 
 /// Create the watchdog timer, stopped, as a child of `device`. Called from `driver_add` so the
@@ -78,7 +76,7 @@ pub fn create(device: WDFDEVICE) -> NTSTATUS {
     };
     dbglog!("[pf-vd] watchdog WdfTimerCreate -> {status:#x}");
     if nt_success(status) {
-        *lock(&TIMER) = Some(SendTimer(timer));
+        *lock(&TIMER) = Some(Sendable(timer));
     }
     status
 }
@@ -107,7 +105,7 @@ pub fn start() {
 /// handle rows go too: they belong to the leaving device.
 pub fn stop() {
     let taken = lock(&TIMER).take();
-    let Some(SendTimer(timer)) = taken else {
+    let Some(Sendable(timer)) = taken else {
         return;
     };
     // SAFETY: `timer` is still live — the device's EvtCleanup runs before the framework deletes its

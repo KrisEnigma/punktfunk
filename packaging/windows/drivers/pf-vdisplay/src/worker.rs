@@ -37,6 +37,9 @@ pub struct Sendable<T>(pub T);
 // SAFETY: see the type doc — the wrapped raw value has one user at a time, and the owner that
 // handed it over outlives the thread borrowing it.
 unsafe impl<T> Send for Sendable<T> {}
+// SAFETY: a shared `&Sendable<T>` yields only by-value copies of an opaque handle that is
+// never dereferenced in Rust; the DDIs it is passed to are the synchronisation point.
+unsafe impl<T> Sync for Sendable<T> {}
 
 /// A Win32 handle this process owns; `Drop` closes it exactly once.
 pub struct OwnedHandle(HANDLE);

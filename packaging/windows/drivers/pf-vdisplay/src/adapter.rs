@@ -11,15 +11,10 @@ use wdk_sys::{NTSTATUS, WDFDEVICE, iddcx};
 use windows::core::w;
 
 use crate::STATUS_SUCCESS;
+use crate::worker::Sendable;
 
 /// The IddCx adapter handle, stashed for later DDIs (e.g. `SET_RENDER_ADAPTER`, STEP 4).
-struct SendAdapter(iddcx::IDDCX_ADAPTER);
-// SAFETY: an opaque IddCx handle, used only as an argument to IddCx DDIs (themselves the synchronisation
-// point) — never dereferenced in Rust. Storing it across threads in a OnceLock is sound.
-unsafe impl Send for SendAdapter {}
-// SAFETY: as above — the handle is only ever passed by value to IddCx DDIs, never dereferenced, so
-// shared `&SendAdapter` access across threads is sound.
-unsafe impl Sync for SendAdapter {}
+type SendAdapter = Sendable<iddcx::IDDCX_ADAPTER>;
 
 // A slot, NOT a OnceLock: `set_adapter` must be last-write-wins so a D0-resume re-init's fresh
 // handle REPLACES the pre-power-cycle one (a OnceLock's second `set` was a silent no-op, leaving
@@ -190,7 +185,7 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
 pub fn set_adapter(adapter: iddcx::IDDCX_ADAPTER) {
     *ADAPTER
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SendAdapter(adapter));
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Sendable(adapter));
 }
 
 /// Forget the cached adapter. Called on a D0 re-entry from a REAL low-power state
