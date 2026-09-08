@@ -127,6 +127,48 @@ fn rgb_true_extent_request() -> bool {
     std::env::var("PUNKTFUNK_VULKAN_RGB_TRUE_EXTENT").as_deref() != Ok("0")
 }
 
+/// `VK_KHR_video_encode_intra_refresh` latched at open (see [`intra_refresh_caps`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IntraRefreshCaps {
+    /// `maxIntraRefreshCycleDuration`, in frames.
+    max_cycle: u32,
+}
+
+/// Whether this session may run a row-based intra refresh wave. Needs the extension, its
+/// feature, `BLOCK_ROW_BASED`, regions independent of our single slice, a cycle of at least 2
+/// and one active reference. `PUNKTFUNK_VK_INTRA_REFRESH=0` opts out. `Err` is the log reason.
+fn intra_refresh_caps(
+    advertised: bool,
+    feature: bool,
+    caps: &super::vk_intra_refresh::VideoEncodeIntraRefreshCapabilitiesKHR,
+) -> std::result::Result<IntraRefreshCaps, &'static str> {
+    use super::vk_intra_refresh as vir;
+    if std::env::var("PUNKTFUNK_VK_INTRA_REFRESH").as_deref() == Ok("0") {
+        return Err("off(PUNKTFUNK_VK_INTRA_REFRESH=0)");
+    }
+    if !advertised {
+        return Err("unsupported(extension not advertised)");
+    }
+    if !feature {
+        return Err("unsupported(videoEncodeIntraRefresh feature off)");
+    }
+    if caps.intra_refresh_modes & vir::MODE_BLOCK_ROW_BASED == 0 {
+        return Err("unsupported(no BLOCK_ROW_BASED mode)");
+    }
+    if caps.partition_independent_intra_refresh_regions != vk::TRUE {
+        return Err("unsupported(regions tied to slices; we encode one slice)");
+    }
+    if caps.max_intra_refresh_cycle_duration < 2 {
+        return Err("unsupported(maxIntraRefreshCycleDuration < 2)");
+    }
+    if caps.max_intra_refresh_active_reference_pictures < 1 {
+        return Err("unsupported(no active reference during a wave)");
+    }
+    Ok(IntraRefreshCaps {
+        max_cycle: caps.max_intra_refresh_cycle_duration,
+    })
+}
+
 /// RGB-direct session config: chroma-siting bits chosen from what the driver advertises
 /// (see [`probe_rgb_direct`]).
 struct RgbDirect {
@@ -592,6 +634,9 @@ pub struct VulkanVideoEncoder {
     /// 10-bit (HDR) session. Every profile chain rebuilt after `open` must present the same
     /// depth, so it is carried here rather than re-derived.
     ten_bit: bool,
+    /// Row-based intra refresh is enabled on the session and its device. `None` = unavailable.
+    #[allow(dead_code)] // read by the on-demand wave, the next change
+    intra_refresh: Option<IntraRefreshCaps>,
 
     /// Rate not yet installed. Next `record_submit` emits `ENCODE_RATE_CONTROL` (or folds it
     /// into the first frame's RESET+RC), then promotes it into `bitrate` — which must keep
@@ -762,6 +807,7 @@ impl VulkanVideoEncoder {
         src_rgb_fmt: vk::Format,
     ) -> Result<Self> {
         use super::vk_av1_encode as av1b;
+        use super::vk_intra_refresh as vir;
         use super::vk_valve_rgb as vrgb;
         let av1 = codec == Codec::Av1;
         let codec_op = codec_op_for(av1);
@@ -903,9 +949,18 @@ impl VulkanVideoEncoder {
             profile.p_next = &h265_profile as *const _ as *const c_void;
         }
 
+        // Device extensions, queried once: the intra-refresh caps chain below and the
+        // `VK_EXT_queue_family_foreign` decision both read it.
+        let dev_ext_props = instance
+            .enumerate_device_extension_properties(pd)
+            .unwrap_or_default();
+        let ir_advertised = crate::vk_util::ext_advertised(&dev_ext_props, vir::EXTENSION_NAME);
+
         let mut h265_caps = vk::VideoEncodeH265CapabilitiesKHR::default();
         let mut av1_caps: av1b::VideoEncodeAV1CapabilitiesKHR = std::mem::zeroed();
         av1_caps.s_type = av1b::stype(av1b::ST_CAPABILITIES);
+        let mut ir_caps: vir::VideoEncodeIntraRefreshCapabilitiesKHR = std::mem::zeroed();
+        ir_caps.s_type = vir::stype(vir::ST_CAPABILITIES);
         let mut enc_caps = vk::VideoEncodeCapabilitiesKHR::default();
         let mut caps = vk::VideoCapabilitiesKHR::default().push_next(&mut enc_caps);
         if av1 {
@@ -914,10 +969,37 @@ impl VulkanVideoEncoder {
         } else {
             caps = caps.push_next(&mut h265_caps);
         }
+        // Only chained when advertised: the layers reject a struct from an absent extension.
+        if ir_advertised {
+            ir_caps.p_next = caps.p_next;
+            caps.p_next = &mut ir_caps as *mut _ as *mut c_void;
+        }
         let r = (vq_inst.fp().get_physical_device_video_capabilities_khr)(pd, &profile, &mut caps);
         if r != vk::Result::SUCCESS {
             bail!("get_physical_device_video_capabilities: {r:?}");
         }
+        let ir_feature = ir_advertised && {
+            let mut f = vir::PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR {
+                s_type: vir::stype(vir::ST_PHYSICAL_DEVICE_FEATURES),
+                p_next: std::ptr::null_mut(),
+                video_encode_intra_refresh: vk::FALSE,
+            };
+            let mut f2 = vk::PhysicalDeviceFeatures2 {
+                p_next: &mut f as *mut _ as *mut c_void,
+                ..Default::default()
+            };
+            instance.get_physical_device_features2(pd, &mut f2);
+            f.video_encode_intra_refresh == vk::TRUE
+        };
+        let intra_refresh = intra_refresh_caps(ir_advertised, ir_feature, &ir_caps);
+        tracing::info!(
+            intra_refresh = match &intra_refresh {
+                Ok(c) => format!("available(row-based, max cycle {} frames)", c.max_cycle),
+                Err(e) => (*e).to_string(),
+            },
+            "vulkan-encode: VK_KHR_video_encode_intra_refresh (design/vulkan-intra-refresh.md)"
+        );
+        let intra_refresh = intra_refresh.ok();
         // Copy needed caps now: `caps` holds `&mut` borrows of the chained structs.
         let std_hdr = caps.std_header_version;
         let min_bs_align = caps.min_bitstream_buffer_size_alignment.max(1);
@@ -994,10 +1076,7 @@ impl VulkanVideoEncoder {
             bitrate
         };
         // Enable `VK_EXT_queue_family_foreign` when advertised so dmabuf-acquire FOREIGN src
-        // is spec-legal. Fresh open-time query (the rgb probe's enumerate is probe-local).
-        let dev_ext_props = instance
-            .enumerate_device_extension_properties(pd)
-            .unwrap_or_default();
+        // is spec-legal.
         let foreign_ok =
             crate::vk_util::ext_advertised(&dev_ext_props, ash::ext::queue_family_foreign::NAME);
         let foreign_qfi = if foreign_ok {
@@ -1024,6 +1103,9 @@ impl VulkanVideoEncoder {
         ];
         if rgb_cfg.is_some() {
             dev_exts.push(vrgb::EXTENSION_NAME.as_ptr());
+        }
+        if intra_refresh.is_some() {
+            dev_exts.push(vir::EXTENSION_NAME.as_ptr());
         }
         if foreign_ok {
             dev_exts.push(ash::ext::queue_family_foreign::NAME.as_ptr());
@@ -1065,6 +1147,16 @@ impl VulkanVideoEncoder {
         if rgb_cfg.is_some() {
             rgb_features.p_next = device_ci.p_next as *mut c_void;
             device_ci.p_next = &rgb_features as *const _ as *const c_void;
+        }
+        // Spec: the feature must be enabled before a session declares an intra refresh mode.
+        let mut ir_features = vir::PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR {
+            s_type: vir::stype(vir::ST_PHYSICAL_DEVICE_FEATURES),
+            p_next: std::ptr::null_mut(),
+            video_encode_intra_refresh: vk::TRUE,
+        };
+        if intra_refresh.is_some() {
+            ir_features.p_next = device_ci.p_next as *mut c_void;
+            device_ci.p_next = &ir_features as *const _ as *const c_void;
         }
         let device = instance
             .create_device(pd, &device_ci, None)
@@ -1117,6 +1209,17 @@ impl VulkanVideoEncoder {
             // Chain ahead of whatever is already there (AV1 create-info keeps its place).
             rgb_sci.p_next = session_ci.p_next;
             session_ci.p_next = &rgb_sci as *const _ as *const c_void;
+        }
+        // The mode is fixed per session; a frame opts in per encode. Declaring it costs
+        // nothing on RADV, which programs an empty stripe for frames without the bit.
+        let mut ir_sci = vir::VideoEncodeSessionIntraRefreshCreateInfoKHR {
+            s_type: vir::stype(vir::ST_SESSION_CREATE_INFO),
+            p_next: std::ptr::null(),
+            intra_refresh_mode: vir::MODE_BLOCK_ROW_BASED,
+        };
+        if intra_refresh.is_some() {
+            ir_sci.p_next = session_ci.p_next;
+            session_ci.p_next = &ir_sci as *const _ as *const c_void;
         }
         let mut session = vk::VideoSessionKHR::null();
         let r = (vq_dev.fp().create_video_session_khr)(
@@ -1421,6 +1524,7 @@ impl VulkanVideoEncoder {
             rgb: rgb_cfg,
             native_nv12,
             ten_bit,
+            intra_refresh,
             pending_bitrate: None,
             width: w,
             height: h,
@@ -3873,9 +3977,41 @@ use self::build::{
 
 #[cfg(test)]
 mod tests {
-    use super::{build_h265_rps_s0, parse_rgb_request, VulkanVideoEncoder};
+    use super::{build_h265_rps_s0, intra_refresh_caps, parse_rgb_request, VulkanVideoEncoder};
     use crate::{Codec, Encoder};
     use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
+
+    /// The latch needs every gate at once; the 780M's measured caps pass, each missing one fails.
+    #[test]
+    fn intra_refresh_latch_needs_every_gate() {
+        use crate::vk_intra_refresh as vir;
+        let good = vir::VideoEncodeIntraRefreshCapabilitiesKHR {
+            s_type: vir::stype(vir::ST_CAPABILITIES),
+            p_next: std::ptr::null_mut(),
+            intra_refresh_modes: vir::MODE_BLOCK_BASED
+                | vir::MODE_BLOCK_ROW_BASED
+                | vir::MODE_BLOCK_COLUMN_BASED,
+            max_intra_refresh_cycle_duration: 256,
+            max_intra_refresh_active_reference_pictures: 1,
+            partition_independent_intra_refresh_regions: ash::vk::TRUE,
+            non_rectangular_intra_refresh_regions: ash::vk::FALSE,
+        };
+        assert_eq!(
+            intra_refresh_caps(true, true, &good).map(|c| c.max_cycle),
+            Ok(256)
+        );
+        assert!(intra_refresh_caps(false, true, &good).is_err());
+        assert!(intra_refresh_caps(true, false, &good).is_err());
+        let mut c = vir::VideoEncodeIntraRefreshCapabilitiesKHR { ..good };
+        c.intra_refresh_modes = vir::MODE_BLOCK_COLUMN_BASED;
+        assert!(intra_refresh_caps(true, true, &c).is_err());
+        let mut c = vir::VideoEncodeIntraRefreshCapabilitiesKHR { ..good };
+        c.partition_independent_intra_refresh_regions = ash::vk::FALSE;
+        assert!(intra_refresh_caps(true, true, &c).is_err());
+        let mut c = vir::VideoEncodeIntraRefreshCapabilitiesKHR { ..good };
+        c.max_intra_refresh_cycle_duration = 1;
+        assert!(intra_refresh_caps(true, true, &c).is_err());
+    }
 
     /// Full-retention RPS: every resident listed, setup occupant excluded, `used_by_curr_pic`
     /// marks only the real reference.
