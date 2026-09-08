@@ -287,8 +287,8 @@ const RESOLUTIONS: [(u32, u32); 6] = [
 /// setting to Automatic. Keep in step with clients/linux/src/ui_settings.rs and
 /// clients/windows/src/app/settings.rs.
 const REFRESH: [u32; 8] = [0, 30, 60, 90, 120, 144, 165, 240];
-/// Must stay in sync with [`punktfunk_core::render_scale::PRESETS`].
-const RENDER_SCALES: [f64; 9] = [0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+/// Render-scale multipliers; `1.0` = Native.
+use punktfunk_core::render_scale::PRESETS as RENDER_SCALES;
 /// Left/right rungs in kbps. Denser below ~20 Mbps; ceiling 2 Gbps. Off-ladder
 /// values go through the Y field rather than a longer ladder.
 const BITRATES: [u32; 30] = [

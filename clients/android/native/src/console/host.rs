@@ -480,10 +480,9 @@ fn render_loop(mut console: Console, shared: Arc<Shared>, store: Arc<SnapshotSto
         }
 
         // Draw, if there is somewhere to draw.
-        // ponytail: half-rate after 60 s without input — one extra frame period between
-        // swaps, so an idle carousel stops redrawing a phone's panel at its full rate
-        // (the aurora still breathes, at half tempo). Any input restores full rate on
-        // its own frame; damage-driven rendering if a TV box ever needs more.
+        // Half-rate after 60 s without input — one extra frame period between swaps, so an
+        // idle carousel stops redrawing a phone's panel at full rate; the aurora still
+        // breathes, at half tempo. Any input restores full rate on its own frame.
         if last_input.elapsed() >= IDLE_AFTER {
             std::thread::sleep(IDLE_FRAME_STEP);
         }
