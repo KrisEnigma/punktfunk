@@ -105,22 +105,6 @@ fn utc_hms_millis() -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The stamp is what lets a driver line be placed against the host event it explains, so it
-    /// must be fixed-width and wrap at midnight rather than run past 24 h.
-    #[test]
-    fn the_stamp_is_fixed_width_hms_millis() {
-        let s = utc_hms_millis();
-        assert_eq!(s.len(), 12, "HH:MM:SS.mmm — got {s:?}");
-        let (h, rest) = s.split_at(2);
-        assert!(h.parse::<u32>().is_ok_and(|h| h < 24), "hours: {s:?}");
-        assert!(rest.starts_with(':'), "separator: {s:?}");
-    }
-}
-
 /// The driver's one [`FileLog`] plus the two helpers every driver wrote around it: `log(s)`
 /// writes unconditionally through the gate, and [`dbglog!`](crate::dbglog) formats only when
 /// the log is on. `$env` is the driver's own opt-in variable; a debug build is always on.
@@ -150,4 +134,20 @@ macro_rules! dbglog {
             log(&format!($($a)*))
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stamp is what lets a driver line be placed against the host event it explains, so it
+    /// must be fixed-width and wrap at midnight rather than run past 24 h.
+    #[test]
+    fn the_stamp_is_fixed_width_hms_millis() {
+        let s = utc_hms_millis();
+        assert_eq!(s.len(), 12, "HH:MM:SS.mmm — got {s:?}");
+        let (h, rest) = s.split_at(2);
+        assert!(h.parse::<u32>().is_ok_and(|h| h < 24), "hours: {s:?}");
+        assert!(rest.starts_with(':'), "separator: {s:?}");
+    }
 }
