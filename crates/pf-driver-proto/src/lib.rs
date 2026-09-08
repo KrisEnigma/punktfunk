@@ -722,6 +722,37 @@ pub mod vdisplay {
         }
     }
 
+    /// The list a monitor advertises: the requested mode first, then — for a host only — the
+    /// fallbacks and whatever the monitor already offered.
+    ///
+    /// A seat rides a remote-session adapter, which IddCx obliges to declare `USE_SMALLEST_MODE`,
+    /// so the OS drives the monitor at the SMALLEST mode on the list. A seat therefore offers
+    /// exactly what the client asked for: one fallback, or one stale larger entry surviving a
+    /// resize, pins that seat to the wrong resolution.
+    ///
+    /// `history` is the monitor's current list on a re-advertise, empty at create. The OS pins the
+    /// settable set at arrival, so a host's list may only grow — [`union_modes`] caps that growth.
+    #[must_use]
+    pub fn advertised_modes(requested: Mode, seat: bool, history: &[Mode]) -> Vec<Mode> {
+        let mut modes = vec![requested];
+        if !seat {
+            modes.extend(default_modes());
+        }
+        accumulate_modes(&mut modes, seat, history);
+        modes
+    }
+
+    /// Merge `history` into `into` — the accumulate half of [`advertised_modes`], for the caller
+    /// that only learns the history later (the registry resolves the monitor id under its lock).
+    ///
+    /// A seat never accumulates: every carried-over mode is one the OS can pick INSTEAD of the
+    /// size the client asked for.
+    pub fn accumulate_modes(into: &mut Vec<Mode>, seat: bool, history: &[Mode]) {
+        if !seat {
+            union_modes(into, history);
+        }
+    }
+
     /// Fallback modes appended after the requested mode, so a topology change still has options.
     #[must_use]
     pub fn default_modes() -> Vec<Mode> {
@@ -2591,6 +2622,45 @@ mod tests {
             .map(|i| (i.width, i.height, i.refresh_rate))
             .collect();
         assert_eq!(flat, [(1920, 1080, 60), (1920, 1080, 120), (1280, 720, 60)]);
+    }
+
+    /// The `USE_SMALLEST_MODE` rule: the OS drives a seat at the smallest advertised mode, so a
+    /// seat must advertise its request alone. A fallback or a surviving larger entry would pin it.
+    #[test]
+    fn a_seat_advertises_only_what_the_client_asked_for() {
+        let asked = mode(2560, 1440, &[120]);
+        let history = vec![mode(3840, 2160, &[60]), mode(1024, 768, &[60])];
+
+        let seat = vdisplay::advertised_modes(asked.clone(), true, &history);
+        assert_eq!(seat, vec![asked.clone()], "a seat offers one mode");
+        let smallest = vdisplay::flatten(&seat)
+            .min_by_key(|i| i.width * i.height)
+            .expect("a non-empty list");
+        assert_eq!((smallest.width, smallest.height), (2560, 1440));
+
+        // A host keeps the request first, then the fallbacks, then its history — and 1024x768
+        // proves the history really does ride along.
+        let host = vdisplay::advertised_modes(asked.clone(), false, &history);
+        assert_eq!(host[0], asked);
+        assert!(host.contains(&mode(1280, 720, &[60])), "fallbacks");
+        assert!(host.contains(&mode(1024, 768, &[60])), "history");
+        assert!(
+            host.len() <= vdisplay::MODE_LIST_CAP,
+            "the union is capped: {}",
+            host.len()
+        );
+    }
+
+    /// Create passes no history; the seat rule still holds and the host still gets its fallbacks.
+    #[test]
+    fn advertised_modes_without_history_is_the_create_path() {
+        let asked = mode(800, 600, &[60]);
+        assert_eq!(
+            vdisplay::advertised_modes(asked.clone(), true, &[]),
+            vec![asked.clone()]
+        );
+        let host = vdisplay::advertised_modes(asked.clone(), false, &[]);
+        assert_eq!(host, [vec![asked], vdisplay::default_modes()].concat());
     }
 
     #[test]
