@@ -477,7 +477,8 @@ fn systemctl_output(args: &[&str]) -> Option<String> {
 mod windows;
 #[cfg(target_os = "windows")]
 use self::windows::{
-    disable, enable, icacls_path, powershell_output, require_elevation, LOCAL_SERVICE_SID,
+    disable, enable, icacls_path, powershell, powershell_output, require_elevation,
+    LOCAL_SERVICE_SID,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

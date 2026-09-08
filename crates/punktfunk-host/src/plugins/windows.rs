@@ -256,7 +256,7 @@ fn powershell_path() -> String {
     crate::install::sys32(r"WindowsPowerShell\v1.0\powershell.exe")
 }
 
-fn powershell(command: &str) -> Result<()> {
+pub(super) fn powershell(command: &str) -> Result<()> {
     let status = Command::new(powershell_path())
         .args(["-NoProfile", "-NonInteractive", "-Command", command])
         .status()
