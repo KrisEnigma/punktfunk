@@ -747,6 +747,18 @@ pub fn create_monitor(
         return None;
     }
 
+    // A clear that landed while the create was in flight found the entry with no handle set,
+    // so `depart` skipped it and dropped it from the registry. The monitor has now arrived and
+    // nothing can reach it: it would stay plugged in for the device's life. Undo it here.
+    // `reap_owner`'s grace already covers the reaper; this covers CLEAR_ALL, which has none.
+    if !registry::find(|m| m.id == id).is_some_and(|m| Arc::ptr_eq(&m, &monitor)) {
+        dbglog!("[pf-vd] create_monitor(id={id}): cleared mid-create — departing the new monitor");
+        // SAFETY: `object` arrived successfully just above, which is what makes departure legal.
+        unsafe { wdk_iddcx::IddCxMonitorDeparture(object) };
+        monitor.teardown();
+        return None;
+    }
+
     let arrival = Arrival {
         target_id: arrival_out.OsTargetId,
         luid_low: arrival_out.OsAdapterLuid.LowPart,
