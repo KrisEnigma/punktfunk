@@ -135,9 +135,10 @@ pub(super) const HDR_FORMAT_ORDER: [VideoFormat; 2] =
     [VideoFormat::xBGR_210LE, VideoFormat::xRGB_210LE];
 
 /// LINEAR-only 10-bit PQ `EnumFormat`. Tiled modifiers are omitted because the
-/// EGL de-tile blit renders into `GL_RGBA8` and would crush the depth. BT.2020
-/// primaries and PQ transfer are **MANDATORY** — Mutter's HDR pods are too, so
-/// the intersection only exists if both sides speak them.
+/// EGL de-tile blit renders into `GL_RGBA8` and would crush the depth. The
+/// modifier is a Choice enum (same shape as [`build_dmabuf_format`]): a scalar
+/// `Long(0)` does not intersect gamescope's `{default:0, alt:0}` choice.
+/// BT.2020 + PQ are **MANDATORY** — Mutter's HDR pods are too.
 pub(super) fn build_hdr_dmabuf_format(
     format: VideoFormat,
     preferred: Option<(u32, u32, u32)>,
@@ -185,7 +186,15 @@ pub(super) fn build_hdr_dmabuf_format(
     obj.properties.push(pw::spa::pod::Property {
         key: pw::spa::sys::SPA_FORMAT_VIDEO_modifier,
         flags: pw::spa::pod::PropertyFlags::MANDATORY,
-        value: pw::spa::pod::Value::Long(0), // DRM_FORMAT_MOD_LINEAR
+        value: pw::spa::pod::Value::Choice(pw::spa::pod::ChoiceValue::Long(
+            pw::spa::utils::Choice(
+                pw::spa::utils::ChoiceFlags::empty(),
+                pw::spa::utils::ChoiceEnum::Enum {
+                    default: 0, // DRM_FORMAT_MOD_LINEAR
+                    alternatives: vec![0],
+                },
+            ),
+        )),
     });
     obj.properties.push(pw::spa::pod::Property {
         key: pw::spa::sys::SPA_FORMAT_VIDEO_transferFunction,
@@ -510,6 +519,13 @@ mod tests {
                 pod.windows(4)
                     .any(|w| w == spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT2020.to_ne_bytes()),
                 "{fmt:?} pod does not carry BT.2020 primaries"
+            );
+            // Choice Long, same as [`build_dmabuf_format`]. A scalar Long(0) does
+            // not intersect gamescope's `{default:0, alt:0}` modifier choice.
+            assert!(
+                pod.windows(4)
+                    .any(|w| w == (spa::sys::SPA_TYPE_Choice as u32).to_ne_bytes()),
+                "{fmt:?} HDR modifier must be a Choice, not a scalar Long"
             );
         }
     }

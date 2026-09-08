@@ -1293,6 +1293,10 @@ pub fn pipewire_thread(
         lazy,
         ..
     } = opts;
+    // gamescope (no portal fd, not KWin): skip Cursor meta and offer LINEAR
+    // as the modifier default — see connect params / `dmabuf_modifiers_for_producer`.
+    let offer_cursor_meta = cursor_id0_hides || fd.is_some();
+    let gamescope = !offer_cursor_meta;
     crate::pwinit::ensure_init();
 
     let mainloop = pw::main_loop::MainLoopRc::new(None).context("pw MainLoop")?;
@@ -1359,9 +1363,8 @@ pub fn pipewire_thread(
         );
     }
     // Per-fourcc: EGL/libva answer per format; XR24 (BGRx) and AR24 (BGRA) are asked
-    // separately. Append LINEAR (0): NVIDIA EGL will not list it, but gamescope LINEAR
-    // dmabufs import via CUDA external memory. VAAPI passthrough has no importer, so
-    // LINEAR is all we advertise — radeonsi/iHD import it and any compositor can allocate it.
+    // separately. LINEAR (0) is appended for KWin/portal (NVIDIA EGL omits it). gamescope
+    // capture textures are LINEAR-only — see `dmabuf_modifiers_for_producer`.
     let mut modifiers = Vec::new();
     let mut modifiers_bgra = Vec::new();
     if let Some(i) = importer.as_mut() {
@@ -1371,11 +1374,8 @@ pub fn pipewire_thread(
     // PyroWave imports through Vulkan, not libva. Extra modifiers come from the facade
     // (`ZeroCopyPolicy::pyrowave_modifiers`) so capture never calls `encode`. Empty unless
     // the `pyrowave` feature is on and this session (or the global pref) is PyroWave.
-    let extend_pyrowave = vaapi_passthrough && !policy.pyrowave_modifiers.is_empty();
+    let extend_pyrowave = vaapi_passthrough && !policy.pyrowave_modifiers.is_empty() && !gamescope;
     for list in [&mut modifiers, &mut modifiers_bgra] {
-        if (importer.is_some() || vaapi_passthrough) && !list.contains(&0) {
-            list.push(0); // DRM_FORMAT_MOD_LINEAR
-        }
         if extend_pyrowave {
             for &m in &policy.pyrowave_modifiers {
                 if !list.contains(&m) {
@@ -1383,6 +1383,8 @@ pub fn pipewire_thread(
                 }
             }
         }
+        *list =
+            dmabuf_modifiers_for_producer(list, importer.is_some() || vaapi_passthrough, gamescope);
     }
     if extend_pyrowave {
         tracing::info!(
@@ -2021,9 +2023,11 @@ pub fn pipewire_thread(
         Some(build_mappable_buffers()?)
     };
 
-    // Cursor-as-metadata on every path (harmless if the producer cannot supply it): the pointer
-    // rides as SPA_META_Cursor so the compositor keeps its hardware cursor plane.
-    let cursor_meta = build_cursor_meta_param()?;
+    let cursor_meta = if offer_cursor_meta {
+        Some(build_cursor_meta_param()?)
+    } else {
+        None
+    };
     let mut byte_slices: Vec<&[u8]> = Vec::new();
     for pod in &format_pods {
         byte_slices.push(pod);
@@ -2031,7 +2035,9 @@ pub fn pipewire_thread(
     if let Some(b) = &buffers_values {
         byte_slices.push(b);
     }
-    byte_slices.push(&cursor_meta);
+    if let Some(m) = &cursor_meta {
+        byte_slices.push(m);
+    }
     let mut params: Vec<&Pod> = byte_slices
         .iter()
         .map(|&b| Pod::from_bytes(b).context("pod from bytes"))
@@ -2432,11 +2438,54 @@ fn producer_supports_request(
     supports.unwrap_or(false)
 }
 
+/// gamescope's node offers LINEAR as `{0,0}`. spa_pod_filter without DONT_FIXATE
+/// fixates our default, so a tiled NVIDIA default fails the link. Empty `egl`
+/// with `advertise` still yields LINEAR — the importer exists, EGL listed none.
+fn dmabuf_modifiers_for_producer(egl: &[u64], advertise: bool, gamescope: bool) -> Vec<u64> {
+    if !advertise {
+        return egl.to_vec();
+    }
+    if gamescope {
+        return vec![0];
+    }
+    let mut m = egl.to_vec();
+    if !m.contains(&0) {
+        m.push(0);
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        negotiation_plan, packed_frame_geometry, supported_data_plane_count, NegotiationInputs,
+        dmabuf_modifiers_for_producer, negotiation_plan, packed_frame_geometry,
+        supported_data_plane_count, NegotiationInputs,
     };
+
+    /// NVIDIA block-linear, the EGL default on this host. gamescope does not offer it.
+    const NVIDIA_TILED: u64 = 216172782120099856;
+
+    #[test]
+    fn gamescope_dmabuf_offer_fixates_linear() {
+        let egl = [NVIDIA_TILED, NVIDIA_TILED + 4];
+        assert_eq!(
+            dmabuf_modifiers_for_producer(&egl, true, true),
+            vec![0],
+            "gamescope's producer choice is LINEAR-only; a tiled default fails the link"
+        );
+        assert_eq!(
+            dmabuf_modifiers_for_producer(&[], true, true),
+            vec![0],
+            "a live importer with no EGL list still advertises LINEAR"
+        );
+        let kwin = dmabuf_modifiers_for_producer(&egl, true, false);
+        assert_eq!(
+            kwin[0], NVIDIA_TILED,
+            "KWin lists the tiled mods; keep them first"
+        );
+        assert!(kwin.contains(&0));
+        assert!(dmabuf_modifiers_for_producer(&[], false, true).is_empty());
+    }
 
     #[test]
     fn only_supported_pipewire_plane_counts_become_slice_lengths() {

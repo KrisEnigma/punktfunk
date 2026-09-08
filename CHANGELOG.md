@@ -429,6 +429,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **HDR PipeWire capture offers LINEAR as a Choice enum.** A scalar `Long(0)`
+  did not intersect gamescope's modifier choice. Nothing to configure.
+- **Gamescope capture omits `SPA_META_Cursor`.** That node only advertises Header
+  meta; the KWin/portal offer emptied the intersection. Nothing to configure.
+- **Gamescope SDR capture offers LINEAR as the modifier default.** A tiled NVIDIA
+  default failed PipeWire intersection against gamescope's LINEAR-only choice.
+  Nothing to configure.
 - **A Windows pointer gesture no longer rests one step behind.** The driver spent the pointer's
   move mark before checking that the stash slot was free, so a move landing while its access unit
   was still owed was never re-encoded; the mark is now spent only when a slot is taken, and a
