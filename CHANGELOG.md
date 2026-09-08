@@ -62,15 +62,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
-- **`EncodedFrame::recovery_point` marks an encoder-driven intra refresh wave.** The Linux
-  Vulkan encoder answers a reference invalidation it cannot anchor with a row-based wave
-  (`VK_KHR_video_encode_intra_refresh`, RADV on AMD) instead of an IDR, tagging the wave's start
-  and close AU `USER_FLAG_RECOVERY_POINT` so the client's existing two-mark lift heals in one
-  cycle without the bitrate spike. Nothing changes on the wire or for a backend that leaves the
-  field `false`; `PUNKTFUNK_INTRA_REFRESH=0` restores the IDR, `PUNKTFUNK_IR_CYCLE` pins
-  the cycle length in frames. A client with a bitstream planner forgets its damaged-chain marks
-  on such a lift (`ReanchorGate::lifted_by_marks`), or every later host anchor would be refused
-  until an IDR.
+- **`EncodedFrame::recovery_point` marks an encoder-driven intra refresh wave.** Vulkan Video
+  (RADV), the native VAAPI session (AMD and Intel) and NVENC (Windows, Linux and the display
+  driver, whose AU flags gained `AU_RECOVERY_POINT`) answer a reference invalidation they cannot
+  anchor with a row-based wave instead of an IDR, tagging the wave's start and close AU
+  `USER_FLAG_RECOVERY_POINT` so the client's existing two-mark lift heals in one cycle without
+  the bitrate spike. Nothing changes on the wire or for a backend that leaves the field `false`;
+  `PUNKTFUNK_INTRA_REFRESH=0` restores the IDR, `PUNKTFUNK_IR_CYCLE` pins the cycle length in
+  frames. A client with a bitstream planner forgets its damaged-chain marks on such a lift
+  (`ReanchorGate::lifted_by_marks`), or every later host anchor would be refused until an IDR.
 - **`Console::focus_announcement` names the focused row for a screen reader.** The Skia console
   has no accessibility node tree, so the driver hands the host a string for home, the library and
   settings (`None` elsewhere) and Android speaks it through the new `{"announce": …}` event on
