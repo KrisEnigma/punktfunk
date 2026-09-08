@@ -20,8 +20,10 @@ Good: `fix(host/hyprland): keep topology restore across pipeline retries`
 
 ### Changelog
 
-Newest `CHANGELOG.md` section only. Two sentences per bullet: what changed, then what
-the reader must do. Bold lead is a noun or an API name. Fail at 160 lines.
+Do not edit `CHANGELOG.md` on ordinary PRs. Commits are the log.
+If the reader must act, add a `BREAKING CHANGE:` footer.
+Release notes are written at version bump: skill `write-release-notes`,
+rules in `docs/writing.md` §2.
 
 ### Comments
 

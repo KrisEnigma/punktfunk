@@ -9,8 +9,10 @@ House style for **commits**, **changelogs**, and **comments**.
 | --- | --- |
 | What changed, in one greppable line | Commit **subject** |
 | Why it changed | Commit **body** (PR if it needs a diagram) |
-| What a user can do now | `docs/releases/vX.Y.Z.md` |
-| What an embedder must do | `CHANGELOG.md` |
+| Reader must act (API, package, driver, flag) | Commit footer `BREAKING CHANGE: <action>` |
+| What a user can do now | `docs/releases/vX.Y.Z.md` (written at bump, from git log) |
+| Did wire / ABI / driver proto move | `CHANGELOG.md` version table for that tag |
+| New env / JNI / CLI that does not move a version integer | `CHANGELOG.md` **Knobs** on that card (and a `BREAKING CHANGE:` footer if the reader must act) |
 | Investigation, measurements, rejected paths | Pull request and `docs/adr/` |
 | Invariant that must remain true | Comment, type, or test |
 
@@ -26,6 +28,13 @@ What you changed. Wrap at 72.
 
 Fixes #123
 ```
+
+If an embedder, packager, or user must act:
+
+    BREAKING CHANGE: install matching host and driver (protocol 8).
+
+The release-notes skill greps this footer for `## Before you update`.
+Do not also add a `CHANGELOG.md` bullet on that PR.
 
 - **50 characters** aim. **72 hard cap.** No trailing period.
 - Imperative, present tense: `keep`, `skip`, `advertise`.
@@ -60,77 +69,49 @@ The Gitea PR title is the merge subject. Write it as the conventional subject.
 
 ## 2. Changelogs
 
-Two audiences. Do not write both files in the same voice.
+Voice and shape below. Procedure — git log, when to retitle `## Unreleased`,
+who runs the skill — is `.grok/skills/write-release-notes/SKILL.md`.
 
 ### `docs/releases/vX.Y.Z.md` — people who stream
 
-Existing template:
+Shape:
 
-1. Compatibility line (plain language, no ABI numbers)
-2. `## TL;DR` — three to six one-line bullets
-3. `## Before you update` — only if the reader must act
-4. `## New` / `## Improved` / `## Fixed` / `## Security`
-5. `## For developers` — one link to CHANGELOG.md at the **tag**
+1. Compatibility line + **3–8 highlight bullets BEFORE the first `##`**. Discord
+   (`scripts/ci/discord-announce.sh`) posts that prefix (1800 chars).
+2. `## Before you update` — delete if nothing. Windows host+driver matching is not
+   “update one side at a time.”
+3. `## New` / `## Improved` / `## Fixed` / `## Security` — one line per theme.
+4. `## For developers` — CHANGELOG at the tag + `git log vPrev..vThis`.
 
-Voice: `docs/releases/README.md`. Do not narrate a lab session. Say what the default is.
+Voice: Name the thing. Then stop. No metaphor, origin story, lab, SKU, soak,
+“we watched”. No crate names, protocol hex, or API symbols on the user page.
+
+Bad: `The headline is a control surface for everyone who streams to a screen they hold.`
+Good: `**Quick-action ring.** A two-finger twist on the stream opens six buttons.`
 
 ### `CHANGELOG.md` — embedders, packagers, plugin authors
 
-Newest first. Version table (every row). Breaking changes with an action.
-New sections only; do not edit older ones. User notes stay in `docs/releases/`.
-
-[Keep a Changelog](https://keepachangelog.com/) categories:
+A **compat card**, not a diary. Ordinary PRs do not edit it. Newest first.
 
 ```markdown
-## [0.32.0] — 2026-08-27
+## v0.35.0
 
-ABI 25 → 26 (additive). Wire protocol stays 2.
+N commits since v0.34.0. Wire stays 2. **Driver protocol floor 8.**
+Deep dive: `git log v0.34.0..v0.35.0`
+
+### Versions
+(table, every row from previous card, unchanged marked)
 
 ### Breaking
-- **Bitrate means the wire budget.** `live_bitrate` is no longer encoder rate.
-  Embedders that treated it as encoder rate must stop.
+- **Noun.** What changed. What the reader must do.
 
-### Added
-- `punktfunk_connect_opts` replaces the `connect_ex*` ladder. Every `ex` remains.
-
-### Fixed
-- Automatic bitrate treated a still picture as congestion.
-
-### Security
-- Authenticated console sessions could reach pairing without the console password.
-  Pairing grants launch. The routes now re-ask.
+### Knobs
+env/JNI/CLI that do not move a version integer — name + action
 ```
 
-### Bullet shape
+No Added/Changed/Fixed diary. Do not rewrite older sections.
 
-Two sentences per bullet.
-
-1. What changed.
-2. What the reader must do, if anything.
-
-The bold lead is a noun or an API name.
-Version-table Notes cells are one clause. If it needs a paragraph, it is a Breaking bullet.
-
-Do not put in `CHANGELOG.md`:
-
-- Metaphor
-- Field measurements (SKU, soak minutes, underrun counts)
-- Causation chains ("so… which means… because…")
-- Why you did not take the other path
-- Behaviour restorations under **Breaking** — those are **Fixed**
-
-Those belong on the PR or in `docs/adr/` / `design/`. Link them.
-
-### Length
-
-| Release | Target |
-| --- | --- |
-| Patch | One screen |
-| Minor | Two screens |
-| Longer than that | Split, or link an ADR |
-| Newest section (CI) | 160 lines (`scripts/ci/check-writing.sh`) |
-
-Older sections are not counted.
+Target: two screens. No CI for changelog length.
 
 ---
 
@@ -272,8 +253,10 @@ window it renders in.
 - [ ] Subject names a subsystem a newcomer would grep
 - [ ] Body is why, not the investigation (investigation is on the PR)
 - [ ] One logical change; no “and” holding two fixes together
-- [ ] User-facing fact updated in `docs/releases/` or the docs-site page that owns it
-- [ ] Embedder-facing fact is a bullet in CHANGELOG.md, not a new chapter
+- [ ] feat/fix/security/perf has a body
+- [ ] BREAKING CHANGE footer if the reader must act
+- [ ] This PR did not add a CHANGELOG.md bullet
+- [ ] User-facing fact updated on the docs-site page (not docs/releases/)
 - [ ] New comments state an invariant or a trap, not a recap of the diff
 - [ ] Comments are present-tense live rules, not archaeology or a poem
 - [ ] Module rustdoc still fits on one screen (CI fails a touched `//!` / `///` at 24 lines)
@@ -288,7 +271,8 @@ window it renders in.
 
 ## 6. Adoption
 
-Do not rewrite old `CHANGELOG.md` sections. Do not sweep existing module rustdoc.
-New sections and files follow this file. Rewrite a comment when you already open that function.
+Do not rewrite old `CHANGELOG.md` sections or old `docs/releases/v*.md` bodies.
+Do not sweep existing module rustdoc. New notes follow this file. Rewrite a comment
+when you already open that function.
 
 This document does not replace `docs/releases/README.md`.

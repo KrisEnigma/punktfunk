@@ -117,8 +117,7 @@ the OpenAPI snapshot must match `api/openapi.json`, the docs-site copy of `data/
 match the canonical one, `scripts/install.sh` must carry the file's install lines verbatim, every `PUNKTFUNK_*` variable the docs mention
 must still exist in the tree, the counts of undocumented `PUNKTFUNK_*` variables and undocumented
 `punktfunk-host` subcommands may never grow (document the new knob, or consciously raise the
-baseline in the script), internal docs links must resolve, and the newest `CHANGELOG.md`
-section stays under 160 lines.
+baseline in the script), and internal docs links must resolve.
 
 Match the surrounding code's comment density and naming.
 
@@ -138,10 +137,10 @@ The three rules you need before your first commit:
   the message. A Gitea PR title becomes the merge subject, so write the PR title as a
   conventional commit too. `scripts/ci/check-writing.sh` fails the PR if a commit on it
   breaks this.
-- **New `CHANGELOG.md` sections use [Keep a Changelog](https://keepachangelog.com/) categories**
-  — `Breaking` / `Added` / `Changed` / `Fixed` / `Security` — plus the version table. Two
-  sentences per bullet. Keep the existing sections as they are. CI fails the newest section at
-  160 lines. What a *user* can do goes in `docs/releases/vX.Y.Z.md` instead.
+- **Release notes are written at version bump, not on every PR.** `docs/releases/vX.Y.Z.md`
+  is the human page. `CHANGELOG.md` is a version table plus Breaking plus Knobs. Do not add
+  a CHANGELOG bullet on a feature PR. If the reader must act, add a `BREAKING CHANGE:`
+  footer on the commit. Rules: `docs/writing.md` §2.
 - **A comment states an invariant or a trap, not a recap of the diff.** Present tense: the
   live rule, not the archaeology of old versions and not a poem. `//` is four lines (CI
   fails at six); a module `//!` is 8–20 (CI fails at 24). Length is a backstop. If a trust

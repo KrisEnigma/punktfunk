@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Length and shape gates for commits, CHANGELOG.md, comments, and error messages.
+"""Length and shape gates for commits, comments, and error messages.
 
 See docs/writing.md. If this fails: shorten. Do not add `writing-ok` unless
 the extra lines are a SAFETY/lifetime trap.
 
   1. Each commit: `type(scope): summary`, ≤72 chars, no trailing period,
      no `and` / semicolon, body ≤ 200 words, no Co-Authored-By.
-  2. Newest CHANGELOG section: ≤160 lines. Older sections are not counted.
-  3. Opened `//` : fail at 6 lines. Opened `//!` / `///`: fail at 24.
-  4. Metaphor / field-report / soak phrasing fails in all three.
-  5. A message this diff wrote does not open with `failed to` / `could not` /
+  2. Opened `//` : fail at 6 lines. Opened `//!` / `///`: fail at 24.
+  3. Metaphor / field-report / soak phrasing fails in commits and comments.
+  4. A message this diff wrote does not open with `failed to` / `could not` /
      `unable to` / `cannot`, and does not apologise.
 
 A comment is opened if its lines are in the diff, or it sits above an item
@@ -28,7 +27,6 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-CHANGELOG_FAIL = 160
 LINE_COMMENT_FAIL = 6
 DOC_COMMENT_FAIL = 24
 SUBJECT_FAIL = 72
@@ -48,7 +46,7 @@ ITEM_START = re.compile(
     r"(fn|struct|enum|impl|trait|type|const|static|mod)\b"
 )
 
-# Shared across commits, changelog, comments. Keep this list the stories we
+# Shared across commits and comments. Keep this list the stories we
 # actually shipped, not a vibe classifier.
 STORY = (
     (re.compile(r"rolled dice", re.I), "metaphor"),
@@ -122,22 +120,6 @@ def check_messages(path: str, lines: list[str], touched: set[int] | None) -> lis
                     )
                     break
     return errors
-
-
-def newest_changelog_section(text: str) -> tuple[int, str, str]:
-    """Return (line_count, heading, section_text) of the first `## v*` section."""
-    lines = text.splitlines()
-    starts = [i for i, line in enumerate(lines) if re.match(r"^## v\d", line)]
-    if not starts:
-        return 0, "", ""
-    a = starts[0]
-    b = starts[1] if len(starts) > 1 else len(lines)
-    return b - a, lines[a], "\n".join(lines[a:b])
-
-
-def newest_changelog_len(text: str) -> tuple[int, str]:
-    n, heading, _ = newest_changelog_section(text)
-    return n, heading
 
 
 def iter_comment_blocks(lines: list[str]):
@@ -439,18 +421,6 @@ def commits_since(base: str) -> list[tuple[str, str, str]]:
 
 def check_repo() -> list[str]:
     errors: list[str] = []
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    n, heading, section = newest_changelog_section(changelog)
-    if n >= CHANGELOG_FAIL:
-        errors.append(
-            f"CHANGELOG.md: newest section {heading!r} is {n} lines "
-            f"(fail at {CHANGELOG_FAIL}). Shorten; do not edit older sections."
-        )
-    for label in story_hits(section):
-        errors.append(
-            f"CHANGELOG.md: newest section {heading!r} is a {label}. "
-            "Two sentences per bullet; stories go on the PR."
-        )
     base = git_merge_base()
     if base:
         for sha, subject, body in commits_since(base):
@@ -492,19 +462,6 @@ def self_test() -> int:
         if not cond:
             print(f"FAIL: {label}", file=sys.stderr)
             fails += 1
-
-    short = "## v1.0.0\n\n### Fixed\n- **Foo.** Bar.\n\n## v0.9.0\n"
-    n, h = newest_changelog_len(short)
-    expect("short changelog counted", n < CHANGELOG_FAIL and h == "## v1.0.0")
-
-    long = "## v1.0.0\n" + ("x\n" * CHANGELOG_FAIL) + "## v0.9.0\n"
-    n, _ = newest_changelog_len(long)
-    expect("long changelog counted", n >= CHANGELOG_FAIL)
-
-    story_cl, _, sec = newest_changelog_section(
-        "## v1.0.0\n- clients rolled dice\n\n## v0.9.0\n"
-    )
-    expect("changelog story", "metaphor" in story_hits(sec) and story_cl == 3)
 
     five = ["// a"] * 5 + ["fn x() {}"]
     expect("five // pass", check_blocks("t.rs", five, {1, 2, 3, 4, 5}) == [])
@@ -637,9 +594,9 @@ def main(argv: list[str]) -> int:
         for e in errors:
             print(f"::error::{e}")
         print(
-            "docs/writing.md: shorten the commit, the changelog bullet, or the "
-            "comment you opened. Do not add writing-ok unless the extra lines "
-            "are a SAFETY/lifetime trap.",
+            "docs/writing.md: shorten the commit or the comment you opened. "
+            "Do not add writing-ok unless the extra lines are a SAFETY/lifetime "
+            "trap.",
             file=sys.stderr,
         )
         return 1
