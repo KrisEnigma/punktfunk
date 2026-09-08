@@ -241,9 +241,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         }
     }
     // "Low-latency mode" master toggle, resolved once for the session. On (the default) enables the
-    // fast pipeline — decoder ranking + vendor keys + async loop (native side), HDMI ALLM below,
-    // game-tagged audio, and DSCP marking (applied earlier, at connect); off falls back to the
-    // original synchronous decode pipeline as a per-device escape hatch.
+    // fast pipeline — decoder ranking + vendor keys + thread boosts (native side), HDMI ALLM below,
+    // game-tagged audio, and DSCP marking (applied earlier, at connect); off runs the same decode
+    // loop and presenter with plain keys and no boosts, the per-device escape hatch.
     val lowLatencyMode = initialSettings.lowLatencyMode
     // A screen with fingers on it — the start banner may only name the three-finger stats tap on a
     // device that can perform it. A TV box has no touchscreen at all, and its remote is not one.

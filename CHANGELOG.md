@@ -324,6 +324,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **Android "Low-latency mode" off.** The toggle no longer switches to the old polling decode
+  loop; it runs the same event-driven loop and presenter with the aggressive keys and thread
+  boosts off, so "Prefer smoothness" now applies in both states. Nothing to do unless you kept the
+  toggle off for a device the fast loop misbehaved on — try it on again, and report the device if
+  it still does.
+
 - **`pf_client_core::collate` is where library sort and grouping live now.** The module was
   private to `pf-console-ui`, so the GTK and WinUI shelves could not reach it; it moves behind
   a `Collatable` trait each shell implements for its own model, and `store_label` and

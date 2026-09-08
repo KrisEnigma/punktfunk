@@ -226,8 +226,8 @@ object NativeBridge {
      * entirely in Rust (NDK AMediaCodec → ANativeWindow) — no per-frame JNI. [decoderName] is the
      * decoder Kotlin ranked from `MediaCodecList` (`""` = let the platform resolve the default for
      * the MIME — what the pre-overhaul client always did); [lowLatencyMode] is the user's
-     * "Low-latency mode" master toggle (ON by default: async loop + per-SoC tuning; off runs the
-     * original synchronous pipeline as the per-device escape hatch); [lowLatencyFeature] is whether
+     * "Low-latency mode" master toggle (ON by default: per-SoC tuning + thread boosts; off runs
+     * the same loop with plain keys, the per-device escape hatch); [lowLatencyFeature] is whether
      * [decoderName] advertised `FEATURE_LowLatency` (HUD label only). [isTv] drives an active HDMI
      * mode switch to the stream refresh on TV boxes when the toggle is on (vs. the softer seamless
      * hint otherwise). [presentPriority]/[smoothBuffer] are the timeline presenter's intent

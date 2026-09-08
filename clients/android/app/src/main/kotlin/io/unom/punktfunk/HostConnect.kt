@@ -62,8 +62,8 @@ suspend fun connectToHost(
         NativeBridge.nativeSetLowLatencyMode(settings.lowLatencyMode)
         val multiSlice = VideoDecoders.multiSliceTolerant()
         val partialFrame = VideoDecoders.partialFrameCapable()
-        // Slice-progressive delivery: decoder truth AND the async decode loop — the legacy
-        // sync loop feeds whole AUs only, so parts must never arrive when it is selected.
+        // Slice-progressive delivery: decoder truth AND the low-latency toggle — parts are part of
+        // the fast pipeline, and the toggle's "off" is the conservative configuration throughout.
         val frameParts = settings.lowLatencyMode && partialFrame
         val codecBits = VideoDecoders.decodableCodecBits()
         // Automatic codec (P5, measured NP3 ↔ RTX 4090): AV1 beat HEVC by ~1.2 ms end-to-end at
