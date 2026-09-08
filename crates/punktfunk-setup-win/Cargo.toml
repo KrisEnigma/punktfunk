@@ -38,6 +38,8 @@ punktfunk-setup = { path = "../punktfunk-setup" }
 # The extract root's ancestors under `%ProgramData%` are re-owned and locked the way the host
 # locks its config dir; a planted parent otherwise keeps FILE_DELETE_CHILD over the root.
 pf-paths = { path = "../pf-paths" }
+# The same admin-only-source check the host runs, for the extract root's ancestors.
+pf-paths-win = { path = "../pf-paths-win" }
 # The D3 sandwich (WP3.1): tar + xz (liblzma, built statically — S2 chose xz over zstd by
 # 60 MB on the installed tree) + the footer sha. Cross-platform so the pack step and its
 # tests run on every lane; the Linux musl engine keeps its own tiny dep set (D4).

@@ -21,5 +21,5 @@ pub(crate) mod tray;
 /// A secret the host did not write is not a credential. Only Windows can be pre-planted:
 /// `%ProgramData%` grants Users create, while the Unix config dir is 0700 from birth.
 pub(crate) mod planted {
-    pub(crate) use crate::install::quarantine_planted_secret;
+    pub(crate) use pf_paths_win::quarantine_planted_secret;
 }

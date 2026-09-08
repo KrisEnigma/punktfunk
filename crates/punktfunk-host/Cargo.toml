@@ -17,6 +17,8 @@ punktfunk-core = { path = "../punktfunk-core", features = ["quic", "ureq-tls"] }
 pf-update-check = { path = "../pf-update-check" }
 # Config-dir + owner-private file helpers (moved out of the gamestream junk drawer, plan §W6).
 pf-paths = { path = "../pf-paths" }
+# Windows owner/DACL checks (planted secrets, admin-only staging dirs).
+pf-paths-win = { path = "../pf-paths-win" }
 # Process-wide host config global, extracted to a leaf crate (plan §W6).
 pf-host-config = { path = "../pf-host-config" }
 # GPU vendor/adapter detection + selection, extracted to a leaf crate (plan §W6).

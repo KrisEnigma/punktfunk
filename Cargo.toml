@@ -20,6 +20,7 @@ members = [
     "crates/pf-console-ui",
     "crates/pf-driver-proto",
     "crates/pf-paths",
+    "crates/pf-paths-win",
     "crates/pf-update",
     "crates/pf-update-check",
     "crates/pf-host-config",

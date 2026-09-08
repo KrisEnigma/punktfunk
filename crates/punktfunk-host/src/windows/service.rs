@@ -1228,15 +1228,11 @@ fn ensure_default_host_env() -> Result<()> {
     // Non-admin-owned host.env was planted before this elevated install (`ProgramData` grants
     // Users add-subdirectory + CREATOR OWNER). Check before `create_private_dir` re-owns the
     // dir and erases that signal. Administrators-owned files from a prior install pass.
-    let planted = path.exists() && crate::install::is_admin_owned(&path) == Some(false);
+    let planted = pf_paths_win::planted_by_non_admin(&path);
     if planted {
         // Rename-aside is best-effort; the guarantee is the `!planted` skip overwrites anyway.
-        let mut aside = path.clone().into_os_string();
-        aside.push(".untrusted");
-        let aside = std::path::PathBuf::from(aside);
-        let _ = std::fs::remove_file(&aside);
-        match std::fs::rename(&path, &aside) {
-            Ok(()) => tracing::warn!(
+        match pf_paths_win::rename_aside(&path) {
+            Ok(aside) => tracing::warn!(
                 path = %path.display(), aside = %aside.display(),
                 "host.env was owned by a non-admin account (planted before install) — renamed aside; writing the default"
             ),

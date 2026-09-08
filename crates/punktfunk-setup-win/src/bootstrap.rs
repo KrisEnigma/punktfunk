@@ -103,6 +103,10 @@ fn fresh_root() -> Result<PathBuf, String> {
         // which renames a protected root away mid-extract. Junctions are refused.
         for dir in [base.parent().unwrap_or(&base), base.as_path()] {
             pf_paths::create_private_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            // Hardening is not proof: the host's own check on what is actually there, so a
+            // grant the reset missed refuses the install instead of staging into it.
+            pf_paths_win::ensure_admin_only_source(dir)
+                .map_err(|e| format!("{} isn't admin-only after hardening: {e}", dir.display()))?;
         }
     } else {
         std::fs::create_dir_all(&base).map_err(|e| format!("{}: {e}", base.display()))?;
