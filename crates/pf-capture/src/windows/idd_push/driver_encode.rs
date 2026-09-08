@@ -64,14 +64,7 @@ impl std::fmt::Display for DriverEncodeOpenError {
 impl std::error::Error for DriverEncodeOpenError {}
 
 fn backend_name(b: u32) -> &'static str {
-    match b {
-        1 => "nvenc",
-        2 => "amf",
-        3 => "qsv",
-        4 => "pyrowave",
-        5 => "mf",
-        _ => "?",
-    }
+    pf_driver_proto::encode::backend::name(b).unwrap_or("?")
 }
 
 fn nul_tag(name: &[u8; 32]) -> String {

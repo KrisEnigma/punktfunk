@@ -263,9 +263,9 @@ pub mod control {
     pub struct EncodeProbeRequest {
         /// OS target of the monitor to tap; `0` = whichever drain worker offers first.
         pub target_id: u32,
-        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave, 5 Media Foundation.
+        /// A [`backend`](crate::encode::backend) id.
         pub backend: u32,
-        /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave (backend 4 only, and only with backend 4).
+        /// A [`codec`](crate::encode::codec) id. PyroWave pairs only with the PyroWave backend.
         pub codec: u32,
         /// `0` = the backend's own input for `flags`, as `SET_ENCODE` would choose it.
         /// `1` = force BGRA→NV12 on the video engine (the NVENC colour A/B); PyroWave ignores it.
@@ -898,6 +898,59 @@ pub mod encode {
     use super::ctl_code;
     use bytemuck::{Pod, Zeroable};
 
+    /// Encoder backend ids, as they travel in [`SetEncodeRequest::backends`],
+    /// [`SetEncodeReply::backend_opened`] and
+    /// [`EncodeProbeRequest::backend`](crate::control::EncodeProbeRequest::backend).
+    ///
+    /// The host picks by these numbers, the driver opens by them and names them back, so both
+    /// sides read the table here rather than restating it. A doc that restated it had already
+    /// drifted: Media Foundation was missing from two of them while the host was sending it.
+    pub mod backend {
+        pub const NVENC: u32 = 1;
+        pub const AMF: u32 = 2;
+        pub const QSV: u32 = 3;
+        pub const PYROWAVE: u32 = 4;
+        pub const MEDIA_FOUNDATION: u32 = 5;
+
+        /// Indexed by `id - 1`; also the stage tag a `SET_ENCODE` reply carries.
+        pub const NAMES: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
+
+        #[must_use]
+        pub fn name(id: u32) -> Option<&'static str> {
+            NAMES.get(id.checked_sub(1)? as usize).copied()
+        }
+
+        /// Whether `id` may appear in [`SetEncodeRequest::backends`]. `0` terminates the list, so
+        /// it passes here and is simply never opened.
+        #[must_use]
+        pub const fn listed(id: u32) -> bool {
+            (id as usize) <= NAMES.len()
+        }
+    }
+
+    /// Codec ids for [`SetEncodeRequest::codec`] and
+    /// [`EncodeProbeRequest::codec`](crate::control::EncodeProbeRequest::codec). PyroWave is a
+    /// codec AND a backend, and only ever pairs with itself.
+    pub mod codec {
+        pub const H264: u32 = 1;
+        pub const HEVC: u32 = 2;
+        pub const AV1: u32 = 3;
+        pub const PYROWAVE: u32 = 4;
+
+        pub const NAMES: [&str; 4] = ["h264", "hevc", "av1", "pyrowave"];
+
+        #[must_use]
+        pub fn name(id: u32) -> Option<&'static str> {
+            NAMES.get(id.checked_sub(1)? as usize).copied()
+        }
+
+        /// Whether `id` names a codec. Unlike a backend list, `0` is not legal here.
+        #[must_use]
+        pub const fn valid(id: u32) -> bool {
+            id != 0 && (id as usize) <= NAMES.len()
+        }
+    }
+
     /// The publish cell of [`au::AuHeader::latest`]: `(generation << 40) | (seq << 8) | slot`,
     /// with `generation` 24-bit, `seq` 32-bit and `slot` 8-bit. `generation` is bumped on every
     /// [`IOCTL_SET_ENCODE`], so a publish an old encoder left behind is rejected, never consumed.
@@ -963,8 +1016,8 @@ pub mod encode {
         pub event: u64,
         /// Bytes the host allocated for the section — [`au::section_bytes`].
         pub section_bytes: u32,
-        /// 1 H264, 2 HEVC, 3 AV1, 4 PyroWave — the
-        /// [`EncodeProbeRequest`](crate::control::EncodeProbeRequest) numbering.
+        /// A [`codec`] id, the same numbering
+        /// [`EncodeProbeRequest`](crate::control::EncodeProbeRequest) uses.
         pub codec: u32,
         /// `0` = 4:2:0, `1` = 4:4:4. Not the H.264/HEVC `chroma_format_idc`.
         pub chroma: u32,
@@ -983,7 +1036,7 @@ pub mod encode {
         pub wire_chunk_bytes: u32,
         /// First `wire_seq` the driver stamps, so the host's `au_seq` domain survives a DriverCycle.
         pub wire_seq_base: u32,
-        /// Ordered preference, 0-terminated: 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave.
+        /// Ordered preference, 0-terminated. [`backend`] ids.
         pub backends: [u32; 4],
         /// Reserved; send `0`.
         pub flags: u32,
@@ -1095,7 +1148,7 @@ pub mod encode {
     pub struct SetEncodeReply {
         /// One of the `SET_ENCODE_*` codes.
         pub status: u32,
-        /// 1 NVENC, 2 AMF, 3 QSV, 4 PyroWave; `0` when `status` is non-zero.
+        /// The [`backend`] id that opened; `0` when `status` is non-zero.
         pub backend_opened: u32,
         /// What the opened backend can actually do.
         pub caps: EncoderCapsWire,
@@ -2599,6 +2652,43 @@ mod tests {
         );
         assert_eq!(partial[141], 0);
         assert_eq!(partial[142], 0);
+    }
+
+    /// The wire numbering, which the host writes and the driver dispatches on. A silent
+    /// renumber swaps one encoder for another on a shipped driver, so pin it here.
+    #[test]
+    fn backend_and_codec_ids_are_the_wire_numbering() {
+        use encode::{backend as be, codec as cc};
+        assert_eq!(
+            [
+                be::NVENC,
+                be::AMF,
+                be::QSV,
+                be::PYROWAVE,
+                be::MEDIA_FOUNDATION
+            ],
+            [1, 2, 3, 4, 5]
+        );
+        assert_eq!([cc::H264, cc::HEVC, cc::AV1, cc::PYROWAVE], [1, 2, 3, 4]);
+        // The driver indexes NAMES by `id - 1` and replies with the entry it found.
+        assert_eq!(be::name(be::MEDIA_FOUNDATION), Some("mf"));
+        assert_eq!(be::NAMES[be::NVENC as usize - 1], "nvenc");
+        assert_eq!(cc::name(cc::AV1), Some("av1"));
+        assert_eq!(be::name(0), None, "0 terminates a list, it names nothing");
+        assert_eq!(be::name(6), None);
+    }
+
+    /// `listed` guards a 0-terminated preference list; `valid` guards a single required field.
+    /// Reading either as the other would let a `SET_ENCODE` through with no codec at all.
+    #[test]
+    fn a_terminator_is_listable_but_never_a_valid_codec() {
+        use encode::{backend as be, codec as cc};
+        assert!(be::listed(0), "the list terminator");
+        assert!(be::listed(be::MEDIA_FOUNDATION), "the widest id");
+        assert!(!be::listed(6));
+        assert!(!cc::valid(0), "a codec field is required");
+        assert!(cc::valid(cc::PYROWAVE));
+        assert!(!cc::valid(5));
     }
 
     /// One advertised resolution, spelled short enough for the mode-list tests to read.
