@@ -82,7 +82,7 @@ mod interactive;
 // `%ProgramData%` grants Users create, while the Unix config dir is 0700 from birth.
 mod planted {
     #[cfg(target_os = "windows")]
-    pub(crate) use crate::install::quarantine_planted_secret;
+    pub(crate) use pf_paths_win::quarantine_planted_secret;
     #[cfg(not(target_os = "windows"))]
     pub(crate) fn quarantine_planted_secret(_path: &std::path::Path) -> bool {
         false
