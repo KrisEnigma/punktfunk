@@ -11,41 +11,17 @@
 use super::*;
 
 impl IddPushCapturer {
-    /// Two user32 reads; 8 ms so a ≥150 ms hole still gets many samples.
-    const CURSOR_WITNESS_INTERVAL: Duration = Duration::from_millis(8);
-
-    /// The damage witness (see the `cursor_*` field docs): fold the PREVIOUS call's pending
-    /// delta into the gap accumulator — if that call had consumed a fresh frame, the fresh-frame
-    /// bookkeeping would have zeroed the pending, so whatever survives belongs to the gap — then
-    /// take a fresh rate-limited `GetCursorPos` sample into the pending slot. The one-call lag is
-    /// what keeps the stall-ending frame's own cursor move out of the gap it ended.
-    ///
-    /// `GetCursorPos` is global, not per-display: a delta of 0 therefore proves the cursor sat
-    /// still EVERYWHERE (the demotion direction is strict), while a delta > 0 on a
-    /// parallel-displays host may be a sibling display's motion — that direction only ever
-    /// upholds today's CONTENT-SILENCE labeling, never worsens it.
+    /// Feed [`CursorWitness`] the one thing it cannot read for itself. The rule — the one-call
+    /// lag, the rate limit, the kick blind spot — lives there and is tested there.
     pub(super) fn sample_cursor_witness(&mut self) {
-        // The compose kick parks the pointer itself (~70 ms on the HID path): its travel is not
-        // user input, and counting it would escalate an idle desktop into a reset.
-        if self.last_kick.elapsed() < Duration::from_millis(200) {
-            self.cursor_last = None;
-            self.cursor_pending_px = 0;
-            return;
-        }
-        self.cursor_gap_px = self.cursor_gap_px.saturating_add(self.cursor_pending_px);
-        self.cursor_pending_px = 0;
-        if self.cursor_sampled_at.elapsed() < Self::CURSOR_WITNESS_INTERVAL {
-            return;
-        }
-        self.cursor_sampled_at = Instant::now();
-        let mut pos = POINT::default();
-        // SAFETY: plain FFI; `pos` is a valid out-param for this synchronous call.
-        if unsafe { GetCursorPos(&mut pos) }.is_ok() {
-            if let Some((x, y)) = self.cursor_last {
-                self.cursor_pending_px = pos.x.abs_diff(x).saturating_add(pos.y.abs_diff(y));
-            }
-            self.cursor_last = Some((pos.x, pos.y));
-        }
+        let kicked = self.last_kick.elapsed() < cursor_witness::KICK_BLIND;
+        self.cursor.sample(Instant::now(), kicked, || {
+            let mut pos = POINT::default();
+            // SAFETY: plain FFI; `pos` is a valid out-param for this synchronous call.
+            unsafe { GetCursorPos(&mut pos) }
+                .is_ok()
+                .then_some((pos.x, pos.y))
+        });
     }
 
     /// Staged recovery (immunity plan WP12/WP13). A wedged-but-ALIVE display answers
@@ -73,7 +49,7 @@ impl IddPushCapturer {
             cursor_gap_px: if self.composite_cursor {
                 0
             } else {
-                self.cursor_gap_px
+                self.cursor.gap_px()
             },
             recreating: self.recovering_since.is_some(),
             secure_desktop: self.secure_active,

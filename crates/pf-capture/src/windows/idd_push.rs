@@ -10,6 +10,7 @@
 
 use super::dxgi::WinCaptureTarget;
 use super::{CapturedFrame, Capturer, FramePayload, PixelFormat};
+use crate::cursor_witness::CursorWitness;
 use anyhow::{bail, Context, Result};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -307,13 +308,10 @@ pub struct IddPushCapturer {
     stall_watch: StallWatch,
     /// The stalest drain heartbeat (µs) seen since the last fresh frame.
     max_hb_age_us: u64,
-    /// Damage witness for [`stall::StallEvidence::cursor_moved_px`]. Pending sample
-    /// is held one call so the stall-ending move is not counted into the gap it ended.
-    /// Sampled at most every [`Self::CURSOR_WITNESS_INTERVAL`]; user32, never the display-config lock.
-    cursor_last: Option<(i32, i32)>,
-    cursor_gap_px: u32,
-    cursor_pending_px: u32,
-    cursor_sampled_at: Instant,
+    /// Damage witness for [`stall::StallEvidence::cursor_moved_px`] and the recovery
+    /// classifier. user32 only, never the display-config lock; the rule itself is
+    /// [`crate::cursor_witness`].
+    cursor: CursorWitness,
     /// Micro-probe singleton; `None` unless [`diag_dir`] is on. A missing window reads as
     /// never-stalled, so a report never invents a leg.
     probes: Option<Arc<probes::ProbeEngine>>,

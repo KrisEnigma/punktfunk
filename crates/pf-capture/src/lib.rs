@@ -647,6 +647,10 @@ pub use idd_push::{open_wudfhost, verify_is_wudfhost};
 // The AU section's reader half. Pure over a mapped view, so its tests run on every target.
 #[path = "windows/au_reader.rs"]
 mod au_reader;
+// The recovery classifier's cursor-damage witness. Pure over `(now, kicked, position)` for the
+// same reason: the rule that decides whether a silent desktop resets gets tests on every target.
+#[path = "windows/cursor_witness.rs"]
+mod cursor_witness;
 #[cfg(target_os = "windows")]
 pub use idd_push::driver_encode::{open_driver_encoder, DriverEncodeOpenError, DriverEncodeParams};
 #[cfg(target_os = "linux")]
