@@ -62,6 +62,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`EncodedFrame::recovery_point` marks an encoder-driven intra refresh wave.** The Linux
+  Vulkan encoder answers a reference invalidation it cannot anchor with a row-based wave
+  (`VK_KHR_video_encode_intra_refresh`, RADV on AMD) instead of an IDR, tagging the wave's start
+  and close AU `USER_FLAG_RECOVERY_POINT` so the client's existing two-mark lift heals in one
+  cycle without the bitrate spike. Nothing changes on the wire or for a backend that leaves the
+  field `false`; `PUNKTFUNK_VK_INTRA_REFRESH=0` restores the IDR, `PUNKTFUNK_VK_IR_CYCLE` pins
+  the cycle length in frames.
 - **`Console::focus_announcement` names the focused row for a screen reader.** The Skia console
   has no accessibility node tree, so the driver hands the host a string for home, the library and
   settings (`None` elsewhere) and Android speaks it through the new `{"announce": …}` event on

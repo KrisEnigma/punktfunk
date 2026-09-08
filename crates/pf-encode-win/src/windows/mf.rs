@@ -616,6 +616,7 @@ fn process_output(shared: &Shared) -> Result<EncodedFrame> {
         pts_ns: meta.map_or(0, |m| m.pts_ns),
         keyframe,
         recovery_anchor: false,
+        recovery_point: false,
         chunk_aligned: false,
     })
 }

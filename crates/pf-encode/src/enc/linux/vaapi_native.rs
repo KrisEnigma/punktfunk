@@ -241,6 +241,7 @@ impl Encoder for NativeVaapiEncoder {
             pts_ns,
             keyframe: pic.is_idr,
             recovery_anchor: pic.recovery_anchor,
+            recovery_point: false,
             chunk_aligned: false,
         });
         Ok(())

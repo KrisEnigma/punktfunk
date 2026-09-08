@@ -134,6 +134,50 @@ struct IntraRefreshCaps {
     max_cycle: u32,
 }
 
+/// An on-demand intra refresh wave in flight. `index` is the frame about to be encoded; the
+/// wave closes when it reaches `cycle`. Replaces the IDR an RFI decline used to force: the
+/// picture heals over `cycle` frames with no bitrate spike. The start AU and the close AU
+/// carry `recovery_point`, which the client counts as its two-mark lift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Wave {
+    cycle: u32,
+    index: u32,
+}
+
+/// Frames per wave: one 64-px CTB row per frame at most (RADV refreshes nothing on indices
+/// past the row count), a quarter second at most (the freeze the client holds during the
+/// wave), the driver's ceiling, and never below the spec's 2. `PUNKTFUNK_VK_IR_CYCLE` pins it.
+fn wave_cycle(coded_height: u32, fps: u32, max_cycle: u32, pinned: Option<u32>) -> u32 {
+    let rows = coded_height.div_ceil(64).max(2);
+    let wanted = pinned.unwrap_or((fps / 4).max(2));
+    wanted.min(rows).min(max_cycle).max(2)
+}
+
+/// The two per-frame structs of a wave frame, built unconditionally so a record path can
+/// chain them only when the frame carries the refresh bit. Zero-valued without a wave.
+fn intra_refresh_chain(
+    wave: Option<Wave>,
+) -> (
+    super::vk_intra_refresh::VideoEncodeIntraRefreshInfoKHR,
+    super::vk_intra_refresh::VideoReferenceIntraRefreshInfoKHR,
+) {
+    use super::vk_intra_refresh as vir;
+    let (cycle, index) = wave.map_or((0, 0), |w| (w.cycle, w.index));
+    (
+        vir::VideoEncodeIntraRefreshInfoKHR {
+            s_type: vir::stype(vir::ST_INFO),
+            p_next: std::ptr::null(),
+            intra_refresh_cycle_duration: cycle,
+            intra_refresh_index: index,
+        },
+        vir::VideoReferenceIntraRefreshInfoKHR {
+            s_type: vir::stype(vir::ST_REFERENCE_INFO),
+            p_next: std::ptr::null(),
+            dirty_intra_refresh_regions: cycle - index,
+        },
+    )
+}
+
 /// Whether this session may run a row-based intra refresh wave. Needs the extension, its
 /// feature, `BLOCK_ROW_BASED`, regions independent of our single slice, a cycle of at least 2
 /// and one active reference. `PUNKTFUNK_VK_INTRA_REFRESH=0` opts out. `Err` is the log reason.
@@ -546,6 +590,7 @@ struct Frame {
     pts_ns: u64,
     keyframe: bool,
     recovery_anchor: bool,
+    recovery_point: bool,
     /// Deferred-requeue hold cloned at submit, dropped when the fence signals. Extends
     /// "producer must not rewrite" across the async GPU read; the host's clone dies at the
     /// next capture, which with a ring of 2 is before this slot finishes.
@@ -635,8 +680,10 @@ pub struct VulkanVideoEncoder {
     /// depth, so it is carried here rather than re-derived.
     ten_bit: bool,
     /// Row-based intra refresh is enabled on the session and its device. `None` = unavailable.
-    #[allow(dead_code)] // read by the on-demand wave, the next change
     intra_refresh: Option<IntraRefreshCaps>,
+    /// Wave in flight, if any. Set at frame-build, read by the record paths for that same
+    /// frame, advanced in `post_submit_bookkeeping`. An IDR or an anchor P abandons it.
+    wave: Option<Wave>,
 
     /// Rate not yet installed. Next `record_submit` emits `ENCODE_RATE_CONTROL` (or folds it
     /// into the first frame's RESET+RC), then promotes it into `bitrate` — which must keep
@@ -1525,6 +1572,7 @@ impl VulkanVideoEncoder {
             native_nv12,
             ten_bit,
             intra_refresh,
+            wave: None,
             pending_bitrate: None,
             width: w,
             height: h,
@@ -2022,12 +2070,38 @@ impl VulkanVideoEncoder {
                             "vulkan-encode: emitting clean recovery-anchor P-frame (references a known-good frame older than the loss, no IDR)"
                         );
                     }
-                    None => {
-                        is_idr = true;
-                        tracing::debug!(loss_first = lf, "vulkan-encode: no resident reference older than the loss — forcing IDR");
-                    }
+                    None => match self.intra_refresh {
+                        // A wave in flight restarts: the client re-armed at this loss and
+                        // counts marks from there, so only a fresh start + close lift it.
+                        Some(ir) => {
+                            let cycle = wave_cycle(
+                                self.height,
+                                self.fps,
+                                ir.max_cycle,
+                                std::env::var("PUNKTFUNK_VK_IR_CYCLE")
+                                    .ok()
+                                    .and_then(|v| v.parse().ok()),
+                            );
+                            self.wave = Some(Wave { cycle, index: 0 });
+                            tracing::debug!(
+                                loss_first = lf,
+                                cycle,
+                                "vulkan-encode: no resident reference older than the loss — \
+                                 starting an intra refresh wave instead of an IDR"
+                            );
+                        }
+                        None => {
+                            is_idr = true;
+                            tracing::debug!(loss_first = lf, "vulkan-encode: no resident reference older than the loss — forcing IDR");
+                        }
+                    },
                 }
             }
+        }
+        // An IDR or an anchor P is clean on its own; a wave under way is abandoned. Both are
+        // legal successors: neither references a picture with dirty regions.
+        if is_idr || recovery {
+            self.wave = None;
         }
         let poc: i32 = if is_idr { 0 } else { self.poc };
         let mut setup_idx = (self.enc_count % DPB_SLOTS as u64) as usize;
@@ -2827,12 +2901,28 @@ impl VulkanVideoEncoder {
         self.frames[slot].pts_ns = pts_ns;
         self.frames[slot].keyframe = is_idr;
         self.frames[slot].recovery_anchor = recovery;
+        // The wave's start and close are the client's two marks. Every wave picture but the
+        // close is part dirty, so it never becomes an RFI anchor: `slot_wire` stays -1.
+        let wave = self.wave;
+        let closes = wave.is_some_and(|w| w.index + 1 == w.cycle);
+        self.frames[slot].recovery_point = wave.is_some_and(|w| w.index == 0) || closes;
         if is_idr {
             self.slot_wire.iter_mut().for_each(|s| *s = -1);
             self.slot_poc.iter_mut().for_each(|s| *s = -1);
         }
-        self.slot_wire[setup_idx] = wire;
+        self.slot_wire[setup_idx] = if wave.is_some() && !closes { -1 } else { wire };
         self.slot_poc[setup_idx] = poc;
+        if let Some(w) = &mut self.wave {
+            w.index += 1;
+            if closes {
+                tracing::debug!(
+                    cycle = w.cycle,
+                    wire,
+                    "vulkan-encode: intra refresh wave closed"
+                );
+                self.wave = None;
+            }
+        }
         self.prev_slot = setup_idx;
         self.poc = poc + 1;
         self.enc_count += 1;
@@ -2956,6 +3046,7 @@ impl VulkanVideoEncoder {
         setup_idx: usize,
         poc: i32,
     ) -> Result<()> {
+        use super::vk_intra_refresh as vir;
         use ash::vk::native as h;
         // Aligned size for app-aligned sessions (pairs with aligned SPS); render size for
         // native NV12's true-size headers.
@@ -3062,6 +3153,13 @@ impl VulkanVideoEncoder {
             vk::VideoEncodeH265DpbSlotInfoKHR::default().std_reference_info(&ref_std);
         let mut ref_dpb_b =
             vk::VideoEncodeH265DpbSlotInfoKHR::default().std_reference_info(&ref_std);
+        // Wave frame: the reference is the previous frame, `cycle - index` of its regions
+        // still dirty (VUID-10843). Absent = 0, which every non-wave frame requires.
+        // `&mut`: `push_next` below writes `ref_ir.p_next` through the chain.
+        let (ir_info, mut ref_ir) = intra_refresh_chain(self.wave);
+        if self.wave.is_some() {
+            ref_dpb_b.p_next = &mut ref_ir as *mut _ as *const c_void;
+        }
         let ref_begin = vk::VideoReferenceSlotInfoKHR::default()
             .slot_index(ref_slot as i32)
             .picture_resource(&ref_res)
@@ -3166,6 +3264,12 @@ impl VulkanVideoEncoder {
         if !is_idr {
             enc = enc.reference_slots(&enc_refs);
         }
+        let mut ir_info = ir_info;
+        if self.wave.is_some() {
+            enc.flags |= vk::VideoEncodeFlagsKHR::from_raw(vir::ENCODE_INTRA_REFRESH_BIT);
+            ir_info.p_next = enc.p_next;
+            enc.p_next = &ir_info as *const _ as *const c_void;
+        }
         (self.venc_dev.fp().cmd_encode_video_khr)(cmd, &enc);
         dev.cmd_end_query(cmd, query_pool, 0);
         (self.vq_dev.fp().cmd_end_video_coding_khr)(cmd, &vk::VideoEndCodingInfoKHR::default());
@@ -3173,7 +3277,7 @@ impl VulkanVideoEncoder {
         Ok(())
     }
 
-    /// AV1 Std structs + begin/encode/end. IDR or recovery breaks the CDF chain
+    /// AV1 Std structs + begin/encode/end. IDR, recovery and a wave start break the CDF chain
     /// (`primary_ref_frame = PRIMARY_REF_NONE` + `error_resilient_mode`). A normal P inherits
     /// context (name 0 → `ref_slot`). AV1's 8 virtual slots persist until `refresh_frame_flags`
     /// overwrites them — no per-frame RPS.
@@ -3194,6 +3298,7 @@ impl VulkanVideoEncoder {
         order: i32,
     ) -> Result<()> {
         use super::vk_av1_encode as av1;
+        use super::vk_intra_refresh as vir;
         use ash::vk::native as h;
         // Aligned size for app-aligned sessions (pairs with aligned SPS); render size for
         // native NV12's true-size headers.
@@ -3246,8 +3351,9 @@ impl VulkanVideoEncoder {
             ref_order_hint[i] = poc.max(0) as u8;
         }
 
-        // Recovery/IDR: error-resilient, no CDF inherit. Normal P inherits from name 0 → `ref_slot`.
-        let independent = is_idr || recovery;
+        // Recovery/IDR/wave start: error-resilient, no CDF inherit — the client's CDFs for a
+        // concealed frame are undefined. Normal P inherits from name 0 → `ref_slot`.
+        let independent = is_idr || recovery || self.wave.is_some_and(|w| w.index == 0);
         let mut pic_flags: av1::StdVideoEncodeAV1PictureInfoFlags = std::mem::zeroed();
         pic_flags.set_show_frame(1);
         if independent {
@@ -3356,10 +3462,18 @@ impl VulkanVideoEncoder {
             .slot_index(ref_slot as i32)
             .picture_resource(&ref_res);
         ref_begin.p_next = &ref_dpb as *const _ as *const c_void;
+        // Wave frame: the reference is the previous frame, `cycle - index` of its regions
+        // still dirty (VUID-10843). Absent = 0, which every non-wave frame requires.
+        let (mut ir_info, mut ref_ir) = intra_refresh_chain(self.wave);
+        ref_ir.p_next = &ref_dpb as *const _ as *const c_void;
         let mut ref_enc = vk::VideoReferenceSlotInfoKHR::default()
             .slot_index(ref_slot as i32)
             .picture_resource(&ref_res);
-        ref_enc.p_next = &ref_dpb as *const _ as *const c_void;
+        ref_enc.p_next = if self.wave.is_some() {
+            &mut ref_ir as *mut _ as *const c_void
+        } else {
+            &ref_dpb as *const _ as *const c_void
+        };
         let begin_p = [ref_begin, begin_setup];
         let begin_i = [begin_setup];
         let enc_refs = [ref_enc];
@@ -3455,6 +3569,11 @@ impl VulkanVideoEncoder {
             enc = enc.reference_slots(&enc_refs);
         }
         enc.p_next = &av1_pic as *const _ as *const c_void;
+        if self.wave.is_some() {
+            enc.flags |= vk::VideoEncodeFlagsKHR::from_raw(vir::ENCODE_INTRA_REFRESH_BIT);
+            ir_info.p_next = enc.p_next;
+            enc.p_next = &ir_info as *const _ as *const c_void;
+        }
         (self.venc_dev.fp().cmd_encode_video_khr)(cmd, &enc);
         dev.cmd_end_query(cmd, query_pool, 0);
         (self.vq_dev.fp().cmd_end_video_coding_khr)(cmd, &vk::VideoEndCodingInfoKHR::default());
@@ -3550,6 +3669,7 @@ impl VulkanVideoEncoder {
             pts_ns: f.pts_ns,
             keyframe: f.keyframe,
             recovery_anchor: f.recovery_anchor,
+            recovery_point: f.recovery_point,
             chunk_aligned: false,
         })
     }
@@ -3636,6 +3756,12 @@ impl Encoder for VulkanVideoEncoder {
         }
         match plan.anchor {
             Some(_) => {
+                self.pending_loss = Some(first_frame);
+                true
+            }
+            // No anchor, but a wave heals without one: frame-build starts it from this arm.
+            // `true` keeps the caller on its RFI bookkeeping instead of the keyframe path.
+            None if self.intra_refresh.is_some() => {
                 self.pending_loss = Some(first_frame);
                 true
             }
@@ -3749,6 +3875,7 @@ impl Encoder for VulkanVideoEncoder {
         self.first_frame = true;
         self.force_kf = false;
         self.pending_loss = None;
+        self.wave = None;
         self.poc = 0;
         self.slot_wire.iter_mut().for_each(|s| *s = -1);
         self.slot_poc.iter_mut().for_each(|s| *s = -1);
@@ -3977,7 +4104,9 @@ use self::build::{
 
 #[cfg(test)]
 mod tests {
-    use super::{build_h265_rps_s0, intra_refresh_caps, parse_rgb_request, VulkanVideoEncoder};
+    use super::{
+        build_h265_rps_s0, intra_refresh_caps, parse_rgb_request, wave_cycle, VulkanVideoEncoder,
+    };
     use crate::{Codec, Encoder};
     use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 
@@ -4050,6 +4179,31 @@ mod tests {
         let mut buf = vec![0u8; (w * h * 4) as usize];
         for px in buf.chunks_exact_mut(4) {
             px.copy_from_slice(&fill);
+        }
+        CapturedFrame {
+            provenance: Default::default(),
+            width: w,
+            height: h,
+            pts_ns,
+            format: PixelFormat::Bgrx,
+            payload: FramePayload::Cpu(buf),
+            cursor: None,
+        }
+    }
+
+    /// BGRX frame of horizontal bands scrolled down by `shift` rows, with a diagonal so no
+    /// two rows are alike: the encoder must reach for rows above to predict it.
+    fn cpu_frame_scroll(w: u32, h: u32, pts_ns: u64, shift: u32) -> CapturedFrame {
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            let band = ((y + h - shift % h) % h) as u8;
+            for x in 0..w {
+                let px = ((y * w + x) * 4) as usize;
+                buf[px] = band.wrapping_mul(3);
+                buf[px + 1] = band ^ (x as u8);
+                buf[px + 2] = 255 - band;
+                buf[px + 3] = 255;
+            }
         }
         CapturedFrame {
             provenance: Default::default(),
@@ -4205,6 +4359,143 @@ mod tests {
         if let Some(aus) = run_smoke_opts(Codec::Av1, true) {
             dump_smoke(&aus, "rgb.obu");
         }
+    }
+
+    /// Rows cap the cycle (1080p = 17 rows), a quarter second caps it at 60 fps, the driver
+    /// ceiling and the pin override, never below 2.
+    #[test]
+    fn wave_cycle_caps() {
+        assert_eq!(wave_cycle(1080, 60, 256, None), 15);
+        assert_eq!(wave_cycle(1080, 120, 256, None), 17);
+        assert_eq!(wave_cycle(2160, 120, 256, None), 30);
+        assert_eq!(wave_cycle(1080, 60, 8, None), 8);
+        assert_eq!(wave_cycle(1080, 60, 256, Some(4)), 4);
+        assert_eq!(wave_cycle(1080, 60, 256, Some(0)), 2);
+        assert_eq!(wave_cycle(64, 60, 256, None), 2);
+        assert_eq!(wave_cycle(256, 60, 256, None), 4);
+    }
+
+    /// Wave smoke frame plan, 256×256 (4 CTB rows → cycle 4): IDR + 2 P, then an RFI with
+    /// every reference tainted, which used to force an IDR and now starts a wave.
+    const WAVE_START: usize = 3;
+    const WAVE_CYCLE: usize = 4;
+
+    /// The wave replaces the IDR: start mark, plain wave frames, close mark, no IDR, no anchor.
+    /// A later loss of the plain P after the wave must re-anchor on the close (a fully swept
+    /// picture is trusted) while mid-wave pictures never are.
+    fn run_wave_smoke(codec: Codec, ext: &str) {
+        let (w, h) = (256u32, 256u32);
+        let mut enc =
+            VulkanVideoEncoder::open_opts(codec, w, h, 60, 10_000_000, false).expect("open");
+        if enc.intra_refresh.is_none() {
+            eprintln!("run_wave_smoke: intra refresh unavailable on this driver — skipping");
+            return;
+        }
+        let after_wave = WAVE_START + WAVE_CYCLE; // the plain P after the close
+        let anchor_p = after_wave + 1; // re-anchors on the close after `after_wave` is lost
+        let mut aus: Vec<crate::EncodedFrame> = Vec::new();
+        for i in 0..=anchor_p {
+            if i == WAVE_START {
+                assert!(
+                    enc.invalidate_ref_frames(0, WAVE_START as i64 - 1),
+                    "a wave-capable encoder answers an RFI with no anchor"
+                );
+                assert!(
+                    enc.wave.is_none(),
+                    "the wave starts at frame-build, not here"
+                );
+            }
+            if i == anchor_p {
+                assert!(
+                    enc.invalidate_ref_frames(after_wave as i64, after_wave as i64),
+                    "the wave close is a trusted anchor"
+                );
+            }
+            // Scrolling texture: vertical motion makes the encoder reach for rows above,
+            // which is what the clean-region constraint has to refuse across a stripe.
+            enc.submit_indexed(
+                &cpu_frame_scroll(w, h, i as u64 * 16_666_667, i as u32 * 6),
+                i as u32,
+            )
+            .expect("submit");
+            if i == WAVE_START {
+                assert_eq!(
+                    enc.wave,
+                    Some(super::Wave {
+                        cycle: WAVE_CYCLE as u32,
+                        index: 1
+                    })
+                );
+            }
+            while let Some(au) = enc.poll().expect("poll") {
+                aus.push(au);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(au) = enc.poll().expect("poll") {
+            aus.push(au);
+        }
+        assert_eq!(aus.len(), anchor_p + 1, "one AU per submitted frame");
+        assert!(enc.wave.is_none(), "the wave closed");
+
+        assert!(aus[0].keyframe, "frame 0 is the IDR");
+        for (i, au) in aus.iter().enumerate().skip(1) {
+            assert!(!au.data.is_empty(), "AU {i} empty");
+            assert!(
+                !au.keyframe,
+                "AU {i}: no IDR after frame 0 — the wave replaced it"
+            );
+            let start = i == WAVE_START;
+            let close = i == WAVE_START + WAVE_CYCLE - 1;
+            assert_eq!(
+                au.recovery_point,
+                start || close,
+                "AU {i}: recovery_point marks exactly the wave start and close"
+            );
+            assert_eq!(
+                au.recovery_anchor,
+                i == anchor_p,
+                "AU {i}: the only anchor P answers the post-wave loss"
+            );
+        }
+        // Full stream, and the client's view with the pre-wave P frames lost: decoded side by
+        // side, the close frame must match the full decode while the frames before it differ.
+        if let Ok(home) = std::env::var("HOME") {
+            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
+            let p = format!("{home}/vkenc-wave-smoke.{ext}");
+            let _ = std::fs::write(&p, &full);
+            let dropped: Vec<u8> = aus
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i == 0 || *i >= WAVE_START)
+                .flat_map(|(_, a)| a.data.iter().copied())
+                .collect();
+            let p2 = format!("{home}/vkenc-wave-smoke-dropped.{ext}");
+            let _ = std::fs::write(&p2, &dropped);
+            eprintln!(
+                "run_wave_smoke: wrote {p} ({} bytes, {} AUs) and {p2} (frames 1..{} dropped; \
+                 the close at {} must decode identical to the full stream)",
+                full.len(),
+                aus.len(),
+                WAVE_START,
+                WAVE_START + WAVE_CYCLE - 1
+            );
+        }
+    }
+
+    /// HEVC wave smoke. Run under `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`: the layers
+    /// are the only check of the dirty-region bookkeeping, RADV ignores it.
+    #[test]
+    #[ignore = "needs VK_KHR_video_encode_intra_refresh (RADV >= Mesa 25.3 on VCN hardware)"]
+    fn vulkan_wave_smoke() {
+        run_wave_smoke(Codec::H265, "h265");
+    }
+
+    /// AV1 twin of [`vulkan_wave_smoke`]; the wave start is error-resilient.
+    #[test]
+    #[ignore = "needs VK_KHR_video_encode_intra_refresh (RADV >= Mesa 25.3 on VCN hardware)"]
+    fn vulkan_wave_smoke_av1() {
+        run_wave_smoke(Codec::Av1, "obu");
     }
 
     /// Packed 2:10:10:10 (`xRGB_210LE` / `PixelFormat::X2Rgb10`) CPU frame. Channels are 10-bit

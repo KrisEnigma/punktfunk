@@ -1673,6 +1673,7 @@ impl NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: false,
                 chunk_aligned: false,
             });
         Ok(())
@@ -2185,6 +2186,7 @@ impl Encoder for NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: false,
                 chunk_aligned: false,
             }))
         }
@@ -2254,6 +2256,7 @@ impl Encoder for NvencCudaEncoder {
                             pts_ns,
                             keyframe: idr_hint,
                             recovery_anchor: anchor,
+                            recovery_point: false,
                             chunk_aligned: false,
                             first,
                             last: false,
@@ -2345,6 +2348,7 @@ impl Encoder for NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: false,
                 chunk_aligned: false,
                 first: !cs.opened,
                 last: true,
