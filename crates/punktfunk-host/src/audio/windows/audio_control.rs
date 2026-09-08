@@ -68,8 +68,11 @@ pub(crate) fn probe_capture_rate() -> super::CaptureRate {
         tracing::debug!(error = %e, "hi-res capture-rate probe: CoInitializeEx (MTA) failed");
         return super::CaptureRate::Unknown;
     }
-    let renders = list_endpoints(Direction::Render);
-    let captures = list_endpoints(Direction::Capture);
+    // The same enumeration `wire_now_full` plans from, per the lockstep rule above: a bare
+    // `list_endpoints` can miss a minted endpoint that is still appearing, and the probe would
+    // then read the format of a device the capture will not use. Enumeration only — minting
+    // stays out of this path, as the doc says.
+    let (renders, captures) = enumerate_including_minted();
     let want = std::env::var("PUNKTFUNK_MIC_DEVICE")
         .ok()
         .map(|s| s.to_lowercase());
