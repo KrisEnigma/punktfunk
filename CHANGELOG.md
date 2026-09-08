@@ -414,6 +414,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **AV1 is offered again on AMD and Intel Linux hosts.** The advertisement asked only the native
+  VAAPI probe, which answers for H.264 and HEVC, so dropping libavcodec also dropped the AV1 bit
+  every packaged build can still open through Vulkan Video; the probe now covers both arms, caches
+  per selected GPU like its Windows twin, and feeds `/serverinfo` the same narrowed answer. Nothing
+  to configure — clients that prefer AV1 negotiate it again.
 - **Trackpad scrolling on a KDE host moves the page as far as the fingers went.** KWin's
   `fake_input` carries a bare axis with no source, which every toolkit reads as ten units per
   wheel click, so injecting a measured distance there spent one click per 10 px and scrolled
