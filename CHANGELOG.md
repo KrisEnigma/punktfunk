@@ -423,6 +423,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Deleting a Moonlight device's access record ends its live session instead of widening it
+  to full control.** The GameStream control thread read the deletion as "no record, ungoverned"
+  and lifted every restriction mid-stream; it now ends the session as the native plane does, and
+  a fresh launch is ungoverned as before. Nothing to do — a record still only exists once the
+  console can create one for a Moonlight row.
 - **AV1 is offered again on AMD and Intel Linux hosts.** The advertisement asked only the native
   VAAPI probe, which answers for H.264 and HEVC, so dropping libavcodec also dropped the AV1 bit
   every packaged build can still open through Vulkan Video; the probe now covers both arms, caches

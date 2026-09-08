@@ -74,6 +74,8 @@ struct SessionAccess {
     mask: u32,
     /// Host-wall-clock expiry, unix seconds; `None` = permanent. Checked each tick.
     deadline: Option<i64>,
+    /// The grants record was deleted while this session was live. Terminal, like expiry.
+    revoked: bool,
 }
 
 impl SessionAccess {
@@ -88,27 +90,28 @@ impl SessionAccess {
             rx: None,
             mask: GRANT_ALL,
             deadline: None,
+            revoked: false,
         };
         if let Some(np) = registry {
             let rx = np.subscribe(&access.fp_hex);
             let st = *rx.borrow();
             access.rx = Some(rx);
-            access.fold(st);
+            // No record at session start is ungoverned (full control): pairing authority
+            // is the GameStream cert list. Only a record that exists governs.
+            if !st.revoked {
+                access.fold(st);
+            }
         }
         access
     }
 
-    /// Fold one watch state. No grants record is ungoverned (full control): pairing
-    /// authority is the GameStream cert list, and unpair ends the session through mgmt,
-    /// not this watch. A record that exists applies its mask and deadline.
+    /// Fold one watch state. A record applies its mask and deadline. `revoked` here means
+    /// the record was deleted under a live session: that ends it, as on the native plane.
+    /// Nothing but a console edit may widen a live session (per-client-access §6.7).
     fn fold(&mut self, st: crate::native_pairing::AccessState) {
-        if st.revoked {
-            self.mask = GRANT_ALL;
-            self.deadline = None;
-        } else {
-            self.mask = st.grants;
-            self.deadline = st.deadline_unix;
-        }
+        self.revoked = st.revoked;
+        self.mask = if st.revoked { 0 } else { st.grants };
+        self.deadline = st.deadline_unix;
     }
 
     /// Fold a pending watch edit. Non-blocking: the control thread is not async.
@@ -122,9 +125,10 @@ impl SessionAccess {
     }
 
     /// True once `now` is at or past the deadline (that second itself is expired, matching
-    /// the trust store's `effective`). An "expire now" edit is a past deadline on the watch.
+    /// the trust store's `effective`), or once the record was deleted while live. An
+    /// "expire now" edit is a past deadline on the watch.
     fn expired(&self, now_unix: i64) -> bool {
-        self.deadline.is_some_and(|d| now_unix >= d)
+        self.revoked || self.deadline.is_some_and(|d| now_unix >= d)
     }
 }
 
@@ -454,17 +458,20 @@ fn spawn(state: Arc<AppState>) -> Result<Running> {
                         } else if let Some(a) = access.as_mut() {
                             a.poll();
                         }
-                        if access
+                        if let Some(a) = access
                             .as_ref()
-                            .is_some_and(|a| a.expired(super::wall_unix_now()))
+                            .filter(|a| a.expired(super::wall_unix_now()))
                         {
                             // Expiry ends the session as a decision, not a network drop.
                             // `quit_session` clears `launch`; the host-side-ended arm then
                             // sends TERMINATION + disconnect (GameStream has no AccessUpdate).
-                            tracing::info!(
-                                "gamestream: session access expired — ending the session"
-                            );
-                            state.quit_session("gamestream access expired");
+                            let why = if a.revoked {
+                                "gamestream access record removed"
+                            } else {
+                                "gamestream access expired"
+                            };
+                            tracing::info!(reason = why, "gamestream: ending the session");
+                            state.quit_session(why);
                             access = None;
                         }
                     }
@@ -1249,10 +1256,10 @@ mod tests {
         assert_eq!(drops.counts, [0u64; 7]);
     }
 
-    /// No grants record is ungoverned (full control, back-compat for existing pairings).
-    /// A record governs; console edits fold in within one poll; "expire now" is a past
-    /// deadline on the same watch. Deleting the record returns ungoverned, not revoked —
-    /// GameStream unpair ends sessions through mgmt, not this watch.
+    /// No grants record at session start is ungoverned (full control, back-compat for
+    /// existing pairings). A record governs; console edits fold in within one poll; "expire
+    /// now" is a past deadline on the same watch. Deleting the record under a live session
+    /// ends it: a deletion must never widen a session it was governing.
     #[test]
     fn session_access_resolves_folds_edits_and_expires() {
         use crate::native_pairing::{Access, NativePairing};
@@ -1305,11 +1312,28 @@ mod tests {
         a.poll();
         assert!(a.expired(now));
 
-        // Deleting the record: back to ungoverned, session survives.
+        // Deleting a governing record ends the session; it never widens it to full.
+        np.set_access(
+            "ab12",
+            Access {
+                grants: GRANT_GAMEPAD,
+                expires_unix: None,
+            },
+        )
+        .unwrap();
+        a.poll();
+        assert!(!a.expired(now));
         assert!(np.remove("ab12").unwrap());
         a.poll();
+        assert_eq!(a.mask, 0);
+        assert!(a.revoked);
+        assert!(a.expired(now));
+
+        // A session that starts after the deletion is ungoverned again.
+        let a = super::SessionAccess::resolve(Some(&np), "ab12".into());
         assert_eq!(a.mask, GRANT_ALL);
-        assert!(!a.expired(now));
+        assert!(!a.revoked);
+        assert!(!a.expired(now + 1_000_000));
         let _ = std::fs::remove_file(&p);
     }
 }
