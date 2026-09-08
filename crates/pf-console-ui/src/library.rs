@@ -1050,10 +1050,10 @@ fn order(games: &mut [LibraryGame]) {
     games.sort_by_key(|g| (g.id != DESKTOP_ID, !g.launcher, !g.running));
 }
 
-/// The desktop tile's id, and the store→label table. Both live in `pf-client-core` now, so
-/// the GTK and WinUI dialogs read the same ones; re-exported because the screens name them
-/// through this module.
-pub use pf_client_core::library::{store_label, DESKTOP_ID};
+/// The desktop tile's id and mark, and the store→label table. All live in `pf-client-core`
+/// now, so the GTK and WinUI dialogs read the same ones; re-exported because the screens name
+/// them through this module.
+pub use pf_client_core::library::{store_label, DESKTOP_ICON, DESKTOP_ID};
 
 /// Every shelf leads with the host's own desktop, so Library is never a dead end for the
 /// desktop-only user and a plugin-less host is still one press from streaming. Model state
@@ -1064,7 +1064,7 @@ fn desktop_tile() -> LibraryGame {
         title: "Desktop".into(),
         store: String::new(),
         launcher: false,
-        icon: "monitor".into(),
+        icon: DESKTOP_ICON.into(),
         platform: None,
         developer: None,
         year: None,
@@ -1694,6 +1694,13 @@ mod tests {
             running: true,
         }]);
         assert_eq!(shared.snapshot().games[0].id, DESKTOP_ID);
+    }
+
+    /// The tile has no cover and never gets one, so its mark is the whole card. A name the set
+    /// does not carry falls through to the monogram, silently and on every shell at once.
+    #[test]
+    fn the_desktop_tile_names_a_mark_the_icon_set_ships() {
+        assert!(crate::icons::by_name(&desktop_tile().icon).is_some());
     }
 
     /// Collections must never offer a "Desktop" group, and a one-store library must not

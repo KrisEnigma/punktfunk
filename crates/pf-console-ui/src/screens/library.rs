@@ -192,7 +192,7 @@ fn placeholder_face(launcher: bool) -> Color4f {
     })
 }
 
-/// Coverless cell. Launcher: brand face + mark. Game: quieter face + monogram. `None`: stale index.
+/// Coverless cell. Brand mark, else UI mark, else a monogram (launcher: its name). `None`: stale index.
 pub(crate) fn draw_poster_placeholder(
     canvas: &Canvas,
     fonts: &Fonts,
@@ -221,6 +221,20 @@ pub(crate) fn draw_poster_placeholder(
         .flatten();
     if let Some(path) = mark {
         canvas.draw_path(&path, &fill(fg(0.85)));
+        return;
+    }
+    // Not a brand: the desktop tile names a Lucide mark. Stroked, not filled — Lucide's paths
+    // are outlines, so filling one gives a blob.
+    if let Some(icon) = crate::icons::by_name(&game.icon) {
+        let side = rect.width().min(rect.height()) * 0.34;
+        crate::icons::draw_icon(
+            canvas,
+            icon,
+            rect.center_x(),
+            rect.center_y(),
+            side,
+            fg(0.85),
+        );
         return;
     }
     // Size off the card, not `k`: grid cells are two-thirds the shelf.
