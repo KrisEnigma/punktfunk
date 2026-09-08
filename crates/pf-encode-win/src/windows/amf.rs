@@ -689,8 +689,14 @@ fn retrieve_loop(
         match unsafe { drain_one_output(comp, odt, output_key_max) } {
             Ok(DrainOutcome::Frame { data, key_prop }) => {
                 let mut g = lock(&out);
-                let (pts_ns, forced, recovery_anchor) =
-                    g.pending.pop_front().unwrap_or((0, false, false));
+                // An AU with no submit behind it would pair every later AU with the wrong
+                // pts, keyframe flag and anchor; that is a reset, never a renumbering.
+                let Some((pts_ns, forced, recovery_anchor)) = g.pending.pop_front() else {
+                    g.err
+                        .get_or_insert_with(|| "AMF produced an AU with no submit pending".into());
+                    have.set();
+                    return;
+                };
                 g.ready.push_back(EncodedFrame {
                     data,
                     pts_ns,
@@ -701,11 +707,10 @@ fn retrieve_loop(
                 // Under the lock, so it cannot race the clear `poll` does when it empties.
                 have.set();
             }
+            // `flush` owns the queue across a drain; a clear here could land on a frame queued
+            // behind the Drain. EOF repeats on every call while the component sits drained and
+            // the loop only exits on `stop`, so pace it like NotReady.
             Ok(DrainOutcome::Eof) => {
-                lock(&out).pending.clear();
-                // EOF repeats on every call while the component sits drained, and the loop only
-                // exits on `stop`, so this arm was a busy spin for as long as that lasts. Same
-                // interval the NotReady arm uses; the next AU surfaces one tick later.
                 if !blocking {
                     std::thread::sleep(std::time::Duration::from_micros(250));
                 }
@@ -1679,12 +1684,9 @@ impl Encoder for AmfEncoder {
             // The retrieve thread is what frees a slot now; this only waits for it, and a whole
             // budget with no progress is the same wedge it always was.
             while inner.retrieve.in_flight() >= cap {
-                {
-                    let mut g = lock(&inner.retrieve.out);
-                    if let Some(e) = g.err.take() {
-                        self.force_kf = true;
-                        bail!("{e}");
-                    }
+                if let Some(e) = lock(&inner.retrieve.out).err.take() {
+                    self.force_kf = true;
+                    bail!("{e}");
                 }
                 if std::time::Instant::now() >= deadline {
                     self.force_kf = true;
@@ -1823,6 +1825,12 @@ impl Encoder for AmfEncoder {
                     }
                 }
             }
+            // Queued before the component takes the frame: the retrieve thread can pop for it the
+            // moment SubmitInput returns, so a push after that races an empty queue. A refusal
+            // below takes the entry back off.
+            lock(&inner.retrieve.out)
+                .pending
+                .push_back((captured.pts_ns, forced, recovery_anchor));
             let mut r = ((*(*inner.comp.0).vtbl).submit_input)(inner.comp.0, surf.0);
             // AMF_INPUT_FULL is "busy, drain and retry", not a wedge. Re-submit the same surface.
             if r == sys::AMF_INPUT_FULL {
@@ -1837,24 +1845,16 @@ impl Encoder for AmfEncoder {
                     }
                 }
             }
-            match r {
-                // NEED_MORE_INPUT = accepted; no AU owed for this submit alone.
-                sys::AMF_OK | sys::AMF_NEED_MORE_INPUT => {}
-                sys::AMF_INPUT_FULL => {
-                    self.force_kf = true; // retried frame stays an IDR candidate
+            // NEED_MORE_INPUT = accepted; no AU owed for this submit alone.
+            if !matches!(r, sys::AMF_OK | sys::AMF_NEED_MORE_INPUT) {
+                lock(&inner.retrieve.out).pending.pop_back();
+                self.force_kf = true;
+                if r == sys::AMF_INPUT_FULL {
                     bail!("AMF SubmitInput stayed AMF_INPUT_FULL past the drain budget — wedged");
                 }
-                other => {
-                    self.force_kf = true;
-                    bail!("AMF SubmitInput failed: {} ({other})", result_name(other));
-                }
+                bail!("AMF SubmitInput failed: {} ({r})", result_name(r));
             }
         }
-        // Recorded after the submit took, so the retrieve thread can never pair an AU with a
-        // frame the component refused.
-        lock(&inner.retrieve.out)
-            .pending
-            .push_back((captured.pts_ns, forced, recovery_anchor));
         Ok(())
     }
 
@@ -2152,6 +2152,17 @@ impl Encoder for AmfEncoder {
                 "AMF Drain returned non-OK at flush"
             );
         }
+        // The owed AUs surface on the retrieve thread; wait for the last of them here so no
+        // frame submitted after this can be paired with one. Past the budget the component is
+        // at end-of-stream, so what is still owed never comes: those entries are stale.
+        let deadline = std::time::Instant::now() + INPUT_DRAIN_BUDGET;
+        while inner.retrieve.in_flight() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_micros(250));
+        }
+        let stale = std::mem::take(&mut lock(&inner.retrieve.out).pending).len();
+        if stale > 0 {
+            tracing::warn!(stale, "AMF drain left frames without an AU");
+        }
         Ok(())
     }
 }
@@ -2310,8 +2321,8 @@ mod tests {
     }
 
     /// `flush` drains the component, which leaves it at end-of-stream where it takes no more
-    /// input. Without the Flush that follows, a session that flushed never encoded again — and
-    /// the retrieve thread spun on EOF for the rest of its life.
+    /// input. A session that flushed must encode again, and every AU on both sides of the
+    /// flush must carry the pts of the frame it encodes.
     #[test]
     fn amf_encodes_again_after_a_flush_live() {
         if let Err(e) = try_factory() {
@@ -2343,7 +2354,7 @@ mod tests {
         };
         enc.prepare(&device).expect("prepare");
         let run = |enc: &mut AmfEncoder, base: u64| {
-            let mut aus = 0usize;
+            let mut pts = Vec::new();
             for i in 0..8 {
                 let frame = CapturedFrame {
                     provenance: Default::default(),
@@ -2359,20 +2370,34 @@ mod tests {
                     cursor: None,
                 };
                 enc.submit(&frame).expect("submit");
-                if enc.poll().expect("poll").is_some() {
-                    aus += 1;
+                if let Some(au) = enc.poll().expect("poll") {
+                    pts.push(au.pts_ns);
                 }
             }
-            aus
+            pts
         };
         let before = run(&mut enc, 1);
-        assert!(before > 0, "the encoder produced nothing before the flush");
+        assert!(
+            !before.is_empty(),
+            "the encoder produced nothing before the flush"
+        );
         enc.flush().expect("flush");
         let after = run(&mut enc, 1000);
-        eprintln!("AMF AUs before flush: {before}, after: {after}");
+        eprintln!("AMF AUs before flush: {before:?}, after: {after:?}");
+        let resumed: Vec<u64> = after.iter().copied().filter(|p| *p >= 1000).collect();
         assert!(
-            after > 0,
+            !resumed.is_empty(),
             "the encoder accepted no input after a flush — it is still at end-of-stream"
+        );
+        assert!(
+            after
+                .iter()
+                .all(|p| (1..=8).contains(p) || (1000..1008).contains(p)),
+            "an AU after the flush carries a pts nobody submitted: {after:?}"
+        );
+        assert!(
+            resumed.windows(2).all(|w| w[1] == w[0] + 1),
+            "AUs after the flush are paired off by one: {resumed:?}"
         );
     }
 
