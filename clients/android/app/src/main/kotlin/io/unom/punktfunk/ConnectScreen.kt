@@ -136,8 +136,12 @@ fun ConnectScreen(
     // NsdManager path. We still request NEARBY_WIFI_DEVICES opportunistically (some OEMs filter
     // multicast without it; harmless where it isn't), but never block discovery on the grant — a
     // denial used to leave discovery dead forever.
-    val discovery = remember { HostDiscovery(context) }
-    var discovered by remember { mutableStateOf<List<DiscoveredHost>>(emptyList()) }
+    val discovery = remember { HostDiscovery.shared(context) }
+    val discoveredState = remember { mutableStateOf<List<DiscoveredHost>>(emptyList()) }
+    val discovered by discoveredState
+    // One value, because subscribing IS what runs the browse: the pauses below (a dial, a wake, a
+    // speed test) drop this exact subscriber and the resumes hand back the same one.
+    val subscriber = remember { { hosts: List<DiscoveredHost> -> discoveredState.value = hosts } }
     // Android 17 Local Network Protection: with targetSdk 37, EVERYTHING this screen does — the mDNS
     // browse, the QUIC dial (UDP 9777), Wake-on-LAN, the library fetch — is blocked until the user
     // grants ACCESS_LOCAL_NETWORK (a runtime permission in the NEARBY_DEVICES group). Blocked UDP
@@ -203,12 +207,8 @@ fun ConnectScreen(
         onDispose { lifecycle?.removeObserver(obs) }
     }
     DisposableEffect(Unit) {
-        discovery.onChange = { discovered = it }
-        discovery.start()
-        onDispose {
-            discovery.onChange = null
-            discovery.stop()
-        }
+        discovery.addListener(subscriber)
+        onDispose { discovery.removeListener(subscriber) }
     }
 
     val identityStore = remember { IdentityStore(context) }
@@ -404,7 +404,7 @@ fun ConnectScreen(
         connecting = true
         status = null
         notice = null
-        discovery.stop() // free the Wi-Fi radio before the stream session
+        discovery.removeListener(subscriber) // let the browse go; the stream session wants the radio
         scope.launch {
             val handle =
                 connectNative(id, targetHost, targetPort, pinHex ?: "", CONNECT_TIMEOUT_MS, profile, launch)
@@ -426,7 +426,7 @@ fun ConnectScreen(
                 }
                 onConnected(session(handle, record, profile))
             } else {
-                discovery.start()
+                discovery.addListener(subscriber)
                 val token = NativeBridge.nativeTakeLastError()
                 val unreachable = token == "timeout" || token == "io" || token.isEmpty()
                 if (onFailure != null && unreachable) {
@@ -450,7 +450,7 @@ fun ConnectScreen(
         attempt?.cancelled?.set(true)
         attempt = null
         connecting = false
-        discovery.start()
+        discovery.addListener(subscriber)
     }
 
     // Wake-aware connect. If auto-wake is on (Settings.autoWakeEnabled) and the target is a saved
@@ -541,7 +541,7 @@ fun ConnectScreen(
         awaiting = req
         connecting = true
         status = null
-        discovery.stop() // free the Wi-Fi radio before the (parked) stream session
+        discovery.removeListener(subscriber) // same, for the session parked behind the console hold
         scope.launch {
             // Pin the advertised fingerprint for a discovered host (defence against an impostor while
             // we wait); a manually-typed host has none, so trust-on-first-use.
@@ -577,7 +577,7 @@ fun ConnectScreen(
                     NativeBridge.nativeTakeLastError(),
                     requestAccess = true,
                 )
-                discovery.start()
+                discovery.addListener(subscriber)
             }
         }
     }
@@ -654,14 +654,14 @@ fun ConnectScreen(
         speedTestPhase = SpeedTestPhase.Connecting
         notice = null
         connecting = true
-        discovery.stop() // a browse running through the burst would measure itself
+        discovery.removeListener(subscriber) // a browse running through the burst would measure itself
         scope.launch {
             runSpeedTest(context, id, entry.host.address, entry.host.port, entry.host.fpHex) { p ->
                 // A dismissed dialog abandons the run; don't drag it back onto the screen.
                 if (speedTest != null) speedTestPhase = p
             }
             connecting = false
-            discovery.start()
+            discovery.addListener(subscriber)
         }
     }
 
@@ -981,7 +981,7 @@ fun ConnectScreen(
             awaiting?.cancelled?.set(true)
             awaiting = null
             connecting = false
-            discovery.start() // the request may still be pending on the host; keep scanning
+            discovery.addListener(subscriber) // the request may still be pending on the host; keep scanning
         },
         speedTest = speedTest,
         speedTestTarget = speedTestTarget,

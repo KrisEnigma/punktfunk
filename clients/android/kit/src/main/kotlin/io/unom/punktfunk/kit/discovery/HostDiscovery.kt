@@ -89,19 +89,26 @@ fun osIconTokens(chain: String): List<String> =
 /**
  * Browses `_punktfunk._udp` for punktfunk/1 hosts via the native `mdns-sd` core (the same browse the
  * Linux/Windows clients use), exposed over JNI — *not* `NsdManager`, whose per-OEM system daemon
- * made discovery "mostly broken". [start] spins up the native browse and polls it ~1 Hz on the main
- * thread, pushing the live host set to [onChange] (also on the main thread, only when it changes);
- * [stop] tears it down.
+ * made discovery "mostly broken". The native browse is polled ~1 Hz on the main thread and the live
+ * host set pushed to every listener (also on the main thread, only when it changes).
+ *
+ * One per process, via [shared]: each instance is one mDNS daemon binding :5353 and joining the
+ * multicast groups, so two of them contend for the same answers. Subscribers hold it up —
+ * [addListener] starts the browse, and the last one out stops it after a short idle gap. Main
+ * thread only.
  *
  * We hold a Wi-Fi [WifiManager.MulticastLock] for the browse lifetime — raw multicast *reception*
  * needs it. (The Android emulator's SLIRP NAT drops multicast, so on the emulator discovery starts
  * but never finds a LAN host — same as before; that's the network, not the API.)
  */
-class HostDiscovery(context: Context) {
+class HostDiscovery private constructor(context: Context) {
     private val appCtx = context.applicationContext
 
-    /** Invoked on the main thread whenever the resolved host set changes. */
-    var onChange: ((List<DiscoveredHost>) -> Unit)? = null
+    /** Subscribers, notified on the main thread. The browse runs while this is non-empty. */
+    private val listeners = mutableListOf<(List<DiscoveredHost>) -> Unit>()
+
+    /** How many subscribers hold the browse up. Zero means no daemon and no multicast lock. */
+    val listenerCount: Int get() = listeners.size
 
     private val handler = Handler(Looper.getMainLooper())
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -112,15 +119,46 @@ class HostDiscovery(context: Context) {
     private var attempt = 0
     private val retry = Runnable { start() }
 
+    /** See [removeListener]: tears the browse down once nobody has come back for it. */
+    private val quiesce = Runnable { if (listeners.isEmpty()) stop() }
+
     private val poll = object : Runnable {
         override fun run() {
             if (!running) return
             val hosts = snapshot()
             if (hosts != last) {
                 last = hosts
-                onChange?.invoke(hosts)
+                listeners.toList().forEach { it(hosts) }
             }
             handler.postDelayed(this, POLL_MS)
+        }
+    }
+
+    /**
+     * Subscribe to the live host set, browsing while anyone is subscribed. A listener that joins a
+     * browse already holding hosts gets them at once, so a screen opening over one draws its list
+     * without waiting for a poll. Registering the same listener twice does nothing.
+     */
+    fun addListener(listener: (List<DiscoveredHost>) -> Unit) {
+        if (listeners.any { it === listener }) return
+        handler.removeCallbacks(quiesce)
+        listeners += listener
+        if (listeners.size == 1) start() // a no-op while the browse is still lingering
+        if (last.isNotEmpty()) listener(last)
+    }
+
+    /**
+     * Unsubscribe. The browse ends [IDLE_LINGER_MS] after the last listener leaves, which frees the
+     * daemon and the multicast lock — the delay is what carries it across a handover, since Compose
+     * disposes the screen that is leaving before it composes the one arriving, and a browse rebuilt
+     * on every switch between the touch and console homes is the churn this shares an instance to
+     * avoid.
+     */
+    fun removeListener(listener: (List<DiscoveredHost>) -> Unit) {
+        listeners.removeAll { it === listener }
+        if (listeners.isEmpty()) {
+            handler.removeCallbacks(quiesce)
+            handler.postDelayed(quiesce, IDLE_LINGER_MS)
         }
     }
 
@@ -129,7 +167,7 @@ class HostDiscovery(context: Context) {
      * reason that is over in a second — its :5353 bind losing a race with the daemon we just tore
      * down — and giving up on it once left the device with no discovery for the rest of the run.
      */
-    fun start() {
+    private fun start() {
         if (running) return
         handler.removeCallbacks(retry)
         acquireMulticastLock()
@@ -178,18 +216,15 @@ class HostDiscovery(context: Context) {
      * refused and its group joins never took. [rescan] covers every other refresh: a rebuild
      * re-binds :5353 and re-joins the groups, and one that fails leaves the device blind.
      *
-     * The shown host set is left alone across the swap (rather than blinking empty via [stop]'s
-     * notification); the first poll of the new browse publishes the fresh set.
+     * The shown host set is left alone across the swap; the first poll of the new browse
+     * publishes the fresh one.
      */
     fun restart() {
-        val keep = onChange
-        onChange = null
         stop()
-        onChange = keep
         start()
     }
 
-    fun stop() {
+    private fun stop() {
         handler.removeCallbacks(retry)
         attempt = 0 // the next start is a new lifetime, with its own retries
         if (!running && nativeHandle == 0L) return
@@ -201,7 +236,6 @@ class HostDiscovery(context: Context) {
             .onFailure { Log.e(TAG, "nativeDiscoveryStop threw", it) }
         releaseMulticastLock()
         last = emptyList()
-        onChange?.invoke(emptyList())
     }
 
     private fun snapshot(): List<DiscoveredHost> {
@@ -234,9 +268,22 @@ class HostDiscovery(context: Context) {
         multicastLock = null
     }
 
-    private companion object {
-        const val POLL_MS = 1000L
-        const val RETRY_MS = 2000L
-        const val MAX_START_ATTEMPTS = 5
+    companion object {
+        private const val POLL_MS = 1000L
+        private const val RETRY_MS = 2000L
+        private const val IDLE_LINGER_MS = 3000L
+        private const val MAX_START_ATTEMPTS = 5
+
+        @Volatile
+        private var instance: HostDiscovery? = null
+
+        /**
+         * The process's one browse. Every caller shares it: a second instance is a second mDNS
+         * daemon on :5353 splitting the same answers with the first.
+         */
+        fun shared(context: Context): HostDiscovery =
+            instance ?: synchronized(this) {
+                instance ?: HostDiscovery(context).also { instance = it }
+            }
     }
 }

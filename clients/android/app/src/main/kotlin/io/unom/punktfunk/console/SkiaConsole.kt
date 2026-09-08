@@ -261,32 +261,50 @@ object SkiaConsole {
         return if (classMb >= 256) 160 shl 20 else 64 shl 20
     }
 
+    /** Held as one value so [resumeDiscovery] and [pauseDiscovery] name the same subscriber. */
+    private val onDiscovered: (List<DiscoveredHost>) -> Unit = { list ->
+        discovered = list
+        // Learn wake MACs / mgmt ports from live adverts, as the desktop service does.
+        ioPool.execute {
+            var changed = false
+            for (dh in list) {
+                val kh = knownHostStore.all().firstOrNull { it.matches(dh) } ?: continue
+                if (dh.mac.isNotEmpty() && dh.mac.toSet() != kh.mac.toSet()) {
+                    knownHostStore.learnMac(kh.address, kh.port, dh.mac); changed = true
+                }
+                dh.mgmtPort?.let { if (it != kh.mgmtPort) { knownHostStore.learnMgmtPort(kh.address, kh.port, it); changed = true } }
+                if (dh.os.isNotEmpty() && dh.os != kh.os) { knownHostStore.learnOs(kh.address, kh.port, dh.os); changed = true }
+            }
+            main.post { pushHosts(); if (changed) pushKnownHosts() }
+        }
+        pushHosts()
+    }
+
+    /**
+     * Subscribe to the shared browse and ask it for a fresh answer — the console is back on screen,
+     * or a dial that was holding the radio let go. Paired with [pauseDiscovery], which drops the
+     * subscription; the browse itself ends only once nobody has claimed it back.
+     */
+    private fun resumeDiscovery() {
+        discovery?.let {
+            it.addListener(onDiscovered)
+            it.rescan()
+        }
+    }
+
+    /** Let the browse go, so the radio belongs to the stream that is about to start. */
+    private fun pauseDiscovery() {
+        discovery?.removeListener(onDiscovered)
+    }
+
     private fun startServices(app: Context) {
         ioPool.execute {
             identity = runCatching { obtainIdentity(IdentityStore(app)) }
                 .onFailure { Log.w(TAG, "identity unavailable: ${it.message}") }
                 .getOrNull()
         }
-        val d = HostDiscovery(app)
-        d.onChange = { list ->
-            discovered = list
-            // Learn wake MACs / mgmt ports from live adverts, as the desktop service does.
-            ioPool.execute {
-                var changed = false
-                for (dh in list) {
-                    val kh = knownHostStore.all().firstOrNull { it.matches(dh) } ?: continue
-                    if (dh.mac.isNotEmpty() && dh.mac.toSet() != kh.mac.toSet()) {
-                        knownHostStore.learnMac(kh.address, kh.port, dh.mac); changed = true
-                    }
-                    dh.mgmtPort?.let { if (it != kh.mgmtPort) { knownHostStore.learnMgmtPort(kh.address, kh.port, it); changed = true } }
-                    if (dh.os.isNotEmpty() && dh.os != kh.os) { knownHostStore.learnOs(kh.address, kh.port, dh.os); changed = true }
-                }
-                main.post { pushHosts(); if (changed) pushKnownHosts() }
-            }
-            pushHosts()
-        }
-        discovery = d
-        d.start()
+        discovery = HostDiscovery.shared(app)
+        resumeDiscovery()
         // The reachability sweep — the whole of presence, every ~12 s (the desktop's cadence).
         // Every saved host, including the ones on mDNS: an advert is a cache entry with a
         // 75-minute TTL that a suspending host sends no goodbye for, so trusting it left a
@@ -357,7 +375,7 @@ object SkiaConsole {
         this.onPadAction = onPadAction
         this.onPulse = onPulse
         this.onAnnounce = onAnnounce
-        discovery?.rescan()
+        resumeDiscovery()
         // The touch UI may have paired/forgotten/edited hosts or profiles while we were away.
         pushHosts()
         pushKnownHosts()
@@ -365,6 +383,9 @@ object SkiaConsole {
     }
 
     fun detach() {
+        // Parked behind the touch UI, which runs the browse itself: hold it here too and the two
+        // screens would both be subscribers, so neither could ever quiet it for a measurement.
+        pauseDiscovery()
         onConnected = null
         onSettingsChange = null
         onQuit = null
@@ -401,7 +422,7 @@ object SkiaConsole {
     fun sessionEnded(reason: String?) {
         if (handle == 0L) return
         NativeBridge.nativeConsoleSessionPhase(handle, 3, reason.orEmpty())
-        discovery?.rescan()
+        resumeDiscovery()
     }
 
     /** Re-root the console on a host's shelf (a game launched from it just exited; a deep link). */
@@ -592,7 +613,7 @@ object SkiaConsole {
                     // A cancel after the dial landed still has a session to let go of.
                     pendingSession?.let { s -> ioPool.execute { NativeBridge.nativeClose(s.handle) } }
                     pendingSession = null
-                    discovery?.rescan()
+                    resumeDiscovery()
                 }
                 // The console's launch hold is done — the game is up, or the player asked to
                 // see. Only now does the stream view replace it.
@@ -642,7 +663,7 @@ object SkiaConsole {
         val d = Dial()
         dial = d
         NativeBridge.nativeConsoleSessionPhase(handle, 0, "")
-        discovery?.stop() // free the Wi-Fi radio before the stream session
+        pauseDiscovery() // the Wi-Fi radio belongs to the stream session now
         ioPool.execute {
             val timeout = if (requestAccess) REQUEST_ACCESS_TIMEOUT_MS else CONNECT_TIMEOUT_MS
             val h = kotlinx.coroutines.runBlocking {
@@ -697,7 +718,7 @@ object SkiaConsole {
                     NativeBridge.nativeConsoleSessionPhase(
                         handle, 2, ConnectErrors.connectMessage(token, requestAccess),
                     )
-                    discovery?.rescan()
+                    resumeDiscovery()
                 }
             }
         }
@@ -711,7 +732,7 @@ object SkiaConsole {
             when (val c = arr.opt(i)) {
                 is String -> when (c) {
                     "CancelWake" -> { wakeGen.incrementAndGet(); NativeBridge.nativeConsoleSetWake(handle, "null") }
-                    "Probe" -> { discovery?.rescan(); pushHosts() }
+                    "Probe" -> { resumeDiscovery(); pushHosts() }
                 }
                 is JSONObject -> {
                     c.optJSONObject("FetchLibrary")?.let { fetchLibrary(it, refreshOnly = false) }
