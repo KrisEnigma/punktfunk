@@ -19,6 +19,7 @@ use crate::mgmt::auth::unix_now;
 use base64::Engine as _;
 use rand::RngCore;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,14 @@ const TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
 /// limit. Old entries are swept on every issue; this is the hard ceiling underneath that.
 const MAX_NONCES: usize = 256;
 
+/// Outstanding challenges one address may hold. A LAN peer flooding `challenge` evicts only
+/// its own nonces, never a browser's exchange in flight from another address.
+const MAX_NONCES_PER_IP: usize = 8;
+
+/// Live tokens one device may hold. A device re-runs the exchange rather than keeping a
+/// long-lived credential, so a few in flight is plenty and the map cannot grow for an hour.
+const MAX_TOKENS_PER_DEVICE: usize = 4;
+
 /// Live nonces and the tokens they turned into.
 ///
 /// Both are in memory and both die with the process, which is the right lifetime: a restart
@@ -46,8 +55,9 @@ pub(crate) struct DeviceAuth {
 
 #[derive(Default)]
 struct Inner {
-    /// nonce (hex) → when it was issued. Removed when spent, so a signature is good once.
-    nonces: HashMap<String, Instant>,
+    /// nonce (hex) → when and to whom it was issued. Removed when spent, so a signature is
+    /// good once. `None` is a test without a peer address.
+    nonces: HashMap<String, (Instant, Option<IpAddr>)>,
     /// token → the device that earned it, and when it lapses.
     tokens: HashMap<String, Session>,
 }
@@ -60,31 +70,30 @@ struct Session {
 impl DeviceAuth {
     /// A fresh challenge. Also the sweep point for both maps — there is no timer, and this is
     /// the only call an unauthenticated peer can make.
-    pub(crate) fn challenge(&self) -> String {
+    pub(crate) fn challenge(&self, peer: Option<IpAddr>) -> String {
         let mut guard = self.inner.lock().expect("device-auth mutex");
         let now = Instant::now();
         guard
             .nonces
-            .retain(|_, at| now.duration_since(*at) < NONCE_TTL);
+            .retain(|_, (at, _)| now.duration_since(*at) < NONCE_TTL);
         guard.tokens.retain(|_, s| s.expires > now);
         // A flood of challenges must not evict a live token, so only the nonce map is capped.
         // Oldest one out per new one in, never the whole map: clearing it let any unauthenticated
-        // caller cancel a real browser's exchange in flight, 256 requests at a time.
+        // caller cancel a real browser's exchange in flight, 256 requests at a time. The
+        // per-address cap comes first, so a flood evicts its own nonces before anyone else's.
+        let mine = guard.nonces.values().filter(|(_, ip)| *ip == peer).count();
+        if mine >= MAX_NONCES_PER_IP {
+            evict_oldest(&mut guard.nonces, |(_, ip)| *ip == peer);
+        }
         while guard.nonces.len() >= MAX_NONCES {
-            let Some(oldest) = guard
-                .nonces
-                .iter()
-                .min_by_key(|(_, at)| **at)
-                .map(|(nonce, _)| nonce.clone())
-            else {
+            if !evict_oldest(&mut guard.nonces, |_| true) {
                 break;
-            };
-            guard.nonces.remove(&oldest);
+            }
         }
         let mut raw = [0u8; 32];
         rand::rng().fill_bytes(&mut raw);
         let nonce: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        guard.nonces.insert(nonce.clone(), now);
+        guard.nonces.insert(nonce.clone(), (now, peer));
         nonce
     }
 
@@ -93,17 +102,38 @@ impl DeviceAuth {
     fn spend(&self, nonce: &str) -> bool {
         let mut guard = self.inner.lock().expect("device-auth mutex");
         match guard.nonces.remove(nonce) {
-            Some(at) => Instant::now().duration_since(at) < NONCE_TTL,
+            Some((at, _)) => Instant::now().duration_since(at) < NONCE_TTL,
             None => false,
         }
     }
 
+    /// Mint a token. A device past [`MAX_TOKENS_PER_DEVICE`] loses its oldest one, so a paired
+    /// device replaying the exchange cannot grow the map for the life of a token.
     fn issue(&self, fingerprint: String) -> (String, i64) {
         let mut raw = [0u8; 32];
         rand::rng().fill_bytes(&mut raw);
         let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let expires = Instant::now() + TOKEN_TTL;
-        self.inner.lock().expect("device-auth mutex").tokens.insert(
+        let now = Instant::now();
+        let expires = now + TOKEN_TTL;
+        let mut guard = self.inner.lock().expect("device-auth mutex");
+        guard.tokens.retain(|_, s| s.expires > now);
+        let mine = guard
+            .tokens
+            .values()
+            .filter(|s| s.fingerprint == fingerprint)
+            .count();
+        if mine >= MAX_TOKENS_PER_DEVICE {
+            let oldest = guard
+                .tokens
+                .iter()
+                .filter(|(_, s)| s.fingerprint == fingerprint)
+                .min_by_key(|(_, s)| s.expires)
+                .map(|(t, _)| t.clone());
+            if let Some(t) = oldest {
+                guard.tokens.remove(&t);
+            }
+        }
+        guard.tokens.insert(
             token.clone(),
             Session {
                 fingerprint,
@@ -120,6 +150,22 @@ impl DeviceAuth {
         let guard = self.inner.lock().expect("device-auth mutex");
         let session = guard.tokens.get(token)?;
         (session.expires > Instant::now()).then(|| session.fingerprint.clone())
+    }
+}
+
+/// Drop the oldest nonce matching `pick`. `false` when none matched.
+fn evict_oldest(
+    nonces: &mut HashMap<String, (Instant, Option<IpAddr>)>,
+    pick: impl Fn(&(Instant, Option<IpAddr>)) -> bool,
+) -> bool {
+    let oldest = nonces
+        .iter()
+        .filter(|(_, v)| pick(v))
+        .min_by_key(|(_, (at, _))| *at)
+        .map(|(nonce, _)| nonce.clone());
+    match oldest {
+        Some(n) => nonces.remove(&n).is_some(),
+        None => false,
     }
 }
 
@@ -166,9 +212,12 @@ pub(crate) struct TokenGrant {
     security(()),
     responses((status = OK, description = "A single-use nonce to sign", body = Challenge)),
 )]
-pub(crate) async fn post_device_challenge(State(st): State<Arc<MgmtState>>) -> Response {
+pub(crate) async fn post_device_challenge(
+    State(st): State<Arc<MgmtState>>,
+    peer: Option<axum::Extension<crate::gamestream::tls::PeerAddr>>,
+) -> Response {
     Json(Challenge {
-        nonce: st.device_auth.challenge(),
+        nonce: st.device_auth.challenge(peer.map(|p| p.0 .0.ip())),
         expires_in: NONCE_TTL.as_secs(),
     })
     .into_response()
@@ -275,10 +324,46 @@ mod tests {
     #[test]
     fn a_nonce_is_spendable_once() {
         let auth = DeviceAuth::default();
-        let nonce = auth.challenge();
+        let nonce = auth.challenge(None);
         assert!(auth.spend(&nonce), "the nonce it just issued");
         assert!(!auth.spend(&nonce), "and never again");
         assert!(!auth.spend("never issued"));
+    }
+
+    /// One address cannot push another's exchange out: its flood evicts its own nonces.
+    #[test]
+    fn a_flood_from_one_address_evicts_only_itself() {
+        let auth = DeviceAuth::default();
+        let a: IpAddr = "192.168.1.10".parse().unwrap();
+        let b: IpAddr = "192.168.1.11".parse().unwrap();
+        let theirs = auth.challenge(Some(b));
+        for _ in 0..(MAX_NONCES_PER_IP * 4) {
+            auth.challenge(Some(a));
+        }
+        let held_by_a = auth
+            .inner
+            .lock()
+            .unwrap()
+            .nonces
+            .values()
+            .filter(|(_, ip)| *ip == Some(a))
+            .count();
+        assert_eq!(held_by_a, MAX_NONCES_PER_IP);
+        assert!(auth.spend(&theirs), "the other address's nonce survived");
+    }
+
+    #[test]
+    fn a_device_holds_a_bounded_number_of_tokens() {
+        let auth = DeviceAuth::default();
+        let (first, _) = auth.issue("abc".into());
+        for _ in 0..MAX_TOKENS_PER_DEVICE {
+            auth.issue("abc".into());
+        }
+        assert_eq!(auth.device_for(&first), None, "the oldest went first");
+        assert_eq!(
+            auth.inner.lock().unwrap().tokens.len(),
+            MAX_TOKENS_PER_DEVICE
+        );
     }
 
     #[test]
@@ -295,8 +380,9 @@ mod tests {
     fn challenges_cannot_grow_without_bound() {
         let auth = DeviceAuth::default();
         let (token, _) = auth.issue("abc".into());
-        for _ in 0..(MAX_NONCES * 2) {
-            let _ = auth.challenge();
+        for i in 0..(MAX_NONCES * 2) {
+            let ip = std::net::Ipv4Addr::new(10, 1, (i / 256) as u8, (i % 256) as u8);
+            let _ = auth.challenge(Some(ip.into()));
         }
         assert!(
             auth.inner.lock().unwrap().nonces.len() <= MAX_NONCES,
@@ -313,15 +399,19 @@ mod tests {
     #[test]
     fn the_cap_evicts_one_nonce_not_the_whole_map() {
         let auth = DeviceAuth::default();
-        for _ in 0..MAX_NONCES {
-            let _ = auth.challenge();
+        // Distinct addresses: the per-address budget would otherwise stop one peer short.
+        let peer = |i: usize| -> Option<IpAddr> {
+            Some(std::net::Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 256) as u8).into())
+        };
+        for i in 0..MAX_NONCES {
+            let _ = auth.challenge(peer(i));
         }
         assert_eq!(
             auth.inner.lock().unwrap().nonces.len(),
             MAX_NONCES,
             "the cap is reached, not overshot"
         );
-        let _ = auth.challenge();
+        let _ = auth.challenge(peer(MAX_NONCES));
         assert_eq!(
             auth.inner.lock().unwrap().nonces.len(),
             MAX_NONCES,

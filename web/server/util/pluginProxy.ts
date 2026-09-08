@@ -6,7 +6,7 @@
 // The credential is cached briefly so a burst of iframe asset requests doesn't hammer the host. On a
 // 401 from the plugin (its secret rotated on restart within the cache window) the proxy busts this
 // cache and re-fetches once — see the route.
-import { isLoopbackUrl, mgmtToken, mgmtUrl } from "./auth";
+import { loopbackTls, mgmtToken, mgmtUrl } from "./auth";
 import { consoleOriginPort, pluginOriginPort } from "./pluginOrigin";
 
 /** A plugin id — its `definePlugin` name; the same shape the host validates. */
@@ -71,9 +71,7 @@ export async function fetchUiCredential(
 	}
 	// The host serves the credential over HTTPS with its self-signed loopback cert; relax
 	// verification for that one loopback hop only (the same scoping the /api BFF uses).
-	const fetchOptions = isLoopbackUrl(base)
-		? ({ tls: { rejectUnauthorized: false } } as unknown as RequestInit)
-		: undefined;
+	const fetchOptions = loopbackTls(base) as RequestInit | undefined;
 	const resp = await fetch(`${base}/api/v1/plugins/${id}/ui-credential`, {
 		...fetchOptions,
 		headers: { authorization: `Bearer ${token}` },

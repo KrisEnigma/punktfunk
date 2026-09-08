@@ -480,6 +480,8 @@ use self::windows::{
     disable, enable, icacls_path, powershell, powershell_output, require_elevation,
     LOCAL_SERVICE_SID,
 };
+#[cfg(all(target_os = "windows", not(test)))]
+pub(crate) use windows::listener_is_runner;
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn enable() -> Result<()> {

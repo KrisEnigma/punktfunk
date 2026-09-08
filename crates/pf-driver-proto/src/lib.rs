@@ -1073,11 +1073,11 @@ pub mod encode {
         #[must_use]
         pub const fn choose(backend: u32, hdr: bool, chroma444: bool) -> Self {
             match (backend, hdr, chroma444) {
-                (4, _, _) => Self::Planar { hdr, chroma444 },
-                (5, _, _) => Self::Nv12,
-                (1, true, true) => Self::Rgb10,
+                (backend::PYROWAVE, _, _) => Self::Planar { hdr, chroma444 },
+                (backend::MEDIA_FOUNDATION, _, _) => Self::Nv12,
+                (backend::NVENC, true, true) => Self::Rgb10,
                 (_, true, _) => Self::P010,
-                (1, false, _) => Self::Bgra,
+                (backend::NVENC, false, _) => Self::Bgra,
                 _ => Self::Nv12,
             }
         }

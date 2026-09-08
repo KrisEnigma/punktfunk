@@ -19,7 +19,7 @@ import {
 	getRequestHeader,
 	getRequestURL,
 } from "h3";
-import { isLoopbackUrl, mgmtToken, mgmtUrl } from "../../../util/auth";
+import { loopbackTls, mgmtToken, mgmtUrl } from "../../../util/auth";
 
 export default defineEventHandler(async (event) => {
 	const token = mgmtToken();
@@ -43,12 +43,8 @@ export default defineEventHandler(async (event) => {
 	if (lastId) headers["last-event-id"] = lastId;
 
 	const init: RequestInit = { method: "GET", headers, redirect: "manual" };
-	if (isLoopbackUrl(base)) {
-		// Bun.fetch extension — scoped per request, never process-wide (see routes/api/[...].ts).
-		(init as unknown as { tls: { rejectUnauthorized: boolean } }).tls = {
-			rejectUnauthorized: false,
-		};
-	}
+	// Bun.fetch extension — pinned per request, never process-wide (see routes/api/[...].ts).
+	Object.assign(init, loopbackTls(base));
 
 	let upstream: Response;
 	try {

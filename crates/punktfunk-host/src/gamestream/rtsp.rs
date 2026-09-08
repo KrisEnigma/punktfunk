@@ -20,7 +20,7 @@ use crate::encode::Codec;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,7 +49,7 @@ impl Drop for ConnGuard {
 }
 
 pub fn spawn(state: Arc<AppState>) -> Result<()> {
-    let listener = TcpListener::bind(("0.0.0.0", RTSP_PORT))
+    let listener = super::tls::bind_exclusive((std::net::Ipv4Addr::UNSPECIFIED, RTSP_PORT).into())
         .with_context(|| format!("bind RTSP {RTSP_PORT}"))?;
     tracing::info!(port = RTSP_PORT, "RTSP listening");
     std::thread::Builder::new()
@@ -879,7 +879,7 @@ mod tests {
     /// slot. An already-passed deadline stands in for a dribbling peer.
     #[test]
     fn read_message_gives_up_at_the_request_deadline() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let client = TcpStream::connect(addr).expect("connect"); // open, sends nothing
         let (mut server, _) = listener.accept().expect("accept");
