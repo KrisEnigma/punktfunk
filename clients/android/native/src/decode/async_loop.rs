@@ -2,7 +2,6 @@
 
 use ndk::data_space::DataSpace;
 use ndk::media::media_codec::{AsyncNotifyCallback, MediaCodec, MediaCodecDirection};
-use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::error::PunktfunkError;
@@ -18,18 +17,15 @@ use super::display::{
     apply_hdr_dataspace, color_dataspace, hdr_dataspace, install_render_callback,
     release_render_callback, DisplayTracker,
 };
-use super::latency::{note_decoded_pts, now_realtime_ns, take_flags, take_stamp};
+use super::latency::{note_decoded_pts, now_realtime_ns, take_flags, take_stamp, Receipts};
 use super::presenter::{presenter_disabled_by_sysprop, PresentMeter, PresentPriority, Presenter};
 use super::setup::{
-    android_hdr_static_info, boost_hot_threads, boost_thread_priority, codec_mime,
-    configure_low_latency, create_codec, try_set_frame_rate,
+    boost_hot_threads, boost_thread_priority, codec_mime, create_codec, hdr_static,
+    low_latency_format, try_set_frame_rate,
 };
 use super::surface_control::PresentComplete;
 use super::vsync::{now_monotonic_ns, VsyncClock, VsyncShared};
-use super::{
-    DecodeOptions, FRAME_PARK_CAP, IN_FLIGHT_CAP, NO_OUTPUT_PATIENCE, NO_VIDEO_PATIENCE,
-    NO_VIDEO_RETRY, PENDING_SPLIT_CAP,
-};
+use super::{Backstops, DecodeOptions, FRAME_PARK_CAP, IN_FLIGHT_CAP};
 
 /// One decoded output buffer ready to release: its codec buffer index + the pts the codec echoed
 /// (from the output callback's `BufferInfo`), used to pair the `decode` HUD stat, and the
@@ -411,25 +407,8 @@ fn bring_up(
 ) -> Option<(MediaCodec, Option<AscBackend>)> {
     let mode = client.mode();
     let mime = codec_mime(client.codec);
-    // HDR static metadata (ST.2086 mastering + content light level): fetched ONCE, ahead of the
-    // ladder, so a retry rung never pays the wait again. MediaCodec wants it BEFORE configure(),
-    // and the host sends a 0xCE right after the handshake, so it's typically already queued; wait
-    // briefly otherwise. The Surface DataSpace (applied on FormatChanged) carries transfer/primaries
-    // regardless — this adds the luminance the tone-mapper needs.
-    let hdr_static = if client.color.is_hdr() {
-        match client.next_hdr_meta(Duration::from_millis(250)) {
-            Ok(meta) => {
-                log::info!("decode: HDR static metadata applied (KEY_HDR_STATIC_INFO)");
-                Some(android_hdr_static_info(&meta))
-            }
-            Err(_) => {
-                log::info!("decode: HDR session but no mastering metadata yet — DataSpace only");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Fetched ONCE, ahead of the ladder, so a retry rung never pays the wait again.
+    let hdr_static = hdr_static(client);
     let priority = PresentPriority::resolve(opts.present_priority, opts.smooth_buffer);
     let asc_wanted = asc_backend_selected();
     if !asc_wanted {
@@ -462,19 +441,7 @@ fn bring_up(
         if !install_async_callbacks(&mut codec, ev_tx) {
             return None; // the platform refused async mode outright — no rung changes that
         }
-        // Build the low-latency format (identical keys to the sync path).
-        let mut format = MediaFormat::new();
-        format.set_str("mime", mime);
-        format.set_i32("width", mode.width as i32);
-        format.set_i32("height", mode.height as i32);
-        format.set_i32(
-            "max-input-size",
-            (mode.width * mode.height).max(2_000_000) as i32,
-        );
-        configure_low_latency(&mut format, &codec_name, aggressive);
-        if let Some(info) = hdr_static.as_ref() {
-            format.set_buffer("hdr-static-info", info);
-        }
+        let format = low_latency_format(mime, &mode, &codec_name, aggressive, hdr_static.as_ref());
         // The present backend. ASurfaceControl (default) drives its own `AImageReader` output
         // surface + compositor layer, scheduling against the panel's real present clock; the
         // SurfaceView presenter is the fallback for API < 29, an ASC init failure, the
@@ -630,21 +597,11 @@ struct State {
     last_arms: u64,
     recovery_flags: VecDeque<(u64, u32)>,
     fatal: bool,
-    last_kf_req: Option<Instant>,
-    /// No-output backstop (see [`NO_OUTPUT_PATIENCE`]): the last time the decoder handed us a
-    /// frame, and how many AUs it had been fed by then. Seeded at start so a decoder that never
-    /// produces a first frame — the missed opening IDR — is caught by the same window.
-    last_output: Instant,
-    fed_at_output: u64,
-    /// Nothing-ever-arrived backstop (see [`NO_VIDEO_PATIENCE`]), for a session whose video
-    /// plane delivers no AU at all.
-    started: Instant,
-    last_no_video_req: Option<Instant>,
+    backstops: Backstops,
 }
 
 impl State {
     fn new(asc: Option<AscBackend>, presenter: Option<Presenter>, gate: ReanchorGate) -> State {
-        let now = Instant::now();
         State {
             asc,
             presenter,
@@ -663,11 +620,7 @@ impl State {
             gate,
             recovery_flags: VecDeque::new(),
             fatal: false,
-            last_kf_req: None,
-            last_output: now,
-            fed_at_output: 0,
-            started: now,
-            last_no_video_req: None,
+            backstops: Backstops::new(),
         }
     }
 
@@ -1072,62 +1025,17 @@ impl State {
         }
     }
 
-    /// Loss recovery + the overdue backstops, folded through the gate. A parked-AU overflow drop
-    /// is itself a loss, so it arms the freeze directly; the gate's `poll` then arms on a
-    /// dropped-count climb and re-asks on an overdue freeze. All keyframe intents route through
-    /// the shared 100 ms throttle so a multi-frame recovery gap can't flood the control stream.
+    /// The keyframe backstops (see [`Backstops::poll`]). Evaluated after `feed`, so an AU that
+    /// arrived this pass has either been fed or is parked in `pending_aus`.
     fn housekeeping(&mut self, ctx: &Ctx, had_output: bool, aus_dropped: u64) {
-        let now = Instant::now();
-        if aus_dropped > 0 {
-            self.gate.arm(now);
-        }
-        // Fed but silent: the decoder is holding nothing it can decode — the opening IDR never
-        // reached it, or its reference chain is gone. Ask for a fresh one and arm the freeze, so
-        // the concealment it may start emitting on the way back is withheld until a clean
-        // re-anchor (`gate.poll` keeps re-asking on the deadline until one arrives).
-        let starved = !had_output
-            && self.fed > self.fed_at_output
-            && now.duration_since(self.last_output) >= NO_OUTPUT_PATIENCE;
-        if had_output {
-            self.last_output = now;
-            self.fed_at_output = self.fed;
-        } else if starved {
-            log::warn!(
-                "decode: no output for {} ms with {} AU(s) fed — requesting a re-anchor keyframe",
-                now.duration_since(self.last_output).as_millis(),
-                self.fed - self.fed_at_output
-            );
-            self.gate.arm(now);
-            self.last_output = now; // one request per patience window, not per iteration
-            self.fed_at_output = self.fed;
-        }
-        // Nothing has EVER arrived: not an idle stream but a session that never got a picture —
-        // the `starved` test cannot see it, because it needs `fed` to have moved. Evaluated after
-        // `feed`, so an AU that arrived this pass has either been fed or is parked in
-        // `pending_aus`; both mean video IS flowing.
-        let no_video_yet = self.fed == 0 && self.pending_aus.is_empty();
-        if no_video_yet
-            && now.duration_since(self.started) >= NO_VIDEO_PATIENCE
-            && self
-                .last_no_video_req
-                .is_none_or(|t| now.duration_since(t) >= NO_VIDEO_RETRY)
-        {
-            log::warn!(
-                "decode: no video received {} ms into the session — requesting a keyframe",
-                now.duration_since(self.started).as_millis()
-            );
-            self.last_no_video_req = Some(now);
-            let _ = ctx.client.request_keyframe();
-            self.last_kf_req = Some(now); // share the throttle with the loss-recovery path below
-        }
-        if (self.gate.poll(ctx.client.frames_dropped(), now) || aus_dropped > 0 || starved)
-            && self
-                .last_kf_req
-                .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(100))
-        {
-            self.last_kf_req = Some(now);
-            let _ = ctx.client.request_keyframe();
-        }
+        self.backstops.poll(
+            &ctx.client,
+            &mut self.gate,
+            self.fed,
+            had_output,
+            !self.pending_aus.is_empty(),
+            aus_dropped,
+        );
     }
 }
 
@@ -1188,85 +1096,33 @@ fn feeder_loop(
     shutdown: Arc<AtomicBool>,
     ev_tx: mpsc::Sender<DecodeEvent>,
 ) {
-    // Received AUs awaiting their 0xCF host timing (Phase-2 split), as (pts_ns, capture→received µs).
-    let mut pending_split: VecDeque<(u64, u64)> = VecDeque::new();
-    // Last logged phase-lock ACK (the host's applied capture hold, from the 0xCF tail) — logged
-    // on change so `adb logcat -s pf.phase` shows the closed loop working (or not) at a glance.
-    let mut last_phase_ack: Option<i32> = None;
+    let mut receipts = Receipts::new();
     while !shutdown.load(Ordering::Relaxed) {
         match client.next_frame(Duration::from_millis(5)) {
             Ok(frame) => {
                 // Loss recovery (RFI): a forward frame-index gap fires a throttled reference-frame-
-                // invalidation request so an RFI-capable host recovers with a cheap clean P-frame
-                // instead of a full IDR (the frames_dropped keyframe path is the backstop). The gap
-                // verdict rides the Au event so the decode loop arms its freeze gate on the same signal.
-                // Slice-progressive parts repeat their AU's index — note it once, on the
-                // AU's first piece (or a whole delivery), so the RFI gap detector keeps
-                // counting AUs.
+                // invalidation request (a cheap clean P-frame instead of a full IDR); the verdict
+                // rides the Au event so the loop arms its freeze gate on the same signal. Parts
+                // repeat their AU's index — note it once, on the first piece.
                 let au_first = frame.part.is_none_or(|p| p.first);
                 let gap = if au_first {
                     client.note_frame_index(frame.frame_index)
                 } else {
                     0
                 };
-                // Park the receipt stamp (keyed by the pts the codec echoes) whenever the `decode`
-                // stage is consumed: the HUD, or the ABR decode signal (`measure_decode`). The
-                // HUD-only `received` point + host/network split stay gated on the overlay.
+                // Park the receipt stamp whenever the `decode` stage is consumed: the HUD, or the
+                // ABR decode signal (`measure_decode`).
                 if (stats.enabled() || measure_decode) && frame.complete {
-                    // Core reassembly-completion stamp (ABI v9), NOT the pull instant: stamping
-                    // here would fold the hand-off queue wait into the network latency figure
-                    // (a client-side standing backlog masquerading as network). 0 = older core.
-                    let received_ns = if frame.received_ns > 0 {
-                        frame.received_ns as i128
-                    } else {
-                        now_realtime_ns()
-                    };
-                    {
-                        let mut g = in_flight
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        g.push_back((frame.pts_ns / 1000, received_ns));
-                        if g.len() > IN_FLIGHT_CAP {
-                            g.pop_front(); // stale — codec never echoed it back
-                        }
-                    }
-                    if stats.enabled() {
-                        let clock_offset = clock_offset.load(Ordering::Relaxed) as i128;
-                        let lat_ns = received_ns + clock_offset - frame.pts_ns as i128;
-                        let lat_us = (lat_ns > 0 && lat_ns < 10_000_000_000)
-                            .then_some((lat_ns / 1000) as u64);
-                        // On a parts stream the completing delivery carries only the AU's
-                        // suffix — its offset restores the full AU byte count for bitrate.
-                        let au_len = frame.part.map_or(0, |p| p.offset as usize) + frame.data.len();
-                        stats.note_received(au_len, lat_us, clock_offset != 0);
-                        if let Some(hostnet_us) = lat_us {
-                            pending_split.push_back((frame.pts_ns, hostnet_us));
-                            if pending_split.len() > PENDING_SPLIT_CAP {
-                                pending_split.pop_front();
-                            }
-                        }
-                        while let Ok(t) = client.next_host_timing(Duration::ZERO) {
-                            // Phase-lock closed-loop readout: the host's applied hold rides the
-                            // 0xCF tail; log transitions (~1 Hz worst case — the host updates it
-                            // once a second). None = a host without the tail (pre-phase-lock).
-                            if t.applied_phase_ns != last_phase_ack {
-                                log::info!(
-                                    target: "pf.phase",
-                                    "host applied_phase={:?}us",
-                                    t.applied_phase_ns.map(|n| n / 1000)
-                                );
-                                last_phase_ack = t.applied_phase_ns;
-                            }
-                            if let Some(i) = pending_split.iter().position(|&(p, _)| p == t.pts_ns)
-                            {
-                                let (_, hostnet_us) = pending_split.remove(i).unwrap();
-                                stats.note_host_split(
-                                    t.host_us as u64,
-                                    hostnet_us.saturating_sub(t.host_us as u64),
-                                );
-                            }
-                        }
-                    }
+                    let mut g = in_flight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    receipts.note(
+                        &client,
+                        &stats,
+                        clock_offset.load(Ordering::Relaxed),
+                        &mut g,
+                        &frame,
+                    );
                 }
                 if ev_tx.send(DecodeEvent::Au(frame, gap)).is_err() {
                     break; // the decode loop is gone

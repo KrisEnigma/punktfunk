@@ -1,7 +1,11 @@
 //! Decode-latency bookkeeping: realtime clock + decoded-pts / user-flags stat recording.
 
 use punktfunk_core::client::NativeClient;
+use punktfunk_core::session::Frame;
 use std::collections::VecDeque;
+use std::time::Duration;
+
+use super::{IN_FLIGHT_CAP, PENDING_SPLIT_CAP};
 
 /// Wall-clock now in nanoseconds (CLOCK_REALTIME basis), to compare against the host-stamped
 /// capture `pts_ns` after the skew offset is applied.
@@ -99,4 +103,78 @@ pub(super) fn take_flags(map: &mut VecDeque<(u64, u32)>, pts_us: u64) -> u32 {
         }
     }
     0
+}
+
+/// The receipt side of the `decode` stage, shared by the async feeder and the sync loop's pull:
+/// parks the receipt stamp for [`note_decoded_pts`] to pair, records the HUD's `received` point,
+/// and matches 0xCF host timings for the Phase-2 host/network split.
+pub(super) struct Receipts {
+    /// Received AUs awaiting their 0xCF host timing, as (pts_ns, capture→received µs).
+    pending_split: VecDeque<(u64, u64)>,
+    /// Last logged phase-lock ACK (the host's applied capture hold, from the 0xCF tail) — logged
+    /// on change so `adb logcat -s pf.phase` shows the closed loop working at a glance.
+    last_phase_ack: Option<i32>,
+}
+
+impl Receipts {
+    pub(super) fn new() -> Receipts {
+        Receipts {
+            pending_split: VecDeque::new(),
+            last_phase_ack: None,
+        }
+    }
+
+    /// One complete AU received. The stamp is core's reassembly-completion stamp (ABI v9), NOT the
+    /// pull instant: stamping at the pull folds the hand-off queue wait into the network figure.
+    /// The HUD-only `received` point + host/network split stay gated on the overlay.
+    pub(super) fn note(
+        &mut self,
+        client: &NativeClient,
+        stats: &crate::stats::VideoStats,
+        clock_offset: i64,
+        in_flight: &mut VecDeque<(u64, i128)>,
+        frame: &Frame,
+    ) {
+        let received_ns = if frame.received_ns > 0 {
+            frame.received_ns as i128
+        } else {
+            now_realtime_ns()
+        };
+        in_flight.push_back((frame.pts_ns / 1000, received_ns));
+        if in_flight.len() > IN_FLIGHT_CAP {
+            in_flight.pop_front(); // stale — codec never echoed it back
+        }
+        if !stats.enabled() {
+            return;
+        }
+        let lat_ns = received_ns + clock_offset as i128 - frame.pts_ns as i128;
+        let lat_us = (lat_ns > 0 && lat_ns < 10_000_000_000).then_some((lat_ns / 1000) as u64);
+        // On a parts stream the completing delivery carries only the AU's suffix — its offset
+        // restores the full AU byte count for bitrate.
+        let au_len = frame.part.map_or(0, |p| p.offset as usize) + frame.data.len();
+        stats.note_received(au_len, lat_us, clock_offset != 0);
+        if let Some(hostnet_us) = lat_us {
+            self.pending_split.push_back((frame.pts_ns, hostnet_us));
+            if self.pending_split.len() > PENDING_SPLIT_CAP {
+                self.pending_split.pop_front(); // 0xCF lost / old host — evict
+            }
+        }
+        while let Ok(t) = client.next_host_timing(Duration::ZERO) {
+            if t.applied_phase_ns != self.last_phase_ack {
+                log::info!(
+                    target: "pf.phase",
+                    "host applied_phase={:?}us",
+                    t.applied_phase_ns.map(|n| n / 1000)
+                );
+                self.last_phase_ack = t.applied_phase_ns;
+            }
+            if let Some(i) = self.pending_split.iter().position(|&(p, _)| p == t.pts_ns) {
+                let (_, hostnet_us) = self.pending_split.remove(i).unwrap();
+                stats.note_host_split(
+                    t.host_us as u64,
+                    hostnet_us.saturating_sub(t.host_us as u64),
+                );
+            }
+        }
+    }
 }
