@@ -10,7 +10,7 @@
 
 use crate::trust::{KnownHost, KnownHosts, Settings};
 
-/// The `start_in` setting. Unknown reads as [`StartIn::Library`], the `library_view`
+/// The `start_in` setting. Unknown reads as [`StartIn::Hosts`], the `library_view`
 /// convention: a value a newer client wrote degrades, it never ends a launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartIn {
@@ -25,9 +25,9 @@ impl StartIn {
 
     pub fn parse(s: &str) -> StartIn {
         match s {
-            "hosts" => StartIn::Hosts,
+            "library" => StartIn::Library,
             "stream" => StartIn::Stream,
-            _ => StartIn::Library,
+            _ => StartIn::Hosts,
         }
     }
 
@@ -50,7 +50,7 @@ impl StartIn {
 
     /// One step of the settings row's cycle; wraps both ways.
     pub fn step(self, forward: bool) -> StartIn {
-        let i = StartIn::ALL.iter().position(|v| *v == self).unwrap_or(1);
+        let i = StartIn::ALL.iter().position(|v| *v == self).unwrap_or(0);
         let n = StartIn::ALL.len();
         StartIn::ALL[if forward { i + 1 } else { i + n - 1 } % n]
     }
@@ -174,9 +174,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_start_in_is_library() {
-        assert_eq!(StartIn::parse(""), StartIn::Library);
-        assert_eq!(StartIn::parse("shelf"), StartIn::Library);
+    fn unknown_start_in_is_the_host_list() {
+        assert_eq!(StartIn::parse(""), StartIn::Hosts);
+        assert_eq!(StartIn::parse("shelf"), StartIn::Hosts);
         for v in StartIn::ALL {
             assert_eq!(StartIn::parse(v.as_str()), v);
         }

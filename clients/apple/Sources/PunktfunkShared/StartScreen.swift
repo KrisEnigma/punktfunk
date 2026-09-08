@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// The `punktfunk.startIn` setting. Unknown reads as `.library`, the `libraryView` convention:
+/// The `punktfunk.startIn` setting. Unknown reads as `.hosts`, the `libraryView` convention:
 /// a value a newer client wrote degrades, it never ends a launch.
 public enum StartIn: String, CaseIterable, Sendable {
     case hosts
@@ -16,7 +16,7 @@ public enum StartIn: String, CaseIterable, Sendable {
 
     /// Stored → case, with the unknown fallback. Use this rather than `init(rawValue:)`.
     public static func parse(_ raw: String?) -> StartIn {
-        StartIn(rawValue: raw ?? "") ?? .library
+        StartIn(rawValue: raw ?? "") ?? .hosts
     }
 
     public var stored: String { rawValue }

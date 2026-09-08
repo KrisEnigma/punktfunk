@@ -626,9 +626,17 @@ pub fn spawn_session(
         // Piped through the ring forwarder, not inherited: a GUI-only log export
         // otherwise holds everything except the stream it was exported about.
         .stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("couldn't start {}: {e}", SESSION_BIN))?;
+    // The reader thread below deletes the spec once the child is done with it; a spawn that
+    // never gets there has to clean up after itself, or the temp is left for good.
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(path) = &spec_path {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(format!("couldn't start {}: {e}", SESSION_BIN));
+        }
+    };
     if let Some(stderr) = child.stderr.take() {
         crate::logring::forward_child_stderr(stderr);
     }
@@ -648,7 +656,13 @@ pub fn spawn_session(
         .spawn(move || {
             use std::io::BufRead as _;
             for line in std::io::BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+                let line = match line {
+                    Ok(line) => line,
+                    // One undecodable line must not end the contract — the child streams on,
+                    // and the shell would simply stop hearing about it.
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                    Err(_) => break,
+                };
                 if let Some(ev) = parse_session_line(&line) {
                     if let SessionEvent::Window { w, h } = ev {
                         persist_window_size(w, h);

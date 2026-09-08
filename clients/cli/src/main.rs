@@ -589,7 +589,9 @@ from the config directory for a true factory reset."
         match trust::pair_with_host(&addr, port, &identity, &pin, &name) {
             Ok(fp) => {
                 let fp_hex = trust::hex(&fp);
-                trust::persist_host(&addr, &addr, port, &fp_hex, true);
+                if let Err(e) = trust::persist_host(&addr, &addr, port, &fp_hex, true) {
+                    eprintln!("couldn't save the host: {e:#}");
+                }
                 trust::forget_placeholder(&addr, port);
                 println!("paired {addr}:{port} fp={fp_hex}");
                 OK
@@ -1108,13 +1110,15 @@ from the config directory for a true factory reset."
                     // exactly this identity by completing a pinned handshake against it.
                     if persist_paired {
                         if let Some(fp_hex) = &plan.host.fp_hex {
-                            trust::persist_host(
+                            if let Err(e) = trust::persist_host(
                                 &plan.host.name,
                                 &plan.host.addr,
                                 plan.host.port,
                                 fp_hex,
                                 true,
-                            );
+                            ) {
+                                eprintln!("couldn't save the host: {e:#}");
+                            }
                             trust::forget_placeholder(&plan.host.addr, plan.host.port);
                         }
                     }
@@ -1320,14 +1324,11 @@ from the config directory for a true factory reset."
         OK
     }
 
+    /// A user-typed `<host[:port]>`. Shared parser: a plain `rsplit_once(':')` reads the
+    /// bare IPv6 `::1` as host `:` port `1`, and this value goes on to be dialled and stored.
     fn split_host_port(target: &str) -> (String, u16) {
-        match target.rsplit_once(':') {
-            Some((a, p)) => match p.parse() {
-                Ok(port) => (a.to_string(), port),
-                Err(_) => (target.to_string(), 9777),
-            },
-            None => (target.to_string(), 9777),
-        }
+        pf_client_core::deeplink::parse_addr_port(target)
+            .unwrap_or_else(|| (target.to_string(), pf_client_core::deeplink::DEFAULT_PORT))
     }
 
     /// Is stdin a terminal? Decides whether a verb may ask a question or must refuse with

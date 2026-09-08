@@ -23,6 +23,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
+- **`punktfunk-client` drops seven headless flags the `punktfunk` CLI already had.** `--pair`,
+  `--wake`, `--list-hosts`, `--reachable`, `--add-host`, `--reset` and their probe helper were a
+  second implementation over the same store, in the same package. Use `punktfunk pair`,
+  `punktfunk wake`, `punktfunk hosts list --probe --json`, `punktfunk reachable`,
+  `punktfunk hosts add` and `punktfunk reset`; `--forget-host`, `--library`, `--set-host`,
+  `--omarchy-menu`, the update flags and the deep link are unchanged.
 - **The host links no FFmpeg.** libavcodec's NVENC and VAAPI backends and the Windows `amf-qsv`
   path are gone: NVIDIA encodes through the direct SDK, AMD and Intel through the native VAAPI
   session, Windows Intel through native QSV, and CPU frames are uploaded to the GPU instead of
@@ -82,7 +88,7 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   ask for Main10 under SDR. Rebuild the kit against the matching native library; an unchanged
   caller will not link.
 - **`start_in` and `default_host` are cross-client settings keys.** The client settings record
-  gained where a bare launch opens (`"hosts"`, `"library"`, `"stream"`; unknown reads as library)
+  gained where a bare launch opens (`"hosts"`, `"library"`, `"stream"`; unknown reads as hosts)
   and which saved-host id it opens on. Resolve them through `pf_client_core::start`, never by
   reading either alone: with one paired host the default is derived and `default_host` is empty.
   The Swift and Kotlin ports are held to it by `clients/shared/start-screen-vectors.json`.
@@ -309,6 +315,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **`punktfunk-host ctl console-url` is back, and now prints a `file://` page instead of a bearer
+  URL.** It writes a 0600 login page under `$XDG_RUNTIME_DIR` carrying the handoff ticket, so the
+  Omarchy launchers open the console already logged in without the ticket ever reaching argv, where
+  `/proc/<pid>/cmdline` shows it to every other local user. Launch a browser at the URL it prints;
+  the verb is Unix-only and fails cleanly when `$XDG_RUNTIME_DIR` is unset, so keep a bare
+  `https://localhost:47992` fallback in any launcher you wrote against it.
 - **Error messages follow one register rule across the stack (`docs/writing.md` §4).** Operator
   lines name the operation, screen text is a plain sentence with the next move, and the
   management API's `error` field is now screen text because the console shows it verbatim —
@@ -436,6 +448,47 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   on NixOS all Vulkan died at `Entry::load()` and native VAAPI was about to follow it the moment
   the host stopped linking FFmpeg, which had been pulling libva in by accident. Rebuild the
   packages; `/run/opengl-driver` carries the vendor ICD and the NVIDIA libraries, neither of these.
+- **A failed save says so.** Pairing wrote the host store and reported success whatever
+  happened, so a read-only config dir or a sandbox denial announced "Paired" for a pairing that
+  was gone at the next launch; the console and the hosts page swallowed the same failure on
+  every edit. Each now names it. Nothing to do.
+- **A resolution or refresh rate this client cannot list survives it.** Values differ between
+  our own clients — the console offers the Deck's 1280x800, the desktop offers 144/165/240 Hz —
+  and opening Settings on the other one rewrote the stored value to the rung it displayed.
+  Nothing to do.
+- **Windows Forget removes the host you picked.** It removed by fingerprint, which a host saved
+  by address does not have, so it took every such record; Edit and pinning wrote to whichever one
+  came first in the file. All three now name one record by its stable id. Nothing to do.
+- **Poster fetches stop when the library page closes.** The worker only checked whether anyone was
+  still listening after a poster it had actually found, so a shelf where every poster missed — or
+  whose host went away — kept requesting against a closed page. Nothing to do.
+- **Clearing the controller pin clears it.** In the console shell one gamepad service is reused
+  across launches, so a pin set for one stream stayed in force after it was set back to Automatic.
+  Nothing to do.
+- **Cancelling a wake no longer clears the next host's card.** The cancelled thread finished its
+  probe and wrote its result over whatever had replaced it. Nothing to do.
+- **Request access connects instead of cancelling itself.** Closing the "Waiting for Approval"
+  dialog emits its close response, so the approval landing fired the dialog's own Cancel, killed
+  the child that had just reported ready and said "Cancelled" — the flow could never succeed.
+  Nothing to do; approve on the host as before.
+- **Forgetting one unpaired host no longer forgets them all.** A record saved by address carries
+  an empty fingerprint, and Forget removed by fingerprint, so `retain` dropped every unpaired
+  record at once; Forget and Edit now name one record by its stable id, and an empty fingerprint
+  is no longer a lookup key anywhere. Nothing to do.
+- **Capturing a quick-action chord no longer kills the client.** Applying the captured modifiers
+  re-entered the draft while it was still borrowed, and any chord that changed a modifier
+  panicked the shell. Nothing to do.
+- **A departing shell no longer kills a live stream.** Every write on the session's stdout
+  contract was a `println!`, which panics on EPIPE once the parent closes the pipe. Nothing to
+  do; a stream now outlives the window that started it.
+- **An open dial no longer strands a button down on the host.** The dial swallowed the release of
+  anything already pressed, and the pad mask was driven by two latches over one flag so it lifted
+  while the dial was still open. Nothing to do.
+- **The library grid shows the host you asked for last.** A slow fetch could land after a newer
+  one and overwrite it, in both the desktop grid and the in-session console. Nothing to do.
+- **Duplicating a profile copies what is on screen.** The copy was taken from disk before the
+  dialog committed, so pending edits went to the original and were missing from the copy; a
+  cancelled "New profile…" also left the scope row stuck on it. Nothing to do.
 - **The native VAAPI session keeps a reference the loss report can still reach.** Its ring held
   four pictures — 40 ms at 100 Hz — so a report that names a frame two frames back and spends a
   round trip arriving always found every pre-loss picture evicted, and every single lost frame
@@ -705,6 +758,17 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Security
 
+- **`punktfunk-client --library` verifies the host again.** It looked the saved record up on the
+  management port while records are keyed by the stream port, so the lookup always missed and the
+  fetch ran with no pin — which the TLS verifier reads as "accept any certificate". Nothing to do;
+  an unpinned host is now refused unless you pass `--fp`.
+- **An advert cannot overwrite a learned wake MAC.** The fingerprint an advert matches on is
+  broadcast in clear, so anything on the LAN could claim a saved host and replace its MAC, and a
+  sleeping machine sends no advert to correct it — Wake-on-LAN stayed broken after the attacker
+  left. Nothing to do; an advert may still teach a MAC that was never known.
+- **A conflicting fingerprint no longer matches by address.** Whoever inherited a sleeping host's
+  DHCP lease was treated as that host and hid the real one, in both the hosts page and the
+  in-session console. Nothing to do.
 - **`GET /api/v1/local/summary` is never answered cross-origin.** It is admitted by loopback with
   no credential, so the same-origin policy was the only thing keeping a page off it, and the CORS
   layer now exempts every route authorised by network position. Nothing to do: a host that never
