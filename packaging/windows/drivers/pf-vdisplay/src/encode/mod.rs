@@ -22,7 +22,7 @@ use pf_driver_proto::encode::{self as wire, EncodeCtlRequest, SetEncodeReply, Se
 use wdk_sys::NTSTATUS;
 
 use self::section::{AuSection, Ctl, EncodeSession};
-use self::thread::{BACKEND_NAMES, EncodeThread, ThreadCtx, fail_reply};
+use self::thread::{EncodeThread, ThreadCtx, fail_reply};
 use crate::monitor::Monitor;
 use crate::{STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS, registry};
 
@@ -32,6 +32,28 @@ const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as NTSTATUS;
 /// in tens; a backend that takes seconds is stuck in a driver, and the host's watchdog window
 /// (10 s) must still see the IOCTL return.
 const OPEN_BOUND: Duration = Duration::from_secs(5);
+
+/// How long `SET_ENCODE` waits for the OS to assign the monitor a swap chain. The host opens the
+/// encoder once its CCD topology settle returns, and that settle says nothing about the swap
+/// chain, so a monitor that has just arrived — a mid-stream resize re-arrives one — is routinely
+/// still without it. 1.5 s matches the host's own settle bound.
+const SWAP_BOUND: Duration = Duration::from_millis(1500);
+
+/// The monitor's render adapter, waiting up to [`SWAP_BOUND`] for the assignment. `None` means the
+/// monitor never got a swap chain (or went away), which is the one thing an encoder cannot open
+/// without — failing immediately instead would reject an open that is merely early.
+fn wait_render_luid(monitor: &Monitor) -> Option<windows::Win32::Foundation::LUID> {
+    let deadline = std::time::Instant::now() + SWAP_BOUND;
+    loop {
+        if let Some(luid) = monitor.render_luid() {
+            return Some(luid);
+        }
+        if monitor.gone() || std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 /// Backend names in the order the addresses below pin them, for the load-time log.
 pub fn backends_linked() -> &'static [&'static str] {
@@ -51,17 +73,13 @@ pub fn backends_linked() -> &'static [&'static str] {
 /// clears the pool's `live` under its successor. The open runs on the new encode thread and
 /// this call waits [`OPEN_BOUND`] for its reply.
 pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, NTSTATUS> {
-    // The bound is the name table's length: `open_listed` indexes it by `backend - 1`, and a
-    // backend added there without widening this would be rejected here instead.
-    let listed = req.backends[0] != 0
-        && req
-            .backends
-            .iter()
-            .all(|&b| (b as usize) <= BACKEND_NAMES.len());
+    // `open_listed` indexes the name table by `backend - 1`, so the bound is that table's —
+    // widening it in the proto widens this with no edit here.
+    let listed = req.backends[0] != 0 && req.backends.iter().all(|&b| wire::backend::listed(b));
     let valid = req.target_id != 0
         && req.section != 0
         && req.event != 0
-        && (1..=4).contains(&req.codec)
+        && wire::codec::valid(req.codec)
         && req.width != 0
         && req.height != 0
         && listed;
@@ -83,7 +101,7 @@ pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, 
             pool.reclaim();
         }
     }
-    let Some(luid) = monitor.render_luid() else {
+    let Some(luid) = wait_render_luid(&monitor) else {
         return Ok(fail_reply(wire::SET_ENCODE_NO_DEVICE, (-5, "noswap")));
     };
     let Some(device) = crate::direct_3d_device::pooled_device(luid) else {
@@ -148,9 +166,11 @@ pub fn encode_ctl(owner: u32, req: &EncodeCtlRequest) -> NTSTATUS {
         wire::ENCODE_CTL_RESET => return reset(&monitor, &session, req.arg0),
         wire::ENCODE_CTL_CLOSE => {
             // The host's proxy is gone; a stale proxy names an older generation and stops
-            // nothing. The pool stays for the retained slot.
+            // nothing. The pool stays for the retained slot. Matching the LIVE session too is
+            // what keeps a close from taking its own replacement: a mid-stream resize installs
+            // the new session first, and this close arrives a moment later.
             if session.generation == req.arg0
-                && let Some(live) = monitor.take_encode()
+                && let Some(live) = monitor.take_encode_if(session.generation)
             {
                 live.stop();
                 if let Some(pool) = monitor.pool() {

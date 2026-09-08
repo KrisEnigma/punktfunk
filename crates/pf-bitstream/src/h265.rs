@@ -660,6 +660,12 @@ impl H265Planner {
         })
     }
 
+    /// An intra refresh wave finished on a picture the freeze gate accepted: forget the
+    /// unclean marks, which a chain through half-refreshed pictures cannot clear itself.
+    pub fn forgive_unclean(&mut self) {
+        self.clean.clear();
+    }
+
     /// Drain the DPB: every still-buffered picture becomes display-ready and
     /// every id is released. Session calls this at teardown or a discontinuity.
     ///
@@ -745,12 +751,12 @@ impl H265Planner {
         Ok(())
     }
 
-    /// Map a vendored slice-header parse failure. Missing-PPS prefix becomes
-    /// [`PlanError::NoActiveParamSet`]. Best-effort: a reworded message degrades
-    /// to `Parse`, not silence.
+    /// Map a vendored slice-header parse failure to [`PlanError::NoActiveParamSet`].
+    /// The needle is the vendored parser's own wording, not ours; reword it here
+    /// and the error degrades to `Parse`.
     fn slice_parse_error(err: String) -> PlanError {
-        match err.strip_prefix("Could not get PPS for pic_parameter_set_id ") {
-            Some(id) => PlanError::NoActiveParamSet {
+        match err.split_once("PPS for pic_parameter_set_id ") {
+            Some((_, id)) => PlanError::NoActiveParamSet {
                 pps_id: id.trim().parse().unwrap_or(0),
             },
             None => PlanError::Parse(err),

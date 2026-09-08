@@ -296,9 +296,13 @@ fn run_service() -> Result<()> {
     std::thread::spawn(warn_if_public_network);
     let result = supervise(stop, session);
 
+    // Report the truth: `running` carries Win32(0), so a failed `supervise` used to stop as
+    // cleanly as an operator-requested stop, and the SCM log — and any failure action keyed on
+    // a non-zero exit — never saw the difference.
     let _ = status_handle.set_service_status(ServiceStatus {
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(u32::from(result.is_err())),
         ..running
     });
     // Leave the OnceLock events open: the SCM handler can still fire until process exit.
@@ -356,7 +360,7 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
             Err(e) => {
                 tracing::error!(
                     session,
-                    "failed to launch host into the active console session: {e:#}"
+                    "launch the host into the active console session: {e:#}"
                 );
                 // A host that never starts is the boot loop the rollback exists for.
                 restarts += 1;
@@ -859,7 +863,7 @@ impl WebSlot {
                 self.child = Some(child);
             }
             Err(e) => {
-                tracing::error!("failed to launch the web console: {e:#}");
+                tracing::error!("web console did not launch: {e:#}");
                 self.schedule_retry();
             }
         }
@@ -1135,7 +1139,7 @@ fn install(args: &[String]) -> Result<()> {
         });
     match recovery {
         Ok(()) => println!("Crash recovery: the SCM restarts the service at 1s/5s/60s."),
-        Err(e) => eprintln!("warning: could not set the service recovery actions: {e}"),
+        Err(e) => eprintln!("warning: service recovery actions not set: {e}"),
     }
 
     ensure_default_host_env()?;
@@ -1244,8 +1248,11 @@ fn ensure_default_host_env() -> Result<()> {
     }
     // Harden the dir first, before the `exists()` check — not only in the create-file branch.
     // `ProgramData` grants Users add-subdirectory + CREATOR OWNER; a planted dir must still lock.
+    // The error is the junction refusal: `write_secret_file` only rejects the FILE being a link,
+    // so a junctioned parent would still redirect this write. Refuse the install step instead.
     if let Some(dir) = path.parent() {
-        pf_paths::create_private_dir(dir).ok();
+        pf_paths::create_private_dir(dir)
+            .with_context(|| format!("lock down {} before writing host.env", dir.display()))?;
     }
     if path.exists() && !planted {
         // Re-lock the file: an owner can rewrite the DACL it inherited. `planted` files fall
@@ -1298,7 +1305,7 @@ fn apply_gamestream_choice(enable: bool) {
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
         eprintln!(
-            "warning: could not read {} to apply the GameStream choice",
+            "warning: {} not read, so the GameStream choice is unapplied",
             path.display()
         );
         return;
@@ -1329,7 +1336,7 @@ fn apply_gamestream_choice(enable: bool) {
     out.push('\n');
     // `write_secret_file` re-asserts the SYSTEM/Administrators DACL.
     if let Err(e) = pf_paths::write_secret_file(&path, out.as_bytes()) {
-        eprintln!("warning: could not write {}: {e}", path.display());
+        eprintln!("warning: {} not written: {e}", path.display());
         return;
     }
     println!(
@@ -1448,7 +1455,7 @@ fn add_firewall_rules(allow_public: bool) {
             };
             println!("Firewall rule added: {name} ({ports}{scope}) [{profile}]");
         } else {
-            eprintln!("warning: could not add firewall rule '{name}' (add it manually if needed)");
+            eprintln!("warning: firewall rule '{name}' not added (add it manually if needed)");
         }
     }
     add_data_plane_firewall_rule(profile, exe.as_deref());
@@ -1554,9 +1561,7 @@ fn set_fw_public_marker(allow_public: bool) {
 fn active_network_is_public() -> Option<bool> {
     // Full System32 path: CreateProcess searches the launching EXE's directory first, so a
     // planted `powershell.exe` next to the host would run as SYSTEM.
-    let ps = std::env::var("SystemRoot")
-        .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
-        .unwrap_or_else(|_| "powershell.exe".to_string());
+    let ps = crate::install::sys32(r"WindowsPowerShell\v1.0\powershell.exe");
     let out = std::process::Command::new(&ps)
         .args([
             "-NoProfile",
@@ -1591,8 +1596,10 @@ fn warn_if_public_network() {
 }
 
 /// `sc.exe` with output passed through (start/stop/status).
+///
+/// Absolute: `CreateProcess` searches the cwd before `%PATH%`, and this runs elevated.
 fn sc(args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("sc")
+    let status = std::process::Command::new(crate::install::resolve_tool("sc"))
         .args(args)
         .status()
         .context("run sc.exe")?;
@@ -1707,7 +1714,7 @@ fn maybe_boot_loop_rollback(restarts: u32, attempted: &mut bool) {
     {
         // Detached: it stops this service and reinstalls the previous version.
         Ok(child) => drop(child),
-        Err(e) => tracing::error!(error = %e, "failed to spawn the rollback installer"),
+        Err(e) => tracing::error!(error = %e, "rollback installer did not spawn"),
     }
 }
 

@@ -201,8 +201,14 @@ fn a_ten_bit_stream_carries_hdr10() {
     let mut planner = pf_bitstream::h265::H265Planner::new();
     let mut stream = Vec::new();
     for i in 0..5 {
-        enc.submit_packed(&picture, VA_FOURCC_X2R10G10B10, p.width as usize * 4)
-            .expect("ten-bit ingest");
+        enc.submit_packed(
+            &picture,
+            VA_FOURCC_X2R10G10B10,
+            p.width,
+            p.height,
+            p.width as usize * 4,
+        )
+        .expect("ten-bit ingest");
         let pic = enc.encode(i == 0).expect("encode");
         if i == 0 {
             assert_eq!(

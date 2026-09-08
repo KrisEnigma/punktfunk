@@ -15,6 +15,7 @@
 //! marker write. Steam's own devices use the same HWIDs under
 //! `ROOT\SteamStreamingSpeakers\*` / `ROOT\SteamStreamingMicrophone\*`.
 
+use super::devnode_api as da;
 use super::{audio_control, audio_probe, minted, pad_endpoint as pe};
 use anyhow::Result;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -83,17 +84,17 @@ pub(crate) fn purge() -> Result<Removed> {
 }
 
 /// MEDIA-class DEVNODEs with an [`OWNER_MARKERS`] value, including phantoms.
-/// Enumerated without `DIGCF_PRESENT` (see [`pe::media_class_devs`]).
+/// Enumerated without `DIGCF_PRESENT` (see [`da::media_class_devs`]).
 fn owned_devnodes() -> Result<Vec<String>> {
-    let set = pe::media_class_devs()?;
+    let set = da::media_class_devs()?;
     let mut out = Vec::new();
     for i in 0.. {
-        let mut did = pe::devinfo_data();
+        let mut did = da::devinfo_data();
         // SAFETY: live set; `did` is a live out-param with cbSize set.
         if unsafe { SetupDiEnumDeviceInfo(set.0, i, &mut did) }.is_err() {
             break; // ERROR_NO_MORE_ITEMS
         }
-        let Some(inst) = pe::instance_id(&set, &did) else {
+        let Some(inst) = da::instance_id(&set, &did) else {
             continue;
         };
         if !is_removable_instance(&inst) {
@@ -101,7 +102,7 @@ fn owned_devnodes() -> Result<Vec<String>> {
         }
         if OWNER_MARKERS
             .iter()
-            .any(|m| pe::read_devparam_dword(&set, &did, m).is_some())
+            .any(|m| da::read_devparam_dword(&set, &did, m).is_some())
         {
             out.push(inst);
             continue;
@@ -110,7 +111,7 @@ fn owned_devnodes() -> Result<Vec<String>> {
         // Prefix is required — Steam's devices share these HWIDs under `ROOT\SteamStreaming*\*`.
         if is_abandoned_mint(
             &inst,
-            &pe::devnode_multi_sz_prop(&set, &did, SPDRP_HARDWAREID),
+            &da::devnode_multi_sz_prop(&set, &did, SPDRP_HARDWAREID),
         ) {
             out.push(inst);
         }
@@ -186,8 +187,7 @@ fn is_removable_instance(instance_id: &str) -> bool {
 
 /// `pnputil /remove-device` by absolute path: an uninstaller must not depend on `%PATH%`.
 fn remove_devnode(instance_id: &str) -> bool {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
-    match std::process::Command::new(format!(r"{windir}\System32\pnputil.exe"))
+    match std::process::Command::new(crate::install::sys32("pnputil.exe"))
         .args(["/remove-device", instance_id])
         .output()
     {
@@ -204,7 +204,7 @@ fn remove_devnode(instance_id: &str) -> bool {
             false
         }
         Err(e) => {
-            eprintln!("warning: could not run pnputil for {instance_id}: {e}");
+            eprintln!("warning: pnputil did not run for {instance_id}: {e}");
             false
         }
     }

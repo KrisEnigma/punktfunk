@@ -91,6 +91,27 @@ pub struct GameEntry {
     pub icon: Option<String>,
 }
 
+/// The console's desktop-tile id. `\0` prefix as Home's Add and Rescan tiles use: a host
+/// title id is a store reference, and none of them can start with a NUL. Lives here, not in
+/// the console, because [`crate::collate`] has to keep the tile out of every group and the
+/// shells that have no such tile simply never match it.
+pub const DESKTOP_ID: &str = "\0desktop";
+
+/// Store id → display label. One table: the console, the GTK dialog and the WinUI dialog all
+/// drew this from a copy of their own, and a store added to one never reached the others.
+pub fn store_label(store: &str) -> &'static str {
+    match store {
+        "steam" => "Steam",
+        "custom" => "Custom",
+        "heroic" => "Heroic",
+        "lutris" => "Lutris",
+        "epic" => "Epic",
+        "gog" => "GOG",
+        "xbox" => "Xbox",
+        _ => "Game",
+    }
+}
+
 impl GameEntry {
     pub fn is_launcher(&self) -> bool {
         self.role.as_deref() == Some("launcher")
@@ -121,25 +142,20 @@ pub enum LibraryError {
 }
 
 impl std::fmt::Display for LibraryError {
+    /// A phrase, never a sentence. Every caller supplies the frame — a
+    /// "Couldn't load the library" title on the three library screens, a
+    /// "{label} failed — " lead on a host action, "Couldn't send logs — " on
+    /// an upload. A sentence here reads as a second headline under the first.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LibraryError::NotPaired => f.write_str(
-                "The host didn't recognize this device. Pair with the host first — the \
-                 library is authorized by this device's certificate (no token needed).",
-            ),
-            LibraryError::PinMismatch => f.write_str(
-                "The host's certificate doesn't match the pinned fingerprint. \
-                 Re-pair with a PIN to re-establish trust.",
-            ),
-            LibraryError::Http(code) => {
-                write!(f, "The management API returned HTTP {code}.")
+            LibraryError::NotPaired => {
+                f.write_str("the host doesn't recognize this device — pair with it first")
             }
-            LibraryError::Unreachable(why) => write!(
-                f,
-                "Couldn't reach the host's management API: {why}. Check the host is \
-                 updated and reachable (a host pinned to --mgmt-bind 127.0.0.1 is \
-                 loopback-only and can't be browsed remotely)."
-            ),
+            LibraryError::PinMismatch => {
+                f.write_str("the host's certificate isn't the one you paired with — pair again")
+            }
+            LibraryError::Http(code) => write!(f, "the host refused it ({code})"),
+            LibraryError::Unreachable(why) => write!(f, "couldn't reach the host — {why}"),
         }
     }
 }
@@ -412,9 +428,19 @@ pub fn spawn_art_fetch(
                     return;
                 };
                 loop {
+                    // Asked before every request, not only on a hit: a title whose posters all
+                    // miss never reaches `send_blocking`, so a run of misses used to grind
+                    // through the whole queue against a page that had already been closed —
+                    // or a host that had gone away.
+                    if tx.is_closed() {
+                        return;
+                    }
                     let job = queue.lock().unwrap().pop_front();
                     let Some((id, candidates)) = job else { break };
                     for url in &candidates {
+                        if tx.is_closed() {
+                            return;
+                        }
                         match fetch_art(&agent, &base, url) {
                             Ok(bytes) => {
                                 // Receiver dropped (page popped) — stop fetching.

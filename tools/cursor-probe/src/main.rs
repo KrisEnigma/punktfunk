@@ -100,6 +100,7 @@ mod linux {
             } else {
                 pf_capture::POOL_MIN
             },
+            kwin && pf_capture::unpaced_capture(),
         )
         .context("attach the PipeWire capturer")?;
         cap.set_active(true);

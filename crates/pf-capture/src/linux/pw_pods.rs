@@ -21,11 +21,29 @@ pub(super) fn serialize_pod(obj: pw::spa::pod::Object) -> Result<Vec<u8>> {
     .into_inner())
 }
 
+/// `maxFramerate = 0/1`: no ceiling, so the producer delivers on its own damage
+/// signal instead of a timer.
+///
+/// KWin derives its screencast timer from the negotiated `maxFramerate` and rounds
+/// the wait up to a whole millisecond, so an 8.333 ms frame is scheduled at 9 and the
+/// cadence jitters. Zero makes its `frameInterval()` zero and the timer fires on the
+/// compositor's own frame signal. KWin 6.7+ offers `Range(refresh, 0/1, refresh)`, so
+/// this fixates; older KWin floors at 1/1 and rejects the pod, so the caller lists a
+/// plain twin behind it.
+fn unpaced_max_framerate() -> pw::spa::pod::Property {
+    pw::spa::pod::Property {
+        key: pw::spa::sys::SPA_FORMAT_VIDEO_maxFramerate,
+        flags: pw::spa::pod::PropertyFlags::empty(),
+        value: pw::spa::pod::Value::Fraction(pw::spa::utils::Fraction { num: 0, denom: 1 }),
+    }
+}
+
 /// NV12 also pins BT.709 limited; packed RGB must not — it is not YUV.
 pub(super) fn build_dmabuf_format(
     format: VideoFormat,
     modifiers: &[u64],
     preferred: Option<(u32, u32, u32)>,
+    unpaced: bool,
 ) -> Result<Vec<u8>> {
     let (dw, dh, dhz) = preferred.unwrap_or((1920, 1080, 60));
     use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
@@ -79,6 +97,9 @@ pub(super) fn build_dmabuf_format(
             )),
         });
     }
+    if unpaced {
+        obj.properties.push(unpaced_max_framerate());
+    }
     obj.properties.push(pw::spa::pod::Property {
         key: pw::spa::sys::SPA_FORMAT_VIDEO_modifier,
         flags: pw::spa::pod::PropertyFlags::MANDATORY,
@@ -120,6 +141,7 @@ pub(super) const HDR_FORMAT_ORDER: [VideoFormat; 2] =
 pub(super) fn build_hdr_dmabuf_format(
     format: VideoFormat,
     preferred: Option<(u32, u32, u32)>,
+    unpaced: bool,
 ) -> Result<Vec<u8>> {
     let (dw, dh, dhz) = preferred.unwrap_or((1920, 1080, 60));
     use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
@@ -157,6 +179,9 @@ pub(super) fn build_hdr_dmabuf_format(
             pw::spa::utils::Fraction { num: 240, denom: 1 }
         ),
     );
+    if unpaced {
+        obj.properties.push(unpaced_max_framerate());
+    }
     obj.properties.push(pw::spa::pod::Property {
         key: pw::spa::sys::SPA_FORMAT_VIDEO_modifier,
         flags: pw::spa::pod::PropertyFlags::MANDATORY,
@@ -178,9 +203,12 @@ pub(super) fn build_hdr_dmabuf_format(
 }
 
 /// SHM/CPU `EnumFormat`. Framerate 0/1 is variable; gamescope fixates that.
-pub(super) fn build_default_format_obj(preferred: Option<(u32, u32, u32)>) -> pw::spa::pod::Object {
+pub(super) fn build_default_format_obj(
+    preferred: Option<(u32, u32, u32)>,
+    unpaced: bool,
+) -> pw::spa::pod::Object {
     let (dw, dh, dhz) = preferred.unwrap_or((1920, 1080, 60));
-    pw::spa::pod::object!(
+    let mut obj = pw::spa::pod::object!(
         pw::spa::utils::SpaTypes::ObjectParamFormat,
         pw::spa::param::ParamType::EnumFormat,
         pw::spa::pod::property!(
@@ -236,7 +264,11 @@ pub(super) fn build_default_format_obj(preferred: Option<(u32, u32, u32)>) -> pw
             pw::spa::utils::Fraction { num: 0, denom: 1 },
             pw::spa::utils::Fraction { num: 240, denom: 1 }
         ),
-    )
+    );
+    if unpaced {
+        obj.properties.push(unpaced_max_framerate());
+    }
+    obj
 }
 
 /// CPU-path Buffers: MemPtr, MemFd, and DmaBuf. Gamescope's modifier-bearing
@@ -421,23 +453,25 @@ mod tests {
             ("cursor meta", build_cursor_meta_param().unwrap()),
             (
                 "default format",
-                serialize_pod(build_default_format_obj(None)).unwrap(),
+                serialize_pod(build_default_format_obj(None, false)).unwrap(),
             ),
             (
                 "dmabuf BGRx",
-                build_dmabuf_format(VideoFormat::BGRx, &[0, 1, 2], Some((1920, 1080, 60))).unwrap(),
+                build_dmabuf_format(VideoFormat::BGRx, &[0, 1, 2], Some((1920, 1080, 60)), false)
+                    .unwrap(),
             ),
             (
                 "dmabuf NV12",
-                build_dmabuf_format(VideoFormat::NV12, &[0], Some((1280, 720, 60))).unwrap(),
+                build_dmabuf_format(VideoFormat::NV12, &[0], Some((1280, 720, 60)), false).unwrap(),
             ),
             (
                 "hdr xRGB",
-                build_hdr_dmabuf_format(VideoFormat::xRGB_210LE, None).unwrap(),
+                build_hdr_dmabuf_format(VideoFormat::xRGB_210LE, None, false).unwrap(),
             ),
             (
                 "hdr xBGR",
-                build_hdr_dmabuf_format(VideoFormat::xBGR_210LE, Some((3840, 2160, 120))).unwrap(),
+                build_hdr_dmabuf_format(VideoFormat::xBGR_210LE, Some((3840, 2160, 120)), false)
+                    .unwrap(),
             ),
         ];
         for (name, bytes) in &mut pods {
@@ -453,7 +487,7 @@ mod tests {
     #[test]
     fn the_hdr_pods_carry_mandatory_pq_and_bt2020() {
         for fmt in [VideoFormat::xRGB_210LE, VideoFormat::xBGR_210LE] {
-            let pod = build_hdr_dmabuf_format(fmt, None).unwrap();
+            let pod = build_hdr_dmabuf_format(fmt, None, false).unwrap();
             for (name, key) in [
                 (
                     "transferFunction",
@@ -482,8 +516,8 @@ mod tests {
 
     #[test]
     fn only_the_nv12_offer_pins_the_colour_matrix() {
-        let nv12 = build_dmabuf_format(VideoFormat::NV12, &[0], None).unwrap();
-        let bgrx = build_dmabuf_format(VideoFormat::BGRx, &[0], None).unwrap();
+        let nv12 = build_dmabuf_format(VideoFormat::NV12, &[0], None, false).unwrap();
+        let bgrx = build_dmabuf_format(VideoFormat::BGRx, &[0], None, false).unwrap();
         for (name, key) in [
             ("colorMatrix", spa::sys::SPA_FORMAT_VIDEO_colorMatrix),
             ("colorRange", spa::sys::SPA_FORMAT_VIDEO_colorRange),
@@ -511,6 +545,39 @@ mod tests {
     }
 
     /// Pool depth must be a Choice Range. A fixed Int a producer cannot afford
+    /// `unpaced` must put `maxFramerate = 0/1` on the wire: KWin reads a non-zero
+    /// ceiling as "schedule on a timer" and rounds each wait up to a whole
+    /// millisecond. A ceiling that survives here is the jitter we came to remove.
+    #[test]
+    fn the_unpaced_offer_carries_a_zero_max_framerate() {
+        let paced = build_dmabuf_format(VideoFormat::BGRx, &[0], None, false).unwrap();
+        let unpaced = build_dmabuf_format(VideoFormat::BGRx, &[0], None, true).unwrap();
+        // Property = { key, flags, value_pod }; value_pod = { size, type, body }.
+        // 4 + 4 + 4 + 4 + a two-word Fraction body = 24.
+        assert_eq!(
+            unpaced.len(),
+            paced.len() + 24,
+            "the unpaced offer must add exactly the maxFramerate property"
+        );
+        let key = spa::sys::SPA_FORMAT_VIDEO_maxFramerate.to_ne_bytes();
+        let at = unpaced
+            .windows(4)
+            .position(|w| w == key)
+            .expect("the unpaced offer must carry a maxFramerate");
+        let word = |off: usize| u32::from_ne_bytes(unpaced[off..off + 4].try_into().unwrap());
+        assert_eq!(word(at + 8), 8, "a Fraction value pod is 8 bytes");
+        assert_eq!(
+            word(at + 12),
+            spa::sys::SPA_TYPE_Fraction,
+            "…of type Fraction"
+        );
+        assert_eq!(
+            (word(at + 16), word(at + 20)),
+            (0, 1),
+            "0/1 is what zeroes KWin's frameInterval(); any other value re-arms the timer"
+        );
+    }
+
     /// empties the Buffers intersection and stalls the link with no error.
     #[test]
     fn the_dmabuf_pool_request_is_a_range_not_a_fixed_count() {
@@ -571,7 +638,9 @@ mod tests {
         // Both must still build: the order is a preference, never a removal.
         for fmt in HDR_FORMAT_ORDER {
             assert!(
-                !build_hdr_dmabuf_format(fmt, None).unwrap().is_empty(),
+                !build_hdr_dmabuf_format(fmt, None, false)
+                    .unwrap()
+                    .is_empty(),
                 "{fmt:?} must still produce a format pod"
             );
         }

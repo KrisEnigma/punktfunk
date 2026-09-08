@@ -16,15 +16,13 @@ The steps below are the same thing by hand, and stay the documented path.
 
 ## 1. GPU driver
 
-- **NVIDIA:** the driver and an NVENC-capable FFmpeg both come from **RPM Fusion** — Fedora's own
-  `ffmpeg-free` has no NVENC and the host cannot encode with it. Enable RPM Fusion, install, reboot:
+- **NVIDIA:** the driver comes from **RPM Fusion**. Enable it, install, reboot:
 
   ```sh
   sudo dnf install \
     https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
     https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
   sudo dnf install akmod-nvidia xorg-x11-drv-nvidia-cuda
-  sudo dnf install --allowerasing ffmpeg ffmpeg-libs
   ```
 
   With **Secure Boot** on, the module won't load until you enrol its key — `nvidia-smi` will say it
@@ -82,9 +80,7 @@ compat later? Add `punktfunk-gamestream` too — [Ports & firewall](/docs/ports)
 
 ## When you want more
 
-- **No video on NVIDIA?** `ffmpeg-libs` is only a *recommended* dependency — without RPM Fusion's
-  build, NVENC fails at runtime. Re-run step 1.
-  [More in Troubleshooting](/docs/troubleshooting#no-video-on-fedora-nvenc-fails-ffmpeg-libs-is-missing).
+- **No video on NVIDIA?** NVENC comes from the driver, so re-run step 1 and check `nvidia-smi`.
 - `punktfunk-host detect-conflicts` tells you if Sunshine or Apollo is also running;
   [Troubleshooting](/docs/troubleshooting) starts from the symptom.
 - Your desktop's particulars — [KDE](/docs/kde), [GNOME](/docs/gnome), [gamescope](/docs/gamescope).

@@ -324,9 +324,19 @@ pub(crate) use linux::pad_sink;
 pub(crate) use linux::pad_usb;
 // DualSense pad-audio endpoint + loopback (design: pad haptics/audio). Session
 // queries by pad index; CLI `pad-endpoint`.
+// SetupAPI + PROPVARIANT plumbing under every audio devnode we mint. Shared by pad_endpoint,
+// minted, audio_probe and devnode_cleanup — only one of which provisions pads.
+#[cfg(target_os = "windows")]
+#[path = "audio/windows/devnode_api.rs"]
+pub(crate) mod devnode_api;
 #[cfg(target_os = "windows")]
 #[path = "audio/windows/pad_endpoint.rs"]
 pub(crate) mod pad_endpoint;
+// WASAPI loopback of a minted pad endpoint, plus the tone/probe devtests. Capturing is a
+// different job from provisioning, and the same one `wasapi_cap` does for the desktop.
+#[cfg(target_os = "windows")]
+#[path = "audio/windows/pad_capture.rs"]
+pub(crate) mod pad_capture;
 // `audio-probe` devtest: mint Steam-driver instances and measure render→capture /
 // loopback paths for the Windows audio-substrate design.
 #[cfg(target_os = "windows")]

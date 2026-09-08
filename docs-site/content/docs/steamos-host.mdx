@@ -17,13 +17,13 @@ on-device build works on any SteamOS 3 system.
 
 SteamOS is an immutable, read-only Arch base, so the host isn't a system package. Instead a single
 script builds the host **natively inside a Debian-trixie distrobox** (ABI-matched to SteamOS's
-FFmpeg/glibc — the binary then runs natively on SteamOS) and wires it up as systemd user services.
+glibc — the binary then runs natively on SteamOS) and wires it up as systemd user services.
 Building on-device means a rebuild always matches the running OS, so a SteamOS update can't leave you
 with a binary linked against the wrong libraries. Encode is auto-detected: **Vulkan Video** on the
-Deck's AMD GPU (with libav **VAAPI** as the fallback), **NVENC** on NVIDIA. The installer writes
+Deck's AMD GPU (with **VAAPI** as the fallback), **NVENC** on NVIDIA. The installer writes
 `RADV_PERFTEST=video_encode` into `~/.config/punktfunk/host.env` — Van Gogh's RADV driver hides
 Vulkan encode behind that flag, and without it sessions quietly fall back to VAAPI. Set
-`PUNKTFUNK_VULKAN_ENCODE=0` in `host.env` to force the libav VAAPI path.
+`PUNKTFUNK_VULKAN_ENCODE=0` in `host.env` to force the VAAPI path.
 
 > **Heads up:** in our testing the Steam Deck's WiFi *tx* topped out around ~250 Mbps of goodput
 > regardless of band — enough for 1080p/1440p60, not 4K. This looked like a hardware/driver
@@ -49,9 +49,8 @@ Vulkan encode behind that flag, and without it sessions quietly fall back to VAA
   ```
   Make sure `~/.local/bin` is on your `PATH` (re-open the terminal).
 - The first build downloads a container image + toolchain (~1 GB) and takes ~10–15 minutes, then
-  ~4 minutes for the FFmpeg the host carries, then another ~5–10 minutes for the HDR gamescope
-  build (a second set of dependencies plus a fresh gamescope clone). Budget around 30 minutes for
-  a first install. Later rebuilds are incremental,
+  another ~5–10 minutes for the HDR gamescope build (a second set of dependencies plus a fresh
+  gamescope clone). Budget around 25 minutes for a first install. Later rebuilds are incremental,
   and the gamescope step is a no-op unless its sources changed.
 
 ## 1. Get the source and run the installer

@@ -29,13 +29,11 @@ RUN sed -i 's|^Types: deb$|Types: deb\nArchitectures: amd64|' /etc/apt/sources.l
     && dpkg --add-architecture arm64
 
 # 2. The cross toolchain + every arm64 dev lib the client links. Mirrors the client half of
-#    rust-ci.Dockerfile's list (FFmpeg, PipeWire, Opus, SDL3, GTK4/libadwaita, xkbcommon). No
+#    rust-ci.Dockerfile's list (PipeWire, Opus, SDL3, GTK4/libadwaita, xkbcommon). No
 #    Vulkan dev package: nothing compiles or links against Vulkan — ash dlopens the loader, and
 #    pyrowave-sys bindgens its own vendored headers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     crossbuild-essential-arm64 \
-    libavcodec-dev:arm64 libavformat-dev:arm64 libavutil-dev:arm64 libswscale-dev:arm64 \
-    libavfilter-dev:arm64 libavdevice-dev:arm64 \
     libpipewire-0.3-dev:arm64 libopus-dev:arm64 \
     libsdl3-dev:arm64 libgtk-4-dev:arm64 libadwaita-1-dev:arm64 \
     libwayland-dev:arm64 libxkbcommon-dev:arm64 \
@@ -61,22 +59,15 @@ WORKDIR /
 #      * BINDGEN_EXTRA_CLANG_ARGS: clang defaults to the host triple, so bindgen would parse
 #        arm64 headers with amd64 type layouts (silently wrong, not a build error) — the
 #        explicit --target plus the multiarch include dir is what keeps the layouts honest.
-#      * CC_x86_64_unknown_linux_gnu routes HOST-targeted compiles through a wrapper that
-#        strips the arm64 include dirs — see ci/pf-host-cc for the ffmpeg-sys-next probe it
-#        exists for.
-COPY ci/pf-host-cc /usr/local/bin/pf-host-cc
-RUN chmod 0755 /usr/local/bin/pf-host-cc
-
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
     CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
     AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
-    CC_x86_64_unknown_linux_gnu=/usr/local/bin/pf-host-cc \
     PKG_CONFIG=aarch64-linux-gnu-pkg-config \
     PKG_CONFIG_ALLOW_CROSS=1 \
     BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-unknown-linux-gnu -I/usr/include/aarch64-linux-gnu"
 
 # Fail the BUILD, not some later CI job, if the wrapper or a sysroot .pc is missing.
 RUN command -v aarch64-linux-gnu-pkg-config \
-    && aarch64-linux-gnu-pkg-config --cflags libavcodec sdl3 gtk4 libpipewire-0.3 \
+    && aarch64-linux-gnu-pkg-config --cflags sdl3 gtk4 libpipewire-0.3 \
     && aarch64-linux-gnu-gcc -dumpmachine | grep -q aarch64

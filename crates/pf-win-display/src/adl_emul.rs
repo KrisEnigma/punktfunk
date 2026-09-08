@@ -24,7 +24,9 @@ use std::time::Instant;
 
 use windows::core::{s, PCSTR};
 use windows::Win32::Foundation::HMODULE;
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+use windows::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExA, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
 
 // adl_defines.h (GPUOpen display-library).
 
@@ -225,8 +227,12 @@ unsafe extern "C" fn adl_malloc(size: i32) -> *mut c_void {
 
 impl Adl {
     fn load() -> Option<Self> {
-        // SAFETY: LoadLibrary of the driver-installed ADL runtime by its well-known name.
-        let lib: HMODULE = unsafe { LoadLibraryA(s!("atiadlxx.dll")) }.ok()?;
+        // The AMD driver installs this into System32. Search only there: a plain LoadLibrary
+        // tries the exe's own directory, the cwd and `%PATH%` first, and this runs as SYSTEM.
+        // SAFETY: LoadLibraryEx of the driver-installed ADL runtime by its well-known name.
+        let lib: HMODULE =
+            unsafe { LoadLibraryExA(s!("atiadlxx.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+                .ok()?;
         // Each Fn* matches the ADL C signature (`extern "C"` is exact on x64).
         unsafe fn sym<T: Copy>(lib: HMODULE, name: PCSTR) -> Option<T> {
             debug_assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<usize>());
@@ -724,16 +730,33 @@ pub fn unlock_after_stream() {
     let leased = std::fs::read(journal_path())
         .map(|b| decode_journal(&b))
         .unwrap_or_default();
+    // The journal is the ONLY record that a connector is still pinned, and a pin outlives the
+    // process (sometimes a reboot). Clearing it after a failed unlock strands the operator's
+    // connector on a dummy EDID with nothing left to retry from, so keep it unless every
+    // unlock reported ADL_OK. `startup_recover` retries on the next start.
+    let unlocked = |outcome: &RunOutcome| {
+        !matches!(outcome, RunOutcome::InitFailed(_)) && outcome.records().iter().all(|r| r.ok())
+    };
+    let mut all_ok = true;
     if leased.is_empty() {
         let outcome = run(EmulAction::Unlock, None);
         tracing_log("edid_lock", &outcome);
+        all_ok = unlocked(&outcome);
     } else {
         for c in leased {
             let outcome = run(EmulAction::Unlock, Some(c));
             tracing_log("edid_lock", &outcome);
+            all_ok &= unlocked(&outcome);
         }
     }
-    let _ = std::fs::remove_file(journal_path());
+    if all_ok {
+        let _ = std::fs::remove_file(journal_path());
+    } else {
+        tracing::warn!(
+            "edid_lock: unlock did not fully succeed — keeping the journal so the next host \
+             start retries; a connector may still carry the pinned EDID"
+        );
+    }
 }
 
 /// If the journal marker exists, unlock leftover pins before any new session.

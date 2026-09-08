@@ -1405,31 +1405,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ffmpeg-next"
-version = "9.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6380599799e175191eb7ffe82c97f36a2a90a36cbc54c738a903e5287d7f516a"
-dependencies = [
- "bitflags 2.13.1",
- "ffmpeg-sys-next",
- "libc",
-]
-
-[[package]]
-name = "ffmpeg-sys-next"
-version = "9.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b939bf79dd5949412a4b81cfe21a07f48ea21b47fcbb5f57816c8c2de5ae30b"
-dependencies = [
- "bindgen",
- "cc",
- "libc",
- "num_cpus",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2906,16 +2881,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num_cpus"
-version = "1.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
-dependencies = [
- "hermit-abi",
- "libc",
-]
-
-[[package]]
 name = "num_enum"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3139,6 +3104,7 @@ version = "0.35.0"
 dependencies = [
  "anyhow",
  "ashpd",
+ "bitflags 2.13.1",
  "libc",
  "pf-driver-proto",
  "pf-encode-win",
@@ -3150,6 +3116,9 @@ dependencies = [
  "pipewire",
  "tokio",
  "tracing",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
  "windows 0.62.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "x11rb",
 ]
@@ -3251,7 +3220,6 @@ version = "0.35.0"
 dependencies = [
  "anyhow",
  "ash",
- "ffmpeg-next",
  "libc",
  "libloading 0.9.0",
  "nvidia-video-codec-sdk",
@@ -3285,6 +3253,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows 0.62.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "windows-core 0.62.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -3421,7 +3390,6 @@ dependencies = [
  "hex",
  "libc",
  "pf-driver-proto",
- "pf-encode",
  "pf-frame",
  "pf-gpu",
  "pf-host-config",
@@ -3776,7 +3744,6 @@ dependencies = [
 name = "punktfunk-client-windows"
 version = "0.35.0"
 dependencies = [
- "async-channel",
  "pf-client-core",
  "punktfunk-core",
  "serde_json",
@@ -3809,7 +3776,6 @@ dependencies = [
  "rcgen",
  "reed-solomon-simd",
  "rustls",
- "rustls-pki-types",
  "sha2 0.11.0",
  "socket2",
  "spake2",
@@ -3881,6 +3847,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -3919,7 +3886,6 @@ dependencies = [
 name = "punktfunk-setup"
 version = "0.35.0"
 dependencies = [
- "anyhow",
  "console",
  "getrandom 0.3.4",
  "portable-pty",

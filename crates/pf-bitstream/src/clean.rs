@@ -58,7 +58,8 @@ impl CleanLedger {
         self.unclean.retain(|id| live.contains(id));
     }
 
-    /// Drop every mark. The DPB was drained (flush or stream discontinuity).
+    /// Drop every mark. The DPB was drained (flush or stream discontinuity), or an intra
+    /// refresh wave healed the picture by overwrite, which no reference chain shows.
     pub fn clear(&mut self) {
         self.unclean.clear();
     }

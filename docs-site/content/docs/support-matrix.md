@@ -262,7 +262,7 @@ It is **not** a ladder, and the two platforms differ:
   deliberately, so that a box with a broken driver fails loudly instead of quietly encoding on the
   CPU.
 - **Windows** — the host reads the vendor of the selected render adapter: NVIDIA → NVENC,
-  AMD → AMF, Intel → QSV (native first, libav QSV as a fallback). An unrecognised adapter falls
+  AMD → AMF, Intel → QSV. An unrecognised adapter falls
   through to the first adapter in the box that *does* have a recognised vendor, and only if none
   does → software H.264. If you pin an encoder whose vendor contradicts the selected adapter, the
   adapter wins and the log says so, because honouring the pin could only fail.
@@ -279,8 +279,7 @@ This is a **GPU and encoder** question, not a compositor one, which is why it is
   they never leave that process either: the driver encodes what the compositor composed, on the
   pooled device its swap chain was assigned to, and publishes a bitstream the host only packetises.
   All three native backends (NVENC, AMF, QSV) take that surface directly and have no readback path
-  at all. The **libavcodec QSV fallback** that once backed a failed native VPL open is no longer
-  reachable, so no GPU → CPU → GPU round-trip is left on this platform.
+  at all, so no GPU → CPU → GPU round-trip is left on this platform.
 - **Linux** — VAAPI takes the captured buffer directly; NVIDIA imports it through an isolated
   worker process; PyroWave imports it on any vendor. Two compositor-shaped edges matter: gamescope
   offers only linear buffers, and GNOME on NVIDIA allocates tiled-only — which PyroWave can still
@@ -292,21 +291,20 @@ This is a **GPU and encoder** question, not a compositor one, which is why it is
 - **Windows installer** — NVENC, AMF and QSV in one executable, plus PyroWave.
 - **Linux packages** (Arch, RPM, deb, Nix) — NVENC and Vulkan Video, plus PyroWave. VAAPI and the
   software encoder are always compiled in.
-- **A hand `cargo build` of the host** compiles in only what needs no cargo feature: VAAPI, libav
-  NVENC and the software encoder on Linux; native AMF and the software encoder on Windows; plus
-  PyroWave, which is a *default* feature. Direct-SDK NVENC, Vulkan Video and native QSV are opt-in.
-  What that costs you differs per platform. On Linux an NVIDIA box still encodes on the GPU,
-  through libav NVENC — it loses real loss recovery and the 10-bit zero-copy path, not the GPU. On
-  Windows an NVIDIA or Intel box **fails the session at encoder open** with a "rebuild with
-  `--features …`" error rather than quietly degrading, while an AMD box is fully served by native
-  AMF. If you built from source and your GPU seems unused, check this first.
+- **A hand `cargo build` of the host** compiles in only what needs no cargo feature: VAAPI and the
+  software encoder on Linux; native AMF and the software encoder on Windows; plus PyroWave, which
+  is a *default* feature. Direct-SDK NVENC, Vulkan Video and native QSV are opt-in. On either
+  platform an NVIDIA or Intel box then **fails the session at encoder open** with a "rebuild with
+  `--features …`" error rather than quietly degrading, while an AMD box is fully served — by
+  VAAPI on Linux, native AMF on Windows. If you built from source and your GPU seems unused,
+  check this first.
 
 ## Client decode
 
-**No punktfunk client contains FFmpeg.** Every decoder below is the platform's own — Vulkan Video,
-DXVA, VAAPI, VideoToolbox, MediaCodec — driven directly from punktfunk's own bitstream parser, with
-openh264 + rav1d as the CPU floor on the desktop. There is no libav* in any client package, and
-nothing to install.
+**Nothing punktfunk ships contains FFmpeg** — host or client. Every decoder below is the platform's
+own — Vulkan Video, DXVA, VAAPI, VideoToolbox, MediaCodec — driven directly from punktfunk's own
+bitstream parser, with openh264 + rav1d as the CPU floor on the desktop. There is no libav* in any
+package, and nothing to install.
 
 | Client | Decode path (in order) | Codecs | 10-bit / HDR | 4:4:4 |
 |---|---|---|---|---|

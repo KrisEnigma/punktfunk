@@ -21,7 +21,7 @@ use pf_client_core::gamepad::is_steam_deck;
 use pf_client_core::{discovery, library, start, trust, wol};
 use pf_console_ui::{
     ConsoleCmd, ConsoleEntry, ConsoleHandles, ConsoleOptions, ConsoleShared, HostRow, LibraryGame,
-    LibraryPhase, LibraryShared, PairPhase, SkiaOverlay, WakeStatus,
+    LibraryPhase, LibraryShared, PairPhase, SkiaOverlay, SpeedPhase, WakeStatus,
 };
 use pf_presenter::overlay::OverlayAction;
 use pf_presenter::ActionOutcome;
@@ -157,19 +157,11 @@ pub fn run(target: Option<&str>) -> u8 {
     // `{"ready":true}` and restores on exit) — plain CLI/gamescope runs stay silent.
     let json_status = arg_flag("--json-status");
     let settings_at_start = trust::Settings::load();
-    // The console's window and its input models are built ONCE, from the global defaults, and
-    // live across every launch — so the presentation-tier fields below (touch and mouse model,
-    // shortcut inhibit, match-window, render scale) are latched here and a per-host profile
-    // cannot move them in this mode. Everything the HOST is told (mode, bitrate, codec, audio,
-    // pad) is re-resolved per launch and does honor the binding. Closing the rest of that gap
-    // means rebuilding the presenter's models per launch — profiles P4 territory, not P0.
-    //
-    // ⚠ The STATS TIER used to be latched here too, and that was a bug people hit: the console's
-    // own settings screen writes the tier to the file and redraws its row, so the choice looked
-    // taken while every stream kept the tier the process started on — "no matter what I select
-    // the overlay is stuck on Detailed", cured only by restarting the app. It now rides
-    // `SessionParams` per launch (`stats_verbosity`), so the value below only seeds the loop
-    // until the first stream. Anything else moved off this snapshot has to travel the same way.
+    // The console window and its input models are built once from the global defaults and live
+    // across launches, so the presentation-tier fields below (touch and mouse model, shortcut
+    // inhibit, match-window, render scale) latch here and no per-host profile can move them.
+    // What the host is told (mode, bitrate, codec, audio, pad) re-resolves per launch and honors
+    // the binding; anything else off this snapshot must ride `SessionParams` like the stats tier.
     let latched_mouse = settings_at_start.mouse_mode();
 
     // Request-access hand-off: the launch handler stamps this when it starts a delegated-approval
@@ -206,7 +198,9 @@ pub fn run(target: Option<&str>) -> u8 {
             // host as paired (it was unsaved/discovered), keyed to the fingerprint we pinned.
             if let Some(p) = pending_cb.lock().unwrap().take() {
                 if p.fp_hex == fp_hex {
-                    trust::persist_host(&p.name, &p.addr, p.port, &fp_hex, true);
+                    if let Err(e) = trust::persist_host(&p.name, &p.addr, p.port, &fp_hex, true) {
+                        tracing::warn!(error = %format!("{e:#}"), "saving the approved host");
+                    }
                 }
             }
             // Where this host serves its library, from the session's own Welcome — recorded
@@ -246,13 +240,10 @@ pub fn run(target: Option<&str>) -> u8 {
                     tracing::info!(%addr, %title, request_access,
                         launch = launch.as_deref().unwrap_or("desktop"),
                         "launching from the console");
-                    // Settings re-resolve per launch: the console's own settings screen may
-                    // have changed the defaults since the last stream, and the host may carry
-                    // a profile binding. Console (and therefore Decky, which spawns this
-                    // binary) honors bindings with no console-side work — the resolver is the
-                    // same one `--connect` goes through. A pinned card's connect arrives as a
-                    // one-off profile id; the resolver prefers it over the binding, and a
-                    // dangling id falls back to the defaults without blocking the connect.
+                    // Re-resolved per launch, not latched: the settings screen may have moved
+                    // the defaults since the last stream, and the host may carry a profile
+                    // binding. A pinned card's one-off profile id wins over that binding, and a
+                    // dangling id falls back to the defaults instead of blocking the connect.
                     let (settings, profile) = trust::effective_settings(
                         &addr,
                         port,
@@ -274,12 +265,9 @@ pub fn run(target: Option<&str>) -> u8 {
                         force_software,
                         vulkan,
                     );
-                    // …with ONE field that must follow the latched model rather than this
-                    // launch's: the cursor-channel advertisement says "this client draws the
-                    // host cursor itself", which is only true while the presenter is in desktop
-                    // mouse mode. A profile that flips `mouse_mode` here would make the host
-                    // stop compositing the pointer into a presenter that isn't drawing one —
-                    // a stream with no visible cursor at all.
+                    // cursor_forward tells the host the client draws the pointer, true only in
+                    // desktop mouse mode — so it follows the latched mode, not this launch's
+                    // profile. Otherwise the host composites no cursor and the stream shows none.
                     params.cursor_forward = latched_mouse == trust::MouseMode::Desktop;
                     if request_access {
                         // The host PARKS the connect until the operator approves — outlast its
@@ -413,6 +401,16 @@ struct Service {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Is this advert this saved host? Two known fingerprints settle it on their own — falling
+/// back to the address there would let whoever inherits a sleeping host's DHCP lease be
+/// treated AS that host, and hide the real one from the discovered shelf.
+fn same_host(h: &trust::KnownHost, d: &pf_client_core::discovery::DiscoveredHost) -> bool {
+    if !h.fp_hex.is_empty() && !d.fp_hex.is_empty() {
+        return h.fp_hex == d.fp_hex;
+    }
+    h.addr == d.addr && h.port == d.port
+}
+
 impl Service {
     fn start(
         console: ConsoleShared,
@@ -476,9 +474,15 @@ impl ServiceState {
     fn run(mut self, stop: Arc<AtomicBool>) {
         let (discovery_rx, rescan) = discovery::browse();
         self.rescan = Some(rescan);
+        // `rows()` re-parses the host store AND the profile catalog, so rebuilding it every
+        // 100 ms read both files ten times a second for a list that changes on events. Rebuilt
+        // when something could have moved it, with a floor so anything unmarked still lands.
+        let mut dirty = true;
+        let mut last_rows = Instant::now() - Duration::from_secs(1);
         while !stop.load(Ordering::SeqCst) {
             // mDNS churn.
             while let Ok(ev) = discovery_rx.try_recv() {
+                dirty = true;
                 match ev {
                     discovery::DiscoveryEvent::Resolved(host) => {
                         self.discovered.insert(host.fullname.clone(), host);
@@ -491,18 +495,25 @@ impl ServiceState {
 
             // Shell commands (plus the binary's own seeded initial fetch).
             for cmd in self.bus.drain() {
+                dirty = true;
                 self.handle(cmd);
             }
 
-            // The 10 s reachability sweep — saved hosts that don't advertise (routed /
-            // multicast-filtered networks) still get honest presence pips.
-            if self.last_probe.elapsed() >= Duration::from_secs(10) {
-                self.last_probe = Instant::now();
-                self.sweep();
-                self.refresh_host_state();
+            let probe_due = self.last_probe.elapsed() >= Duration::from_secs(10);
+            if dirty || probe_due || last_rows.elapsed() >= Duration::from_millis(500) {
+                let rows = self.rows();
+                // The 10 s reachability sweep — saved hosts that don't advertise (routed /
+                // multicast-filtered networks) still get honest presence pips. It reuses this
+                // tick's list rather than building two more of its own.
+                if probe_due {
+                    self.last_probe = Instant::now();
+                    self.sweep(&rows);
+                    self.refresh_host_state(&rows);
+                }
+                self.console.set_hosts(rows);
+                last_rows = Instant::now();
+                dirty = false;
             }
-
-            self.console.set_hosts(self.rows());
             std::thread::sleep(Duration::from_millis(100));
         }
         if let Some(c) = &self.wake_cancel {
@@ -590,6 +601,50 @@ impl ServiceState {
                     })
                     .ok();
             }
+            ConsoleCmd::SpeedTest {
+                key,
+                addr,
+                port,
+                fp_hex,
+                host_name,
+            } => {
+                // A worker like every other command here, but a long one: the probe opens
+                // its own session and bursts for two seconds. The shell already raised the
+                // takeover, so this only advances the phase.
+                let identity = self.identity.clone();
+                let console = self.console.clone();
+                std::thread::Builder::new()
+                    .name("punktfunk-speedtest".into())
+                    .spawn(move || {
+                        console.advance_speed(&key, SpeedPhase::Measuring);
+                        let fp = (!fp_hex.is_empty()).then_some(fp_hex.as_str());
+                        match pf_client_core::speed::run_speed_probe(&addr, port, fp, identity) {
+                            Ok(r) => {
+                                tracing::info!(
+                                    host = %host_name,
+                                    kbps = r.throughput_kbps,
+                                    loss = r.loss_pct,
+                                    "speed test finished"
+                                );
+                                console.advance_speed(
+                                    &key,
+                                    SpeedPhase::Done {
+                                        throughput_kbps: r.throughput_kbps,
+                                        loss_pct: r.loss_pct,
+                                        recommended_kbps: pf_client_core::speed::recommended_kbps(
+                                            r.throughput_kbps,
+                                        ),
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(host = %host_name, error = %e, "speed test failed");
+                                console.advance_speed(&key, SpeedPhase::Failed(e));
+                            }
+                        }
+                    })
+                    .ok();
+            }
             ConsoleCmd::HostAction {
                 addr,
                 mgmt,
@@ -646,7 +701,11 @@ impl ServiceState {
                         match trust::pair_with_host(&addr, port, &identity, &pin, &device_name) {
                             Ok(fp) => {
                                 let fp_hex = trust::hex(&fp);
-                                trust::persist_host(&name, &addr, port, &fp_hex, true);
+                                if let Err(e) =
+                                    trust::persist_host(&name, &addr, port, &fp_hex, true)
+                                {
+                                    tracing::warn!(error = %format!("{e:#}"), "saving the paired host");
+                                }
                                 console.set_pair(PairPhase::Paired { key: fp_hex });
                             }
                             Err(e) => {
@@ -677,9 +736,7 @@ impl ServiceState {
                         ..Default::default()
                     });
                 }
-                if let Err(e) = known.save() {
-                    tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                }
+                self.save_known(&known);
                 self.last_probe = Instant::now() - Duration::from_secs(60); // probe it now
             }
             ConsoleCmd::UpdateHost {
@@ -704,9 +761,7 @@ impl ServiceState {
                 };
                 h.addr = addr;
                 h.port = port;
-                if let Err(e) = known.save() {
-                    tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                }
+                self.save_known(&known);
                 self.last_probe = Instant::now() - Duration::from_secs(60); // the address moved
             }
             ConsoleCmd::ForgetHost { key } => {
@@ -716,9 +771,7 @@ impl ServiceState {
                     return;
                 };
                 let gone = known.hosts.remove(i);
-                if let Err(e) = known.save() {
-                    tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                }
+                self.save_known(&known);
                 // A forgotten host leaves no list of what somebody plays behind on disk. The
                 // catalog cache is keyed on the fingerprint, so this is the only moment that
                 // key is still known.
@@ -801,9 +854,7 @@ impl ServiceState {
                 } else if !pin {
                     h.pinned_profiles.retain(|id| *id != profile_id);
                 }
-                if let Err(e) = known.save() {
-                    tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                }
+                self.save_known(&known);
                 // `run` refreshes the rows right after this drain, so the carousel and
                 // the pin screen reflect the new card within the same service pass.
             }
@@ -835,9 +886,7 @@ impl ServiceState {
                     }
                 };
                 if changed {
-                    if let Err(e) = known.save() {
-                        tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                    }
+                    self.save_known(&known);
                 }
             }
             ConsoleCmd::SetClipboard { key, on } => {
@@ -851,9 +900,7 @@ impl ServiceState {
                 };
                 if h.clipboard_sync != on {
                     h.clipboard_sync = on;
-                    if let Err(e) = known.save() {
-                        tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                    }
+                    self.save_known(&known);
                 }
             }
         }
@@ -863,13 +910,12 @@ impl ServiceState {
     /// definition — an advert is a cache entry with a 75-minute TTL that a suspending host sends
     /// no goodbye for, so skipping them left a sleeping machine reading Online (and, since the
     /// wake item is gated on `!online`, unwakeable). Runs on its own thread; at most one in flight.
-    fn sweep(&self) {
+    fn sweep(&self, rows: &[HostRow]) {
         if self.probe_inflight.swap(true, Ordering::SeqCst) {
             return;
         }
-        let targets: Vec<(String, (String, u16))> = self
-            .rows()
-            .into_iter()
+        let targets: Vec<(String, (String, u16))> = rows
+            .iter()
             .map(|r| (r.key.clone(), (r.addr.clone(), r.port)))
             .collect();
         let probed = self.probed.clone();
@@ -888,12 +934,22 @@ impl ServiceState {
             .ok();
     }
 
+    /// Write the host store, and SAY so when it fails. The console is the only surface the
+    /// user has here — a warning in the log reaches nobody on a TV — and a dropped write
+    /// means the change they just made is not on disk.
+    fn save_known(&self, known: &trust::KnownHosts) {
+        if let Err(e) = known.save() {
+            tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
+            self.console.set_notice(format!("Couldn't save — {e:#}"));
+        }
+    }
+
     /// Keep every paired, reachable host's advertised actions and running title fresh (the
     /// shared TTL'd caches in `pf_client_core`). Idempotent and cheap — each only reaches the
     /// network when its own entry has lapsed, and the running one lapses far sooner: what a
     /// host has UP is what changes between two visits to the carousel.
-    fn refresh_host_state(&self) {
-        for r in self.rows() {
+    fn refresh_host_state(&self, rows: &[HostRow]) {
+        for r in rows {
             if r.paired && r.online && r.pin.is_none() {
                 pf_client_core::host_actions::refresh(&r.addr, r.mgmt_port, &r.fp_hex);
                 library::refresh_running(&r.addr, r.mgmt_port, &r.fp_hex);
@@ -912,6 +968,9 @@ impl ServiceState {
             id: p.id.clone(),
             name: p.name.clone(),
             accent: p.accent.clone(),
+            // Only the speed test reads this: a profile that PINS bitrate is the layer its
+            // host streams at, so the console must not offer to write the global instead.
+            bitrate_kbps: p.overrides.bitrate_kbps,
         };
         // Primary rows paired with their pinned cards, so the sort below can order hosts
         // while every host's cards stay glued behind its primary tile.
@@ -924,10 +983,7 @@ impl ServiceState {
                 } else {
                     h.fp_hex.clone()
                 };
-                let advert = self.discovered.values().find(|d| {
-                    (!h.fp_hex.is_empty() && d.fp_hex == h.fp_hex)
-                        || (d.addr == h.addr && d.port == h.port)
-                });
+                let advert = self.discovered.values().find(|d| same_host(h, d));
                 let online = probed.get(&key).copied().unwrap_or(false);
                 // Everything the advert teaches, while it is visible: mgmt port, OS chain, wake
                 // MAC — a Deck in Gaming Mode runs only this console and the Decky panel, and a
@@ -1021,12 +1077,7 @@ impl ServiceState {
         let mut extra: Vec<HostRow> = self
             .discovered
             .values()
-            .filter(|d| {
-                !known.hosts.iter().any(|h| {
-                    (!h.fp_hex.is_empty() && h.fp_hex == d.fp_hex)
-                        || (h.addr == d.addr && h.port == d.port)
-                })
-            })
+            .filter(|d| !known.hosts.iter().any(|h| same_host(h, d)))
             .map(|d| HostRow {
                 key: if d.fp_hex.is_empty() {
                     format!("{}:{}", d.addr, d.port)
@@ -1090,8 +1141,9 @@ fn spawn_wake(
             let started = Instant::now();
             let mut last_packet: Option<Instant> = None;
             loop {
+                // A cancelled thread writes NOTHING: the card it would clear may already have
+                // been replaced by the next host's, and `CancelWake` cleared the slot itself.
                 if cancel.load(Ordering::SeqCst) {
-                    console.set_wake(None);
                     return;
                 }
                 let elapsed = started.elapsed();
@@ -1107,6 +1159,11 @@ fn spawn_wake(
                 .first()
                 .copied()
                 .unwrap_or(false);
+                // Re-checked after the probe: it blocks for ~900 ms, which is long enough for
+                // the user to go back and start waking a different host.
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
                 console.set_wake(Some(WakeStatus {
                     key: row.key.clone(),
                     name: row.name.clone(),
@@ -1164,9 +1221,14 @@ fn spawn_fetch(
     // than the previous host's. A cached catalog can land within a millisecond of this, so there
     // is no phase transition for anyone to observe.
     shared.begin_fetch();
+    let epoch = shared.fetch_epoch();
     std::thread::Builder::new()
         .name("punktfunk-library".into())
         .spawn(move || {
+            // This worker retries for up to a minute and cannot be cancelled, so the player can
+            // be two hosts further on by the time it answers. Every write below asks first
+            // whether this fetch still owns the model.
+            let mine = || shared.fetch_epoch() == epoch;
             if let Ok(path) = std::env::var("PUNKTFUNK_FAKE_LIBRARY") {
                 load_fake(&shared, &path);
                 return;
@@ -1176,7 +1238,7 @@ fn spawn_fetch(
             // is still recognised as the same host with the same library.
             let mut have_cached = false;
             if let Some(cached) = pf_client_core::library_cache::load(&fp_hex) {
-                if !cached.games.is_empty() {
+                if !cached.games.is_empty() && mine() {
                     have_cached = true;
                     shared.set_games_cached(to_model(&cached.games));
                 }
@@ -1219,6 +1281,9 @@ fn spawn_fetch(
 
             let Some(games) = fetched else {
                 let e = last_err.expect("the loop runs at least once and every miss records why");
+                if !mine() {
+                    return;
+                }
                 if have_cached {
                     // The shelf stays; only the words change. The player can still pick a title
                     // — the launch will wake and dial the host on its own.
@@ -1234,6 +1299,9 @@ fn spawn_fetch(
                 return;
             };
 
+            if !mine() {
+                return;
+            }
             let base = library::base_url(&addr, mgmt);
             let jobs: VecDeque<(String, Vec<String>)> = games
                 .iter()
@@ -1250,6 +1318,9 @@ fn spawn_fetch(
             if !jobs.is_empty() {
                 let rx = library::spawn_art_fetch(base, identity, pin, jobs);
                 while let Ok((id, bytes)) = rx.recv_blocking() {
+                    if !mine() {
+                        return;
+                    }
                     shared.push_art(id, bytes);
                 }
             }

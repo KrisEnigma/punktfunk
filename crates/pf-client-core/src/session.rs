@@ -874,7 +874,10 @@ fn pump(
                 // Host said why it turned us away — show that verbatim: "denied on the
                 // host" and "timed out" call for different next steps.
                 PunktfunkError::Rejected(reason) => crate::trust::connect_reject_message(reason),
-                other => format!("Connect failed: {other:?}"),
+                other => {
+                    tracing::warn!(error = %other, "connect failed");
+                    "The host didn't answer".to_string()
+                }
             };
             let _ = ev_tx.send_blocking(SessionEvent::Failed {
                 msg,
@@ -1182,6 +1185,7 @@ fn pump(
                             _ => image.local_recovery(),
                         };
                         if gate.on_local_recovery(local) {
+                            decoder.forgive_unclean();
                             tracing::debug!(
                                 "re-anchored on the stream's own recovery point SEI — no IDR needed"
                             );
@@ -1208,6 +1212,15 @@ fn pump(
                             evidence,
                             now,
                         ) == GateVerdict::Present;
+                        // A wave lift: the planner's damaged-chain marks are stale from here,
+                        // or every later host anchor is refused until an IDR.
+                        if was_holding && present && gate.lifted_by_marks() {
+                            decoder.forgive_unclean();
+                            tracing::debug!(
+                                "re-anchored on intra refresh marks — forgetting the damaged \
+                                 reference chain"
+                            );
+                        }
                         if !present && !was_holding {
                             tracing::debug!(
                                 "damaged reference chain reached an unfrozen gate — holding, \
@@ -1401,7 +1414,10 @@ fn pump(
                     End::None => Some("Host ended the session".to_string()),
                 };
             }
-            Err(e) => break Some(format!("session: {e:?}")),
+            Err(e) => {
+                tracing::warn!(error = %e, "session pump failed");
+                break Some("The stream stopped unexpectedly".to_string());
+            }
         }
 
         // Drain per-AU 0xCF timings and match by pts. An old host never emits any —
@@ -1892,7 +1908,7 @@ fn spawn_audio(
             }
             tracing::debug!("audio pull thread exited");
         })
-        .map_err(|e| tracing::warn!(error = %e, "audio thread failed to start — audio disabled"))
+        .map_err(|e| tracing::warn!(error = %e, "audio thread start failed — audio disabled"))
         .ok()
 }
 

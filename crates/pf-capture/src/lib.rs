@@ -20,6 +20,46 @@ pub const POOL_MIN: i32 = 2;
 /// negotiation outright.
 pub const KWIN_POOL_MIN: i32 = 4;
 
+/// Whether to ask a KWin output for unpaced delivery (`maxFramerate = 0/1`).
+///
+/// KWin schedules each screencast frame on a QTimer whose wait it rounds *up* to a whole
+/// millisecond, so an 8.333 ms frame is scheduled at 9 and the cadence jitters against the
+/// real refresh. Offering no ceiling zeroes its `frameInterval()`, and the timer then fires
+/// on the compositor's own frame signal. KWin 6.7+ accepts the value; older KWin floors at
+/// 1/1, rejects that pod, and fixates the plain twin listed behind it.
+///
+/// That timer also coalesces cursor-only records, which KWin schedules from
+/// `Cursors::positionChanged` — pointer cadence, not vblank. Uncapped, each such record
+/// takes a pool buffer, and KWin drops a frame outright when it finds none free.
+/// `PUNKTFUNK_KWIN_PACED=1` restores the throttle if that bites.
+pub fn unpaced_capture() -> bool {
+    !pf_host_config::env_on("PUNKTFUNK_KWIN_PACED").unwrap_or(false)
+}
+
+/// Whether to capture a compositor's output directly with `ext-image-copy-capture-v1`
+/// instead of going through the xdg ScreenCast portal.
+///
+/// The portal is a second clock in the path: xdg-desktop-portal-hyprland re-requests each
+/// frame on a millisecond timer with a 6 ms floor, which halves the rate at 165 Hz and
+/// adds ~3 ms to every frame's age. Capturing the protocol ourselves removes both.
+/// `PUNKTFUNK_DIRECT_CAPTURE=0` keeps the portal.
+#[cfg(target_os = "linux")]
+pub fn direct_capture() -> bool {
+    pf_host_config::env_on("PUNKTFUNK_DIRECT_CAPTURE").unwrap_or(true)
+}
+
+/// Whether a virtual output may be driven as a PipeWire lazy driver.
+///
+/// A producer that emits RequestProcess (Mutter ≥ 49 virtual monitors) paints only in a
+/// graph cycle the consumer starts, so the encode loop's slot is the one tick: no
+/// compositor timer to beat against, no throttle to lose frames in, no extra render.
+/// Producers without it are never driven. `PUNKTFUNK_LAZY_CAPTURE=0` restores the
+/// producer-driven stream.
+#[cfg(target_os = "linux")]
+pub fn lazy_capture() -> bool {
+    pf_host_config::env_on("PUNKTFUNK_LAZY_CAPTURE").unwrap_or(true)
+}
+
 /// A FATAL capture fault: retrying `try_latest` cannot help — the caller must rebuild the
 /// capture attachment or fail the session. Carried inside the `anyhow::Error` a capture call
 /// returns (downcast to route on it), so it can never collapse into an ordinary `Ok(None)`.
@@ -412,15 +452,15 @@ pub struct ZeroCopyPolicy {
     /// Per-session, unlike `backend_is_vaapi`.
     pub pyrowave_session: bool,
     /// Encoder can ingest producer-native NV12 (Linux raw Vulkan Video on
-    /// H265/AV1 — `pf_encode::linux_native_nv12_ok`). libav VAAPI (H264)
-    /// misreads the two-plane buffer; H264/GameStream/PyroWave must never see NV12.
+    /// H265/AV1 — `pf_encode::linux_native_nv12_ok`). Every other arm takes
+    /// packed RGB; H264/GameStream/PyroWave must never see NV12.
     pub native_nv12_session: bool,
     /// PyroWave Vulkan-importable dmabuf modifiers for packed-RGB. Advertised
     /// so Mutter+NVIDIA (tiled-only alloc) still negotiates zero-copy. Empty otherwise.
     pub pyrowave_modifiers: Vec<u64>,
     /// Encoder can ingest packed 10-bit PQ CUDA (`pf_encode::linux_hdr_cuda_ok`,
-    /// direct-SDK NVENC only). libav's HDR route swscales into P010, so packed
-    /// 2:10:10:10 CUDA lands as garbage unless this holds.
+    /// direct-SDK NVENC only). No other arm reads those 2:10:10:10 words as
+    /// anything but garbage, so do not produce them unless this holds.
     pub hdr_cuda_ok: bool,
 }
 
@@ -599,13 +639,18 @@ pub mod dxgi;
 #[cfg(target_os = "windows")]
 #[path = "windows/idd_push.rs"]
 mod idd_push;
-// WUDFHost-identity check reused by the host gamepad-channel bootstrap
-// (`inject::windows::gamepad_raii`); re-export so that reach stays a leaf.
+// WUDFHost duplication target — open with the shared rights mask, then prove the image path.
+// Reused by the host gamepad-channel bootstrap (`inject::windows::gamepad_raii`); re-export so
+// that reach stays a leaf.
 #[cfg(target_os = "windows")]
-pub use idd_push::verify_is_wudfhost;
+pub use idd_push::{open_wudfhost, verify_is_wudfhost};
 // The AU section's reader half. Pure over a mapped view, so its tests run on every target.
 #[path = "windows/au_reader.rs"]
 mod au_reader;
+// The recovery classifier's cursor-damage witness. Pure over `(now, kicked, position)` for the
+// same reason: the rule that decides whether a silent desktop resets gets tests on every target.
+#[path = "windows/cursor_witness.rs"]
+mod cursor_witness;
 #[cfg(target_os = "windows")]
 pub use idd_push::driver_encode::{open_driver_encoder, DriverEncodeOpenError, DriverEncodeParams};
 #[cfg(target_os = "linux")]
@@ -645,7 +690,8 @@ pub fn open_portal_monitor(
 /// `want_hdr` only when the output was brought up HDR — a PQ session cannot
 /// fall back to SDR. `cursor_id0_hides`: KWin rewrites `SPA_META_Cursor` on
 /// every buffer and treats `id == 0` as "pointer hidden". `pool_min`:
-/// [`POOL_MIN`], or [`KWIN_POOL_MIN`] for a KWin output.
+/// [`POOL_MIN`], or [`KWIN_POOL_MIN`] for a KWin output. `unpaced`:
+/// [`unpaced_capture`] for a KWin output, else `false`.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub fn open_virtual_output(
@@ -660,6 +706,7 @@ pub fn open_virtual_output(
     expect_exact_dims: bool,
     cursor_id0_hides: bool,
     pool_min: i32,
+    unpaced: bool,
 ) -> Result<Box<dyn Capturer>> {
     linux::PortalCapturer::from_virtual_output(
         remote_fd,
@@ -673,8 +720,25 @@ pub fn open_virtual_output(
         expect_exact_dims,
         cursor_id0_hides,
         pool_min,
+        unpaced,
     )
     .map(|c| Box::new(c) as Box<dyn Capturer>)
+}
+
+/// Direct `ext-image-copy-capture-v1` capturer for a compositor output the host has
+/// already created, named by its `wl_output.name`.
+///
+/// Returns `Err` for every reason the caller should fall back to the portal: the
+/// compositor lacks the protocol, the output is gone, or nothing it offers can be
+/// imported by this session's encoder.
+#[cfg(target_os = "linux")]
+pub fn open_direct_output(
+    output_name: String,
+    keepalive: Box<dyn Send>,
+    policy: ZeroCopyPolicy,
+) -> Result<Box<dyn Capturer>> {
+    linux::WlCapturer::open(output_name, keepalive, policy)
+        .map(|c| Box::new(c) as Box<dyn Capturer>)
 }
 
 /// Windows IDD direct-push capturer on a pf-vdisplay target. `sender` delivers

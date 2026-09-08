@@ -344,7 +344,7 @@ mod tests {
     }
 
     fn screen_of(facts: WinFacts, artifact: Artifact) -> WinScreen {
-        let choices = WinChoices::derive(&facts);
+        let choices = WinChoices::derive(&facts, Artifact::Host);
         WinScreen::new(facts, choices, artifact)
     }
 
@@ -474,7 +474,7 @@ mod tests {
         let via_step = s.plan();
 
         let facts = public_facts();
-        let mut choices = WinChoices::derive(&facts);
+        let mut choices = WinChoices::derive(&facts, Artifact::Host);
         let args = InnoArgs::parse(&[r#"/MERGETASKS="allowpublicfw""#.to_string()]);
         choices.apply(&args, &Env::default());
         let via_flag = plan::build(&facts, &choices, Artifact::Host, false);

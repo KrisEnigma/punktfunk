@@ -249,6 +249,18 @@ in the future."
     `frame_size_with_refs`, and authoring the syntax by hand is out of proportion for a
     two-line zero check. **Not filed upstream.**
 
+16. `src/codec/av1/parser.rs` — `parse_obu_header` and `read_obu`: refuse a set
+    `obu_reserved_1bit`, and a low-overhead OBU that clears `obu_has_size_field`, with the
+    parser's usual `String` error instead of `assert!`. Both were bare asserts, so they fired
+    in release, and `parse_obu_header` runs before any type dispatch — one bit in the first
+    byte of any OBU aborted the decoding thread. `Av1Planner::plan_au` degrades every `Err`
+    into a `PlanError`, which a panic walked straight past. Same reachability as deviation 14:
+    a client decodes whatever its host sends, so this is a remote abort on the client and a
+    crash on any corruption that survives FEC. The third assert in `read_obu`
+    (`position() % 8 == 0`) is byte-aligned by construction and is now a `debug_assert!`.
+    Regression test: `a_reserved_obu_header_bit_is_an_error_not_a_panic` in `pf-bitstream`.
+    **Report upstream — not yet filed.**
+
 23. `src/codec/h264/parser.rs` — new `SpsBuilder::bitstream_restriction`. The
     synthesizer already writes `bitstream_restriction_flag`, `max_num_reorder_frames` and
     `max_dec_frame_buffering` (`synthesizer.rs` VUI tail); the builder had no way to set them,

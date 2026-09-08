@@ -17,8 +17,7 @@ The steps below are the same thing by hand, and stay the documented path.
 
 ## 1. GPU driver
 
-- **NVIDIA:** `sudo pacman -S --needed nvidia-utils` (NVENC and the zero-copy path; Arch's `ffmpeg`
-  already has NVENC built in).
+- **NVIDIA:** `sudo pacman -S --needed nvidia-utils` (NVENC and the zero-copy path).
 - **AMD / Intel:** the Mesa stack you already have — `vulkan-radeon` / `vulkan-intel` for Vulkan
   Video, `libva-mesa-driver` / `intel-media-driver` for VAAPI. Usually all installed on a desktop.
 
@@ -75,8 +74,6 @@ compat on.
 
 - **pacman says `database already registered`?** The repo got added twice —
   [the one-line fix](/docs/troubleshooting#pacman-error-could-not-register-punktfunk-database-database-already-registered).
-  **`unable to satisfy dependency 'libavcodec.so=…'`?** FFmpeg major mismatch —
-  [what to do](/docs/troubleshooting#pacman-unable-to-satisfy-dependency-libavcodecso).
 - `punktfunk-host detect-conflicts` tells you if Sunshine or Apollo is also running;
   [Troubleshooting](/docs/troubleshooting) starts from the symptom.
 - Your desktop's particulars — [KDE](/docs/kde), [GNOME](/docs/gnome), [gamescope](/docs/gamescope),

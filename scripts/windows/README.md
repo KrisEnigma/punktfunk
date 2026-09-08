@@ -17,9 +17,8 @@ points are runtime-loaded from the driver's `nvEncodeAPI64.dll`):
 | `LIBCLANG_PATH` | `C:\Program Files\LLVM\bin` | bindgen (`libclang.dll`) |
 | `CMAKE_POLICY_VERSION_MINIMUM` | `3.5` | `audiopus_sys` / cmake crates |
 
-`FFMPEG_DIR` is **not** set — the `--features nvenc` build the RTX box uses does not link
-libavcodec (that is only the `amf-qsv` feature). The VS C++ toolchain is loaded per-build via
-`vcvars64.bat` (auto-discovered with `vswhere`).
+No `FFMPEG_DIR`: nothing in punktfunk links libavcodec. The VS C++ toolchain is loaded
+per-build via `vcvars64.bat` (auto-discovered with `vswhere`).
 
 ## Rebuild + redeploy the host service
 

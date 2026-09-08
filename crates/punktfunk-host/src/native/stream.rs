@@ -11,6 +11,20 @@
 //! `design/phase-locked-capture.md`, `design/midstream-resolution-resize.md`.
 
 use super::*;
+use crate::send_pacing::{frame_driven_enabled, CaptureCredit};
+
+// Finding #16: three clusters the frame loop only calls into. `virtual_stream`'s prologue is
+// deliberately NOT split — its bindings are read by the loop throughout.
+mod phase_lock;
+mod send;
+mod session_watch;
+use self::phase_lock::{phase_lock_enabled, PhaseController};
+// `native.rs` builds it and `control.rs` holds it: the 0xCF ACK hold crosses the module.
+pub(crate) use self::phase_lock::PhaseCtl;
+use self::send::{send_loop, ChunkMsg, FrameMsg, SendMsg, SendStats};
+// `native.rs` asks before offering a mid-stream reconfig.
+pub(crate) use self::send::reconfig_allowed;
+use self::session_watch::{session_watch_enabled, session_watcher_loop, SessionSwitch};
 
 #[cfg(target_os = "windows")]
 const REJECTED_SLOT: &str = "pf-vdisplay refused this process's connector slot; see the log for the PUNKTFUNK_SEAT_DISPLAY_SLOT or reservation problem";
@@ -243,247 +257,6 @@ fn service_probes(
     }
 }
 
-use crate::send_pacing::{frame_driven_enabled, CaptureCredit};
-
-/// `PUNKTFUNK_PHASE_LOCK=0` disarms the controller. Armed, it still waits for a [`PhaseReport`].
-fn phase_lock_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PUNKTFUNK_PHASE_LOCK").as_deref() != Ok("0"))
-}
-
-/// Control-task → encode-loop bridge: latest-wins [`PhaseReport`], drained ~1 Hz, published as
-/// the 0xCF ACK hold.
-pub(crate) struct PhaseCtl {
-    report: std::sync::Mutex<Option<punktfunk_core::quic::PhaseReport>>,
-    applied_ns: std::sync::atomic::AtomicI64,
-}
-
-impl PhaseCtl {
-    pub(crate) fn new() -> PhaseCtl {
-        PhaseCtl {
-            report: std::sync::Mutex::new(None),
-            applied_ns: std::sync::atomic::AtomicI64::new(0),
-        }
-    }
-
-    pub(crate) fn store(&self, r: punktfunk_core::quic::PhaseReport) {
-        *self
-            .report
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(r);
-    }
-
-    fn take(&self) -> Option<punktfunk_core::quic::PhaseReport> {
-        self.report
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-
-    fn set_applied(&self, ns: i64) {
-        self.applied_ns.store(ns, Ordering::Relaxed);
-    }
-
-    pub(crate) fn applied_ns(&self) -> i64 {
-        self.applied_ns.load(Ordering::Relaxed)
-    }
-}
-
-/// Submit lock onto an absolute grid `epoch + k×period + offset` (`design/phase-locked-capture.md`).
-///
-/// A per-frame additive hold on an arrival-slaved loop saturates once `hold + work ≥ interval`
-/// and free-runs; the commanded phase never arrives. A periodic grid cannot free-run: occupancy
-/// is one frame per period, so actuation is linear. Loop-local so it survives in-loop rebuilds;
-/// a new session starts disengaged (no grid sleeps).
-///
-/// Failure = DISENGAGE, never park a hold. Near-antipode errors (within 1 ms of ±period/2) flip
-/// sign on sampling noise — half-step until the error commits. Engagement needs sustained
-/// coherence; each incoherent cycle backs off longer; a host that cannot hold coherence fuses
-/// for the session. Evidence: `design/host-source-stutter-fixes.md`.
-struct PhaseController {
-    /// Grid offset, ns ∈ [0, period). Meaningful only while engaged.
-    offset_ns: i64,
-    /// Grid epoch; `None` = disengaged. Stamped at engage, cleared at disengage — the lock's age.
-    epoch: Option<std::time::Instant>,
-    last_adjust: std::time::Instant,
-    /// |step| integrated since engage — the chase detector.
-    cum_travel_ns: i64,
-    /// Consecutive incoherent reports; 3 disengage.
-    incoherent_streak: u32,
-    /// Consecutive coherent reports — the engage gate.
-    coherent_streak: u32,
-    /// Incoherent disengages this session. Forgiven by a lock that holds [`LOCK_STABLE`].
-    incoherent_cycles: u32,
-    fused: bool,
-    reengage_backoff: u32,
-}
-
-impl PhaseController {
-    /// 2 ms/s of reports: wire cadence stays visually still; a half-period error converges in ~2–3 s.
-    const MAX_STEP_NS: i64 = 2_000_000;
-    const DEADBAND_NS: i64 = 300_000;
-    /// SurfaceFlinger-class compositors need the frame ~2.5 ms before latch; `uncertainty_ns` widens this.
-    const TARGET_LEAD_FLOOR_NS: i64 = 2_500_000;
-    /// Below this circular coherence (‰) the arrival phase is smeared. `u16::MAX` bypasses the gate.
-    const COHERENCE_FLOOR_MILLI: u16 = 300;
-    /// Within this of ±period/2, sampling noise flips the sign — damp until the error commits.
-    const ANTIPODE_GUARD_NS: i64 = 1_000_000;
-    const REENGAGE_BACKOFF: u32 = 10;
-    /// ~5 s of a lockable phase at the ~1 Hz report cadence. One report re-engages a hovering host.
-    const ENGAGE_COHERENT_REPORTS: u32 = 5;
-    /// Permanently disengaged (zero added latency) beats another cycle of timing steps.
-    const INCOHERENT_FUSE: u32 = 8;
-    /// `REENGAGE_BACKOFF << 5` = 320 ticks ≈ 5 min.
-    const MAX_BACKOFF_SHIFT: u32 = 5;
-    /// A transient bad patch must not fuse a host that is otherwise lockable.
-    const LOCK_STABLE: std::time::Duration = std::time::Duration::from_secs(60);
-
-    fn new() -> PhaseController {
-        PhaseController {
-            offset_ns: 0,
-            epoch: None,
-            last_adjust: std::time::Instant::now(),
-            cum_travel_ns: 0,
-            incoherent_streak: 0,
-            coherent_streak: 0,
-            incoherent_cycles: 0,
-            fused: false,
-            reengage_backoff: 0,
-        }
-    }
-
-    fn engaged(&self) -> bool {
-        self.epoch.is_some()
-    }
-
-    /// `coherence_milli` is the number that says whether the host is marginal or hopeless.
-    fn disengage(&mut self, reason: &'static str, backoff: u32, coherence_milli: u16) {
-        if self.engaged() {
-            tracing::info!(
-                offset_ms = self.offset_ns as f64 / 1e6,
-                coherence_milli,
-                reason,
-                "phase lock: disengaging the submit grid"
-            );
-        }
-        self.epoch = None;
-        self.offset_ns = 0;
-        self.cum_travel_ns = 0;
-        self.incoherent_streak = 0;
-        self.coherent_streak = 0;
-        self.reengage_backoff = backoff;
-    }
-
-    /// Positive (shortest-way) error = frames arrive early → grow the offset; negative → earlier.
-    fn adjust(&mut self, r: &punktfunk_core::quic::PhaseReport, period_ns: i64) {
-        if period_ns <= 0 || self.fused {
-            return;
-        }
-        self.last_adjust = std::time::Instant::now();
-        if self.reengage_backoff > 0 {
-            self.reengage_backoff -= 1;
-            return;
-        }
-        let coherent =
-            r.coherence_milli == u16::MAX || r.coherence_milli >= Self::COHERENCE_FLOOR_MILLI;
-        if !coherent {
-            self.coherent_streak = 0;
-            self.incoherent_streak += 1;
-            if self.incoherent_streak >= 3 {
-                // Count only an engaged tear-down. Pre-lock incoherent arrival must not blow the fuse.
-                if self.engaged() {
-                    self.incoherent_cycles += 1;
-                    if self.incoherent_cycles >= Self::INCOHERENT_FUSE {
-                        self.fused = true;
-                        tracing::info!(
-                            cycles = self.incoherent_cycles,
-                            coherence_milli = r.coherence_milli,
-                            "phase lock: arrival phase incoherent on this host — parked for the \
-                             session"
-                        );
-                    }
-                }
-                let backoff = Self::REENGAGE_BACKOFF
-                    << self
-                        .incoherent_cycles
-                        .saturating_sub(1)
-                        .min(Self::MAX_BACKOFF_SHIFT);
-                self.disengage("incoherent arrival phase", backoff, r.coherence_milli);
-            }
-            return;
-        }
-        self.incoherent_streak = 0;
-        self.coherent_streak = self.coherent_streak.saturating_add(1);
-        // Forgive while the lock is good, not only when it is lost.
-        if self.epoch.is_some_and(|e| e.elapsed() >= Self::LOCK_STABLE) {
-            self.incoherent_cycles = 0;
-        }
-        let target = Self::TARGET_LEAD_FLOOR_NS.max(r.uncertainty_ns as i64 + 1_000_000);
-        let raw = (r.arrival_lead_ns as i64 - target).rem_euclid(period_ns);
-        let error = if raw > period_ns / 2 {
-            raw - period_ns
-        } else {
-            raw
-        };
-        if error.abs() < Self::DEADBAND_NS {
-            self.cum_travel_ns = 0;
-            return;
-        }
-        if !self.engaged() {
-            if self.coherent_streak < Self::ENGAGE_COHERENT_REPORTS {
-                return;
-            }
-            self.epoch = Some(std::time::Instant::now());
-            tracing::info!(
-                coherence_milli = r.coherence_milli,
-                "phase lock: engaging the submit grid"
-            );
-        }
-        let mut step = error.clamp(-Self::MAX_STEP_NS, Self::MAX_STEP_NS);
-        if error.abs() > period_ns / 2 - Self::ANTIPODE_GUARD_NS {
-            step /= 2;
-        }
-        self.offset_ns = (self.offset_ns + step).rem_euclid(period_ns);
-        self.cum_travel_ns += step.abs();
-        if self.cum_travel_ns > period_ns + period_ns / 4 {
-            tracing::info!("phase lock: travel budget exhausted without convergence — disengaging");
-            self.disengage("travel budget", Self::REENGAGE_BACKOFF, r.coherence_milli);
-        }
-    }
-
-    /// Next grid instant at or after `now`. Newest-wins keeps content fresh across the wait.
-    fn next_submit_target(
-        &self,
-        now: std::time::Instant,
-        period_ns: i64,
-    ) -> Option<std::time::Instant> {
-        let epoch = self.epoch?;
-        if period_ns <= 0 {
-            return None;
-        }
-        let elapsed = now.duration_since(epoch).as_nanos() as i64;
-        let k = (elapsed - self.offset_ns).div_euclid(period_ns) + 1;
-        let target_ns = k * period_ns + self.offset_ns;
-        let target = epoch + std::time::Duration::from_nanos(target_ns.max(0) as u64);
-        if target.duration_since(now).as_nanos() as i64 > period_ns {
-            return Some(now);
-        }
-        Some(target)
-    }
-
-    fn applied_readout(&self) -> i64 {
-        if self.engaged() {
-            self.offset_ns
-        } else {
-            0
-        }
-    }
-
-    fn due(&self) -> bool {
-        self.last_adjust.elapsed() >= std::time::Duration::from_secs(1)
-    }
-}
-
 /// Depth-1 by default: depth-2 holds a ready AU a whole interval unpolled (~13 ms extra at 60 fps).
 /// Escalate to the capturer's max only when cadence cannot hold at depth-1 (GPU contention).
 /// `PUNKTFUNK_IDD_ADAPTIVE=0` pins the capturer's full depth. Off when max depth is already 1.
@@ -562,570 +335,6 @@ fn pace_sealed(
     result.map_err(|e| anyhow!("send_sealed: {e:?}"))
 }
 
-/// One encoded AU handed to the send thread. Encode of N+1 overlaps transmit of N.
-struct FrameMsg {
-    data: Vec<u8>,
-    capture_ns: u64,
-    flags: u32,
-    /// Predicted at submit as `au_seq + inflight`; stamped on the wire so RFI stays 1:1 across rebuilds.
-    frame_index: u32,
-    /// Next frame's due time. Past = send immediately (catch up).
-    deadline: std::time::Instant,
-    encode_us: u32,
-    /// Delivery→submit age (µs). 0 for repeats/tail. Wire pts anchors at the same delivery stamp.
-    queue_us: u32,
-    /// `cap_us` = `try_latest`; `submit_us` = encode launch; `wait_us` = lock_bitstream.
-    /// Synchronous backends (PyroWave) put the whole encode in `submit_us` — `wait_us` reads ~0.
-    cap_us: u32,
-    submit_us: u32,
-    wait_us: u32,
-    repeat: bool,
-    /// Trust this, not a re-read of `is_armed()`: a capture that arms mid-flight must not fold
-    /// zeroed splits into the first window's percentiles.
-    was_measured: bool,
-}
-
-/// Whole AU, or one slice-boundary chunk of a streamed AU (seal/pace while the encoder still runs).
-enum SendMsg {
-    Frame(FrameMsg),
-    Chunk(ChunkMsg),
-}
-
-/// One encoder chunk of a streamed AU. AU-level fields match on every chunk; splits matter on `last`.
-struct ChunkMsg {
-    data: Vec<u8>,
-    first: bool,
-    last: bool,
-    capture_ns: u64,
-    flags: u32,
-    frame_index: u32,
-    deadline: std::time::Instant,
-    encode_us: u32,
-    queue_us: u32,
-    cap_us: u32,
-    submit_us: u32,
-    wait_us: u32,
-    repeat: bool,
-    was_measured: bool,
-}
-
-/// Open streamed AU: incremental sealer plus pace aggregation across per-chunk flushes.
-struct StreamedOpen {
-    au: punktfunk_core::packet::StreamedAu,
-    spread_us: u32,
-    paced: bool,
-    /// One microburst budget per AU, consumed across flushes. Per-flush auto granted each block
-    /// its own 128 KiB. `None` = pacing off (`PUNKTFUNK_PACE_FACTOR=0`, no burst pin).
-    burst_left: Option<usize>,
-}
-
-/// Open at `first`, seal+pace completed FEC blocks, close at `last`. `None` mid-AU.
-fn handle_chunk(
-    session: &mut Session,
-    open: &mut Option<StreamedOpen>,
-    c: ChunkMsg,
-    slice_wire: bool,
-    burst_cap: Option<usize>,
-    pace_rate_bps: u64,
-    max_spread: std::time::Duration,
-) -> Result<Option<(FrameMsg, PaceStat)>> {
-    if c.first {
-        if open.take().is_some() {
-            // Rebuild forfeits the in-flight AU; sentinel packets are already on the wire.
-            tracing::warn!(
-                "streamed AU abandoned mid-flight (encoder rebuild) — client ages it out"
-            );
-        }
-        // USER_FLAG_SLICE_STREAM only toward a client that negotiated streamed AUs AND multi-slice.
-        let flags = c.flags
-            | if slice_wire {
-                punktfunk_core::packet::USER_FLAG_SLICE_STREAM
-            } else {
-                0
-            }
-            | if c.repeat {
-                punktfunk_core::packet::USER_FLAG_REPEAT
-            } else {
-                0
-            };
-        *open = Some(StreamedOpen {
-            au: session
-                .begin_streamed_frame_at(c.capture_ns, flags, c.frame_index)
-                .map_err(|e| anyhow!("begin_streamed_frame: {e:?}"))?,
-            spread_us: 0,
-            paced: false,
-            burst_left: if pace_rate_bps == 0 && burst_cap.is_none() {
-                None
-            } else {
-                Some(
-                    burst_cap
-                        .unwrap_or_else(|| crate::send_pacing::auto_burst_bytes(pace_rate_bps, 0)),
-                )
-            },
-        });
-    }
-    let Some(s) = open.as_mut() else {
-        return Err(anyhow!(
-            "streamed chunk without an open AU (encode-loop bug)"
-        ));
-    };
-    // Chunked poll returns per-slice; the AU's flag gates whether the sealer cuts a block there.
-    let wires = session
-        .seal_streamed_chunk(&mut s.au, &c.data, true)
-        .map_err(|e| anyhow!("seal_streamed_chunk: {e:?}"))?;
-    if !wires.is_empty() {
-        // Charge the flush's full wire size. Over-count paces later blocks sooner (the safe direction).
-        let flush_bytes: usize = wires.iter().map(|w| w.len()).sum();
-        let stat = pace_sealed(
-            session,
-            wires,
-            c.deadline,
-            s.burst_left.or(burst_cap),
-            pace_rate_bps,
-            max_spread,
-        )?;
-        if let Some(left) = s.burst_left.as_mut() {
-            *left = left.saturating_sub(flush_bytes);
-        }
-        s.spread_us = s.spread_us.saturating_add(stat.spread_us);
-        s.paced |= stat.paced;
-    }
-    if !c.last {
-        return Ok(None);
-    }
-    let s = open.take().expect("checked above");
-    let tail = session
-        .seal_streamed_finish(s.au)
-        .map_err(|e| anyhow!("seal_streamed_finish: {e:?}"))?;
-    let stat = pace_sealed(
-        session,
-        tail,
-        c.deadline,
-        s.burst_left.or(burst_cap),
-        pace_rate_bps,
-        max_spread,
-    )?;
-    Ok(Some((
-        FrameMsg {
-            data: Vec::new(),
-            capture_ns: c.capture_ns,
-            flags: c.flags,
-            frame_index: c.frame_index,
-            deadline: c.deadline,
-            encode_us: c.encode_us,
-            queue_us: c.queue_us,
-            cap_us: c.cap_us,
-            submit_us: c.submit_us,
-            wait_us: c.wait_us,
-            repeat: c.repeat,
-            was_measured: c.was_measured,
-        },
-        PaceStat {
-            spread_us: s.spread_us.saturating_add(stat.spread_us),
-            paced: s.paced || stat.paced,
-        },
-    )))
-}
-
-/// Inputs the send thread needs for the 2 s web-console sample.
-struct SendStats {
-    rec: Arc<StatsRecorder>,
-    /// Packed w:16|h:16|hz:16. Capture thread updates it on a mid-stream mode switch.
-    mode: Arc<AtomicU64>,
-    codec: &'static str,
-    client: String,
-    bitrate_kbps: Arc<AtomicU32>,
-    bringup: Arc<crate::bringup::Trace>,
-}
-
-/// Whether this session may accept a mid-stream `Reconfigure`.
-///
-/// Off for gamescope (a resize respawns the nested game), a per-client-mode identity (the mode
-/// is part of the slot key, so a resize is a different display), and a monitor mirror (the
-/// physical head's mode is fixed; see `design/per-monitor-portal-capture.md`). The client scales.
-pub(super) fn reconfig_allowed(
-    compositor: Option<crate::vdisplay::Compositor>,
-    per_client_mode: bool,
-    mirrored: bool,
-) -> bool {
-    compositor != Some(crate::vdisplay::Compositor::Gamescope) && !per_client_mode && !mirrored
-}
-
-#[allow(clippy::too_many_arguments)]
-fn send_loop(
-    mut session: Session,
-    frame_rx: std::sync::mpsc::Receiver<SendMsg>,
-    probe_rx: std::sync::mpsc::Receiver<ProbeRequest>,
-    probe_result_tx: tokio::sync::mpsc::UnboundedSender<ProbeResult>,
-    stop: Arc<AtomicBool>,
-    perf: bool,
-    // Smoothed whole-AU paced-send µs. The split arbiter prices HEVC overlap from this; only this
-    // thread sees a send.
-    send_spread_us: Arc<AtomicU32>,
-    wire_rekeys: Arc<AtomicU32>,
-    slice_wire: bool,
-    burst_cap: Option<usize>,
-    fec_target: Arc<AtomicU8>,
-    // Applied between AUs only — a streamed AU's tiling is derived from the size it began with.
-    shard_rx: std::sync::mpsc::Receiver<usize>,
-    stats: SendStats,
-    timing_conn: Option<super::link::SessionLink>,
-    phase: Arc<PhaseCtl>,
-    probe_seq: bool,
-) {
-    boost_thread_priority(false);
-    // 3× default: the link carries 1× sustained, so a bounded 3× excursion is safe (WebRTC uses 2.5×).
-    // `PUNKTFUNK_PACE_FACTOR=0` restores deadline-only spread.
-    let pace_factor: f64 = std::env::var("PUNKTFUNK_PACE_FACTOR")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|f: &f64| f.is_finite() && *f >= 0.0)
-        .unwrap_or(3.0);
-    let mut last_perf = std::time::Instant::now();
-    let mut last_bytes = 0u64;
-    let mut last_send_dropped = 0u64;
-    let mut encode_us: Vec<u32> = Vec::new();
-    let mut pace_us: Vec<u32> = Vec::new();
-    let (mut paced_frames, mut immediate_frames) = (0u64, 0u64);
-    let mut sid: Option<u32> = None;
-    let (mut cap_v, mut submit_v, mut wait_v, mut queue_v): (
-        Vec<u32>,
-        Vec<u32>,
-        Vec<u32>,
-        Vec<u32>,
-    ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let (mut new_frames, mut repeat_frames) = (0u64, 0u64);
-    let mut last_frames_dropped = 0u64;
-    let mut last_packets_dropped = 0u64;
-    let mut last_fec_recovered = 0u64;
-    let mut streamed: Option<StreamedOpen> = None;
-    loop {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        // Never mid-AU: a burst spliced between streamed chunks would push the tail past its deadline.
-        if streamed.is_none() {
-            service_probes(&mut session, &stop, &probe_rx, &probe_result_tx, probe_seq);
-        }
-        apply_fec_target(&mut session, &fec_target);
-        if streamed.is_none() {
-            let mut want_shard = None;
-            while let Ok(s) = shard_rx.try_recv() {
-                want_shard = Some(s);
-            }
-            if let Some(s) = want_shard {
-                match session.set_shard_payload(s) {
-                    Ok(()) => {
-                        wire_rekeys.fetch_add(1, Ordering::Relaxed);
-                        tracing::info!(shard_payload = s, "wire shard payload re-keyed");
-                    }
-                    Err(e) => tracing::warn!(shard_payload = s, error = ?e,
-                        "shard re-key refused by session validation"),
-                }
-            }
-        }
-        match frame_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-            Ok(send_msg) => {
-                let pace_rate = (stats.bitrate_kbps.load(Ordering::Relaxed) as f64
-                    * 1000.0
-                    * pace_factor) as u64;
-                // Bound one frame's spread to ~2 intervals so a big IDR cannot back the channel
-                // into `cadence_degraded`. hz 0 = not yet known → the absolute ceiling alone.
-                let (_, _, hz) = unpack_mode(stats.mode.load(Ordering::Relaxed));
-                let max_spread = if hz > 0 {
-                    std::time::Duration::from_secs_f64(2.0 / hz as f64)
-                } else {
-                    crate::send_pacing::MAX_PACE_SPREAD
-                };
-                let outcome = match send_msg {
-                    SendMsg::Frame(msg) => paced_submit(
-                        &mut session,
-                        &msg.data,
-                        msg.capture_ns,
-                        // HOST_CAP2_REPEAT_MARK makes the bit's absence mean "new content".
-                        msg.flags
-                            | if msg.repeat {
-                                punktfunk_core::packet::USER_FLAG_REPEAT
-                            } else {
-                                0
-                            },
-                        msg.frame_index,
-                        msg.deadline,
-                        burst_cap,
-                        pace_rate,
-                        max_spread,
-                    )
-                    .map(|stat| Some((msg, stat))),
-                    SendMsg::Chunk(c) => handle_chunk(
-                        &mut session,
-                        &mut streamed,
-                        c,
-                        slice_wire,
-                        burst_cap,
-                        pace_rate,
-                        max_spread,
-                    ),
-                };
-                match outcome {
-                    Ok(None) => {}
-                    Ok(Some((msg, stat))) => {
-                        if msg.flags & FLAG_PROBE as u32 == 0 {
-                            stats.bringup.finish("first_packet");
-                        }
-                        // Stamp 0xCF now against the same capture anchor the wire pts carries.
-                        if let Some(tc) = &timing_conn {
-                            if msg.flags & FLAG_PROBE as u32 == 0 {
-                                let host_us = (now_ns().saturating_sub(msg.capture_ns) / 1000)
-                                    .min(u32::MAX as u64)
-                                    as u32;
-                                let t = punktfunk_core::quic::HostTiming {
-                                    pts_ns: msg.capture_ns,
-                                    host_us,
-                                    stages: Some(punktfunk_core::quic::HostStages {
-                                        queue_us: msg.queue_us,
-                                        encode_us: msg.encode_us,
-                                        pace_us: stat.spread_us,
-                                    }),
-                                    applied_phase_ns: Some(
-                                        phase.applied_ns().clamp(i32::MIN as i64, i32::MAX as i64)
-                                            as i32,
-                                    ),
-                                };
-                                let _ = tc.send_datagram(
-                                    punktfunk_core::quic::encode_host_timing_datagram(&t),
-                                );
-                            }
-                        }
-                        // EWMA (3:1): a single AU's spread must not flip the split-arbiter verdict.
-                        {
-                            let prev = send_spread_us.load(Ordering::Relaxed);
-                            let next = if prev == 0 {
-                                stat.spread_us
-                            } else {
-                                ((prev as u64 * 3 + stat.spread_us as u64) / 4) as u32
-                            };
-                            send_spread_us.store(next, Ordering::Relaxed);
-                        }
-                        if perf || stats.rec.is_armed() {
-                            encode_us.push(msg.encode_us);
-                            pace_us.push(stat.spread_us);
-                            if msg.was_measured {
-                                cap_v.push(msg.cap_us);
-                                submit_v.push(msg.submit_us);
-                                wait_v.push(msg.wait_us);
-                                if !msg.repeat {
-                                    queue_v.push(msg.queue_us);
-                                }
-                            }
-                            if msg.repeat {
-                                repeat_frames += 1;
-                            } else {
-                                new_frames += 1;
-                            }
-                            if stat.paced {
-                                paced_frames += 1;
-                            } else {
-                                immediate_frames += 1;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %format!("{e:#}"), "send failed — stopping stream");
-                        break;
-                    }
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        if last_perf.elapsed() >= std::time::Duration::from_secs(2) {
-            let s = session.stats();
-            let secs = last_perf.elapsed().as_secs_f64();
-            let tx_mbps = (s.bytes_sent - last_bytes) as f64 * 8.0 / secs / 1_000_000.0;
-            if perf {
-                let sp = session.take_seal_perf().unwrap_or_default();
-                tracing::info!(
-                    tx_mbps = format!("{tx_mbps:.0}"),
-                    send_dropped = s.packets_send_dropped - last_send_dropped,
-                    send_dropped_total = s.packets_send_dropped,
-                    encode_us_p50 = percentile(&mut encode_us, 0.50),
-                    encode_us_p99 = percentile(&mut encode_us, 0.99),
-                    pace_us_p50 = percentile(&mut pace_us, 0.50),
-                    pace_us_p99 = percentile(&mut pace_us, 0.99),
-                    pace_us_max = pace_us.last().copied().unwrap_or(0),
-                    immediate_frames,
-                    paced_frames,
-                    window_ms = format!("{:.0}", secs * 1000.0),
-                    fec_ms = format!("{:.2}", sp.fec_ns as f64 / 1e6),
-                    seal_ms = format!("{:.2}", sp.seal_ns as f64 / 1e6),
-                    sock_ms = format!("{:.2}", sp.sock_ns as f64 / 1e6),
-                    fec_ns_pp = sp.fec_ns.checked_div(sp.packets).unwrap_or(0),
-                    seal_ns_pp = sp.seal_ns.checked_div(sp.packets).unwrap_or(0),
-                    sock_ns_pp = sp.sock_ns.checked_div(sp.packets).unwrap_or(0),
-                    sealed_pkts = sp.packets,
-                    "perf"
-                );
-            }
-            if stats.rec.is_armed() {
-                let session_id = *sid.get_or_insert_with(|| {
-                    let (w, h, hz) = unpack_mode(stats.mode.load(Ordering::Relaxed));
-                    stats
-                        .rec
-                        .register_session("native", w, h, hz, stats.codec, &stats.client)
-                });
-                let sample = crate::stats_recorder::StatsSample {
-                    t_ms: 0,
-                    session_id,
-                    stages: vec![
-                        crate::stats_recorder::StageTiming {
-                            name: "queue".into(),
-                            p50_us: percentile(&mut queue_v, 0.50) as f32,
-                            p99_us: percentile(&mut queue_v, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "capture".into(),
-                            p50_us: percentile(&mut cap_v, 0.50) as f32,
-                            p99_us: percentile(&mut cap_v, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "submit".into(),
-                            p50_us: percentile(&mut submit_v, 0.50) as f32,
-                            p99_us: percentile(&mut submit_v, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "encode".into(),
-                            p50_us: percentile(&mut wait_v, 0.50) as f32,
-                            p99_us: percentile(&mut wait_v, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "send".into(),
-                            p50_us: percentile(&mut pace_us, 0.50) as f32,
-                            p99_us: percentile(&mut pace_us, 0.99) as f32,
-                        },
-                    ],
-                    fps: (new_frames as f64 / secs) as f32,
-                    repeat_fps: (repeat_frames as f64 / secs) as f32,
-                    mbps: tx_mbps as f32,
-                    bitrate_kbps: stats.bitrate_kbps.load(Ordering::Relaxed),
-                    frames_dropped: s.frames_dropped.saturating_sub(last_frames_dropped) as u32,
-                    packets_dropped: s.packets_dropped.saturating_sub(last_packets_dropped) as u32,
-                    send_dropped: s.packets_send_dropped.saturating_sub(last_send_dropped) as u32,
-                    fec_recovered: s.fec_recovered_shards.saturating_sub(last_fec_recovered) as u32,
-                };
-                stats.rec.push_sample(session_id, sample);
-            }
-            last_perf = std::time::Instant::now();
-            last_bytes = s.bytes_sent;
-            last_send_dropped = s.packets_send_dropped;
-            last_frames_dropped = s.frames_dropped;
-            last_packets_dropped = s.packets_dropped;
-            last_fec_recovered = s.fec_recovered_shards;
-            encode_us.clear();
-            pace_us.clear();
-            cap_v.clear();
-            submit_v.clear();
-            wait_v.clear();
-            queue_v.clear();
-            paced_frames = 0;
-            immediate_frames = 0;
-            new_frames = 0;
-            repeat_frames = 0;
-        }
-    }
-}
-
-/// Mid-stream Gaming↔Desktop flip. Env is applied on the encode thread — the watcher never `setenv`s.
-struct SessionSwitch {
-    kind: crate::vdisplay::ActiveKind,
-    compositor: crate::vdisplay::Compositor,
-    env: crate::vdisplay::SessionEnv,
-}
-
-/// `PUNKTFUNK_SESSION_WATCH` wins (truthy → on; `0`/`false`/`no`/`off`/empty → off). Unset defaults
-/// on for Bazzite/SteamOS (they flip Gaming↔Desktop mid-stream) and off elsewhere.
-fn session_watch_enabled() -> bool {
-    match std::env::var("PUNKTFUNK_SESSION_WATCH") {
-        Ok(v) => {
-            let v = v.trim();
-            !(v.is_empty()
-                || v == "0"
-                || v.eq_ignore_ascii_case("false")
-                || v.eq_ignore_ascii_case("no")
-                || v.eq_ignore_ascii_case("off"))
-        }
-        Err(_) => is_steam_htpc_platform(),
-    }
-}
-
-/// Bazzite or SteamOS (`ID`/`ID_LIKE`). Absent os-release (non-Linux) → false.
-fn is_steam_htpc_platform() -> bool {
-    let Ok(os) = std::fs::read_to_string("/etc/os-release") else {
-        return false;
-    };
-    os.lines().any(|line| {
-        let line = line.trim();
-        let Some(val) = line
-            .strip_prefix("ID=")
-            .or_else(|| line.strip_prefix("ID_LIKE="))
-        else {
-            return false;
-        };
-        val.trim_matches('"')
-            .split_whitespace()
-            .any(|tok| tok.eq_ignore_ascii_case("bazzite") || tok.eq_ignore_ascii_case("steamos"))
-    })
-}
-
-fn session_watcher_loop(tx: std::sync::mpsc::Sender<SessionSwitch>, stop: Arc<AtomicBool>) {
-    use crate::vdisplay;
-    const DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(3);
-    let mut current = vdisplay::detect_active_session().kind;
-    let mut pending: Option<(vdisplay::ActiveKind, std::time::Instant)> = None;
-    while !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        let active = vdisplay::detect_active_session();
-        // Kind change OR same-kind restart: bump the epoch even when no SessionSwitch will fire.
-        vdisplay::observe_session_instance(&active);
-        let cur = active.kind;
-        if cur == current {
-            pending = None;
-            continue;
-        }
-        match pending {
-            Some((k, since)) if k == cur && since.elapsed() >= DEBOUNCE => {
-                // Unmask before compositor_for_kind: a switch we cannot follow still has to unbar
-                // "Return to Gaming Mode" (a masked autologin unit will not start).
-                vdisplay::release_autologin_mask(cur);
-                match vdisplay::compositor_for_kind(cur) {
-                    Some(comp) => {
-                        tracing::info!(from = ?current, to = ?cur, compositor = comp.id(),
-                            "session watcher: mid-stream switch — signaling backend rebuild");
-                        if tx
-                            .send(SessionSwitch {
-                                kind: cur,
-                                compositor: comp,
-                                env: active.env,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                        current = cur;
-                    }
-                    None => tracing::debug!(to = ?cur,
-                        "session watcher: no usable backend for the new session — staying put"),
-                }
-                pending = None;
-            }
-            Some((k, _)) if k == cur => {}
-            _ => pending = Some((cur, std::time::Instant::now())),
-        }
-    }
-}
-
 /// Owned per-session inputs for [`virtual_stream`]. Receivers move in; the whole context moves
 /// onto the stream thread.
 pub(super) struct SessionContext {
@@ -1179,8 +388,9 @@ pub(super) struct SessionContext {
     pub(super) cursor_forward: bool,
     /// `true` = client draws; `false` = host composites. Always `true` (inert) for non-cap sessions.
     pub(super) cursor_client_draws: Arc<AtomicBool>,
+    /// Depth-1 latest-wins; see [`super::cursor_fwd::CursorForwarder::tick`].
     pub(super) cursor_shape_tx:
-        tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::CursorShape>,
+        tokio::sync::watch::Sender<Option<punktfunk_core::quic::CursorShape>>,
     /// Without this, a mid-session probe consumes video indexes the gap detector cannot see.
     pub(super) probe_seq: bool,
     pub(super) streamed_au: bool,
@@ -1580,7 +790,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     spawned_now = true;
                 }
                 Err(e) => {
-                    tracing::warn!(launch_id = id, error = %e, "could not launch requested library title")
+                    tracing::warn!(launch_id = id, error = %e, "requested library title not launched")
                 }
             }
         }
@@ -1617,7 +827,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 Some(spawned)
             }
             Err(e) => {
-                tracing::warn!(command = %cmd, error = %e, "could not launch requested title into the session");
+                tracing::warn!(command = %cmd, error = %e, "requested title not launched into the session");
                 None
             }
         },
@@ -1684,7 +894,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     });
     #[cfg(target_os = "linux")]
     if let Some(Err(e)) = steam_exit_watch.as_ref().map(|r| r.as_ref()) {
-        tracing::warn!(error = %e, "could not start the dedicated Steam exit watcher");
+        tracing::warn!(error = %e, "dedicated Steam exit watcher not started");
     }
 
     let game_lease = launch_target.as_ref().map(|target| {
@@ -1808,6 +1018,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         game: game_shared,
         capture_health: capture_health.clone(),
     });
+    // Concurrent sessions interleave in one log; this stamps every line below with
+    // the id `/status` reports. Sync body, so the guard never straddles an await.
+    let _session_span = tracing::info_span!("session", id = _live_session.id).entered();
     // Capture-health publish cadence (WP18): `/status` polls at 2 s; twice a second is plenty
     // and keeps the report's clone off the per-frame path.
     let mut health_published_at = std::time::Instant::now();
@@ -2117,6 +1330,13 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 resize_trace.finish("pipeline_rebuilt");
                 // Reconfigured clears baselines, not the straddling window or slow start.
                 announce_pipeline_gap(&gap_tx, resize_trace.total_slot().load(Ordering::Relaxed));
+                // This resize moved the topology itself, so the watchdog's re-assert lands as a
+                // bump the eviction check below would read as somebody else's. Capture just
+                // rebuilt at the new mode, which is what that check would do anyway.
+                #[cfg(target_os = "windows")]
+                {
+                    seen_reassert_gen = crate::vdisplay::manager::topology_reassert_gen();
+                }
             }
         }
         #[cfg(target_os = "windows")]
@@ -2153,10 +1373,59 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     trace.finish("pipeline_rebuilt");
                     announce_pipeline_gap(&gap_tx, trace.total_slot().load(Ordering::Relaxed));
                 } else {
-                    return Err(anyhow!(
-                        "exclusive-topology eviction recovery failed — ending the session for a \
-                         clean reconnect (a fresh bring-up re-attaches capture)"
-                    ));
+                    // The in-place recovery proves the OS resumed presenting by waiting for a
+                    // NEWER frame, which an idle desktop never produces — so its failure is not
+                    // evidence the display is gone. Rebuild the pipeline outright instead of
+                    // ending the session, which on an idle desktop just loops the client.
+                    match build_pipeline(
+                        &mut vd,
+                        cur_mode,
+                        bitrate_kbps,
+                        bitrate_auto,
+                        bit_depth,
+                        enc_derive(fec_target.load(Ordering::Relaxed)),
+                        plan,
+                        &quit,
+                        cur_display_gen,
+                        None,
+                        Some(trace.as_ref()),
+                        au_seq,
+                    ) {
+                        Ok(next_pipe) => {
+                            let old_display_gen = cur_display_gen;
+                            // Same mode as before the bounce, so the built bitrate is the one
+                            // already in force: nothing to adopt.
+                            (
+                                capturer,
+                                enc,
+                                frame,
+                                interval,
+                                cur_node_id,
+                                cur_display_gen,
+                                _,
+                            ) = next_pipe;
+                            if let Some(g) = old_display_gen.filter(|g| cur_display_gen != Some(*g))
+                            {
+                                crate::vdisplay::registry::retire(g);
+                            }
+                            enc_src = (frame.format, frame.width, frame.height);
+                            inflight.clear();
+                            last_au_at = std::time::Instant::now();
+                            encoder_resets = 0;
+                            last_forced_idr = Some(std::time::Instant::now());
+                            trace.finish("pipeline_rebuilt");
+                            announce_pipeline_gap(
+                                &gap_tx,
+                                trace.total_slot().load(Ordering::Relaxed),
+                            );
+                        }
+                        Err(e) => {
+                            return Err(e).context(
+                                "exclusive-topology eviction recovery failed, and the full \
+                                 pipeline rebuild after it failed too",
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2223,12 +1492,13 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     &plan,
                     &*capturer,
                     &frame,
+                    (mode.width, mode.height),
                     hz,
-                    ed.enc_kbps(new_kbps) as u64 * 1000,
+                    |_, _| ed.enc_kbps(new_kbps) as u64 * 1000,
                     bit_depth,
                     au_seq,
                 ) {
-                    Ok(new_enc) => {
+                    Ok((new_enc, _)) => {
                         let applied_kbps = new_enc
                             .applied_bitrate_bps()
                             .map(|b| (b / 1000) as u32)
@@ -2886,8 +2156,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 &plan,
                 &*capturer,
                 &frame,
+                (mode.width, mode.height),
                 actual.refresh_hz,
-                src_kbps as u64 * 1000,
+                |_, _| src_kbps as u64 * 1000,
                 bit_depth,
                 au_seq,
             )
@@ -2899,7 +2170,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 )
             });
             let new_enc = match opened {
-                Ok(e) => e,
+                Ok((e, _)) => e,
                 Err(e) => {
                     encoder_resets += 1;
                     if encoder_resets > MAX_ENCODER_RESETS {
@@ -3080,6 +2351,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         {
                             au_flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
                         }
+                        if c.recovery_point {
+                            au_flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
+                        }
                         if c.recovery_anchor {
                             au_flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_ANCHOR;
                         }
@@ -3187,6 +2461,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 && caps.intra_refresh_period > 0
                 && mark_recovery_boundary(&mut ir_wave_pos, au.keyframe, caps.intra_refresh_period)
             {
+                flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
+            }
+            if au.recovery_point {
                 flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
             }
             if au.recovery_anchor {
@@ -3513,27 +2790,37 @@ fn try_inplace_resize(
         return false;
     }
     trace.mark("presentation_restored");
-    // The driver's pool is still built for the OLD geometry, so it refuses every composed frame
-    // and stays stale until the next SET_ENCODE - which only this re-open sends. Waiting for a
-    // new-size frame first can therefore never succeed. The open wants the geometry, which the
-    // accepted mode already carries, not a frame.
+    let open_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    // The driver's pool is still built for the OLD geometry, so no composed frame passes until
+    // this SET_ENCODE rebuilds it — the frame wait below cannot come first. A re-arrival gets its
+    // swap chain after the arrival, so an open in that window fails for a display about to be
+    // fine: retry to its own deadline rather than drop the resize to a full rebuild.
     let pre_opened = if plan.capture == crate::session_plan::CaptureBackend::IddPush {
-        match crate::capture::open_driver_encoder(
-            &plan,
-            &**capturer,
-            (new_mode.width, new_mode.height),
-            effective_hz,
-            enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
-            bit_depth,
-            wire_seq_base,
-        ) {
-            Ok(e) => Some(e),
-            Err(e) => {
-                tracing::warn!(error = %format!("{e:#}"),
-                    "resize: re-opening the driver encoder at the new mode failed - full rebuild");
-                return false;
+        let opened = loop {
+            match crate::capture::open_driver_encoder(
+                &plan,
+                &**capturer,
+                (new_mode.width, new_mode.height),
+                effective_hz,
+                enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+                bit_depth,
+                wire_seq_base,
+            ) {
+                Ok(e) => break Some(e),
+                Err(e) => {
+                    if std::time::Instant::now() >= open_deadline || quit.load(Ordering::Relaxed) {
+                        tracing::warn!(error = %format!("{e:#}"),
+                            "resize: re-opening the driver encoder at the new mode failed - full rebuild");
+                        break None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
             }
+        };
+        if opened.is_none() {
+            return false;
         }
+        opened
     } else {
         None
     };
@@ -3602,12 +2889,13 @@ fn try_inplace_resize(
             &plan,
             &**capturer,
             &new_frame,
+            (new_mode.width, new_mode.height),
             effective_hz,
-            enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+            |_, _| enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
             bit_depth,
             wire_seq_base,
         ) {
-            Ok(e) => e,
+            Ok((e, _)) => e,
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"),
                     "resize: encoder open failed after the in-place mode set - full rebuild");
@@ -3802,7 +3090,7 @@ fn is_permanent_build_error(chain: &str) -> bool {
     const PERMANENT: &[&str] = &[
         "virtual displays require linux",
         "unknown punktfunk_compositor",
-        "could not detect compositor",
+        "compositor not detected",
         "kwin virtual output failed",
         "must be a node id",
         "is it installed",
@@ -3871,19 +3159,22 @@ fn announce_pipeline_gap(gap: &tokio::sync::mpsc::UnboundedSender<u32>, gap_ms: 
     let _ = gap.send(gap_ms);
 }
 
-/// Open the session's encoder at `frame`'s geometry with the plan's chunking and the
-/// capturer's ring depth applied. An IDD-push source gets the driver's encoder instead, its
-/// wire-index domain continuing at `wire_seq_base` (the loop's `au_seq`).
+/// Open the session's encoder for `frame` — at the client's `negotiated` size when a larger
+/// head is mirrored (`session_plan::open_encoder_fitted`) — with the plan's chunking and the
+/// capturer's ring depth applied, and return the size it opened at. `bitrate_bps` is asked
+/// for that size. An IDD-push source gets the driver's encoder instead, its wire-index domain
+/// continuing at `wire_seq_base` (the loop's `au_seq`).
 #[allow(clippy::too_many_arguments)]
 fn open_session_encoder(
     plan: &crate::session_plan::SessionPlan,
     capturer: &dyn crate::capture::Capturer,
     frame: &crate::capture::CapturedFrame,
+    negotiated: (u32, u32),
     hz: u32,
-    bitrate_bps: u64,
+    bitrate_bps: impl Fn(u32, u32) -> u64,
     bit_depth: u8,
     wire_seq_base: u32,
-) -> Result<Box<dyn crate::encode::Encoder>> {
+) -> Result<(Box<dyn crate::encode::Encoder>, (u32, u32))> {
     #[cfg(target_os = "windows")]
     if plan.capture == crate::session_plan::CaptureBackend::IddPush {
         return crate::capture::open_driver_encoder(
@@ -3891,30 +3182,34 @@ fn open_session_encoder(
             capturer,
             (frame.width, frame.height),
             hz,
-            bitrate_bps,
+            bitrate_bps(frame.width, frame.height),
             bit_depth,
             wire_seq_base,
-        );
+        )
+        .map(|e| (e, (frame.width, frame.height)));
     }
     let _ = wire_seq_base;
-    let mut enc = crate::encode::open_video(
-        plan.codec,
-        frame.format,
-        frame.width,
-        frame.height,
-        hz,
-        bitrate_bps,
-        frame.is_cuda(),
-        bit_depth,
-        plan.chroma,
-        plan.cursor_blend,
-        plan.max_slices,
-    )?;
+    let (mut enc, size) =
+        crate::session_plan::open_encoder_fitted(frame, negotiated, |width, height| {
+            crate::encode::open_video(
+                plan.codec,
+                frame.format,
+                width,
+                height,
+                hz,
+                bitrate_bps(width, height),
+                frame.is_cuda(),
+                bit_depth,
+                plan.chroma,
+                plan.cursor_blend,
+                plan.max_slices,
+            )
+        })?;
     if let Some(c) = plan.wire_chunk {
         enc.set_wire_chunking(c);
     }
     enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
-    Ok(enc)
+    Ok((enc, size))
 }
 
 /// Rebuild the encoder in place and drop owed in-flight AUs. `false` = no in-place reset.
@@ -4063,37 +3358,44 @@ fn build_pipeline(
     if let Some(t) = trace {
         t.mark("first_frame");
     }
-    let bitrate_kbps = if bitrate_auto && (frame.width, frame.height) != (mode.width, mode.height) {
-        let delivered = punktfunk_core::Mode {
-            width: frame.width,
-            height: frame.height,
-            ..mode
-        };
-        let re = resolve_bitrate_kbps_for(plan.codec, 0, &delivered, plan.chroma, bit_depth);
-        if re != bitrate_kbps {
-            tracing::info!(
-                negotiated = %format!("{}x{}", mode.width, mode.height),
-                delivered = %format!("{}x{}", frame.width, frame.height),
-                from_kbps = bitrate_kbps,
-                to_kbps = re,
-                "the source delivers a different size than the session negotiated — re-resolved the \
-                 Automatic bitrate for the pixels actually being encoded"
-            );
+    let negotiated = (mode.width, mode.height);
+    // Automatic bitrate follows the pixels actually encoded: a mirrored head's fit, or
+    // whatever a virtual display delivered.
+    let kbps_for = |w: u32, h: u32| {
+        if bitrate_auto && (w, h) != negotiated {
+            let encoded = punktfunk_core::Mode {
+                width: w,
+                height: h,
+                ..mode
+            };
+            resolve_bitrate_kbps_for(plan.codec, 0, &encoded, plan.chroma, bit_depth)
+        } else {
+            bitrate_kbps
         }
-        re
-    } else {
-        bitrate_kbps
     };
-    let enc = open_session_encoder(
+    let (enc, encoded) = open_session_encoder(
         &plan,
         &*capturer,
         &frame,
+        negotiated,
         effective_hz,
-        enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+        |w, h| enc_of.enc_kbps(kbps_for(w, h)) as u64 * 1000,
         bit_depth,
         wire_seq_base,
     )
     .context("open video encoder")?;
+    let re = kbps_for(encoded.0, encoded.1);
+    if re != bitrate_kbps {
+        tracing::info!(
+            negotiated = %format!("{}x{}", mode.width, mode.height),
+            encoded = %format!("{}x{}", encoded.0, encoded.1),
+            from_kbps = bitrate_kbps,
+            to_kbps = re,
+            "the encoder opened at a size other than the session negotiated — re-resolved the \
+             Automatic bitrate for the pixels actually being encoded"
+        );
+    }
+    let bitrate_kbps = re;
     if let Some(t) = trace {
         t.mark("encoder_open");
     }
@@ -4337,320 +3639,6 @@ mod tests {
             "create virtual output: timed out creating the KWin virtual output"
         ));
         assert!(!is_permanent_build_error("open NVENC: device busy"));
-    }
-
-    const SIM_P: i64 = 8_333_333;
-    const SIM_TARGET: i64 = 2_500_000;
-
-    struct Lcg(u64);
-    impl Lcg {
-        fn next_noise(&mut self, spread_ns: i64) -> i64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            if spread_ns == 0 {
-                return 0;
-            }
-            ((self.0 >> 33) as i64 % (2 * spread_ns)) - spread_ns
-        }
-    }
-
-    fn report_from_lead(
-        base_lead_ns: i64,
-        noise_spread_ns: i64,
-        rng: &mut Lcg,
-    ) -> punktfunk_core::quic::PhaseReport {
-        let samples_us: Vec<u64> = (0..120)
-            .map(|_| {
-                let lead = (base_lead_ns + rng.next_noise(noise_spread_ns)).rem_euclid(SIM_P);
-                (lead / 1000) as u64
-            })
-            .collect();
-        let (mean_ns, coherence) =
-            punktfunk_core::phase::circular_latch(&samples_us, SIM_P).expect("120 samples");
-        punktfunk_core::quic::PhaseReport {
-            next_latch_host_ns: 0,
-            latch_period_ns: SIM_P as u32,
-            uncertainty_ns: 1_000_000,
-            arrival_lead_ns: mean_ns as u32,
-            coherence_milli: coherence,
-        }
-    }
-
-    fn grid_lead(base_lead_ns: i64, c: &PhaseController) -> i64 {
-        (base_lead_ns - c.applied_readout()).rem_euclid(SIM_P)
-    }
-
-    #[test]
-    fn grid_plant_tight_jitter_locks_and_stays() {
-        let mut c = PhaseController::new();
-        let mut rng = Lcg(7);
-        for _ in 0..12 {
-            let r = report_from_lead(grid_lead(7_500_000, &c), 500_000, &mut rng);
-            c.adjust(&r, SIM_P);
-        }
-        let err = grid_lead(7_500_000, &c) - SIM_TARGET;
-        assert!(c.engaged(), "a coherent linear plant must engage");
-        assert!(
-            err.abs() < 1_000_000,
-            "tight jitter must converge near the target lead, residual {err} ns"
-        );
-        let before = c.offset_ns;
-        for _ in 0..10 {
-            let r = report_from_lead(grid_lead(7_500_000, &c), 500_000, &mut rng);
-            c.adjust(&r, SIM_P);
-        }
-        assert!(
-            (c.offset_ns - before).abs() <= 2 * PhaseController::MAX_STEP_NS,
-            "a locked loop must not wander"
-        );
-    }
-
-    #[test]
-    fn grid_plant_antipode_start_converges_without_chatter() {
-        let mut c = PhaseController::new();
-        let mut rng = Lcg(11);
-        let base = (SIM_TARGET + SIM_P / 2).rem_euclid(SIM_P);
-        for _ in 0..25 {
-            let r = report_from_lead(grid_lead(base, &c), 400_000, &mut rng);
-            c.adjust(&r, SIM_P);
-        }
-        let err = grid_lead(base, &c) - SIM_TARGET;
-        assert!(
-            err.abs() < 1_000_000,
-            "an antipode start must still converge, residual {err} ns"
-        );
-        assert!(
-            c.cum_travel_ns <= SIM_P,
-            "damped antipode stepping spent {} ns of travel — it chattered",
-            c.cum_travel_ns
-        );
-    }
-
-    #[test]
-    fn decoupled_plant_disengages_and_holds_nothing() {
-        let mut c = PhaseController::new();
-        let mut rng = Lcg(13);
-        let mut engaged_at_some_point = false;
-        for _ in 0..40 {
-            let r = report_from_lead(7_500_000, 300_000, &mut rng);
-            c.adjust(&r, SIM_P);
-            engaged_at_some_point |= c.engaged();
-        }
-        assert!(
-            engaged_at_some_point,
-            "the chase must have started before the budget tripped"
-        );
-        assert!(
-            !c.engaged(),
-            "a decoupled plant must end DISENGAGED, not parked"
-        );
-        assert_eq!(
-            c.applied_readout(),
-            0,
-            "disengaged means zero applied offset"
-        );
-    }
-
-    #[test]
-    fn incoherent_phase_never_engages() {
-        let mut c = PhaseController::new();
-        let mut rng = Lcg(17);
-        for _ in 0..20 {
-            let r = report_from_lead(7_500_000, SIM_P, &mut rng);
-            c.adjust(&r, SIM_P);
-        }
-        assert!(
-            !c.engaged(),
-            "an incoherent phase must never engage the grid"
-        );
-    }
-
-    #[test]
-    fn regime_change_reengages_after_backoff() {
-        let mut c = PhaseController::new();
-        let mut rng = Lcg(19);
-        for _ in 0..40 {
-            let r = report_from_lead(7_500_000, 300_000, &mut rng);
-            c.adjust(&r, SIM_P);
-        }
-        assert!(!c.engaged());
-        for _ in 0..30 {
-            let r = report_from_lead(grid_lead(7_500_000, &c), 400_000, &mut rng);
-            c.adjust(&r, SIM_P);
-        }
-        let err = grid_lead(7_500_000, &c) - SIM_TARGET;
-        assert!(
-            c.engaged(),
-            "a linearized plant after backoff must re-engage"
-        );
-        assert!(err.abs() < 1_000_000, "…and lock, residual {err} ns");
-    }
-
-    #[test]
-    fn submit_grid_is_periodic_and_offset_shifted() {
-        let mut c = PhaseController::new();
-        c.epoch = Some(std::time::Instant::now() - std::time::Duration::from_millis(50));
-        c.offset_ns = 1_000_000;
-        let now = std::time::Instant::now();
-        let t1 = c.next_submit_target(now, SIM_P).unwrap();
-        let t2 = c
-            .next_submit_target(t1 + std::time::Duration::from_nanos(1), SIM_P)
-            .unwrap();
-        let dt = t2.duration_since(t1).as_nanos() as i64;
-        assert!(
-            (dt - SIM_P).abs() < 1_000,
-            "grid ticks must advance by exactly one period, got {dt}"
-        );
-        c.offset_ns = 3_000_000;
-        let t1b = c.next_submit_target(now, SIM_P).unwrap();
-        let shift =
-            t1b.duration_since(now).as_nanos() as i64 - t1.duration_since(now).as_nanos() as i64;
-        assert!(
-            (shift - 2_000_000).rem_euclid(SIM_P) < 1_000
-                || (shift - 2_000_000).rem_euclid(SIM_P) > SIM_P - 1_000,
-            "a +2 ms offset must shift the next target by +2 ms mod P, got {shift}"
-        );
-    }
-
-    const COHERENT: u16 = PhaseController::COHERENCE_FLOOR_MILLI + 40;
-    const INCOHERENT: u16 = PhaseController::COHERENCE_FLOOR_MILLI - 40;
-    const ACTIONABLE_LEAD: i64 = 7_500_000;
-
-    fn report_at(coherence_milli: u16, lead_ns: i64) -> punktfunk_core::quic::PhaseReport {
-        punktfunk_core::quic::PhaseReport {
-            next_latch_host_ns: 0,
-            latch_period_ns: SIM_P as u32,
-            uncertainty_ns: 1_000_000,
-            arrival_lead_ns: lead_ns.rem_euclid(SIM_P) as u32,
-            coherence_milli,
-        }
-    }
-
-    fn one_incoherent_cycle(c: &mut PhaseController) -> u32 {
-        for _ in 0..PhaseController::ENGAGE_COHERENT_REPORTS {
-            c.adjust(&report_at(COHERENT, ACTIONABLE_LEAD), SIM_P);
-        }
-        assert!(c.engaged(), "the cycle must engage before it tears down");
-        for _ in 0..3 {
-            c.adjust(&report_at(INCOHERENT, ACTIONABLE_LEAD), SIM_P);
-        }
-        let asked = c.reengage_backoff;
-        while !c.fused && c.reengage_backoff > 0 {
-            c.adjust(&report_at(INCOHERENT, ACTIONABLE_LEAD), SIM_P);
-        }
-        asked
-    }
-
-    #[test]
-    fn engage_requires_sustained_coherence() {
-        let mut c = PhaseController::new();
-        for i in 1..PhaseController::ENGAGE_COHERENT_REPORTS {
-            c.adjust(&report_at(COHERENT, ACTIONABLE_LEAD), SIM_P);
-            assert!(!c.engaged(), "engaged on only {i} coherent report(s)");
-        }
-        c.adjust(&report_at(COHERENT, ACTIONABLE_LEAD), SIM_P);
-        assert!(
-            c.engaged(),
-            "sustained coherence must still engage the grid"
-        );
-
-        let mut c = PhaseController::new();
-        for _ in 0..PhaseController::ENGAGE_COHERENT_REPORTS - 1 {
-            c.adjust(&report_at(COHERENT, ACTIONABLE_LEAD), SIM_P);
-        }
-        c.adjust(&report_at(INCOHERENT, ACTIONABLE_LEAD), SIM_P);
-        for _ in 0..PhaseController::ENGAGE_COHERENT_REPORTS - 1 {
-            c.adjust(&report_at(COHERENT, ACTIONABLE_LEAD), SIM_P);
-        }
-        assert!(
-            !c.engaged(),
-            "a broken streak must not count toward engaging"
-        );
-    }
-
-    #[test]
-    fn incoherent_disengage_backoff_escalates() {
-        let mut c = PhaseController::new();
-        let asked: Vec<u32> = (0..4).map(|_| one_incoherent_cycle(&mut c)).collect();
-        assert_eq!(
-            asked,
-            vec![10, 20, 40, 80],
-            "each cycle must wait longer than the last (v3 asked for zero, every time)"
-        );
-    }
-
-    #[test]
-    fn fuse_after_repeated_cycles() {
-        let mut c = PhaseController::new();
-        for _ in 0..PhaseController::INCOHERENT_FUSE {
-            one_incoherent_cycle(&mut c);
-        }
-        assert!(
-            c.fused,
-            "a host that never holds a lock must park for the session"
-        );
-        for _ in 0..50 {
-            c.adjust(&report_at(u16::MAX, ACTIONABLE_LEAD), SIM_P);
-        }
-        assert!(!c.engaged(), "a fused controller must stay disengaged");
-    }
-
-    #[test]
-    fn stable_lock_resets_escalation() {
-        let mut c = PhaseController::new();
-        one_incoherent_cycle(&mut c);
-        one_incoherent_cycle(&mut c);
-        assert_eq!(c.incoherent_cycles, 2, "two cycles should have escalated");
-
-        for _ in 0..PhaseController::ENGAGE_COHERENT_REPORTS {
-            c.adjust(&report_at(COHERENT, ACTIONABLE_LEAD), SIM_P);
-        }
-        assert!(c.engaged());
-        c.epoch = Some(
-            std::time::Instant::now()
-                - PhaseController::LOCK_STABLE
-                - std::time::Duration::from_secs(1),
-        );
-        c.adjust(&report_at(COHERENT, ACTIONABLE_LEAD), SIM_P);
-        assert_eq!(
-            c.incoherent_cycles, 0,
-            "a lock that held past LOCK_STABLE must forgive the escalation"
-        );
-    }
-
-    #[test]
-    fn flap_replay_stops_the_engage_churn() {
-        let mut c = PhaseController::new();
-        let mut rng = Lcg(23);
-        let (mut engagements, mut reports, mut coherent_side) = (0u32, 0u32, true);
-        while reports < 24 * 60 {
-            let run = 2 + rng.next_noise(3).rem_euclid(3) as u32;
-            for _ in 0..run {
-                let was = c.engaged();
-                let side = if coherent_side { COHERENT } else { INCOHERENT };
-                c.adjust(&report_at(side, ACTIONABLE_LEAD), SIM_P);
-                engagements += u32::from(!was && c.engaged());
-                reports += 1;
-            }
-            coherent_side = !coherent_side;
-        }
-        assert!(
-            engagements <= 2,
-            "24 min of gate-hovering must not churn the grid: {engagements} engagements"
-        );
-        assert!(
-            !c.fused,
-            "flapping that never engaged must not blow the fuse"
-        );
-        for _ in 0..PhaseController::REENGAGE_BACKOFF + PhaseController::ENGAGE_COHERENT_REPORTS {
-            c.adjust(&report_at(COHERENT, ACTIONABLE_LEAD), SIM_P);
-        }
-        assert!(
-            c.engaged(),
-            "a phase that finally holds must still get the grid"
-        );
     }
 
     #[cfg(target_os = "linux")]

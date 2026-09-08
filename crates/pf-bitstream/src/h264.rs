@@ -567,6 +567,12 @@ impl H264Planner {
         })
     }
 
+    /// An intra refresh wave finished on a picture the freeze gate accepted: forget the
+    /// unclean marks, which a chain through half-refreshed pictures cannot clear itself.
+    pub fn forgive_unclean(&mut self) {
+        self.clean.clear();
+    }
+
     /// Drain the DPB and discard 8.2.1/8.2.5 state. Planning resumes only at
     /// an IDR ([`PlanError::AwaitingIdr`]). Parameter sets survive (7.4.1.2).
     pub fn flush(&mut self) -> DpbUpdate {
@@ -613,10 +619,11 @@ impl H264Planner {
     }
 
     /// Map a missing-PPS parse string to [`PlanError::NoActiveParamSet`].
-    /// Prefix match is best-effort: a reworded upstream message becomes `Parse`.
+    /// The needle is the vendored parser's own wording, not ours; reword it here
+    /// and every missing-PPS error degrades to `Parse`.
     fn slice_parse_error(err: String) -> PlanError {
-        match err.strip_prefix("Could not get PPS for pic_parameter_set_id ") {
-            Some(id) => PlanError::NoActiveParamSet {
+        match err.split_once("PPS for pic_parameter_set_id ") {
+            Some((_, id)) => PlanError::NoActiveParamSet {
                 pps_id: id.trim().parse().unwrap_or(0),
             },
             None => PlanError::Parse(err),

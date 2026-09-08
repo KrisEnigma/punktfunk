@@ -120,8 +120,7 @@ pub struct OutputFormat {
     pub pyrowave: bool,
     /// This session's encoder can ingest producer-native NV12 (Linux Vulkan Video on
     /// H265/AV1; `pf_encode::linux_native_nv12_ok`). Capture offers gamescope the NV12 pod
-    /// only when set: libav VAAPI (H264 and the fallback) would read the two-plane buffer
-    /// as packed RGB. Always `false` on Windows.
+    /// only when set: every other Linux arm reads packed RGB. Always `false` on Windows.
     pub nv12_native: bool,
     /// Cursor-forward channel: Windows IDD-push delivers the driver's hardware-cursor
     /// section so DWM stops compositing the pointer; capturer surfaces it via

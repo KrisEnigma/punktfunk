@@ -20,8 +20,10 @@ Good: `fix(host/hyprland): keep topology restore across pipeline retries`
 
 ### Changelog
 
-Newest `CHANGELOG.md` section only. Two sentences per bullet: what changed, then what
-the reader must do. Bold lead is a noun or an API name. Fail at 160 lines.
+Do not edit `CHANGELOG.md` on ordinary PRs. Commits are the log.
+If the reader must act, add a `BREAKING CHANGE:` footer.
+Release notes are written at version bump: skill `write-release-notes`
+(`.agents/skills/write-release-notes/SKILL.md`), rules in `docs/writing.md` §2.
 
 ### Comments
 
@@ -42,7 +44,25 @@ Good: `A host that leaves this field zero fails the bind.`
 Bad: `Field 2026-08-28, iPad Pro / iOS 27 over Tailscale: …`
 Good: `250 ms ≈ 30 refreshes at 120 Hz. A miss freezes the picture.`
 
+### Error messages
+
+Two registers, picked by who reads the line. Rules: `docs/writing.md` §4.
+
+- **Operator** (`anyhow` context, `bail!`, `expect`, `#[error]`): a lowercase
+  phrase naming the operation. No `failed to` / `could not` prefix, no trailing
+  period. `.context("open {path}")`. A `tracing` event takes the noun phrase
+  instead — `"hook command did not launch"` — with the cause in a field.
+- **User** (console, TUI, tray, setup, client apps, `api_error`): one plain
+  sentence of what did not happen, then the next move if there is one. No crate
+  or symbol names, no errno.
+
+Both: `Couldn't` / `can't`, never `Could not` / `cannot` / `unable to`. Append
+the cause once — ` — ` in prose, `: ` in operator lines. Never a bare code.
+
 ## Agent skills
+
+Project SKILL.md files live in `.agents/skills/`. A harness that only
+scans its own vendor dir still finds them via this file.
 
 ### Issue tracker
 

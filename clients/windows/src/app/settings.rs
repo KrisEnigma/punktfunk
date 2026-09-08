@@ -37,9 +37,8 @@ const RESOLUTIONS: &[(u32, u32)] = &[
 ];
 /// `0` = the display's native refresh, resolved at connect.
 const REFRESH: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240];
-/// Render-scale multipliers (persisted as f64; mirrors [`punktfunk_core::render_scale::PRESETS`]).
-/// `1.0` = Native. Applied at connect and each match-window resize.
-const RENDER_SCALES: &[f64] = &[0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+/// Render-scale multipliers. `1.0` = Native; applied at connect and each match-window resize.
+use punktfunk_core::render_scale::PRESETS as RENDER_SCALES;
 
 /// A compact label for a render-scale multiplier: "Native" / "1.5×" / "2× (supersample)".
 fn render_scale_label(scale: f64) -> String {

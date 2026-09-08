@@ -377,7 +377,7 @@ pub(crate) unsafe fn self_test(fd: i32, seconds: i32, hz: i32) -> i32 {
     let mut playback = match sink::open(&dev) {
         Ok(p) => p,
         Err(e) => {
-            log::warn!("pad audio self-test: could not open the stream: {e}");
+            log::warn!("pad audio self-test: open failed: {e}");
             return SelfTest::OPEN_FAILED;
         }
     };
@@ -522,7 +522,7 @@ pub(crate) fn spawn(
     std::thread::Builder::new()
         .name("pf-pad-audio".into())
         .spawn(move || run(&client, &stop, pad, fd, haptics, speaker))
-        .map_err(|e| log::warn!("pad-audio thread failed to start: {e}"))
+        .map_err(|e| log::warn!("pad-audio thread not started: {e}"))
         .ok()
 }
 
@@ -625,17 +625,7 @@ fn pump(
 ) {
     let mut mixer = QuadMixer::new();
     let mut streams: [Option<KindStream>; 2] = [None, None];
-    // Periodic accounting. Without it the only way to tell "the host is sending nothing" from
-    // "frames arrive but render silently" is to guess, and those two have completely different
-    // causes — one is host-side routing, the other is here.
-    let mut frames_in = 0u64;
-    let mut samples_in = 0u64;
-    let mut peak = 0i32;
-    let mut last_report = std::time::Instant::now();
-    // R13: caller-side short-write accounting (distinct from `st.short_bytes`, which is a
-    // URB-level statistic from inside the transport).
-    let mut st_short = 0u64;
-    let mut st_short_logged = std::time::Instant::now();
+    let mut tally = Tally::new();
     let mut pcm: Vec<i16> = Vec::with_capacity(MAX_FRAME_SAMPLES * 2);
     let mut out: Vec<i16> = Vec::with_capacity(MAX_BUFFER_FRAMES * PAD_CHANNELS);
 
@@ -644,25 +634,14 @@ fn pump(
         // diagnostic — state: it means the host's capture hears nothing, which is a routing
         // problem upstream rather than anything here. Reporting only when a frame arrives makes
         // that state indistinguishable from the renderer being dead.
-        if last_report.elapsed() >= Duration::from_secs(1) {
-            let st = playback.stats();
-            log::info!(
-                "pad audio: {frames_in} frames in, {samples_in} samples, peak={peak}, \
-                 {} written, {} underruns, {} short, {st_short} dropped to back-pressure",
-                playback.frames_written(),
-                st.underruns,
-                st.short_bytes
-            );
-            last_report = std::time::Instant::now();
-            peak = 0;
-        }
+        tally.report(playback);
 
         let Some(frame) = client.next_pad_audio(Duration::from_millis(10)) else {
             // R12: `next_pad_audio` collapses a DISCONNECTED channel into the same `None` as an
             // ordinary timeout, so this arm cannot tell "nothing arrived in 10 ms" from "the
             // session is gone and nothing will ever arrive again". Left to `continue`, a closed
-            // session span this loop at nice -16 until the owner's stop flag caught up — roughly
-            // a second of a real-time-priority thread doing nothing. Ask the connection directly.
+            // session span this loop at nice -16 until the owner's stop flag caught up. Ask the
+            // connection directly.
             if client.is_session_ended() {
                 log::debug!("pad audio: session ended, leaving the render loop");
                 break;
@@ -702,7 +681,7 @@ fn pump(
             note_haptics_frame(pad);
         }
 
-        frames_in += 1;
+        tally.frames_in += 1;
         let k = usize::from(frame.kind).min(1);
         let st = match &mut streams[k] {
             Some(s) => s,
@@ -718,75 +697,13 @@ fn pump(
                 }
             },
         };
-
-        // Conceal whatever the sequence numbers say is missing, before decoding what arrived.
-        let missing = plc_frames(&mut st.gaps, frame.seq, st.frame_samples);
-        for _ in 0..missing {
-            pcm.resize(st.frame_samples * 2, 0);
-            match st.dec.decode(&[], &mut pcm, false) {
-                Ok(n) => mixer.push(frame.kind, &pcm[..n * 2]),
-                Err(_) => break,
-            }
-        }
-
-        // An empty payload is DTX silence: the tracker has already accounted for the sequence,
-        // and there is nothing to decode.
-        if !frame.opus.is_empty() {
-            pcm.resize(MAX_FRAME_SAMPLES * 2, 0);
-            match st.dec.decode(&frame.opus, &mut pcm, false) {
-                Ok(n) => {
-                    st.frame_samples = n;
-                    samples_in += n as u64;
-                    // Peak of what actually decoded: distinguishes "frames arriving but silent"
-                    // (a host-side routing problem) from "frames arriving with signal that is not
-                    // reaching the actuators" (a problem here).
-                    peak = peak.max(
-                        pcm[..n * 2]
-                            .iter()
-                            .map(|s| i32::from(s.abs()))
-                            .max()
-                            .unwrap_or(0),
-                    );
-                    mixer.push(frame.kind, &pcm[..n * 2]);
-                }
-                Err(e) => log::debug!("pad audio: opus decode failed: {e}"),
-            }
-        }
+        decode_into(st, &frame, &mut pcm, &mut mixer, &mut tally);
 
         // Hand over whole frames only. `write` stages any remainder internally, so a partial
         // chunk is never padded with silence mid-stream.
         out.clear();
-        if mixer.pop(&mut out) > 0 {
-            match playback.write_interleaved(&out) {
-                // R13: a SHORT write is back-pressure, not success — the endpoint took `n` frames
-                // and the rest is ours to deal with. Discarding the return value dropped the tail
-                // with nothing said, so a stalled endpoint sounded like clipped audio with a clean
-                // log. We cannot retry from here without unbounded buffering (the mixer's whole
-                // point is to stay ahead of the device), so the tail is still dropped — but it is
-                // now COUNTED and reported by the 1 s line, which is the difference between a
-                // diagnosable stall and a mystery.
-                Ok(n) if n < out.len() => {
-                    st_short += (out.len() - n) as u64;
-                    if st_short_logged.elapsed() >= Duration::from_secs(5) {
-                        log::warn!(
-                            "pad audio: endpoint short-wrote {} of {} samples ({st_short} total) \
-                             — the device is not keeping up",
-                            n,
-                            out.len()
-                        );
-                        st_short_logged = std::time::Instant::now();
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    if is_fatal(&e) {
-                        log::warn!("pad audio: stream lost: {e}");
-                        return;
-                    }
-                    log::debug!("pad audio: write hiccup: {e}");
-                    mixer.discard();
-                }
-            }
+        if mixer.pop(&mut out) > 0 && !write_out(playback, &out, &mut mixer, &mut tally) {
+            return;
         }
     }
 
@@ -799,6 +716,133 @@ fn pump(
         stats.short_bytes,
         mixer.dropped_frames(),
     );
+}
+
+/// Conceal whatever the sequence numbers say is missing, then decode what arrived, into the
+/// mixer. An empty payload is DTX silence: the tracker has already accounted for the sequence.
+fn decode_into(
+    st: &mut KindStream,
+    frame: &punktfunk_core::quic::PadAudioFrame,
+    pcm: &mut Vec<i16>,
+    mixer: &mut QuadMixer,
+    tally: &mut Tally,
+) {
+    let missing = plc_frames(&mut st.gaps, frame.seq, st.frame_samples);
+    for _ in 0..missing {
+        pcm.resize(st.frame_samples * 2, 0);
+        match st.dec.decode(&[], pcm, false) {
+            Ok(n) => mixer.push(frame.kind, &pcm[..n * 2]),
+            Err(_) => break,
+        }
+    }
+    if frame.opus.is_empty() {
+        return;
+    }
+    pcm.resize(MAX_FRAME_SAMPLES * 2, 0);
+    match st.dec.decode(&frame.opus, pcm, false) {
+        Ok(n) => {
+            st.frame_samples = n;
+            tally.samples_in += n as u64;
+            // Peak of what actually decoded: distinguishes "frames arriving but silent" (a
+            // host-side routing problem) from "frames arriving with signal that is not reaching
+            // the actuators" (a problem here).
+            tally.peak = tally.peak.max(
+                pcm[..n * 2]
+                    .iter()
+                    .map(|s| i32::from(s.abs()))
+                    .max()
+                    .unwrap_or(0),
+            );
+            mixer.push(frame.kind, &pcm[..n * 2]);
+        }
+        Err(e) => log::debug!("pad audio: opus decode failed: {e}"),
+    }
+}
+
+/// One write to the endpoint. `false` = the stream is gone. A SHORT write is back-pressure, not
+/// success: the tail cannot be retried without unbounded buffering (the mixer's whole point is to
+/// stay ahead of the device), so it is dropped but COUNTED — the difference between a
+/// diagnosable stall and a mystery.
+fn write_out(
+    playback: &mut uac_host::Playback<'_>,
+    out: &[i16],
+    mixer: &mut QuadMixer,
+    tally: &mut Tally,
+) -> bool {
+    match playback.write_interleaved(out) {
+        Ok(n) if n < out.len() => tally.short_write(n, out.len()),
+        Ok(_) => {}
+        Err(e) => {
+            if is_fatal(&e) {
+                log::warn!("pad audio: stream lost: {e}");
+                return false;
+            }
+            log::debug!("pad audio: write hiccup: {e}");
+            mixer.discard();
+        }
+    }
+    true
+}
+
+/// Periodic accounting. Without it the only way to tell "the host is sending nothing" from
+/// "frames arrive but render silently" is to guess, and those two have completely different
+/// causes — one is host-side routing, the other is here.
+struct Tally {
+    frames_in: u64,
+    samples_in: u64,
+    peak: i32,
+    last_report: std::time::Instant,
+    /// R13: caller-side short-write accounting (distinct from `st.short_bytes`, a URB-level
+    /// statistic from inside the transport).
+    st_short: u64,
+    st_short_logged: std::time::Instant,
+}
+
+impl Tally {
+    fn new() -> Tally {
+        let now = std::time::Instant::now();
+        Tally {
+            frames_in: 0,
+            samples_in: 0,
+            peak: 0,
+            last_report: now,
+            st_short: 0,
+            st_short_logged: now,
+        }
+    }
+
+    /// The 1 s line.
+    fn report(&mut self, playback: &uac_host::Playback<'_>) {
+        if self.last_report.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        let st = playback.stats();
+        log::info!(
+            "pad audio: {} frames in, {} samples, peak={}, {} written, {} underruns, {} short, \
+             {} dropped to back-pressure",
+            self.frames_in,
+            self.samples_in,
+            self.peak,
+            playback.frames_written(),
+            st.underruns,
+            st.short_bytes,
+            self.st_short,
+        );
+        self.last_report = std::time::Instant::now();
+        self.peak = 0;
+    }
+
+    fn short_write(&mut self, wrote: usize, len: usize) {
+        self.st_short += (len - wrote) as u64;
+        if self.st_short_logged.elapsed() >= Duration::from_secs(5) {
+            log::warn!(
+                "pad audio: endpoint short-wrote {wrote} of {len} samples ({} total) — the device \
+                 is not keeping up",
+                self.st_short
+            );
+            self.st_short_logged = std::time::Instant::now();
+        }
+    }
 }
 
 /// Is this the end of the stream, or just a bad moment?

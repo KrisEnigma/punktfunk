@@ -187,7 +187,7 @@ pub(crate) struct HiddenState {
         (status = OK, description = "Stored; the entry's visibility after the call", body = HiddenState),
         (status = BAD_REQUEST, description = "Empty entry id", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the settings", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the settings", body = ApiError),
     )
 )]
 pub(crate) async fn set_library_entry_hidden(
@@ -211,10 +211,11 @@ pub(crate) struct ScannerToggle {
     enabled: bool,
 }
 
-/// List every game source on this host with its enable state.
+/// List library sources
 ///
-/// One row per installed library plugin. Sources default to enabled; disabling hides titles
-/// from the next read. The custom store is not a source and is always on. Every row is
+/// One row per installed library plugin, with its enable state. Sources default to
+/// enabled; disabling hides titles from the next read. The custom store is not a
+/// source and is always on. Every row is
 /// `origin: "plugin"`.
 #[utoipa::path(
     get,
@@ -245,7 +246,7 @@ pub(crate) async fn list_library_scanners() -> Json<Vec<crate::library::ScannerI
         (status = OK, description = "Toggle stored; the full scanner list", body = [crate::library::ScannerInfo]),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = NOT_FOUND, description = "No such scanner on this platform", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the settings", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the settings", body = ApiError),
     )
 )]
 pub(crate) async fn set_library_scanner(
@@ -266,7 +267,9 @@ pub(crate) async fn set_library_scanner(
     }
 }
 
-/// Create a user-curated title. The host assigns a stable id, returned in the body.
+/// Create a custom title
+///
+/// A user-curated entry. The host assigns a stable id, returned in the body.
 #[utoipa::path(
     post,
     path = "/library/custom",
@@ -277,7 +280,7 @@ pub(crate) async fn set_library_scanner(
         (status = CREATED, description = "Entry created", body = crate::library::CustomEntry),
         (status = BAD_REQUEST, description = "Empty title", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn create_custom_game(
@@ -314,7 +317,7 @@ pub(crate) async fn create_custom_game(
         (status = BAD_REQUEST, description = "Empty title", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = NOT_FOUND, description = "No custom entry with that id", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn update_custom_game(
@@ -347,7 +350,7 @@ pub(crate) async fn update_custom_game(
         // Manual CRUD never requests a store claim; this arm is a programming error.
         Ok(MutateOutcome::StoreClaimed { .. }) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "unexpected claim outcome",
+            "The entry wasn't updated — the host hit an unexpected state",
         ),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -363,7 +366,7 @@ pub(crate) async fn update_custom_game(
         (status = NO_CONTENT, description = "Entry deleted"),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = NOT_FOUND, description = "No custom entry with that id", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn delete_custom_game(Path(id): Path<String>) -> Response {
@@ -382,7 +385,7 @@ pub(crate) async fn delete_custom_game(Path(id): Path<String>) -> Response {
         // Manual CRUD never requests a store claim; this arm is a programming error.
         Ok(MutateOutcome::StoreClaimed { .. }) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "unexpected claim outcome",
+            "The entry wasn't deleted — the host hit an unexpected state",
         ),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -399,7 +402,7 @@ pub(crate) struct ReconcileQuery {
     store: Option<String>,
 }
 
-/// Replace a provider's library entries (declarative reconcile).
+/// Replace a provider's entries
 ///
 /// The payload is the desired set, keyed by `external_id`. The host diffs, keeps surviving
 /// host ids stable, and drops orphans. Empty array removes everything this provider owns.
@@ -423,7 +426,7 @@ pub(crate) struct ReconcileQuery {
         (status = BAD_REQUEST, description = "Invalid provider id, store id, or payload", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = CONFLICT, description = "That store is already claimed by another provider", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn reconcile_provider_entries(
@@ -509,13 +512,15 @@ pub(crate) async fn reconcile_provider_entries(
         ),
         Ok(_) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "unexpected reconcile outcome",
+            "The library wasn't updated — the host hit an unexpected state",
         ),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
-/// Delete every entry owned by `{provider}` (plugin uninstall). Emits `library.changed`
+/// Delete a provider's entries
+///
+/// Everything owned by `{provider}`, for plugin uninstall. Emits `library.changed`
 /// when anything was removed.
 #[utoipa::path(
     delete,
@@ -527,7 +532,7 @@ pub(crate) async fn reconcile_provider_entries(
         (status = OK, description = "How many entries were removed", body = ProviderRemoved),
         (status = BAD_REQUEST, description = "Invalid provider id", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn delete_provider_entries(Path(provider): Path<String>) -> Response {

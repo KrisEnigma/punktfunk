@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import io.unom.punktfunk.kit.NativeBridge
 
 /**
@@ -99,7 +100,10 @@ class ClipboardSync(
                 pendingFetch = -1
                 val text = parts.getOrNull(2)?.takeIf { it.isNotEmpty() } ?: return
                 lastFromHost = text
+                // Android 10+ refuses clipboard writes from the background; a refusal must be
+                // visible in the log, or "clipboard sync stopped" has nothing to point at.
                 runCatching { cm.setPrimaryClip(ClipData.newPlainText("Punktfunk", text)) }
+                    .onFailure { Log.w("ClipboardSync", "setPrimaryClip refused", it) }
             }
             // "state"/"cancel"/"error": nothing to drive in the text-only v1.
         }

@@ -139,10 +139,10 @@ impl SessionPlan {
     /// `gpu` from the already-resolved `encoder` (no second probe); `hdr` from the plan.
     pub fn output_format(&self) -> crate::capture::OutputFormat {
         let gpu = self.encoder.is_gpu();
-        // Linux NVENC 4:4:4: libavcodec `hevc_nvenc` only emits 4:4:4 from a YUV444
-        // *input*; RGB-in is always 4:2:0. Zero-copy produces that input on the GPU
-        // (`ImportKind::Tiled444`). Without it the encoder swscales CPU RGB → YUV444P,
-        // so force GPU capture off here only. (VAAPI 4:4:4 keeps dmabuf; Windows NVENC takes BGRA.)
+        // Linux NVENC 4:4:4: zero-copy hands the encoder a GPU YUV444 surface
+        // (`ImportKind::Tiled444`). Without it the encoder takes CPU RGB and CSCs
+        // itself, so force GPU capture off here only. (VAAPI 4:4:4 keeps dmabuf;
+        // Windows NVENC takes BGRA.)
         #[cfg(target_os = "linux")]
         let gpu = {
             let force_cpu_for_nvenc_444 = self.chroma.is_444()
@@ -212,7 +212,7 @@ pub(crate) fn resolve_topology() -> SessionTopology {
 ///   gamescope (no pointer in the capture; XFixes must be drawn), and for a
 ///   no-channel session when the backend can composite. Mutter virtual streams
 ///   never re-record on cursor-only motion, so compositor-embeds is not a
-///   fallback except on backends that cannot blend (libav VAAPI/NVENC, software).
+///   fallback except on backends that cannot blend (VAAPI, software).
 /// * **Everywhere else**: never. Windows IDD composites the pointer itself
 ///   (`cursor_blend.rs` / DWM); no Windows encode backend reads `frame.cursor`.
 ///   Gated on Linux because the VAAPI/CUDA prediction and zero-copy switch
@@ -240,7 +240,7 @@ pub(crate) fn cursor_blend_for(
             return true;
         }
         // Same CUDA-payload prediction as `handshake::cursor_forward`: NVIDIA plus
-        // the zero-copy switch, deciding direct-SDK NVENC (blends) vs libav (doesn't).
+        // the zero-copy switch. Only a CUDA payload reaches the blend.
         let cuda_planned = !crate::encode::linux_zero_copy_is_vaapi() && crate::zerocopy::enabled();
         crate::encode::cursor_blend_capable(codec, cuda_planned, bit_depth == 10)
     }
@@ -291,6 +291,59 @@ fn resolve_encoder() -> EncoderBackend {
         "software" | "sw" | "openh264" => EncoderBackend::Software,
         _ => EncoderBackend::PlatformAuto,
     }
+}
+
+/// Whether this host streams a pinned physical head instead of a virtual display.
+pub(crate) fn mirrored() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::vdisplay::capture_monitor().is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Open the encoder for `frame` through `open(width, height)` and return the size it opened
+/// at. A mirrored head larger than the client's `negotiated` picture opens at the fit inside
+/// it and scales on ingest; a backend that cannot scale is reopened at the head's own size.
+pub(crate) fn open_encoder_fitted(
+    frame: &crate::capture::CapturedFrame,
+    negotiated: (u32, u32),
+    mut open: impl FnMut(u32, u32) -> anyhow::Result<Box<dyn crate::encode::Encoder>>,
+) -> anyhow::Result<(Box<dyn crate::encode::Encoder>, (u32, u32))> {
+    let captured = (frame.width, frame.height);
+    let fitted = if mirrored() {
+        punktfunk_core::render_scale::fit_inside(
+            frame.width,
+            frame.height,
+            negotiated.0,
+            negotiated.1,
+        )
+    } else {
+        captured
+    };
+    if fitted == captured {
+        return Ok((open(captured.0, captured.1)?, captured));
+    }
+    let enc = open(fitted.0, fitted.1)?;
+    if enc.caps().downscales_input {
+        tracing::info!(
+            ?captured,
+            encoder = ?fitted,
+            ?negotiated,
+            "mirror: the encoder opens at the client's size and scales on ingest"
+        );
+        return Ok((enc, fitted));
+    }
+    tracing::warn!(
+        ?captured,
+        wanted = ?fitted,
+        "mirror downscale is unavailable on this encode backend — encoding the head at its own size"
+    );
+    drop(enc);
+    Ok((open(captured.0, captured.1)?, captured))
 }
 
 #[cfg(test)]

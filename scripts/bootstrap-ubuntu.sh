@@ -2,10 +2,9 @@
 # Bootstrap an Ubuntu (24.04 "noble") NVIDIA-GPU VM to build/run the punktfunk Linux host
 # and the M0 capture spike (headless Sway/wlroots -> PipeWire -> NVENC).
 #
-# Assumes the NVIDIA driver + an FFmpeg-with-NVENC are ALREADY installed (verify-only).
-# Installs: rustup toolchain, build deps, PipeWire/portal/wlroots/Sway, DRM/EGL/VA dev
-# libs. Does NOT touch your existing FFmpeg (gated) and does NOT auto-reboot or edit GRUB
-# — it prints exact commands when a reboot-requiring change (nvidia-drm modeset) is needed.
+# Assumes the NVIDIA driver is ALREADY installed (verify-only). Installs: rustup toolchain,
+# build deps, PipeWire/portal/wlroots/Sway, DRM/EGL/VA dev libs. Does NOT auto-reboot or edit
+# GRUB — it prints exact commands when a reboot-requiring change (nvidia-drm modeset) is needed.
 #
 # Idempotent; safe to re-run. Usage: bash scripts/bootstrap-ubuntu.sh
 set -euo pipefail
@@ -25,9 +24,9 @@ fi
 CODENAME="$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-unknown}")"
 case "$CODENAME" in
     noble) ok "Ubuntu 24.04 (noble) — the recommended target" ;;
-    questing) ok "Ubuntu 25.10 (questing) — newer than the tested 24.04; M0 verified here (Sway 1.10, FFmpeg 7.1)" ;;
-    jammy) warn "Ubuntu 22.04 (jammy): Sway 1.7 / FFmpeg 4.4 are too old for the M0 path. \
-Strongly prefer 24.04+, or build Sway/wlroots + FFmpeg 7.x from source here." ;;
+    questing) ok "Ubuntu 25.10 (questing) — newer than the tested 24.04; M0 verified here (Sway 1.10)" ;;
+    jammy) warn "Ubuntu 22.04 (jammy): Sway 1.7 is too old for the M0 path. \
+Strongly prefer 24.04+, or build Sway/wlroots from source here." ;;
     *)     warn "Unrecognized release '$CODENAME' — proceeding, but package names are tuned for noble/questing." ;;
 esac
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
@@ -52,26 +51,9 @@ else
     warn "nvidia-smi not found — the NVIDIA driver is not installed/visible. M0 encode will fail."
 fi
 
-if have ffmpeg; then
-    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE 'hevc_nvenc|h264_nvenc'; then
-        ok "FFmpeg has NVENC: $(ffmpeg -hide_banner -encoders 2>/dev/null | grep -oE '(hevc|h264)_nvenc' | paste -sd' ' -)"
-        log "  smoke-test: 1s HEVC NVENC encode to null"
-        if ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=black:s=1280x720:d=1 \
-               -c:v hevc_nvenc -preset p1 -tune ull -f null - 2>/tmp/punktfunk_nvenc.err; then
-            ok "hevc_nvenc encode succeeded — NVENC is usable in this guest"
-        else
-            warn "hevc_nvenc encode FAILED (see /tmp/punktfunk_nvenc.err). Common cause on a VM: \
-missing libnvidia-encode.so.1 or an unlicensed vGPU."
-        fi
-    else
-        warn "FFmpeg present but no *_nvenc encoder listed — rebuild FFmpeg with --enable-nvenc."
-    fi
-    ldconfig -p 2>/dev/null | grep -qi 'libnvidia-encode.so' \
-        && ok "libnvidia-encode.so present (runtime NVENC lib)" \
-        || warn "libnvidia-encode.so not found by ldconfig — NVENC will fail at runtime."
-else
-    warn "ffmpeg not on PATH."
-fi
+ldconfig -p 2>/dev/null | grep -qi 'libnvidia-encode.so' \
+    && ok "libnvidia-encode.so present (runtime NVENC lib)" \
+    || warn "libnvidia-encode.so not found by ldconfig — NVENC will fail at runtime."
 
 # ---------------------------------------------------------------------------
 log "Enabling universe + multiverse (needed for xdg-desktop-portal-wlr, libnvidia-egl-gbm1)"
@@ -137,23 +119,6 @@ if [ -n "$NEED_GROUPS" ]; then
         || warn "could not usermod automatically — run the commands above."
 else
     ok "$TARGET_USER already in render + video"
-fi
-
-# ---------------------------------------------------------------------------
-log "FFmpeg dev headers (gated — must NOT clobber your custom NVENC build)"
-# ---------------------------------------------------------------------------
-if pkg-config --exists libavcodec 2>/dev/null; then
-    ok "system FFmpeg exposes pkg-config (libavcodec $(pkg-config --modversion libavcodec)). \
-The ffmpeg-next/rsmpeg crates will link it directly — NOT installing apt libav*-dev."
-    PREFIX="$(pkg-config --variable=prefix libavcodec 2>/dev/null || true)"
-    [ -n "$PREFIX" ] && echo "     FFmpeg prefix: $PREFIX  (if non-standard, export FFMPEG_DIR=$PREFIX before 'cargo build')"
-else
-    warn "No FFmpeg .pc on the default pkg-config path. Your custom build's headers aren't discoverable."
-    echo "     Pick ONE before building the host encoder crate:"
-    echo "       A) export FFMPEG_DIR=/path/to/ffmpeg/prefix   (and PKG_CONFIG_PATH=\$FFMPEG_DIR/lib/pkgconfig)"
-    echo "       B) last resort: sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev \\"
-    echo "            libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev"
-    echo "          (NOTE: apt's FFmpeg on noble is 6.1.1 and may shadow your NVENC build.)"
 fi
 
 # ---------------------------------------------------------------------------

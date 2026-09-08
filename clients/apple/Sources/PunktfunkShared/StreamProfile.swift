@@ -108,10 +108,10 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
     /// Profileable because it is about how a HOST is streamed (a wired desktop can afford
     /// lossless; a phone on cellular cannot), not about this device's hardware.
     ///
-    /// ⚠ The one key here with **no counterpart in the Rust overlay yet**
-    /// (`pf-client-core::profiles`): Apple is the first client to carry it. `audio_format` is the
-    /// name the others should adopt, and until they do a profile written here round-trips through
-    /// their unknown-key carry-through untouched rather than being honoured.
+    /// The Rust overlay (`pf-client-core::profiles`) carries the same `audio_format` key with the
+    /// same spellings, but its table stops at `opus`/`lossless48`/`lossless96`. A profile written
+    /// here as `lossless441` or `lossless882` round-trips there intact and plays as Opus, since an
+    /// unrecognized value falls back to the default rather than failing the connect.
     public var audioFormat: String?
     public var micEnabled: Bool?
     public var echoCancel: Bool?
@@ -133,6 +133,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
     public var fullscreenWhileStreaming: Bool?
     // Apple-only additions (design §3).
     public var enable444: Bool?
+    public var tenBitSdr: Bool?
     public var presentPriority: String?
     public var smoothBuffer: Int?
     public var vsync: Bool?
@@ -178,6 +179,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         case statsVerbosity = "stats_verbosity"
         case fullscreenWhileStreaming = "fullscreen_on_stream"
         case enable444 = "enable_444"
+        case tenBitSdr = "ten_bit_sdr"
         case presentPriority = "present_priority"
         case smoothBuffer = "smooth_buffer"
         case vsync
@@ -218,6 +220,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         statsVerbosity = str(.statsVerbosity)
         fullscreenWhileStreaming = bool(.fullscreenWhileStreaming)
         enable444 = bool(.enable444)
+        tenBitSdr = bool(.tenBitSdr)
         presentPriority = str(.presentPriority)
         smoothBuffer = int(.smoothBuffer)
         vsync = bool(.vsync)
@@ -262,6 +265,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         try c.encodeIfPresent(
             fullscreenWhileStreaming, forKey: AnyKey(Key.fullscreenWhileStreaming.rawValue))
         try c.encodeIfPresent(enable444, forKey: AnyKey(Key.enable444.rawValue))
+        try c.encodeIfPresent(tenBitSdr, forKey: AnyKey(Key.tenBitSdr.rawValue))
         try c.encodeIfPresent(presentPriority, forKey: AnyKey(Key.presentPriority.rawValue))
         try c.encodeIfPresent(smoothBuffer, forKey: AnyKey(Key.smoothBuffer.rawValue))
         try c.encodeIfPresent(vsync, forKey: AnyKey(Key.vsync.rawValue))
@@ -320,6 +324,7 @@ public enum OverlayField {
         case "stats_verbosity": overlay.statsVerbosity = nil
         case "fullscreen_on_stream": overlay.fullscreenWhileStreaming = nil
         case "enable_444": overlay.enable444 = nil
+        case "ten_bit_sdr": overlay.tenBitSdr = nil
         case "present_priority": overlay.presentPriority = nil
         case "smooth_buffer": overlay.smoothBuffer = nil
         case "vsync": overlay.vsync = nil
@@ -362,6 +367,7 @@ public enum OverlayField {
         case "stats_verbosity": return o.statsVerbosity != nil
         case "fullscreen_on_stream": return o.fullscreenWhileStreaming != nil
         case "enable_444": return o.enable444 != nil
+        case "ten_bit_sdr": return o.tenBitSdr != nil
         case "present_priority": return o.presentPriority != nil
         case "smooth_buffer": return o.smoothBuffer != nil
         case "vsync": return o.vsync != nil
@@ -370,6 +376,15 @@ public enum OverlayField {
         case "modifier_layout": return o.modifierLayout != nil
         default: return false
         }
+    }
+
+    /// Does this build model `field` at all? `clear` and `isOverridden` both answer "no override"
+    /// for a name they do not know, which is indistinguishable from "not overridden" — so a typo
+    /// in a settings row loses its marker and its Reset with nothing to report it. Callers that
+    /// take a field name from source rather than from data assert on this.
+    public static func isModelled(_ field: String) -> Bool {
+        var probe = SettingsOverlay()
+        return clear(field, in: &probe)
     }
 }
 

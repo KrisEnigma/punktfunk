@@ -311,8 +311,14 @@ fn a_1080p60_picture_costs() {
         let mut vpp_us = Vec::new();
         for i in 0..30 {
             let t0 = std::time::Instant::now();
-            enc.submit_packed(&bgra, pf_vaapi::vpp::VA_FOURCC_BGRA, p.width as usize * 4)
-                .expect("ingest");
+            enc.submit_packed(
+                &bgra,
+                pf_vaapi::vpp::VA_FOURCC_BGRA,
+                p.width,
+                p.height,
+                p.width as usize * 4,
+            )
+            .expect("ingest");
             let t1 = std::time::Instant::now();
             enc.encode(false).expect("encode");
             if i >= 5 {

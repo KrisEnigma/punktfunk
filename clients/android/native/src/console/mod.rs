@@ -17,11 +17,13 @@ use jni::errors::LogErrorAndDefault;
 use jni::objects::{JByteArray, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::EnvUnowned;
+
+use crate::session::jni_guard;
 use pf_client_core::console::{PointerButton, PointerInput};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuSample, PadBattery, PadInfo};
 use pf_console_ui::{
     ConsoleEntry, ConsoleOptions, HostRow, Insets, Key, LibraryGame, LibraryPhase, PairPhase,
-    Platform, SnapshotStore, Stale, WakeStatus,
+    Platform, SnapshotStore, SpeedPhase, Stale, WakeStatus,
 };
 use punktfunk_core::config::GamepadPref;
 use std::collections::HashMap;
@@ -158,6 +160,29 @@ fn json_arg<T: serde::de::DeserializeOwned>(env: &mut jni::Env, s: &JString) -> 
     }
 }
 
+/// One `nativeConsoleXxx(handle, json)` pusher: parse the JSON as `$ty` and hand it to `$apply`
+/// on the host. A bad handle or bad JSON is a logged no-op.
+macro_rules! json_pusher {
+    ($(#[$doc:meta])* $name:ident, $ty:ty, |$h:ident, $v:ident| $apply:expr) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub extern "system" fn $name(
+            mut env: EnvUnowned,
+            _this: JObject,
+            handle: jlong,
+            json: JString,
+        ) {
+            env.with_env(|env| -> jni::errors::Result<()> {
+                if let (Some($h), Some($v)) = (host(handle), json_arg::<$ty>(env, &json)) {
+                    $apply;
+                }
+                Ok(())
+            })
+            .resolve::<LogErrorAndDefault>()
+        }
+    };
+}
+
 /// Build the console and return its opaque table key.
 ///
 /// The render thread parks until a surface arrives. `0` means setup failed and Kotlin keeps its
@@ -202,7 +227,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleDest
     _this: JObject,
     handle: jlong,
 ) {
-    drop(remove_host(handle));
+    jni_guard((), || {
+        drop(remove_host(handle));
+    })
 }
 
 /// `NativeBridge.nativeConsoleSurfaceCreated(handle, surface)` — the `SurfaceView`'s surface is
@@ -242,9 +269,11 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSurf
     _this: JObject,
     handle: jlong,
 ) {
-    if let Some(h) = host(handle) {
-        h.shared.send(Cmd::SurfaceChanged);
-    }
+    jni_guard((), || {
+        if let Some(h) = host(handle) {
+            h.shared.send(Cmd::SurfaceChanged);
+        }
+    })
 }
 
 /// `NativeBridge.nativeConsoleSurfaceDestroyed(handle)` — BLOCKS until the render thread has
@@ -256,9 +285,11 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSurf
     _this: JObject,
     handle: jlong,
 ) {
-    if let Some(h) = host(handle) {
-        h.shared.destroy_surface_blocking();
-    }
+    jni_guard((), || {
+        if let Some(h) = host(handle) {
+            h.shared.destroy_surface_blocking();
+        }
+    })
 }
 
 /// `NativeBridge.nativeConsoleSetViewport(handle, left, top, right, bottom, scale)` — safe-area
@@ -274,17 +305,19 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetV
     bottom: jfloat,
     scale: jfloat,
 ) {
-    if let Some(h) = host(handle) {
-        h.shared.send(Cmd::Viewport {
-            insets: Insets {
-                left: left.max(0.0),
-                top: top.max(0.0),
-                right: right.max(0.0),
-                bottom: bottom.max(0.0),
-            },
-            scale: (scale > 0.0).then_some(f64::from(scale)),
-        });
-    }
+    jni_guard((), || {
+        if let Some(h) = host(handle) {
+            h.shared.send(Cmd::Viewport {
+                insets: Insets {
+                    left: left.max(0.0),
+                    top: top.max(0.0),
+                    right: right.max(0.0),
+                    bottom: bottom.max(0.0),
+                },
+                scale: (scale > 0.0).then_some(f64::from(scale)),
+            });
+        }
+    })
 }
 
 /// `NativeBridge.nativeConsolePadSample(handle, buttons, lx, ly, dpad)` — the raw pad, whenever
@@ -302,22 +335,24 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsolePadS
     ly: jint,
     dpad: jint,
 ) {
-    if let Some(h) = host(handle) {
-        let bit = |v: jint, i: u32| v & (1 << i) != 0;
-        h.shared.send(Cmd::PadSample(MenuSample {
-            buttons: [
-                bit(buttons, 0),
-                bit(buttons, 1),
-                bit(buttons, 2),
-                bit(buttons, 3),
-                bit(buttons, 4),
-                bit(buttons, 5),
-            ],
-            lx: lx.clamp(-32767, 32767) as i16,
-            ly: ly.clamp(-32767, 32767) as i16,
-            dpad: [bit(dpad, 0), bit(dpad, 1), bit(dpad, 2), bit(dpad, 3)],
-        }));
-    }
+    jni_guard((), || {
+        if let Some(h) = host(handle) {
+            let bit = |v: jint, i: u32| v & (1 << i) != 0;
+            h.shared.send(Cmd::PadSample(MenuSample {
+                buttons: [
+                    bit(buttons, 0),
+                    bit(buttons, 1),
+                    bit(buttons, 2),
+                    bit(buttons, 3),
+                    bit(buttons, 4),
+                    bit(buttons, 5),
+                ],
+                lx: lx.clamp(-32767, 32767) as i16,
+                ly: ly.clamp(-32767, 32767) as i16,
+                dpad: [bit(dpad, 0), bit(dpad, 1), bit(dpad, 2), bit(dpad, 3)],
+            }));
+        }
+    })
 }
 
 /// `NativeBridge.nativeConsoleMenu(handle, event)` — a discrete menu event, for input that is
@@ -331,22 +366,24 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleMenu
     handle: jlong,
     event: jint,
 ) {
-    let ev = match event {
-        0 => MenuEvent::Move(MenuDir::Up),
-        1 => MenuEvent::Move(MenuDir::Down),
-        2 => MenuEvent::Move(MenuDir::Left),
-        3 => MenuEvent::Move(MenuDir::Right),
-        4 => MenuEvent::Confirm,
-        5 => MenuEvent::Back,
-        6 => MenuEvent::Secondary,
-        7 => MenuEvent::Tertiary,
-        8 => MenuEvent::JumpBack,
-        9 => MenuEvent::JumpForward,
-        _ => return,
-    };
-    if let Some(h) = host(handle) {
-        h.shared.send(Cmd::Menu(ev));
-    }
+    jni_guard((), || {
+        let ev = match event {
+            0 => MenuEvent::Move(MenuDir::Up),
+            1 => MenuEvent::Move(MenuDir::Down),
+            2 => MenuEvent::Move(MenuDir::Left),
+            3 => MenuEvent::Move(MenuDir::Right),
+            4 => MenuEvent::Confirm,
+            5 => MenuEvent::Back,
+            6 => MenuEvent::Secondary,
+            7 => MenuEvent::Tertiary,
+            8 => MenuEvent::JumpBack,
+            9 => MenuEvent::JumpForward,
+            _ => return,
+        };
+        if let Some(h) = host(handle) {
+            h.shared.send(Cmd::Menu(ev));
+        }
+    })
 }
 
 /// `NativeBridge.nativeConsolePointer(handle, kind, x, y, dy)` — touch/mouse in surface pixels:
@@ -363,38 +400,40 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsolePoin
     y: jfloat,
     dy: jfloat,
 ) {
-    let input = match kind {
-        0 => PointerInput::Move { x, y },
-        1 => PointerInput::Down {
-            x,
-            y,
-            button: PointerButton::Primary,
-            touch: false,
-        },
-        2 => PointerInput::Up {
-            x,
-            y,
-            button: PointerButton::Primary,
-        },
-        3 => PointerInput::Down {
-            x,
-            y,
-            button: PointerButton::Secondary,
-            touch: false,
-        },
-        4 => PointerInput::Wheel { x, y, dy },
-        5 => PointerInput::Cancel,
-        6 => PointerInput::Down {
-            x,
-            y,
-            button: PointerButton::Primary,
-            touch: true,
-        },
-        _ => return,
-    };
-    if let Some(h) = host(handle) {
-        h.shared.send(Cmd::Pointer(input));
-    }
+    jni_guard((), || {
+        let input = match kind {
+            0 => PointerInput::Move { x, y },
+            1 => PointerInput::Down {
+                x,
+                y,
+                button: PointerButton::Primary,
+                touch: false,
+            },
+            2 => PointerInput::Up {
+                x,
+                y,
+                button: PointerButton::Primary,
+            },
+            3 => PointerInput::Down {
+                x,
+                y,
+                button: PointerButton::Secondary,
+                touch: false,
+            },
+            4 => PointerInput::Wheel { x, y, dy },
+            5 => PointerInput::Cancel,
+            6 => PointerInput::Down {
+                x,
+                y,
+                button: PointerButton::Primary,
+                touch: true,
+            },
+            _ => return,
+        };
+        if let Some(h) = host(handle) {
+            h.shared.send(Cmd::Pointer(input));
+        }
+    })
 }
 
 /// `NativeBridge.nativeConsoleKey(handle, key, shift, repeat)` — a hardware key the console
@@ -409,25 +448,27 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleKey(
     shift: jboolean,
     repeat: jboolean,
 ) {
-    let key = match key {
-        0 => Key::Left,
-        1 => Key::Right,
-        2 => Key::Up,
-        3 => Key::Down,
-        4 => Key::Return,
-        5 => Key::Space,
-        6 => Key::Escape,
-        7 => Key::Backspace,
-        8 => Key::PageUp,
-        9 => Key::PageDown,
-        10 => Key::Tab,
-        11 => Key::Y,
-        12 => Key::X,
-        _ => return,
-    };
-    if let Some(h) = host(handle) {
-        h.shared.send(Cmd::Key { key, shift, repeat });
-    }
+    jni_guard((), || {
+        let key = match key {
+            0 => Key::Left,
+            1 => Key::Right,
+            2 => Key::Up,
+            3 => Key::Down,
+            4 => Key::Return,
+            5 => Key::Space,
+            6 => Key::Escape,
+            7 => Key::Backspace,
+            8 => Key::PageUp,
+            9 => Key::PageDown,
+            10 => Key::Tab,
+            11 => Key::Y,
+            12 => Key::X,
+            _ => return,
+        };
+        if let Some(h) = host(handle) {
+            h.shared.send(Cmd::Key { key, shift, repeat });
+        }
+    })
 }
 
 /// `NativeBridge.nativeConsoleText(handle, text)` — typed characters while the console reports
@@ -478,39 +519,22 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSess
     .resolve::<LogErrorAndDefault>()
 }
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleNavigate(handle, entryJson)` — re-root the console (`{"library":
 /// <HostRow>}` opens that host's shelf over Home; `{}` is Home).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleNavigate(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    entry: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(e)) = (host(handle), json_arg::<EntryJson>(env, &entry)) {
-            h.shared.send(Cmd::Navigate(e.into_entry()));
-        }
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleNavigate,
+    EntryJson,
+    |h, e| h.shared.send(Cmd::Navigate(e.into_entry()))
+);
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleSetPads(handle, padsJson)` — the connected controllers for the
 /// chip, the settings rows and the controllers screen: `{"label": "DualSense", "pref": 1,
 /// "pads": [{name, key, pref, steam_virtual, battery: {percent, charging} | null, detail,
 /// forwarded, rumble}]}`.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPads(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    pads: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        let (Some(h), Some(p)) = (host(handle), json_arg::<PadsJson>(env, &pads)) else {
-            return Ok(());
-        };
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPads,
+    PadsJson,
+    |h, p| {
         let pads = p
             .pads
             .into_iter()
@@ -532,11 +556,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetP
             label: p.label,
             pref: p.pref.map(GamepadPref::from_u8),
             pads,
-        });
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+        })
+    }
+);
 
 /// `NativeBridge.nativeConsoleNextEvent(handle): String` — block up to ~100 ms for the next
 /// event: `{"action": <OverlayAction>}`, `{"pulse": "move"|"confirm"|"boundary"}`,
@@ -581,53 +603,47 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleDrai
 
 // ---- model pushers -----------------------------------------------------------------------
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleSetHosts(handle, json)` — the home carousel's rows (`[HostRow]`).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetHosts(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    json: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(rows)) = (host(handle), json_arg::<Vec<HostRow>>(env, &json)) {
-            h.handles.console.set_hosts(rows);
-        }
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetHosts,
+    Vec<HostRow>,
+    |h, rows| h.handles.console.set_hosts(rows)
+);
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleSetPair(handle, json)` — the pairing ceremony's phase
 /// (`"Idle"`, `"Busy"`, `{"Failed": "why"}`, `{"Paired": {"key": "…"}}`).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPair(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    json: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(p)) = (host(handle), json_arg::<PairPhase>(env, &json)) {
-            h.handles.console.set_pair(p);
-        }
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPair,
+    PairPhase,
+    |h, p| h.handles.console.set_pair(p)
+);
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleSetWake(handle, json)` — the wake-and-wait card's status
 /// (`WakeStatus` JSON, or `null` to clear).
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetWake,
+    Option<WakeStatus>,
+    |h, w| h.handles.console.set_wake(w)
+);
+
+/// `NativeBridge.nativeConsoleAdvanceSpeed(handle, key, json)` — a new [`SpeedPhase`] for the
+/// speed test on `key`. No setter for the status itself: the shell seeds and clears that slot,
+/// which is what makes a dismissed (or superseded) test's late result a no-op here.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetWake(
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleAdvanceSpeed(
     mut env: EnvUnowned,
     _this: JObject,
     handle: jlong,
+    key: JString,
     json: JString,
 ) {
     env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(w)) = (host(handle), json_arg::<Option<WakeStatus>>(env, &json)) {
-            h.handles.console.set_wake(w);
+        if let (Some(h), Ok(k), Some(p)) = (
+            host(handle),
+            key.try_to_string(env),
+            json_arg::<SpeedPhase>(env, &json),
+        ) {
+            h.handles.console.advance_speed(&k, p);
         }
         Ok(())
     })
@@ -660,28 +676,20 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibr
     _this: JObject,
     handle: jlong,
 ) {
-    if let Some(h) = host(handle) {
-        h.handles.library.begin_fetch();
-    }
+    jni_guard((), || {
+        if let Some(h) = host(handle) {
+            h.handles.library.begin_fetch();
+        }
+    })
 }
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleLibraryPhase(handle, json)` — `"Loading"`, `"Empty"`, `"Ready"`,
 /// or `{"Error": {"title", "body", "can_retry"}}`.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibraryPhase(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    json: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(p)) = (host(handle), json_arg::<LibraryPhase>(env, &json)) {
-            h.handles.library.set_phase(p);
-        }
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibraryPhase,
+    LibraryPhase,
+    |h, p| h.handles.library.set_phase(p)
+);
 
 /// `NativeBridge.nativeConsoleLibraryGames(handle, json, cached)` — the catalog (`[LibraryGame]`);
 /// `cached` = this is the last-known list from the cache, shown while the fetch runs.
@@ -728,26 +736,13 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibr
     .resolve::<LogErrorAndDefault>()
 }
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleLibraryRunning(handle, json)` — the host's `/status` `games[]`
 /// (`[{"app_id": "steam:570", "state": "running"}, …]`).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibraryRunning(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    json: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(games)) = (
-            host(handle),
-            json_arg::<Vec<pf_client_core::library::RunningGame>>(env, &json),
-        ) {
-            h.handles.library.set_running(&games);
-        }
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibraryRunning,
+    Vec<pf_client_core::library::RunningGame>,
+    |h, games| h.handles.library.set_running(&games)
+);
 
 /// `NativeBridge.nativeConsoleLibraryStale(handle, stale)` — 0 fresh, 1 waking, 2 offline.
 #[unsafe(no_mangle)]
@@ -757,70 +752,36 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibr
     handle: jlong,
     stale: jint,
 ) {
-    if let Some(h) = host(handle) {
-        h.handles.library.set_stale(match stale {
-            1 => Stale::Waking,
-            2 => Stale::Offline,
-            _ => Stale::No,
-        });
-    }
+    jni_guard((), || {
+        if let Some(h) = host(handle) {
+            h.handles.library.set_stale(match stale {
+                1 => Stale::Waking,
+                2 => Stale::Offline,
+                _ => Stale::No,
+            });
+        }
+    })
 }
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleSetSettings(handle, json)` — a settings change made elsewhere
 /// (the touch UI, a deep link): the shell reads this on its next mutation. Not a save.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetSettings(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    json: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(s)) = (
-            host(handle),
-            json_arg::<pf_client_core::trust::Settings>(env, &json),
-        ) {
-            h.store.set(s);
-        }
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetSettings,
+    pf_client_core::trust::Settings,
+    |h, s| h.store.set(s)
+);
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleSetProfiles(handle, json)` — the profile catalog `[[id, name]]`.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetProfiles(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    json: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(p)) = (host(handle), json_arg::<Vec<(String, String)>>(env, &json)) {
-            h.store.set_profiles(p);
-        }
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetProfiles,
+    Vec<(String, String)>,
+    |h, p| h.store.set_profiles(p)
+);
 
+json_pusher!(
 /// `NativeBridge.nativeConsoleSetKnownHosts(handle, json)` — the known-hosts records
 /// (`KnownHosts` JSON) the console builds `punktfunk://` links from.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetKnownHosts(
-    mut env: EnvUnowned,
-    _this: JObject,
-    handle: jlong,
-    json: JString,
-) {
-    env.with_env(|env| -> jni::errors::Result<()> {
-        if let (Some(h), Some(k)) = (
-            host(handle),
-            json_arg::<pf_client_core::trust::KnownHosts>(env, &json),
-        ) {
-            h.store.set_known_hosts(k);
-        }
-        Ok(())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetKnownHosts,
+    pf_client_core::trust::KnownHosts,
+    |h, k| h.store.set_known_hosts(k)
+);

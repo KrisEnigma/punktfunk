@@ -46,16 +46,11 @@ license=('MIT OR Apache-2.0')
 options=('!lto' '!debug')
 
 # All build deps for both packages (Arch runtime packages ship their own headers, so these cover
-# build + link). aws-lc/ring need clang+cmake; nasm is for asm. ffmpeg stays because the HOST's
-# encoder links libav* — the CLIENT dropped it in M10 and decodes natively. `ffmpeg` is
-# deliberately UNVERSIONED here: ffmpeg-sys-next auto-detects the installed FFmpeg, so the package
-# builds against whatever the builder ships, and the RUNTIME bound follows automatically from the
-# soname deps makepkg derives from the linked binary (see package_punktfunk-host's depends). Pinning
-# a version at build time would just have to be re-edited on every FFmpeg major. No vulkan-headers:
+# build + link). aws-lc/ring need clang+cmake; nasm is for asm. No vulkan-headers:
 # nothing in the workspace compiles against the system Vulkan headers any more (pyrowave-sys builds
 # against its own vendored copy, and both binaries reach Vulkan through ash, which dlopens it).
 makedepends=('rust' 'cargo' 'clang' 'cmake' 'nasm' 'pkgconf' 'git'
-             'gtk4' 'libadwaita' 'sdl3' 'ffmpeg' 'pipewire' 'wayland' 'libxkbcommon' 'opus' 'libei')
+             'gtk4' 'libadwaita' 'sdl3' 'pipewire' 'wayland' 'libxkbcommon' 'opus' 'libei')
 
 # Opt-in punktfunk-web / punktfunk-scripting: only then is bun (the build tool AND the vendored
 # runtime) required. Adding bun twice is harmless (makepkg dedups makedepends).
@@ -94,12 +89,13 @@ build() {
   # anchor on Linux NVIDIA; design/linux-direct-nvenc.md). AMD/Intel-SAFE: the NVENC/CUDA entry
   # points are dlopen'd at RUNTIME (libloading), never link-imported — `objdump -p` shows the same
   # DT_NEEDED as a plain build (no libcuda/libnvidia-encode), so the binary starts fine driver-less
-  # and only touches NVIDIA on a CUDA capture frame (default on NVIDIA; PUNKTFUNK_NVENC_DIRECT=0
-  # opts back to libav). AMD/Intel never reach it — the `cuda` gate leaves them on VAAPI.
+  # and only touches NVIDIA on a CUDA capture frame. AMD/Intel never reach it — the `cuda` gate
+  # leaves them on VAAPI. Without this feature an NVIDIA box has no NVENC at all.
   # `punktfunk-host/vulkan-encode` is the AMD/Intel twin: a raw VK_KHR_video_encode_h265 backend with
   # real RFI (clean P-frame recovery anchor via DPB reference slots; design/linux-vulkan-video-encode.md).
   # Pure Rust `ash` (no new lib, no link-time deps); default on for HEVC (PUNKTFUNK_VULKAN_ENCODE=0
-  # opts back to libav VAAPI), and a failed open falls back to VAAPI so unsupported devices are safe.
+  # opts back to the native VAAPI session), and a failed open falls back to it so unsupported
+  # devices are safe.
   if [ "$CARCH" = 'aarch64' ]; then
     # Client-only: no host crate, so none of the encode features below apply. pf-update still
     # builds — the client package ships its own copy for `--apply-update`.
@@ -111,7 +107,7 @@ build() {
   # can never carry a capability (KWin identification; see the scriptlet) — and it must ship in the
   # SAME package as the host, because host and worker version-check each other over their socket
   # and fall back to the in-process encoder on any mismatch. Co-built here on purpose: v1 accepts
-  # that the worker links the same FFmpeg the host does (same package, same sonames, no new break
+  # that the worker shares the host's dependency graph (same package, same sonames, no new break
   # class), so cargo's feature unification across this one invocation is harmless.
   cargo build --release --locked --features punktfunk-host/nvenc,punktfunk-host/vulkan-encode \
     -p punktfunk-host -p punktfunk-encode-worker \
@@ -162,36 +158,11 @@ package_punktfunk-host() {
   # opens a Pulse socket itself, so pipewire-pulse is an OPTdepend, not a depend: it exists
   # for the GAMES, which commonly emit through the PulseAudio API. Hard-depending on it made
   # the package uninstallable next to real `pulseaudio`, which serves those games just as well.
-  # ⚠ The libav* entries below are SONAME deps, not package names, and they are load-bearing.
-  # pacman is the only one of our packaging formats that does NOT derive dependencies from ELF
-  # DT_NEEDED (rpm auto-generates `libavcodec.so.62()(64bit)`; dpkg-shlibdeps emits `libavcodec62`;
-  # nix pins the closure). So a bare `depends=('ffmpeg')` let `pacman -Syu` walk the host across an
-  # FFmpeg soname bump with no warning and no conflict — which is exactly what FFmpeg 8 -> 9
-  # (2026-08-08, ffmpeg 2:9.0-5: libavutil .60->.61, libavcodec .62->.63, libavfilter .11->.12,
-  # libavdevice .62->.63, libswscale .9->.10) did to every Arch/CachyOS user: the dynamic loader
-  # cannot start the binary at all, so it is exit 127 *before* main() in a systemd restart loop,
-  # with nothing in the host's own log to explain it (`ldd /usr/bin/punktfunk-host | grep "not found"`
-  # is the one-line diagnosis). Arch's ffmpeg declares the matching
-  # `provides=(libavcodec.so=63-64 libavutil.so=61-64 ...)`, and makepkg rewrites each bare
-  # `libfoo.so` listed here into `libfoo.so=<soname>-<arch>` by reading the built binary's
-  # DT_NEEDED — so the bound tracks whatever FFmpeg the builder linked against, with nothing to
-  # hand-maintain across the next bump. pacman then REFUSES the ffmpeg upgrade instead of bricking
-  # the install, and the canary rebuilt on an ffmpeg-9 image installs cleanly on an ffmpeg-9 box.
-  # A hand-written `ffmpeg<2:9` would have to be edited (and would go stale) on every bump; this
-  # does not. NOT bundling FFmpeg the way the .deb does (BUNDLE_FFMPEG=1): that exists because
-  # Ubuntu 24.04 LTS is frozen on FFmpeg 6.1 and can never satisfy the dep, whereas rolling Arch
-  # always ships a current FFmpeg — and vendoring a second copy of a system library is against
-  # Arch packaging doctrine (and would not survive AUR review).
-  # All seven are listed even though --as-needed currently drops libavformat/libswresample from the
-  # link: an unlinked soname is left bare by makepkg and is satisfied by any ffmpeg, so listing it
-  # costs nothing, while a future link picking one up gets the version bound automatically.
   # punktfunk-icons: the brand mark the Omarchy webapp entry and the tray name. It lives in its
   # own package because the CLIENT needs the same file — two packages shipping one path is a
   # pacman file conflict the moment both land on one box (found exactly that way).
-  depends=('ffmpeg' 'pipewire' 'wireplumber' 'opus' 'libei'
-           'mesa' 'libglvnd' 'libxkbcommon' 'wayland' 'punktfunk-icons'
-           'libavcodec.so' 'libavutil.so' 'libavfilter.so' 'libavdevice.so'
-           'libavformat.so' 'libswscale.so' 'libswresample.so')
+  depends=('pipewire' 'wireplumber' 'opus' 'libei'
+           'mesa' 'libglvnd' 'libxkbcommon' 'wayland' 'punktfunk-icons')
   optdepends=('rtkit: data-plane thread priority without a relogin (else the shipped LimitNICE drop-in applies from next login)'
               'pipewire-pulse: PulseAudio-API audio from games/apps (real `pulseaudio` also works)'
               'nvidia-utils: NVENC hardware encode + GPU EGL/CUDA zero-copy (REQUIRED to encode on NVIDIA)'

@@ -60,8 +60,10 @@ pub(super) struct Task {
     /// Client `ShardPayloadAck`s return on `shard_ack_tx` and gate a grow.
     pub(super) shard_change_rx: tokio::sync::mpsc::UnboundedReceiver<u16>,
     pub(super) shard_ack_tx: tokio::sync::mpsc::UnboundedSender<u16>,
+    /// Depth-1 latest-wins slot: the encode loop overwrites a shape this task
+    /// has not drained, so a stalled peer cannot grow the host.
     pub(super) cursor_shape_rx:
-        tokio::sync::mpsc::UnboundedReceiver<punktfunk_core::quic::CursorShape>,
+        tokio::sync::watch::Receiver<Option<punktfunk_core::quic::CursorShape>>,
     pub(super) cursor_client_draws: Arc<AtomicBool>,
     pub(super) clip_enabled: Arc<AtomicBool>,
     pub(super) clip: pf_clipboard::ClipCoord,
@@ -135,15 +137,14 @@ pub(super) async fn run(task: Task) {
     // `select!` drops this future whenever a sibling fires. `io::read_msg`
     // would lose a partial frame and misalign the rest of the session.
     let mut ctrl_reader = io::MsgReader::new(ctrl_recv);
-    // After real loss, decay stops at 5 % not 1 % (`FecFloor`).
-    let mut fec_floor = FecFloor::default();
     loop {
         tokio::select! {
             msg = ctrl_reader.read_msg() => {
                 let Ok(msg) = msg else { break };
                 if let Ok(req) = Reconfigure::decode(&msg) {
                     let now = std::time::Instant::now();
-                    let valid = req.mode.refresh_hz > 0
+                    // Same bound as the handshake: `> 0` alone acked a mode that cannot land.
+                    let valid = crate::encode::validate_refresh(req.mode.refresh_hz).is_ok()
                         && crate::encode::validate_dimensions(
                             codec,
                             req.mode.width,
@@ -213,12 +214,7 @@ pub(super) async fn run(task: Task) {
                         // clean ~750 ms window so a burst every few seconds
                         // does not drop FEC to the floor between hits.
                         let prev = fec_target_ctl.load(Ordering::Relaxed);
-                        // Floor binds decay, not attack. Real loss raises it to
-                        // 5 %; ~2 clean minutes re-earn the 1 % floor.
-                        let floor = fec_floor.on_report(rep.loss_ppm);
-                        let target = adapt_fec(rep.loss_ppm)
-                            .max(prev.saturating_sub(1))
-                            .max(floor);
+                        let target = adapt_fec(rep.loss_ppm).max(prev.saturating_sub(1));
                         fec_target_ctl.store(target, Ordering::Relaxed);
                         if prev != target {
                             tracing::debug!(
@@ -390,9 +386,14 @@ pub(super) async fn run(task: Task) {
                     break;
                 }
             }
-            shape = cursor_shape_rx.recv() => {
+            changed = cursor_shape_rx.changed() => {
+                // Err = encode loop gone, i.e. session end.
+                if changed.is_err() {
+                    break;
+                }
                 // ≤ ~58 KiB fits the u16 frame (`cursor_fwd` downscales).
-                let Some(shape) = shape else { break };
+                let shape = cursor_shape_rx.borrow_and_update().clone();
+                let Some(shape) = shape else { continue };
                 if io::write_msg(&mut ctrl_send, &shape.encode()).await.is_err() {
                     break;
                 }

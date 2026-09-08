@@ -3,15 +3,13 @@
 //! scenes.
 
 use crate::app::AppModel;
-use crate::trust::{forget_placeholder, KnownHost, KnownHosts};
+use crate::trust::{KnownHost, KnownHosts};
 use crate::ui_hosts::{ConnectRequest, HostsMsg};
 use gtk::glib;
 use gtk::prelude::*;
-use punktfunk_core::client::NativeClient;
 use relm4::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
 
 /// The handles `run_shot` needs — cloned out of `AppModel` before it moves into the
 /// component parts, so the scene can be dispatched from the window's `map` callback.
@@ -60,10 +58,20 @@ pub fn fullscreen_mode() -> bool {
 
 /// Split `host[:port]`: no colon defaults the port to 9777; a colon with an unparsable
 /// port yields `None` for it (callers decide whether to default or bail).
+///
+/// IPv6 goes through the shared parser — a plain `rsplit_once(':')` reads `::1` as host
+/// `:` port `1`.
 fn parse_host_port(target: &str) -> (String, Option<u16>) {
-    match target.rsplit_once(':') {
-        Some((a, p)) => (a.to_string(), p.parse().ok()),
-        None => (target.to_string(), Some(9777)),
+    match pf_client_core::deeplink::parse_addr_port(target) {
+        Some((addr, port)) => (addr, Some(port)),
+        // Keep the "colon, but no usable port" shape the callers branch on.
+        None => (
+            target
+                .rsplit_once(':')
+                .map_or(target, |(a, _)| a)
+                .to_string(),
+            None,
+        ),
     }
 }
 
@@ -104,88 +112,20 @@ pub fn exec_session() -> glib::ExitCode {
     glib::ExitCode::FAILURE
 }
 
-/// Run the SPAKE2 PIN ceremony without a GTK window and persist the verified host to the
-/// known-hosts store as paired, so a later `--connect` connects silently. Same identity
-/// store the streaming path uses, so pairing here makes the stream work.
-/// Prints a one-line `paired <addr>:<port> fp=<hex>` on success; exits non-zero on failure.
-pub fn headless_pair(pin: &str) -> glib::ExitCode {
-    let Some(target) = arg_value("--connect") else {
-        eprintln!("--pair requires --connect host[:port]");
-        return glib::ExitCode::FAILURE;
-    };
-    let (addr, port) = parse_host_port(&target);
-    let port = port.unwrap_or(9777);
-    // The label the HOST stores this client under (its paired-devices list).
-    let name = arg_value("--name").unwrap_or_else(|| "Steam Deck".to_string());
-
-    let identity = match crate::trust::load_or_create_identity() {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("client identity: {e:#}");
-            return glib::ExitCode::FAILURE;
-        }
-    };
-    match crate::trust::pair_with_host(&addr, port, &identity, pin, &name) {
-        Ok(fp) => {
-            let fp_hex = crate::trust::hex(&fp);
-            crate::trust::persist_host(
-                &arg_value("--host-label").unwrap_or_else(|| addr.clone()),
-                &addr,
-                port,
-                &fp_hex,
-                true,
-            );
-            // A host manually added via `--add-host` (no fingerprint yet) is stored as an
-            // addr-keyed placeholder; now that the ceremony yielded the real fingerprint,
-            // `persist_host` created the fp-keyed entry — drop the placeholder so the list
-            // shows this host once, not twice.
-            forget_placeholder(&addr, port);
-            println!("paired {addr}:{port} fp={fp_hex}");
-            glib::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!(
-                "pairing failed: {} ({e:?})",
-                crate::trust::pair_error_message(&e)
-            );
-            glib::ExitCode::FAILURE
-        }
-    }
-}
-
-/// `--wake host[:port]` — send a Wake-on-LAN magic packet to a saved host and exit,
-/// without opening a window. The MAC comes from the known-hosts store (learned from the
-/// host's mDNS `mac` TXT while it was online); exits non-zero if none is known yet.
-pub fn cli_wake() -> glib::ExitCode {
-    let Some(target) = arg_value("--wake") else {
-        eprintln!("--wake requires host[:port]");
-        return glib::ExitCode::FAILURE;
-    };
-    let (addr, port) = parse_host_port(&target);
-    let port = port.unwrap_or(9777);
-    let mac = crate::trust::KnownHosts::load()
-        .find_by_addr(&addr, port)
-        .map(|h| h.mac.clone())
-        .unwrap_or_default();
-    if mac.is_empty() {
-        eprintln!(
-            "--wake: no MAC known for {addr}:{port} — connect once while the host is awake so its \
-             advertised MAC is learned"
-        );
-        return glib::ExitCode::FAILURE;
-    }
-    crate::wol::wake(&mac, addr.parse().ok());
-    println!("woke {addr}:{port} ({} MAC(s) targeted)", mac.len());
-    glib::ExitCode::SUCCESS
-}
-
 /// `--library host[:mgmt_port]` — fetch and print the host's game library over the real
-/// mTLS + pinned-fingerprint client, no GTK window. The pin comes from `--fp HEX` when
-/// given, else the known-hosts store (matched by address), else none (TOFU-accept).
+/// mTLS + pinned-fingerprint client, no GTK window. The pin comes from `--fp HEX` when given,
+/// else the saved record for that address. Without one this refuses: an absent pin is not a
+/// weaker check, it is no check — the verifier accepts any certificate.
 pub fn headless_library(target: &str) -> glib::ExitCode {
-    let (addr, port) = match target.rsplit_once(':') {
-        Some((a, p)) if p.parse::<u16>().is_ok() => (a.to_string(), p.parse().unwrap()),
-        _ => (target.to_string(), crate::library::DEFAULT_MGMT_PORT),
+    // `parse_addr_port` defaults a bare host to the STREAM port, but here a bare host means
+    // "ask the saved record" — so a port counts only when the target spelled one out. A bare
+    // `::1` carries colons and no port, which is why this is not a colon test.
+    let (addr, explicit_port) = match pf_client_core::deeplink::parse_addr_port(target) {
+        Some((a, p)) => {
+            let spelled = target.len() > a.len() && target.ends_with(&format!(":{p}"));
+            (a, spelled.then_some(p))
+        }
+        None => (target.to_string(), None),
     };
     let identity = match crate::trust::load_or_create_identity() {
         Ok(i) => i,
@@ -194,15 +134,27 @@ pub fn headless_library(target: &str) -> glib::ExitCode {
             return glib::ExitCode::FAILURE;
         }
     };
-    let pin = arg_value("--fp")
+    // The saved record is keyed by its STREAM port, so it is resolved by address alone — a
+    // lookup on the mgmt port never matches, and `fetch_games` reads a `None` pin as "accept
+    // any certificate". A host we cannot pin is refused rather than fetched unpinned.
+    let known = crate::trust::KnownHosts::load();
+    let saved = known
+        .hosts
+        .iter()
+        .find(|h| h.addr == addr && !h.fp_hex.is_empty());
+    let Some(pin) = arg_value("--fp")
         .as_deref()
         .and_then(crate::trust::parse_hex32)
-        .or_else(|| {
-            crate::trust::KnownHosts::load()
-                .find_by_addr(&addr, port)
-                .and_then(|h| crate::trust::parse_hex32(&h.fp_hex))
-        });
-    match crate::library::fetch_games(&addr, port, &identity, pin) {
+        .or_else(|| saved.and_then(|h| crate::trust::parse_hex32(&h.fp_hex)))
+    else {
+        eprintln!("library: no pinned fingerprint for {addr} — pair the host first, or pass --fp");
+        return glib::ExitCode::FAILURE;
+    };
+    // An explicit `host:port` names the mgmt port; otherwise the saved record's own.
+    let port = explicit_port
+        .or_else(|| saved.map(|h| h.effective_mgmt_port()))
+        .unwrap_or(crate::library::DEFAULT_MGMT_PORT);
+    match crate::library::fetch_games(&addr, port, &identity, Some(pin)) {
         Ok(games) => {
             // A fourth column, appended: `game` or `launcher` (design D4). Appended rather than
             // folded into an existing field so anything reading the first three columns is
@@ -225,19 +177,10 @@ pub fn headless_library(target: &str) -> glib::ExitCode {
     }
 }
 
-// -----------------------------------------------------------------------------------------
-// Headless host-store management — the shared known-hosts store (`client-known-hosts.json`)
-// is the SINGLE source of truth for every client on this device (the GTK shell, the Vulkan
-// session, and the Decky plugin, which shells out to these modes). Exposing add/edit/forget/
-// list/reset here lets the Decky Gaming-Mode UI mutate exactly the store the desktop client
-// reads, so a change in one surface shows up in the other. Reachability (`--list-hosts
-// --probe`, `--reachable`) answers "is this host online?" WITHOUT mDNS, so a host reached
-// over a routed network (Tailscale/VPN/another subnet) no longer reads as offline.
-// -----------------------------------------------------------------------------------------
-
-/// The per-probe budget: a cold host on a routed link answers in well under this, and every
-/// saved host is probed in parallel so the wall-clock cost is one timeout, not the sum.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
+// `client-known-hosts.json` is the one host store every client on this device reads — the GTK
+// shell, the Vulkan session, and the Decky plugin, which shells out to these headless modes. So
+// `--set-host` and `--forget-host` mutate exactly that store, and an edit made in one surface
+// shows up in the others.
 
 /// Selector for `--set-host`/`--forget-host`: a 64-hex fingerprint pins one entry across IP
 /// changes; anything else is treated as `addr[:port]` (manual entries have no fingerprint).
@@ -262,14 +205,6 @@ impl Selector {
             Selector::Addr(addr, port) => h.addr == *addr && h.port == *port,
         }
     }
-}
-
-/// Probe every saved host for reachability in parallel (shared with the hosts-page presence pips).
-fn probe_all(hosts: &[KnownHost]) -> Vec<bool> {
-    crate::trust::probe_reachable_many(
-        hosts.iter().map(|h| (h.addr.clone(), h.port)).collect(),
-        PROBE_TIMEOUT,
-    )
 }
 
 /// `--omarchy-menu on|off|sync` — Punktfunk's rows in the Omarchy menu (Super+Space): a root
@@ -305,105 +240,6 @@ fn headless_omarchy_menu(verb: &str) -> glib::ExitCode {
             }
         }
         other => failed(format!("unknown verb {other:?} — use on, off or sync")),
-    }
-}
-
-/// `--list-hosts [--probe]` — the saved known-hosts store as JSON (the store the Decky plugin
-/// renders). With `--probe`, each host carries an `online` bool from a live reachability probe
-/// (mDNS-independent); without it, `online` is `null` (unknown — the caller falls back to its
-/// own mDNS view). Shape: `{"hosts":[{name,addr,port,fp_hex,paired,mac,last_used,online}]}`.
-pub fn headless_list_hosts() -> glib::ExitCode {
-    let known = KnownHosts::load();
-    let online: Option<Vec<bool>> = arg_flag("--probe").then(|| probe_all(&known.hosts));
-    let hosts: Vec<serde_json::Value> = known
-        .hosts
-        .iter()
-        .enumerate()
-        .map(|(i, h)| {
-            serde_json::json!({
-                "name": h.name,
-                "addr": h.addr,
-                "port": h.port,
-                "fp_hex": h.fp_hex,
-                "paired": h.paired,
-                "mac": h.mac,
-                "os": h.os,
-                "last_used": h.last_used,
-                "online": online.as_ref().map(|v| serde_json::Value::Bool(v[i]))
-                    .unwrap_or(serde_json::Value::Null),
-            })
-        })
-        .collect();
-    match serde_json::to_string(&serde_json::json!({ "hosts": hosts })) {
-        Ok(s) => {
-            println!("{s}");
-            glib::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("list-hosts: {e}");
-            glib::ExitCode::FAILURE
-        }
-    }
-}
-
-/// `--reachable host[:port]` — probe one target and exit 0 (reachable) / 1 (not). A cheap
-/// "is it online / test this address" check that never touches mDNS.
-pub fn headless_reachable(target: &str) -> glib::ExitCode {
-    let (addr, port) = parse_host_port(target);
-    let port = port.unwrap_or(9777);
-    if NativeClient::probe(&addr, port, PROBE_TIMEOUT) {
-        println!("reachable {addr}:{port}");
-        glib::ExitCode::SUCCESS
-    } else {
-        eprintln!("unreachable {addr}:{port}");
-        glib::ExitCode::FAILURE
-    }
-}
-
-/// `--add-host host[:port] [--host-label NAME] [--fp HEX]` — save a host by address so it can
-/// be paired/streamed even when mDNS never sees it (a Tailscale/VPN box). Without `--fp` the
-/// entry is an unpaired placeholder (keyed by address) the user pairs later — `headless_pair`
-/// then replaces it with the fingerprinted entry. With `--fp` (e.g. carried from an advert)
-/// it is pinned immediately as trusted-but-not-PIN-paired. Prints `added <addr>:<port>`.
-pub fn headless_add_host(target: &str) -> glib::ExitCode {
-    let (addr, port) = parse_host_port(target);
-    let port = port.unwrap_or(9777);
-    let name = arg_value("--host-label")
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| addr.clone());
-    if let Some(fp_hex) = arg_value("--fp").filter(|f| crate::trust::parse_hex32(f).is_some()) {
-        // Fingerprint known up front: upsert the pinned entry (paired stays false — no PIN
-        // ceremony happened; a later `--pair` upgrades it).
-        crate::trust::persist_host(&name, &addr, port, &fp_hex.to_lowercase(), false);
-        forget_placeholder(&addr, port);
-        println!("added {addr}:{port} fp={}", fp_hex.to_lowercase());
-        return glib::ExitCode::SUCCESS;
-    }
-    // No fingerprint yet — an address-keyed placeholder. Refresh the name if it already exists.
-    let mut known = KnownHosts::load();
-    if let Some(h) = known
-        .index_by_addr(&addr, port)
-        .and_then(|i| known.hosts.get_mut(i))
-    {
-        h.name = name;
-    } else {
-        known.hosts.push(KnownHost {
-            name,
-            addr: addr.clone(),
-            port,
-            ..Default::default()
-        });
-    }
-    match known.save() {
-        Ok(()) => {
-            println!("added {addr}:{port}");
-            glib::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("add-host: {e:#}");
-            glib::ExitCode::FAILURE
-        }
     }
 }
 
@@ -459,34 +295,6 @@ pub fn headless_forget_host(selector: &str) -> glib::ExitCode {
     }
     println!("forgot {removed}");
     glib::ExitCode::SUCCESS
-}
-
-/// `--reset` — clear this device's client state: the saved known-hosts and the stream
-/// settings. The persistent IDENTITY (`client-cert.pem`/`client-key.pem`) is deliberately
-/// KEPT so the box isn't seen as a brand-new device everywhere (a re-pair still re-adds hosts);
-/// a caller wanting a true factory reset removes those separately. Missing files are fine.
-pub fn headless_reset() -> glib::ExitCode {
-    let Ok(dir) = crate::trust::config_dir() else {
-        eprintln!("reset: could not resolve config dir (HOME unset?)");
-        return glib::ExitCode::FAILURE;
-    };
-    let mut ok = true;
-    for name in ["client-known-hosts.json", "client-gtk-settings.json"] {
-        match std::fs::remove_file(dir.join(name)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                eprintln!("reset: {name}: {e}");
-                ok = false;
-            }
-        }
-    }
-    if ok {
-        println!("reset");
-        glib::ExitCode::SUCCESS
-    } else {
-        glib::ExitCode::FAILURE
-    }
 }
 
 /// The version this binary was built as — the CI-stamped string (`0.23.0~ci10250.gab12cd34`
@@ -611,23 +419,11 @@ pub fn headless_host_command() -> Option<glib::ExitCode> {
     if let Some(v) = arg_value("--omarchy-menu") {
         return Some(headless_omarchy_menu(&v));
     }
-    if arg_flag("--list-hosts") {
-        return Some(headless_list_hosts());
-    }
-    if let Some(t) = arg_value("--reachable") {
-        return Some(headless_reachable(&t));
-    }
-    if let Some(t) = arg_value("--add-host") {
-        return Some(headless_add_host(&t));
-    }
     if let Some(s) = arg_value("--set-host") {
         return Some(headless_set_host(&s));
     }
     if let Some(s) = arg_value("--forget-host") {
         return Some(headless_forget_host(&s));
-    }
-    if arg_flag("--reset") {
-        return Some(headless_reset());
     }
     if arg_flag("--version") {
         return Some(headless_version());

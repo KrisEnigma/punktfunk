@@ -13,12 +13,10 @@
 //! the first presented frame, `stats:` lines per 1 s window, one `{"error": …}` /
 //! `{"ended": …}` JSON line on the way out. Logs go to stderr. Exit codes: 0 clean end,
 //! 2 connect failed, 3 trust rejected / pairing required, 4 presenter init failed.
-// `deny`, not `forbid`: edition 2024 makes the std process-environment mutators unsafe
-// (WP20 — the env-mutation class made visible; named-API mentions here would count against
-// the unsafe-hygiene gate C baseline, which tracks this file's real call sites), and this
-// bin's three single-threaded-startup env writes carry documented SAFETY comments under
-// localized `#[allow(unsafe_code)]` (the pf-update idiom). A `forbid` cannot be overridden
-// at those sites and refuses the file.
+// `deny`, not `forbid`: edition 2024 makes this bin's startup env writes unsafe, and they
+// sit under localized `#[allow(unsafe_code)]` with SAFETY comments. `forbid` cannot be
+// overridden there and refuses the file. Do not name the env APIs here — the unsafe-hygiene
+// gate counts mentions against this file's baseline.
 #![deny(unsafe_code)]
 
 #[cfg(all(any(target_os = "linux", windows), feature = "ui"))]
@@ -38,7 +36,7 @@ mod console;
 mod ctl_socket {
     use pf_client_core::gamepad::GamepadService;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
 
     fn path() -> Option<PathBuf> {
@@ -57,10 +55,27 @@ mod ctl_socket {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(move || {
             let Some(path) = path() else { return };
-            // A previous session's socket file refuses the bind — it's ours to replace.
-            let _ = std::fs::remove_file(&path);
+            // Bind FIRST. Unlinking on sight handed the socket to whichever session started
+            // last, leaving the running one holding an unreachable inode — so the Decky
+            // panel's guide/qam reached only the newest stream.
             let listener = match UnixListener::bind(&path) {
                 Ok(l) => l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    // Held, or left behind by a session that died? A live socket accepts;
+                    // only a stale one is ours to replace.
+                    if UnixStream::connect(&path).is_ok() {
+                        tracing::debug!(path = %path.display(), "session ctl socket held by another session");
+                        return;
+                    }
+                    let _ = std::fs::remove_file(&path);
+                    match UnixListener::bind(&path) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::debug!(error = %e, path = %path.display(), "session ctl socket unavailable");
+                            return;
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::debug!(error = %e, path = %path.display(), "session ctl socket unavailable");
                     return;
@@ -71,6 +86,9 @@ mod ctl_socket {
                 .spawn(move || {
                     for stream in listener.incoming() {
                         let Ok(mut s) = stream else { continue };
+                        // A peer that connects and says nothing must not hold the one thread
+                        // that serves this socket.
+                        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                         let mut line = String::new();
                         if BufReader::new(&s).read_line(&mut line).is_err() {
                             continue;
@@ -90,7 +108,7 @@ mod ctl_socket {
                     }
                 });
             if let Err(e) = spawned {
-                tracing::debug!(error = %e, "session ctl thread failed to start");
+                tracing::debug!(error = %e, "spawning the session ctl thread");
             }
         });
     }
@@ -199,36 +217,34 @@ mod session_main {
         match trust::pair_with_host(&addr, port, &identity, pin, &name) {
             Ok(fp) => {
                 let fp_hex = trust::hex(&fp);
-                trust::persist_host(
+                if let Err(e) = trust::persist_host(
                     &arg_value("--host-label").unwrap_or_else(|| addr.clone()),
                     &addr,
                     port,
                     &fp_hex,
                     true,
-                );
+                ) {
+                    eprintln!("couldn't save the host: {e:#}");
+                }
                 trust::forget_placeholder(&addr, port);
                 println!("paired {addr}:{port} fp={fp_hex}");
                 0
             }
             Err(e) => {
-                eprintln!("pairing failed: {} ({e:?})", trust::pair_error_message(&e));
+                eprintln!("{}", trust::pair_error_message(&e));
                 EXIT_TRUST_REJECTED
             }
         }
     }
 
-    /// `host[:port]`, port defaulting to the native 9777.
+    /// `host[:port]`, port defaulting to the native 9777. Shared parser: a plain
+    /// `rsplit_once(':')` reads the bare IPv6 `::1` as host `:` port `1`, which then both
+    /// dials the wrong address and misses the saved record keyed by the right one.
     pub(crate) fn parse_host_port(target: &str) -> (String, u16) {
-        match target.rsplit_once(':') {
-            Some((a, p)) => match p.parse() {
-                Ok(port) => (a.to_string(), port),
-                Err(_) => {
-                    eprintln!("unparsable port in '{target}', using default 9777");
-                    (a.to_string(), 9777)
-                }
-            },
-            None => (target.to_string(), 9777),
-        }
+        pf_client_core::deeplink::parse_addr_port(target).unwrap_or_else(|| {
+            eprintln!("unparsable port in '{target}', using default 9777");
+            (target.to_string(), pf_client_core::deeplink::DEFAULT_PORT)
+        })
     }
 
     /// `--profile <id|name>` — the settings profile this one session runs with, overriding the
@@ -287,13 +303,12 @@ mod session_main {
                 .find_by_addr(&addr, port)
                 .is_some_and(|h| h.clipboard_sync)
         });
-        // Re-apply the shell-persisted forwarded-controller pin (stable `vid:pid:name`
-        // key) to OUR gamepad service — the shells' in-process services can't reach this
-        // process. Applied per params-build (idempotent; browse re-launches included) so
-        // it lands before the session attaches. Empty = automatic (most recent).
-        if !settings.forward_pad.is_empty() {
-            gamepad.set_pinned(Some(settings.forward_pad.clone()));
-        }
+        // The shell-persisted forwarded-controller pin (stable `vid:pid:name`), applied to
+        // OUR service — the shells' own can't reach this process. Empty = automatic. Set
+        // unconditionally for `set_forwarding`'s reason below: browse mode reuses one
+        // service, so a cleared pin has to clear it there too.
+        gamepad
+            .set_pinned((!settings.forward_pad.is_empty()).then(|| settings.forward_pad.clone()));
         // Whether to forward controllers AT ALL (off = the pad reaches the host by some other
         // route — VirtualHere and friends). Set unconditionally, not only when off: browse mode
         // reuses one service across launches, so a stream that follows one with it off must put
@@ -369,20 +384,18 @@ mod session_main {
                  to (PyroWave carries 4:4:4 on any GPU, if the link can take it)."
             );
         }
-        // …and the HDR promise, same discipline: `VIDEO_CAP_HDR` invites a PQ stream, and
-        // a Windows box with no HDR10 swapchain whose video processor cannot tone-map
-        // PQ→sRGB shows that stream as garbage — the D3D11VA Blt accepts the colorspaces
-        // and renders green where the conversion is missing (Arc A370M field report,
-        // 2026-08-26). `ten_bit_sdr` is deliberately NOT gated on this: a 10-bit SDR
-        // stream is no tonemap, and every hardware rung decodes P010.
+        // Computed before the struct literal below moves `vulkan`. Advertising HDR invites a
+        // PQ stream, and a device with no HDR10 swapchain and no PQ→sRGB tone-map renders it
+        // green. `ten_bit_sdr` is not gated on this: 10-bit SDR needs no tone-map, and every
+        // hardware rung decodes P010.
         let hdr_enabled =
             settings.hdr_enabled && pf_client_core::video::hdr_presentable(vulkan.as_ref());
         if settings.hdr_enabled && !hdr_enabled {
             tracing::warn!(
-                "HDR requested but this device cannot present a PQ stream (no HDR10 \
+                "HDR requested but this device can't present a PQ stream (no HDR10 \
                  swapchain, and the video processor reports no PQ→sRGB conversion) — \
                  asking for SDR instead. Advertising it would paint the stream green: \
-                 the driver accepts the tonemap it cannot do and renders garbage."
+                 the driver accepts the tonemap it can't do and renders garbage."
             );
         }
         SessionParams {
@@ -415,33 +428,21 @@ mod session_main {
             // sets this, and it does so on a CLONE of these params — a Settings-level
             // "never use HEVC" would be `preferred_codec`, not this.
             exclude_codecs: 0,
-            // HDR off = don't advertise 10-bit/HDR at all; the host then never upgrades.
-            // MULTI_SLICE is decoder truth for THIS embedder: every desktop decode stack
-            // (Vulkan Video, D3D11VA, VAAPI, openh264/rav1d) handles AUs carrying several
-            // slice NALs, so the host may keep its multi-slice low-latency default (§7 LN1).
-            // The mobile/TV embedders must NOT copy this blindly — Amlogic MediaCodec wedges
-            // on multi-slice AUs (see `VIDEO_CAP_MULTI_SLICE`), so they advertise per-decoder.
-            // 4:4:4 is opt-in and off by default (Settings "Full chroma"): the bit says
-            // "upgrade me if you can" — the host still gates on its own policy, its capturer,
-            // HEVC, and a real GPU 4:4:4 encode probe, and answers the resolved chroma in the
-            // Welcome BEFORE we build a decoder. It is now ALSO gated on this device being
-            // able to decode 4:4:4 (`want_444`, computed above); the rule and its reasoning
-            // live in `video::video_caps_for`, which is where they get tested.
-            // The cost stays VISIBLE, not silent: the Detailed stats overlay prints the
-            // resolved chroma ("4:4:4→4:2:0" when the host declined) and the decode path
-            // frames actually took.
+            // Desktop decode truth: every stack here (Vulkan Video, D3D11VA, VAAPI,
+            // openh264/rav1d) takes multi-slice AUs, so MULTI_SLICE is unconditional —
+            // mobile/TV embedders advertise per-decoder instead (Amlogic wedges on it).
+            // HDR and 4:4:4 are requests only; the host answers the resolved chroma in the
+            // Welcome, before we build a decoder. Rules and tests: `video::video_caps_for`.
             video_caps: pf_client_core::video::video_caps_for(
                 hdr_enabled,
                 settings.ten_bit_sdr,
                 want_444,
             ),
-            // This panel's HDR colour volume → the host's virtual-display EDID, so host
-            // apps tone-map to the real glass. Windows reads it from DXGI (the
-            // `--window-pos` monitor; advanced-color outputs only) — gated on the HDR
-            // setting, since with 10-bit/HDR unadvertised above the volume is noise. No
-            // portable Wayland/X11 query exists yet, so Linux keeps the host's EDID
-            // defaults; `PUNKTFUNK_CLIENT_PEAK_NITS` (read in the session pump) pins one
-            // manually on either OS and wins over both.
+            // The panel's HDR volume reaches the host's virtual-display EDID so host apps
+            // tone-map to the real glass. Windows only: DXGI reads the `--window-pos`
+            // monitor (advanced-color outputs), gated on the HDR setting because an
+            // unadvertised 10-bit/HDR makes the volume noise. Linux has no portable query
+            // and keeps the host EDID; `PUNKTFUNK_CLIENT_PEAK_NITS` overrides both.
             #[cfg(windows)]
             display_hdr: hdr_enabled
                 .then(|| pf_client_core::video_d3d11::display_hdr_volume(window_pos()))
@@ -517,7 +518,7 @@ mod session_main {
     ) -> Option<Box<dyn FnMut(u32, u32)>> {
         settings.match_window.then(|| {
             Box::new(move |w: u32, h: u32| {
-                println!("{{\"window\":{{\"w\":{w},\"h\":{h}}}}}");
+                machine_line(&format!("{{\"window\":{{\"w\":{w},\"h\":{h}}}}}"));
                 if persist_locally {
                     pf_client_core::orchestrate::persist_window_size(w, h);
                 }
@@ -540,8 +541,200 @@ mod session_main {
             })
             .collect();
         match trust_rejected {
-            Some(t) => println!("{{\"{key}\":\"{escaped}\",\"trust_rejected\":{t}}}"),
-            None => println!("{{\"{key}\":\"{escaped}\"}}"),
+            Some(t) => machine_line(&format!(
+                "{{\"{key}\":\"{escaped}\",\"trust_rejected\":{t}}}"
+            )),
+            None => machine_line(&format!("{{\"{key}\":\"{escaped}\"}}")),
+        }
+    }
+
+    /// Write one line of the shell contract. A dropped write is NOT fatal: `println!` panics
+    /// on EPIPE, so a shell that exited mid-stream used to abort the stream the user is still
+    /// watching. Status nobody is left to read costs nothing to lose.
+    pub(crate) fn machine_line(line: &str) {
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }
+
+    /// The PipeWire endpoints the settings pickers offer, as
+    /// `sink|source<TAB>node.name<TAB>description` lines — a debug window into the same
+    /// enumeration the GTK shell probes.
+    #[cfg(target_os = "linux")]
+    fn list_audio() -> u8 {
+        match pf_client_core::audio::devices() {
+            Ok((sinks, sources)) => {
+                for d in sinks {
+                    println!("sink\t{}\t{}", d.name, d.description);
+                }
+                for d in sources {
+                    println!("source\t{}\t{}", d.name, d.description);
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("list-audio: {e:#}");
+                EXIT_PRESENTER_FAILED
+            }
+        }
+    }
+
+    /// Drive a tone into a wired pad's coils (and with `--speaker`, its speaker), so
+    /// "the plane never arrived" separates from "it arrived and the graph folded the
+    /// coil pair away". Deliberately blind to the settings, which is why it says up
+    /// front when a real session would render nothing.
+    #[cfg(target_os = "linux")]
+    fn pad_audio_devtest() -> u8 {
+        let seconds = arg_value("--seconds")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        // Coils by default: they are the half that silently disappears, so they are the
+        // half worth testing. `--speaker` adds (or, with nothing else, selects) the
+        // speaker pair.
+        let speaker = arg_flag("--speaker");
+        let coils = arg_flag("--coils") || !speaker;
+        // This drives the pad DIRECTLY and ignores the settings, so say up front when a
+        // real session would render nothing: "the tone plays but the game is silent" sends
+        // you measuring the host, and the toggle is on the client. Nothing logs it later —
+        // the capability is never advertised when the toggle is off.
+        {
+            let s = trust::Settings::load();
+            if speaker && !pf_client_core::pad_audio::speaker_active(&s.pad_speaker) {
+                println!(
+                    "note: \"Controller speaker\" is OFF in your settings (pad_speaker = \
+                     {:?}), so a streaming session will NOT render the pad's speaker even if \
+                     the tone below is audible.",
+                    s.pad_speaker
+                );
+            }
+            if coils && !s.pad_haptics {
+                println!(
+                    "note: \"Controller haptics\" is OFF in your settings, so a streaming \
+                     session will NOT render the voice coils even if the tone below is felt."
+                );
+            }
+        }
+        match pf_client_core::pad_audio::pad_audio_test(seconds, coils, speaker) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("pad-audio-test: {e:#}");
+                EXIT_PRESENTER_FAILED
+            }
+        }
+    }
+
+    /// Per-adapter Vulkan Video decode capability, in human words — a triage tool, not a
+    /// picker source. That is why it is its own flag: `--list-adapters` is parsed
+    /// line-by-line by the desktop shells' GPU picker and must keep printing bare names.
+    fn probe_decode_report() -> u8 {
+        match pf_presenter::vk::probe_decode() {
+            Ok(adapters) => {
+                if adapters.is_empty() {
+                    println!("no Vulkan physical devices");
+                }
+                for (i, a) in adapters.iter().enumerate() {
+                    // The bracketed number is the PUNKTFUNK_VK_DEVICE value, and the
+                    // FIRST listed entry is what
+                    // a default run presents on — the decoder shares that device, so
+                    // on a hybrid box this line is usually the answer.
+                    let kind = if a.discrete { "discrete" } else { "integrated" };
+                    // `a.index`, NOT the loop position: this list is sorted
+                    // discrete-first, while PUNKTFUNK_VK_DEVICE indexes the raw
+                    // enumeration, which puts the iGPU first on some hybrids. The
+                    // `i == 0` marker stays the loop position — sorted-first is what
+                    // `pick_device` lands on when nothing overrides it.
+                    println!(
+                        "[{}] {} ({kind}){}",
+                        a.index,
+                        a.name,
+                        if i == 0 { "  <- default presenter" } else { "" }
+                    );
+                    println!(
+                        "     vulkan video decode: {}",
+                        if a.usable { "YES" } else { "no" }
+                    );
+                    // Name every advertised bit, including unsupported VP9, so the labels
+                    // account for the complete mask.
+                    const OPS: [(u32, &str); 4] = [
+                        (0x1, "H.264"),
+                        (0x2, "H.265"),
+                        (0x4, "AV1"),
+                        (0x8, "VP9 (no punktfunk rung)"),
+                    ];
+                    let mut codecs: Vec<String> = OPS
+                        .iter()
+                        .filter(|(bit, _)| a.codec_ops & bit != 0)
+                        .map(|(_, n)| (*n).to_string())
+                        .collect();
+                    let named: u32 = OPS.iter().map(|(b, _)| b).sum();
+                    let unknown = a.codec_ops & !named;
+                    if unknown != 0 {
+                        codecs.push(format!("unrecognised bits 0x{unknown:X}"));
+                    }
+                    println!(
+                        "     driver decode ops:   {}",
+                        if codecs.is_empty() {
+                            format!("none (0x{:X})", a.codec_ops)
+                        } else {
+                            format!("{} (0x{:X})", codecs.join(", "), a.codec_ops)
+                        }
+                    );
+                    if !a.usable {
+                        // Say which conjunct failed. "no" with no reason is the thing
+                        // this whole flag exists to stop.
+                        let mut why: Vec<String> = Vec::new();
+                        if !a.api_1_3 {
+                            why.push("device is not Vulkan 1.3".into());
+                        }
+                        if !a.features_ok {
+                            why.push(
+                                "missing samplerYcbcrConversion / timelineSemaphore / \
+                                 synchronization2"
+                                    .into(),
+                            );
+                        }
+                        if a.decode_family.is_none() {
+                            why.push("no queue family advertises VIDEO_DECODE".into());
+                        }
+                        if !a.base_missing.is_empty() {
+                            why.push(format!("missing {}", a.base_missing.join(", ")));
+                        }
+                        if a.codec_exts.is_empty() {
+                            why.push("no VK_KHR_video_decode_{h264,h265,av1} extension".into());
+                        }
+                        println!("     why not:             {}", why.join("; "));
+                    } else {
+                        println!("     extensions:          {}", a.codec_exts.join(", "));
+                    }
+                    print_video_formats(a);
+                }
+                if adapters.len() > 1 {
+                    // The single most common misreading of this output: seeing a
+                    // capable GPU listed and concluding the decoder will use it.
+                    // Vulkan Video decodes on the PRESENTER's device, and the decoder
+                    // preference does not move the presenter.
+                    println!();
+                    println!(
+                        "Vulkan Video decodes on the presenter's device. PUNKTFUNK_DECODER \
+                         picks the rung,"
+                    );
+                    println!(
+                        "not the GPU — move the presenter with PUNKTFUNK_VK_DEVICE=<index \
+                         above> or"
+                    );
+                    println!(
+                        "PUNKTFUNK_VK_ADAPTER=<name substring>, which is the safer knob \
+                         where two"
+                    );
+                    println!("adapters share a name.");
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("probe-decode: {e:#}");
+                EXIT_PRESENTER_FAILED
+            }
         }
     }
 
@@ -616,13 +809,10 @@ mod session_main {
                         .join("; "),
                 };
                 println!("       {:<24} {answer}", u.label);
-                // The second opinion, printed only where it differs from the video
-                // format query. Worded as "also asked" rather than "disagrees" on
-                // purpose: measured on both vendors this call answers "creatable" for
-                // combinations the video query rejects (NVIDIA included, for SAMPLED
-                // alone), so it does not honour the profile list and a difference here
-                // is NOT the driver contradicting itself. Printed anyway because the
-                // question gets re-asked by everyone who reads a refusal.
+                // The second opinion, printed only where it differs from the video format
+                // query. This call does not honour the profile list, so it answers
+                // "creatable" for combinations the video query rejects; a difference is
+                // not the driver contradicting itself.
                 let listed = u
                     .wanted_entry(p.wanted)
                     .is_some_and(|f| f.image_usage.contains(u.usage));
@@ -670,20 +860,10 @@ mod session_main {
         #[cfg(windows)]
         punktfunk_core::crash::install();
 
-        // Before ANY Vulkan call — and that includes the two probe flags below, which is the
-        // whole reason this sits at the top of `run` instead of beside the session setup it
-        // was written for. Make RADV expose its video-decode queue + extensions so the
-        // decoder's `auto` path prefers Vulkan Video over VAAPI (Steam Deck, and any gated
-        // RADV). Windows drivers (NVIDIA/AMD Adrenalin) expose theirs unconditionally.
-        //
-        // ⚠⚠ It USED to sit after the `--list-adapters` / `--probe-decode` / `--list-audio` /
-        // `--pair` early exits, which meant the triage tool answered a DIFFERENT question from
-        // the one the streaming path asks. Measured on a Steam Deck (2026-08-08, canary
-        // `e22af40f`), same binary, back to back: bare `--probe-decode` printed `vulkan video
-        // decode: no`, `driver decode ops: none (0x0)`, `no queue family advertises
-        // VIDEO_DECODE`; the same call with `RADV_PERFTEST=video_decode` in the environment
-        // printed `YES` and `H.264, H.265, AV1, VP9`. The tool exists to be believed, so any
-        // Deck triage that consulted it reached the opposite of the truth.
+        // Runs before ANY Vulkan call, including the probe flags below — hence the top of
+        // `run`, ahead of the early exits, so triage answers the same question the streaming
+        // path asks. Makes RADV expose its video-decode queue and extensions so the decoder's
+        // `auto` path prefers Vulkan Video over VAAPI. Windows drivers expose theirs already.
         #[cfg(target_os = "linux")]
         enable_radv_video_decode();
 
@@ -704,121 +884,8 @@ mod session_main {
             };
         }
 
-        // `--probe-decode`: per-adapter Vulkan Video decode capability, then exit. Human
-        // output on purpose — this is a triage tool, not a picker source, which is also
-        // why it is a separate flag: `--list-adapters` is parsed line-by-line by the
-        // desktop shells' GPU picker and must keep printing bare names.
         if arg_flag("--probe-decode") {
-            return match pf_presenter::vk::probe_decode() {
-                Ok(adapters) => {
-                    if adapters.is_empty() {
-                        println!("no Vulkan physical devices");
-                    }
-                    for (i, a) in adapters.iter().enumerate() {
-                        // The bracketed number is the PUNKTFUNK_VK_DEVICE value, and the
-                        // FIRST listed entry is what
-                        // a default run presents on — the decoder shares that device, so
-                        // on a hybrid box this line is usually the answer.
-                        let kind = if a.discrete { "discrete" } else { "integrated" };
-                        // `a.index`, NOT the loop position. This list is sorted
-                        // discrete-first for reading, but PUNKTFUNK_VK_DEVICE indexes the
-                        // raw enumeration, which puts the iGPU first on some hybrids —
-                        // printing the loop position would name the other GPU on exactly
-                        // the machines this flag is for. The `i == 0` marker is still the
-                        // loop position, because sorted-first IS what pick_device lands on
-                        // when nothing overrides it.
-                        println!(
-                            "[{}] {} ({kind}){}",
-                            a.index,
-                            a.name,
-                            if i == 0 { "  <- default presenter" } else { "" }
-                        );
-                        println!(
-                            "     vulkan video decode: {}",
-                            if a.usable { "YES" } else { "no" }
-                        );
-                        // Name every advertised bit, including unsupported VP9, so the labels
-                        // account for the complete mask.
-                        const OPS: [(u32, &str); 4] = [
-                            (0x1, "H.264"),
-                            (0x2, "H.265"),
-                            (0x4, "AV1"),
-                            (0x8, "VP9 (no punktfunk rung)"),
-                        ];
-                        let mut codecs: Vec<String> = OPS
-                            .iter()
-                            .filter(|(bit, _)| a.codec_ops & bit != 0)
-                            .map(|(_, n)| (*n).to_string())
-                            .collect();
-                        let named: u32 = OPS.iter().map(|(b, _)| b).sum();
-                        let unknown = a.codec_ops & !named;
-                        if unknown != 0 {
-                            codecs.push(format!("unrecognised bits 0x{unknown:X}"));
-                        }
-                        println!(
-                            "     driver decode ops:   {}",
-                            if codecs.is_empty() {
-                                format!("none (0x{:X})", a.codec_ops)
-                            } else {
-                                format!("{} (0x{:X})", codecs.join(", "), a.codec_ops)
-                            }
-                        );
-                        if !a.usable {
-                            // Say which conjunct failed. "no" with no reason is the thing
-                            // this whole flag exists to stop.
-                            let mut why: Vec<String> = Vec::new();
-                            if !a.api_1_3 {
-                                why.push("device is not Vulkan 1.3".into());
-                            }
-                            if !a.features_ok {
-                                why.push(
-                                    "missing samplerYcbcrConversion / timelineSemaphore / \
-                                     synchronization2"
-                                        .into(),
-                                );
-                            }
-                            if a.decode_family.is_none() {
-                                why.push("no queue family advertises VIDEO_DECODE".into());
-                            }
-                            if !a.base_missing.is_empty() {
-                                why.push(format!("missing {}", a.base_missing.join(", ")));
-                            }
-                            if a.codec_exts.is_empty() {
-                                why.push("no VK_KHR_video_decode_{h264,h265,av1} extension".into());
-                            }
-                            println!("     why not:             {}", why.join("; "));
-                        } else {
-                            println!("     extensions:          {}", a.codec_exts.join(", "));
-                        }
-                        print_video_formats(a);
-                    }
-                    if adapters.len() > 1 {
-                        // The single most common misreading of this output: seeing a
-                        // capable GPU listed and concluding the decoder will use it.
-                        // Vulkan Video decodes on the PRESENTER's device, and the decoder
-                        // preference does not move the presenter.
-                        println!();
-                        println!(
-                            "Vulkan Video decodes on the presenter's device. PUNKTFUNK_DECODER \
-                             picks the rung,"
-                        );
-                        println!(
-                            "not the GPU — move the presenter with PUNKTFUNK_VK_DEVICE=<index \
-                             above> or"
-                        );
-                        println!(
-                            "PUNKTFUNK_VK_ADAPTER=<name substring>, which is the safer knob \
-                             where two"
-                        );
-                        println!("adapters share a name.");
-                    }
-                    0
-                }
-                Err(e) => {
-                    eprintln!("probe-decode: {e:#}");
-                    EXIT_PRESENTER_FAILED
-                }
-            };
+            return probe_decode_report();
         }
 
         // `--list-audio`: the PipeWire endpoints the settings pickers offer, as
@@ -826,21 +893,7 @@ mod session_main {
         // same enumeration the GTK shell probes.
         #[cfg(target_os = "linux")]
         if arg_flag("--list-audio") {
-            return match pf_client_core::audio::devices() {
-                Ok((sinks, sources)) => {
-                    for d in sinks {
-                        println!("sink\t{}\t{}", d.name, d.description);
-                    }
-                    for d in sources {
-                        println!("source\t{}\t{}", d.name, d.description);
-                    }
-                    0
-                }
-                Err(e) => {
-                    eprintln!("list-audio: {e:#}");
-                    EXIT_PRESENTER_FAILED
-                }
-            };
+            return list_audio();
         }
 
         // `--pad-audio-test [--seconds N] [--speaker] [--coils]`: the controller-audio
@@ -849,44 +902,7 @@ mod session_main {
         // — no host, no game, no pairing needed, just a wired DualSense.
         #[cfg(target_os = "linux")]
         if arg_flag("--pad-audio-test") {
-            let seconds = arg_value("--seconds")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3);
-            // Coils by default: they are the half that silently disappears, so they are the
-            // half worth testing. `--speaker` adds (or, with nothing else, selects) the
-            // speaker pair.
-            let speaker = arg_flag("--speaker");
-            let coils = arg_flag("--coils") || !speaker;
-            // Say up front whether a real session would render what this is about to prove
-            // works. The devtest drives the pad DIRECTLY, so it is deliberately blind to the
-            // settings — which makes "the tone plays here but the game is silent" a genuinely
-            // confusing result, and one that has cost a whole debugging evening: the toggle is
-            // on the client while every instinct sends you measuring the host. The capability
-            // is never advertised when the toggle is off, so no later log line can catch this.
-            {
-                let s = trust::Settings::load();
-                if speaker && !pf_client_core::pad_audio::speaker_active(&s.pad_speaker) {
-                    println!(
-                        "note: \"Controller speaker\" is OFF in your settings (pad_speaker = \
-                         {:?}), so a streaming session will NOT render the pad's speaker even if \
-                         the tone below is audible.",
-                        s.pad_speaker
-                    );
-                }
-                if coils && !s.pad_haptics {
-                    println!(
-                        "note: \"Controller haptics\" is OFF in your settings, so a streaming \
-                         session will NOT render the voice coils even if the tone below is felt."
-                    );
-                }
-            }
-            return match pf_client_core::pad_audio::pad_audio_test(seconds, coils, speaker) {
-                Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("pad-audio-test: {e:#}");
-                    EXIT_PRESENTER_FAILED
-                }
-            };
+            return pad_audio_devtest();
         }
 
         // Deprecated compatibility path: stdin only, so the PIN never enters process metadata.
@@ -908,17 +924,11 @@ mod session_main {
         // (The RADV video-decode opt-in that used to live here now runs at the very top of
         // `run` — it has to precede the probe flags too, not just the session.)
 
-        // The Settings device picks → env, unless the user already forced one by hand:
-        // the GPU (the shells' pickers store the adapter's marketing name) for the
-        // presenter's device selection, and the audio endpoints (PipeWire node names /
-        // WASAPI endpoint ids) for the playback/mic streams. Before any Vulkan call,
-        // like the RADV knob (covers --connect and --browse).
-        //
-        // Spec mode takes them from the SPEC's settings — the spawner's resolve — which
-        // keeps the §5 zero-store-reads invariant and lets a profile overlay reach these
-        // fields if they ever become profileable. Parsed leniently here (the `--connect`
-        // flow re-reads the spec authoritatively and errors there); the compat path and
-        // `--browse` (which never carries a spec) still load the store.
+        // Settings device picks (adapter marketing name, PipeWire node names / WASAPI
+        // endpoint ids) → env unless the user already set the var, before any Vulkan
+        // call — covers `--connect` and `--browse`. With a spec the values come from the
+        // spec's settings, never the store (§5 zero-store-reads); lenient parsing is safe
+        // because `--connect` re-reads the spec authoritatively and errors there.
         {
             let s = arg_value("--resolved-spec")
                 .and_then(|p| {
@@ -998,7 +1008,8 @@ mod session_main {
         let identity = match trust::load_or_create_identity() {
             Ok(i) => i,
             Err(e) => {
-                json_line("error", &format!("client identity: {e:#}"), None);
+                tracing::error!(error = %format!("{e:#}"), "loading the client identity");
+                json_line("error", "this device's client key didn't load", None);
                 return EXIT_CONNECT_FAILED;
             }
         };
@@ -1015,7 +1026,8 @@ mod session_main {
                     (s.settings, s.profile, Some(s.clipboard))
                 }
                 Err(e) => {
-                    json_line("error", &format!("resolved spec: {e}"), None);
+                    tracing::error!(error = %e, path = %path.display(), "reading the resolved spec");
+                    json_line("error", "this stream's settings didn't load", None);
                     return EXIT_CONNECT_FAILED;
                 }
             },
@@ -1045,10 +1057,7 @@ mod session_main {
         let Some(pin) = pin else {
             json_line(
                 "error",
-                &format!(
-                    "no pinned fingerprint for {addr}:{port} — pair first \
-                     (punktfunk-session --pair - --connect {addr}:{port}) or pass --fp HEX"
-                ),
+                &format!("{addr}:{port} isn't paired with this device yet. Pair it to continue."),
                 Some(true),
             );
             return EXIT_TRUST_REJECTED;
@@ -1141,7 +1150,8 @@ mod session_main {
                 }
             }
             Err(e) => {
-                json_line("error", &format!("presenter: {e:#}"), None);
+                tracing::error!(error = %format!("{e:#}"), "running the presenter");
+                json_line("error", "the stream window didn't start", None);
                 EXIT_PRESENTER_FAILED
             }
         }

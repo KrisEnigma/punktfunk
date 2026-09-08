@@ -156,7 +156,7 @@ impl IddPushCapturer {
                 etw,
                 etw_counts,
                 // Gap accumulator only; this call's pending (ending-frame move) is still unfolded.
-                cursor_moved_px: self.cursor_last.map(|_| self.cursor_gap_px),
+                cursor_moved_px: self.cursor.moved_px(),
             };
             self.stall_watch.report(&stall, now, &evidence);
         }
@@ -189,8 +189,7 @@ impl IddPushCapturer {
         self.last_fresh = now;
         self.max_hb_age_us = 0;
         // Pending sample is the ending frame's move — discarded, never folded.
-        self.cursor_gap_px = 0;
-        self.cursor_pending_px = 0;
+        self.cursor.fresh_frame();
         self.source_seq += 1;
         Ok(Some(CapturedFrame {
             // The driver stamps each access unit with the frame's own present QPC; this side

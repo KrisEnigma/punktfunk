@@ -69,6 +69,15 @@ pub mod keymap;
     target_family = "wasm"
 ))]
 pub mod library;
+// Library sort/group policy, shared by every Rust shell so the console and the two desktop
+// dialogs cannot drift into three orders. Apple and Android port the same file.
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
+pub mod collate;
 // Per-host catalog cache, so a library screen has titles to show while a sleeping host boots.
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod library_cache;
@@ -141,6 +150,11 @@ pub mod pad_audio;
 pub mod profiles;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod session;
+// One decode-less connect and one host burst — the shared half of every "Test network
+// speed…" row. Desktop-gated with `video`, whose codec advertisement the probe connect
+// sends; Android measures through its own JNI session instead.
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+pub mod speed;
 #[cfg(any(
     target_os = "linux",
     windows,

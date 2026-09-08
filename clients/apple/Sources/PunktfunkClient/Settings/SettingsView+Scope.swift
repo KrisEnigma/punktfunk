@@ -86,6 +86,10 @@ enum SettingsFields {
         .init(name: "enable_444", key: DefaultsKey.enable444,
               overlay: \.enable444, effective: \.enable444)
     }
+    static var tenBitSdr: SettingsField<Bool> {
+        .init(name: "ten_bit_sdr", key: DefaultsKey.tenBitSdr,
+              overlay: \.tenBitSdr, effective: \.tenBitSdr)
+    }
     static var compositor: SettingsField<Int> {
         .init(name: "compositor", key: DefaultsKey.compositor,
               overlay: \.compositor, effective: \.compositor)
@@ -204,6 +208,7 @@ extension SettingsView {
         base.codec = codec
         base.hdrEnabled = hdrEnabled
         base.enable444 = enable444
+        base.tenBitSdr = tenBitSdr
         base.compositor = compositor
         base.audioChannels = audioChannels
         base.audioFormat = audioFormat
@@ -212,6 +217,8 @@ extension SettingsView {
         base.keepHostAudio = keepHostAudio
         base.gamepadType = gamepadType
         base.gamepadForwarding = gamepadForwarding
+        base.systemButtons = systemButtons
+        base.guideGesture = guideGesture
         base.statsVerbosity = statsVerbosityRaw
         base.fullscreenWhileStreaming = fullscreenWhileStreaming
         base.presentPriority = presentPriority

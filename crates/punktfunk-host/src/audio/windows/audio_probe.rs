@@ -9,6 +9,7 @@
 //!
 //! Evidence: `design/windows-audio-endpoints-and-vbcable.md`.
 
+use super::devnode_api as da;
 use super::pad_endpoint as pe;
 use super::{audio_control, SAMPLE_RATE};
 use anyhow::{anyhow, bail, Context, Result};
@@ -168,9 +169,9 @@ fn probe_ssm(keep: bool) -> Result<()> {
     let prev_render = audio_control::default_render_id();
     let prev_capture = audio_control::default_capture_id();
 
-    let inst = pe::create_media_devnode(PROBE_DESC, &hwid, write_probe_marker)?;
+    let inst = da::create_media_devnode(PROBE_DESC, &hwid, write_probe_marker)?;
     println!("audio-probe ssm: created devnode {inst}");
-    pe::bind_driver(&hwid, &inf)?;
+    da::bind_driver(&hwid, &inf)?;
 
     let render_ep = wait_endpoint(&inst, Dir::Render)?;
     let capture_ep = match wait_endpoint(&inst, Dir::Capture) {
@@ -227,9 +228,9 @@ fn probe_sink(keep: bool) -> Result<()> {
     let prev_render = audio_control::default_render_id();
     let prev_capture = audio_control::default_capture_id();
 
-    let inst = pe::create_media_devnode(PROBE_DESC, &hwid, write_probe_marker)?;
+    let inst = da::create_media_devnode(PROBE_DESC, &hwid, write_probe_marker)?;
     println!("audio-probe sink: created devnode {inst}");
-    pe::bind_driver(&hwid, &inf)?;
+    da::bind_driver(&hwid, &inf)?;
     let ep = wait_endpoint(&inst, Dir::Render)?;
     println!("audio-probe sink: endpoint={ep}");
     report_mix_format("sink", &ep);
@@ -326,9 +327,9 @@ fn probe_sss_primary(secs: u32) -> Result<()> {
 
 use super::minted::discover_driver;
 
-/// `mark` callback of [`pe::create_media_devnode`]: stamp `PROBE_MARKER`.
+/// `mark` callback of [`da::create_media_devnode`]: stamp `PROBE_MARKER`.
 fn write_probe_marker(
-    set: &pe::DevInfoSet,
+    set: &da::DevInfoSet,
     did: &mut windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
 ) -> Result<()> {
     // SAFETY: live set + element; DIREG_DEV opens (or the create below mints) the devnode's
@@ -382,10 +383,10 @@ fn write_probe_marker(
 }
 
 fn probe_devnodes() -> Result<Vec<(String, u32)>> {
-    let set = pe::media_class_devs()?;
+    let set = da::media_class_devs()?;
     let mut out = Vec::new();
     for i in 0.. {
-        let mut did = pe::devinfo_data();
+        let mut did = da::devinfo_data();
         // SAFETY: live set; `did` is a live out-param with cbSize set.
         if unsafe { SetupDiEnumDeviceInfo(set.0, i, &mut did) }.is_err() {
             break;
@@ -427,7 +428,7 @@ fn probe_devnodes() -> Result<Vec<(String, u32)>> {
             let _ = RegCloseKey(hkey);
         }
         if rc.is_ok() && ty == REG_DWORD && len == 4 {
-            if let Some(inst) = pe::instance_id(&set, &did) {
+            if let Some(inst) = da::instance_id(&set, &did) {
                 out.push((inst, u32::from_le_bytes(data)));
             }
         }
@@ -449,8 +450,7 @@ fn cleanup() -> Result<()> {
 
 /// `pnputil /remove-device` — same teardown as `pad-endpoint remove`.
 fn remove_devnode(inst: &str) {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
-    match std::process::Command::new(format!(r"{windir}\System32\pnputil.exe"))
+    match std::process::Command::new(crate::install::sys32("pnputil.exe"))
         .args(["/remove-device", inst])
         .output()
     {
@@ -460,7 +460,7 @@ fn remove_devnode(inst: &str) {
             o.status.code(),
             String::from_utf8_lossy(&o.stderr).trim()
         ),
-        Err(e) => println!("audio-probe: could not run pnputil for {inst}: {e}"),
+        Err(e) => println!("audio-probe: pnputil did not run for {inst}: {e}"),
     }
 }
 
@@ -697,7 +697,7 @@ fn restore_defaults(prev_render: Option<String>, prev_capture: Option<String>) {
         if audio_control::default_render_id().as_deref() != Some(prev.as_str()) {
             match audio_control::set_default_endpoint(&prev) {
                 Ok(()) => println!("audio-probe: default playback restored"),
-                Err(e) => println!("audio-probe: could not restore default playback: {e:#}"),
+                Err(e) => println!("audio-probe: default playback not restored: {e:#}"),
             }
         }
     }
@@ -705,7 +705,7 @@ fn restore_defaults(prev_render: Option<String>, prev_capture: Option<String>) {
         if audio_control::default_capture_id().as_deref() != Some(prev.as_str()) {
             match audio_control::set_default_endpoint(&prev) {
                 Ok(()) => println!("audio-probe: default recording restored"),
-                Err(e) => println!("audio-probe: could not restore default recording: {e:#}"),
+                Err(e) => println!("audio-probe: default recording not restored: {e:#}"),
             }
         }
     }

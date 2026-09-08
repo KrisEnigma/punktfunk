@@ -54,7 +54,13 @@ fn extract_and_run(exe: &Path, data: &[u8], payload: &[u8]) -> Result<ExitCode, 
     // Administrators. Best-effort — the per-user client root cannot and need not be re-owned.
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("icacls")
+        // Absolute: `CreateProcess` searches the cwd before `%PATH%`, and setup runs elevated.
+        // Never the bare name — that is the search this avoids.
+        let root = std::env::var("SystemRoot")
+            .or_else(|_| std::env::var("WINDIR"))
+            .unwrap_or_else(|_| r"C:\Windows".to_string());
+        let icacls = format!(r"{root}\System32\icacls.exe");
+        let _ = std::process::Command::new(icacls)
             .arg(&root)
             .args(["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"])
             .stdout(std::process::Stdio::null())
@@ -72,7 +78,7 @@ fn extract_and_run(exe: &Path, data: &[u8], payload: &[u8]) -> Result<ExitCode, 
         .args(std::env::args_os().skip(1))
         .env(ROOT_ENV, &root)
         .status()
-        .map_err(|e| format!("could not start {}: {e}", child.display()))?;
+        .map_err(|e| format!("couldn't start {}: {e}", child.display()))?;
     // The child is gone, so its exe is deletable: nothing of the ~300 MB extract stays under
     // %ProgramData% (the /LOG file lives elsewhere). Best effort — a locked file is not a
     // failed install.

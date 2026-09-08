@@ -147,7 +147,7 @@ pub(crate) async fn set_display_settings(
     if let Err(e) = crate::vdisplay::policy::prefs().set(policy) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("persist display policy: {e:#}"),
+            &format!("Couldn't save the display policy — {e:#}"),
         );
     }
     tracing::info!("management API: display policy updated");
@@ -373,7 +373,13 @@ pub(crate) async fn get_display_state() -> Json<DisplayStateResponse> {
 pub(crate) async fn release_display(
     ApiJson(req): ApiJson<ReleaseDisplayRequest>,
 ) -> Json<ReleaseDisplayResult> {
-    let released = crate::vdisplay::registry::release(req.slot);
+    // Teardown restores the topology: CCD commits, a driver IOCTL and, on the slow paths, a
+    // PowerShell shell-out — seconds of blocking work. Off the async worker, as the listing
+    // above already does.
+    let slot = req.slot;
+    let released = tokio::task::spawn_blocking(move || crate::vdisplay::registry::release(slot))
+        .await
+        .unwrap_or(0);
     tracing::info!(slot = ?req.slot, released, "management API: display release");
     Json(ReleaseDisplayResult { released })
 }
@@ -417,7 +423,7 @@ pub(crate) async fn set_display_layout(ApiJson(req): ApiJson<DisplayLayoutReques
     if let Err(e) = store.set(policy) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("persist display layout: {e:#}"),
+            &format!("Couldn't save the display layout — {e:#}"),
         );
     }
     tracing::info!(
@@ -458,7 +464,7 @@ pub(crate) async fn list_custom_presets() -> Json<Vec<crate::vdisplay::policy::C
         (status = CREATED, description = "Preset created", body = crate::vdisplay::policy::CustomPreset),
         (status = BAD_REQUEST, description = "Empty name", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn create_custom_preset(
@@ -469,7 +475,10 @@ pub(crate) async fn create_custom_preset(
     }
     match crate::vdisplay::policy::add_custom_preset(input) {
         Ok(preset) => (StatusCode::CREATED, Json(preset)).into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Couldn't save the preset — {e}"),
+        ),
     }
 }
 
@@ -486,7 +495,7 @@ pub(crate) async fn create_custom_preset(
         (status = BAD_REQUEST, description = "Empty name", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = NOT_FOUND, description = "No custom preset with that id", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn update_custom_preset(
@@ -499,7 +508,10 @@ pub(crate) async fn update_custom_preset(
     match crate::vdisplay::policy::update_custom_preset(&id, input) {
         Ok(Some(preset)) => Json(preset).into_response(),
         Ok(None) => api_error(StatusCode::NOT_FOUND, "no custom preset with that id"),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Couldn't save the preset — {e}"),
+        ),
     }
 }
 
@@ -517,13 +529,16 @@ pub(crate) async fn update_custom_preset(
         (status = NO_CONTENT, description = "Preset deleted"),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = NOT_FOUND, description = "No custom preset with that id", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn delete_custom_preset(Path(id): Path<String>) -> Response {
     match crate::vdisplay::policy::delete_custom_preset(&id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_error(StatusCode::NOT_FOUND, "no custom preset with that id"),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Couldn't delete the preset — {e}"),
+        ),
     }
 }

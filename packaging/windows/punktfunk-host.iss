@@ -52,11 +52,6 @@
 ; own audio endpoints from Steam's streaming drivers - "Punktfunk Speakers" for desktop audio and
 ; "Punktfunk Microphone" for mic passthrough - so audio needs Steam INSTALLED (never running). A
 ; VB-CABLE the user installed themselves keeps working as a fallback mic target.
-; FfmpegBin (a dir of FFmpeg shared DLLs) is optional - present when the host is built with
-; --features amf-qsv (the AMD/Intel AMF/QSV encode backend link-imports the FFmpeg libs).
-#ifdef FfmpegBin
-  #define WithFfmpeg
-#endif
 ; WebDir (the built web .output tree) + BunExe (a portable bun.exe) are passed together by
 ; pack-host-installer.ps1 to bundle the management console. Both required -> WithWeb.
 #ifdef WebDir
@@ -183,16 +178,8 @@ Source: "{#Readme}"; DestDir: "{app}"; DestName: "README.txt"; Flags: ignorevers
 Source: "{#BrandingDir}\punktfunk.ico"; DestDir: "{app}"; Flags: ignoreversion
 #ifdef LicensesDir
 ; License/attribution payload -> {app}\licenses: the project's MIT/Apache texts, the generated
-; THIRD-PARTY-NOTICES (permissive crate attributions), and (on an amf-qsv build) the FFmpeg LGPL
-; notice + license text. Staged by pack-host-installer.ps1.
+; THIRD-PARTY-NOTICES (permissive crate attributions). Staged by pack-host-installer.ps1.
 Source: "{#LicensesDir}\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
-#endif
-#ifdef WithFfmpeg
-; FFmpeg shared DLLs (avcodec/avutil/swscale/...) laid down next to the exe - the AMD/Intel
-; (AMF/QSV) encode backend link-imports them, so the exe won't start without them. NVENC/software-
-; only builds simply omit this block. These are unmodified BtbN *lgpl-shared* builds, linked
-; dynamically (replaceable DLLs) - FFmpeg is used under the LGPL v2.1+; see {app}\licenses.
-Source: "{#FfmpegBin}\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 #endif
 ; The portable bun runtime -> {app}\bun\bun.exe. Shared by the web console AND the plugin/script
 ; runner (both run on bun), so stage it once when EITHER is bundled.

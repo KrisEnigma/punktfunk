@@ -79,6 +79,10 @@ pairing and its own name.
 - **Its audio endpoints are its own.** The minted speaker and microphone devices carry the seat's
   id, so a seat finds its own devices and never adopts a neighbour's. A seat host also leaves the
   machine's default playback and recording devices alone, since those are shared by the whole box.
+- **Its virtual pointer is its own.** The resident HID mouse that keeps Windows drawing a cursor
+  into the stream is named after the seat's connector, so each seat mints its own instead of the
+  second one finding the first's name taken. Virtual gamepads are not partitioned this way yet: a
+  seat can still be refused a pad another host on the box holds.
 - **No status tray.** The tray is a per-user, per-session icon and the supervisor is the control
   surface for seats, so a seat host does not supervise one.
 
@@ -123,6 +127,22 @@ Run with at least one seat connected, since the devnodes only exist while a sess
 which driver owns each live seat display, compares both driver dates and warns before the tie can
 be lost, and names the Windows edition — a client edition serves one session at a time however
 well the display works.
+
+## Seat audio needs a driver on disk
+
+A seat with no sound card has nothing to loopback-capture, so the host mints its own render
+endpoint per seat. Minting binds Valve's Remote Play streaming drivers, which means
+`SteamStreamingSpeakers.inf` and `SteamStreamingMicrophone.inf` have to be present — either
+already bound to a device, or in Steam's driver directory. Steam never has to run. Without them
+a seat starts, streams video and is silently mute.
+
+```
+powershell -File check-seat-audio.ps1
+```
+
+A virtual cable is not a substitute. The wiring plan refuses a cable as a loopback source,
+because capturing one re-records whatever is written into it, and `PUNKTFUNK_MIC_DEVICE` only
+pins the microphone. Both address the microphone, not desktop audio.
 
 ## What the host never knows
 

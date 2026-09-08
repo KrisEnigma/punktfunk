@@ -15,13 +15,15 @@ use std::time::Duration;
 
 use pf_driver_proto::encode::DRV_STATUS_OPENED;
 use pf_driver_proto::encode::au::{self, AuHeader};
-use pf_driver_proto::encode::{self as wire, EncoderCapsWire, SetEncodeReply, SetEncodeRequest};
+use pf_driver_proto::encode::{
+    self as wire, EncoderCapsWire, SetEncodeReply, SetEncodeRequest, backend,
+};
 use pf_encode_win::{ChromaFormat, Codec, Encoder, EncoderCaps};
 use pf_frame::HdrMeta;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
-use super::convert::{AdapterId, Fail, InputKind, pixel_format};
+use super::convert::{AdapterId, Fail, InputKind, bridge, pixel_format};
 use super::drive::Drive;
 use super::pool::Pool;
 use super::section::{AuSection, EncodeSession};
@@ -29,7 +31,7 @@ use crate::direct_3d_device::Direct3DDevice;
 use crate::monitor::Monitor;
 use crate::worker::{Mmcss, Worker};
 
-pub(crate) const BACKEND_NAMES: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
+pub(crate) use pf_driver_proto::encode::backend::NAMES as BACKEND_NAMES;
 
 /// A failed `SET_ENCODE` as the wire reply: `status` from the driver's domain, the stage tag
 /// in `name`.
@@ -86,10 +88,13 @@ fn caps_wire(c: EncoderCaps) -> EncoderCapsWire {
 }
 
 /// Walk the request's backend list in order; the first that opens wins. `Err` is the last
-/// failure as the wire reply — no silent fallback past the list.
+/// failure as the wire reply — no silent fallback past the list. `open_backend` returns a
+/// backend whose session already exists, so `reply.caps` describes the live encoder rather
+/// than its defaults — the host reads those caps once and never asks again.
 fn open_listed(
     req: &SetEncodeRequest,
     adapter: &AdapterId,
+    device: &windows62::Win32::Graphics::Direct3D11::ID3D11Device,
 ) -> Result<(Box<dyn Encoder>, OpenSpec, SetEncodeReply), SetEncodeReply> {
     let mut last: Fail = (-1, "nobackend");
     for &backend in req.backends.iter().take_while(|&&b| b != 0) {
@@ -100,7 +105,7 @@ fn open_listed(
                 continue;
             }
         };
-        match open_backend(&spec, adapter) {
+        match open_backend(&spec, adapter, device) {
             Ok(mut enc) => {
                 if req.wire_chunk_bytes != 0 {
                     enc.set_wire_chunking(req.wire_chunk_bytes as usize);
@@ -187,7 +192,11 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
     let Some(monitor) = ctx.monitor.upgrade() else {
         return fail(wire::SET_ENCODE_NO_MONITOR, (-6, "gone"));
     };
-    let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter) {
+    let device = match bridge(&ctx.device.device) {
+        Ok(d) => d,
+        Err(f) => return fail(wire::SET_ENCODE_NO_DEVICE, f),
+    };
+    let (mut enc, spec, reply) = match open_listed(&ctx.session.request, &adapter, &device) {
         Ok(x) => x,
         Err(reply) => {
             let _ = ctx.opened.send(reply);
@@ -224,6 +233,10 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         if pool.bypass() { "bypass" } else { "pool" },
         ctx.session.request.target_id
     );
+    // What the pool guarantees, so a backend that can encode an input texture where it lies skips
+    // its own copy of every frame. A slot the encoder holds is in `encoding`, which no drain pass
+    // takes back until the AU is published.
+    enc.set_input_ring_depth(super::drive::MAX_INFLIGHT);
     section.store_u32(offset_of!(AuHeader, driver_status), DRV_STATUS_OPENED);
     section.store_u32(
         offset_of!(AuHeader, driver_status_detail),
@@ -295,7 +308,16 @@ pub fn disable_implicit_vulkan_layers() {
 }
 
 /// One backend open on `adapter`. `Err` carries the stage tag; the backend's message is logged.
-pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Encoder>, Fail> {
+/// `device` is the one the pool's frames carry: NVENC opens its session against it here so the
+/// caller's caps read describes the hardware.
+pub fn open_backend(
+    spec: &OpenSpec,
+    adapter: &AdapterId,
+    device: &windows62::Win32::Graphics::Direct3D11::ID3D11Device,
+) -> Result<Box<dyn Encoder>, Fail> {
+    // NVENC is the only arm that opens against the device, and it is x86-64 only.
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = device;
     let (w, h, fps, bps) = (spec.width, spec.height, spec.fps, spec.bitrate_bps);
     let (depth, chroma) = (spec.bit_depth, spec.chroma);
     let format = pixel_format(spec.kind);
@@ -304,21 +326,38 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
     // ids here and the host falls through to Media Foundation.
     let opened: anyhow::Result<Box<dyn Encoder>> = match spec.backend {
         #[cfg(target_arch = "x86_64")]
-        1 => pf_encode_win::nvenc::NvencD3d11Encoder::open(
+        backend::NVENC => pf_encode_win::nvenc::NvencD3d11Encoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, 1, luid,
         )
-        .map(|e| Box::new(e) as Box<dyn Encoder>),
-        2 => pf_encode_win::amf::AmfEncoder::open(
+        .and_then(|mut e| {
+            // The drive loop parks on handles, so the session opens async and hands its
+            // completion events out through `ready_event` — no retrieve thread, no sampling.
+            // `PFVD_NVENC_EVENTS=0` (machine environment, read per open) falls back to the sync
+            // session and the loop's bounded-poll arm: the A/B for a GPU whose async encode
+            // retires slower than its sync one.
+            e.use_completion_events(crate::log::knob("PFVD_NVENC_EVENTS").as_deref() != Some("0"));
+            // All three of these defer their session to the first frame, and the host reads the
+            // caps in our reply once per session: open it here or it caches the defaults.
+            e.prepare_d3d11(device, format, w, h)?;
+            Ok(Box::new(e) as Box<dyn Encoder>)
+        }),
+        backend::AMF => pf_encode_win::amf::AmfEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
-        .map(|e| Box::new(e) as Box<dyn Encoder>),
+        .and_then(|mut e| {
+            e.prepare(device)?;
+            Ok(Box::new(e) as Box<dyn Encoder>)
+        }),
         #[cfg(target_arch = "x86_64")]
-        3 => pf_encode_win::qsv::QsvEncoder::open(
+        backend::QSV => pf_encode_win::qsv::QsvEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
-        .map(|e| Box::new(e) as Box<dyn Encoder>),
+        .and_then(|mut e| {
+            e.prepare(device)?;
+            Ok(Box::new(e) as Box<dyn Encoder>)
+        }),
         #[cfg(target_arch = "x86_64")]
-        4 => {
+        backend::PYROWAVE => {
             // Layers were disabled at `driver_entry`; doing it here would race the live threads.
             pf_encode_win::pyrowave::PyroWaveEncoder::open(
                 w,
@@ -332,7 +371,7 @@ pub fn open_backend(spec: &OpenSpec, adapter: &AdapterId) -> Result<Box<dyn Enco
             )
             .map(|e| Box::new(e) as Box<dyn Encoder>)
         }
-        5 => pf_encode_win::mf::MfEncoder::open(
+        backend::MEDIA_FOUNDATION => pf_encode_win::mf::MfEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
         .map(|e| Box::new(e) as Box<dyn Encoder>),

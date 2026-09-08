@@ -263,6 +263,7 @@ impl Link {
                     pts_ns,
                     keyframe,
                     recovery_anchor: false,
+                    recovery_point: false,
                     chunk_aligned,
                 })
             }
@@ -386,7 +387,7 @@ fn handshake(mut link: Link, p: &Params, bitrate_bps: u64) -> Result<Handshake> 
             })
         }
         FromWorker::InitErr { message } => {
-            bail!("encode worker could not open its encoder: {message}")
+            bail!("encode worker did not open its encoder: {message}")
         }
         other => bail!("unexpected encode worker handshake: {other:?}"),
     }
@@ -651,6 +652,12 @@ impl Encoder for RemotePyroWave {
             bail!("pyrowave: poll() on an AU already being drained through poll_chunk");
         }
         self.poll_whole()
+    }
+
+    /// Encode is synchronous on both rungs, so `poll` never blocks on hardware and there is
+    /// no handle to park on. Written out for the same reason as `ready_aus`.
+    fn ready_event(&self) -> Option<isize> {
+        None
     }
 
     fn supports_chunked_poll(&self) -> bool {
@@ -1016,7 +1023,7 @@ mod tests {
         assert!(format!("{err:#}").contains("punktfunk-encode-worker"));
     }
 
-    /// Ladder rung: the worker started, spoke, and could not open its encoder. An answer, not a
+    /// Ladder rung: the worker started, spoke, and did not open its encoder. An answer, not a
     /// death, so the host encodes in-process.
     #[test]
     fn an_init_error_fails_the_handshake_without_looking_like_a_death() {
@@ -1037,7 +1044,7 @@ mod tests {
         server.join().unwrap();
         let text = format!("{err:#}");
         assert!(
-            text.contains("could not open its encoder") && text.contains("Vulkan features"),
+            text.contains("did not open its encoder") && text.contains("Vulkan features"),
             "the rung must carry the worker's own diagnosis: {text}"
         );
     }

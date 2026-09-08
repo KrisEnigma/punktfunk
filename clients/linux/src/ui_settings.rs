@@ -83,9 +83,8 @@ const RESOLUTIONS: &[(u32, u32)] = &[
 ];
 /// `0` = the monitor's native refresh, resolved at connect.
 const REFRESH: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240];
-/// Render-scale multipliers (persisted as f64; mirrors [`punktfunk_core::render_scale::PRESETS`]).
-/// `1.0` = Native. Applied at connect and each match-window resize.
-const RENDER_SCALES: &[f64] = &[0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+/// Render-scale multipliers. `1.0` = Native; applied at connect and each match-window resize.
+use punktfunk_core::render_scale::PRESETS as RENDER_SCALES;
 
 /// Where each picker sits for a given settings snapshot. Factored out because two places need
 /// exactly this: seeding the dialog, and putting ONE row back to the inherited value when its
@@ -292,6 +291,15 @@ fn swatch_row(current: Option<&str>, on_pick: impl Fn(String) + 'static) -> gtk:
     row
 }
 
+/// Report a failed catalog write on the dialog that asked for it. Without this the prompt
+/// closes, nothing changes, and the button simply appears dead.
+fn saved(dialog: &adw::PreferencesDialog, r: anyhow::Result<()>) -> bool {
+    if let Err(e) = &r {
+        dialog.add_toast(adw::Toast::new(&format!("Couldn't save — {e:#}")));
+    }
+    r.is_ok()
+}
+
 /// The scope switcher, plus (in profile scope) that profile's management actions.
 ///
 /// Switching scope does not swap the rows in place: it closes the dialog — which commits the
@@ -305,6 +313,7 @@ fn scope_group(
     catalog: &ProfilesFile,
     active: Option<&StreamProfile>,
     next_scope: &Rc<RefCell<Option<Scope>>>,
+    pending_dup: &Rc<RefCell<Option<String>>>,
     parent: &impl IsA<gtk::Widget>,
 ) -> adw::PreferencesGroup {
     let g = group(
@@ -335,8 +344,14 @@ fn scope_group(
     {
         let (dialog, next, parent) = (dialog.clone(), next_scope.clone(), parent.as_ref().clone());
         let ids: Vec<String> = catalog.profiles.iter().map(|p| p.id.clone()).collect();
+        let restore = row.restorer();
         row.connect_changed(move |i| {
             if i == new_index {
+                // Put the row back on the layer being edited before asking. The prompt can be
+                // cancelled or refused, and a row parked on "New profile…" both names the wrong
+                // layer and — `changed` firing only on a real index change — makes picking it
+                // again do nothing at all.
+                restore_selected(&restore, current);
                 // Creation is the one branch that has to ask a question first; the switch
                 // happens in its callback, so a cancelled prompt leaves the dialog put.
                 let (dialog, next) = (dialog.clone(), next.clone());
@@ -355,7 +370,7 @@ fn scope_group(
                         profile.accent = accent;
                         let id = profile.id.clone();
                         catalog.profiles.push(profile);
-                        if catalog.save().is_ok() {
+                        if saved(&dialog, catalog.save()) {
                             *next.borrow_mut() = Some(Scope::Profile(id));
                             dialog.close();
                         }
@@ -385,13 +400,14 @@ fn scope_group(
             "Colour \u{2014} tints this profile's chips on host cards",
             active.accent.as_deref(),
             {
-                let id = active.id.clone();
+                let (dialog, id) = (dialog.downgrade(), active.id.clone());
                 move |hex| {
                     let mut catalog = ProfilesFile::load();
                     if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == id) {
                         p.accent = (!hex.is_empty()).then(|| hex.clone());
-                        if let Err(e) = catalog.save() {
-                            tracing::warn!(error = %format!("{e:#}"), "saving the profile colour");
+                        let r = catalog.save();
+                        if let Some(d) = dialog.upgrade() {
+                            saved(&d, r);
                         }
                     }
                 }
@@ -415,15 +431,16 @@ fn scope_group(
             if matches!(action, ProfileAction::Delete) {
                 b.add_css_class("destructive-action");
             }
-            let (dialog, next, parent, id, name) = (
+            let (dialog, next, dup, parent, id, name) = (
                 dialog.clone(),
                 next_scope.clone(),
+                pending_dup.clone(),
                 parent.as_ref().clone(),
                 active.id.clone(),
                 active.name.clone(),
             );
             b.connect_clicked(move |_| {
-                run_profile_action(action, &parent, &dialog, &next, &id, &name)
+                run_profile_action(action, &parent, &dialog, &next, &dup, &id, &name)
             });
             buttons.append(&b);
         }
@@ -447,10 +464,16 @@ fn run_profile_action(
     parent: &gtk::Widget,
     dialog: &adw::PreferencesDialog,
     next: &Rc<RefCell<Option<Scope>>>,
+    pending_dup: &Rc<RefCell<Option<String>>>,
     id: &str,
     name: &str,
 ) {
-    let (dialog, next, id) = (dialog.clone(), next.clone(), id.to_string());
+    let (dialog, next, pending_dup, id) = (
+        dialog.clone(),
+        next.clone(),
+        pending_dup.clone(),
+        id.to_string(),
+    );
     match action {
         ProfileAction::Rename => {
             let keep = id.clone();
@@ -468,7 +491,7 @@ fn run_profile_action(
                     if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == keep) {
                         p.name = new_name;
                     }
-                    if catalog.save().is_ok() {
+                    if saved(&dialog, catalog.save()) {
                         *next.borrow_mut() = Some(Scope::Profile(keep.clone()));
                         dialog.close();
                     }
@@ -476,24 +499,12 @@ fn run_profile_action(
             );
         }
         ProfileAction::Duplicate => {
-            let mut catalog = ProfilesFile::load();
-            let Some(source) = catalog.find_by_id(&id).cloned() else {
-                return;
-            };
-            // "Work 2", "Work 3", … — the first name the catalog doesn't already hold.
-            let copy_name = (2..)
-                .map(|n| format!("{} {n}", source.name))
-                .find(|n| !catalog.name_taken(n, None))
-                .unwrap_or_else(|| source.name.clone());
-            let mut copy = StreamProfile::new(copy_name);
-            copy.overrides = source.overrides.clone();
-            copy.accent = source.accent.clone();
-            let new_id = copy.id.clone();
-            catalog.profiles.push(copy);
-            if catalog.save().is_ok() {
-                *next.borrow_mut() = Some(Scope::Profile(new_id));
-                dialog.close();
-            }
+            // Only NAMED here; the copy is taken in the close handler. The rows the user
+            // edited are still in the widgets and reach the catalog when this dialog closes,
+            // so duplicating from disk now would copy the profile as it was BEFORE those
+            // edits — and land them on the original the user thought they were leaving.
+            *pending_dup.borrow_mut() = Some(id.clone());
+            dialog.close();
         }
         ProfileAction::Delete => {
             // The warning counts what actually breaks: hosts that fall back to the defaults,
@@ -525,11 +536,12 @@ fn run_profile_action(
             let confirm = adw::AlertDialog::new(Some("Delete profile?"), Some(&body));
             confirm.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
             confirm.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+            confirm.set_default_response(Some("cancel"));
             confirm.set_close_response("cancel");
             confirm.connect_response(Some("delete"), move |_, _| {
                 let mut catalog = ProfilesFile::load();
                 catalog.profiles.retain(|p| p.id != id);
-                if catalog.save().is_ok() {
+                if saved(&dialog, catalog.save()) {
                     // Bindings and pins are left dangling on purpose: they resolve as "no
                     // profile" everywhere, and rewriting every host record here would be a
                     // second, racier source of truth.
@@ -810,10 +822,9 @@ const APP_LICENSE: &str = concat!(
 /// scripts/gen-third-party-notices.sh; shown as a Legal section in the About dialog, and
 /// shipped as /usr/share/doc/punktfunk-client/THIRD-PARTY-NOTICES.txt by the packages).
 ///
-/// Deliberately the client-scoped file and not the workspace-wide one at the repo root:
-/// that root file is the HOST's, it still carries `ffmpeg-next` and the full FFmpeg licence
-/// text — and after M10 this app links no FFmpeg at all, which is exactly what the section
-/// below it claims.
+/// Deliberately the client-scoped file and not the workspace-wide one at the repo root: the
+/// root file covers the whole workspace, so it attributes crates this app never links, and
+/// the section below it claims exactly what is here.
 const THIRD_PARTY_NOTICES: &str = include_str!("../THIRD-PARTY-NOTICES.txt");
 
 /// The dynamically linked system libraries — not in the crate notices, since they aren't
@@ -888,6 +899,9 @@ fn gamescope_session() -> bool {
 }
 
 type ChangedFn = Rc<RefCell<Vec<Box<dyn Fn(u32)>>>>;
+
+/// The weak half of a [`ChangedFn`], held by [`RowRestore`].
+type ChangedWeak = std::rc::Weak<RefCell<Vec<Box<dyn Fn(u32)>>>>;
 
 /// A titled single-choice preference row. On a desktop this is a stock popover
 /// [`adw::ComboRow`]; under gamescope (see [`gamescope_session`]) it becomes an activatable
@@ -1042,16 +1056,57 @@ impl ChoiceRow {
 
     fn set_selected(&self, i: u32) {
         if let Some(combo) = self.row.downcast_ref::<adw::ComboRow>() {
-            combo.set_selected(i); // the notify handler syncs the cell
+            combo.set_selected(i); // the notify handler syncs the cell and dispatches
         } else {
-            self.selected.set(i);
+            let moved = self.selected.replace(i) != i;
             self.sync_value();
+            // Subpage mode (gamescope) has no `notify` to ride, so it has to dispatch what
+            // the combo branch gets for free — a per-row Reset reverts through here, and the
+            // rows whose caption or visibility follow this one are updated by these handlers.
+            if moved {
+                let fns = self.changed.borrow();
+                for f in fns.iter() {
+                    f(i);
+                }
+            }
         }
     }
 
     fn connect_changed(&self, f: impl Fn(u32) + 'static) {
         self.changed.borrow_mut().push(Box::new(f));
     }
+
+    /// A handle for putting this row's selection back from inside its own handler. The Rc
+    /// halves are weak, so a row never owns the closure that owns the row.
+    fn restorer(&self) -> RowRestore {
+        RowRestore {
+            row: self.row.clone(),
+            selected: Rc::downgrade(&self.selected),
+            changed: Rc::downgrade(&self.changed),
+        }
+    }
+}
+
+/// See [`ChoiceRow::restorer`].
+struct RowRestore {
+    row: adw::PreferencesRow,
+    selected: std::rc::Weak<Cell<u32>>,
+    changed: ChangedWeak,
+}
+
+/// Move a row's selection without running its handlers — for a handler that has just decided
+/// the change should not stand. `set_selected` dispatches them in both modes, so they are
+/// parked for the duration rather than reasoned about.
+fn restore_selected(r: &RowRestore, i: u32) {
+    let (Some(changed), Some(selected)) = (r.changed.upgrade(), r.selected.upgrade()) else {
+        return;
+    };
+    let parked = std::mem::take(&mut *changed.borrow_mut());
+    match r.row.downcast_ref::<adw::ComboRow>() {
+        Some(combo) => combo.set_selected(i),
+        None => selected.set(i),
+    }
+    *changed.borrow_mut() = parked;
 }
 
 /// Update a row's caption after construction — the dynamic-caption hook (touch mode,
@@ -1209,6 +1264,8 @@ pub fn show_scoped(
     let globals: Settings = settings.borrow().clone();
     // Where a scope switch wants to go once this dialog has committed and closed.
     let next_scope: Rc<RefCell<Option<Scope>>> = Rc::default();
+    // The profile "Duplicate" asked for, copied once this dialog's edits are committed.
+    let pending_dup: Rc<RefCell<Option<String>>> = Rc::default();
 
     // The dialog exists before the rows: ChoiceRow's gamescope mode pushes its selection
     // subpage onto it.
@@ -1508,14 +1565,11 @@ pub fn show_scoped(
         &audio_format_labels,
     );
     {
-        // Stereo-only, and insensitive rather than hidden under surround: a lossless surround
-        // frame does not fit one QUIC datagram at the default MTU, so the host declines it
-        // outright (design/hi-res-audio.md §4.2). Greying it keeps the reason visible next to the
-        // channel row that caused it — a row that vanished would read as a missing feature.
-        //
-        // Insensitivity covers the whole row including a profile scope's per-row Reset, exactly
-        // as the mic-dependent rows above do: an audio_format override can only be reset while
-        // the channels row says Stereo.
+        // Lossless is stereo-only: a lossless surround frame does not fit one QUIC datagram at
+        // the default MTU and the host declines it (design/hi-res-audio.md §4.2). Greyed, not
+        // hidden, so the reason stays beside the channel row that caused it. Insensitivity also
+        // covers the row's per-profile Reset, so an audio_format override can only be reset
+        // while the channels row says Stereo.
         let w = audio_format_row.widget().clone();
         w.set_sensitive(surround_row.selected() == 0);
         surround_row.connect_changed(move |i| w.set_sensitive(i == 0));
@@ -1574,13 +1628,10 @@ pub fn show_scoped(
         "Microphone",
         "The input that feeds the host's virtual mic",
     );
-    // The device pick and the echo canceller only matter while the mic streams at all — both
-    // follow it. One handler each (the pickers are optional, the echo row never is), and the
-    // initial state is set here because the seed block further down fires these too.
-    //
-    // Insensitivity covers the whole row, including the per-row Reset a profile scope adds:
-    // an echo_cancel override can only be reset while the mic row is on. Turn it on, reset,
-    // turn it back off — the alternative is a control that looks live and isn't.
+    // The mic device picker and the echo canceller follow the mic switch; the seed's
+    // `set_active` fires the handler only when it changes the switch, so set the initial
+    // state here too. Desensitising the whole row disables the per-row Reset a profile scope
+    // adds, so an echo_cancel override can only be reset while the mic row is on.
     if let Some(r) = &micdev_row {
         let w = r.widget().clone();
         w.set_sensitive(mic_row.is_active());
@@ -1593,16 +1644,10 @@ pub fn show_scoped(
     }
 
     // ---- Controllers ----
-    // Controller forwarding: Automatic forwards EVERY real controller, each as its own pad
-    // (Steam's virtual pad skipped); pinning one restricts the session to that single
-    // controller (single-player). The pin is persisted by stable key (`Settings::forward_pad`),
-    // so it survives restarts — and disconnects: an offline pinned pad keeps its entry here
-    // instead of silently snapping back to Automatic.
-    // Off = this device's controllers are not sent at all, because they reach the host
-    // another way (USB passthrough such as VirtualHere, or a pad plugged into the host).
-    // It also stops the session OPENING the pad, which is what frees the device for a
-    // passthrough tool to bind — so the two rows below have nothing to act on while it is
-    // off, and are desensitised to say so.
+    // Automatic forwards every real controller as its own pad (Steam's virtual pad skipped);
+    // pinning one forces single-player. The pin persists by stable key (`Settings::forward_pad`),
+    // so an offline pinned pad keeps its entry here. Off sends nothing and never opens the pad,
+    // which frees it for USB passthrough — so the two rows below are desensitised.
     let pad_forward_row = adw::SwitchRow::builder()
         .title("Forward controllers")
         .subtitle(
@@ -1696,14 +1741,11 @@ pub fn show_scoped(
         "Hold Select alone for the host's guide button — a tap still goes through",
         GUIDE_GESTURE_LABELS,
     );
-    // Controller audio (the 0xD1 plane): a wired DualSense's own voice coils and its little
-    // built-in speaker, streamed from the host and rendered on the pad in your hands. Both are
-    // negotiated — they change nothing without a capable host AND a wired DualSense — so the
-    // rows say what they are for rather than promising an effect.
-    //
-    // Deliberately NOT profileable: which pad is in your hands is a property of this device,
-    // not of the host a profile is authored against (the forwarded-pad pin below sits out for
-    // the same reason).
+    // Controller audio (the 0xD1 plane): a wired DualSense's voice coils and its own speaker,
+    // streamed from the host. Both are negotiated — nothing happens without a capable host AND
+    // a wired DualSense — so the rows say what they are for, not what they will do.
+    // Global scope only, like the forwarded-pad pin: which pad is in your hands is a property
+    // of this device, not of the host a profile is authored against.
     let haptics_row = adw::SwitchRow::builder()
         .title("Controller haptics")
         .subtitle("Play a DualSense's voice-coil haptics on the pad itself — wired pads only")
@@ -1810,19 +1852,10 @@ pub fn show_scoped(
     }
 
     // ---- Override markers, per-row reset, and the touch that creates an override ----
-    // One pass per row, because the three are the same fact from different sides: the marker
-    // says "this profile changes this", the reset is the only way back (the override model
-    // never infers "not overridden" from a value comparison), and touching the control is what
-    // creates it. The marker appears ON TOUCH — a user who changes a row and sees no
-    // acknowledgement has no reason to believe it took.
-    //
-    // A reset acts IN PLACE: it clears the field, puts that one control back to the inherited
-    // value, and drops the marker. Rebuilding the dialog would be simpler, but it animates the
-    // whole surface for a one-row change and dumps the user back on the first page — a heavy,
-    // disorienting answer to "undo this row".
-    //
-    // Wired after the seed block on purpose: `set_selected`/`set_active` during setup must not
-    // look like the user touching anything, or opening a profile would override every row.
+    // One pass per row: the marker appears on touch, and reset acts in place — it clears the
+    // field, restores the inherited value and drops the marker, because the model never infers
+    // "not overridden" from a value comparison. Wired after the seed block: `set_selected` and
+    // `set_active` during setup must not read as a touch, or opening a profile overrides everything.
     if let Some(active) = &active {
         let o = &active.overrides;
         let profile_id = active.id.clone();
@@ -1838,10 +1871,11 @@ pub fn show_scoped(
          -> Option<Rc<dyn Fn()>> {
             let row = row.downcast_ref::<adw::ActionRow>()?.clone();
             let widgets: Rc<RefCell<Option<(gtk::Box, gtk::Button)>>> = Rc::default();
-            let (touched, id) = (touched.clone(), profile_id.clone());
+            let (dialog, touched, id) = (dialog.downgrade(), touched.clone(), profile_id.clone());
             let revert = Rc::new(revert_control);
             let build = {
-                let (widgets, row, touched, id, revert) = (
+                let (dialog, widgets, row, touched, id, revert) = (
+                    dialog.clone(),
                     widgets.clone(),
                     row.clone(),
                     touched.clone(),
@@ -1870,7 +1904,8 @@ pub fn show_scoped(
                     row.add_prefix(&dot);
                     row.add_prefix(&reset);
                     {
-                        let (widgets, row, touched, id, revert) = (
+                        let (dialog, widgets, row, touched, id, revert) = (
+                            dialog.clone(),
                             widgets.clone(),
                             row.clone(),
                             touched.clone(),
@@ -1885,8 +1920,9 @@ pub fn show_scoped(
                             let mut catalog = ProfilesFile::load();
                             if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == id) {
                                 p.overrides.clear(key);
-                                if let Err(e) = catalog.save() {
-                                    tracing::warn!(error = %format!("{e:#}"), "clearing an override");
+                                let r = catalog.save();
+                                if let Some(d) = dialog.upgrade() {
+                                    saved(&d, r);
                                 }
                             }
                             revert();
@@ -2137,6 +2173,7 @@ pub fn show_scoped(
         &catalog,
         active.as_ref(),
         &next_scope,
+        &pending_dup,
         parent,
     ));
     let session_group = group("Session", "");
@@ -2301,17 +2338,39 @@ pub fn show_scoped(
         // Sharing it is what keeps the two scopes from interpreting the same controls
         // differently (the tri-state resolution row is the obvious trap).
         let apply_rows = |s: &mut Settings| {
+            // A value these tables cannot list (the console offers the Deck's 1280x800, this
+            // one offers 144 Hz up) displays as the fallback rung, so writing it back erases it
+            // just by opening and closing. Write only what this table lists, or what moved —
+            // the rule the gamepad and pad-speaker rows below already follow.
+            let listed_res = s.match_window
+                || (s.width, s.height) == (0, 0)
+                || RESOLUTIONS.contains(&(s.width, s.height));
+            let (seed_res, seed_hz, seed_scale) = (
+                index::resolution(s),
+                index::refresh(s),
+                index::render_scale(s),
+            );
             // Index 1 is the virtual "Match window" option; 0 = Native, 2.. = explicit.
             let res_i = (res_row.selected() as usize).min(RESOLUTIONS.len());
-            s.match_window = res_i == 1;
-            (s.width, s.height) = if res_i <= 1 {
-                (0, 0)
-            } else {
-                RESOLUTIONS[res_i - 1]
-            };
-            s.refresh_hz = REFRESH[(hz_row.selected() as usize).min(REFRESH.len() - 1)];
-            s.render_scale =
-                RENDER_SCALES[(scale_row.selected() as usize).min(RENDER_SCALES.len() - 1)];
+            if listed_res || res_i as u32 != seed_res {
+                s.match_window = res_i == 1;
+                (s.width, s.height) = if res_i <= 1 {
+                    (0, 0)
+                } else {
+                    RESOLUTIONS[res_i - 1]
+                };
+            }
+            let hz_i = (hz_row.selected() as usize).min(REFRESH.len() - 1);
+            if REFRESH.contains(&s.refresh_hz) || hz_i as u32 != seed_hz {
+                s.refresh_hz = REFRESH[hz_i];
+            }
+            let scale_i = (scale_row.selected() as usize).min(RENDER_SCALES.len() - 1);
+            let listed_scale = RENDER_SCALES
+                .iter()
+                .any(|&x| (x - s.render_scale).abs() < 1e-6);
+            if listed_scale || scale_i as u32 != seed_scale {
+                s.render_scale = RENDER_SCALES[scale_i];
+            }
             s.bitrate_kbps = (bitrate_row.value() * 1000.0) as u32;
             // Keep a stored preference this table doesn't list (e.g. "switchpro" — valid to the
             // session, hand-edited or written by another client): it displays as "Automatic", and
@@ -2427,16 +2486,33 @@ pub fn show_scoped(
                 commit_profile(active, &touched, &values);
             }
             None => {
-                // Rebase on the file, not the shell's start-of-app snapshot: the settings file
-                // has other whole-file writers (the spawner persists `last_window_w/h` after a
-                // match-window resize — see `profiles.rs` on why there's no merge), and saving
-                // the stale snapshot here would silently revert whatever they stored while this
-                // app was open. The rows carry every value this dialog owns, so applying them
-                // onto a fresh load loses nothing.
+                // Rebase on the file, not the start-of-app snapshot: other whole-file writers
+                // exist (the spawner persists `last_window_w/h`), and saving the stale snapshot
+                // would revert them. The rows carry every value this dialog owns.
                 let mut s = settings.borrow_mut();
                 *s = Settings::load();
                 apply_rows(&mut s);
                 s.save();
+            }
+        }
+        // Deferred Duplicate: the source has just been committed above, so the copy is
+        // taken from what the user was actually looking at.
+        if let Some(src) = pending_dup.borrow_mut().take() {
+            let mut catalog = ProfilesFile::load();
+            if let Some(source) = catalog.find_by_id(&src).cloned() {
+                // "Work 2", "Work 3", … — the first name the catalog doesn't already hold.
+                let copy_name = (2..)
+                    .map(|n| format!("{} {n}", source.name))
+                    .find(|n| !catalog.name_taken(n, None))
+                    .unwrap_or_else(|| source.name.clone());
+                let mut copy = StreamProfile::new(copy_name);
+                copy.overrides = source.overrides.clone();
+                copy.accent = source.accent.clone();
+                let new_id = copy.id.clone();
+                catalog.profiles.push(copy);
+                if catalog.save().is_ok() {
+                    *next_scope.borrow_mut() = Some(Scope::Profile(new_id));
+                }
             }
         }
         // A scope switch closed this dialog to commit first; now re-open in the new scope.
@@ -2452,6 +2528,52 @@ pub fn show_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The premise the write guard rests on: a stored value this dialog's table does not
+    /// list seeds the row at a FALLBACK rung, indistinguishable from the user having chosen
+    /// that rung. `apply_rows` therefore leaves such a row alone unless it moved — otherwise
+    /// opening and closing Settings rewrites a value another client set.
+    ///
+    /// No display needed: these are the pure index helpers the rows are seeded from.
+    #[test]
+    fn off_ladder_values_seed_a_fallback_rung() {
+        // The Steam Deck's panel, which the console's table offers and this one does not.
+        let deck = Settings {
+            width: 1280,
+            height: 800,
+            ..Default::default()
+        };
+        assert_eq!(index::resolution(&deck), 0, "seeds Native, not 1280x800");
+        assert!(
+            !RESOLUTIONS.contains(&(deck.width, deck.height)),
+            "the premise: this table cannot show it"
+        );
+
+        // A refresh rung the console's table lacks round-trips here, so it must be written.
+        let fast = Settings {
+            refresh_hz: 240,
+            ..Default::default()
+        };
+        assert!(REFRESH.contains(&fast.refresh_hz));
+        assert_eq!(REFRESH[index::refresh(&fast) as usize], 240);
+
+        // One this table lacks seeds rung 0 and must NOT be written back.
+        let odd = Settings {
+            refresh_hz: 75,
+            ..Default::default()
+        };
+        assert!(!REFRESH.contains(&odd.refresh_hz));
+        assert_eq!(index::refresh(&odd), 0);
+
+        // Render scale falls back to 1.0's rung, which is not index 0 — so "unmoved" cannot
+        // be spelled as "index 0" for this row.
+        let odd_scale = Settings {
+            render_scale: 0.63,
+            ..Default::default()
+        };
+        let fallback = index::render_scale(&odd_scale);
+        assert!(RENDER_SCALES[fallback as usize] == 1.0 && fallback != 0);
+    }
 
     /// Depth-first search for an [`adw::ActionRow`] with the given title.
     fn find_action_row(root: &gtk::Widget, title: &str) -> Option<adw::ActionRow> {

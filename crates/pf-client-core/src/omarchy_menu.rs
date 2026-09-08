@@ -78,7 +78,7 @@ fn write_rows(path: &Path, rows: Option<&str>) -> Result<(), String> {
     let stripped = strip_block(&text);
     let next = match rows {
         Some(r) => insert_block(&stripped, r)
-            .ok_or_else(|| format!("could not find the closing brace in {}", path.display()))?,
+            .ok_or_else(|| format!("no closing brace in {}", path.display()))?,
         None => stripped,
     };
     if !jsonc_valid(&next) {
@@ -353,7 +353,7 @@ mod tests {
         let real = concat!(
             "{\n",
             "  // header comment with an example: \"a\": {\"b\":1},\n",
-            "  \"punktfunk.console\": {\"label\":\"Open console\",\"action\":\"omarchy-launch-webapp https://localhost:47992\"},\n",
+            "  \"punktfunk.console\": {\"label\":\"Open console\",\"action\":\"sh -c 'omarchy-launch-webapp \\\"$(punktfunk-host ctl console-url || echo https://localhost:47992)\\\"'\"},\n",
             "  \"last\": {\"label\":\"x\"}, // trailing, then a comment\n",
             "}\n"
         );

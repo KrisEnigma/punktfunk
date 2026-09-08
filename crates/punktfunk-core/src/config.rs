@@ -298,7 +298,8 @@ pub const fn pad_motion_reaches(
     }
 }
 
-/// Per-block FEC. Recovery is GameStream's `m = ceil(k * fec_percent / 100)`.
+/// Per-block FEC. Recovery is GameStream's `m = ceil(k * fec_percent / 100)`, floored at
+/// `MIN_RECOVERY_SHARDS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FecConfig {
     pub scheme: FecScheme,
@@ -308,12 +309,20 @@ pub struct FecConfig {
     pub max_data_per_block: u16,
 }
 
+/// Parity floor per block while FEC is on. A burst is N packets whatever the frame size,
+/// and a percent gives a small frame one shard or none; Moonlight's
+/// `minRequiredFecPackets` floor is the same 2. Not a `FecConfig` field: that struct is
+/// on the wire in `Welcome`, and the receiver sizes blocks from the packet header anyway.
+pub(crate) const MIN_RECOVERY_SHARDS: usize = 2;
+
 impl FecConfig {
     pub fn recovery_for(&self, data_shards: usize) -> usize {
         if self.fec_percent == 0 || data_shards == 0 {
             return 0;
         }
-        (data_shards * self.fec_percent as usize).div_ceil(100)
+        (data_shards * self.fec_percent as usize)
+            .div_ceil(100)
+            .max(MIN_RECOVERY_SHARDS)
     }
 }
 

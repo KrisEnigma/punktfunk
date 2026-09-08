@@ -7,14 +7,10 @@
 # the package names the target boxes ship. The client links no NVIDIA libs — no filter
 # needed.
 #
-# NO libav* here since M10 (design/client-native-decode.md §6): the client decodes with
-# pf-vkdecode / pf-vaapi (libva is dlopen'd, never linked) / openh264+rav1d, so nothing in
-# either binary has an FFmpeg DT_NEEDED and shlibdeps stops emitting `libavcodec…` on its
-# own — there is no list here to prune, which is exactly the property to keep. That also
-# ends the soname coupling that forced the host package's BUNDLE_FFMPEG dance: a client
-# .deb built on 26.04 no longer names a libavcodec the target box must have.
-# The HOST package (build-deb.sh) is unchanged — it encodes with libavcodec and still
-# depends on / bundles it.
+# The client decodes with pf-vkdecode / pf-vaapi (libva is dlopen'd, never linked) /
+# openh264+rav1d, so neither binary carries a codec-library DT_NEEDED and shlibdeps emits
+# no soname the target box must match. There is no list here to prune, which is exactly the
+# property to keep.
 #
 # Usage: VERSION=0.0.1~ci42.gdeadbee [ARCH=amd64] [TARGET=<rust triple>] \
 #          bash packaging/debian/build-client-deb.sh
@@ -117,9 +113,9 @@ install -Dm0644 LICENSE-APACHE                           "$DOCDIR/LICENSE-APACHE
 install -Dm0644 README.md                                "$DOCDIR/README.md"
 # Third-party crate attributions (regenerate with scripts/gen-third-party-notices.sh).
 #
-# The CLIENT-scoped copy, not the workspace-wide one at the repo root: the root file is the host's
-# and still lists ffmpeg-next plus the full FFmpeg licence text, while this package links no FFmpeg
-# at all since M10. It is the same file the GTK shell shows on its About → Legal page, so the
+# The CLIENT-scoped copy, not the workspace-wide one at the repo root: the root file covers the
+# whole workspace, of which this package is a subset. It is the same file the GTK shell shows on
+# its About → Legal page, so the
 # installed doc and the running app say the same thing. Falls back to the root file only if the
 # generated copy is missing (an old checkout), because shipping no attribution at all is worse.
 if [ -f clients/linux/THIRD-PARTY-NOTICES.txt ]; then

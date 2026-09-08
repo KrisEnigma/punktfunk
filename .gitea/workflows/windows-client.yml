@@ -34,9 +34,8 @@
 #
 # NO FFmpeg here since M10 (design/client-native-decode.md §6): the client decodes with
 # pf-vkdecode / pf-dxvadec / openh264+rav1d and links no libav* at all, so this workflow sets
-# no FFMPEG_DIR, no PF_FFVK_VULKAN_INCLUDE and prepends nothing to PATH. The provisioning
-# script still fetches the FFmpeg trees because the HOST keeps FFmpeg — windows-host.yml's
-# `amf-qsv` leg link-imports them.
+# no FFMPEG_DIR, no PF_FFVK_VULKAN_INCLUDE and prepends nothing to PATH. Nor does the host
+# any more, so nothing provisions an FFmpeg tree.
 #
 # The MSVC/WinUI toolchain (cargo/rustup on ASCII paths, NASM, CMake, LLVM, CARGO_HOME,
 # CMAKE_POLICY_VERSION_MINIMUM, …) is baked into the runner's daemon env. Per-checkout / per-arch
@@ -163,14 +162,13 @@ jobs:
   # PR code could therefore persist on that machine or harvest signing material a later job exposes.
   # The DEFINITIVE fix is operational and lives outside this file: enable Gitea's "require approval to
   # run workflows for PRs from outside collaborators/forks", and/or route PR CI to isolated ephemeral
-  # runners. The `if:` below is only a backstop — it skips fork PRs where Gitea reports the fork flag,
-  # and FAILS OPEN (still runs) for same-repo PRs and on Gitea versions that don't populate it, so it
-  # never blocks internal PR CI.
+  # runners. The `if:` below is only a backstop, and it fails closed: only a PR whose head repo IS
+  # this repo runs. A fork, or a Gitea that leaves the field empty, does not.
   client:
     runs-on: windows-amd64
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.fork != true
+      github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -247,7 +245,7 @@ jobs:
       # cc-rs's cl.exe fan-out, which is what tips this runner into C1069 (see the header).
       - name: Build (release)
         shell: pwsh
-        run: cargo build --release -p punktfunk-client-windows -p punktfunk-client-session -p punktfunk-cli ${{ matrix.session_flags }} --target ${{ matrix.target }}
+        run: cargo build --release --locked -p punktfunk-client-windows -p punktfunk-client-session -p punktfunk-cli ${{ matrix.session_flags }} --target ${{ matrix.target }}
 
       - name: Clippy (-D warnings)
         shell: pwsh
@@ -258,7 +256,7 @@ jobs:
           $pkgs = @('-p','punktfunk-client-windows','-p','punktfunk-client-session','-p','punktfunk-cli','-p','pf-client-core','-p','pf-presenter','-p','pf-bitstream','-p','pf-vkdecode','-p','pf-dxvadec')
           $sf = @()
           if ('${{ matrix.target }}' -eq 'aarch64-pc-windows-msvc') { $sf = @('--no-default-features') } else { $pkgs += @('-p','pf-console-ui') }
-          cargo clippy --release @pkgs --all-targets @sf --target ${{ matrix.target }} -- -D warnings
+          cargo clippy --release --locked @pkgs --all-targets @sf --target ${{ matrix.target }} -- -D warnings
           if ($LASTEXITCODE) { throw "clippy" }
 
       - name: Rustfmt check
@@ -273,7 +271,7 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          cargo test --release -p punktfunk-client-windows -p punktfunk-client-session -p punktfunk-cli -p pf-client-core -p pf-presenter -p pf-console-ui -p pf-dxvadec --target ${{ matrix.target }}
+          cargo test --release --locked -p punktfunk-client-windows -p punktfunk-client-session -p punktfunk-cli -p pf-client-core -p pf-presenter -p pf-console-ui -p pf-dxvadec --target ${{ matrix.target }}
           if ($LASTEXITCODE) { throw "tests" }
 
       - name: sccache stats (visibility only)

@@ -526,6 +526,7 @@ mod tests {
             av1_input_depth_minus8: 0,
             hdr: false,
             rfi_supported: false,
+            intra_refresh_cnt: 0,
             slices: 0,
         }
     }
@@ -979,8 +980,20 @@ pub struct LowLatencyConfig {
     pub av1_input_depth_minus8: u32,
     pub hdr: bool,
     pub rfi_supported: bool,
+    /// Arm the on-demand intra refresh wave: the mode on with a period that never fires, so
+    /// a per-picture `forceIntraRefreshWithFrameCnt` runs one when an RFI declines. The
+    /// longest cycle the backend will force; 0 leaves the mode off.
+    pub intra_refresh_cnt: u32,
     /// [`resolve_slices`] result. ≤ 1 leaves the preset's single slice.
     pub slices: u32,
+}
+
+/// A periodic wave that never comes: only the forced one runs.
+const INTRA_REFRESH_NEVER: u32 = 1 << 30;
+
+/// Rows the driver sweeps: 32-px blocks bound the cycle for every NVENC codec.
+pub fn wave_rows(height: u32) -> u32 {
+    height.div_ceil(32)
 }
 
 /// Shared `NV_ENC_INITIALIZE_PARAMS` (P1/ULL, PTD, session dims/rate) pointing
@@ -1198,6 +1211,38 @@ pub unsafe fn apply_low_latency_config(cfg: &mut nv::NV_ENC_CONFIG, c: LowLatenc
             Codec::PyroWave => unreachable!("PyroWave never opens the direct-NVENC backend"),
         }
     }
+    // On-demand intra refresh: the mode on, the timer never, the recovery-point SEI where the
+    // codec has one so a stock decoder heals in-band too. `intraRefreshCnt` is the forced
+    // count's ceiling.
+    if c.rfi_supported && c.intra_refresh_cnt > 0 {
+        let cnt = c.intra_refresh_cnt;
+        match c.codec {
+            // SAFETY: H.264 session (matched on `c.codec`): `h264Config` is the active arm.
+            Codec::H264 => unsafe {
+                let h = &mut cfg.encodeCodecConfig.h264Config;
+                h.set_enableIntraRefresh(1);
+                h.intraRefreshPeriod = INTRA_REFRESH_NEVER;
+                h.intraRefreshCnt = cnt;
+                h.set_outputRecoveryPointSEI(1);
+            },
+            // SAFETY: HEVC session: `hevcConfig` is the active arm.
+            Codec::H265 => unsafe {
+                let h = &mut cfg.encodeCodecConfig.hevcConfig;
+                h.set_enableIntraRefresh(1);
+                h.intraRefreshPeriod = INTRA_REFRESH_NEVER;
+                h.intraRefreshCnt = cnt;
+                h.set_outputRecoveryPointSEI(1);
+            },
+            // SAFETY: AV1 session: `av1Config` is the active arm.
+            Codec::Av1 => unsafe {
+                let a = &mut cfg.encodeCodecConfig.av1Config;
+                a.set_enableIntraRefresh(1);
+                a.intraRefreshPeriod = INTRA_REFRESH_NEVER;
+                a.intraRefreshCnt = cnt;
+            },
+            Codec::PyroWave => unreachable!("PyroWave never opens the direct-NVENC backend"),
+        }
+    }
 }
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
@@ -1344,8 +1389,8 @@ mod arbiter_tests {
 }
 
 /// Hand-written split constants in `codec.rs` must equal the SDK enum.
-/// Duplicated so the libav path (no `nvenc` feature, no enum) shares one
-/// policy. This is the only crate that can see both.
+/// Duplicated so a build without the `nvenc` feature — which cannot see the
+/// SDK enum — still carries the policy. This crate sees both.
 #[cfg(test)]
 mod split_constant_parity {
     use nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_SPLIT_ENCODE_MODE as M;

@@ -25,9 +25,10 @@
 use super::nvenc_core::{
     apply_low_latency_config, build_init_params, cached_ceiling, codec_guid, plan_range_recovery,
     resolve_slices, resolve_split_subframe, resolve_subframe, store_ceiling, subframe_env_forced,
-    CeilingKey, LowLatencyConfig, NvStatusExt, RangePlan,
+    wave_rows, CeilingKey, LowLatencyConfig, NvStatusExt, RangePlan,
 };
-// Shared with the libav path (builds without the `nvenc` feature). Do not fork this copy.
+use crate::rfi::Wave;
+// Shared with Linux's direct session. Do not fork this copy.
 use super::nvenc_core::{
     cached_split_verdict, store_split_verdict, ArbAction, SplitArbiter, SplitKey,
 };
@@ -469,8 +470,12 @@ pub struct NvencD3d11Encoder {
     bitstreams: Vec<nv::NV_ENC_OUTPUT_PTR>,
     /// Async: completion event per pool bitstream (`HANDLE` as `usize`); empty in sync. Closed in `teardown`.
     events: Vec<usize>,
-    /// Async retrieve thread + channels. `None` = same-thread sync retrieve.
+    /// Async retrieve thread + channels. `None` = same-thread retrieve, sync or event-driven.
     async_rt: Option<AsyncRetrieve>,
+    /// Caller asked for completion events without a retrieve thread
+    /// ([`Self::use_completion_events`]). Survives a rebuild; the session honours it only when
+    /// the GPU advertises async encode and nobody asked for the two-thread mode.
+    want_events: bool,
     /// Capturer `pipeline_depth`. Encode is in-place, so this hard-caps async depth: the capturer
     /// rotates the ring regardless of encode completion. `None` = unknown, do not pipeline past the env cap.
     input_ring_depth: Option<usize>,
@@ -490,7 +495,14 @@ pub struct NvencD3d11Encoder {
     arbiter: Option<SplitArbiter>,
     /// In-flight encodes: (bitstream, mapped input, pts_ns, recovery-anchor, idr-hint). The
     /// fourth field is the first frame after a successful [`invalidate_ref_frames`].
-    pending: VecDeque<(nv::NV_ENC_OUTPUT_PTR, nv::NV_ENC_INPUT_PTR, u64, bool, bool)>,
+    pending: VecDeque<(
+        nv::NV_ENC_OUTPUT_PTR,
+        nv::NV_ENC_INPUT_PTR,
+        u64,
+        bool,
+        bool,
+        bool,
+    )>,
     /// Next submission's `inputTimeStamp`. [`Encoder::submit_indexed`] pins it to the
     /// wire index so RFI timestamps stay 1:1 across rebuilds.
     frame_idx: i64,
@@ -499,6 +511,17 @@ pub struct NvencD3d11Encoder {
     /// is the recovery anchor. NVENC applies invalidation at the next `encode_picture`. Without
     /// the tag the client can only lift on an IDR, which session glue suppresses after RFI.
     pending_anchor: bool,
+    /// Intra refresh wave in flight: a declined RFI's answer instead of the IDR. The start
+    /// frame carries `forceIntraRefreshWithFrameCnt`; the driver sweeps from there.
+    wave: Option<Wave>,
+    /// Timestamps `[start, close)` of the latest wave: part-dirty pictures the driver would
+    /// otherwise serve as an RFI anchor. The close and everything after are clean.
+    wave_span: Option<(i64, i64)>,
+    /// A loss landed inside the wave in flight. The driver ignores a re-force mid-sweep, so
+    /// the sweep runs on with damage behind it: its close carries no mark, and a fresh wave
+    /// starts on the frame after it (`wave_queued`).
+    wave_spoiled: bool,
+    wave_queued: bool,
     inited: bool,
     /// From `query_caps`. Gates RFI instead of failing later as opaque `InvalidParam`.
     rfi_supported: bool,
@@ -643,6 +666,7 @@ impl NvencD3d11Encoder {
             bitstreams: Vec::new(),
             events: Vec::new(),
             async_rt: None,
+            want_events: false,
             input_ring_depth: None,
             async_supported: false,
             subframe_cap: false,
@@ -655,6 +679,10 @@ impl NvencD3d11Encoder {
             frame_idx: 0,
             force_kf: false,
             pending_anchor: false,
+            wave: None,
+            wave_span: None,
+            wave_spoiled: false,
+            wave_queued: false,
             inited: false,
             rfi_supported: false,
             custom_vbv: false,
@@ -689,7 +717,7 @@ impl NvencD3d11Encoder {
             // Completions poll never absorbed. AUs drop with the session; pending unmap below covers maps.
             while rt.done_rx.try_recv().is_ok() {}
         }
-        for (_, map, _, _, _) in &self.pending {
+        for (_, map, _, _, _, _) in &self.pending {
             if !map.is_null() {
                 let _ = (api().unmap_input_resource)(self.encoder, *map);
             }
@@ -745,6 +773,7 @@ impl NvencD3d11Encoder {
         self.pending.clear();
         self.chunk = None;
         self.subframe_chunks = false;
+        self.session_async = false;
         self.encoder = ptr::null_mut();
         self.inited = false;
         self.next = 0;
@@ -753,6 +782,59 @@ impl NvencD3d11Encoder {
         self.last_rfi_range = None;
         self.pending_anchor = false;
         self.distrusted = false;
+        self.wave = None;
+        self.wave_span = None;
+        self.wave_spoiled = false;
+        self.wave_queued = false;
+    }
+
+    /// A real loss with no clean frame old enough left: a wave heals without an anchor.
+    /// The client re-armed at this loss, so a wave under way restarts to give it a fresh
+    /// start and close. Nonsense and a range past the head stay the caller's keyframe.
+    fn start_wave(&mut self, first: i64, last: i64) -> bool {
+        let cycle = self.wave_cycle();
+        if cycle == 0 || first < 0 || first > last || first >= self.frame_idx {
+            return false;
+        }
+        if self.wave.is_some() {
+            // The driver ignores a re-force mid-sweep (measured on the RTX box): let this
+            // one run out unmarked and queue a fresh wave behind it.
+            self.wave_spoiled = true;
+            self.wave_queued = true;
+            tracing::debug!(
+                first,
+                last,
+                "nvenc RFI: loss mid-wave — wave queued behind it"
+            );
+            return true;
+        }
+        self.wave = Some(Wave::start(cycle));
+        tracing::debug!(
+            first,
+            last,
+            cycle,
+            "nvenc RFI: no clean anchor — intra refresh wave"
+        );
+        true
+    }
+
+    /// Whether the picture at `ts` is a part-dirty wave frame the driver must not anchor on.
+    fn wave_dirty(&self, ts: i64) -> bool {
+        self.wave_span
+            .is_some_and(|(start, close)| ts >= start && ts < close)
+    }
+
+    /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.
+    fn wave_cycle(&self) -> u32 {
+        if !crate::rfi::wave_enabled() {
+            return 0;
+        }
+        crate::rfi::wave_cycle(
+            wave_rows(self.height),
+            self.fps,
+            256,
+            crate::rfi::pinned_cycle(),
+        )
     }
 
     /// One `NV_ENC_CAPS` value; 0 on error (unqueryable = unsupported).
@@ -902,6 +984,7 @@ impl NvencD3d11Encoder {
                 av1_input_depth_minus8: if ten_bit_in { 2 } else { 0 },
                 hdr: self.hdr,
                 rfi_supported: self.rfi_supported,
+                intra_refresh_cnt: self.wave_cycle(),
                 // Latched at open so a later reconfigure re-presents the same slicing.
                 slices: self.slices,
             },
@@ -975,7 +1058,9 @@ impl NvencD3d11Encoder {
     }
 
     /// Arm a live split experiment. Same gates as Linux `arm_split_arbiter`; Windows also
-    /// refuses when `async_rt` is set — the submit→AU span then includes queue depth.
+    /// refuses any async session — the two-thread mode and the completion-event mode both
+    /// keep frames in flight, so `last_submit_at` names a newer submit than the AU it is
+    /// measured against and the span undercounts.
     fn arm_split_arbiter(&mut self) {
         if !matches!(
             std::env::var("PUNKTFUNK_NVENC_SPLIT_ARBITRATE").as_deref(),
@@ -985,7 +1070,7 @@ impl NvencD3d11Encoder {
         }
         if std::env::var_os("PUNKTFUNK_SPLIT_ENCODE").is_some()
             || cached_split_verdict(&self.split_key()).is_some()
-            || self.async_rt.is_some()
+            || self.session_async
             || self.encoder_engines < 2
             || self.codec == Codec::H264
         {
@@ -1138,7 +1223,11 @@ impl NvencD3d11Encoder {
             // disable it and retry; if bitrate itself is too high, bisect [FLOOR, requested].
             const CLAMP_TOL_BPS: u64 = 20_000_000; // stop bisecting within ~20 Mbps of the ceiling
 
-            let use_async = self.async_supported && async_retrieve_requested();
+            // Two async shapes share one init flag and one event per bitstream: the operator's
+            // two-thread retrieve, and the caller's event-driven same-thread retrieve. The
+            // retrieve thread is what separates them, and only the two-thread mode has one.
+            let two_thread = self.async_supported && async_retrieve_requested();
+            let use_async = two_thread || (self.async_supported && self.want_events);
 
             // Prior clamp already found this config's max — open at the ceiling
             // instead of binary-searching on every ABR overshoot.
@@ -1228,6 +1317,9 @@ impl NvencD3d11Encoder {
                             }
                         }
                     }
+                    // Only a bisection result, or a floor that opened at the split we asked for,
+                    // isolates the bitrate as the constraint. See the split fallback below.
+                    let mut bitrate_is_the_constraint = true;
                     if best.is_null() {
                         // Nothing in (FLOOR, requested] accepted — try the floor, also split-disabled
                         // in case forced split (not bitrate) is the blocker.
@@ -1254,6 +1346,9 @@ impl NvencD3d11Encoder {
                                     "NVENC initialize_encoder rejected even at the floor bitrate",
                                 )?;
                                 used_split = no_split;
+                                // Dropping split is what opened it, so the floor says nothing
+                                // about the bitrate this GPU accepts.
+                                bitrate_is_the_constraint = false;
                                 e
                             }
                         };
@@ -1264,7 +1359,12 @@ impl NvencD3d11Encoder {
                         clamped_mbps = best_bps / 1_000_000,
                         "NVENC: requested bitrate above the GPU codec-level ceiling — clamped to the max accepted"
                     );
-                    store_ceiling(self.ceiling_key(used_split), best_bps);
+                    // A ceiling is remembered for the process lifetime and clamps every later
+                    // open and reconfigure. Only record one the search actually attributed to
+                    // the bitrate; otherwise the split fallback would pin this key at the floor.
+                    if bitrate_is_the_constraint {
+                        store_ceiling(self.ceiling_key(used_split), best_bps);
+                    }
                     self.bitrate_bps = best_bps;
                     best
                 }
@@ -1300,8 +1400,10 @@ impl NvencD3d11Encoder {
                     .map_err(|e| nvenc_status::call_err("create_bitstream_buffer", e))?;
                 self.bitstreams.push(cb.bitstreamBuffer);
             }
-            // One auto-reset completion event per pool bitstream, plus the retrieve thread.
-            // The thread only sees raw addresses; `teardown` joins it before any of them die.
+            // One auto-reset completion event per pool bitstream. In the two-thread mode the
+            // retrieve thread waits on them and only ever sees raw addresses (`teardown` joins
+            // it before any of them die); in the event mode the caller parks on them itself
+            // through [`Encoder::ready_event`] and this thread still does the lock/copy.
             if use_async {
                 for _ in 0..POOL {
                     let ev = CreateEventW(None, false, false, PCWSTR::null())
@@ -1318,6 +1420,8 @@ impl NvencD3d11Encoder {
                         .nv_ok()
                         .map_err(|e| nvenc_status::call_err("register_async_event", e))?;
                 }
+            }
+            if two_thread {
                 let (work_tx, work_rx) = mpsc::sync_channel::<RetrieveJob>(POOL);
                 let (done_tx, done_rx) = mpsc::channel::<RetrieveDone>();
                 let enc_addr = enc as usize;
@@ -1335,6 +1439,12 @@ impl NvencD3d11Encoder {
                     pool = POOL,
                     "NVENC async retrieve active (two-thread encode: submit here, \
                      lock_bitstream on the retrieve thread)"
+                );
+            } else if use_async {
+                tracing::info!(
+                    pool = POOL,
+                    "NVENC completion events active (single-thread: the caller parks on \
+                     ready_event, poll locks here)"
                 );
             }
             self.inited = true;
@@ -1364,7 +1474,7 @@ impl NvencD3d11Encoder {
     /// oldest `pending` (FIFO), verify bitstream pairing, unmap, queue the AU. A retrieve error
     /// surfaces after the unmap so the rebuild path starts from clean state.
     fn absorb_done(&mut self, done: RetrieveDone) -> Result<()> {
-        let Some((bs, map, pts_ns, anchor, _idr_hint)) = self.pending.pop_front() else {
+        let Some((bs, map, pts_ns, anchor, _idr_hint, mark)) = self.pending.pop_front() else {
             bail!("NVENC async: completion with no in-flight frame (pairing bug)");
         };
         if bs as usize != done.bs {
@@ -1388,8 +1498,104 @@ impl NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: mark,
                 chunk_aligned: false,
             });
+        Ok(())
+    }
+
+    /// Build the encode session now, so [`caps`](Encoder::caps) describes the hardware.
+    ///
+    /// [`submit`](Encoder::submit) calls this on its own, but a caller that reads caps before
+    /// the first frame would otherwise get the struct defaults — `supports_rfi: false` on a
+    /// card that does support reference-picture invalidation, which costs every later loss a
+    /// full IDR. `device` must be the one the frames will arrive on, or the first submit
+    /// rebuilds the session.
+    ///
+    /// Open the session in async mode and expose its per-bitstream completion events through
+    /// [`Encoder::ready_event`], with no retrieve thread: `poll` stays the same-thread lock/copy
+    /// the sync path uses, immediate once the event has fired. For a caller whose loop already
+    /// parks on handles (the Windows driver's encode thread) — a two-thread retrieve there would
+    /// only add a queue. Ignored on a GPU without `NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT`, and by
+    /// `PUNKTFUNK_NVENC_ASYNC=1`, which asks for the two-thread mode instead. Call before the
+    /// session opens.
+    pub fn use_completion_events(&mut self, on: bool) {
+        self.want_events = on;
+    }
+
+    /// Idempotent: a repeat call with the same device, format and size keeps the session.
+    pub fn prepare_d3d11(
+        &mut self,
+        device: &ID3D11Device,
+        format: PixelFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        // Capturer recreates its D3D11 device on a desktop switch and may return a different
+        // resolution. Re-init on a different device or size. HDR (BT.2020 PQ) when the capturer
+        // hands a 10-bit frame (Rgb10a2 or P010); 8-bit NV12/ARGB is SDR. Can flip mid-session.
+        let hdr = matches!(format, PixelFormat::Rgb10a2 | PixelFormat::P010);
+        let dev_raw = device.as_raw();
+        let size_changed = self.inited && (self.width != width || self.height != height);
+        // Compare against last-init REQUEST, not effective `self.hdr`: on a no-10-bit GPU
+        // `query_caps` clears `self.hdr`, so a P010 capturer would rebuild every frame.
+        let hdr_changed = self.inited && self.hdr_requested != hdr;
+        if self.inited && (self.init_device != dev_raw || size_changed || hdr_changed) {
+            tracing::info!(
+                device_changed = self.init_device != dev_raw,
+                size_changed,
+                hdr_changed,
+                hdr,
+                new = format!("{width}x{height}"),
+                "NVENC: capture device/size/HDR changed — re-initializing session"
+            );
+            // SAFETY: `teardown` needs the encode thread with no NVENC call in flight and a session
+            // whose cached regs/bitstreams/pending belong to `self.encoder`. All hold: this is the
+            // encode thread, `self.inited` so `self.encoder` is the live session, and the previous
+            // frame's encode has already been polled.
+            unsafe { self.teardown() };
+        }
+        if !self.inited {
+            self.width = width;
+            self.height = height;
+            self.hdr_requested = hdr;
+            // Effective until `query_caps` clears it on a card without 10-bit.
+            self.hdr = hdr;
+            // Recompute effective 4:4:4 from the negotiation. Overwriting `chroma_444` on the
+            // first subsampled-YUV frame would permanently demote the session.
+            self.chroma_444 = self.chroma_444_requested;
+            // YUV (NV12/P010): native encode, no RGB→YUV CSC. RGB is the shader path.
+            // 10-bit forces Main10; NV12 pins 8 — `register_resource` rejects it in a
+            // 10-bit session, unlike ARGB.
+            self.buffer_fmt = buffer_format(format);
+            match format {
+                PixelFormat::P010 | PixelFormat::Rgb10a2 | PixelFormat::Rgb10a2Sdr => {
+                    self.bit_depth = 10;
+                }
+                PixelFormat::Nv12 => self.bit_depth = 8,
+                _ => {}
+            }
+            // Clear the effective flag so `caps().chroma_444` reports what the stream carries;
+            // keep `chroma_444_requested` so a later RGB re-init recovers 4:4:4.
+            if self.chroma_444 && !full_chroma_input(self.buffer_fmt) {
+                tracing::warn!(
+                    ?format,
+                    "4:4:4 negotiated but the capturer delivered subsampled YUV — encoding 4:2:0"
+                );
+                self.chroma_444 = false;
+            }
+            // `init_session` publishes `self.encoder` (and charges units) before its last
+            // fallible steps, so a failure leaves a live session with `inited == false`.
+            // Re-init guards key off `inited`; teardown here, keyed off `encoder.is_null()`,
+            // so the next submit does not overwrite a live handle.
+            if let Err(e) = self.init_session(device) {
+                // SAFETY: same contract as the teardown above — encode thread owns the session,
+                // and a failed init leaves nothing mid-encode.
+                unsafe { self.teardown() };
+                return Err(e);
+            }
+            self.init_device = dev_raw;
+        }
         Ok(())
     }
 }
@@ -1404,73 +1610,12 @@ impl Encoder for NvencD3d11Encoder {
                 )
             }
         };
-        // Capturer recreates its D3D11 device on a desktop switch and may return a different
-        // resolution. Re-init on a different device or size. HDR (BT.2020 PQ) when the capturer
-        // hands a 10-bit frame (Rgb10a2 or P010); 8-bit NV12/ARGB is SDR. Can flip mid-session.
-        let hdr = matches!(captured.format, PixelFormat::Rgb10a2 | PixelFormat::P010);
-        let dev_raw = frame.device.as_raw();
-        let size_changed =
-            self.inited && (self.width != captured.width || self.height != captured.height);
-        // Compare against last-init REQUEST, not effective `self.hdr`: on a no-10-bit GPU
-        // `query_caps` clears `self.hdr`, so a P010 capturer would rebuild every frame.
-        let hdr_changed = self.inited && self.hdr_requested != hdr;
-        if self.inited && (self.init_device != dev_raw || size_changed || hdr_changed) {
-            tracing::info!(
-                device_changed = self.init_device != dev_raw,
-                size_changed,
-                hdr_changed,
-                hdr,
-                new = format!("{}x{}", captured.width, captured.height),
-                "NVENC: capture device/size/HDR changed — re-initializing session"
-            );
-            // SAFETY: `teardown` needs the encode thread with no NVENC call in flight and a session
-            // whose cached regs/bitstreams/pending belong to `self.encoder`. All hold: this is the
-            // encode thread, `self.inited` so `self.encoder` is the live session, and the previous
-            // frame's encode has already been polled.
-            unsafe { self.teardown() };
-        }
-        if !self.inited {
-            self.width = captured.width;
-            self.height = captured.height;
-            self.hdr_requested = hdr;
-            // Effective until `query_caps` clears it on a card without 10-bit.
-            self.hdr = hdr;
-            // Recompute effective 4:4:4 from the negotiation. Overwriting `chroma_444` on the
-            // first subsampled-YUV frame would permanently demote the session.
-            self.chroma_444 = self.chroma_444_requested;
-            // YUV (NV12/P010): native encode, no RGB→YUV CSC. RGB is the shader path.
-            // 10-bit forces Main10; NV12 pins 8 — `register_resource` rejects it in a
-            // 10-bit session, unlike ARGB.
-            self.buffer_fmt = buffer_format(captured.format);
-            match captured.format {
-                PixelFormat::P010 | PixelFormat::Rgb10a2 | PixelFormat::Rgb10a2Sdr => {
-                    self.bit_depth = 10;
-                }
-                PixelFormat::Nv12 => self.bit_depth = 8,
-                _ => {}
-            }
-            // Clear the effective flag so `caps().chroma_444` reports what the stream carries;
-            // keep `chroma_444_requested` so a later RGB re-init recovers 4:4:4.
-            if self.chroma_444 && !full_chroma_input(self.buffer_fmt) {
-                tracing::warn!(
-                    format = ?captured.format,
-                    "4:4:4 negotiated but the capturer delivered subsampled YUV — encoding 4:2:0"
-                );
-                self.chroma_444 = false;
-            }
-            let device = frame.device.clone();
-            // `init_session` publishes `self.encoder` (and charges units) before its last
-            // fallible steps, so a failure leaves a live session with `inited == false`.
-            // Re-init guards key off `inited`; teardown here, keyed off `encoder.is_null()`,
-            // so the next submit does not overwrite a live handle.
-            if let Err(e) = self.init_session(&device) {
-                // SAFETY: same contract as the teardown above — encode thread owns the session,
-                // and a failed init leaves nothing mid-encode.
-                unsafe { self.teardown() };
-                return Err(e);
-            }
-            self.init_device = dev_raw;
-        }
+        self.prepare_d3d11(
+            &frame.device,
+            captured.format,
+            captured.width,
+            captured.height,
+        )?;
         // Opening frame: NVENC emits an IDR regardless of pic flags, so HDR SEI must ride it.
         // Detected via `next == 0` (`teardown` zeroes it), not `pts == 0`: `submit_indexed`
         // pins pts to the wire index, which is non-zero on a mid-session rebuild's first frame.
@@ -1492,8 +1637,9 @@ impl Encoder for NvencD3d11Encoder {
             };
             self.absorb_done(done)?;
         }
+        // `next` advances only once the picture is queued: advanced first, a transient failure
+        // on the opening frame cost the retry its `opening` flag and the IDR its HDR SEI.
         let slot = self.next % POOL;
-        self.next += 1;
         // SAFETY: NVENC calls go through the loaded `EncodeApi` table against `self.encoder`
         // (live, non-null). `rr` (version set) registers `frame.texture` from the same
         // device the session opened against; the cloned texture in `regs` keeps it alive.
@@ -1544,6 +1690,31 @@ impl Encoder for NvencD3d11Encoder {
             // Recovery anchor (armed by a successful invalidate_ref_frames): this frame is the
             // first encoded after invalidation. A simultaneous forced IDR is itself the re-anchor.
             let anchor = std::mem::take(&mut self.pending_anchor) && flags == 0;
+            // The wave: an IDR flushes it, queue and all; its start frame asks the driver
+            // for the sweep.
+            if flags != 0 {
+                self.wave = None;
+                self.wave_spoiled = false;
+                self.wave_queued = false;
+            }
+            let wave = self.wave;
+            let mark = wave.is_some_and(|w| w.marks() && !(w.closes() && self.wave_spoiled));
+            if let Some(w) = wave {
+                let ts = pts as i64;
+                if w.index == 0 {
+                    // A wave after a spoiled one keeps the spoiled pictures dirty too.
+                    let start = match self.wave_span {
+                        Some((s, _)) if self.wave_spoiled => s,
+                        _ => ts,
+                    };
+                    self.wave_span = Some((start, ts + i64::from(w.cycle) - 1));
+                    self.wave_spoiled = false;
+                }
+                self.wave = w.next();
+                if self.wave.is_none() && std::mem::take(&mut self.wave_queued) {
+                    self.wave = Some(Wave::start(w.cycle));
+                }
+            }
             // Chunked poll must flag early chunks before the driver reports `pictureType`.
             // Under P-only + infinite GOP, IDRs happen only when forced, or on the opening
             // frame (NVENC emits IDR regardless). Without `opening`, frame 1's early chunks go unflagged.
@@ -1594,6 +1765,28 @@ impl Encoder for NvencD3d11Encoder {
                     });
                 }
             }
+
+            // The wave's start frame: the driver sweeps the picture over `cycle` frames from
+            // here, one union arm per codec. Zero on every other frame.
+            let force_cnt = wave.filter(|w| w.index == 0).map_or(0, |w| w.cycle);
+            match self.codec {
+                Codec::H265 => {
+                    pic.codecPicParams
+                        .hevcPicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::H264 => {
+                    pic.codecPicParams
+                        .h264PicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::Av1 => {
+                    pic.codecPicParams
+                        .av1PicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::PyroWave => unreachable!("PyroWave never opens the direct-NVENC backend"),
+            }
             if !sei.is_empty() {
                 // Union write: pointers/len are read during encode_picture (scratch outlives it).
                 match self.codec {
@@ -1615,14 +1808,19 @@ impl Encoder for NvencD3d11Encoder {
             if let Err(e) = (api().encode_picture)(self.encoder, &mut pic).nv_ok() {
                 // Nothing owns the mapping yet; left mapped, the slot's next map fails too.
                 let _ = (api().unmap_input_resource)(self.encoder, mp.mappedResource);
+                // The forced IDR and the anchor were spent on a picture that never went out.
+                self.force_kf |= flags != 0;
+                self.pending_anchor |= anchor;
                 return Err(nvenc_status::call_err("encode_picture", e));
             }
+            self.next += 1;
             self.pending.push_back((
                 self.bitstreams[slot],
                 mp.mappedResource,
                 captured.pts_ns,
                 anchor,
                 idr_hint,
+                mark,
             ));
             // Split-arbiter cost; only meaningful on the sync depth-1 path `arm_split_arbiter` allows.
             self.last_submit_at = Some(std::time::Instant::now());
@@ -1670,10 +1868,11 @@ impl Encoder for NvencD3d11Encoder {
             supports_rfi: self.rfi_supported,
             // What the session actually configured (cleared in `query_caps` if the GPU lacks YUV444).
             chroma_444: self.chroma_444,
-            // Direct-NVENC recovers via real RFI (or a forced IDR), not libavcodec intra-refresh.
+            // Direct-NVENC recovers via real RFI (or a forced IDR), never an intra-refresh wave.
             intra_refresh: false,
             intra_refresh_recovery: false,
             intra_refresh_period: 0,
+            downscales_input: false,
         }
     }
 
@@ -1698,8 +1897,13 @@ impl Encoder for NvencD3d11Encoder {
                 self.pending_anchor = true;
                 true
             }
-            RangePlan::Decline => false,
+            RangePlan::Decline => self.start_wave(first, last),
             RangePlan::Invalidate { first, last } => {
+                // The driver would anchor on `first - 1`; a part-dirty wave picture there
+                // would lift the client onto damage, so wave again instead.
+                if self.wave_dirty(first - 1) {
+                    return self.start_wave(first, last);
+                }
                 // `inputTimeStamp` is the wire index, so the client's lost-frame range maps 1:1
                 // onto NVENC timestamps across rebuilds.
                 // SAFETY: `invalidate_ref_frames` is a loaded `EncodeApi` pointer. `self.encoder`
@@ -1748,7 +1952,7 @@ impl Encoder for NvencD3d11Encoder {
                 .ready
                 .pop_front());
         }
-        let Some((bs, map, pts_ns, anchor, _idr_hint)) = self.pending.pop_front() else {
+        let Some((bs, map, pts_ns, anchor, _idr_hint, mark)) = self.pending.pop_front() else {
             return Ok(None);
         };
         // SAFETY: non-empty `pending` implies `submit` ran, so `self.encoder` is live
@@ -1791,9 +1995,22 @@ impl Encoder for NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: mark,
                 chunk_aligned: false,
             }))
         }
+    }
+
+    /// The completion event of the oldest in-flight encode, in the event mode only
+    /// ([`Self::use_completion_events`]). The two-thread mode owns its events, and a sync
+    /// session has none — both answer `None`, and their `poll` blocks as before.
+    fn ready_event(&self) -> Option<isize> {
+        if !self.session_async || self.async_rt.is_some() {
+            return None;
+        }
+        let (bs, ..) = self.pending.front()?;
+        let slot = self.bitstreams.iter().position(|b| b == bs)?;
+        self.events.get(slot).map(|&e| e as isize)
     }
 
     fn supports_chunked_poll(&self) -> bool {
@@ -1806,7 +2023,7 @@ impl Encoder for NvencD3d11Encoder {
         if !self.supports_chunked_poll() && self.chunk.is_none() {
             return Ok(self.poll()?.map(AuChunk::whole));
         }
-        let Some(&(bs, _, pts_ns, anchor, idr_hint)) = self.pending.front() else {
+        let Some(&(bs, _, pts_ns, anchor, idr_hint, mark)) = self.pending.front() else {
             return Ok(None);
         };
         // If this driver never publishes intermediate slices, stop after ~2 frame intervals and
@@ -1863,6 +2080,7 @@ impl Encoder for NvencD3d11Encoder {
                             pts_ns,
                             keyframe: idr_hint,
                             recovery_anchor: anchor,
+                            recovery_point: mark,
                             chunk_aligned: false,
                             first,
                             last: false,
@@ -1880,7 +2098,7 @@ impl Encoder for NvencD3d11Encoder {
 
         // One blocking lock — the completion authority. The AU tail must not ride a +1 tick
         // (depth-1 pump contract).
-        let (bs, map, pts_ns, anchor, idr_hint) =
+        let (bs, map, pts_ns, anchor, idr_hint, mark) =
             self.pending.pop_front().expect("front() checked above");
         // SAFETY: same contract as `poll`'s blocking lock: `bs` is the popped in-flight pool
         // bitstream on the live session (encode thread); blocking `lock_bitstream` (version set)
@@ -1942,11 +2160,21 @@ impl Encoder for NvencD3d11Encoder {
                     "NVENC chunked poll: picture type diverged from the submit-time prediction"
                 );
             }
+            // Chunked path is how a sub-frame session finishes — feed the arbiter here too or
+            // the HEVC sub-frame incumbent is invisible and the experiment never concludes.
+            let encode_us = self
+                .last_submit_at
+                .take()
+                .map(|t| t.elapsed().as_micros() as u64);
+            if let Some(us) = encode_us {
+                self.feed_split_arbiter(us);
+            }
             Ok(Some(AuChunk {
                 data,
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
+                recovery_point: mark,
                 chunk_aligned: false,
                 first: !cs.opened,
                 last: true,
@@ -2240,6 +2468,158 @@ mod tests {
         CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
     };
 
+    #[test]
+    #[ignore = "requires an RTX GPU with HEVC/AV1 encode and the default synchronous retrieve mode"]
+    fn nvenc_prepare_publishes_caps_before_submit() {
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM,
+        };
+
+        // SAFETY: DXGI factory creation borrows nothing and has no preconditions.
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI factory");
+        let adapter = (0..)
+            .map_while(|i| {
+                // SAFETY: `factory` outlives this closure and the call takes no lasting alias.
+                unsafe { factory.EnumAdapters1(i) }.ok()
+            })
+            .find(|a| {
+                // SAFETY: `a` is a live adapter the enumeration above just returned.
+                unsafe { a.GetDesc1() }.is_ok_and(|d| d.VendorId == 0x10de)
+            })
+            .expect("NVIDIA adapter");
+        // SAFETY: `adapter` is a live enumeration result held by this scope for the whole call,
+        // and `make_device` takes no lasting alias to it.
+        let (device, _) = unsafe { pf_frame::dxgi::make_device(&adapter) }.expect("make_device");
+        const W: u32 = 1280;
+        const H: u32 = 720;
+        const BPS: u64 = 20_000_000;
+        for codec in [Codec::H265, Codec::Av1] {
+            for (format, dxgi, depth, hdr) in [
+                (PixelFormat::Nv12, DXGI_FORMAT_NV12, 8, false),
+                (PixelFormat::P010, DXGI_FORMAT_P010, 10, true),
+                (
+                    PixelFormat::Rgb10a2Sdr,
+                    DXGI_FORMAT_R10G10B10A2_UNORM,
+                    10,
+                    false,
+                ),
+            ] {
+                let mut enc = NvencD3d11Encoder::open(
+                    codec,
+                    format,
+                    W,
+                    H,
+                    60,
+                    BPS,
+                    10,
+                    ChromaFormat::Yuv444,
+                    1,
+                    None,
+                )
+                .expect("NVENC open");
+                enc.prepare_d3d11(&device, format, W, H).expect("prepare");
+                assert!(enc.inited);
+                assert_eq!(enc.init_device, device.as_raw());
+                assert_eq!((enc.bit_depth, enc.hdr_requested), (depth, hdr));
+                assert_eq!(enc.next, 0);
+                assert_eq!(enc.frame_idx, 0);
+                assert!(enc.pending.is_empty());
+                assert!(enc.regs.is_empty());
+                assert!(enc.poll().expect("poll before submit").is_none());
+                // SAFETY: `enc.encoder` is the open session this test built above, and a cap
+                // query neither retains the handle nor mutates session state.
+                let rfi = unsafe {
+                    enc.get_cap(
+                        enc.encoder,
+                        nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
+                    )
+                } != 0;
+                // SAFETY: as above — same live session, same read-only query.
+                let yuv444 = unsafe {
+                    enc.get_cap(
+                        enc.encoder,
+                        nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_YUV444_ENCODE,
+                    )
+                } != 0;
+                let caps = enc.caps();
+                assert_eq!(caps.supports_rfi, rfi);
+                assert_eq!(
+                    caps.chroma_444,
+                    codec == Codec::H265 && full_chroma_input(buffer_format(format)) && yuv444,
+                );
+                assert_eq!(enc.applied_bitrate_bps(), Some(BPS));
+                let session = enc.encoder;
+                let bitstreams = enc.bitstreams.clone();
+                enc.prepare_d3d11(&device, format, W, H)
+                    .expect("prepare again");
+                assert_eq!(enc.encoder, session);
+                assert_eq!(enc.bitstreams, bitstreams);
+                assert_eq!(enc.caps(), caps);
+                assert!(!enc.invalidate_ref_frames(-1, -1));
+                assert!(!enc.invalidate_ref_frames(100, 100));
+
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: W,
+                    Height: H,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: dxgi,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                    ..Default::default()
+                };
+                let mut texture = None;
+                // SAFETY: `device` is live for this scope and `desc` is a fully initialised
+                // D3D11_TEXTURE2D_DESC; the out-parameter is a local the call writes once.
+                unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }
+                    .expect("input texture");
+                let mut frame = CapturedFrame {
+                    provenance: Default::default(),
+                    width: W,
+                    height: H,
+                    pts_ns: 0,
+                    format,
+                    payload: FramePayload::D3d11(D3d11Frame {
+                        texture: texture.expect("input texture"),
+                        device: device.clone(),
+                        pyro: None,
+                    }),
+                    cursor: None,
+                };
+                for i in 100..104 {
+                    frame.pts_ns = u64::from(i) * 16_666_667;
+                    enc.submit_indexed(&frame, i).expect("submit");
+                    let au = enc.poll().expect("poll").expect("AU");
+                    assert_eq!(au.keyframe, i == 100);
+                    assert_eq!(enc.encoder, session);
+                    assert_eq!(enc.bitstreams, bitstreams);
+                    assert_eq!(enc.caps(), caps);
+                    assert_eq!(enc.applied_bitrate_bps(), Some(BPS));
+                }
+                enc.rfi_supported = false;
+                assert!(!enc.invalidate_ref_frames(103, 103));
+                assert!(!enc.pending_anchor);
+                enc.rfi_supported = rfi;
+                enc.distrust_references();
+                assert!(!enc.invalidate_ref_frames(103, 103));
+                enc.distrusted = false;
+                let recovered = enc.invalidate_ref_frames(103, 103);
+                if !recovered {
+                    enc.request_keyframe();
+                }
+                frame.pts_ns += 16_666_667;
+                enc.submit_indexed(&frame, 104).expect("recovery submit");
+                let au = enc.poll().expect("recovery poll").expect("recovery AU");
+                assert_eq!(au.recovery_anchor, recovered);
+                assert_eq!(au.keyframe, !recovered);
+            }
+        }
+    }
+
     /// Saturated primaries separate BT.601 from BT.709 by tens of code points (pure-green luma 145 vs 173).
     const BARS: [(u8, u8, u8); 8] = [
         (255, 255, 255),
@@ -2274,6 +2654,193 @@ mod tests {
             }
         }
         px
+    }
+
+    /// BGRA rows scrolled down by `shift`, with a diagonal so no two rows match: the encoder
+    /// must reach for rows above, which is what a stripe's clean region has to refuse.
+    fn scroll_pattern(w: usize, h: usize, shift: usize) -> Vec<u8> {
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let band = ((y + h - shift % h) % h) as u8;
+            for x in 0..w {
+                let o = (y * w + x) * 4;
+                px[o] = band.wrapping_mul(3);
+                px[o + 1] = band ^ (x as u8);
+                px[o + 2] = 255 - band;
+                px[o + 3] = 255;
+            }
+        }
+        px
+    }
+
+    /// The wave on NVENC, one HEVC stream: a loss with no anchor starts wave A (marks on
+    /// its start and close, no IDR); a loss of the plain P after it anchors on the close; a
+    /// loss whose anchor would be a dirty picture of A waves again (B); a loss mid-B spoils
+    /// it (no close mark) and queues C on the frame after B closes. Dumps the stream and two
+    /// client views for the decode check: `-dropA` loses frames 1–2 ahead of A, `-dropC`
+    /// loses the two frames ahead of the mid-B loss; C's close must decode identical.
+    ///
+    /// `cargo test -p pf-encode-win --features nvenc nvenc_wave_smoke -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires an NVIDIA GPU + driver — run manually on the RTX box (.173)"]
+    fn nvenc_wave_smoke() {
+        const W: u32 = 256;
+        const H: u32 = 256;
+        // SAFETY: test-only D3D11/DXGI COM calls on one thread; every out-pointer is checked
+        // before use; every texture outlives the encoder call that reads it.
+        unsafe {
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().expect("DXGI factory");
+            let adapter = (0..)
+                .map_while(|i| factory.EnumAdapters1(i).ok())
+                .find(|a| a.GetDesc1().is_ok_and(|d| d.VendorId == 0x10de))
+                .expect("NVIDIA adapter");
+            let (device, _ctx) = pf_frame::dxgi::make_device(&adapter).expect("make_device");
+            let texture = |i: usize| {
+                let bytes = scroll_pattern(W as usize, H as usize, i * 6);
+                let init = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: bytes.as_ptr() as *const _,
+                    SysMemPitch: W * 4,
+                    SysMemSlicePitch: 0,
+                };
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: W,
+                    Height: H,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let mut tex = None;
+                device
+                    .CreateTexture2D(&desc, Some(&init), Some(&mut tex))
+                    .expect("frame texture");
+                tex.expect("null frame texture")
+            };
+            let mut enc = NvencD3d11Encoder::open(
+                Codec::H265,
+                PixelFormat::Bgra,
+                W,
+                H,
+                60,
+                10_000_000,
+                8,
+                ChromaFormat::Yuv420,
+                1,
+                None,
+            )
+            .expect("NVENC open");
+            // Caps, RFI included, exist only once the session is prepared on a device.
+            enc.prepare_d3d11(&device, PixelFormat::Bgra, W, H)
+                .expect("prepare");
+            assert!(
+                enc.caps().supports_rfi,
+                "the RTX box invalidates references"
+            );
+            let cycle = enc.wave_cycle() as usize;
+            assert!(cycle >= 2, "the wave is on");
+            println!("nvenc_wave_smoke: cycle {cycle} frames");
+            // Wave A at 3 (loss with no anchor), anchor P after it, wave B off a dirty
+            // anchor, a loss three frames into B that queues C behind it, a plain P after C.
+            let a_start = 3;
+            let a_close = a_start + cycle - 1;
+            let anchor_p = a_close + 2;
+            let b_start = anchor_p + 1;
+            let b_close = b_start + cycle - 1;
+            let spoil_at = b_start + 3;
+            let c_start = b_close + 1;
+            let c_close = c_start + cycle - 1;
+            let last = c_close + 1;
+            let mut aus = Vec::new();
+            for i in 0..=last {
+                if i == a_start {
+                    assert!(
+                        enc.invalidate_ref_frames(0, 2),
+                        "no anchor: the wave answers"
+                    );
+                    assert_eq!(enc.wave.map(|w| w.index), Some(0));
+                }
+                if i == anchor_p {
+                    let lost = (anchor_p - 1) as i64;
+                    assert!(enc.invalidate_ref_frames(lost, lost), "the close anchors");
+                    assert!(enc.wave.is_none(), "a clean anchor, no wave");
+                }
+                if i == b_start {
+                    // The anchor for this loss would be a picture of A before its close.
+                    let lost = (a_close - 1) as i64;
+                    assert!(enc.invalidate_ref_frames(lost, lost));
+                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "dirty anchor: wave B");
+                }
+                if i == spoil_at {
+                    let lost = (spoil_at - 1) as i64;
+                    assert!(enc.invalidate_ref_frames(lost, lost));
+                    assert_eq!(enc.wave.map(|w| w.index), Some(3), "B runs on");
+                    assert!(enc.wave_spoiled && enc.wave_queued, "C queued behind B");
+                }
+                if i == c_start {
+                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "C starts as B closes");
+                }
+                let tex = texture(i);
+                let frame = CapturedFrame {
+                    provenance: Default::default(),
+                    width: W,
+                    height: H,
+                    pts_ns: i as u64 * 16_666_667,
+                    format: PixelFormat::Bgra,
+                    payload: FramePayload::D3d11(D3d11Frame {
+                        texture: tex,
+                        device: device.clone(),
+                        pyro: None,
+                    }),
+                    cursor: None,
+                };
+                enc.submit_indexed(&frame, i as u32).expect("submit");
+                let au = enc.poll().expect("poll").expect("an AU per submit (sync)");
+                aus.push(au);
+            }
+            enc.flush().ok();
+            assert_eq!(aus.len(), last + 1);
+            assert!(enc.wave.is_none(), "wave C closed");
+            for (i, au) in aus.iter().enumerate() {
+                assert_eq!(au.keyframe, i == 0, "AU {i}: the only IDR is frame 0");
+                let marks = [a_start, a_close, b_start, c_start, c_close];
+                assert_eq!(
+                    au.recovery_point,
+                    marks.contains(&i),
+                    "AU {i}: marks on every start and close but the spoiled close {b_close}"
+                );
+                assert_eq!(au.recovery_anchor, i == anchor_p, "AU {i}: one anchor P");
+            }
+            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
+            let view = |lost: std::ops::Range<usize>| -> Vec<u8> {
+                aus.iter()
+                    .enumerate()
+                    .filter(|(i, _)| !lost.contains(i))
+                    .flat_map(|(_, a)| a.data.iter().copied())
+                    .collect()
+            };
+            let dir = std::env::var("PUNKTFUNK_SMOKE_DIR").unwrap_or_else(|_| ".".into());
+            std::fs::write(format!("{dir}/nvenc-wave.h265"), &full).expect("write");
+            std::fs::write(format!("{dir}/nvenc-wave-dropA.h265"), view(1..3)).expect("write");
+            std::fs::write(
+                format!("{dir}/nvenc-wave-dropC.h265"),
+                view(spoil_at - 2..spoil_at),
+            )
+            .expect("write");
+            println!(
+                "nvenc_wave_smoke: {} AUs, {} bytes; A {a_start}..={a_close}, anchor {anchor_p}, \
+                 B {b_start}..={b_close} spoiled at {spoil_at}, C {c_start}..={c_close}; wrote \
+                 {dir}/nvenc-wave{{,-dropA,-dropC}}.h265",
+                aus.len(),
+                full.len()
+            );
+        }
     }
 
     /// Encode 30 static pattern frames through a real NVENC session (ARGB, production config).

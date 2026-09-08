@@ -27,7 +27,7 @@ const HAPTICS_FRAME_SAMPLES: usize =
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 const SPEAKER_FRAME_SAMPLES: usize =
     crate::audio::SAMPLE_RATE as usize * SPEAKER_FRAME_MS as usize / 1000;
-/// Quad: FL FR = speaker, BL BR = voice coils. Own copy: `pad_endpoint::PAD_CHANNELS` is Windows-gated.
+/// Quad: FL FR = speaker, BL BR = voice coils. Own copy: `pad_capture::PAD_CHANNELS` is Windows-gated.
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 const CAP_CHANNELS: usize = 4;
 
@@ -289,7 +289,7 @@ pub(super) fn spawn(
                 conn,
                 pad,
                 kinds,
-                move || crate::audio::pad_endpoint::PadLoopbackCapturer::open(&endpoint_id),
+                move || crate::audio::pad_capture::PadLoopbackCapturer::open(&endpoint_id),
                 stop_t,
             );
             crate::audio::pad_endpoint::set_visibility(&vis_id, pad, false);

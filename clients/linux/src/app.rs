@@ -126,7 +126,15 @@ pub struct AppModel {
     /// The request-access "waiting for approval" dialog, closed on the first child
     /// event. A shared slot (not a message): dialogs are main-thread GTK objects and
     /// `AppMsg` must stay `Send` for the session child's reader thread.
-    waiting: Rc<RefCell<Option<adw::AlertDialog>>>,
+    ///
+    /// The handler id rides along because `close()` EMITS the close response: closing this
+    /// dialog in code is indistinguishable from the user pressing Cancel unless the handler
+    /// is disconnected first ([`AppModel::close_waiting`]).
+    waiting: crate::ui_trust::WaitingSlot,
+    /// Set when this shell kills the session child itself (the request-access Cancel). Read
+    /// once on the child's exit: without it, EVERY signal death read as "we meant that" and
+    /// an OOM-killed or crashed stream vanished with no message at all.
+    session_cancelled: bool,
 }
 
 #[derive(Debug)]
@@ -343,6 +351,7 @@ impl SimpleComponent for AppModel {
             busy: false,
             wake_fallback: None,
             waiting: Rc::new(RefCell::new(None)),
+            session_cancelled: false,
         };
         install_actions(&model.window, &sender);
 
@@ -411,13 +420,10 @@ impl SimpleComponent for AppModel {
     fn update(&mut self, msg: AppMsg, sender: ComponentSender<Self>) {
         match msg {
             AppMsg::DeepLink(url) => self.open_deep_link(&url, &sender),
-            // The trust gate (the host is the policy authority — it advertises
-            // `pair=optional` only when it accepts unpaired clients):
-            //   1. PINNED RECONNECT — a stored fingerprint connects silently.
-            //   2. FINGERPRINT CHANGED — known address, different fp: the impostor
-            //      signal; force the PIN ceremony.
-            //   3a. NEW + pair=optional — offer TOFU alongside PIN.
-            //   3b. NEW otherwise — delegated approval (request access) or PIN.
+            // Trust gate, in order: a stored fingerprint connects silently; a known address
+            // under a new fingerprint is the impostor case and forces the PIN ceremony; an
+            // unknown host is offered TOFU alongside PIN only when it advertises
+            // `pair=optional`, else delegated approval or PIN.
             AppMsg::Connect(req) => {
                 if self.busy {
                     return;
@@ -477,17 +483,11 @@ impl SimpleComponent for AppModel {
             }
             AppMsg::WakeConnect(req) => {
                 if !self.busy {
-                    // DIAL FIRST — no mDNS advert does NOT mean unreachable: a host reached over
-                    // a routed network (Tailscale/VPN/another subnet) is mDNS-blind forever, and
-                    // gating the dial on presence bricked exactly those reconnects. Fire the magic
-                    // packet now (fire-and-forget — harmless if it's awake) so a genuinely-asleep
-                    // box is already booting while the dial times out, arm the wake-wait fallback
-                    // for THIS request, and connect immediately.
-                    //
-                    // Auto-wake OFF (the Settings toggle, for VPN hosts that look offline when
-                    // they aren't): no packet and no wake-and-wait fallback — the dial either
-                    // succeeds or fails with the normal error. The host-card menu's explicit
-                    // "Wake host" is deliberately not gated.
+                    // Never gate the dial on mDNS presence: a routed host (Tailscale/VPN) never
+                    // advertises. The magic packet goes first, fire-and-forget, so an asleep box
+                    // boots while the dial times out, and the fallback is armed for THIS request.
+                    // Auto-wake off means no packet and no wake-and-wait, just the normal dial
+                    // error; the host-card menu's explicit "Wake host" stays ungated.
                     if self.settings.borrow().auto_wake {
                         crate::wol::wake(&req.mac, req.addr.parse().ok());
                         self.wake_fallback = Some(req.clone());
@@ -643,18 +643,28 @@ impl SimpleComponent for AppModel {
             } => {
                 self.close_waiting();
                 self.hosts.emit(HostsMsg::SetConnecting(None));
+                // A child that reported ready proves the host answered — the exact condition
+                // the dial-first wake fallback exists to rule out. Left armed, it turns a
+                // later ordinary failure into a spurious "waking…".
+                self.wake_fallback = None;
                 if persist_paired {
                     // Request-access: the operator approved this device — a trusted
                     // PAIRED host from now on, like after a PIN ceremony.
-                    trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, true);
-                    self.toast("Approved — connected");
+                    match trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, true) {
+                        Ok(()) => self.toast("Approved — connected"),
+                        // The stream is up (the pin was carried in memory), but nothing was
+                        // written — say so, or the host is simply gone at the next launch.
+                        Err(e) => self.toast(&format!("Connected, but couldn't save — {e:#}")),
+                    }
                 } else if tofu {
                     // The advertised fingerprint proved itself on a real connect.
-                    trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, false);
-                    self.toast(&format!(
-                        "Trusted on first use — fingerprint {}…",
-                        &fp_hex[..16.min(fp_hex.len())]
-                    ));
+                    match trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, false) {
+                        Ok(()) => self.toast(&format!(
+                            "Trusted on first use — fingerprint {}…",
+                            &fp_hex[..16.min(fp_hex.len())]
+                        )),
+                        Err(e) => self.toast(&format!("Connected, but couldn't save — {e:#}")),
+                    }
                 }
                 self.hosts.emit(HostsMsg::Refresh);
             }
@@ -672,6 +682,7 @@ impl SimpleComponent for AppModel {
                 // a failed dial to the non-advertising host it was armed for falls into the
                 // visible wake-and-wait instead of an error alert. Matched by fingerprint (else
                 // address) so a stale armed request can never redirect another host's failure.
+                let cancelled = std::mem::take(&mut self.session_cancelled);
                 let wake_fb =
                     self.wake_fallback
                         .take()
@@ -701,12 +712,17 @@ impl SimpleComponent for AppModel {
                     (_, Some((msg, _)), _) => self
                         .hosts
                         .emit(HostsMsg::ShowError(format!("Couldn't connect — {msg}"))),
-                    (-1, None, _) => {} // killed (request-access cancel) — already handled
+                    // Killed by us (request-access cancel) — the toast already said so.
+                    (-1, None, _) if cancelled => {}
+                    (-1, None, _) => self.hosts.emit(HostsMsg::ShowError(
+                        "Stream session was killed — out of memory, or stopped by the system"
+                            .into(),
+                    )),
                     (_, None, _) if wake_fb.is_some() => {
                         crate::ui_trust::wake_and_connect(&self.window, &sender, req)
                     }
                     (code, None, _) => self.hosts.emit(HostsMsg::ShowError(format!(
-                        "Stream session failed (punktfunk-session exit {code})"
+                        "The session didn't start (exit {code}). Check the client log."
                     ))),
                 }
             }
@@ -715,11 +731,9 @@ impl SimpleComponent for AppModel {
                     return;
                 }
                 // The console owns the screen and the pads while it runs, so it takes `busy`
-                // like a stream does. `gio::Subprocess` is the GLib-native child: its
-                // `wait_check_async` lands the exit on this very main loop — no thread, no
-                // channel — and reports a non-zero exit as an error. That is also how a
-                // build without the session's `ui` feature (Nix) surfaces: the child prints
-                // "--browse needs the console UI" and exits non-zero, and we banner it.
+                // like a stream does. `wait_check_async` lands the exit on this main loop —
+                // no thread, no channel — and turns a non-zero exit into the error the
+                // banner shows, which is also how a session built without `ui` surfaces.
                 let mut argv = vec![
                     std::ffi::OsString::from(crate::spawn::session_binary()),
                     "--browse".into(),
@@ -756,6 +770,8 @@ impl SimpleComponent for AppModel {
                 self.hosts.emit(HostsMsg::Refresh);
             }
             AppMsg::CancelPending => {
+                // The child is being killed by the handler that sent this; its exit is ours.
+                self.session_cancelled = true;
                 self.close_waiting();
                 self.busy = false;
                 self.hosts.emit(HostsMsg::SetConnecting(None));
@@ -877,6 +893,7 @@ impl AppModel {
                 let dialog = adw::AlertDialog::new(Some("Open this link?"), Some(&body));
                 dialog.add_responses(&[("cancel", "Cancel"), ("connect", "Connect")]);
                 dialog.set_response_appearance("connect", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("connect"));
                 dialog.set_close_response("cancel");
                 let sender = sender.clone();
                 let wake = plan.wake;
@@ -922,8 +939,12 @@ impl AppModel {
         }
     }
 
+    /// Dismiss the waiting dialog without its Cancel handler running. `close()` emits the
+    /// close response, so the handler has to go first or the approval that just landed reads
+    /// as the user cancelling — and kills the child that reported ready.
     fn close_waiting(&mut self) {
-        if let Some(w) = self.waiting.borrow_mut().take() {
+        if let Some((w, handler)) = self.waiting.borrow_mut().take() {
+            w.disconnect(handler);
             w.close();
         }
     }
@@ -966,6 +987,7 @@ impl AppModel {
             }
         }
         dialog.set_response_enabled("apply", false);
+        dialog.set_default_response(Some("close"));
         dialog.set_close_response("close");
         dialog.present(Some(&self.window));
 
@@ -1001,9 +1023,14 @@ impl AppModel {
                     Some(identity),
                     std::time::Duration::from_secs(15),
                 )
-                .map_err(|e| format!("connect: {e:?}"))?;
-                c.request_probe(3_000_000, 2_000)
-                    .map_err(|e| format!("probe: {e:?}"))?;
+                .map_err(|e| {
+                    tracing::warn!(error = ?e, "speed test connect");
+                    "Couldn't start the speed test".to_string()
+                })?;
+                c.request_probe(3_000_000, 2_000).map_err(|e| {
+                    tracing::warn!(error = ?e, "speed test probe request");
+                    "The host didn't start the speed test".to_string()
+                })?;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(250));
@@ -1014,7 +1041,7 @@ impl AppModel {
                         return Ok(c.probe_result());
                     }
                     if std::time::Instant::now() > deadline {
-                        return Err("probe timed out".to_string());
+                        return Err("The speed test didn't finish in time".to_string());
                     }
                 }
             })();
@@ -1176,12 +1203,9 @@ fn clear_steam_sdl_device_filter() {
 }
 
 pub fn run() -> glib::ExitCode {
-    // The fmt layer as before, plus the in-process ring (`pf_client_core::logring`, DEBUG+ regardless
-    // of RUST_LOG) that "Send logs to host" uploads — the env filter scopes the stderr layer
-    // only, because the ring exists precisely for the diagnostics nobody enabled before the
-    // bug happened. The spawned session's own stderr joins the ring too (`orchestrate` pipes
-    // it through `logring::forward_child_stderr`), so a bundle from this shell carries the
-    // stream's trail, not just the launcher's.
+    // The env filter scopes the fmt layer only; the ring (`pf_client_core::logring`) keeps
+    // DEBUG+ regardless of RUST_LOG, because "Send logs to host" uploads it. The spawned
+    // session's stderr joins the ring too, so a bundle carries the stream's trail.
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -1204,24 +1228,10 @@ pub fn run() -> glib::ExitCode {
     // physical pad Steam Input has virtualized; the Settings controller list needs the
     // real devices (same rationale as the session binary).
     clear_steam_sdl_device_filter();
-    // Headless paths (no GTK window).
-    if let Some(pin_arg) = crate::cli::arg_value("--pair") {
-        if pin_arg != "-" {
-            eprintln!("a pairing PIN may not be passed in argv; use `--pair -` and stdin");
-            return glib::ExitCode::FAILURE;
-        }
-        let mut pin = String::new();
-        if std::io::stdin().read_line(&mut pin).is_err() || pin.trim().is_empty() {
-            eprintln!("no pairing PIN on stdin");
-            return glib::ExitCode::FAILURE;
-        }
-        return crate::cli::headless_pair(pin.trim());
-    }
+    // Headless paths (no GTK window). Pairing, wake, host listing and reset live in the
+    // `punktfunk` CLI, which ships in the same package.
     if let Some(target) = crate::cli::arg_value("--library") {
         return crate::cli::headless_library(&target);
-    }
-    if crate::cli::arg_value("--wake").is_some() {
-        return crate::cli::cli_wake();
     }
     // Headless known-hosts management (list/add/edit/forget/reset) + reachability probes —
     // the shared store the Decky plugin drives; returns None when argv names none of them.

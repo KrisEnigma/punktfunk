@@ -52,13 +52,12 @@ env:
 jobs:
   # SECURITY: same caveat as apple.yml's `swift` job — this compiles PULL-REQUEST code on the
   # host-mode, persistent runner that apple.yml's signing job also uses. The `if:` is the same
-  # fail-open backstop: it skips fork PRs where Gitea reports the fork flag, and still runs
-  # same-repo PRs (and any where the flag is absent), so it never blocks internal PR CI.
+  # fail-closed backstop: only a PR whose head repo IS this repo runs.
   check:
     runs-on: macos-arm64
     if: >-
       gitea.event_name != 'pull_request' ||
-      gitea.event.pull_request.head.repo.fork != true
+      gitea.event.pull_request.head.repo.full_name == gitea.repository
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

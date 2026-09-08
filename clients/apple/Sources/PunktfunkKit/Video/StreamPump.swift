@@ -49,20 +49,11 @@ final class StreamPump {
         layer.flush() // drop any frames a previous connection left queued
 
         let thread = Thread {
-            var format: CMVideoFormatDescription?
-            // Report the coded dims to the resize overlay only when they CHANGE (a new-mode IDR),
-            // not on every loss-recovery IDR at the same size — so it fires once per real switch.
-            var lastDecodedDims: CMVideoDimensions?
-            var lastFramesDropped = connection.framesDropped()
-            // Recovery is a persistent WANT, not a one-shot edge: set it on detected loss (or a
-            // decoder reset), retry the throttled request EVERY iteration, and clear it only when a
-            // fresh IDR actually re-anchors decode. The old code advanced `lastFramesDropped` on the
-            // same edge it fired the throttled request — so a request swallowed by the throttle (a
-            // second drop within the window, e.g. the lost recovery IDR itself being pruned) was
-            // never re-sent: the counter went flat, the climb never re-fired, and the picture stayed
-            // frozen for good while audio kept playing. The iPhone's lossy Wi-Fi hits this where the
-            // Mac's Ethernet never does.
-            var awaitingIDR = false
+            // Format, decoded size, straggler filter and the keyframe WANT — shared with the
+            // stage-2 pump, which had the same rules copied. `awaitingIDR` is retried every
+            // iteration so a request the throttle swallowed is re-sent; loss itself goes through
+            // the gate, where an RFI anchor heals it without an IDR.
+            var pump = AUPumpState()
             var awaitingSince = Date.distantPast // when the current recovery began (for the resume log)
             var wasFailed = false
             // Every iteration drains its own autorelease pool: this thread has no runloop, so
@@ -80,69 +71,36 @@ final class StreamPump {
                         _ = try connection.nextAU(timeoutMs: 100)
                         return true
                     }
-                    // Loss recovery (the primary path). Under the host's infinite GOP the only
-                    // recovery keyframe is one we request. The reassembler drops unrecoverable AUs
-                    // (framesDropped); the decoder then *conceals* the reference-missing deltas — a
-                    // frozen / garbage picture that never flips the layer to .failed — so key off the
-                    // drop count climbing, then keep asking (awaitingIDR) until an IDR lands. Polled
-                    // every iteration so a total-loss drought still recovers when packets resume.
-                    let dropped = connection.framesDropped()
-                    if dropped > lastFramesDropped {
-                        // Log only on the false→true transition (once per recovery cycle), not per
-                        // dropped AU, so heavy loss doesn't spam the log.
-                        if !awaitingIDR {
-                            awaitingSince = Date()
-                            pumpLog.notice(
-                                "video: unrecoverable drop (framesDropped=\(dropped, privacy: .public)) — requesting recovery IDR")
-                        }
-                        lastFramesDropped = dropped
-                        awaitingIDR = true
-                    }
-                    if awaitingIDR { recovery.request() }
-                    // Freeze backstop: a drop-count climb arms the gate (should the frame-index gap
-                    // below be lost too), and an overdue freeze re-asks for the re-anchor.
-                    if gate.poll(framesDropped: dropped) { recovery.request() }
+                    if pump.awaitingIDR { recovery.request() }
+                    // Loss recovery through the shared gate: a drop-count climb beyond the gap's
+                    // credit arms the freeze and asks (the decoder conceals reference-missing
+                    // deltas without flipping the layer to .failed), and an overdue freeze re-asks
+                    // for the re-anchor. Polled every iteration so a total-loss drought still
+                    // recovers when packets resume.
+                    if gate.poll(framesDropped: connection.framesDropped()) { recovery.request() }
 
                     guard let au = try connection.nextAU(timeoutMs: 100) else { return true }
-                    // Loss recovery (RFI): a forward frame-index gap fires a throttled reference-
-                    // frame-invalidation request so an RFI-capable host (AMD LTR / NVENC) recovers
-                    // with a cheap clean P-frame instead of a full IDR. The framesDropped-driven
-                    // recovery above stays the backstop for when the recovery frame itself is lost.
-                    // The same gap is the earliest, most precise signal to ARM the display freeze.
-                    // Credited arm: the gap width pre-covers the reassembler's ~120 ms-later
-                    // framesDropped climb for the same loss, so a fast RFI anchor that heals in
-                    // between isn't re-frozen by it (the double-arm race).
+                    // A forward frame-index gap fires a throttled RFI (a clean P-frame, no IDR)
+                    // and arms the freeze, credited with the gap width so the reassembler's
+                    // ~120 ms-later framesDropped climb for the same loss cannot re-freeze a
+                    // stream the anchor already healed. A lost anchor lapses into the gate's
+                    // overdue re-ask above.
                     let gapWidth = connection.noteFrameIndexGapWidth(au.frameIndex)
                     if gapWidth > 0 { gate.arm(expectingDrops: UInt64(gapWidth)) }
                     onFrame?(au)
                     let idrFormat = connection.videoCodec.formatDescription(fromKeyframe: au.data)
-                    if let f = idrFormat {
-                        format = f          // refreshed on every IDR (mode changes included)
-                        let dims = CMVideoFormatDescriptionGetDimensions(f)
-                        if lastDecodedDims?.width != dims.width || lastDecodedDims?.height != dims.height {
-                            lastDecodedDims = dims
-                            onDecodedSize?(Int(dims.width), Int(dims.height))
-                        }
-                        if awaitingIDR {
-                            let ms = Int(Date().timeIntervalSince(awaitingSince) * 1000)
-                            pumpLog.notice("video: recovery IDR received — resumed after \(ms, privacy: .public) ms")
-                        }
-                        awaitingIDR = false // a fresh IDR re-anchored decode — recovery complete
+                    let step = pump.note(frameIndex: au.frameIndex, idrFormat: idrFormat)
+                    if step.straggler { return true }
+                    if let size = step.newSize { onDecodedSize?(size.width, size.height) }
+                    if step.resumed {
+                        let ms = Int(Date().timeIntervalSince(awaitingSince) * 1000)
+                        pumpLog.notice("video: recovery IDR received — resumed after \(ms, privacy: .public) ms")
                     }
-                    if format == nil {
-                        // No decodable format yet: the opening IDR's parameter sets never
-                        // arrived (or never parsed), and under the host's infinite GOP nothing
-                        // re-delivers them unless we ASK. Without this the format guard below
-                        // drops every AU silently, forever — the field "black stream, zero
-                        // recovery requests" state (2026-08-12). awaitingIDR routes through the
-                        // same 100 ms-throttled recovery.request() at the top of the loop.
-                        if !awaitingIDR {
-                            awaitingSince = Date()
-                            pumpLog.warning(
-                                "video: received AUs but no decodable format (missing/unparsed parameter sets) — requesting an IDR until one seeds it"
-                            )
-                        }
-                        awaitingIDR = true
+                    if step.startedFormatWait {
+                        awaitingSince = Date()
+                        pumpLog.warning(
+                            "video: received AUs but no decodable format (missing/unparsed parameter sets) — requesting an IDR until one seeds it"
+                        )
                     }
                     let failed = layer.status == .failed
                     if failed {
@@ -153,13 +111,10 @@ final class StreamPump {
                         if !wasFailed { pumpLog.warning("video: display layer .failed — flushing + re-anchoring") }
                         layer.flush()
                         gate.arm() // a wedged decoder is a loss — freeze until the re-anchor
-                        if idrFormat == nil {
-                            format = nil
-                            awaitingIDR = true
-                        }
+                        if idrFormat == nil { pump.requireIDR() }
                     }
                     wasFailed = failed
-                    guard let f = format,
+                    guard let f = pump.format,
                           let sample = connection.videoCodec.sampleBuffer(au: au, format: f),
                           !token.isStopped // don't enqueue a stale frame after a restart
                     else { return true }

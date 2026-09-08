@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Length and shape gates for commits, CHANGELOG.md, and Rust comments.
+"""Length and shape gates for commits, comments, and error messages.
 
 See docs/writing.md. If this fails: shorten. Do not add `writing-ok` unless
 the extra lines are a SAFETY/lifetime trap.
 
   1. Each commit: `type(scope): summary`, ≤72 chars, no trailing period,
      no `and` / semicolon, body ≤ 200 words, no Co-Authored-By.
-  2. Newest CHANGELOG section: ≤160 lines. Older sections are not counted.
-  3. Opened `//` : fail at 6 lines. Opened `//!` / `///`: fail at 24.
-  4. Metaphor / field-report / soak phrasing fails in all three.
+  2. Opened `//` : fail at 6 lines. Opened `//!` / `///`: fail at 24.
+  3. Metaphor / field-report / soak phrasing fails in commits and comments.
+  4. A message this diff wrote does not open with `failed to` / `could not` /
+     `unable to` / `cannot`, and does not apologise.
 
 A comment is opened if its lines are in the diff, or it sits above an item
 (`fn` / `struct` / …) whose body this diff changed. Other comments in the
-file are ignored.
+file are ignored. A message is checked on the lines the diff touched.
 
 `// SAFETY:` is exempt. `writing-ok:` on the line above the block, or on
 its first line, with a reason. Vendor trees skipped. No cargo.
@@ -26,7 +27,6 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-CHANGELOG_FAIL = 160
 LINE_COMMENT_FAIL = 6
 DOC_COMMENT_FAIL = 24
 SUBJECT_FAIL = 72
@@ -46,7 +46,7 @@ ITEM_START = re.compile(
     r"(fn|struct|enum|impl|trait|type|const|static|mod)\b"
 )
 
-# Shared across commits, changelog, comments. Keep this list the stories we
+# Shared across commits and comments. Keep this list the stories we
 # actually shipped, not a vibe classifier.
 STORY = (
     (re.compile(r"rolled dice", re.I), "metaphor"),
@@ -69,20 +69,57 @@ def story_hits(text: str) -> list[str]:
     return found
 
 
-def newest_changelog_section(text: str) -> tuple[int, str, str]:
-    """Return (line_count, heading, section_text) of the first `## v*` section."""
-    lines = text.splitlines()
-    starts = [i for i, line in enumerate(lines) if re.match(r"^## v\d", line)]
-    if not starts:
-        return 0, "", ""
-    a = starts[0]
-    b = starts[1] if len(starts) > 1 else len(lines)
-    return b - a, lines[a], "\n".join(lines[a:b])
+# docs/writing.md §4. Framing is only wrong as an OPENER, after an optional
+# `subsystem: ` prefix — mid-sentence `cannot` states a fact ("AMF cannot
+# encode 4:4:4") and stays legal, as do `Couldn't` and `can't`.
+MESSAGE = (
+    (
+        re.compile(
+            r'^"\s*(?:[\w .\-/]{1,30}: )?'
+            r"(?:[Ff]ailed to|[Cc]ould not|[Uu]nable to|[Cc]annot)\b"
+        ),
+        "opens with framing",
+        "name the operation (`open {path}`), or use `Couldn't` on a user screen",
+    ),
+    (
+        re.compile(r"\b(?:Oops|Sorry|Please)\b"),
+        "apologises",
+        "say what did not happen, then the next move",
+    ),
+)
+STRING_LIT = re.compile(r'"(?:[^"\\]|\\.)*"')
+CODE_COMMENT = re.compile(r"^\s*(?://|/\*|\*|#)")
+MESSAGE_EXTS = (".rs", ".swift", ".ts", ".tsx", ".kt")
+
+# Comments are Rust and Swift only; messages add the client languages. Generated
+# trees carry an upstream style we do not own.
+DIFF_GLOBS = (
+    "*.rs", "*.swift", "*.ts", "*.tsx", "*.kt",
+    ":!**/vendor/**", ":!web/src/api/gen/**", ":!**/node_modules/**", ":!**/dist/**",
+)
 
 
-def newest_changelog_len(text: str) -> tuple[int, str]:
-    n, heading, _ = newest_changelog_section(text)
-    return n, heading
+def check_messages(path: str, lines: list[str], touched: set[int] | None) -> list[str]:
+    """docs/writing.md §4, on the message lines this diff wrote."""
+    if not path.endswith(MESSAGE_EXTS):
+        return []
+    span = range(1, len(lines) + 1) if touched is None else sorted(touched)
+    errors = []
+    for lineno in span:
+        i = lineno - 1
+        if i < 0 or i >= len(lines):
+            continue
+        line = lines[i]
+        if CODE_COMMENT.match(line) or "writing-ok:" in line:
+            continue
+        for lit in STRING_LIT.findall(line):
+            for rx, what, fix in MESSAGE:
+                if rx.search(lit):
+                    errors.append(
+                        f"{path}:{lineno}: error message {what}. {fix}: {lit[:70]}"
+                    )
+                    break
+    return errors
 
 
 def iter_comment_blocks(lines: list[str]):
@@ -225,6 +262,10 @@ def check_blocks(
         if _waived(lines, start):
             continue
         kind = kinds.get((start, end), "line")
+        # Swift has no `//!`, so a file's opening `//` block IS its module doc and earns the doc
+        # budget. Anything below the header is an ordinary comment on the ordinary cap.
+        if kind == "line" and start == 0 and path.endswith(".swift"):
+            kind = "doc"
         length = end - start
         limit = DOC_COMMENT_FAIL if kind == "doc" else LINE_COMMENT_FAIL
         lead = lines[start].strip()[:80]
@@ -353,7 +394,7 @@ def git_merge_base() -> str | None:
 
 def changed_rs_lines(base: str) -> dict[str, set[int]]:
     diff = subprocess.check_output(
-        ["git", "diff", "-U0", f"{base}...HEAD", "--", "*.rs", ":!**/vendor/**"],
+        ["git", "diff", "-U0", f"{base}...HEAD", "--", *DIFF_GLOBS],
         cwd=ROOT,
         text=True,
     )
@@ -380,18 +421,6 @@ def commits_since(base: str) -> list[tuple[str, str, str]]:
 
 def check_repo() -> list[str]:
     errors: list[str] = []
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    n, heading, section = newest_changelog_section(changelog)
-    if n >= CHANGELOG_FAIL:
-        errors.append(
-            f"CHANGELOG.md: newest section {heading!r} is {n} lines "
-            f"(fail at {CHANGELOG_FAIL}). Shorten; do not edit older sections."
-        )
-    for label in story_hits(section):
-        errors.append(
-            f"CHANGELOG.md: newest section {heading!r} is a {label}. "
-            "Two sentences per bullet; stories go on the PR."
-        )
     base = git_merge_base()
     if base:
         for sha, subject, body in commits_since(base):
@@ -402,7 +431,7 @@ def check_repo() -> list[str]:
             changed[rel].update(lines_touched)
     try:
         wt = subprocess.check_output(
-            ["git", "diff", "-U0", "HEAD", "--", "*.rs", ":!**/vendor/**"],
+            ["git", "diff", "-U0", "HEAD", "--", *DIFF_GLOBS],
             cwd=ROOT,
             text=True,
         )
@@ -417,7 +446,11 @@ def check_repo() -> list[str]:
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        errors.extend(check_blocks(rel, text.splitlines(), lines_touched))
+        lines = text.splitlines()
+        # Comment caps are a Rust/Swift rule; the message rule spans every client language.
+        if rel.endswith((".rs", ".swift")):
+            errors.extend(check_blocks(rel, lines, lines_touched))
+        errors.extend(check_messages(rel, lines, lines_touched))
     return errors
 
 
@@ -429,19 +462,6 @@ def self_test() -> int:
         if not cond:
             print(f"FAIL: {label}", file=sys.stderr)
             fails += 1
-
-    short = "## v1.0.0\n\n### Fixed\n- **Foo.** Bar.\n\n## v0.9.0\n"
-    n, h = newest_changelog_len(short)
-    expect("short changelog counted", n < CHANGELOG_FAIL and h == "## v1.0.0")
-
-    long = "## v1.0.0\n" + ("x\n" * CHANGELOG_FAIL) + "## v0.9.0\n"
-    n, _ = newest_changelog_len(long)
-    expect("long changelog counted", n >= CHANGELOG_FAIL)
-
-    story_cl, _, sec = newest_changelog_section(
-        "## v1.0.0\n- clients rolled dice\n\n## v0.9.0\n"
-    )
-    expect("changelog story", "metaphor" in story_hits(sec) and story_cl == 3)
 
     five = ["// a"] * 5 + ["fn x() {}"]
     expect("five // pass", check_blocks("t.rs", five, {1, 2, 3, 4, 5}) == [])
@@ -475,6 +495,14 @@ def self_test() -> int:
     expect("field report opened", any("field report" in e for e in err))
 
     doc_ok = ["//! m"] * 23 + ["pub fn z() {}"]
+    swift_header = ["// h"] * 10 + ["", "import Foundation"]
+    expect("swift file header gets the doc budget",
+           check_blocks("t.swift", swift_header, {1}) == [])
+    expect("same block in a .rs file does not",
+           check_blocks("t.rs", swift_header, {1}) != [])
+    swift_body = ["import Foundation", ""] + ["// c"] * 10
+    expect("swift comment below the header keeps the // cap",
+           check_blocks("t.swift", swift_body, {3}) != [])
     expect("23 //! pass", check_blocks("t.rs", doc_ok, None) == [])
 
     doc_bad = ["//! m"] * 24 + ["pub fn z() {}"]
@@ -491,6 +519,27 @@ def self_test() -> int:
     header_and_fn = ["//! m"] * 24 + ["pub fn z() {", "    let x = 1;", "}"]
     err = check_blocks("t.rs", header_and_fn, {26})
     expect("fn body does not open //!", err == [])
+
+    # --- error messages (docs/writing.md §4) ---
+    def msg(line: str, path: str = "t.rs") -> list[str]:
+        return check_messages(path, [line], {1})
+
+    expect("framing opener fails", msg('bail!("failed to open {path}");') != [])
+    expect("framing after a prefix fails", msg('warn!("pad audio: could not open it");') != [])
+    expect("cannot as an opener fails", msg('bail!("cannot read {p}");') != [])
+    expect("unable to fails", msg('.context("unable to bind")') != [])
+    expect("apology fails", msg('toast("Please try again")', "t.ts") != [])
+    expect("the operator form passes", msg('.context("open {path}")') == [])
+    expect("Couldn’t is the approved user form", msg('label("Couldn\'t reach the host")') == [])
+    expect(
+        "cannot mid-sentence is a fact",
+        msg('warn!("AMF cannot encode 4:4:4 — encoding 4:2:0");') == [],
+    )
+    expect("a comment is not a message", msg('// failed to do the thing') == [])
+    expect("writing-ok waives it", msg('bail!("failed to x"); // writing-ok: upstream text') == [])
+    expect("untouched lines are ignored", check_messages("t.rs", ['bail!("failed to x");'], set()) == [])
+    expect("other languages are skipped", msg('throw new Error("failed to x")', "t.py") == [])
+    expect("kotlin is checked", msg('error("could not claim iface")', "t.kt") != [])
 
     diff = """diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
@@ -545,9 +594,9 @@ def main(argv: list[str]) -> int:
         for e in errors:
             print(f"::error::{e}")
         print(
-            "docs/writing.md: shorten the commit, the changelog bullet, or the "
-            "comment you opened. Do not add writing-ok unless the extra lines "
-            "are a SAFETY/lifetime trap.",
+            "docs/writing.md: shorten the commit or the comment you opened. "
+            "Do not add writing-ok unless the extra lines are a SAFETY/lifetime "
+            "trap.",
             file=sys.stderr,
         )
         return 1

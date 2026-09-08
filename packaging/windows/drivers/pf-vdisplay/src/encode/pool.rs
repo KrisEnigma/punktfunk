@@ -14,7 +14,7 @@
 
 use std::collections::VecDeque;
 use std::mem::offset_of;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pf_driver_proto::encode as wire;
@@ -63,8 +63,9 @@ pub fn bypass_enabled() -> bool {
 
 /// What [`Pool::offer`] did with a surface.
 pub enum Offer {
-    /// In a slot; the frame's source sequence.
-    Taken(u64),
+    /// In a slot; the frame's source sequence, and the new drop total when the slot was
+    /// recycled from under a live consumer.
+    Taken(u64, Option<u64>),
     /// Counted; the new drop total.
     Dropped(u64),
     /// Not this pool's surface — nothing counted. Carries what arrived against what the pool
@@ -87,8 +88,8 @@ struct State {
     /// until a later pass reuses it, which is what lets a keyframe request re-encode the last
     /// picture when the desktop composed nothing since.
     stash: Option<(usize, u64, u64)>,
-    /// An encode thread is consuming. Without one the newest frame recycles the oldest full
-    /// slot, so the retained image is always the current desktop.
+    /// An encode thread is consuming. A recycle costs a frame only while this is set; without
+    /// a consumer the retained image just becomes the current desktop.
     live: bool,
     /// Bypass only: the acquired surface the encoder reads. One at a time — the drain worker
     /// waits for its release before it acquires again — and the reference here is what keeps
@@ -186,10 +187,14 @@ impl Pool {
         self.event.as_raw()
     }
 
-    /// The drain worker's pass: one GPU pass from the acquired surface into a free slot, then
-    /// the event. Never blocks — a contended lock is a counted drop, as is a full pool with a
-    /// live consumer. Under [`bypass_enabled`] there is no pass: the surface itself becomes
-    /// the encoder's input and only one may be out at a time.
+    /// The drain worker's pass: one GPU pass from the acquired surface into a slot, then the
+    /// event. The state lock is taken blocking — every holder releases it before it calls the
+    /// encoder, so the wait is one pass on the shared immediate context, which this pass would
+    /// serialise on through the D3D11 runtime lock anyway. With no free slot the oldest queued
+    /// frame is recycled ([`wire::offer_slot`]), so the encoder always reads the freshest
+    /// composed picture; that recycle is the only counted drop. Under [`bypass_enabled`] there
+    /// is no pass: the surface itself becomes the encoder's input and only one may be out at a
+    /// time.
     pub fn offer(&self, device: &Direct3DDevice, tex: &ID3D11Texture2D, qpc: u64) -> Offer {
         let want = (self.width, self.height, self.source_format.0 as u32);
         if device.epoch() != self.device_epoch {
@@ -205,9 +210,8 @@ impl Pool {
         if got != want {
             return Offer::Refused { got, want };
         }
-        let Ok(mut st) = self.state.try_lock() else {
-            return self.drop_one();
-        };
+        let mut st = lock(&self.state);
+        let mut recycled = None;
         let i = if self.bypass {
             // A surface still held means the previous access unit is not out; this frame is
             // dropped rather than queued behind it, so the hold below is never nested.
@@ -223,24 +227,27 @@ impl Pool {
             st.full.clear();
             0
         } else {
-            // Recycle the oldest queued slot only when no free one is left: a slot popped and
-            // then not used is in none of the three lists, and nothing would put it back.
-            let mut i = st.free.pop();
-            if i.is_none() && !st.live {
-                i = st.full.pop_front().map(|f| f.0);
-            }
-            let Some(i) = i else {
-                return self.drop_one();
+            // Take the slot out of exactly one list: a slot popped and then not used is in
+            // none of the three, and nothing would put it back.
+            let free_top = st.free.last().copied();
+            let oldest = st.full.front().map(|f| f.0);
+            let i = match wire::offer_slot(free_top, oldest, st.live) {
+                Some(wire::OfferSlot::Free(i)) => {
+                    st.free.pop();
+                    i
+                }
+                Some(wire::OfferSlot::Recycle { slot, lost }) => {
+                    st.full.pop_front();
+                    if lost {
+                        recycled = Some(self.dropped.fetch_add(1, Ordering::Relaxed) + 1);
+                    }
+                    slot
+                }
+                None => return self.drop_one(),
             };
             let blend = self.cursor.blends();
-            let passed = bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| {
-                st.targets.pass(&src, i, blend)?;
-                // Keep the clean source every frame, so the first pointer move after the client
-                // hands the cursor back already has a cursor-free plate that predates the blend.
-                // One copy at the compose rate; a still desktop reaches it barely.
-                let _ = st.targets.keep_plate(&src);
-                Ok(())
-            });
+            let passed =
+                bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| st.targets.pass(&src, i, blend));
             if passed.is_err() {
                 st.free.push(i);
                 return self.drop_one();
@@ -254,7 +261,7 @@ impl Pool {
         unsafe {
             let _ = SetEvent(self.event.as_raw());
         }
-        Offer::Taken(seq)
+        Offer::Taken(seq, recycled)
     }
 
     /// One more frame dropped; the new total, for the header.
@@ -293,25 +300,33 @@ impl Pool {
     /// Yields nothing unless the slot is idle and no composed frame is queued
     /// ([`wire::republish_slot`]), and moves it out of `free` so no drain pass can overwrite
     /// the pixels the encoder is about to read. A blended pointer is re-drawn by `frame`, so
-    /// the slot is re-filled from the clean plate first or the old pointer stays under the new
-    /// one. QPC 0: the drive stamps the re-encode with now, not the stale present time.
+    /// the last blend is lifted off the slot first or the old pointer stays under the new one.
+    /// QPC 0: the drive stamps the re-encode with now, not the stale present time.
     pub fn republish(&self) -> Option<(usize, u64, u64)> {
         let mut st = lock(&self.state);
         let (slot, _, seq) = st.stash?;
         let queued = st.full.len();
         wire::republish_slot(Some(slot), queued, &st.free)?;
         if self.cursor.blends() {
-            st.targets.refill_from_plate(slot).ok()?;
+            st.targets.restore_under(slot).ok()?;
         }
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
         Some((slot, 0, seq))
     }
 
-    /// A blended pointer moved since the encode thread last looked — a peek that leaves the
-    /// mark, so the drive loop can rate-limit to the refresh before it re-encodes.
+    /// A blended pointer moved since the encode thread last looked AND the stash can be
+    /// re-encoded now — a peek that leaves the mark, so the drive loop can rate-limit to the
+    /// refresh. A stash whose access unit is still owed is not pending: the loop parks on that
+    /// AU instead of spinning on a timer, and the move is picked up once the slot comes back.
     pub fn cursor_pending(&self) -> bool {
-        !self.bypass && self.cursor.is_dirty()
+        if self.bypass || !self.cursor.is_dirty() {
+            return false;
+        }
+        let st = lock(&self.state);
+        st.stash.is_some_and(|(slot, ..)| {
+            wire::republish_slot(Some(slot), st.full.len(), &st.free).is_some()
+        })
     }
 
     /// Re-encode the stash with the pointer where it is NOW. DWM excludes the hardware cursor and
@@ -320,14 +335,22 @@ impl Pool {
     /// slot is taken like [`Self::republish`], and the source counter advances so the move reads
     /// as real progress. `None` unless a move is pending, a plate exists, the slot is idle and no
     /// composed frame is queued — a queued frame carries the current pointer itself.
+    ///
+    /// The mark is consumed only once the slot is taken: consumed on a busy slot, the last move
+    /// of a gesture was lost and the client's pointer rested one step behind.
     pub fn cursor_republish(&self) -> Option<(usize, u64, u64)> {
-        if !self.cursor.take_dirty() {
+        if !self.cursor.is_dirty() {
             return None;
         }
         let mut st = lock(&self.state);
         let (slot, ..) = st.stash?;
         wire::republish_slot(Some(slot), st.full.len(), &st.free)?;
-        st.targets.refill_from_plate(slot).ok()?;
+        if !self.cursor.take_dirty() {
+            return None;
+        }
+        // A slot with no clean plate has nothing to re-blend until the next compose, which
+        // carries the pointer itself; the mark is spent so the loop does not spin on it.
+        st.targets.restore_under(slot).ok()?;
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
         let seq = self.source_seq.fetch_add(1, Ordering::Relaxed) + 1;
@@ -415,13 +438,19 @@ impl Pool {
     /// draws none (the planar pair signals its fence here). In bypass the frame is the held
     /// surface itself and carries no pointer: there is no driver-owned image to draw one on,
     /// so that mode is only honest for a client that takes the cursor plane.
+    ///
+    /// A blend draws the pointer where it is now, so it spends the move mark: left set, the
+    /// loop re-encoded the same picture once more right after a composed frame.
     pub fn frame(&self, slot: usize, pts_ns: u64) -> Result<CapturedFrame, Fail> {
-        let cursor = self.cursor.to_blend();
         let mut st = lock(&self.state);
         if self.bypass {
             let src = st.held.clone().ok_or((-2, "bypass"))?;
             return Ok(st.targets.direct_frame(&src, pts_ns));
         }
+        // Taken before the image is read: a move landing between the two is drawn now and
+        // re-encoded once more, never drawn now and forgotten.
+        let _ = self.cursor.take_dirty();
+        let cursor = self.cursor.to_blend();
         st.targets.frame(slot, pts_ns, cursor)
     }
 }
@@ -432,6 +461,8 @@ pub struct Attached {
     session: Option<Arc<EncodeSession>>,
     seen_gen: u32,
     cadence: Cadence,
+    /// One line per worker, not one per discarded surface.
+    warned_no_pool: AtomicBool,
 }
 
 impl Attached {
@@ -441,6 +472,7 @@ impl Attached {
             session: None,
             seen_gen: u32::MAX,
             cadence: Cadence::new(),
+            warned_no_pool: AtomicBool::new(false),
         }
     }
 
@@ -453,6 +485,14 @@ impl Attached {
         self.seen_gen = generation;
         self.pool = monitor.pool();
         self.session = monitor.encode();
+        // Which pool this worker now fills, so it can be matched against the one the encode
+        // thread drains: a worker filling a pool nobody drains starves the encoder silently.
+        dbglog!(
+            "[pf-vd] pool attach: gen {} -> pool {:?} session {}",
+            generation,
+            self.pool.as_ref().map(Arc::as_ptr),
+            self.session.is_some()
+        );
     }
 
     /// The hook, per acquired surface (see [`Pool::offer`]). A pool on another device epoch
@@ -461,6 +501,12 @@ impl Attached {
     /// `FinishedProcessingFrame`.
     pub fn offer(&self, device: &Direct3DDevice, tex: &ID3D11Texture2D, display_qpc: u64) -> bool {
         let Some(pool) = &self.pool else {
+            // No pool attached: every acquired surface goes nowhere, with nothing else logging it.
+            if !self.warned_no_pool.swap(true, Ordering::AcqRel) {
+                dbglog!(
+                    "[pf-vd] pool attach: NO pool for this worker - surfaces are being discarded"
+                );
+            }
             return false;
         };
         let session = self.session.as_deref();
@@ -470,17 +516,35 @@ impl Attached {
                 if let Some(s) = session {
                     s.section.store_u64(offset_of!(AuHeader, dropped_total), n);
                 }
+                // A pool with no free slot means the encode thread is not releasing them. Rate
+                // limited: this fires per frame once the encoder stops draining.
+                if n == 1 || n % 512 == 0 {
+                    dbglog!(
+                        "[pf-vd] pool: no free slot - dropped {n} surfaces (encoder not draining)"
+                    );
+                }
             }
-            Offer::Taken(seq) => {
+            Offer::Taken(seq, recycled) => {
                 held = pool.bypass();
                 if let Some(s) = session {
                     s.section.store_u64(offset_of!(AuHeader, source_seq), seq);
+                    if let Some(n) = recycled {
+                        s.section.store_u64(offset_of!(AuHeader, dropped_total), n);
+                    }
                 }
             }
             Offer::Refused { got, want } => {
                 if let Some(s) = session
                     && !s.stale.swap(true, Ordering::AcqRel)
                 {
+                    // Say so in the header too. Only a fresh SET_ENCODE rebuilds the pool, and
+                    // the host cannot ask for one it never learns it needs: every surface is
+                    // dropped here while its telemetry still reads a healthy open encoder, so the
+                    // stream goes black until an unrelated timeout happens to rebuild it.
+                    s.section.store_u32(
+                        offset_of!(AuHeader, encoder_state),
+                        pf_driver_proto::encode::au::ENCODER_WEDGED,
+                    );
                     dbglog!(
                         "[pf-vd] encode: pool cannot take the surface - got {}x{} fmt {}, pool wants {}x{} fmt {} (epoch {} vs {}) - session stale until the next SET_ENCODE",
                         got.0,

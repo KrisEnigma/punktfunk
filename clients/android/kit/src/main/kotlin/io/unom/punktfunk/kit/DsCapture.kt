@@ -66,8 +66,7 @@ class DsCapture(
 
     // Typed-mirror diff state (wire units) + rich-plane on-change mirrors. Link thread only.
     private val state = DsDevice.State()
-    private var wireButtons = 0
-    private val lastAxis = IntArray(6) { Int.MIN_VALUE }
+    private var mirror = TypedMirror()
     private val lastTouchActive = BooleanArray(2)
     private val lastTouchX = IntArray(2) { -1 }
     private val lastTouchY = IntArray(2) { -1 }
@@ -308,7 +307,7 @@ class DsCapture(
         val fd = conn?.fileDescriptor ?: -1
         if (fd < 0) {
             conn?.close()
-            Log.w(TAG, "pad audio: could not open a second USB connection")
+            Log.w(TAG, "pad audio: second USB connection failed")
             return
         }
         padAudioConn = conn
@@ -350,7 +349,7 @@ class DsCapture(
         val m = model ?: return
         if (m == DsDevice.Model.DUALSHOCK4) return // no voice coils, no audio-haptics path
         if (!usb.writeControl(DsDevice.ds5AudioHapticsReport(m))) {
-            Log.w(TAG, "pad audio: could not hand the coils back to audio haptics")
+            Log.w(TAG, "pad audio: handing the coils back to audio haptics failed")
         }
     }
 
@@ -392,27 +391,8 @@ class DsCapture(
     }
 
     /** Diff the parsed state onto the per-transition plane (buttons + axes, on change only). */
-    private fun mirrorTyped(p: GamepadRouter.ExternalPad) {
-        var changed = state.buttons xor wireButtons
-        while (changed != 0) {
-            val bit = changed and -changed // lowest changed bit
-            p.button(bit, state.buttons and bit != 0)
-            changed = changed and bit.inv()
-        }
-        wireButtons = state.buttons
-        axis(p, Gamepad.AXIS_LS_X, state.lsX)
-        axis(p, Gamepad.AXIS_LS_Y, state.lsY)
-        axis(p, Gamepad.AXIS_RS_X, state.rsX)
-        axis(p, Gamepad.AXIS_RS_Y, state.rsY)
-        axis(p, Gamepad.AXIS_LT, state.lt)
-        axis(p, Gamepad.AXIS_RT, state.rt)
-    }
-
-    private fun axis(p: GamepadRouter.ExternalPad, id: Int, v: Int) {
-        if (lastAxis[id] == v) return
-        lastAxis[id] = v
-        p.axis(id, v)
-    }
+    private fun mirrorTyped(p: GamepadRouter.ExternalPad) =
+        mirror.push(p, state.buttons, state.lsX, state.lsY, state.rsX, state.rsY, state.lt, state.rt)
 
     /**
      * The rich plane: touch contacts normalized to the wire's 0..65535 screen space, forwarded
@@ -446,8 +426,7 @@ class DsCapture(
         }
         p?.close()
         pad = null
-        wireButtons = 0
-        lastAxis.fill(Int.MIN_VALUE)
+        mirror = TypedMirror()
         lastTouchActive.fill(false)
         lastTouchX.fill(-1)
         lastTouchY.fill(-1)

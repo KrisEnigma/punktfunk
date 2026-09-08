@@ -7,6 +7,7 @@ use crate::theme::{fg, fill, Fonts, PanelStroke, W};
 use skia_safe::{gradient, Canvas, Color4f, Image, PathBuilder, Point, RRect, Rect, TileMode, M44};
 
 use super::{Launching, Shell, ToastMark, BOTTOM_BAND};
+use crate::model::SpeedPhase;
 
 /// Kind mark in a 13 dp box.
 fn draw_toast_mark(canvas: &Canvas, mark: ToastMark, cx: f64, cy: f64, k: f64, ink: Color4f) {
@@ -61,8 +62,15 @@ impl Shell {
         t: f64,
         fonts: &Fonts,
     ) {
-        // Connect and wake share one full-screen shape. A connect can follow a wake
-        // (`sync`) so they share the backdrop and never blink between them.
+        // Resolved before the chain below: naming the layer Apply writes to reads the
+        // whole shell, which the chain's `&mut self.connecting` arm would forbid.
+        let pinned_by = self
+            .speed
+            .as_ref()
+            .and_then(|sp| self.speed_pinned_by(&sp.key))
+            .map(str::to_string);
+        // Connect, wake and the speed test share one full-screen shape. A connect can
+        // follow a wake (`sync`) so they share the backdrop and never blink between them.
         let takeover: Option<(f64, bool, String, String, Vec<Hint>)> =
             if let Some(c) = &mut self.connecting {
                 c.appear = approach(c.appear, 1.0, dt, 0.07);
@@ -116,6 +124,65 @@ impl Shell {
                         )],
                     ))
                 }
+            } else if let Some(sp) = &self.speed {
+                // Service-driven like the wake card: already settled, no fade-in.
+                let close = Hint::new(HintKey::Back, "Close");
+                Some(match &sp.phase {
+                    SpeedPhase::Connecting => (
+                        1.0,
+                        true,
+                        format!("Testing {}\u{2026}", sp.name),
+                        "Connecting.".to_string(),
+                        vec![Hint::new(HintKey::Back, "Cancel")],
+                    ),
+                    SpeedPhase::Measuring => (
+                        1.0,
+                        true,
+                        format!("Testing {}\u{2026}", sp.name),
+                        "Measuring the link \u{2014} this takes two seconds.".to_string(),
+                        vec![Hint::new(HintKey::Back, "Cancel")],
+                    ),
+                    SpeedPhase::Failed(why) => (
+                        1.0,
+                        false,
+                        format!("Couldn't measure {}", sp.name),
+                        why.clone(),
+                        vec![close],
+                    ),
+                    SpeedPhase::Done {
+                        throughput_kbps,
+                        loss_pct,
+                        recommended_kbps,
+                    } => {
+                        let measured = format!(
+                            "{} Mb/s \u{b7} {loss_pct:.1} % loss",
+                            throughput_kbps / 1_000
+                        );
+                        match &pinned_by {
+                            // Read-only: the default is not the layer this host streams at.
+                            Some(name) => (
+                                1.0,
+                                false,
+                                measured,
+                                format!(
+                                    "\u{201c}{name}\u{201d} sets this host's bitrate \u{2014} \
+                                     change it there to use this."
+                                ),
+                                vec![close],
+                            ),
+                            None => (
+                                1.0,
+                                false,
+                                measured,
+                                format!(
+                                    "{} Mb/s recommended, leaving headroom for FEC and loss.",
+                                    recommended_kbps / 1_000
+                                ),
+                                vec![Hint::new(HintKey::Confirm, "Set as the default"), close],
+                            ),
+                        }
+                    }
+                })
             } else {
                 None
             };
@@ -218,7 +285,13 @@ impl Shell {
         hints: &[Hint],
     ) {
         let cx = w / 2.0;
-        canvas.save_layer_alpha_f(None, appear as f32);
+        // Only while it is arriving: an unbounded layer is a full-screen offscreen per frame,
+        // and `appear` is at 1.0 within half a second of a hold that runs for many.
+        if appear < 0.999 {
+            canvas.save_layer_alpha_f(None, appear as f32);
+        } else {
+            canvas.save();
+        }
         self.draw_takeover_field(canvas, w, h, t);
 
         let title_y = h / 2.0 + if spinner { 14.0 * k } else { 0.0 };
@@ -314,7 +387,11 @@ impl Shell {
     ) {
         // Fades in rather than replacing the shelf outright: the cover has to be seen
         // LEAVING its tile, which means the tile has to still be there when it does.
-        canvas.save_layer_alpha_f(None, l.appear as f32);
+        if l.appear < 0.999 {
+            canvas.save_layer_alpha_f(None, l.appear as f32);
+        } else {
+            canvas.save();
+        }
         self.draw_takeover_field(canvas, w, h, t);
         canvas.restore();
 

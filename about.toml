@@ -10,15 +10,11 @@
 #
 # ⚠ KNOW THE LIMIT OF THIS GATE. cargo-about walks the CARGO graph, so it sees CRATES. A native
 # library linked through a permissively-licensed `-sys` crate is INVISIBLE to it, licence and all.
-# FFmpeg is precisely that shape: `ffmpeg-sys-next` is WTFPL and passes cleanly, while the LGPL
-# libavcodec/libavutil/swscale it link-imports — and which the Windows host installer bundles as
-# DLLs — never appear in the harvest at all. This gate did not catch FFmpeg entering the tree and
-# would not catch the next such library. Copyleft arriving as C behind a -sys crate is a REVIEW
-# question, not a CI one; the LGPL obligations we do carry are discharged by hand (the notice files
-# and the replaceable-DLL linkage, see packaging/windows/punktfunk-host.iss).
-#
-# Since M10 this is a HOST-only concern: the client links no FFmpeg, so for every client artifact
-# the crate graph and the linked set finally coincide and the gate means what it appears to mean.
+# FFmpeg was precisely that shape while we linked it: `ffmpeg-sys-next` is WTFPL and passed
+# cleanly, while the LGPL libavcodec/libavutil/swscale it link-imported never appeared in the
+# harvest at all. Nothing links it any more (host encode went native, 2026-09), so the crate graph
+# and the linked set coincide for every artifact — but the gate is no stronger than it was.
+# Copyleft arriving as C behind a -sys crate is a REVIEW question, not a CI one.
 #
 # The dependency-free fallback is scripts/gen-third-party-notices.py (reads the cargo registry cache),
 # which is what produced the committed baseline when cargo-about is unavailable offline.

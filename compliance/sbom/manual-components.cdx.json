@@ -8,72 +8,157 @@
       "name": "pyrowave",
       "version": "509e4f887b585a3f97471fcc804e9de649f2c16f",
       "description": "GPU wavelet codec, vendored at crates/pyrowave-sys/vendor/pyrowave (pruned tree) with local patches from crates/pyrowave-sys/patches/; commits recorded in vendor/pyrowave/PUNKTFUNK-VENDOR.txt",
-      "licenses": [{ "license": { "id": "MIT" } }],
-      "externalReferences": [{ "type": "vcs", "url": "https://github.com/Themaister/pyrowave" }]
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Themaister/pyrowave"
+        }
+      ]
     },
     {
       "type": "library",
       "name": "Granite",
       "version": "44362775d36e0c4139352f83efd96bab4e239f66",
       "description": "Vulkan backend subset vendored inside the pyrowave tree",
-      "licenses": [{ "license": { "id": "MIT" } }],
-      "externalReferences": [{ "type": "vcs", "url": "https://github.com/Themaister/Granite" }]
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Themaister/Granite"
+        }
+      ]
     },
     {
       "type": "library",
       "name": "volk",
       "version": "47cddf7ed97b94118a08aacb548a411188e016cc",
       "description": "Vulkan meta-loader vendored inside the pyrowave/Granite tree",
-      "licenses": [{ "license": { "id": "MIT" } }],
-      "externalReferences": [{ "type": "vcs", "url": "https://github.com/zeux/volk" }]
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/zeux/volk"
+        }
+      ]
     },
     {
       "type": "library",
       "name": "Vulkan-Headers",
       "version": "015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9",
       "description": "Vulkan API headers vendored inside the pyrowave tree",
-      "licenses": [{ "license": { "id": "Apache-2.0" } }, { "license": { "id": "MIT" } }],
-      "externalReferences": [{ "type": "vcs", "url": "https://github.com/KhronosGroup/Vulkan-Headers" }]
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        },
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/KhronosGroup/Vulkan-Headers"
+        }
+      ]
     },
     {
       "type": "library",
       "name": "libvpl",
       "version": "2.17.0",
       "description": "Intel oneVPL dispatcher, vendored at crates/libvpl-sys/vendor/libvpl",
-      "licenses": [{ "license": { "id": "MIT" } }],
-      "externalReferences": [{ "type": "vcs", "url": "https://github.com/intel/libvpl" }]
-    },
-    {
-      "type": "library",
-      "name": "FFmpeg",
-      "version": "7.x/8.x (HOST only \u2014 system-provided on Linux; replaceable DLLs bundled with the Windows host installer)",
-      "description": "Dynamically linked libav* ENCODE for the host (pf-encode: NVENC-libav, VAAPI, AMF/QSV); LGPL notice at packaging/windows/licenses/FFmpeg-LGPL-NOTICE.txt. No punktfunk CLIENT links FFmpeg since M10 \u2014 client decode is Vulkan Video / DXVA / VAAPI / VideoToolbox / MediaCodec with openh264 + rav1d as the CPU floor.",
-      "licenses": [{ "license": { "id": "LGPL-2.1-or-later" } }],
-      "externalReferences": [{ "type": "website", "url": "https://ffmpeg.org" }]
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/intel/libvpl"
+        }
+      ]
     },
     {
       "type": "library",
       "name": "SDL3",
       "version": "3.x (system-provided or bundled per platform package)",
       "description": "Windowing/input layer for the desktop clients, dynamically linked",
-      "licenses": [{ "license": { "id": "Zlib" } }],
-      "externalReferences": [{ "type": "vcs", "url": "https://github.com/libsdl-org/SDL" }]
+      "licenses": [
+        {
+          "license": {
+            "id": "Zlib"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/libsdl-org/SDL"
+        }
+      ]
     },
     {
       "type": "application",
       "name": "punktfunk-gamescope",
       "version": "upstream gamescope pinned by packaging/nix/gamescope.nix (nixpkgs) or built by packaging/gamescope/build-punktfunk-gamescope.sh, plus the local patch series from packaging/gamescope/patches/",
       "description": "Patched gamescope compositor distributed via sysext/Arch/nix channels alongside the host",
-      "licenses": [{ "license": { "id": "BSD-2-Clause" } }],
-      "externalReferences": [{ "type": "vcs", "url": "https://github.com/ValveSoftware/gamescope" }]
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/ValveSoftware/gamescope"
+        }
+      ]
     },
     {
       "type": "application",
       "name": "Bun",
       "version": "1.3.14 (pinned in .gitea/workflows/windows-host.yml)",
       "description": "Portable JavaScript runtime bundled in the Windows host installer to run the web console (.output) and the plugin/script runner. Embeds JavaScriptCore (LGPL-2.1).",
-      "licenses": [{ "license": { "id": "MIT" } }],
-      "externalReferences": [{ "type": "vcs", "url": "https://github.com/oven-sh/bun" }]
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/oven-sh/bun"
+        }
+      ]
     }
   ]
 }

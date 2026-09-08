@@ -63,6 +63,18 @@ pub fn ask_plugin_launch(plugin: &str, key: &str) -> Option<PluginLaunch> {
         );
         return None;
     };
+    // The registration outlives a dead plugin by up to its lease, and the dial carries the UI
+    // secret: whoever listens on the port now must still be the LocalService runner. Tests
+    // stub the plugin in-process, as whoever runs them.
+    #[cfg(all(windows, not(test)))]
+    if !crate::plugins::listener_is_runner(cred.port) {
+        tracing::warn!(
+            plugin,
+            port = cred.port,
+            "plugin launch: the registered port is not held by the plugin runner — not dialling"
+        );
+        return None;
+    }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(ASK_TIMEOUT))
         .build()
@@ -100,7 +112,7 @@ pub fn ask_plugin_launch(plugin: &str, key: &str) -> Option<PluginLaunch> {
                 plugin,
                 entry = key,
                 error = %e,
-                "plugin launch: could not reach the plugin's launch surface"
+                "plugin launch: the plugin's launch surface is unreachable"
             );
             return None;
         }

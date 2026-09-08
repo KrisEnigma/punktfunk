@@ -11,24 +11,12 @@
 # same risk the distro's own package carries between rebuilds"), and any ci/ edit — or
 # bumping the date in this line (refreshed: 2026-08-08) — re-keys and re-snapshots it.
 #
-# ⚠ That staleness has a sharp edge, and 2026-08-08 is why the date above moved: this snapshot is
-# what decides which FFmpeg the HOST links, and arch.yml deliberately runs no -Syu, so the builder
-# stayed frozen on ffmpeg 8 (libavcodec 62) even after Arch shipped 2:9.0-5 (libavcodec 63) to
-# every user. A canary built from the old snapshot therefore CANNOT satisfy the soname dep that
-# packaging/arch/PKGBUILD now derives from the link (libavcodec.so=62-64 against a box that has
-# 63-64), so it would simply refuse to install rather than start. Re-keying this image is the step
-# that makes the ffmpeg-9 bump actually reach the package — a Cargo.toml bump alone does nothing
-# here. Whenever Arch moves to an FFmpeg major, bump the date in the same commit.
-#
-# ⚠ AND KNOW WHY THAT WAS NOT ENOUGH: bumping this date only helps once docker.yml has actually
-# republished the image, and nothing sequences the two workflows. v0.25.0 was tagged four minutes
-# after the ffmpeg-9 merge, so the release build still pulled the FFmpeg-8 `:latest` and published
-# a punktfunk-host that no up-to-date Arch box could install — which blocks the user's ENTIRE
-# `pacman -Syu`, not just our package. arch.yml therefore no longer trusts this image on that one
-# axis: it compares the builder's libav sonames against the repos before building (and `-Syu`s
-# itself if they differ), and refuses to publish anything a pristine-db `pacman -U --print` says
-# is unsatisfiable. This file staying current is still the CHEAP path — those guards are the
-# backstop, not the plan.
+# ⚠ AND KNOW WHY THAT IS NOT ENOUGH ON ITS OWN: bumping this date only helps once docker.yml has
+# actually republished the image, and nothing sequences the two workflows. A release tagged four
+# minutes after a system-library major once published a punktfunk-host that no up-to-date Arch
+# box could install — which blocks the user's ENTIRE `pacman -Syu`, not just our package. So
+# arch.yml refuses to publish anything a pristine-db `pacman -U --print` says is unsatisfiable.
+# This file staying current is still the CHEAP path — that gate is the backstop, not the plan.
 FROM docker.io/library/archlinux:base-devel
 
 # One transaction: the main build/runtime deps (first list) + the gamescope companion's
@@ -41,7 +29,7 @@ FROM docker.io/library/archlinux:base-devel
 # reported as a missing dependency, only as a compile failure. Keep it.
 RUN pacman -Syu --noconfirm --needed \
         git nodejs rust clang cmake ninja nasm pkgconf python vulkan-headers \
-        gtk4 libadwaita sdl3 ffmpeg pipewire wayland libxkbcommon opus libei \
+        gtk4 libadwaita sdl3 pipewire wayland libxkbcommon opus libei \
         mesa libglvnd unzip libarchive \
         glslang libcap libdrm libinput libx11 libxcomposite libxdamage libxext \
         libxmu libxrender libxres libxtst libxxf86vm libavif libdecor \

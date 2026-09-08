@@ -58,7 +58,7 @@ fn zero_copy_policy(
         pyrowave_modifiers,
         native_nv12_session,
         // Only the direct-SDK NVENC backend takes a packed 10-bit PQ CUDA payload.
-        // Without it HDR capture stays on the CPU path (libav swscales into P010).
+        // Without it HDR capture stays on the CPU path.
         hdr_cuda_ok: pf_encode::linux_hdr_cuda_ok(),
     }
 }
@@ -106,8 +106,9 @@ pub fn capture_virtual_output(
     _capture: crate::session_plan::CaptureBackend,
     // The output's compositor is KWin, derived from the backend that created
     // `vout` (a pooled display only ever matches its own backend). KWin rewrites
-    // `SPA_META_Cursor` on every buffer, so id-0 is an authoritative hide, and
-    // serves a 3-buffer pool unless asked for `KWIN_POOL_MIN`.
+    // `SPA_META_Cursor` on every buffer, so id-0 is an authoritative hide, serves
+    // a 3-buffer pool unless asked for `KWIN_POOL_MIN`, and paces delivery on a
+    // millisecond-rounded timer unless offered no `maxFramerate` ceiling.
     kwin: bool,
 ) -> Result<Box<dyn Capturer>> {
     // Portal negotiates its own pixel format, so `want.gpu` gates GPU zero-copy
@@ -123,6 +124,35 @@ pub fn capture_virtual_output(
     // the stream. `None` (KWin/Mutter/gamescope) CLEARS a stale name — e.g.
     // Game-Mode switching Hyprland → gamescope, after which `PF-…` is gone.
     crate::inject::set_stream_output(vout.output_name.clone());
+    // Direct capture first where the compositor has it: the portal's re-request timer
+    // halves the rate above ~140 Hz. GPU consumers only — this delivers dmabufs, and a
+    // software encoder wants the portal's CPU pixels. Any failure falls through.
+    if let (Some(name), true) = (
+        vout.output_name.clone(),
+        want.gpu && pf_capture::direct_capture(),
+    ) {
+        // `keepalive` must move exactly once: rebuild it for the portal on failure.
+        match pf_capture::open_direct_output(
+            name.clone(),
+            Box::new(()),
+            zero_copy_policy(want.pyrowave, want.nv12_native),
+        ) {
+            Ok(c) => {
+                tracing::info!(output = %name, "capturing the compositor output directly");
+                // The keepalive still has to outlive the capturer; hand it over now that
+                // the session is known good.
+                return Ok(Box::new(KeptAlive {
+                    inner: c,
+                    _keepalive: vout.keepalive,
+                }));
+            }
+            Err(e) => tracing::info!(
+                output = %name,
+                reason = %format!("{e:#}"),
+                "no direct capture on this compositor — using the ScreenCast portal"
+            ),
+        }
+    }
     pf_capture::open_virtual_output(
         vout.remote_fd,
         vout.node_id,
@@ -139,7 +169,59 @@ pub fn capture_virtual_output(
         } else {
             pf_capture::POOL_MIN
         },
+        kwin && pf_capture::unpaced_capture(),
     )
+}
+
+/// Keeps the compositor's output alive for a capturer that did not take it.
+///
+/// `pf-capture` owns the keepalive on the portal path; the direct path is opened before
+/// the keepalive can be committed, so it rides here instead. Every trait call forwards.
+#[cfg(target_os = "linux")]
+struct KeptAlive {
+    inner: Box<dyn Capturer>,
+    /// Dropped after `inner`, releasing the output only once capture has stopped.
+    _keepalive: Box<dyn Send>,
+}
+
+#[cfg(target_os = "linux")]
+impl Capturer for KeptAlive {
+    fn next_frame(&mut self) -> Result<CapturedFrame> {
+        self.inner.next_frame()
+    }
+    fn next_frame_within(&mut self, b: std::time::Duration) -> Result<CapturedFrame> {
+        self.inner.next_frame_within(b)
+    }
+    fn next_frame_within_provisional(&mut self, b: std::time::Duration) -> Result<CapturedFrame> {
+        self.inner.next_frame_within_provisional(b)
+    }
+    fn try_latest(&mut self) -> Result<Option<CapturedFrame>> {
+        self.inner.try_latest()
+    }
+    fn supports_arrival_wait(&self) -> bool {
+        self.inner.supports_arrival_wait()
+    }
+    fn wait_arrival(&mut self, deadline: std::time::Instant) {
+        self.inner.wait_arrival(deadline)
+    }
+    fn set_active(&mut self, active: bool) {
+        self.inner.set_active(active)
+    }
+    fn is_alive(&self) -> bool {
+        self.inner.is_alive()
+    }
+    fn cursor(&mut self) -> Option<pf_frame::CursorOverlay> {
+        self.inner.cursor()
+    }
+    fn attach_gamescope_cursor(&mut self, t: pf_capture::GamescopeCursorTargets) {
+        self.inner.attach_gamescope_cursor(t)
+    }
+    fn hdr_meta(&self) -> Option<pf_frame::HdrMeta> {
+        self.inner.hdr_meta()
+    }
+    fn pipeline_depth(&self) -> usize {
+        self.inner.pipeline_depth()
+    }
 }
 
 /// Can the native-plane source this session will drive deliver 10-bit PQ/BT.2020?
@@ -316,13 +398,14 @@ pub fn open_driver_encoder(
                 )
             }
         });
+    use pf_driver_proto::encode::{backend as be, codec as cc};
     let backend = match plan.codec {
-        Codec::PyroWave => 4,
+        Codec::PyroWave => be::PYROWAVE,
         _ => match crate::encode::windows_resolved_backend() {
-            WindowsBackend::Nvenc => 1,
-            WindowsBackend::Amf => 2,
-            WindowsBackend::Qsv => 3,
-            WindowsBackend::MediaFoundation => 5,
+            WindowsBackend::Nvenc => be::NVENC,
+            WindowsBackend::Amf => be::AMF,
+            WindowsBackend::Qsv => be::QSV,
+            WindowsBackend::MediaFoundation => be::MEDIA_FOUNDATION,
             WindowsBackend::Software => anyhow::bail!(
                 "driver encode: the resolved backend is software, which the driver cannot run"
             ),
@@ -332,13 +415,14 @@ pub fn open_driver_encoder(
     // declined native open would otherwise end, but only inside its 8-bit 4:2:0 ceiling: the
     // plan is already negotiated here, so a wider one would open and then refuse every frame.
     let mf_fits = !plan.hdr && !plan.chroma.is_444() && bit_depth <= 8;
-    let fallback = u32::from(!matches!(backend, 4 | 5) && mf_fits) * 5;
+    let fallback = u32::from(!matches!(backend, be::PYROWAVE | be::MEDIA_FOUNDATION) && mf_fits)
+        * be::MEDIA_FOUNDATION;
     let params = pf_capture::DriverEncodeParams {
         codec: match plan.codec {
-            Codec::H264 => 1,
-            Codec::H265 => 2,
-            Codec::Av1 => 3,
-            Codec::PyroWave => 4,
+            Codec::H264 => cc::H264,
+            Codec::H265 => cc::HEVC,
+            Codec::Av1 => cc::AV1,
+            Codec::PyroWave => cc::PYROWAVE,
         },
         chroma: u32::from(plan.chroma.is_444()),
         bit_depth: u32::from(bit_depth),

@@ -56,6 +56,8 @@ public struct EffectiveSettings: Equatable, Sendable {
     public var statsVerbosity = "normal"
     public var fullscreenWhileStreaming = true
     public var enable444 = false
+    /// Cross-client `ten_bit_sdr`. Subsumed by `hdrEnabled`, which advertises the depth already.
+    public var tenBitSdr = false
     public var presentPriority = "latency"
     public var smoothBuffer = 0
     public var vsync = false
@@ -123,6 +125,7 @@ public struct EffectiveSettings: Equatable, Sendable {
         fullscreenWhileStreaming = bool(
             DefaultsKey.fullscreenWhileStreaming, fullscreenWhileStreaming)
         enable444 = bool(DefaultsKey.enable444, enable444)
+        tenBitSdr = bool(DefaultsKey.tenBitSdr, tenBitSdr)
         presentPriority = str(DefaultsKey.presentPriority, presentPriority)
         smoothBuffer = int(DefaultsKey.smoothBuffer, smoothBuffer)
         vsync = bool(DefaultsKey.vsync, vsync)
@@ -135,9 +138,10 @@ public struct EffectiveSettings: Equatable, Sendable {
         pointerCapture = bool(DefaultsKey.pointerCapture, pointerCapture)
     }
 
-    /// The stats tier as stored, with the pre-tier `hudEnabled` migration `StatsVerbosity.current`
-    /// performs — duplicated in one line here so this module needn't reach into PunktfunkKit.
-    private static func storedStatsVerbosity(_ defaults: UserDefaults) -> String {
+    /// The stats tier as stored, migrating the pre-tier `hudEnabled` bool: written once, here,
+    /// because the tier and the resolved settings disagreeing about a legacy install is a bug
+    /// nobody would see until an old device upgraded.
+    public static func storedStatsVerbosity(_ defaults: UserDefaults) -> String {
         if let raw = defaults.string(forKey: DefaultsKey.statsVerbosity) { return raw }
         if let legacy = defaults.object(forKey: DefaultsKey.hudEnabled) as? Bool, !legacy {
             return "off"
@@ -206,6 +210,7 @@ public struct EffectiveSettings: Equatable, Sendable {
         if let v = overlay.statsVerbosity { s.statsVerbosity = v }
         if let v = overlay.fullscreenWhileStreaming { s.fullscreenWhileStreaming = v }
         if let v = overlay.enable444 { s.enable444 = v }
+        if let v = overlay.tenBitSdr { s.tenBitSdr = v }
         if let v = overlay.presentPriority { s.presentPriority = v }
         if let v = overlay.smoothBuffer { s.smoothBuffer = v }
         if let v = overlay.vsync { s.vsync = v }

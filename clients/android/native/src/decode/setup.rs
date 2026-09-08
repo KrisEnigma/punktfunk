@@ -3,7 +3,10 @@
 use ndk::media::media_codec::MediaCodec;
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
+use punktfunk_core::client::NativeClient;
+use punktfunk_core::config::Mode;
 use std::ffi::c_void;
+use std::time::Duration;
 
 /// The MediaCodec MIME for the codec the host resolved (`Welcome.codec`). Shared by the decode
 /// thread and `nativeVideoMime` (which tells Kotlin what to rank decoders for). AV1 uses the
@@ -259,4 +262,49 @@ pub(super) fn android_hdr_static_info(m: &punktfunk_core::quic::HdrMeta) -> [u8;
         out[1 + i * 2..3 + i * 2].copy_from_slice(&v.to_le_bytes());
     }
     out
+}
+
+/// HDR static metadata (ST.2086 mastering + content light level) for `KEY_HDR_STATIC_INFO`, so the
+/// display tone-maps from the source's real grade. MediaCodec wants it BEFORE configure(), and the
+/// host sends a 0xCE right after the handshake, so it's typically already queued; wait briefly
+/// otherwise. The Surface DataSpace (applied on the format change) carries transfer/primaries
+/// regardless — this adds the luminance the tone-mapper needs. `None` on an SDR session.
+pub(super) fn hdr_static(client: &NativeClient) -> Option<[u8; 25]> {
+    if !client.color.is_hdr() {
+        return None;
+    }
+    match client.next_hdr_meta(Duration::from_millis(250)) {
+        Ok(meta) => {
+            log::info!("decode: HDR static metadata applied (KEY_HDR_STATIC_INFO)");
+            Some(android_hdr_static_info(&meta))
+        }
+        Err(_) => {
+            log::info!("decode: HDR session but no mastering metadata yet — DataSpace only");
+            None
+        }
+    }
+}
+
+/// The decoder's configure format: the mode, an input buffer generous enough that a large keyframe
+/// AU is never truncated, the low-latency keys for `codec_name`, and the HDR static info.
+pub(super) fn low_latency_format(
+    mime: &str,
+    mode: &Mode,
+    codec_name: &str,
+    aggressive: bool,
+    hdr_static: Option<&[u8; 25]>,
+) -> MediaFormat {
+    let mut format = MediaFormat::new();
+    format.set_str("mime", mime);
+    format.set_i32("width", mode.width as i32);
+    format.set_i32("height", mode.height as i32);
+    format.set_i32(
+        "max-input-size",
+        (mode.width * mode.height).max(2_000_000) as i32,
+    );
+    configure_low_latency(&mut format, codec_name, aggressive);
+    if let Some(info) = hdr_static {
+        format.set_buffer("hdr-static-info", info);
+    }
+    format
 }

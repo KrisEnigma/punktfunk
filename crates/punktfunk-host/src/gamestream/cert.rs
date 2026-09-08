@@ -30,14 +30,18 @@ impl ServerIdentity {
         let dir = config_dir();
         let cert_path = dir.join("cert.pem");
         let key_path = dir.join("key.pem");
-        // Harden before the first read. This never regenerates while both
-        // files are non-empty, so a planted pair becomes the host identity.
+        // This never regenerates while both files are non-empty, so a pair planted before the
+        // first elevated run would become the host identity. Disown it first: hardening the
+        // dir does not, and `create_private_dir` re-owns contents, erasing the evidence.
+        // Not `||`: both halves must be quarantined, and short-circuiting would skip the second.
+        let planted = crate::planted::quarantine_planted_secret(&cert_path)
+            | crate::planted::quarantine_planted_secret(&key_path);
         pf_paths::create_private_dir(&dir).ok();
         let (cert_pem, key_pem) = match (
             fs::read_to_string(&cert_path),
             fs::read_to_string(&key_path),
         ) {
-            (Ok(c), Ok(k)) if !c.trim().is_empty() && !k.trim().is_empty() => (c, k),
+            (Ok(c), Ok(k)) if !planted && !c.trim().is_empty() && !k.trim().is_empty() => (c, k),
             _ => {
                 let (c, k) = generate()?;
                 pf_paths::write_secret_file(&key_path, k.as_bytes())

@@ -50,6 +50,8 @@ struct SettingsView: View {
     @AppStorage(DefaultsKey.compositor) var compositor = 0
     @AppStorage(DefaultsKey.gamepadType) var gamepadType = 0
     @AppStorage(DefaultsKey.gamepadForwarding) var gamepadForwarding = true
+    @AppStorage(DefaultsKey.systemButtons) var systemButtons = "auto"
+    @AppStorage(DefaultsKey.guideGesture) var guideGesture = "auto"
     @AppStorage(DefaultsKey.bitrateKbps) var bitrateKbps = 0
     @AppStorage(DefaultsKey.presentPriority) var presentPriority =
         SettingsOptions.presentPriorityDefault
@@ -63,11 +65,12 @@ struct SettingsView: View {
     #endif
     @AppStorage(DefaultsKey.hdrEnabled) var hdrEnabled = true
     @AppStorage(DefaultsKey.enable444) var enable444 = false
+    @AppStorage(DefaultsKey.tenBitSdr) var tenBitSdr = false
     /// The gamepad library's arrangement and its collections-first switch — device preferences,
     /// stored as the cross-client `library_view` / `library_collections` values.
     @AppStorage(DefaultsKey.libraryView) var libraryViewRaw = LibraryArrangement.shelf.stored
     @AppStorage(DefaultsKey.libraryCollections) var libraryCollections = false
-    @AppStorage(DefaultsKey.startIn) var startInRaw = StartIn.library.stored
+    @AppStorage(DefaultsKey.startIn) var startInRaw = StartIn.hosts.stored
     @AppStorage(DefaultsKey.defaultHost) var defaultHostID = ""
     @AppStorage(DefaultsKey.fullscreenWhileStreaming) var fullscreenWhileStreaming = true
     @AppStorage(DefaultsKey.micEnabled) var micEnabled = true

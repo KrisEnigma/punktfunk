@@ -37,13 +37,13 @@
   addDriverRunpath,
   wrapGAppsHook4,
   # host + client shared libs
-  ffmpeg,
   pipewire,
   libopus,
   wayland,
   libxkbcommon,
   libGL,
   vulkan-loader,
+  libva,
   # gbm lives in `libgbm` on recent nixpkgs, `mesa` on older ones.
   libgbm ? null,
   mesa,
@@ -104,7 +104,7 @@ let
       cmake # pyrowave-sys (C++/Vulkan), the vendored libopus (opus crate), aws-lc-sys (rustls)
       nasm # libopus SIMD + OpenH264 (openh264 `source` feature)
       perl # aws-lc-sys asm generation (rustls' aws-lc-rs crypto provider)
-      rustPlatform.bindgenHook # LIBCLANG_PATH + clang args for ffmpeg-sys-next (host) / pyrowave-sys bindgen
+      rustPlatform.bindgenHook # LIBCLANG_PATH + clang args for pyrowave-sys bindgen
       addDriverRunpath # provides the `addDriverRunpath` shell fn used in postFixup
     ];
   };
@@ -163,7 +163,6 @@ in
       PUNKTFUNK_BUILD_VERSION = buildVersion;
 
       buildInputs = [
-        ffmpeg # libavcodec/avformat/avutil (NVENC + VAAPI encode), via ffmpeg-next → ffmpeg-sys-next pkg-config
         pipewire # libpipewire-0.3 + libspa-0.2 (portal capture + the `pipewire` crate)
         libopus # audiopus_sys links system opus via pkg-config (else it vendors a static libopus that mis-links)
         wayland # libwayland-client (wlr / KWin fake_input backends)
@@ -171,6 +170,7 @@ in
         libGL # src/linux/zerocopy/egl.rs `#[link(name = "GL")]`
         gbm # src/linux/zerocopy/egl.rs `#[link(name = "gbm")]`
         vulkan-loader # ash (Vulkan-Video encode + the dmabuf→VK bridge); loaded at runtime
+        libva # pf-libva (native VAAPI encode); dlopen'd, and no longer transitively via FFmpeg
       ];
 
       # KWin resolves a streaming client to a .desktop by matching /proc/<pid>/exe against `Exec`, so
@@ -214,17 +214,30 @@ in
         install -Dm0644 api/openapi.json                      "$out/share/punktfunk-host/openapi.json"
       '';
 
-      # Run AFTER fixup (patchelf --shrink-rpath would otherwise drop /run/opengl-driver/lib, which is
-      # empty at build time): append the driver runpath so the runtime dlopen of libcuda.so.1 /
-      # libnvidia-encode.so.1 / libEGL.so.1 / the GPU's libvulkan ICD resolves from the running system.
+      # Run AFTER fixup, and add every dlopen'd library by hand. A `buildInputs` entry only reaches
+      # RUNPATH when something DT_NEEDEDs it, and nothing links these: ash and volk dlopen
+      # libvulkan.so.1, pf-libva dlopens libva.so.2. The driver link is the third entry and covers
+      # libcuda.so.1 / libnvidia-encode.so.1 / libnvidia-ml.so.1 / libEGL.so.1 and the vendor ICD,
+      # but carries neither the Khronos loader nor libva. A miss here is silent: the codepath just
+      # reports "unavailable" and falls back.
       postFixup = ''
-        # Only the host dlopens the GPU stack; the tray (its own derivation, copied in above) does not.
-        addDriverRunpath "$out/bin/punktfunk-host"
-        # The encode worker owns a Vulkan device of its own (PyroWave encodes through ash, which
-        # dlopens the loader and the vendor ICD), so it needs the same driver runpath. Without it
-        # the worker starts and then finds no usable device — the host falls back to the in-process
-        # encoder, so nothing breaks, but the GPU-priority lever this binary exists for is dead.
-        addDriverRunpath "$out/bin/punktfunk-encode-worker"
+        # Both binaries dlopen the GPU stack; the worker owns a Vulkan device of its own for
+        # PyroWave, and without it the host silently falls back to the in-process encoder at
+        # default priority. The tray (its own derivation, copied in above) does not.
+        for b in punktfunk-host punktfunk-encode-worker; do
+          addDriverRunpath "$out/bin/$b"
+          patchelf --add-rpath "${vulkan-loader.out}/lib" "$out/bin/$b"
+          patchelf --add-rpath "${libva.out}/lib" "$out/bin/$b"
+          # Assert each soname RESOLVES, not merely that a directory is listed: a package whose
+          # default output is `dev` puts a lib-less path on RUNPATH and the dlopen still fails.
+          for s in libvulkan.so.1 libva.so.2; do
+            ok=""
+            for d in $(patchelf --print-rpath "$out/bin/$b" | tr : ' '); do
+              [ -e "$d/$s" ] && ok=1
+            done
+            [ -n "$ok" ] || { echo "$b: $s unresolvable from RUNPATH"; exit 1; }
+          done
+        done
       '';
 
       meta = meta // {
@@ -250,9 +263,8 @@ in
 
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ wrapGAppsHook4 ];
 
-      # No ffmpeg: the client decodes natively since M10 (pf-vkdecode / pf-vaapi — libva is
-      # dlopen'd, never linked — / openh264 + rav1d, both built from vendored source). The HOST
-      # derivation above still has it.
+      # The client decodes natively (pf-vkdecode / pf-vaapi — libva is dlopen'd, never linked —
+      # / openh264 + rav1d, both built from vendored source).
       buildInputs = [
         pipewire # PipeWire audio playback + mic capture
         libopus # audiopus_sys → system opus via pkg-config (Opus decode)
@@ -266,6 +278,7 @@ in
         libxkbcommon
         libGL
         vulkan-loader # ash presenter + Vulkan-Video decode (loaded at runtime)
+        libva # pf-vaapi decode; dlopen'd, so the postFixup below is what actually finds it
       ];
 
       # wrapGApp needs to run on the real ELF, and addDriverRunpath must run post-shrink — so disable
@@ -288,9 +301,22 @@ in
       '';
 
       postFixup = ''
-        addDriverRunpath "$out/bin/punktfunk-client" "$out/bin/punktfunk-session"
+        # Same three runpath entries as the host: the driver link for the vendor ICD and libEGL,
+        # vulkan-loader for the presenter and Vulkan-Video decode, libva for pf-vaapi decode.
+        for b in punktfunk-client punktfunk-session; do
+          addDriverRunpath "$out/bin/$b"
+          patchelf --add-rpath "${vulkan-loader.out}/lib" "$out/bin/$b"
+          patchelf --add-rpath "${libva.out}/lib" "$out/bin/$b"
+          for s in libvulkan.so.1 libva.so.2; do
+            ok=""
+            for d in $(patchelf --print-rpath "$out/bin/$b" | tr : ' '); do
+              [ -e "$d/$s" ] && ok=1
+            done
+            [ -n "$ok" ] || { echo "$b: $s unresolvable from RUNPATH"; exit 1; }
+          done
+        done
         # Only the GTK shell needs the GApps wrapper (GSETTINGS_SCHEMA_DIR, icon themes, typelibs);
-        # the ash session binary is not a GTK app.
+        # the ash session binary is not a GTK app. Wrap last: it renames the ELF just patched.
         wrapGApp "$out/bin/punktfunk-client"
       '';
 

@@ -1,19 +1,18 @@
-//! The native VAAPI encoder behind [`Encoder`]: `pf_libva`'s session, no libavcodec.
+//! The VAAPI encoder behind [`Encoder`]: `pf_libva`'s session, and the only one.
 //!
-//! What the libav path structurally cannot do, this does: a loss is answered by
-//! predicting from a slot the client still has (`invalidate_ref_frames`), an ABR
-//! step retargets in place (`reconfigure_bitrate`), and HEVC Main 10 carries the
-//! HDR10 SEI. Synchronous: `submit` encodes and `poll` hands the AU straight
-//! back, as the libav path does at `async_depth=1`.
+//! A loss is answered by predicting from a slot the client still has
+//! (`invalidate_ref_frames`), or by an intra refresh wave when none survives
+//! (`design/vulkan-intra-refresh.md` §10), an ABR step retargets in place
+//! (`reconfigure_bitrate`), and HEVC Main 10 carries the HDR10 SEI.
+//! Synchronous: `submit` encodes and `poll` hands the AU straight back.
 //!
-//! `PUNKTFUNK_ENCODER=vaapi-native` opens it; libav VAAPI stays the default and
-//! the A/B oracle until this has been measured against it.
+//! H.264 and HEVC on AMD and Intel. AV1 there is Vulkan Video's.
 
 use std::os::fd::AsRawFd as _;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
-use pf_libva::encode::{CodecParams, Encoder as Session};
+use pf_libva::encode::{CodecParams, Encoder as Session, Stripe};
 use pf_libva::{Display, DmabufSource, Libva};
 use pf_vaapi::drm::ExportedPlane;
 use pf_vaapi::enc_params::SessionParams;
@@ -21,11 +20,13 @@ use pf_vaapi::hevc::{HdrStatic, COLOUR_BT2020_PQ, COLOUR_BT709};
 use pf_vaapi::vpp;
 
 use super::{ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
-use pf_encode_win::rfi::plan_slot_recovery;
+use pf_encode_win::rfi::{self, plan_slot_recovery, Wave};
 
-/// Slots a session keeps: how far back a recovery anchor may reach. Four is
-/// 66 ms at 60 fps, past a LAN loss report; the level's DPB may allow fewer.
-const SLOTS: u8 = 4;
+/// Slots a session keeps: how far back a recovery anchor may reach. A report
+/// names frames the client missed two frames ago and spends a round trip
+/// arriving, so the ring must still hold the picture before the loss — eight is
+/// 80 ms at 100 fps, past a Wi-Fi report. The level's DPB may allow fewer.
+const SLOTS: u8 = 8;
 
 pub struct NativeVaapiEncoder {
     /// `None` between a [`Encoder::reset`] and the submit that reopens.
@@ -36,12 +37,17 @@ pub struct NativeVaapiEncoder {
     force_kf: bool,
     /// A loss plan's anchor, consumed by the next submit.
     anchor: Option<usize>,
+    /// Intra refresh wave in flight: the rung a loss with no anchor takes instead of the
+    /// IDR. An anchor or a forced IDR abandons it; a new loss restarts it.
+    wave: Option<Wave>,
     /// The host's wire index minus the session's own picture count.
     wire_offset: i64,
     frames: u64,
     pending: Option<EncodedFrame>,
     /// 24-bit CPU frames are repacked to 32 here.
     repack: Vec<u8>,
+    /// `PUNKTFUNK_VAAPI_DUMP=<file>`: every access unit, appended, for a decoder to look at.
+    dump: Option<std::fs::File>,
 }
 
 impl NativeVaapiEncoder {
@@ -87,7 +93,10 @@ impl NativeVaapiEncoder {
             initial_qp: 26,
             vbv_frames: super::vbv_frames_env() as f32,
         };
-        params.slots = SLOTS.min(params.h264_max_slots());
+        params.slots = SLOTS.min(match codec {
+            CodecParams::H264 => params.h264_max_slots(),
+            CodecParams::Hevc { .. } => params.hevc_max_slots(),
+        });
         let mut this = Self {
             session: None,
             params,
@@ -95,10 +104,14 @@ impl NativeVaapiEncoder {
             hdr: None,
             force_kf: true,
             anchor: None,
+            wave: None,
             wire_offset: 0,
             frames: 0,
             pending: None,
             repack: Vec::new(),
+            dump: std::env::var("PUNKTFUNK_VAAPI_DUMP")
+                .ok()
+                .and_then(|p| std::fs::File::create(&p).ok()),
         };
         this.open_session()?;
         tracing::info!(
@@ -128,11 +141,45 @@ impl NativeVaapiEncoder {
     }
 }
 
+/// Whether the host's render node offers an encode entrypoint for `codec`
+/// at this depth — what a native open needs. AV1 is not a native path.
+pub fn probe_can_encode(codec: Codec, ten_bit: bool) -> bool {
+    use pf_vaapi::config::{VA_PROFILE_H264_HIGH, VA_PROFILE_HEVC_MAIN, VA_PROFILE_HEVC_MAIN10};
+    use pf_vaapi::enc_h264::{VA_ENTRYPOINT_ENC_SLICE, VA_ENTRYPOINT_ENC_SLICE_LP};
+    let profile = match (codec, ten_bit) {
+        (Codec::H264, false) => VA_PROFILE_H264_HIGH,
+        (Codec::H265, false) => VA_PROFILE_HEVC_MAIN,
+        (Codec::H265, true) => VA_PROFILE_HEVC_MAIN10,
+        _ => return false,
+    };
+    let node = pf_gpu::linux_render_node();
+    let display = match Libva::load().and_then(|va| Display::open_path(va, &node.to_string_lossy()))
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::info!(error = %format!("{e:#}"), "no VAAPI display to probe");
+            return false;
+        }
+    };
+    display
+        .entrypoints(profile)
+        .map(|e| {
+            e.iter()
+                .any(|&p| p == VA_ENTRYPOINT_ENC_SLICE || p == VA_ENTRYPOINT_ENC_SLICE_LP)
+        })
+        .unwrap_or(false)
+}
+
 impl Encoder for NativeVaapiEncoder {
+    /// A mirrored head arrives larger and is scaled on ingest; the shape must match
+    /// within the even-floor's two pixels. Smaller, or another shape, is a host
+    /// size fault: fail here, not with a garbage picture.
     fn submit(&mut self, frame: &CapturedFrame) -> Result<()> {
+        let (fw, fh) = (u64::from(frame.width), u64::from(frame.height));
+        let (ew, eh) = (u64::from(self.params.width), u64::from(self.params.height));
         ensure!(
-            frame.width == self.params.width && frame.height == self.params.height,
-            "captured frame {}x{} != encoder {}x{}",
+            fw >= ew && fh >= eh && (fw * eh).abs_diff(fh * ew) < 2 * fw.max(fh),
+            "captured frame {}x{} does not fit encoder {}x{}",
             frame.width,
             frame.height,
             self.params.width,
@@ -145,7 +192,13 @@ impl Encoder for NativeVaapiEncoder {
         match &frame.payload {
             FramePayload::Cpu(bytes) => {
                 let (fourcc, bytes) = packed_rgb(frame.format, bytes, &mut self.repack)?;
-                session.submit_packed(bytes, fourcc, frame.width as usize * 4)?;
+                session.submit_packed(
+                    bytes,
+                    fourcc,
+                    frame.width,
+                    frame.height,
+                    frame.width as usize * 4,
+                )?;
             }
             FramePayload::Dmabuf(d) => {
                 let fd = d.fd.as_raw_fd();
@@ -177,11 +230,30 @@ impl Encoder for NativeVaapiEncoder {
                  PUNKTFUNK_ZEROCOPY or do not pin PUNKTFUNK_ENCODER=vaapi-native on an NVIDIA host"
             ),
         }
-        let pic = match self.anchor.take() {
-            Some(slot) => session.encode_anchored(slot)?,
-            None => session.encode(self.force_kf)?,
+        if self.force_kf || self.anchor.is_some() {
+            self.wave = None;
+        }
+        let wave = self.wave;
+        let pic = match (self.anchor.take(), wave) {
+            (Some(slot), _) => session.encode_anchored(slot)?,
+            (None, Some(w)) => {
+                let (first_row, rows) = w.stripe(session.wave_rows());
+                let stripe = Stripe {
+                    first_row: first_row as u16,
+                    rows: rows as u16,
+                };
+                session.encode_wave(stripe, !w.closes())?
+            }
+            (None, None) => session.encode(self.force_kf)?,
         };
         self.force_kf = false;
+        if let Some(w) = wave {
+            self.wave = w.next();
+        }
+        if let Some(f) = &mut self.dump {
+            use std::io::Write as _;
+            let _ = f.write_all(&pic.bytes);
+        }
         let pts_ns = self.frames * 1_000_000_000 / u64::from(self.params.fps_num.max(1));
         self.frames += 1;
         self.pending = Some(EncodedFrame {
@@ -189,6 +261,7 @@ impl Encoder for NativeVaapiEncoder {
             pts_ns,
             keyframe: pic.is_idr,
             recovery_anchor: pic.recovery_anchor,
+            recovery_point: wave.is_some_and(Wave::marks) && !pic.is_idr,
             chunk_aligned: false,
         });
         Ok(())
@@ -206,6 +279,7 @@ impl Encoder for NativeVaapiEncoder {
     fn caps(&self) -> EncoderCaps {
         EncoderCaps {
             supports_rfi: true,
+            downscales_input: true,
             ..Default::default()
         }
     }
@@ -246,7 +320,36 @@ impl Encoder for NativeVaapiEncoder {
         let plan = plan_slot_recovery(&refs, first);
         session.distrust(plan.tainted);
         self.anchor = plan.anchor.map(|(slot, _)| slot);
-        self.anchor.is_some()
+        if self.anchor.is_some() {
+            return true;
+        }
+        if rfi::wave_enabled() && session.next_wire() > 0 {
+            // No anchor, but a wave heals without one; the client re-armed at this loss,
+            // so a wave already running restarts to give it a fresh start and close.
+            let cycle = rfi::wave_cycle(
+                session.wave_rows(),
+                (self.params.fps_num / self.params.fps_den.max(1)).max(1),
+                u32::MAX,
+                rfi::pinned_cycle(),
+            );
+            self.wave = Some(Wave::start(cycle));
+            tracing::debug!(
+                first,
+                last,
+                cycle,
+                "vaapi-native RFI: no reference older than the loss — starting an intra \
+                 refresh wave instead of an IDR"
+            );
+            return true;
+        }
+        tracing::debug!(
+            first,
+            last,
+            slots = refs.len(),
+            "vaapi-native RFI declined: the ring holds no reference older than the loss — \
+             caller falls back to its (coalesced) keyframe path"
+        );
+        false
     }
 
     fn distrust_references(&mut self) {
@@ -264,6 +367,7 @@ impl Encoder for NativeVaapiEncoder {
         self.session = None;
         self.pending = None;
         self.anchor = None;
+        self.wave = None;
         self.force_kf = true;
         true
     }
@@ -382,13 +486,154 @@ mod tests {
         enc.submit_indexed(&frame(10), 110).expect("submit");
         let recovery = enc.poll().expect("poll").expect("an AU");
         assert!(recovery.recovery_anchor && !recovery.keyframe);
-        // Everything is tainted: no anchor, the caller keyframes.
-        assert!(!enc.invalidate_ref_frames(100, 110));
+        // Everything is tainted: no anchor, so a wave answers instead of the IDR.
+        assert!(enc.invalidate_ref_frames(100, 110));
+        assert!(enc.wave.is_some(), "the wave starts where the IDR used to");
         assert!(enc.reset());
         enc.submit(&frame(11)).expect("submit after reset");
         assert!(
             enc.poll().unwrap().unwrap().keyframe,
             "a rebuild starts with an IDR"
         );
+    }
+    /// BGRX frame of horizontal bands scrolled down by `shift` rows, with a diagonal so no
+    /// two rows are alike: the encoder must reach for rows above to predict it.
+    fn scroll_frame(w: u32, h: u32, i: u32) -> CapturedFrame {
+        let shift = i * 6;
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            let band = ((y + h - shift % h) % h) as u8;
+            for x in 0..w {
+                let px = ((y * w + x) * 4) as usize;
+                buf[px] = band.wrapping_mul(3);
+                buf[px + 1] = band ^ (x as u8);
+                buf[px + 2] = 255 - band;
+                buf[px + 3] = 255;
+            }
+        }
+        CapturedFrame {
+            provenance: Default::default(),
+            width: w,
+            height: h,
+            pts_ns: u64::from(i) * 16_666_666,
+            format: PixelFormat::Bgrx,
+            payload: FramePayload::Cpu(buf),
+            cursor: None,
+        }
+    }
+
+    /// The wave replaces the IDR: an RFI with every reference tainted starts one; its start
+    /// and close AU carry the mark, nothing in between does, no IDR follows frame 0, and a
+    /// later loss of the plain P after the wave re-anchors on the close (a fully swept
+    /// picture is trusted). Dumps the full stream and the client's view with the pre-wave
+    /// P frames lost: decoded side by side, the close must match the full decode.
+    ///
+    /// `cargo test -p pf-encode native_vaapi_wave -- --ignored --nocapture`
+    fn run_wave_smoke(codec: Codec, ext: &str) {
+        let (w, h) = (256u32, 256u32);
+        let mut enc = NativeVaapiEncoder::open(codec, w, h, 60, 4_000_000, 8, ChromaFormat::Yuv420)
+            .expect("open");
+        const WAVE_START: usize = 3;
+        let mut aus = Vec::new();
+        let mut cycle = 0usize;
+        let mut i = 0usize;
+        loop {
+            if i == WAVE_START {
+                assert!(
+                    enc.invalidate_ref_frames(0, WAVE_START as i64 - 1),
+                    "a wave-capable encoder answers an RFI with no anchor"
+                );
+                let w = enc.wave.expect("the wave is armed");
+                assert_eq!(w.index, 0);
+                cycle = w.cycle as usize;
+                eprintln!(
+                    "run_wave_smoke: {} rows, cycle {cycle}",
+                    enc.session.as_ref().unwrap().wave_rows()
+                );
+            }
+            let after_wave = WAVE_START + cycle; // the plain P after the close
+            let anchor_p = after_wave + 1;
+            if cycle > 0 && i == anchor_p {
+                assert!(
+                    enc.invalidate_ref_frames(after_wave as i64, after_wave as i64),
+                    "the wave close is a trusted anchor"
+                );
+            }
+            enc.submit_indexed(&scroll_frame(w, h, i as u32), i as u32)
+                .expect("submit");
+            aus.push(enc.poll().expect("poll").expect("an AU per submit"));
+            if cycle > 0 && i == anchor_p {
+                break;
+            }
+            i += 1;
+        }
+        let after_wave = WAVE_START + cycle;
+        let anchor_p = after_wave + 1;
+        assert!(enc.wave.is_none(), "the wave closed");
+        assert!(aus[0].keyframe, "frame 0 is the IDR");
+        for (i, au) in aus.iter().enumerate().skip(1) {
+            assert!(!au.data.is_empty(), "AU {i} empty");
+            assert!(
+                !au.keyframe,
+                "AU {i}: no IDR after frame 0 — the wave replaced it"
+            );
+            let start = i == WAVE_START;
+            let close = i == WAVE_START + cycle - 1;
+            assert_eq!(
+                au.recovery_point,
+                start || close,
+                "AU {i}: recovery_point marks exactly the wave start and close"
+            );
+            assert_eq!(
+                au.recovery_anchor,
+                i == anchor_p,
+                "AU {i}: the only anchor P answers the post-wave loss"
+            );
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
+            let p = format!("{home}/vaenc-wave-smoke.{ext}");
+            let _ = std::fs::write(&p, &full);
+            let dropped: Vec<u8> = aus
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i == 0 || *i >= WAVE_START)
+                .flat_map(|(_, a)| a.data.iter().copied())
+                .collect();
+            let p2 = format!("{home}/vaenc-wave-smoke-dropped.{ext}");
+            let _ = std::fs::write(&p2, &dropped);
+            eprintln!(
+                "run_wave_smoke: wrote {p} ({} bytes, {} AUs) and {p2} (frames 1..{} dropped; \
+                 the close at {} must decode identical to the full stream)",
+                full.len(),
+                aus.len(),
+                WAVE_START,
+                WAVE_START + cycle - 1
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a real VAAPI device"]
+    fn native_vaapi_wave_h264() {
+        run_wave_smoke(Codec::H264, "h264");
+    }
+
+    #[test]
+    #[ignore = "needs a real VAAPI device"]
+    fn native_vaapi_wave_hevc() {
+        run_wave_smoke(Codec::H265, "h265");
+    }
+
+    /// The probe agrees with an open: H.264 and both HEVC depths yes, AV1 and
+    /// ten-bit H.264 no.
+    #[test]
+    #[ignore = "needs a real VAAPI device"]
+    fn native_probe_matches_open() {
+        assert!(probe_can_encode(Codec::H264, false));
+        assert!(probe_can_encode(Codec::H265, false));
+        assert!(probe_can_encode(Codec::H265, true));
+        assert!(!probe_can_encode(Codec::Av1, false));
+        assert!(!probe_can_encode(Codec::H264, true));
     }
 }

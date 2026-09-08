@@ -139,7 +139,7 @@ pub struct HostConfig {
     /// `PUNKTFUNK_IDD_DEPTH` — IDD-push pipeline depth. Default 2; the call site clamps to its `OUT_RING`.
     pub idd_depth: usize,
     /// `PUNKTFUNK_ZEROCOPY` — Windows D3D11 zero-copy encode input. `None` defers to
-    /// the per-vendor default (AMF on, QSV off — `encode/ffmpeg_win.rs`).
+    /// the per-vendor default (AMF on, QSV off).
     pub zerocopy: Option<bool>,
     /// `PUNKTFUNK_10BIT` — host policy gate for HEVC Main10 / AV1. **Default ON**,
     /// explicit-off. The host only *allows* 10-bit; the session still needs

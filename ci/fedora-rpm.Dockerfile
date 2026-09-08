@@ -1,8 +1,7 @@
 # CI builder for the punktfunk RPM. The Fedora version is parameterized so one Dockerfile
-# serves every target whose ffmpeg soname must match: Fedora 43 == Bazzite's base (group
-# "bazzite"), Fedora 44 == the Fedora KDE spin (group "fedora-44"). The RPM's auto-generated
-# library Requires (e.g. libavcodec.so.NN) pin to exactly what the chosen base — and thus the
-# target — ships. Used by .gitea/workflows/rpm.yml; built+pushed by .gitea/workflows/docker.yml.
+# serves every target whose sonames must match: Fedora 43 == Bazzite's base (group "bazzite"),
+# Fedora 44 == the Fedora KDE spin (group "fedora-44"). The RPM's auto-generated library
+# Requires pin to exactly what the chosen base — and thus the target — ships. Used by .gitea/workflows/rpm.yml; built+pushed by .gitea/workflows/docker.yml.
 #
 #   docker build --build-arg FEDORA_VERSION=43 -f ci/fedora-rpm.Dockerfile -t punktfunk-fedora-rpm ci
 #   docker build --build-arg FEDORA_VERSION=44 -f ci/fedora-rpm.Dockerfile -t punktfunk-fedora44-rpm ci
@@ -11,11 +10,8 @@
 ARG FEDORA_VERSION=43
 FROM fedora:${FEDORA_VERSION}
 
-# RPM Fusion (free + nonfree) provides the NVENC-capable ffmpeg-devel the host links against.
+# Stock Fedora only: the host links nothing from RPM Fusion any more.
 RUN dnf -y install \
-      "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-      "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
-  && dnf -y install \
       # rpmbuild + source-tarball tooling; nodejs runs the Gitea Actions JS (checkout/cache) only
       # — the punktfunk-web console builds AND runs on bun (installed below); unzip extracts the
       # pinned bun zip.
@@ -28,8 +24,8 @@ RUN dnf -y install \
       # default `-Wl,--build-id` still reaches the link and rpmbuild's debuginfo extraction (which
       # hard-requires a build-id) behaves exactly as before; mold implements --build-id natively.
       mold \
-      # ffmpeg (NVENC), capture/audio/display link deps
-      ffmpeg-devel pipewire-devel wayland-devel libxkbcommon-devel opus-devel \
+      # capture/audio/display link deps
+      pipewire-devel wayland-devel libxkbcommon-devel opus-devel \
       mesa-libGL-devel mesa-libgbm-devel \
       # punktfunk-client link deps (GTK4 shell + SDL3 gamepads)
       gtk4-devel libadwaita-devel SDL3-devel \

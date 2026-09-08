@@ -19,6 +19,18 @@ pub enum Platform {
     Web,
 }
 
+impl Platform {
+    /// Every variant. A platform absent from a universal row list offers no settings
+    /// row at all, which is a blank screen rather than a missing control — walk this
+    /// instead of retyping the set.
+    pub const ALL: [Platform; 4] = [
+        Platform::Desktop,
+        Platform::Android,
+        Platform::WebOS,
+        Platform::Web,
+    ];
+}
+
 /// A native screen the platform owns. The shell sends
 /// [`crate::model::ConsoleCmd::OpenPlatformScreen`] and suspends input until the host
 /// reports the screen closed.

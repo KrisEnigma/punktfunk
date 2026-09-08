@@ -62,6 +62,9 @@ enum Planner {
 struct PictureFacts {
     colour: ColorDesc,
     keyframe: bool,
+    /// Whole prediction chain was fully available — see
+    /// [`crate::video_d3d11::D3d11Frame::references_clean`].
+    references_clean: bool,
     /// Conformance-window crop (H.264/H.265) or render size (AV1) — the blit rectangle.
     width: u32,
     height: u32,
@@ -263,6 +266,16 @@ impl NativeD3d11Decoder {
     /// Drain the keyframe request raised by concealment.
     pub(crate) fn take_recovery_request(&mut self) -> bool {
         std::mem::take(&mut self.want_recovery)
+    }
+
+    /// The gate lifted on intra refresh marks: the planner's damaged-chain marks are stale
+    /// (`CleanLedger::clear`).
+    pub(crate) fn forgive_unclean(&mut self) {
+        match &mut self.planner {
+            Planner::H264(p) => p.forgive_unclean(),
+            Planner::H265(p) => p.forgive_unclean(),
+            Planner::Av1(p) => p.forgive_unclean(),
+        }
     }
 
     /// Plan, convert, and submit one access unit.
@@ -510,6 +523,7 @@ impl NativeD3d11Decoder {
             facts: PictureFacts {
                 colour: colour_of(plan.picture.colour),
                 keyframe: plan.picture.is_key,
+                references_clean: plan.picture.references_clean,
                 // Render size: AV1 display region (conformance-window crop on the other
                 // two). Not `upscaled_width` when superres is on. Treated as a crop to
                 // match the Vulkan rung and the goldens; libavcodec uses sample aspect.
@@ -589,6 +603,7 @@ impl NativeD3d11Decoder {
                     facts: PictureFacts {
                         colour: colour_of(plan.picture.colour),
                         keyframe: plan.picture.is_idr,
+                        references_clean: plan.picture.references_clean,
                         width: plan.picture.display_crop.width,
                         height: plan.picture.display_crop.height,
                     },
@@ -649,6 +664,7 @@ impl NativeD3d11Decoder {
                     facts: PictureFacts {
                         colour: colour_of(plan.picture.colour),
                         keyframe: plan.picture.is_irap,
+                        references_clean: plan.picture.references_clean,
                         width: plan.picture.display_crop.width,
                         height: plan.picture.display_crop.height,
                     },
@@ -712,6 +728,7 @@ impl NativeD3d11Decoder {
             height: facts.height,
             color: facts.colour,
             keyframe: facts.keyframe,
+            references_clean: facts.references_clean,
             decoder: DECODER_PIN,
         })
     }

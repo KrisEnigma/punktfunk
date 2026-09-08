@@ -256,7 +256,7 @@ impl std::fmt::Display for VkDecodeError {
             VkDecodeError::Device(e) => write!(f, "device handles rejected: {e}"),
             VkDecodeError::Unsupported(what) => write!(f, "outside device caps: {what}"),
             VkDecodeError::Vk(r) => write!(f, "Vulkan call failed: {r:?}"),
-            VkDecodeError::DeviceLost => write!(f, "VK_ERROR_DEVICE_LOST"),
+            VkDecodeError::DeviceLost => write!(f, "GPU device lost (VK_ERROR_DEVICE_LOST)"),
             VkDecodeError::Timeout(what) => {
                 write!(f, "GPU wait expired after {DECODE_TIMEOUT_NS} ns: {what}")
             }
@@ -1030,6 +1030,12 @@ impl VkH264Decoder {
     /// want_keyframe). Cleared by the next `decode`.
     pub fn take_warnings(&mut self) -> Vec<PlanWarning> {
         std::mem::take(&mut self.last_warnings)
+    }
+
+    /// Forget the planner's unclean marks after a freeze lift on intra refresh marks
+    /// ([`pf_bitstream::clean::CleanLedger::clear`]).
+    pub fn forgive_unclean(&mut self) {
+        self.planner.forgive_unclean();
     }
 
     /// Session generation stamped onto newly delivered frames.

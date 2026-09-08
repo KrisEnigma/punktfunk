@@ -155,18 +155,22 @@ pub fn build(facts: &Facts, choices: &Choices) -> Plan {
         return plan;
     }
 
-    match choices.switch_from {
-        Some(from) => plan.push(
-            Phase::Switch,
-            format!(
-                "Channel switch: {} → {} ({DOCS}/channels)",
-                from.as_str(),
-                choices.channel.as_str()
-            ),
-            backend.switch(facts, choices),
-        ),
+    // A switch reinstalls what the box has; the unit probe already saw its console.
+    let console_installed = match choices.switch_from {
+        Some(from) => {
+            plan.push(
+                Phase::Switch,
+                format!(
+                    "Channel switch: {} → {} ({DOCS}/channels)",
+                    from.as_str(),
+                    choices.channel.as_str()
+                ),
+                backend.switch(facts, choices),
+            );
+            false
+        }
         None => install_phase(&mut plan, facts, choices, backend),
-    }
+    };
 
     if facts.omarchy {
         plan.push(Phase::Omarchy, "Omarchy", omarchy_steps(facts, choices));
@@ -210,18 +214,19 @@ pub fn build(facts: &Facts, choices: &Choices) -> Plan {
         plan.push(
             Phase::Start,
             "Starting the host and the web console",
-            start_steps(facts, choices),
+            start_steps(facts, choices, console_installed),
         );
     }
     plan
 }
 
+/// Whether this run puts the web console on the box.
 fn install_phase(
     plan: &mut Plan,
     facts: &Facts,
     choices: &Choices,
     backend: &dyn platform::PkgBackend,
-) {
+) -> bool {
     // Host, console, and plugin runner are three packages. A weak-deps-off box never
     // grows a console if we only ask "is the host there".
     if facts.fully_installed() && choices.components.host {
@@ -242,7 +247,7 @@ fn install_phase(
                     ),
                 )],
             );
-            return;
+            return false;
         };
         // The install line is the only step that moves an installed box onto the channel's
         // current build; skipping it stranded one on whatever it had, so a re-run could never
@@ -262,7 +267,7 @@ fn install_phase(
             ),
             steps,
         );
-        return;
+        return facts.family.installs_console();
     }
     let mut what = if choices.components.host {
         facts.missing.join(" ")
@@ -293,6 +298,7 @@ fn install_phase(
         format!("{} channel", choices.channel.as_str())
     };
     plan.push(Phase::Install, format!("Installing: {what} ({how})"), steps);
+    choices.components.host && facts.family.installs_console()
 }
 
 /// Everything from here to the start phase is generic Linux wiring — a group, a wide-open
@@ -411,6 +417,15 @@ fn option_steps(facts: &Facts, choices: &Choices) -> Vec<Step> {
     if choices.clipboard {
         steps.push(Step::set_env("PUNKTFUNK_CLIPBOARD", "on"));
     }
+    // A box with no desktop installed cannot stand a session up for the host; gamescope
+    // brings its own. A seat that is merely not logged in (ssh) keeps the host's detection.
+    if !facts.graphical_seat && !facts.desktop_sessions && !facts.couch_box {
+        steps.push(Step::note(
+            Level::Ok,
+            "no desktop session is installed here, so the host will spawn a headless gamescope per connect",
+        ));
+        steps.push(Step::set_env("PUNKTFUNK_COMPOSITOR", "gamescope"));
+    }
     steps
 }
 
@@ -455,10 +470,12 @@ fn firewall_steps(facts: &Facts, choices: &Choices) -> Vec<Step> {
     }
 }
 
-fn start_steps(facts: &Facts, choices: &Choices) -> Vec<Step> {
+fn start_steps(facts: &Facts, choices: &Choices, console_installed: bool) -> Vec<Step> {
     let mut steps = vec![];
     let mut units = vec!["punktfunk-host".to_string()];
-    if facts.web_unit_present {
+    // The install phase puts the console on every package family, so its unit exists by
+    // the time this runs even when the pre-install probe found none.
+    if facts.web_unit_present || console_installed {
         units.push("punktfunk-web".to_string());
     } else {
         steps.push(Step::note(

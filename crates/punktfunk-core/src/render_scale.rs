@@ -1,6 +1,7 @@
 //! Client render-scale: ask the host for `chosen resolution × scale` as a
-//! [`Mode`](crate::Mode). The host does no scaling; the presenter downscales
-//! (`> 1`) or upscales (`< 1`) after decode.
+//! [`Mode`](crate::Mode). The host scales nothing on a virtual display; the
+//! presenter downscales (`> 1`) or upscales (`< 1`) after decode. A mirrored
+//! head larger than the client is the exception: [`fit_inside`] sizes the encoder.
 //!
 //! Multiply, keep the aspect ratio, even-floor (host `validate_dimensions`
 //! rejects odd sizes), clamp to the codec per-axis ceiling so a connect cannot
@@ -48,6 +49,28 @@ pub fn apply(base_w: u32, base_h: u32, scale: f64, max_dim: u32) -> (u32, u32) {
         h /= over;
     }
     (even_floor(w, 320), even_floor(h, 200))
+}
+
+/// Shrink `w`×`h` to fit inside `max_w`×`max_h`: keep aspect, even-floor, never
+/// grow. Integer maths, so the binding axis lands on the box exactly. Not
+/// [`apply`]: its `sanitize` floors the scale at [`MIN_SCALE`], and a 4K head
+/// into an 800p client needs a third.
+pub fn fit_inside(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w <= max_w && h <= max_h {
+        return (w, h);
+    }
+    let (w, h, max_w, max_h) = (
+        u64::from(w),
+        u64::from(h),
+        u64::from(max_w),
+        u64::from(max_h),
+    );
+    let (fw, fh) = if w * max_h >= h * max_w {
+        (max_w, h * max_w / w.max(1))
+    } else {
+        (w * max_h / h.max(1), max_h)
+    };
+    (even_floor(fw as f64, 320), even_floor(fh as f64, 200))
 }
 
 fn even_floor(value: f64, minimum: u32) -> u32 {
@@ -110,6 +133,27 @@ mod tests {
     #[test]
     fn h264_ceiling_is_tighter() {
         assert_eq!(apply(1920, 1080, 4.0, 4096), (4096, 2304));
+    }
+
+    #[test]
+    fn fit_inside_shrinks_a_4k_head_to_an_800p_client() {
+        assert_eq!(fit_inside(3840, 2160, 1280, 800), (1280, 720));
+    }
+
+    #[test]
+    fn fit_inside_leaves_a_matching_panel_alone() {
+        assert_eq!(fit_inside(1920, 1080, 1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn fit_inside_never_upscales() {
+        assert_eq!(fit_inside(1280, 800, 3840, 2160), (1280, 800));
+    }
+
+    #[test]
+    fn fit_inside_is_even_on_the_free_axis() {
+        assert_eq!(fit_inside(3440, 1440, 1280, 800), (1280, 534));
+        assert_eq!(fit_inside(2160, 3840, 1280, 800), (450, 800));
     }
 
     #[test]

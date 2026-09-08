@@ -10,7 +10,7 @@ Gitea Release) — separate repos, so a stable box never jumps to a canary build
 [Release Channels](https://punktfunk.unom.io/docs/channels)). The `baseurl` below subscribes to the
 `bazzite` stable group; use `bazzite-canary` for the latest main builds. The RPM is built in the
 Fedora 43 image (`ci/fedora-rpm.Dockerfile`) so its auto-generated library Requires
-(`libavcodec.so.NN`, …) match Bazzite's sonames; the NVIDIA driver lib (`libcuda.so.1`) is
+match Bazzite's sonames; the NVIDIA driver lib (`libcuda.so.1`) is
 excluded — NVENC/EGL come from whatever NVIDIA stack the host runs (a weak Recommends).
 
 This is the same package as the [COPR](../copr/README.md) / [bootc](../bootc/Containerfile)
@@ -87,32 +87,11 @@ its signing key's fingerprint against `FEED_KEY` and refuses to sign on a mismat
 the third one fails the publish instead of stranding every Bazzite box in front of a feed it
 can't verify.
 
-After reboot, as the desktop user:
-
-```sh
-ujust add-user-to-input-group           # virtual gamepads need /dev/uinput (re-login).
-                                        # Bazzite is atomic — use ujust, NOT `usermod -aG input`.
-mkdir -p ~/.config/punktfunk
-cp /usr/share/punktfunk/host.env.bazzite ~/.config/punktfunk/host.env   # gamescope defaults
-systemctl --user enable --now punktfunk-host
-# Web console — enable it and read the auto-generated login password (then open https://<host-ip>:47992):
-systemctl --user enable --now punktfunk-web
-journalctl --user -u punktfunk-web-init | sed -n 's/.*password generated: //p'
-```
-
-(See [`../bazzite/README.md`](../bazzite/README.md) for the full appliance walkthrough —
-udev/group, `host.env`, the Steam session unit, firewall, verify.)
-
-## Updates
-
-```sh
-rpm-ostree upgrade            # pulls the newest punktfunk with the system update
-systemctl reboot             # rpm-ostree changes apply on reboot
-```
-
-Layered packages are re-resolved against their repos on every `rpm-ostree upgrade`, so the box
-tracks new builds automatically (Bazzite's auto-update timer does this for you). To pin or stop
-tracking: `rpm-ostree override` / `rpm-ostree uninstall punktfunk`.
+First-run setup and updates are on the docs pages
+([Fedora](https://docs.punktfunk.unom.io/docs/fedora) /
+[Bazzite](https://docs.punktfunk.unom.io/docs/bazzite), where the sysext rather than layering is the
+supported default). Layered packages are re-resolved against their repos on every `rpm-ostree
+upgrade`, so a box tracks new builds automatically.
 
 ## Build an RPM locally
 

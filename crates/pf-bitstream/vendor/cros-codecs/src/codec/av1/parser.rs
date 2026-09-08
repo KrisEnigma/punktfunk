@@ -1773,8 +1773,12 @@ impl Parser {
             spatial_id: Default::default(),
         };
 
-        let obu_reserved_1bit = r.0.read_bit()?;
-        assert!(!obu_reserved_1bit); // Must be set to zero as per spec.
+        // Zero per spec. This runs before any type dispatch, so it is the first field a
+        // malformed access unit reaches; an `assert!` here aborts the decoding thread on one
+        // wire bit. See PROVENANCE.md deviation 16.
+        if r.0.read_bit()? {
+            return Err("obu_reserved_1bit must be zero".into());
+        }
 
         if header.extension_flag {
             header.temporal_id = r.0.read_bits::<u32>(3)?;
@@ -1827,8 +1831,10 @@ impl Parser {
         // Both "low-overhead" and Annex B are now at the same point, i.e.: a
         // open_bitstream_unit() follows.
         let header = Self::parse_obu_header(&mut reader)?;
-        if matches!(self.stream_format, StreamFormat::LowOverhead) {
-            assert!(header.has_size_field);
+        // Low-overhead framing has no other way to find the OBU boundary, so a cleared flag is
+        // a malformed unit rather than a bug in this parser. See PROVENANCE.md deviation 16.
+        if matches!(self.stream_format, StreamFormat::LowOverhead) && !header.has_size_field {
+            return Err("low-overhead OBU must set obu_has_size_field".into());
         }
 
         let obu_size: usize = if header.has_size_field {
@@ -1852,7 +1858,8 @@ impl Parser {
             annexb_state.frame_unit_consumed += u32::try_from(obu_size).unwrap();
         }
 
-        assert!(reader.0.position() % 8 == 0);
+        // Holds by construction: the header is 8 or 16 bits and the leb128 is whole bytes.
+        debug_assert!(reader.0.position() % 8 == 0);
         let start_offset: usize = (reader.0.position() / 8).try_into().unwrap();
 
         // `obu_size` was read off the wire as a leb128 and is bounded only by `u32::MAX`; nothing

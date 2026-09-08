@@ -280,9 +280,15 @@ const RESOLUTIONS: [(u32, u32); 6] = [
     (2560, 1440),
     (3840, 2160),
 ];
-const REFRESH: [u32; 5] = [0, 30, 60, 90, 120];
-/// Must stay in sync with [`punktfunk_core::render_scale::PRESETS`].
-const RENDER_SCALES: [f64; 9] = [0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+/// `0` = the panel's native refresh, resolved at connect. Must cover every value the desktop
+/// shells can write: on Linux both write the same client-gtk-settings.json, so a box that set
+/// 144 Hz there opens this screen holding it. A value missing from this table has no index, and
+/// `step_option` answers a missing index with 0 — one nudge on the row would silently snap the
+/// setting to Automatic. Keep in step with clients/linux/src/ui_settings.rs and
+/// clients/windows/src/app/settings.rs.
+const REFRESH: [u32; 8] = [0, 30, 60, 90, 120, 144, 165, 240];
+/// Render-scale multipliers; `1.0` = Native.
+use punktfunk_core::render_scale::PRESETS as RENDER_SCALES;
 /// Left/right rungs in kbps. Denser below ~20 Mbps; ceiling 2 Gbps. Off-ladder
 /// values go through the Y field rather than a longer ladder.
 const BITRATES: [u32; 30] = [
@@ -298,7 +304,7 @@ const CUSTOM_MAX_MBPS: u32 = 2_000;
 /// webOS is the one platform with a real ceiling: the TV client bounds its own slider at
 /// 200 Mbps and clamps the document to it, so a shell offering more would write a number the
 /// classic menus take straight back off again. Everywhere else the ladder's own top stands.
-fn bitrate_ceiling_kbps(platform: crate::platform::Platform) -> u32 {
+pub(crate) fn bitrate_ceiling_kbps(platform: crate::platform::Platform) -> u32 {
     match platform {
         crate::platform::Platform::WebOS => 200_000,
         crate::platform::Platform::Desktop
@@ -770,6 +776,23 @@ impl SettingsScreen {
         }
     }
 
+    /// What a screen reader speaks: the section while the strip holds focus, otherwise the
+    /// focused row's label and the value drawn beside it.
+    pub(crate) fn announcement(&self, ctx: &Ctx) -> Option<String> {
+        if self.strip_focus {
+            return Some(format!("{} section", TABS[self.tab].0));
+        }
+        let row = row_spec(
+            *self.row_ids(ctx).get(self.list.cursor)?,
+            ctx,
+            &self.profiles,
+        );
+        Some(match row.value {
+            Some(value) => format!("{}, {}", row.label, value),
+            None => row.label,
+        })
+    }
+
     pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         if self.custom_bitrate.is_some() {
             if ctx.deck {
@@ -942,6 +965,10 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         // DualSense capture — the pad reaches webOS over Bluetooth HID, not hidraw, so the
         // concept is real there too (punktfunk-webos docs/NOTES.md).
         RowId::DsCapture => &[Android, WebOS],
+        // Which pad is player 1 — a question only a client that forwards ONE pad has to answer.
+        // Android's router and the browser's Gamepad API both give every controller its own wire
+        // slot, so there is nothing to pick; webOS is still single-pad and keeps the row.
+        RowId::Pad => &[Desktop, WebOS],
         // That client's own audio plane and its remote's missing second button.
         RowId::AudioRoute | RowId::CursorGestures => &[WebOS],
         // Main10 at BT.709 asks nothing of the panel, and MediaCodec decodes it from the SPS, so
@@ -949,15 +976,17 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         // bit-depth ask.
         RowId::TenBitSdr => &[Desktop, Android],
         // Decoder choice, chroma and the window-manager knobs: the TV decodes through NDL and has
-        // no window manager, so none of these is a control it could obey. VRR is desktop-only for
-        // a different reason — Android pins a fixed mode on purpose (`trust::Settings::allow_vrr`).
+        // no window manager, so none of these is a control it could obey. The browser is out for
+        // the same shape of reason — WebCodecs picks the decoder, a page binds no system chord,
+        // and fullscreen needs a gesture. VRR is desktop-only because Android pins a fixed mode
+        // on purpose (`trust::Settings::allow_vrr`).
         RowId::Decoder
         | RowId::Chroma444
         | RowId::Vsync
         | RowId::AllowVrr
         | RowId::Fullscreen
         | RowId::Shortcuts => &[Desktop],
-        _ => &[Desktop, Android, WebOS],
+        _ => &Platform::ALL,
     };
     on.contains(&platform)
 }
@@ -1895,12 +1924,32 @@ pub(crate) mod tests {
         assert_eq!(got, want, "the desktop console's tab names and order");
     }
 
+    /// Every refresh rate the desktop shells can persist must have an index here.
+    /// `step_option` answers a missing index with 0, and `REFRESH[0]` is Automatic, so a rate
+    /// this table lacks is silently discarded the first time the user nudges the row. On Linux
+    /// both desktop shells write the same client-gtk-settings.json this screen reads, so 144,
+    /// 165 and 240 arrive here whether or not this table offers them.
+    #[test]
+    fn refresh_table_covers_every_rate_the_desktop_shells_write() {
+        // clients/linux/src/ui_settings.rs and clients/windows/src/app/settings.rs.
+        for hz in [0u32, 30, 60, 90, 120, 144, 165, 240] {
+            assert!(
+                REFRESH.contains(&hz),
+                "{hz} Hz is offered by the desktop shells but has no index in REFRESH"
+            );
+        }
+        // The mechanism this pins: no index means index 0, which is Automatic.
+        assert_eq!(step_option(None, REFRESH.len(), 1, false), Some(0));
+        assert_eq!(REFRESH[0], 0, "index 0 must stay Automatic");
+    }
+
     fn ctx_parts() -> (Settings, Vec<pf_client_core::menu_nav::PadInfo>) {
         (Settings::default(), Vec::new())
     }
 
-    /// Throwaway config dir. `apply_row` rebases on the file, so a test against
-    /// the real profile would rewrite the developer's settings.
+    /// Throwaway config dir: the screens read the profile catalog and the known hosts
+    /// straight off it, and a test must not see the developer's own. Settings go through
+    /// `store::file_store`, which in tests is per-thread and in memory.
     ///
     /// Redirects `HOME` on unix, `APPDATA` on Windows (`trust::config_dir`).
     /// One `OnceLock` for the binary — a second copy races `set_var`.
@@ -2020,7 +2069,7 @@ pub(crate) mod tests {
         rendered(&mut s);
         let first = s.list.row_rect(0).expect("the list drew its rows");
         let (mut settings, pads) = ctx_parts();
-        settings.save(); // seat the fake HOME file — `apply_row` rebases on it
+        crate::store::file_store().save(&settings); // `apply_row` rebases on the store
         let library = crate::library::LibraryShared::default();
         let mut ctx = Ctx {
             hosts: &[],
@@ -2316,11 +2365,11 @@ pub(crate) mod tests {
     /// flip presentation intent while this screen is open.
     #[test]
     fn a_shrinking_list_pulls_the_cursor_back() {
-        // Seat the FILE with the shrunken list: `apply_row` rebases on it.
+        // Seat the STORE with the shrunken list: `apply_row` rebases on it.
         fake_home();
         let (mut settings, pads) = ctx_parts();
         settings.present_priority = "latency".into();
-        settings.save();
+        crate::store::file_store().save(&settings);
         settings.present_priority = "smooth".into();
         let library = crate::library::LibraryShared::default();
         let mut ctx = Ctx {
@@ -2520,6 +2569,7 @@ pub(crate) mod tests {
                 id: "p1".into(),
                 name: "Work".into(),
                 accent: None,
+                bitrate_kbps: None,
             }),
             bound_profile: None,
             running: String::new(),
@@ -2679,17 +2729,38 @@ pub(crate) mod tests {
                 RowId::Vsync,
                 RowId::AllowVrr,
                 RowId::AudioRoute,
+                // Every controller already gets its own wire slot, so player 1 is not a choice.
+                RowId::Pad,
                 RowId::CursorGestures,
                 RowId::Shortcuts,
                 RowId::Fullscreen,
             ]
         );
         // Every row reaches at least one platform: a row listed in a tab and offered nowhere
-        // is dead weight the tab still spends a line on. webOS is in the set because it now
-        // has rows of its own — its audio plane, and a remote with no second button.
-        assert!(all.iter().all(|id| row_on(*id, Platform::Desktop)
-            || row_on(*id, Platform::Android)
-            || row_on(*id, Platform::WebOS)));
+        // is dead weight the tab still spends a line on.
+        assert!(all
+            .iter()
+            .all(|id| Platform::ALL.iter().any(|p| row_on(*id, *p))));
+    }
+
+    /// The other direction, and the one that bites: a platform missing from every list
+    /// offers no row at all, so all six tabs draw empty instead of one control going
+    /// missing. `Web` shipped that way.
+    #[test]
+    fn every_platform_offers_rows() {
+        use crate::platform::Platform;
+        for p in Platform::ALL {
+            // Exhaustive on purpose: a new variant must be weighed here and added to `ALL`.
+            match p {
+                Platform::Desktop | Platform::Android | Platform::WebOS | Platform::Web => {}
+            }
+            let n = TABS
+                .iter()
+                .flat_map(|(_, rows)| rows.iter())
+                .filter(|id| row_on(**id, p))
+                .count();
+            assert!(n > 0, "{p:?} offers no settings rows at all");
+        }
     }
 
     #[test]
@@ -3101,6 +3172,10 @@ pub(crate) mod tests {
         };
         let value = |ctx: &Ctx| row_spec(RowId::StartIn, ctx, &[]).value.unwrap();
 
+        // The fresh default is the list by choice, so the row reads plainly, not as a fallback.
+        assert_eq!(value(&ctx), "Host list");
+        assert!(adjust(RowId::StartIn, 1, false, &mut ctx));
+        assert_eq!(ctx.settings.start_in, "library");
         assert_eq!(value(&ctx), "Host list (no default host)");
         store.set_known_hosts(KnownHosts {
             hosts: vec![KnownHost {
@@ -3129,7 +3204,7 @@ pub(crate) mod tests {
         assert_eq!(
             value(&ctx),
             "Host list",
-            "the list by choice reads differently from the list by default"
+            "a resolved default host does not dress up the list"
         );
     }
 }

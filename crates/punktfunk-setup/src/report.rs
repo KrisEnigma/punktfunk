@@ -10,7 +10,7 @@
 
 use crate::choices::{Action, Choices};
 use crate::exec::{Opts, Outcome};
-use crate::facts::{Facts, Family, Nvidia, DOCS};
+use crate::facts::{Facts, Nvidia, DOCS};
 use crate::seam::CommandRunner;
 use crate::ui::Reporter;
 
@@ -121,10 +121,10 @@ pub fn verify(
     next_steps(ui, run, facts, choices, outcome, opts);
 }
 
-/// The install succeeded; these two NVIDIA failures are silent and still block encode.
+/// The install succeeded; these NVIDIA failures are silent and still block encode.
 fn nvidia_warnings(ui: &dyn Reporter, facts: &Facts) {
     match facts.nvidia {
-        Nvidia::Absent => return,
+        Nvidia::Absent => {}
         Nvidia::NoDriver => ui.warn(&format!(
             "NVIDIA GPU without the NVIDIA driver — nothing can encode until it's installed: step 1 of {}",
             facts.docs_page
@@ -133,13 +133,6 @@ fn nvidia_warnings(ui: &dyn Reporter, facts: &Facts) {
             "NVIDIA GPU, but nvidia-smi can't talk to the driver — the kernel module didn't load (Secure Boot? run: mokutil --sb-state): {DOCS}/troubleshooting#nvidia-smi-says-it-cant-communicate-with-the-driver"
         )),
         Nvidia::Ok => {}
-    }
-    // Fedora's own ffmpeg has no NVENC; the RPM only Recommends RPM Fusion's build.
-    if facts.family == Family::Dnf && !facts.has_rpmfusion_ffmpeg {
-        ui.warn(&format!(
-            "NVIDIA GPU, but RPM Fusion's ffmpeg-libs isn't installed — NVENC won't work until it is: step 1 of {}",
-            facts.docs_page
-        ));
     }
 }
 

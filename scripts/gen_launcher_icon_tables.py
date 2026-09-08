@@ -122,7 +122,7 @@ export default LauncherIcon;
 # --- Android ---------------------------------------------------------------------------------
 
 rows = "\n".join(
-    f'    "{t}" to LauncherGlyph(\n'
+    f'    "{t}" to Glyph(\n'
     f"        viewportWidth = {w:g}f,\n"
     f"        viewportHeight = {h:g}f,\n"
     f'        d = "{d}",\n'
@@ -135,33 +135,18 @@ write(
 
 {comment("//")}
 
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.PathParser
-import androidx.compose.ui.unit.dp
-import kotlin.math.max
 
 /**
- * The brand mark a `role: "launcher"` tile draws, resolved from the entry's `icon` token.
- * Material ships no brand icons, so this is a curated registry — the sibling of [OsIcons],
- * which does the equivalent job for the host cards.
- *
- * Held as raw SVG path strings rather than transcribed ImageVector DSL: [PathParser] builds
- * the vector once and [launcherIcon] caches it. Viewports are the masters' own and are NOT
- * all square, so the builder letterboxes — a mark forced into a square box is a squashed mark.
+ * The brand mark a `role: "launcher"` tile draws, resolved from the entry's `icon` token — the
+ * sibling of [resolveOsIcon], which does the equivalent job for the host cards. Viewports are
+ * the masters' own and are NOT all square; [GlyphCache] keeps each mark's ratio.
  */
-private class LauncherGlyph(
-    val viewportWidth: Float,
-    val viewportHeight: Float,
-    val d: String,
-)
-
-private val GLYPHS: Map<String, LauncherGlyph> = mapOf(
+private val GLYPHS: Map<String, Glyph> = mapOf(
 {rows}
 )
 
-private val CACHE = HashMap<String, ImageVector>()
+private val CACHE = GlyphCache("launcher", GLYPHS)
 
 /**
  * The [ImageVector] for an `icon` token, or null when the entry carries none or names a mark
@@ -170,30 +155,7 @@ private val CACHE = HashMap<String, ImageVector>()
  *
  * Tinted by the caller via `tint`, so one mark serves every palette.
  */
-fun launcherIcon(token: String?): ImageVector? {{
-    val glyph = GLYPHS[token ?: return null] ?: return null
-    return CACHE.getOrPut(token) {{
-        // Square the box and centre the mark in it, so a wide or tall master keeps its aspect
-        // ratio instead of being stretched to the tile.
-        val side = max(glyph.viewportWidth, glyph.viewportHeight)
-        val dx = (side - glyph.viewportWidth) / 2f
-        val dy = (side - glyph.viewportHeight) / 2f
-        ImageVector.Builder(
-            name = "launcher_$token",
-            defaultWidth = 24.dp,
-            defaultHeight = 24.dp,
-            viewportWidth = side,
-            viewportHeight = side,
-        ).apply {{
-            addGroup(translationX = dx, translationY = dy)
-            addPath(
-                pathData = PathParser().parsePathString(glyph.d).toNodes(),
-                fill = SolidColor(Color.White),
-            )
-            clearGroup()
-        }}.build()
-    }}
-}}
+fun launcherIcon(token: String?): ImageVector? = CACHE[token ?: return null]
 """,
 )
 
@@ -206,33 +168,26 @@ write(
     "crates/pf-console-ui/src/launcher_icons.rs",
     f"""{comment("//!")}
 //!
-//! The brand mark a `role: "launcher"` tile draws, resolved from the entry's `icon` token.
-//! Skia parses SVG path data directly, so the masters need no transcription into a drawing
-//! DSL — the path string is the asset.
+//! Brand mark a `role: "launcher"` tile draws, resolved from the entry's
+//! `icon` token.
 
 use skia_safe::{{Matrix, Path, Rect}};
 use std::collections::HashMap;
 use std::sync::{{Mutex, OnceLock}};
 
-/// A parsed mark and the viewport its coordinates are in.
 type Glyph = (Path, f32, f32);
 
-/// Token → parsed mark, with `None` memoizing "no such token / did not parse" so a miss is not
-/// re-attempted every frame. Named because `clippy::type_complexity` rejects it inline, and this
-/// file is generated — an inline type would fail the `-D warnings` gate on every regeneration.
+/// Token → parsed mark. `None` memoizes a miss so a bad token is not re-parsed
+/// every frame. Named: `clippy::type_complexity` rejects the inline form, and
+/// this file is generated — an inline type would fail `-D warnings` on regen.
 type GlyphCache = HashMap<String, Option<Glyph>>;
 
-/// `(token, viewport width, viewport height, path data)` — the masters, verbatim.
 const GLYPHS: &[(&str, f32, f32, &str)] = &[
 {rows}
 ];
 
-/// The parsed path for a token plus the viewport it was authored in, or `None` when the token is
-/// absent, unknown, or (defensively) unparseable — the tile then names its launcher instead,
-/// which is exactly how every launcher tile looked before icons existed.
-///
-/// Parsed once per token and cached: `Path::from_svg` on a 3 kB string is not free, and the
-/// library shelf re-renders every frame while the cursor springs.
+/// Cached: `Path::from_svg` on a 3 kB string is not free, and the library
+/// shelf re-renders every frame. `None` is a miss or an unparseable path.
 fn glyph(token: &str) -> Option<Glyph> {{
     static CACHE: OnceLock<Mutex<GlyphCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -248,8 +203,7 @@ fn glyph(token: &str) -> Option<Glyph> {{
     built
 }}
 
-/// The mark for `token`, scaled to fit `dst` and centred in it — aspect ratio preserved, because
-/// the masters' viewports are not all square. `None` when there is no mark to draw.
+/// Aspect preserved: the masters' viewports are not all square.
 pub fn launcher_mark(token: &str, dst: Rect) -> Option<Path> {{
     let (path, vw, vh) = glyph(token)?;
     let scale = (dst.width() / vw).min(dst.height() / vh);
@@ -266,8 +220,6 @@ pub fn launcher_mark(token: &str, dst: Rect) -> Option<Path> {{
 mod tests {{
     use super::*;
 
-    /// Every shipped master parses. A mark that silently fails to parse is a tile that silently
-    /// loses its icon, which no other test in this crate would notice.
     #[test]
     fn every_glyph_parses() {{
         for (token, ..) in GLYPHS {{
@@ -280,16 +232,21 @@ mod tests {{
         assert!(launcher_mark("not-a-launcher", Rect::from_wh(64.0, 64.0)).is_none());
     }}
 
-    /// The mark is letterboxed into the destination, never stretched past it — the guarantee the
-    /// non-square viewports (playnite is 1024x1024, steam 496x512) depend on.
+    /// Letterboxed, never stretched. Steam's viewport is 496×512, not square.
     #[test]
     fn mark_is_contained_and_centred() {{
         let dst = Rect::from_xywh(10.0, 20.0, 80.0, 40.0);
         let b = launcher_mark("steam", dst).unwrap().compute_tight_bounds();
         assert!(b.width() <= dst.width() + 0.5 && b.height() <= dst.height() + 0.5);
         let (cx, cy) = (b.center_x(), b.center_y());
-        assert!((cx - dst.center_x()).abs() < 1.0, "off-centre horizontally: {{cx}}");
-        assert!((cy - dst.center_y()).abs() < 1.0, "off-centre vertically: {{cy}}");
+        assert!(
+            (cx - dst.center_x()).abs() < 1.0,
+            "off-centre horizontally: {{cx}}"
+        );
+        assert!(
+            (cy - dst.center_y()).abs() < 1.0,
+            "off-centre vertically: {{cy}}"
+        );
     }}
 }}
 """,

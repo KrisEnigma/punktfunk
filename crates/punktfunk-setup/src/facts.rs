@@ -56,6 +56,12 @@ impl Family {
     pub fn has_native_client(self) -> bool {
         matches!(self, Family::Apt | Family::Dnf | Family::Pacman)
     }
+
+    /// Every host install puts the console on the box: the package lines name it and the
+    /// SteamOS build script builds it (`--no-web` is that script's own opt-out).
+    pub fn installs_console(self) -> bool {
+        self != Family::Flatpak
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +222,9 @@ pub struct Facts {
     pub has_flatpak_client: bool,
     pub couch_box: bool,
     pub graphical_seat: bool,
+    /// A session file under `/usr/share/{wayland-sessions,xsessions}`: a desktop can be
+    /// logged into later. Without one, only gamescope can stand a session up.
+    pub desktop_sessions: bool,
     pub sunshine_active: bool,
     pub current_channel: Option<Channel>,
     pub installed_pf: Vec<String>,
@@ -229,7 +238,6 @@ pub struct Facts {
     pub in_punktfunk_group: bool,
     pub has_input_group: bool,
     pub nvidia: Nvidia,
-    pub has_rpmfusion_ffmpeg: bool,
     pub firewall: Firewall,
     pub systemd_pid1: bool,
     pub user_manager: bool,
@@ -277,6 +285,7 @@ impl Facts {
                 .is_some_and(|o| o.ok()),
             couch_box: os.like("bazzite") || os.like("nobara"),
             graphical_seat: graphical_seat(env),
+            desktop_sessions: desktop_sessions(paths),
             sunshine_active: sunshine_active(run),
             current_channel: crate::platform::backend(family).current_channel(paths, run),
             installed_pf: crate::platform::backend(family).installed_pf(run),
@@ -291,9 +300,6 @@ impl Facts {
                 .probe("getent", &["group", "input"])
                 .is_some_and(|o| o.ok()),
             nvidia: nvidia(paths, run),
-            has_rpmfusion_ffmpeg: run
-                .probe("rpm", &["-q", "ffmpeg-libs"])
-                .is_some_and(|o| o.ok()),
             firewall: firewall(paths, run),
             systemd_pid1: paths.run.join("systemd/system").is_dir(),
             user_manager: run
@@ -382,11 +388,11 @@ pub fn floors(os: &OsRelease, family: Family) -> (Option<String>, Option<Floor>)
             os.version_id
         ))),
         "ubuntu" if (20..=25).contains(&os.major()) => Some(Floor::Confirm(format!(
-            "Ubuntu {} installs the package but cannot host — its desktop is too old to create a virtual display ({DOCS}/requirements#the-floor-for-a-working-host). Use 26.04+.",
+            "Ubuntu {} installs the package but can't host — its desktop is too old to create a virtual display ({DOCS}/requirements#the-floor-for-a-working-host). Use 26.04+.",
             os.version_id
         ))),
         "linuxmint" if (20..=22).contains(&os.major()) => Some(Floor::Confirm(format!(
-            "Linux Mint {} (Ubuntu 24.04 base) installs the package but cannot host — {DOCS}/requirements#cinnamon-linux-mint-and-lmde. LMDE 7 and Mint 23 can.",
+            "Linux Mint {} (Ubuntu 24.04 base) installs the package but can't host — {DOCS}/requirements#cinnamon-linux-mint-and-lmde. LMDE 7 and Mint 23 can.",
             os.version_id
         ))),
         _ => None,
@@ -406,6 +412,12 @@ pub fn floors(os: &OsRelease, family: Family) -> (Option<String>, Option<Floor>)
             ))),
         ),
     }
+}
+
+fn desktop_sessions(paths: &BasePaths) -> bool {
+    ["usr/share/wayland-sessions", "usr/share/xsessions"]
+        .iter()
+        .any(|d| std::fs::read_dir(paths.etc_root.join(d)).is_ok_and(|mut it| it.next().is_some()))
 }
 
 fn graphical_seat(env: &Env) -> bool {
