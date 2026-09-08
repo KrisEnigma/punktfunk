@@ -582,7 +582,13 @@ fn open_any(ladder: &[OpenRung], ctx: &OpenCtx) -> Option<LiveStream> {
     log::warn!(
         "audio: no rung proved it was pulling — falling back to {rung:?} unproven; if this device is silent, this line is where to look"
     );
-    let live = try_open(rung, ctx).ok()?;
+    let live = match try_open(rung, ctx) {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!("audio: unproven {rung:?} did not open either: {e:?} — no playback");
+            return None;
+        }
+    };
     match arm(&live, ctx.fmt, ctx.counters, false) {
         Ok(()) => {
             log_started(&live, false);

@@ -296,13 +296,20 @@ fn encode_loop(
             return;
         }
     };
-    let _ = enc.set_bitrate(opus::Bitrate::Bits(MIC_BITRATE));
     // Speech tuning: complexity 5 roughly halves encode cost for no audible loss at this rate,
     // and in-band FEC at an assumed 10% loss lets the host's decoder reconstruct a dropped
     // datagram from its successor instead of playing a hole (the uplink is fire-and-forget).
-    let _ = enc.set_complexity(5);
-    let _ = enc.set_inband_fec(true);
-    let _ = enc.set_packet_loss_perc(10);
+    // A refused setter leaves the encoder on libopus defaults — audible, so say which.
+    for (what, r) in [
+        ("bitrate", enc.set_bitrate(opus::Bitrate::Bits(MIC_BITRATE))),
+        ("complexity", enc.set_complexity(5)),
+        ("inband_fec", enc.set_inband_fec(true)),
+        ("packet_loss_perc", enc.set_packet_loss_perc(10)),
+    ] {
+        if let Err(e) = r {
+            log::warn!("mic: opus {what} not applied: {e}");
+        }
+    }
 
     let frame = FRAME_SAMPLES * CHANNELS;
     let mut ring: VecDeque<f32> = VecDeque::with_capacity(frame * 4);

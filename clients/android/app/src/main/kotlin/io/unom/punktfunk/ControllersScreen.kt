@@ -7,9 +7,11 @@ import android.os.CombinedVibration
 import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
+import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -728,7 +730,12 @@ private fun PadRow(info: PadInfo, gamepadSetting: Int) {
                 )
             }
             if (info.canRumble) {
-                OutlinedButton(onClick = { info.dev?.let(::testRumble) }) { Text("Test rumble") }
+                val context = LocalContext.current
+                OutlinedButton(onClick = {
+                    if (info.dev?.let(::testRumble) != true) {
+                        Toast.makeText(context, "No motor answered", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("Test rumble") }
             } else {
                 Text(
                     "No rumble motors reported — host rumble will be silent",
@@ -851,20 +858,26 @@ private fun deviceHasVibrator(dev: InputDevice): Boolean =
         dev.vibrator.hasVibrator()
     }
 
-/** A short pulse on the pad's own motor. Also the console's `PadAction::Rumble`. */
-internal fun testRumble(dev: InputDevice) {
-    runCatching {
-        if (Build.VERSION.SDK_INT >= 31) {
-            val vm = dev.vibratorManager
-            if (vm.vibratorIds.isEmpty()) return
-            vm.vibrate(CombinedVibration.createParallel(VibrationEffect.createOneShot(300, 200)))
-        } else {
-            @Suppress("DEPRECATION")
-            val v = dev.vibrator
-            if (!v.hasVibrator()) return
-            v.vibrate(VibrationEffect.createOneShot(300, 200))
-        }
+/**
+ * A short pulse on the pad's own motor. Also the console's `PadAction::Rumble`. `false` when
+ * nothing was pulsed — no motor, or the platform refused — so the caller can say so instead of
+ * leaving "Test" indistinguishable from a pad that has no motor.
+ */
+internal fun testRumble(dev: InputDevice): Boolean = runCatching {
+    if (Build.VERSION.SDK_INT >= 31) {
+        val vm = dev.vibratorManager
+        if (vm.vibratorIds.isEmpty()) return false
+        vm.vibrate(CombinedVibration.createParallel(VibrationEffect.createOneShot(300, 200)))
+    } else {
+        @Suppress("DEPRECATION")
+        val v = dev.vibrator
+        if (!v.hasVibrator()) return false
+        v.vibrate(VibrationEffect.createOneShot(300, 200))
     }
+    true
+}.getOrElse {
+    Log.w("Controllers", "rumble on ${dev.name}", it)
+    false
 }
 
 /** Identity line: VID:PID + the source classes Android assigned. */
