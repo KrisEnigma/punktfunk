@@ -1379,24 +1379,32 @@ impl VirtualDisplayManager {
         // Gate on an opened device: the version is 0 until the handshake ran, and the capture
         // layer must not create a section nobody will publish into.
         let hw_cursor = hw_cursor && self.driver_proto.load(Ordering::Relaxed) != 0;
-        // PRE-MUTATION baseline for the standby-sink selector (immunity plan WP3a): which targets
-        // were part of the desktop before THIS acquire touches anything — the ADD's
-        // auto-activation, the resolve ladder's force-EXTEND (which can light a sleeping sink!),
-        // and the isolate all mutate the active set, so only a snapshot taken here can tell a
-        // pre-dark sink from a display we switched off (or lit) ourselves.
-        let baseline_active: Vec<CcdTargetKey> =
+        // PRE-MUTATION baseline for the standby-sink selector (immunity plan WP3a): the targets
+        // active before this acquire mutates the set. `None` is not an empty baseline — a target
+        // missing from one is a disable candidate, so a failed read would nominate the
+        // operator's own display, and the pass is skipped instead.
+        let baseline_active: Option<Vec<CcdTargetKey>> =
             if inner.slots.is_empty() && crate::policy::prefs().standby_sink_neutralise() {
-                // A FRESH read through the display actor (it runs the query, off this thread),
-                // falling back to the newest snapshot if the actor is slow or not running.
+                // A FRESH read through the display actor (it runs the query, off this thread).
+                // A re-stamped last-known-good carries `failures > 0` and is not a baseline.
                 pf_win_display::display_events::refresh_and_wait(Duration::from_millis(500))
-                    .unwrap_or_else(pf_win_display::display_events::snapshot_or_query)
-                    .targets
-                    .iter()
-                    .filter(|t| t.active)
-                    .map(|t| t.key)
-                    .collect()
+                    .filter(|s| s.is_fresh())
+                    .map(|s| {
+                        s.targets
+                            .iter()
+                            .filter(|t| t.active)
+                            .map(|t| t.key)
+                            .collect()
+                    })
+                    // Actor slow or not running: one direct query on this thread. Its `Err`
+                    // is the case that must not become an empty baseline.
+                    .or_else(|| {
+                        pf_win_display::win_display::target_inventory_checked()
+                            .ok()
+                            .map(|ts| ts.iter().filter(|t| t.active).map(|t| t.key).collect())
+                    })
             } else {
-                Vec::new()
+                None
             };
         // SAFETY: `create_monitor`'s own `# Safety` contract guarantees `dev` is the live control
         // handle; we forward it unchanged to `add_monitor`, whose precondition is exactly that.
@@ -1613,7 +1621,11 @@ impl VirtualDisplayManager {
                 // the deactivated-set selector misses. After settle so force-
                 // EXTEND physicals are not still mid-activation. First member
                 // only; Extend leaves active panels untouched by construction.
-                if first_member && crate::policy::prefs().standby_sink_neutralise() {
+                // No baseline ⇒ no pass: see `baseline_active`.
+                if let (true, Some(baseline_active)) = (
+                    first_member && crate::policy::prefs().standby_sink_neutralise(),
+                    baseline_active.as_deref(),
+                ) {
                     if let Some(rest) =
                         Duration::from_millis(1500).checked_sub(settle_start.elapsed())
                     {
@@ -1623,7 +1635,7 @@ impl VirtualDisplayManager {
                     keep.push(added_key);
                     for id in pf_win_display::monitor_devnode::disable_connected_inactive(
                         &keep,
-                        &baseline_active,
+                        baseline_active,
                         pf_win_display::topology_churn::generation(),
                     ) {
                         if !inner.group.pnp_disabled.contains(&id) {
