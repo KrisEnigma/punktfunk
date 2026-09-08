@@ -116,6 +116,15 @@ static MOUSE_RDESC: [u8; 80] = [
 // {reportType=0x22, wReportLength = 80 (0x0050)}.
 static HID_DESC: [u8; 9] = [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x50, 0x00];
 
+// `wReportLength` above and `MOUSE_RDESC`'s array size are the same number written twice, in
+// different places. Out of step they fail quietly: hidclass asks for `wReportLength` bytes and
+// parses whatever it gets, so the mouse enumerates truncated or not at all with nothing naming
+// the cause. Same compile-time pairing pf-gamepad uses.
+const fn declared_len(hid_desc: &[u8; 9]) -> usize {
+    (hid_desc[7] as usize) | ((hid_desc[8] as usize) << 8)
+}
+const _: () = assert!(declared_len(&HID_DESC) == MOUSE_RDESC.len());
+
 // HID_DEVICE_ATTRIBUTES (32 bytes): Size(u32)=32, VendorID, ProductID, VersionNumber, Reserved[11].
 fn hid_attrs() -> [u8; 32] {
     let mut a = [0u8; 32];
