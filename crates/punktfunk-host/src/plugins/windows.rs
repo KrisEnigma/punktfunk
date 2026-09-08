@@ -351,11 +351,13 @@ fn is_elevated() -> bool {
 /// Whether the process listening on `127.0.0.1:port` runs as LocalService, the runner's
 /// principal. A registration outlives its plugin by up to the lease TTL, and a local user who
 /// binds the freed port would otherwise receive the UI secret and answer the launch.
+#[cfg(not(test))]
 pub(crate) fn listener_is_runner(port: u16) -> bool {
     loopback_listener_pid(port).is_some_and(runs_as_local_service)
 }
 
 /// Owning pid of the IPv4 listener on `127.0.0.1:port`, if there is one.
+#[cfg(not(test))]
 fn loopback_listener_pid(port: u16) -> Option<u32> {
     use ::windows::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
@@ -418,6 +420,7 @@ fn loopback_listener_pid(port: u16) -> Option<u32> {
 }
 
 /// Whether `pid`'s primary token belongs to `NT AUTHORITY\LocalService`.
+#[cfg(not(test))]
 fn runs_as_local_service(pid: u32) -> bool {
     use ::windows::Win32::Foundation::{CloseHandle, HANDLE};
     use ::windows::Win32::Security::{
