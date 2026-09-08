@@ -125,7 +125,7 @@ final class StartScreenVectorsTests: XCTestCase {
     }
 
     /// An unpaired host is never a landing, so a store of them opens the list whatever the
-    /// setting says — the rule that lets `startIn` default to library on a fresh install.
+    /// setting says — the rule that carries a fresh install, before anything is paired.
     func testAnUnpairedStoreAlwaysOpensTheList() {
         let hosts = [StoredHost(name: "Desk", address: "10.0.0.5")]
         for value in StartIn.allCases {
@@ -133,7 +133,7 @@ final class StartScreenVectorsTests: XCTestCase {
                 StartScreen.resolve(startIn: value.stored, defaultHost: nil, hosts: hosts),
                 .hosts, "\(value.stored) landed somewhere with nothing to land on")
         }
-        XCTAssertEqual(StartIn.parse("shelf"), .library, "unknown must degrade, not throw")
-        XCTAssertEqual(StartIn.parse(nil), .library)
+        XCTAssertEqual(StartIn.parse("shelf"), .hosts, "unknown must degrade, not throw")
+        XCTAssertEqual(StartIn.parse(nil), .hosts)
     }
 }
