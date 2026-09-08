@@ -283,8 +283,8 @@ pub(super) fn hdr_dataspace(codec: &MediaCodec) -> Option<DataSpace> {
 /// SDR maps to `BT709` (limited-range video), never `0`/untagged: an untagged buffer on an
 /// ASurfaceControl transaction leaves SurfaceFlinger to guess, and a full-range guess shows
 /// limited-range black (16) as gray — the elevated-blacks bug.
-// ponytail: full-range SDR would need hand-composed dataspace bits (no named constant); the host
-// only encodes limited-range SDR today (ColorInfo::SDR_BT709), so BT709 covers every SDR session.
+// Full-range SDR would need hand-composed dataspace bits — there is no named constant — and
+// the host only encodes limited-range SDR (`ColorInfo::SDR_BT709`), so BT709 covers every session.
 pub(super) fn color_dataspace(color: &punktfunk_core::quic::ColorInfo) -> i32 {
     use punktfunk_core::quic::ColorInfo;
     let full = color.full_range != 0;

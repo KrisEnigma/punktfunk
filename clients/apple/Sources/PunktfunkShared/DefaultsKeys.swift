@@ -248,8 +248,8 @@ public enum DefaultsKey {
     /// not worth browsing (one platform, one store) opens on the shelf regardless. Presentation
     /// only.
     public static let libraryCollections = "punktfunk.libraryCollections"
-    /// Where a bare launch opens — a `StartIn` stored value (`"hosts"`, `"library"` the default,
-    /// `"stream"`). The cross-client `start_in` key; unknown reads as library, and with no default
+    /// Where a bare launch opens — a `StartIn` stored value (`"hosts"` the default, `"library"`,
+    /// `"stream"`). The cross-client `start_in` key; unknown reads as hosts, and with no default
     /// host every value degrades to the host list. Resolve through `StartScreen.resolve`, never by
     /// reading this alone. Presentation only — a device preference, never part of a profile.
     public static let startIn = "punktfunk.startIn"

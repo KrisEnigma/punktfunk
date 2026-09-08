@@ -149,7 +149,7 @@ struct ContentView: View {
     /// Where a bare launch opens (Settings → Library). Library (the default) opens the default
     /// host's shelf; Stream also dials its desktop. Resolved once per process by
     /// `applyStartScreen`, never on foregrounding — see `startApplied`.
-    @AppStorage(DefaultsKey.startIn) private var startInRaw = StartIn.library.stored
+    @AppStorage(DefaultsKey.startIn) private var startInRaw = StartIn.hosts.stored
     /// Which host that is, when several are paired. Empty until somebody picks one; with exactly
     /// one paired host the default is derived and this stays empty.
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""

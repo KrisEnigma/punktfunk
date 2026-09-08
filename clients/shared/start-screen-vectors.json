@@ -73,16 +73,16 @@
       "expect": { "start": "library", "host_index": 1, "source": "derived" }
     },
     {
-      "name": "an-unknown-start-in-reads-as-library",
+      "name": "an-unknown-start-in-reads-as-the-host-list",
       "start_in": "shelf",
       "hosts": [{ "name": "Desk", "id": "a", "paired": true, "pinned": true }],
-      "expect": { "start": "library", "host_index": 0, "source": "derived" }
+      "expect": { "start": "hosts", "host_index": 0, "source": "derived" }
     },
     {
-      "name": "an-empty-start-in-reads-as-library",
+      "name": "an-empty-start-in-reads-as-the-host-list",
       "start_in": "",
       "hosts": [{ "name": "Desk", "id": "a", "paired": true, "pinned": true }],
-      "expect": { "start": "library", "host_index": 0, "source": "derived" }
+      "expect": { "start": "hosts", "host_index": 0, "source": "derived" }
     },
     {
       "name": "stream-with-no-default-lands-on-the-list",

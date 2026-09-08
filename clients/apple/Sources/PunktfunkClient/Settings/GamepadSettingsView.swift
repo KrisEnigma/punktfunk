@@ -92,7 +92,7 @@ struct GamepadSettingsView: View {
     @AppStorage(DefaultsKey.libraryCollections) private var libraryCollections = false
     /// Where a bare launch opens, and which host it opens on. The pointer is written from a
     /// host's own options menu, not here — this row only picks between the three landings.
-    @AppStorage(DefaultsKey.startIn) private var startInRaw = StartIn.library.stored
+    @AppStorage(DefaultsKey.startIn) private var startInRaw = StartIn.hosts.stored
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     @AppStorage(DefaultsKey.gamepadUIEnabled) private var gamepadUIEnabled = true
     /// When the switch above takes over — the row is only built while it is on.
