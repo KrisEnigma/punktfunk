@@ -149,8 +149,6 @@ pub(super) struct AscBackend {
 
     // -- 1 Hz pf.present window --
     released: u64,
-    /// `released` of the last flushed window — the glass follower's offered rate.
-    released_last: u64,
     skipped: u64,
     displays: u64,
     forced: u64,
@@ -269,7 +267,6 @@ impl AscBackend {
             next_seq: 0,
             stamps: VecDeque::new(),
             released: 0,
-            released_last: 0,
             skipped: 0,
             displays: 0,
             forced: 0,
@@ -578,7 +575,6 @@ impl AscBackend {
             self.forced,
             cadence,
         );
-        self.released_last = self.released;
         self.released = 0;
         self.displays = 0;
     }
@@ -597,26 +593,6 @@ impl AscBackend {
     /// Update the `ADataSpace` applied to every subsequent transaction (a refinement from the
     /// codec's output format — the analogue of the SurfaceView path's `apply_hdr_dataspace`; the
     /// negotiated colour set the initial value at create).
-    /// The panel's learned refresh period (0 = unknown) — the glass the follower reads.
-    pub(super) fn panel_period_ns(&self) -> i64 {
-        self.panel.period_ns()
-    }
-
-    /// Frames released to glass in the last flushed second.
-    pub(super) fn released_last_second(&self) -> u64 {
-        self.released_last
-    }
-
-    /// A mid-stream refresh change: the cadence interval and the layer's frame-rate hint follow.
-    pub(super) fn set_source_hz(&mut self, hz: u32) {
-        if hz == 0 {
-            return;
-        }
-        self.frame_interval_ns = 1_000_000_000 / i64::from(hz);
-        self.frame_rate = hz as f32;
-        log::info!("asc: source now {hz} Hz — cadence and frame-rate hint re-tuned");
-    }
-
     pub(super) fn set_dataspace(&mut self, dataspace: i32) {
         if self.dataspace != dataspace {
             self.dataspace = dataspace;

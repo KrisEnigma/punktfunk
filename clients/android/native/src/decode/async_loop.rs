@@ -17,7 +17,6 @@ use super::display::{
     apply_hdr_dataspace, color_dataspace, hdr_dataspace, install_render_callback,
     release_render_callback, DisplayTracker,
 };
-use super::glass::GlassFollower;
 use super::latency::{
     note_decoded_pts, note_received_frame, now_realtime_ns, take_flags, take_stamp,
 };
@@ -260,12 +259,7 @@ pub(super) fn run_async(
         // callback, and it keeps the event channel alive for those callbacks.
         present_tx: asc.as_ref().map(|_| ev_tx.clone()),
     };
-    let mut state = State::new(
-        asc,
-        presenter,
-        ReanchorGate::new(client.frames_dropped()),
-        mode.refresh_hz,
-    );
+    let mut state = State::new(asc, presenter, ReanchorGate::new(client.frames_dropped()));
 
     // Feeder thread: block on the network so this loop doesn't (an AU's arrival becomes an event that
     // wakes us immediately, with no input-side poll latency). It also records the `received` HUD stat.
@@ -605,17 +599,10 @@ struct State {
     recovery_flags: VecDeque<(u64, u32)>,
     fatal: bool,
     backstops: Backstops,
-    /// Re-negotiates the stream at the panel's achieved refresh (see `glass`).
-    glass: GlassFollower,
 }
 
 impl State {
-    fn new(
-        asc: Option<AscBackend>,
-        presenter: Option<Presenter>,
-        gate: ReanchorGate,
-        stream_hz: u32,
-    ) -> State {
+    fn new(asc: Option<AscBackend>, presenter: Option<Presenter>, gate: ReanchorGate) -> State {
         State {
             asc,
             presenter,
@@ -635,7 +622,6 @@ impl State {
             recovery_flags: VecDeque::new(),
             fatal: false,
             backstops: Backstops::new(),
-            glass: GlassFollower::new(stream_hz),
         }
     }
 
@@ -1020,20 +1006,6 @@ impl State {
                 }
             }
             a.flush(&ctx.stats);
-        }
-        // The glass: the ASC backend's own latch grid, else the choreographer's panel estimate,
-        // each with the rate frames were offered at — a slow source latches every other vsync
-        // and would read as a slow panel.
-        let (panel_ns, offered) = match (&self.asc, &self.presenter, clock) {
-            (Some(a), _, _) => (a.panel_period_ns(), a.released_last_second()),
-            (None, Some(p), Some(c)) => (c.panel_period_ns(), p.released_last_second()),
-            _ => (0, 0),
-        };
-        if let Some(hz) = self.glass.tick(&ctx.client, panel_ns, offered) {
-            // A mode switch landed (ours or the ring's): the pacing period follows it.
-            if let Some(a) = self.asc.as_mut() {
-                a.set_source_hz(hz);
-            }
         }
     }
 
