@@ -77,6 +77,7 @@ struct GamepadSettingsView: View {
     @AppStorage(DefaultsKey.audioFormat) private var audioFormat = AudioFormatChoice.opus.rawValue
     @AppStorage(DefaultsKey.hdrEnabled) private var hdrEnabled = true
     @AppStorage(DefaultsKey.enable444) private var enable444 = false
+    @AppStorage(DefaultsKey.tenBitSdr) private var tenBitSdr = false
     @AppStorage(DefaultsKey.codec) private var codec = "auto"
     @AppStorage(DefaultsKey.micEnabled) private var micEnabled = true
     @AppStorage(DefaultsKey.echoCancel) private var echoCancel = true
@@ -91,7 +92,7 @@ struct GamepadSettingsView: View {
     @AppStorage(DefaultsKey.libraryCollections) private var libraryCollections = false
     /// Where a bare launch opens, and which host it opens on. The pointer is written from a
     /// host's own options menu, not here — this row only picks between the three landings.
-    @AppStorage(DefaultsKey.startIn) private var startInRaw = StartIn.library.stored
+    @AppStorage(DefaultsKey.startIn) private var startInRaw = StartIn.hosts.stored
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     @AppStorage(DefaultsKey.gamepadUIEnabled) private var gamepadUIEnabled = true
     /// When the switch above takes over — the row is only built while it is on.
@@ -888,6 +889,12 @@ struct GamepadSettingsView: View {
                 id: "chroma", tab: .video, field: "enable_444", icon: "textformat", label: "Full chroma (4:4:4)",
                 detail: "Sharper text and UI, at more bandwidth. For desktop work; HEVC only.",
                 value: $enable444),
+            toggleRow(
+                id: "tenBitSdr", tab: .video, field: "ten_bit_sdr", icon: "circle.lefthalf.filled",
+                label: "10-bit SDR",
+                detail: "Main10 for an SDR desktop, which takes the banding out of gradients. "
+                    + "10-bit HDR already asks for the depth.",
+                value: $tenBitSdr),
             choiceRow(
                 id: "presentPriority", tab: .video, field: "present_priority", icon: "rectangle.stack", label: "Prioritize",
                 detail: "Lowest latency shows each frame immediately; Smoothness buffers a few.",

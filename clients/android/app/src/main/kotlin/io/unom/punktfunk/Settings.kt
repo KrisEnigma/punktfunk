@@ -285,8 +285,8 @@ data class Settings(
      */
     val overlayActions: String = "",
     /**
-     * Where a bare launch opens — the cross-client `start_in` key: `"hosts"`, `"library"` (the
-     * default) or `"stream"`. Empty or unknown reads as library, and with no default host every
+     * Where a bare launch opens — the cross-client `start_in` key: `"hosts"` (the default),
+     * `"library"` or `"stream"`. Empty or unknown reads as hosts, and with no default host every
      * value degrades to the host list. Resolve through [io.unom.punktfunk.kit.link.StartScreen],
      * never by reading this alone.
      */

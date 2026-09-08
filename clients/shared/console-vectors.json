@@ -1943,7 +1943,7 @@
     {
       "name": "Input",
       "desktop_only": true,
-      "$why": "Touch mode, mouse, invert-scroll and shortcuts are desktop-host settings with nothing to set on a phone or a TV, so the mobile clients ship six tabs and the desktop console seven. Modelled rather than omitted: a flat six-name list would red the desktop on day one, and a seven-name list would red both mobile clients."
+      "$why": "The NATIVE ports ship six tabs and the shared shell seven — this flag records that gap, not a platform rule. Touch mode, mouse and invert-scroll are real everywhere (Android's own touch settings carry all three), so `pf-console-ui` offers the tab on every platform and only `Shortcuts` is desktop-gated inside it. Apple's `GpSettingsTab` has no `input` case at all and Android's touch UI groups those rows elsewhere; until both port the tab, a flat seven-name list would red them and a six-name list would red the desktop. Drop the flag when Apple grows the tab."
     },
     {
       "name": "Interface"

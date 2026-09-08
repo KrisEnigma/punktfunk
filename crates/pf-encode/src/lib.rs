@@ -304,6 +304,9 @@ impl Encoder for TrackedEncoder {
     fn poll(&mut self) -> Result<Option<EncodedFrame>> {
         self.inner.poll()
     }
+    fn ready_event(&self) -> Option<isize> {
+        self.inner.ready_event()
+    }
     fn supports_chunked_poll(&self) -> bool {
         self.inner.supports_chunked_poll()
     }

@@ -119,9 +119,13 @@ Item {
     Quickshell.execDetached(argv)
   }
 
-  // Open the ordinary login page; an admin bearer URL must never enter process arguments.
+  // The console opens at a one-shot login page under $XDG_RUNTIME_DIR, so it lands already logged
+  // in with no bearer URL in argv. Shell indirection because the ticket must be minted at CLICK
+  // time — one minted at widget load would be long expired. `|| echo`: a stopped host fails `ctl
+  // console-url`, and an EMPTY --app= opens a plain browser window.
   function openConsole() {
-    detached(["omarchy-launch-webapp", "https://localhost:47992"])
+    detached(["sh", "-c",
+              "exec omarchy-launch-webapp \"$(punktfunk-host ctl console-url || echo https://localhost:47992)\""])
   }
 
   Component {

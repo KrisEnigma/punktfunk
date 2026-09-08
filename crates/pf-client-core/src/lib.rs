@@ -69,6 +69,15 @@ pub mod keymap;
     target_family = "wasm"
 ))]
 pub mod library;
+// Library sort/group policy, shared by every Rust shell so the console and the two desktop
+// dialogs cannot drift into three orders. Apple and Android port the same file.
+#[cfg(any(
+    target_os = "linux",
+    windows,
+    target_os = "android",
+    target_family = "wasm"
+))]
+pub mod collate;
 // Per-host catalog cache, so a library screen has titles to show while a sleeping host boots.
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod library_cache;

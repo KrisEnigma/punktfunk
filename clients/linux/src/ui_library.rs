@@ -11,10 +11,15 @@ use crate::trust;
 use crate::ui_hosts::ConnectRequest;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use pf_client_core::collate::{self, SortKey};
+use pf_client_core::library::store_label;
 use relm4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+
+/// Poster bytes as they arrive from the fetch threads, keyed by entry id.
+type ArtRx = async_channel::Receiver<(String, Vec<u8>)>;
 
 /// Everything the page re-renders from. Kept alive by the widget closures (reload/retry/
 /// card activation); dropped when the page is popped, which also winds down any in-flight
@@ -42,6 +47,29 @@ struct State {
     pics: RefCell<HashMap<String, gtk::Picture>>,
     /// Screenshot mode: render injected entries only, never touch the network.
     mock: Cell<bool>,
+    /// The snapshot on screen, so changing the sort re-renders without refetching.
+    games: RefCell<Vec<GameEntry>>,
+    /// Shared `library_sort` (`pf_client_core::collate`), so the console and this page
+    /// order one library the same way.
+    sort: Cell<SortKey>,
+    /// The art channel, kept so dropping this page CLOSES it. The consuming future parks on
+    /// `recv()` and holds its own handle, so on an all-miss run nothing ever wakes it and the
+    /// fetch threads would carry on against a page nobody can see.
+    art_rx: RefCell<Option<ArtRx>>,
+    /// Bumped by every [`load`]. A fetch whose generation is stale when it lands is dropped:
+    /// Reload can be pressed again while one is in flight, and results arrive in whatever
+    /// order the two hosts answer, not the order they were asked.
+    generation: Cell<u64>,
+}
+
+impl Drop for State {
+    /// Close the art channel: the fetch threads watch it to know whether anyone is still
+    /// looking. Nothing else here needs teardown.
+    fn drop(&mut self) {
+        if let Some(rx) = self.art_rx.borrow().as_ref() {
+            rx.close();
+        }
+    }
 }
 
 /// What the page calls the host it is browsing. A request that carries a one-off profile
@@ -118,7 +146,8 @@ pub fn open_mock(
     if games.is_empty() {
         state.stack.set_visible_child_name("empty");
     } else {
-        render(&state, &games);
+        *state.games.borrow_mut() = games;
+        render(&state);
         state.stack.set_visible_child_name("grid");
     }
 }
@@ -231,6 +260,19 @@ fn build(
     let reload = crate::lucide::button("refresh-cw");
     reload.set_tooltip_text(Some("Reload"));
     header.pack_end(&reload);
+    // Shared `library_sort`: the same four orders the console's bar offers, so one library
+    // reads the same on both fronts. Default is the host's own order, which is a no-op.
+    let stored_sort = SortKey::parse(&trust::Settings::load().library_sort);
+    let labels: Vec<&str> = SortKey::ALL.iter().map(|k| k.label()).collect();
+    let sort_menu = gtk::DropDown::from_strings(&labels);
+    sort_menu.set_tooltip_text(Some("Sort"));
+    sort_menu.set_selected(
+        SortKey::ALL
+            .iter()
+            .position(|k| *k == stored_sort)
+            .unwrap_or(0) as u32,
+    );
+    header.pack_end(&sort_menu);
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -255,7 +297,29 @@ fn build(
         art: RefCell::new(HashMap::new()),
         pics: RefCell::new(HashMap::new()),
         mock: Cell::new(false),
+        games: RefCell::new(Vec::new()),
+        sort: Cell::new(stored_sort),
+        art_rx: RefCell::new(None),
+        generation: Cell::new(0),
     });
+    {
+        let state = state.clone();
+        // Presentation only, like the console's bar: write the key, re-render what is already
+        // fetched. Load-modify-save because the settings file has one writer per shell.
+        sort_menu.connect_selected_notify(move |menu| {
+            let key = SortKey::ALL
+                .get(menu.selected() as usize)
+                .copied()
+                .unwrap_or_default();
+            if state.sort.replace(key) == key {
+                return;
+            }
+            let mut settings = trust::Settings::load();
+            settings.library_sort = key.id().to_string();
+            settings.save();
+            render(&state);
+        });
+    }
     {
         let state = state.clone();
         reload.connect_clicked(move |_| load(&state));
@@ -275,6 +339,8 @@ fn load(state: &Rc<State>) {
         return; // screenshot scene renders injected entries only
     }
     state.stack.set_visible_child_name("loading");
+    let generation = state.generation.get().wrapping_add(1);
+    state.generation.set(generation);
     let port = state.mgmt_port;
     let addr = state.req.addr.clone();
     let identity = state.identity.clone();
@@ -290,10 +356,14 @@ fn load(state: &Rc<State>) {
     glib::spawn_future_local(async move {
         let Ok(result) = rx.recv().await else { return };
         let Some(state) = weak.upgrade() else { return };
+        if state.generation.get() != generation {
+            return; // a newer load already owns the grid
+        }
         match result {
             Ok(games) if games.is_empty() => state.stack.set_visible_child_name("empty"),
             Ok(games) => {
-                render(&state, &games);
+                *state.games.borrow_mut() = games.clone();
+                render(&state);
                 state.stack.set_visible_child_name("grid");
                 load_art(&state, &games);
             }
@@ -307,23 +377,33 @@ fn load(state: &Rc<State>) {
 
 /// (Re)build the poster grid from one library snapshot. Cached textures apply
 /// immediately; the rest keep their monogram placeholder until `load_art` delivers.
-fn render(state: &Rc<State>, games: &[GameEntry]) {
+fn render(state: &Rc<State>) {
     state.flow.remove_all();
     state.launcher_flow.remove_all();
     state.pics.borrow_mut().clear();
-    // Design D4: launchers never interleave with titles. The host already sorts by title, and
-    // `partition` is stable, so each group keeps that order.
-    let (launchers, titles): (Vec<&GameEntry>, Vec<&GameEntry>) =
-        games.iter().partition(|g| g.is_launcher());
+    let games = state.games.borrow();
+    // Design D4: launchers never interleave with titles. `collate` is the shared policy —
+    // launchers lead as their own group, and the sort applies inside a group, never across.
+    let groups = collate::collate(&games[..], state.sort.get(), None);
+    let of_group = |key: collate::GroupKey| -> Vec<usize> {
+        groups
+            .iter()
+            .find(|g| g.key == key)
+            .map(|g| g.games.clone())
+            .unwrap_or_default()
+    };
+    let launchers = of_group(collate::GroupKey::Launchers);
+    // Ungrouped collation puts every title in one bucket the label never draws.
+    let titles = of_group(collate::GroupKey::Platform("All".to_string()));
     // The desktop leads the launcher band: both open something rather than play a title, and
     // a host with no launchers gets that band for the tile alone.
     let desktop = desktop_entry();
     state.launcher_flow.append(&game_card(state, &desktop));
-    for game in &launchers {
-        state.launcher_flow.append(&game_card(state, game));
+    for i in &launchers {
+        state.launcher_flow.append(&game_card(state, &games[*i]));
     }
-    for game in &titles {
-        state.flow.append(&game_card(state, game));
+    for i in &titles {
+        state.flow.append(&game_card(state, &games[*i]));
     }
     // The band always has the desktop tile in it now, so it is always shown; the GAMES heading
     // still only appears when there is something on both sides of it.
@@ -528,6 +608,10 @@ fn load_art(state: &Rc<State>, games: &[GameEntry]) {
     let identity = state.identity.clone();
     let pin = state.req.fp_hex.as_deref().and_then(trust::parse_hex32);
     let rx = library::spawn_art_fetch(base, identity, pin, jobs);
+    // A previous page's channel closes here too: one library page, one art run.
+    if let Some(old) = state.art_rx.replace(Some(rx.clone())) {
+        old.close();
+    }
     let weak = Rc::downgrade(state);
     glib::spawn_future_local(async move {
         while let Ok((id, bytes)) = rx.recv().await {
@@ -550,19 +634,6 @@ fn load_art(state: &Rc<State>, games: &[GameEntry]) {
 /// The store badge text — `store` comes from the entry (today `steam`/`custom`; future
 /// stores per the host's provider list), with the id prefix as a fallback spelling.
 /// Shared with the gamepad launcher's posters.
-pub fn store_label(store: &str) -> &'static str {
-    match store {
-        "steam" => "Steam",
-        "custom" => "Custom",
-        "heroic" => "Heroic",
-        "lutris" => "Lutris",
-        "epic" => "Epic",
-        "gog" => "GOG",
-        "xbox" => "Xbox",
-        _ => "Game",
-    }
-}
-
 /// Monogram for the placeholder tile: the first letters of the first two words.
 /// Shared with the gamepad launcher's posters.
 pub fn initials(title: &str) -> String {

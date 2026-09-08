@@ -101,7 +101,7 @@ class StartScreenVectorTest {
                 StartScreen.resolve(value.stored, null, hosts),
             )
         }
-        assertEquals(StartIn.LIBRARY, StartIn.parse("shelf"))
-        assertEquals(StartIn.LIBRARY, StartIn.parse(null))
+        assertEquals(StartIn.HOSTS, StartIn.parse("shelf"))
+        assertEquals(StartIn.HOSTS, StartIn.parse(null))
     }
 }

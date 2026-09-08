@@ -287,8 +287,8 @@ const RESOLUTIONS: [(u32, u32); 6] = [
 /// setting to Automatic. Keep in step with clients/linux/src/ui_settings.rs and
 /// clients/windows/src/app/settings.rs.
 const REFRESH: [u32; 8] = [0, 30, 60, 90, 120, 144, 165, 240];
-/// Must stay in sync with [`punktfunk_core::render_scale::PRESETS`].
-const RENDER_SCALES: [f64; 9] = [0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+/// Render-scale multipliers; `1.0` = Native.
+use punktfunk_core::render_scale::PRESETS as RENDER_SCALES;
 /// Left/right rungs in kbps. Denser below ~20 Mbps; ceiling 2 Gbps. Off-ladder
 /// values go through the Y field rather than a longer ladder.
 const BITRATES: [u32; 30] = [
@@ -965,6 +965,10 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         // DualSense capture — the pad reaches webOS over Bluetooth HID, not hidraw, so the
         // concept is real there too (punktfunk-webos docs/NOTES.md).
         RowId::DsCapture => &[Android, WebOS],
+        // Which pad is player 1 — a question only a client that forwards ONE pad has to answer.
+        // Android's router and the browser's Gamepad API both give every controller its own wire
+        // slot, so there is nothing to pick; webOS is still single-pad and keeps the row.
+        RowId::Pad => &[Desktop, WebOS],
         // That client's own audio plane and its remote's missing second button.
         RowId::AudioRoute | RowId::CursorGestures => &[WebOS],
         // Main10 at BT.709 asks nothing of the panel, and MediaCodec decodes it from the SPS, so
@@ -972,15 +976,17 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         // bit-depth ask.
         RowId::TenBitSdr => &[Desktop, Android],
         // Decoder choice, chroma and the window-manager knobs: the TV decodes through NDL and has
-        // no window manager, so none of these is a control it could obey. VRR is desktop-only for
-        // a different reason — Android pins a fixed mode on purpose (`trust::Settings::allow_vrr`).
+        // no window manager, so none of these is a control it could obey. The browser is out for
+        // the same shape of reason — WebCodecs picks the decoder, a page binds no system chord,
+        // and fullscreen needs a gesture. VRR is desktop-only because Android pins a fixed mode
+        // on purpose (`trust::Settings::allow_vrr`).
         RowId::Decoder
         | RowId::Chroma444
         | RowId::Vsync
         | RowId::AllowVrr
         | RowId::Fullscreen
         | RowId::Shortcuts => &[Desktop],
-        _ => &[Desktop, Android, WebOS],
+        _ => &Platform::ALL,
     };
     on.contains(&platform)
 }
@@ -2723,17 +2729,38 @@ pub(crate) mod tests {
                 RowId::Vsync,
                 RowId::AllowVrr,
                 RowId::AudioRoute,
+                // Every controller already gets its own wire slot, so player 1 is not a choice.
+                RowId::Pad,
                 RowId::CursorGestures,
                 RowId::Shortcuts,
                 RowId::Fullscreen,
             ]
         );
         // Every row reaches at least one platform: a row listed in a tab and offered nowhere
-        // is dead weight the tab still spends a line on. webOS is in the set because it now
-        // has rows of its own — its audio plane, and a remote with no second button.
-        assert!(all.iter().all(|id| row_on(*id, Platform::Desktop)
-            || row_on(*id, Platform::Android)
-            || row_on(*id, Platform::WebOS)));
+        // is dead weight the tab still spends a line on.
+        assert!(all
+            .iter()
+            .all(|id| Platform::ALL.iter().any(|p| row_on(*id, *p))));
+    }
+
+    /// The other direction, and the one that bites: a platform missing from every list
+    /// offers no row at all, so all six tabs draw empty instead of one control going
+    /// missing. `Web` shipped that way.
+    #[test]
+    fn every_platform_offers_rows() {
+        use crate::platform::Platform;
+        for p in Platform::ALL {
+            // Exhaustive on purpose: a new variant must be weighed here and added to `ALL`.
+            match p {
+                Platform::Desktop | Platform::Android | Platform::WebOS | Platform::Web => {}
+            }
+            let n = TABS
+                .iter()
+                .flat_map(|(_, rows)| rows.iter())
+                .filter(|id| row_on(**id, p))
+                .count();
+            assert!(n > 0, "{p:?} offers no settings rows at all");
+        }
     }
 
     #[test]
@@ -3145,6 +3172,10 @@ pub(crate) mod tests {
         };
         let value = |ctx: &Ctx| row_spec(RowId::StartIn, ctx, &[]).value.unwrap();
 
+        // The fresh default is the list by choice, so the row reads plainly, not as a fallback.
+        assert_eq!(value(&ctx), "Host list");
+        assert!(adjust(RowId::StartIn, 1, false, &mut ctx));
+        assert_eq!(ctx.settings.start_in, "library");
         assert_eq!(value(&ctx), "Host list (no default host)");
         store.set_known_hosts(KnownHosts {
             hosts: vec![KnownHost {
@@ -3173,7 +3204,7 @@ pub(crate) mod tests {
         assert_eq!(
             value(&ctx),
             "Host list",
-            "the list by choice reads differently from the list by default"
+            "a resolved default host does not dress up the list"
         );
     }
 }

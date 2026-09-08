@@ -653,6 +653,12 @@ impl Encoder for RemotePyroWave {
         self.poll_whole()
     }
 
+    /// Encode is synchronous on both rungs, so `poll` never blocks on hardware and there is
+    /// no handle to park on. Written out for the same reason as `ready_aus`.
+    fn ready_event(&self) -> Option<isize> {
+        None
+    }
+
     fn supports_chunked_poll(&self) -> bool {
         stream_chunk_step(self.wire_chunk).is_some()
     }
