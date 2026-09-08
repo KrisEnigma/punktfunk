@@ -1181,8 +1181,8 @@ pub struct Settings {
     /// Default off so an existing install's deep-link landing screen does not move.
     #[serde(default)]
     pub library_collections: bool,
-    /// Where a bare launch opens: `"hosts"`, `"library"` (default), or `"stream"`.
-    /// `""`/unknown = library, the `library_view` convention. Resolve through
+    /// Where a bare launch opens: `"hosts"` (default), `"library"`, or `"stream"`.
+    /// `""`/unknown = hosts, the `library_view` convention. Resolve through
     /// [`crate::start::start_screen`] — no default host degrades every value to the list.
     #[serde(default)]
     pub start_in: String,

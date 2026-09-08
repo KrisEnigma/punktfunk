@@ -3145,6 +3145,10 @@ pub(crate) mod tests {
         };
         let value = |ctx: &Ctx| row_spec(RowId::StartIn, ctx, &[]).value.unwrap();
 
+        // The fresh default is the list by choice, so the row reads plainly, not as a fallback.
+        assert_eq!(value(&ctx), "Host list");
+        assert!(adjust(RowId::StartIn, 1, false, &mut ctx));
+        assert_eq!(ctx.settings.start_in, "library");
         assert_eq!(value(&ctx), "Host list (no default host)");
         store.set_known_hosts(KnownHosts {
             hosts: vec![KnownHost {
@@ -3173,7 +3177,7 @@ pub(crate) mod tests {
         assert_eq!(
             value(&ctx),
             "Host list",
-            "the list by choice reads differently from the list by default"
+            "a resolved default host does not dress up the list"
         );
     }
 }
