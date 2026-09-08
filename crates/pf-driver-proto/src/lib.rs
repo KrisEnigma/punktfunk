@@ -1040,8 +1040,225 @@ pub mod encode {
         pub backends: [u32; 4],
         /// Reserved; send `0`.
         pub flags: u32,
-        /// Pads the struct to its 8-byte alignment (Pod forbids implicit tail padding).
+        /// Pads the prefix to its 8-byte alignment (Pod forbids implicit tail padding).
         pub _pad_tail: u32,
+        /// Encoder knobs from the host's `host.env`. Prefix-compatible after
+        /// [`SET_ENCODE_REQUEST_LEGACY_SIZE`]: an old host sends none and the driver zero-fills,
+        /// which is every backend's default; an old driver reads the prefix and ignores them.
+        pub knobs: EncodeKnobs,
+    }
+
+    /// Bytes of [`SetEncodeRequest`] before [`SetEncodeRequest::knobs`]: what a host older than
+    /// the knobs sends, and what a driver older than them reads.
+    pub const SET_ENCODE_REQUEST_LEGACY_SIZE: usize = 120;
+
+    /// Encoder tuning the host resolves once from `host.env` and hands to the driver in the
+    /// request, so a knob takes effect on the next session instead of after `setx /M` plus a
+    /// driver restart. Zero is every backend's own default. Each field names the environment
+    /// variable it replaces; [`EncodeKnobs::apply_env`] is the one parser for those, and the
+    /// encoder crate still reads the same variables inside WUDFHost as a dev override.
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq)]
+    pub struct EncodeKnobs {
+        /// `PUNKTFUNK_IR_PERIOD_FRAMES`: intra-refresh wave length in frames, `>= 2`; `0` = half
+        /// a second of frames.
+        pub ir_period_frames: u16,
+        /// `PUNKTFUNK_LTR_INTERVAL_FRAMES`: frames between LTR marks; `0` = the backend's tuning.
+        pub ltr_interval_frames: u16,
+        /// `PUNKTFUNK_LTR_FORCE_AT`: spike-only self-triggered RFI at this frame; `0` = off.
+        pub ltr_force_at: u16,
+        /// `PUNKTFUNK_SPLIT_ENCODE`: `0` = by pixel rate, `1` = disable, `2` = auto-forced,
+        /// `3` = two engines, `4` = three engines.
+        pub split_encode: u8,
+        /// `PUNKTFUNK_NVENC_ASYNC`: `1` = the two-thread retrieve.
+        pub nvenc_async: u8,
+        /// `PUNKTFUNK_NVENC_ASYNC_DEPTH`: in-flight encodes in async mode; `0` = 4.
+        pub nvenc_async_depth: u8,
+        /// `PUNKTFUNK_NVENC_SLICES`: H.264/HEVC slices, `1..=32`; `0` = the session's default.
+        pub nvenc_slices: u8,
+        /// `PUNKTFUNK_NVENC_SUBFRAME`: `0` = the GPU's cap decides, `1` = never, `2` = force.
+        pub nvenc_subframe: u8,
+        /// `PUNKTFUNK_NVENC_MAX_SESSIONS`: concurrent-session budget; `0` = 8.
+        pub nvenc_max_sessions: u8,
+        /// `PUNKTFUNK_NVENC_SPLIT_ARBITRATE`: `1` = arm the live split experiment.
+        pub nvenc_split_arbitrate: u8,
+        /// `PUNKTFUNK_INTRA_REFRESH`: `0` = the on-demand wave only, `1` = the periodic wave on
+        /// AMF/QSV too, `2` = no wave, IDR on every loss.
+        pub intra_refresh: u8,
+        /// `PUNKTFUNK_AMF_USAGE`: `0` = ultralowlatency, `1` = lowlatency,
+        /// `2` = lowlatency_high_quality, `3` = transcoding, `4` = highquality.
+        pub amf_usage: u8,
+        /// `PUNKTFUNK_NO_AMF_LTR`: `1` = IDR-only loss recovery on AMF.
+        pub no_amf_ltr: u8,
+        /// `PUNKTFUNK_NO_QSV_LTR`: `1` = IDR-only loss recovery on QSV.
+        pub no_qsv_ltr: u8,
+        /// `PUNKTFUNK_VBV_FRAMES` in tenths of a frame interval; `0` = 10 (one frame).
+        pub vbv_tenths: u8,
+        /// `PUNKTFUNK_PYROWAVE_STREAMED_AU`: `1` = arm streamed PyroWave AUs.
+        pub pyrowave_streamed_au: u8,
+        /// `PUNKTFUNK_PYROWAVE_CHUNK_KIB` / 64: streamed-AU chunk target; `0` = 256 KiB.
+        pub pyrowave_chunk_64kib: u8,
+        /// Reserved; send `0`.
+        pub _reserved: [u8; 4],
+    }
+
+    /// The trimmed, case-folded truthy set every `PUNKTFUNK_*` flag shares.
+    #[must_use]
+    pub fn truthy(v: &str) -> bool {
+        let v = v.trim();
+        v == "1"
+            || v.eq_ignore_ascii_case("true")
+            || v.eq_ignore_ascii_case("yes")
+            || v.eq_ignore_ascii_case("on")
+    }
+
+    impl EncodeKnobs {
+        /// Every variable [`Self::apply_env`] knows, for a caller that walks the environment.
+        pub const ENV_NAMES: [&'static str; 17] = [
+            "PUNKTFUNK_SPLIT_ENCODE",
+            "PUNKTFUNK_NVENC_ASYNC",
+            "PUNKTFUNK_NVENC_ASYNC_DEPTH",
+            "PUNKTFUNK_NVENC_SLICES",
+            "PUNKTFUNK_NVENC_SUBFRAME",
+            "PUNKTFUNK_NVENC_MAX_SESSIONS",
+            "PUNKTFUNK_NVENC_SPLIT_ARBITRATE",
+            "PUNKTFUNK_INTRA_REFRESH",
+            "PUNKTFUNK_IR_PERIOD_FRAMES",
+            "PUNKTFUNK_LTR_INTERVAL_FRAMES",
+            "PUNKTFUNK_LTR_FORCE_AT",
+            "PUNKTFUNK_AMF_USAGE",
+            "PUNKTFUNK_NO_AMF_LTR",
+            "PUNKTFUNK_NO_QSV_LTR",
+            "PUNKTFUNK_VBV_FRAMES",
+            "PUNKTFUNK_PYROWAVE_STREAMED_AU",
+            "PUNKTFUNK_PYROWAVE_CHUNK_KIB",
+        ];
+
+        /// Set the knob `name` names from its environment spelling. Unparseable values leave
+        /// the field alone, as the encoders always did. `false` = not a knob name.
+        pub fn apply_env(&mut self, name: &str, value: &str) -> bool {
+            let v = value.trim();
+            let num = |lo: u32, hi: u32| v.parse::<u32>().ok().filter(|n| (lo..=hi).contains(n));
+            match name {
+                "PUNKTFUNK_SPLIT_ENCODE" => {
+                    self.split_encode = match v {
+                        "0" | "disable" => 1,
+                        "1" | "auto" => 2,
+                        "2" => 3,
+                        "3" => 4,
+                        _ => self.split_encode,
+                    }
+                }
+                "PUNKTFUNK_NVENC_ASYNC" => self.nvenc_async = truthy(v) as u8,
+                "PUNKTFUNK_NVENC_ASYNC_DEPTH" => {
+                    if let Some(n) = num(1, 255) {
+                        self.nvenc_async_depth = n as u8;
+                    }
+                }
+                "PUNKTFUNK_NVENC_SLICES" => {
+                    if let Some(n) = num(1, 32) {
+                        self.nvenc_slices = n as u8;
+                    }
+                }
+                "PUNKTFUNK_NVENC_SUBFRAME" => {
+                    self.nvenc_subframe = match v {
+                        "0" => 1,
+                        "1" => 2,
+                        _ => self.nvenc_subframe,
+                    }
+                }
+                "PUNKTFUNK_NVENC_MAX_SESSIONS" => {
+                    if let Some(n) = num(1, 255) {
+                        self.nvenc_max_sessions = n as u8;
+                    }
+                }
+                "PUNKTFUNK_NVENC_SPLIT_ARBITRATE" => self.nvenc_split_arbitrate = (v == "1") as u8,
+                "PUNKTFUNK_INTRA_REFRESH" => {
+                    self.intra_refresh = if v == "0" {
+                        2
+                    } else if truthy(v) {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                "PUNKTFUNK_IR_PERIOD_FRAMES" => {
+                    if let Some(n) = num(2, u16::MAX as u32) {
+                        self.ir_period_frames = n as u16;
+                    }
+                }
+                "PUNKTFUNK_LTR_INTERVAL_FRAMES" => {
+                    if let Some(n) = num(1, u16::MAX as u32) {
+                        self.ltr_interval_frames = n as u16;
+                    }
+                }
+                "PUNKTFUNK_LTR_FORCE_AT" => {
+                    if let Some(n) = num(1, u16::MAX as u32) {
+                        self.ltr_force_at = n as u16;
+                    }
+                }
+                "PUNKTFUNK_AMF_USAGE" => {
+                    self.amf_usage = match v {
+                        "ultralowlatency" => 0,
+                        "lowlatency" => 1,
+                        "lowlatency_high_quality" => 2,
+                        "transcoding" => 3,
+                        "highquality" | "high_quality" => 4,
+                        _ => self.amf_usage,
+                    }
+                }
+                "PUNKTFUNK_NO_AMF_LTR" => self.no_amf_ltr = truthy(v) as u8,
+                "PUNKTFUNK_NO_QSV_LTR" => self.no_qsv_ltr = truthy(v) as u8,
+                "PUNKTFUNK_VBV_FRAMES" => {
+                    // Tenths, so `1.5` survives the byte; `0` and garbage keep the default.
+                    if let Some(t) = parse_tenths(v).filter(|t| (1..=255).contains(t)) {
+                        self.vbv_tenths = t as u8;
+                    }
+                }
+                "PUNKTFUNK_PYROWAVE_STREAMED_AU" => self.pyrowave_streamed_au = (v == "1") as u8,
+                "PUNKTFUNK_PYROWAVE_CHUNK_KIB" => {
+                    // 4..=8192 KiB in the encoder; the byte carries 64 KiB steps, so the floor
+                    // rounds up to one step.
+                    if let Some(k) = num(4, 8192) {
+                        self.pyrowave_chunk_64kib = k.div_ceil(64) as u8;
+                    }
+                }
+                _ => return false,
+            }
+            true
+        }
+
+        /// `PUNKTFUNK_VBV_FRAMES` as the encoders read it: frame intervals, default one.
+        #[must_use]
+        pub fn vbv_frames(&self) -> f64 {
+            if self.vbv_tenths == 0 {
+                1.0
+            } else {
+                f64::from(self.vbv_tenths) / 10.0
+            }
+        }
+    }
+
+    /// `"1.5"` → `15`; integers and one decimal only, no exponent. Negative or empty = `None`.
+    fn parse_tenths(v: &str) -> Option<u32> {
+        let (whole, frac) = match v.split_once('.') {
+            Some((w, f)) => (w, f),
+            None => (v, ""),
+        };
+        let whole: u32 = if whole.is_empty() {
+            0
+        } else {
+            whole.parse().ok()?
+        };
+        let tenth: u32 = match frac.as_bytes().first() {
+            None => 0,
+            Some(d) if d.is_ascii_digit() => u32::from(d - b'0'),
+            Some(_) => return None,
+        };
+        if !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(whole.checked_mul(10)? + tenth)
     }
 
     /// The encoder input one [`SetEncodeRequest`] resolves to, so the chroma the reply promises
@@ -1578,13 +1795,17 @@ pub mod encode {
     const _: () = {
         use core::mem::{offset_of, size_of};
 
-        assert!(size_of::<SetEncodeRequest>() == 120);
+        assert!(size_of::<SetEncodeRequest>() == 144);
         assert!(offset_of!(SetEncodeRequest, target_id) == 0);
         assert!(offset_of!(SetEncodeRequest, section) == 8);
         assert!(offset_of!(SetEncodeRequest, event) == 16);
         assert!(offset_of!(SetEncodeRequest, hdr_meta) == 60);
         assert!(offset_of!(SetEncodeRequest, backends) == 96);
         assert!(offset_of!(SetEncodeRequest, flags) == 112);
+        assert!(offset_of!(SetEncodeRequest, knobs) == SET_ENCODE_REQUEST_LEGACY_SIZE);
+        assert!(size_of::<EncodeKnobs>() == 24);
+        assert!(offset_of!(EncodeKnobs, split_encode) == 6);
+        assert!(offset_of!(EncodeKnobs, _reserved) == 20);
 
         assert!(size_of::<EncoderCapsWire>() == 24);
         assert!(size_of::<SetEncodeReply>() == 72);
@@ -3460,7 +3681,11 @@ mod tests {
             offset_of!(SetEncodeRequest, backends),
             offset_of!(SetEncodeRequest, flags),
         );
-        assert_eq!(size_of::<SetEncodeRequest>(), 120);
+        assert_eq!(size_of::<SetEncodeRequest>(), 144);
+        assert_eq!(
+            offset_of!(SetEncodeRequest, knobs),
+            encode::SET_ENCODE_REQUEST_LEGACY_SIZE
+        );
         assert_eq!(offset_of!(SetEncodeRequest, target_id), 0);
         assert_eq!(offset_of!(SetEncodeRequest, section), 8);
         assert_eq!(offset_of!(SetEncodeRequest, event), 16);
@@ -3850,11 +4075,21 @@ mod tests {
         req.wire_seq_base = 0x7FFF_FFFF;
         req.backends = [1, 2, 0, 0];
 
+        req.knobs.apply_env("PUNKTFUNK_NVENC_SLICES", "4");
+
         let bytes = bytemuck::bytes_of(&req);
         println!("SetEncodeRequest on the wire: {} bytes", bytes.len());
-        assert_eq!(bytes.len(), 120);
+        assert_eq!(bytes.len(), 144);
         let back: SetEncodeRequest = bytemuck::pod_read_unaligned(bytes);
         assert_eq!(back, req);
+        // A pre-knobs driver reads the first 120 bytes and sees the same request minus knobs;
+        // a pre-knobs host's 120 bytes zero-fill to every backend's default.
+        let mut prefix = [0u8; 144];
+        prefix[..encode::SET_ENCODE_REQUEST_LEGACY_SIZE]
+            .copy_from_slice(&bytes[..encode::SET_ENCODE_REQUEST_LEGACY_SIZE]);
+        let old: SetEncodeRequest = bytemuck::pod_read_unaligned(&prefix);
+        assert_eq!(old.backends, req.backends);
+        assert_eq!(old.knobs, encode::EncodeKnobs::default());
         // The two handle values sit where the driver reads them, byte for byte.
         assert_eq!(
             u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
@@ -3867,7 +4102,7 @@ mod tests {
         // A zeroed request is inert: no target, no handles, no backend.
         let zero = SetEncodeRequest::zeroed();
         assert_eq!(zero.backends, [0; 4]);
-        assert_eq!(bytemuck::bytes_of(&zero), [0u8; 120]);
+        assert_eq!(bytemuck::bytes_of(&zero), [0u8; 144]);
     }
 
     #[test]
@@ -3947,5 +4182,55 @@ mod tests {
             ring.take(heap, &states).is_some(),
             "a whole-heap AU fits an empty heap"
         );
+    }
+
+    #[test]
+    fn encode_knobs_parse_their_env_spellings() {
+        use encode::{truthy, EncodeKnobs};
+        let mut k = EncodeKnobs::default();
+        assert!(!k.apply_env("PUNKTFUNK_NOT_A_KNOB", "1"));
+        for name in EncodeKnobs::ENV_NAMES {
+            assert!(k.apply_env(name, ""), "{name} must be a knob name");
+        }
+        assert_eq!(
+            k,
+            EncodeKnobs::default(),
+            "empty values leave every default"
+        );
+
+        assert!(k.apply_env("PUNKTFUNK_SPLIT_ENCODE", "disable"));
+        assert_eq!(k.split_encode, 1);
+        k.apply_env("PUNKTFUNK_SPLIT_ENCODE", "3");
+        assert_eq!(k.split_encode, 4);
+        k.apply_env("PUNKTFUNK_SPLIT_ENCODE", "garbage");
+        assert_eq!(k.split_encode, 4, "garbage keeps the last value");
+        k.apply_env("PUNKTFUNK_NVENC_ASYNC", " yes ");
+        assert_eq!(k.nvenc_async, 1);
+        k.apply_env("PUNKTFUNK_NVENC_SUBFRAME", "0");
+        assert_eq!(k.nvenc_subframe, 1);
+        k.apply_env("PUNKTFUNK_NVENC_SLICES", "33");
+        assert_eq!(k.nvenc_slices, 0, "out of range is ignored");
+        k.apply_env("PUNKTFUNK_INTRA_REFRESH", "0");
+        assert_eq!(k.intra_refresh, 2);
+        k.apply_env("PUNKTFUNK_INTRA_REFRESH", "on");
+        assert_eq!(k.intra_refresh, 1);
+        k.apply_env("PUNKTFUNK_INTRA_REFRESH", "maybe");
+        assert_eq!(k.intra_refresh, 0);
+        k.apply_env("PUNKTFUNK_IR_PERIOD_FRAMES", "1");
+        assert_eq!(k.ir_period_frames, 0, "a one-frame wave is not a wave");
+        k.apply_env("PUNKTFUNK_IR_PERIOD_FRAMES", "60");
+        assert_eq!(k.ir_period_frames, 60);
+        k.apply_env("PUNKTFUNK_AMF_USAGE", "highquality");
+        assert_eq!(k.amf_usage, 4);
+        k.apply_env("PUNKTFUNK_VBV_FRAMES", "1.5");
+        assert_eq!(k.vbv_tenths, 15);
+        assert_eq!(k.vbv_frames(), 1.5);
+        k.apply_env("PUNKTFUNK_VBV_FRAMES", "-1");
+        assert_eq!(k.vbv_tenths, 15);
+        k.apply_env("PUNKTFUNK_PYROWAVE_CHUNK_KIB", "4");
+        assert_eq!(k.pyrowave_chunk_64kib, 1, "the floor rounds up to one step");
+        k.apply_env("PUNKTFUNK_PYROWAVE_CHUNK_KIB", "8192");
+        assert_eq!(k.pyrowave_chunk_64kib, 128);
+        assert!(truthy("TRUE") && truthy(" 1") && !truthy("2") && !truthy(""));
     }
 }

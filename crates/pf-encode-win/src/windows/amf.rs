@@ -426,31 +426,23 @@ fn codec_props(codec: Codec) -> CodecProps {
     }
 }
 
-/// `PUNKTFUNK_AMF_USAGE` → `*_USAGE_ENUM`. AVC/HEVC share numbering; **AV1 swaps
-/// ULTRA_LOW_LATENCY (2) and LOW_LATENCY (1)** (VideoEncoderAV1.h). Unknown → ultralowlatency.
-fn usage_from_env(codec: Codec) -> i64 {
+/// `PUNKTFUNK_AMF_USAGE` (the knob's numbering) → `*_USAGE_ENUM`. AVC/HEVC share numbering;
+/// **AV1 swaps ULTRA_LOW_LATENCY (2) and LOW_LATENCY (1)** (VideoEncoderAV1.h).
+fn usage_from_knobs(codec: Codec) -> i64 {
     let av1 = codec == Codec::Av1;
     let ull = if av1 { 2 } else { 1 };
-    let v = std::env::var("PUNKTFUNK_AMF_USAGE").unwrap_or_else(|_| "ultralowlatency".into());
-    match v.as_str() {
-        "ultralowlatency" => ull,
-        "lowlatency" => {
+    match crate::knobs::get().amf_usage {
+        1 => {
             if av1 {
                 1
             } else {
                 2
             }
         }
-        "lowlatency_high_quality" => 5,
-        "transcoding" => 0,
-        "highquality" | "high_quality" => 4,
-        other => {
-            tracing::warn!(
-                usage = other,
-                "unknown PUNKTFUNK_AMF_USAGE — using ultralowlatency"
-            );
-            ull
-        }
+        2 => 5,
+        3 => 0,
+        4 => 4,
+        _ => ull,
     }
 }
 
@@ -462,13 +454,13 @@ const NUM_LTR_SLOTS: usize = 2;
 /// for intra-refresh instead: AMF has no constrained-intra property, so the two exclude each
 /// other and the operator's pick wins, as on QSV.
 fn ltr_disabled() -> bool {
-    super::policy::env_flag("PUNKTFUNK_NO_AMF_LTR")
+    crate::knobs::get().no_amf_ltr != 0
 }
 
 /// Frames between LTR marks. Default `fps/2` (~0.5 s); [`NUM_LTR_SLOTS`] then covers ~1 s of
 /// recent references. `PUNKTFUNK_LTR_INTERVAL_FRAMES` overrides.
 fn ltr_mark_interval(fps: u32) -> i64 {
-    super::policy::ltr_interval_env().unwrap_or_else(|| (fps.max(2) / 2).max(1) as i64)
+    super::policy::ltr_interval().unwrap_or_else(|| (fps.max(2) / 2).max(1) as i64)
 }
 
 // Owned-pointer guards: Terminate before Release (amfenc.c teardown order).
@@ -953,7 +945,7 @@ impl AmfEncoder {
         set_prop(
             comp,
             p.usage,
-            AmfVariant::from_i64(usage_from_env(self.codec)),
+            AmfVariant::from_i64(usage_from_knobs(self.codec)),
             true,
         )?;
         set_prop(comp, p.rc_method, AmfVariant::from_i64(p.rc_cbr), true)?;
@@ -1421,7 +1413,7 @@ fn probe_open_on(device: &ID3D11Device, codec: Codec, ten_bit: bool) -> bool {
         if ((*(*comp.0).vtbl).set_property)(
             comp.0,
             props.usage.0,
-            AmfVariant::from_i64(usage_from_env(codec)),
+            AmfVariant::from_i64(usage_from_knobs(codec)),
         ) != sys::AMF_OK
         {
             return false;
@@ -2879,7 +2871,7 @@ mod tests {
                 let _ = set_prop(
                     comp.0,
                     props.usage,
-                    AmfVariant::from_i64(usage_from_env(codec)),
+                    AmfVariant::from_i64(usage_from_knobs(codec)),
                     true,
                 );
                 let (name, block) = props.intra_refresh.expect("AVC/HEVC define intra-refresh");

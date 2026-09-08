@@ -9,6 +9,8 @@
 //! Evidence: `design/windows-video-plane-overhaul.md` §2.6.
 
 mod codec;
+/// The encoder knobs (`host.env` via the driver request, or the environment).
+pub mod knobs;
 pub use codec::*;
 
 // D3D11 colour converters + cursor blend, run on the capture device before encode.
