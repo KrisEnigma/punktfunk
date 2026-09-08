@@ -425,7 +425,7 @@ impl EncoderProxy {
             pts_ns: pts_from_qpc(t.qpc_pts),
             keyframe: t.flags & au::AU_KEYFRAME != 0,
             recovery_anchor: t.flags & au::AU_RECOVERY_ANCHOR != 0,
-            recovery_point: false,
+            recovery_point: t.flags & au::AU_RECOVERY_POINT != 0,
             chunk_aligned: t.flags & au::AU_CHUNK_ALIGNED != 0,
             first: t.flags & au::AU_FIRST != 0,
             last: t.flags & au::AU_LAST != 0,

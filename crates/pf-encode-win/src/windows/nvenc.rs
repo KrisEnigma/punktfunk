@@ -25,8 +25,9 @@
 use super::nvenc_core::{
     apply_low_latency_config, build_init_params, cached_ceiling, codec_guid, plan_range_recovery,
     resolve_slices, resolve_split_subframe, resolve_subframe, store_ceiling, subframe_env_forced,
-    CeilingKey, LowLatencyConfig, NvStatusExt, RangePlan,
+    wave_rows, CeilingKey, LowLatencyConfig, NvStatusExt, RangePlan,
 };
+use crate::rfi::Wave;
 // Shared with Linux's direct session. Do not fork this copy.
 use super::nvenc_core::{
     cached_split_verdict, store_split_verdict, ArbAction, SplitArbiter, SplitKey,
@@ -494,7 +495,14 @@ pub struct NvencD3d11Encoder {
     arbiter: Option<SplitArbiter>,
     /// In-flight encodes: (bitstream, mapped input, pts_ns, recovery-anchor, idr-hint). The
     /// fourth field is the first frame after a successful [`invalidate_ref_frames`].
-    pending: VecDeque<(nv::NV_ENC_OUTPUT_PTR, nv::NV_ENC_INPUT_PTR, u64, bool, bool)>,
+    pending: VecDeque<(
+        nv::NV_ENC_OUTPUT_PTR,
+        nv::NV_ENC_INPUT_PTR,
+        u64,
+        bool,
+        bool,
+        bool,
+    )>,
     /// Next submission's `inputTimeStamp`. [`Encoder::submit_indexed`] pins it to the
     /// wire index so RFI timestamps stay 1:1 across rebuilds.
     frame_idx: i64,
@@ -503,6 +511,12 @@ pub struct NvencD3d11Encoder {
     /// is the recovery anchor. NVENC applies invalidation at the next `encode_picture`. Without
     /// the tag the client can only lift on an IDR, which session glue suppresses after RFI.
     pending_anchor: bool,
+    /// Intra refresh wave in flight: a declined RFI's answer instead of the IDR. The start
+    /// frame carries `forceIntraRefreshWithFrameCnt`; the driver sweeps from there.
+    wave: Option<Wave>,
+    /// Timestamps `[start, close)` of the latest wave: part-dirty pictures the driver would
+    /// otherwise serve as an RFI anchor. The close and everything after are clean.
+    wave_span: Option<(i64, i64)>,
     inited: bool,
     /// From `query_caps`. Gates RFI instead of failing later as opaque `InvalidParam`.
     rfi_supported: bool,
@@ -660,6 +674,8 @@ impl NvencD3d11Encoder {
             frame_idx: 0,
             force_kf: false,
             pending_anchor: false,
+            wave: None,
+            wave_span: None,
             inited: false,
             rfi_supported: false,
             custom_vbv: false,
@@ -694,7 +710,7 @@ impl NvencD3d11Encoder {
             // Completions poll never absorbed. AUs drop with the session; pending unmap below covers maps.
             while rt.done_rx.try_recv().is_ok() {}
         }
-        for (_, map, _, _, _) in &self.pending {
+        for (_, map, _, _, _, _) in &self.pending {
             if !map.is_null() {
                 let _ = (api().unmap_input_resource)(self.encoder, *map);
             }
@@ -759,6 +775,45 @@ impl NvencD3d11Encoder {
         self.last_rfi_range = None;
         self.pending_anchor = false;
         self.distrusted = false;
+        self.wave = None;
+        self.wave_span = None;
+    }
+
+    /// A real loss with no clean frame old enough left: a wave heals without an anchor.
+    /// The client re-armed at this loss, so a wave under way restarts to give it a fresh
+    /// start and close. Nonsense and a range past the head stay the caller's keyframe.
+    fn start_wave(&mut self, first: i64, last: i64) -> bool {
+        let cycle = self.wave_cycle();
+        if cycle == 0 || first < 0 || first > last || first >= self.frame_idx {
+            return false;
+        }
+        self.wave = Some(Wave::start(cycle));
+        tracing::debug!(
+            first,
+            last,
+            cycle,
+            "nvenc RFI: no clean anchor — intra refresh wave"
+        );
+        true
+    }
+
+    /// Whether the picture at `ts` is a part-dirty wave frame the driver must not anchor on.
+    fn wave_dirty(&self, ts: i64) -> bool {
+        self.wave_span
+            .is_some_and(|(start, close)| ts >= start && ts < close)
+    }
+
+    /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.
+    fn wave_cycle(&self) -> u32 {
+        if !crate::rfi::wave_enabled() {
+            return 0;
+        }
+        crate::rfi::wave_cycle(
+            wave_rows(self.height),
+            self.fps,
+            256,
+            crate::rfi::pinned_cycle(),
+        )
     }
 
     /// One `NV_ENC_CAPS` value; 0 on error (unqueryable = unsupported).
@@ -908,6 +963,7 @@ impl NvencD3d11Encoder {
                 av1_input_depth_minus8: if ten_bit_in { 2 } else { 0 },
                 hdr: self.hdr,
                 rfi_supported: self.rfi_supported,
+                intra_refresh_cnt: self.wave_cycle(),
                 // Latched at open so a later reconfigure re-presents the same slicing.
                 slices: self.slices,
             },
@@ -1384,7 +1440,7 @@ impl NvencD3d11Encoder {
     /// oldest `pending` (FIFO), verify bitstream pairing, unmap, queue the AU. A retrieve error
     /// surfaces after the unmap so the rebuild path starts from clean state.
     fn absorb_done(&mut self, done: RetrieveDone) -> Result<()> {
-        let Some((bs, map, pts_ns, anchor, _idr_hint)) = self.pending.pop_front() else {
+        let Some((bs, map, pts_ns, anchor, _idr_hint, mark)) = self.pending.pop_front() else {
             bail!("NVENC async: completion with no in-flight frame (pairing bug)");
         };
         if bs as usize != done.bs {
@@ -1408,7 +1464,7 @@ impl NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: false,
+                recovery_point: mark,
                 chunk_aligned: false,
             });
         Ok(())
@@ -1599,6 +1655,18 @@ impl Encoder for NvencD3d11Encoder {
             // Recovery anchor (armed by a successful invalidate_ref_frames): this frame is the
             // first encoded after invalidation. A simultaneous forced IDR is itself the re-anchor.
             let anchor = std::mem::take(&mut self.pending_anchor) && flags == 0;
+            // The wave: an IDR flushes it; its start frame asks the driver for the sweep.
+            if flags != 0 {
+                self.wave = None;
+            }
+            let wave = self.wave;
+            let mark = wave.is_some_and(Wave::marks);
+            if let Some(w) = wave {
+                if w.index == 0 {
+                    self.wave_span = Some((pts as i64, pts as i64 + i64::from(w.cycle) - 1));
+                }
+                self.wave = w.next();
+            }
             // Chunked poll must flag early chunks before the driver reports `pictureType`.
             // Under P-only + infinite GOP, IDRs happen only when forced, or on the opening
             // frame (NVENC emits IDR regardless). Without `opening`, frame 1's early chunks go unflagged.
@@ -1649,6 +1717,28 @@ impl Encoder for NvencD3d11Encoder {
                     });
                 }
             }
+
+            // The wave's start frame: the driver sweeps the picture over `cycle` frames from
+            // here, one union arm per codec. Zero on every other frame.
+            let force_cnt = wave.filter(|w| w.index == 0).map_or(0, |w| w.cycle);
+            match self.codec {
+                Codec::H265 => {
+                    pic.codecPicParams
+                        .hevcPicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::H264 => {
+                    pic.codecPicParams
+                        .h264PicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::Av1 => {
+                    pic.codecPicParams
+                        .av1PicParams
+                        .forceIntraRefreshWithFrameCnt = force_cnt;
+                }
+                Codec::PyroWave => unreachable!("PyroWave never opens the direct-NVENC backend"),
+            }
             if !sei.is_empty() {
                 // Union write: pointers/len are read during encode_picture (scratch outlives it).
                 match self.codec {
@@ -1678,6 +1768,7 @@ impl Encoder for NvencD3d11Encoder {
                 captured.pts_ns,
                 anchor,
                 idr_hint,
+                mark,
             ));
             // Split-arbiter cost; only meaningful on the sync depth-1 path `arm_split_arbiter` allows.
             self.last_submit_at = Some(std::time::Instant::now());
@@ -1754,8 +1845,13 @@ impl Encoder for NvencD3d11Encoder {
                 self.pending_anchor = true;
                 true
             }
-            RangePlan::Decline => false,
+            RangePlan::Decline => self.start_wave(first, last),
             RangePlan::Invalidate { first, last } => {
+                // The driver would anchor on `first - 1`; a part-dirty wave picture there
+                // would lift the client onto damage, so wave again instead.
+                if self.wave_dirty(first - 1) {
+                    return self.start_wave(first, last);
+                }
                 // `inputTimeStamp` is the wire index, so the client's lost-frame range maps 1:1
                 // onto NVENC timestamps across rebuilds.
                 // SAFETY: `invalidate_ref_frames` is a loaded `EncodeApi` pointer. `self.encoder`
@@ -1804,7 +1900,7 @@ impl Encoder for NvencD3d11Encoder {
                 .ready
                 .pop_front());
         }
-        let Some((bs, map, pts_ns, anchor, _idr_hint)) = self.pending.pop_front() else {
+        let Some((bs, map, pts_ns, anchor, _idr_hint, mark)) = self.pending.pop_front() else {
             return Ok(None);
         };
         // SAFETY: non-empty `pending` implies `submit` ran, so `self.encoder` is live
@@ -1847,7 +1943,7 @@ impl Encoder for NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: false,
+                recovery_point: mark,
                 chunk_aligned: false,
             }))
         }
@@ -1875,7 +1971,7 @@ impl Encoder for NvencD3d11Encoder {
         if !self.supports_chunked_poll() && self.chunk.is_none() {
             return Ok(self.poll()?.map(AuChunk::whole));
         }
-        let Some(&(bs, _, pts_ns, anchor, idr_hint)) = self.pending.front() else {
+        let Some(&(bs, _, pts_ns, anchor, idr_hint, mark)) = self.pending.front() else {
             return Ok(None);
         };
         // If this driver never publishes intermediate slices, stop after ~2 frame intervals and
@@ -1932,7 +2028,7 @@ impl Encoder for NvencD3d11Encoder {
                             pts_ns,
                             keyframe: idr_hint,
                             recovery_anchor: anchor,
-                            recovery_point: false,
+                            recovery_point: mark,
                             chunk_aligned: false,
                             first,
                             last: false,
@@ -1950,7 +2046,7 @@ impl Encoder for NvencD3d11Encoder {
 
         // One blocking lock — the completion authority. The AU tail must not ride a +1 tick
         // (depth-1 pump contract).
-        let (bs, map, pts_ns, anchor, idr_hint) =
+        let (bs, map, pts_ns, anchor, idr_hint, mark) =
             self.pending.pop_front().expect("front() checked above");
         // SAFETY: same contract as `poll`'s blocking lock: `bs` is the popped in-flight pool
         // bitstream on the live session (encode thread); blocking `lock_bitstream` (version set)
@@ -2026,7 +2122,7 @@ impl Encoder for NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: false,
+                recovery_point: mark,
                 chunk_aligned: false,
                 first: !cs.opened,
                 last: true,
@@ -2506,6 +2602,182 @@ mod tests {
             }
         }
         px
+    }
+
+    /// BGRA rows scrolled down by `shift`, with a diagonal so no two rows match: the encoder
+    /// must reach for rows above, which is what a stripe's clean region has to refuse.
+    fn scroll_pattern(w: usize, h: usize, shift: usize) -> Vec<u8> {
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let band = ((y + h - shift % h) % h) as u8;
+            for x in 0..w {
+                let o = (y * w + x) * 4;
+                px[o] = band.wrapping_mul(3);
+                px[o + 1] = band ^ (x as u8);
+                px[o + 2] = 255 - band;
+                px[o + 3] = 255;
+            }
+        }
+        px
+    }
+
+    /// The wave on NVENC, one HEVC stream: a loss with no anchor starts wave A (marks on
+    /// its start and close, no IDR); a loss of the plain P after it anchors on the close; a
+    /// loss whose anchor would be a dirty picture of A waves again (B); a loss mid-B
+    /// restarts (C). Dumps the stream and two client views for the decode check:
+    /// `-dropA` loses frames 1–2 ahead of A, `-dropC` loses 14–15 ahead of the restart.
+    ///
+    /// `cargo test -p pf-encode-win --features nvenc nvenc_wave_smoke -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires an NVIDIA GPU + driver — run manually on the RTX box (.173)"]
+    fn nvenc_wave_smoke() {
+        const W: u32 = 256;
+        const H: u32 = 256;
+        // SAFETY: test-only D3D11/DXGI COM calls on one thread; every out-pointer is checked
+        // before use; every texture outlives the encoder call that reads it.
+        unsafe {
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().expect("DXGI factory");
+            let adapter = (0..)
+                .map_while(|i| factory.EnumAdapters1(i).ok())
+                .find(|a| a.GetDesc1().is_ok_and(|d| d.VendorId == 0x10de))
+                .expect("NVIDIA adapter");
+            let (device, _ctx) = pf_frame::dxgi::make_device(&adapter).expect("make_device");
+            let texture = |i: usize| {
+                let bytes = scroll_pattern(W as usize, H as usize, i * 6);
+                let init = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: bytes.as_ptr() as *const _,
+                    SysMemPitch: W * 4,
+                    SysMemSlicePitch: 0,
+                };
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: W,
+                    Height: H,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let mut tex = None;
+                device
+                    .CreateTexture2D(&desc, Some(&init), Some(&mut tex))
+                    .expect("frame texture");
+                tex.expect("null frame texture")
+            };
+            let mut enc = NvencD3d11Encoder::open(
+                Codec::H265,
+                PixelFormat::Bgra,
+                W,
+                H,
+                60,
+                10_000_000,
+                8,
+                ChromaFormat::Yuv420,
+                1,
+                None,
+            )
+            .expect("NVENC open");
+            assert!(
+                enc.caps().supports_rfi,
+                "the RTX box invalidates references"
+            );
+            let cycle = enc.wave_cycle() as usize;
+            assert!(cycle >= 2, "the wave is on");
+            println!("nvenc_wave_smoke: cycle {cycle} frames");
+            // Wave A at 3 (loss with no anchor), anchor P after it, wave B off a dirty
+            // anchor, wave C restarting B three frames in, then a plain P after C.
+            let a_start = 3;
+            let a_close = a_start + cycle - 1;
+            let anchor_p = a_close + 2;
+            let b_start = anchor_p + 1;
+            let c_start = b_start + 3;
+            let c_close = c_start + cycle - 1;
+            let last = c_close + 1;
+            let mut aus = Vec::new();
+            for i in 0..=last {
+                if i == a_start {
+                    assert!(
+                        enc.invalidate_ref_frames(0, 2),
+                        "no anchor: the wave answers"
+                    );
+                    assert_eq!(enc.wave.map(|w| w.index), Some(0));
+                }
+                if i == anchor_p {
+                    let lost = (anchor_p - 1) as i64;
+                    assert!(enc.invalidate_ref_frames(lost, lost), "the close anchors");
+                    assert!(enc.wave.is_none(), "a clean anchor, no wave");
+                }
+                if i == b_start {
+                    // The anchor for this loss would be a picture of A before its close.
+                    let lost = (a_close - 1) as i64;
+                    assert!(enc.invalidate_ref_frames(lost, lost));
+                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "dirty anchor: wave B");
+                }
+                if i == c_start {
+                    let lost = (c_start - 1) as i64;
+                    assert!(enc.invalidate_ref_frames(lost, lost));
+                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "mid-wave loss: restart");
+                }
+                let tex = texture(i);
+                let frame = CapturedFrame {
+                    provenance: Default::default(),
+                    width: W,
+                    height: H,
+                    pts_ns: i as u64 * 16_666_667,
+                    format: PixelFormat::Bgra,
+                    payload: FramePayload::D3d11(D3d11Frame {
+                        texture: tex,
+                        device: device.clone(),
+                        pyro: None,
+                    }),
+                    cursor: None,
+                };
+                enc.submit_indexed(&frame, i as u32).expect("submit");
+                let au = enc.poll().expect("poll").expect("an AU per submit (sync)");
+                aus.push(au);
+            }
+            enc.flush().ok();
+            assert_eq!(aus.len(), last + 1);
+            assert!(enc.wave.is_none(), "wave C closed");
+            for (i, au) in aus.iter().enumerate() {
+                assert_eq!(au.keyframe, i == 0, "AU {i}: the only IDR is frame 0");
+                let marks = [a_start, a_close, b_start, c_start, c_close];
+                assert_eq!(
+                    au.recovery_point,
+                    marks.contains(&i),
+                    "AU {i}: marks on every wave's start and close"
+                );
+                assert_eq!(au.recovery_anchor, i == anchor_p, "AU {i}: one anchor P");
+            }
+            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
+            let view = |lost: std::ops::Range<usize>| -> Vec<u8> {
+                aus.iter()
+                    .enumerate()
+                    .filter(|(i, _)| !lost.contains(i))
+                    .flat_map(|(_, a)| a.data.iter().copied())
+                    .collect()
+            };
+            let dir = std::env::var("PUNKTFUNK_SMOKE_DIR").unwrap_or_else(|_| ".".into());
+            std::fs::write(format!("{dir}/nvenc-wave.h265"), &full).expect("write");
+            std::fs::write(format!("{dir}/nvenc-wave-dropA.h265"), view(1..3)).expect("write");
+            std::fs::write(
+                format!("{dir}/nvenc-wave-dropC.h265"),
+                view(c_start - 2..c_start),
+            )
+            .expect("write");
+            println!(
+                "nvenc_wave_smoke: {} AUs, {} bytes; A {a_start}..={a_close}, anchor {anchor_p}, \
+                 B {b_start}, C {c_start}..={c_close}; wrote {dir}/nvenc-wave{{,-dropA,-dropC}}.h265",
+                aus.len(),
+                full.len()
+            );
+        }
     }
 
     /// Encode 30 static pattern frames through a real NVENC session (ARGB, production config).
