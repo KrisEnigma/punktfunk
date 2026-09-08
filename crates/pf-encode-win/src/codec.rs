@@ -435,11 +435,11 @@ pub const SPLIT_DISABLE: u32 = 15;
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
 pub fn resolve_split_mode(codec: Codec, bit_depth: u8, pixel_rate: u64, engines: u32) -> u32 {
     let hw_max = max_forced_split_mode(engines);
-    let mode = match std::env::var("PUNKTFUNK_SPLIT_ENCODE").ok().as_deref() {
-        Some("0") | Some("disable") => SPLIT_DISABLE,
-        Some("1") | Some("auto") => SPLIT_AUTO_FORCED,
-        Some("3") => clamp_to_engines(SPLIT_THREE_FORCED, hw_max, engines),
-        Some("2") => clamp_to_engines(SPLIT_TWO_FORCED, hw_max, engines),
+    let mode = match crate::knobs::get().split_encode {
+        1 => SPLIT_DISABLE,
+        2 => SPLIT_AUTO_FORCED,
+        4 => clamp_to_engines(SPLIT_THREE_FORCED, hw_max, engines),
+        3 => clamp_to_engines(SPLIT_TWO_FORCED, hw_max, engines),
         // Widest split the card can deliver, not a hard-coded two. Ahead of
         // the 10-bit rule so 10-bit 4K120 (~995 Mpix/s) is not vetoed.
         _ if pixel_rate >= SPLIT_FORCE_PIXEL_RATE => hw_max,
@@ -517,14 +517,10 @@ pub fn clamp_to_engines(requested: u32, hw_max: u32, engines: u32) -> u32 {
 
 /// `PUNKTFUNK_VBV_FRAMES` — HRD/VBV size in frame intervals (default 1.0:
 /// each frame must fit its rate share, keeping sizes uniform for the pacer).
-/// Direct-NVENC, AMF, VAAPI, and QSV parse the same variable. Larger
+/// Direct-NVENC, AMF, VAAPI, and QSV read the same knob. Larger
 /// values let complex frames borrow bits at the cost of size variance.
 pub fn vbv_frames_env() -> f64 {
-    std::env::var("PUNKTFUNK_VBV_FRAMES")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(1.0)
+    crate::knobs::get().vbv_frames()
 }
 
 /// Same HRD/VBV window as [`vbv_frames_env`], as Vulkan Video wants it:

@@ -13,7 +13,7 @@
 //! Every verb is scoped to the calling process (v8): a monitor answers only to the owner whose
 //! ADD created it, and CLEAR_ALL departs the caller's own. Two hosts on one box never meet.
 
-use bytemuck::Pod;
+use bytemuck::{Pod, Zeroable};
 use pf_driver_proto::control;
 use pf_driver_proto::vdisplay::valid_mode;
 use pf_umdf_util::wdf::Request;
@@ -149,8 +149,9 @@ fn rdpidd_transport(request: Request) {
 /// the driver owns the two handles from there — and only a malformed or unmatched one fails
 /// the IOCTL with nothing adopted (`SetEncodeReply` docs).
 fn set_encode(owner: u32, request: Request) {
-    use pf_driver_proto::encode::{SetEncodeReply, SetEncodeRequest};
-    let Some(req) = read_input::<SetEncodeRequest>(&request) else {
+    use pf_driver_proto::encode::{SetEncodeReply, SetEncodeRequest, SET_ENCODE_REQUEST_LEGACY_SIZE};
+    let Some(req) = read_input_prefix::<SetEncodeRequest>(&request, SET_ENCODE_REQUEST_LEGACY_SIZE)
+    else {
         request.complete(STATUS_INVALID_PARAMETER);
         return;
     };
@@ -312,15 +313,20 @@ fn remove(owner: u32, request: Request) {
 /// luminance tail), whose missing tail zero-fills to "unknown" — so a new driver keeps serving an
 /// old host (see the `AddRequest` size-compatibility docs).
 fn read_add_request(request: &Request) -> Option<control::AddRequest> {
-    const FULL: usize = size_of::<control::AddRequest>();
-    let (bytes, _) = request.input_bytes(FULL).ok()?;
-    if bytes.len() < control::ADD_REQUEST_LEGACY_SIZE {
+    read_input_prefix(request, control::ADD_REQUEST_LEGACY_SIZE)
+}
+
+/// Read a Pod input struct that grew prefix-compatibly: the full struct, or at least
+/// `legacy_size` bytes of it from an older host, whose missing tail zero-fills to the
+/// Zeroable contract's "unknown"/default for every field past what the host sent.
+fn read_input_prefix<T: Pod>(request: &Request, legacy_size: usize) -> Option<T> {
+    let (bytes, _) = request.input_bytes(size_of::<T>()).ok()?;
+    if bytes.len() < legacy_size {
         return None;
     }
-    // Zero fill = the Zeroable contract's "unknown" for every field past what the host sent.
-    let mut buf = [0u8; FULL];
-    buf[..bytes.len()].copy_from_slice(&bytes);
-    Some(bytemuck::pod_read_unaligned(&buf))
+    let mut out = T::zeroed();
+    bytemuck::bytes_of_mut(&mut out)[..bytes.len()].copy_from_slice(&bytes);
+    Some(out)
 }
 
 /// Read a Pod input struct from the request's input buffer. `None` if the host sent fewer bytes

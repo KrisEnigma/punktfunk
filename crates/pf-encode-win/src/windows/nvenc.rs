@@ -211,10 +211,10 @@ static LIVE_SESSION_UNITS: std::sync::atomic::AtomicU32 = std::sync::atomic::Ato
 /// Concurrent-session budget (GeForce 8; pro cards unlimited).
 /// `PUNKTFUNK_NVENC_MAX_SESSIONS` overrides.
 fn session_cap() -> u32 {
-    std::env::var("PUNKTFUNK_NVENC_MAX_SESSIONS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8)
+    match crate::knobs::get().nvenc_max_sessions {
+        0 => 8,
+        n => u32::from(n),
+    }
 }
 
 /// Whether one more plain (non-split) session fits. AMD/Intel never open NVENC so this passes.
@@ -329,9 +329,7 @@ unsafe fn reap_parked_sessions() {
 /// Operator asked for two-thread retrieve (`PUNKTFUNK_NVENC_ASYNC` truthy). Combined with
 /// `NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT` in `init_session`. An async-rejecting config fails the open.
 fn async_retrieve_requested() -> bool {
-    std::env::var("PUNKTFUNK_NVENC_ASYNC")
-        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+    crate::knobs::get().nvenc_async != 0
 }
 
 /// Max in-flight encodes in async mode (`PUNKTFUNK_NVENC_ASYNC_DEPTH`, default 4,
@@ -341,11 +339,11 @@ fn async_retrieve_requested() -> bool {
 fn async_inflight_cap() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
-        std::env::var("PUNKTFUNK_NVENC_ASYNC_DEPTH")
-            .ok()
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .unwrap_or(4)
-            .clamp(2, POOL - 1)
+        match crate::knobs::get().nvenc_async_depth {
+            0 => 4,
+            n => usize::from(n),
+        }
+        .clamp(2, POOL - 1)
     })
 }
 
@@ -1062,13 +1060,11 @@ impl NvencD3d11Encoder {
     /// keep frames in flight, so `last_submit_at` names a newer submit than the AU it is
     /// measured against and the span undercounts.
     fn arm_split_arbiter(&mut self) {
-        if !matches!(
-            std::env::var("PUNKTFUNK_NVENC_SPLIT_ARBITRATE").as_deref(),
-            Ok("1")
-        ) {
+        let knobs = crate::knobs::get();
+        if knobs.nvenc_split_arbitrate != 1 {
             return;
         }
-        if std::env::var_os("PUNKTFUNK_SPLIT_ENCODE").is_some()
+        if knobs.split_encode != 0
             || cached_split_verdict(&self.split_key()).is_some()
             || self.session_async
             || self.encoder_engines < 2

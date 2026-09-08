@@ -109,12 +109,12 @@ const NUM_LTR_SLOTS: usize = 2;
 
 /// Defeat LTR-RFI (`PUNKTFUNK_NO_QSV_LTR`); loss recovery then always IDRs.
 fn ltr_disabled() -> bool {
-    super::policy::env_flag("PUNKTFUNK_NO_QSV_LTR")
+    crate::knobs::get().no_qsv_ltr != 0
 }
 
 /// Frames between LTR marks. Default ~1/4 s so a loss usually finds a recent slot.
 fn ltr_mark_interval(fps: u32) -> i64 {
-    super::policy::ltr_interval_env().unwrap_or_else(|| (fps as i64 / 4).max(1))
+    super::policy::ltr_interval().unwrap_or_else(|| (fps as i64 / 4).max(1))
 }
 
 /// Intra-refresh wave period, clamped to the `mfxU16` field's useful 8..=240.

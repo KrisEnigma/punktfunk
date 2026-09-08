@@ -123,16 +123,16 @@ pub fn wave_cycle(rows: u32, fps: u32, max_cycle: u32, pinned: Option<u32>) -> u
 /// `PUNKTFUNK_INTRA_REFRESH=0` keeps the IDR on every backend. The same knob at `1` opts the
 /// Windows periodic wave in (`policy::intra_refresh_requested`); unset is this wave alone.
 pub fn wave_enabled() -> bool {
-    std::env::var("PUNKTFUNK_INTRA_REFRESH").as_deref() != Ok("0")
+    crate::knobs::get().intra_refresh != 2
 }
 
 /// `PUNKTFUNK_IR_PERIOD_FRAMES=<frames>` pins the cycle for a measurement: the one wave-length
 /// knob, shared with the periodic wave's length (`policy::intra_refresh_period`).
 pub fn pinned_cycle() -> Option<u32> {
-    std::env::var("PUNKTFUNK_IR_PERIOD_FRAMES")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|v| *v >= 2)
+    match crate::knobs::get().ir_period_frames {
+        n if n >= 2 => Some(u32::from(n)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
