@@ -1,6 +1,7 @@
 package io.unom.punktfunk
 
 import io.unom.punktfunk.kit.security.ClientIdentity
+import android.util.Log
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -23,6 +24,7 @@ import org.json.JSONObject
  * Blocking — call it off the main thread.
  */
 object HostActions {
+    private const val TAG = "HostActions"
 
     /** One action as the host reports it to THIS device. */
     data class Action(
@@ -115,7 +117,11 @@ object HostActions {
                     }.getOrNull()?.takeIf { it.isNotEmpty() } ?: "the host refused (${resp.code})"
                 }
             }
-        }.getOrElse { it.message ?: "the request didn't go through" }
+        }.getOrElse {
+            // The exception text is OkHttp/TLS internals — for the log, not the toast.
+            Log.w(TAG, "action $actionId on $addr", it)
+            "the request didn't reach the host"
+        }
         return if (err.isEmpty()) "$hostName: $label — on its way" else "$label failed — $err"
     }
 }

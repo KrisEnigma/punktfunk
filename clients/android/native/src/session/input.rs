@@ -16,7 +16,7 @@ use punktfunk_core::quic::{
     HOST_CAP_TEXT_INPUT, PEN_ANGLE_UNKNOWN, PEN_BATCH_MAX, PEN_DISTANCE_UNKNOWN, PEN_TILT_UNKNOWN,
 };
 
-use super::get_session;
+use super::{get_session, jni_guard};
 
 /// Retain the keyed session for one non-blocking [`InputEvent`] send.
 fn send_event(handle: jlong, kind: InputKind, code: u32, x: i32, y: i32, flags: u32) {
@@ -42,7 +42,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendPointer
     dx: jint,
     dy: jint,
 ) {
-    send_event(handle, InputKind::MouseMove, 0, dx, dy, 0);
+    jni_guard((), || {
+        send_event(handle, InputKind::MouseMove, 0, dx, dy, 0);
+    })
 }
 
 /// `NativeBridge.nativeSendPointerAbs(handle, x, y, surfaceWidth, surfaceHeight)` — absolute cursor
@@ -60,9 +62,11 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendPointer
     surface_width: jint,
     surface_height: jint,
 ) {
-    let w = (surface_width.max(0) as u32) & 0xffff;
-    let ht = (surface_height.max(0) as u32) & 0xffff;
-    send_event(handle, InputKind::MouseMoveAbs, 0, x, y, (w << 16) | ht);
+    jni_guard((), || {
+        let w = (surface_width.max(0) as u32) & 0xffff;
+        let ht = (surface_height.max(0) as u32) & 0xffff;
+        send_event(handle, InputKind::MouseMoveAbs, 0, x, y, (w << 16) | ht);
+    })
 }
 
 /// `NativeBridge.nativeSendPointerButton(handle, button, down)` — one button transition.
@@ -75,12 +79,14 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendPointer
     button: jint,
     down: jboolean,
 ) {
-    let kind = if down {
-        InputKind::MouseButtonDown
-    } else {
-        InputKind::MouseButtonUp
-    };
-    send_event(handle, kind, button as u32, 0, 0, 0);
+    jni_guard((), || {
+        let kind = if down {
+            InputKind::MouseButtonDown
+        } else {
+            InputKind::MouseButtonUp
+        };
+        send_event(handle, kind, button as u32, 0, 0, 0);
+    })
 }
 
 /// `NativeBridge.nativeSendScroll(handle, axis, delta, precise)` — one scroll step. `axis`:
@@ -96,8 +102,10 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendScroll(
     delta: jint,
     precise: jboolean,
 ) {
-    let flags = if precise { SCROLL_FLAG_PRECISE } else { 0 };
-    send_event(handle, InputKind::MouseScroll, axis as u32, delta, 0, flags);
+    jni_guard((), || {
+        let flags = if precise { SCROLL_FLAG_PRECISE } else { 0 };
+        send_event(handle, InputKind::MouseScroll, axis as u32, delta, 0, flags);
+    })
 }
 
 /// `NativeBridge.nativeSendTouch(handle, id, kind, x, y, surfaceWidth, surfaceHeight)` — one REAL
@@ -118,14 +126,16 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendTouch(
     surface_width: jint,
     surface_height: jint,
 ) {
-    let kind = match kind {
-        0 => InputKind::TouchDown,
-        1 => InputKind::TouchMove,
-        _ => InputKind::TouchUp,
-    };
-    let w = (surface_width.max(0) as u32) & 0xffff;
-    let h = (surface_height.max(0) as u32) & 0xffff;
-    send_event(handle, kind, id as u32, x, y, (w << 16) | h);
+    jni_guard((), || {
+        let kind = match kind {
+            0 => InputKind::TouchDown,
+            1 => InputKind::TouchMove,
+            _ => InputKind::TouchUp,
+        };
+        let w = (surface_width.max(0) as u32) & 0xffff;
+        let h = (surface_height.max(0) as u32) & 0xffff;
+        send_event(handle, kind, id as u32, x, y, (w << 16) | h);
+    })
 }
 
 /// `NativeBridge.nativeSendKey(handle, vk, down, mods)` — one key transition. `vk`: Windows
@@ -140,15 +150,17 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendKey(
     down: jboolean,
     mods: jint,
 ) {
-    if vk == 0 {
-        return;
-    }
-    let kind = if down {
-        InputKind::KeyDown
-    } else {
-        InputKind::KeyUp
-    };
-    send_event(handle, kind, vk as u32, 0, 0, mods as u32);
+    jni_guard((), || {
+        if vk == 0 {
+            return;
+        }
+        let kind = if down {
+            InputKind::KeyDown
+        } else {
+            InputKind::KeyUp
+        };
+        send_event(handle, kind, vk as u32, 0, 0, mods as u32);
+    })
 }
 
 /// `NativeBridge.nativeTextInputSupported(handle)` — whether the host advertised
@@ -160,7 +172,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeTextInputSu
     _this: JObject,
     handle: jlong,
 ) -> jboolean {
-    get_session(handle).is_some_and(|h| h.client.host_caps() & HOST_CAP_TEXT_INPUT != 0)
+    jni_guard(false, || {
+        get_session(handle).is_some_and(|h| h.client.host_caps() & HOST_CAP_TEXT_INPUT != 0)
+    })
 }
 
 /// `NativeBridge.nativeHostSupportsPen(handle)` — the host advertised `HOST_CAP_PEN`, so the
@@ -172,7 +186,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeHostSupport
     _this: JObject,
     handle: jlong,
 ) -> jboolean {
-    get_session(handle).is_some_and(|h| h.client.host_caps() & HOST_CAP_PEN != 0)
+    jni_guard(false, || {
+        get_session(handle).is_some_and(|h| h.client.host_caps() & HOST_CAP_PEN != 0)
+    })
 }
 
 /// `NativeBridge.nativeHostSupportsTouch(handle)` — the host advertised `HOST_CAP2_TOUCH`, so
@@ -184,7 +200,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeHostSupport
     _this: JObject,
     handle: jlong,
 ) -> jboolean {
-    get_session(handle).is_some_and(|h| h.client.host_caps2() & HOST_CAP2_TOUCH != 0)
+    jni_guard(false, || {
+        get_session(handle).is_some_and(|h| h.client.host_caps2() & HOST_CAP2_TOUCH != 0)
+    })
 }
 
 /// Floats per sample in the `nativeSendPen` flat array.
@@ -319,14 +337,16 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendGamepad
     down: jboolean,
     pad: jint,
 ) {
-    send_event(
-        handle,
-        InputKind::GamepadButton,
-        bit as u32,
-        i32::from(down),
-        0,
-        pad as u32,
-    );
+    jni_guard((), || {
+        send_event(
+            handle,
+            InputKind::GamepadButton,
+            bit as u32,
+            i32::from(down),
+            0,
+            pad as u32,
+        );
+    })
 }
 
 /// `NativeBridge.nativeSendGamepadAxis(handle, axisId, value, pad)` — one gamepad axis update on wire
@@ -341,14 +361,16 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendGamepad
     value: jint,
     pad: jint,
 ) {
-    send_event(
-        handle,
-        InputKind::GamepadAxis,
-        axis_id as u32,
-        value,
-        0,
-        pad as u32,
-    );
+    jni_guard((), || {
+        send_event(
+            handle,
+            InputKind::GamepadAxis,
+            axis_id as u32,
+            value,
+            0,
+            pad as u32,
+        );
+    })
 }
 
 /// `NativeBridge.nativeSendGamepadArrival(handle, pref, pad)` — declare the controller KIND presented
@@ -365,14 +387,16 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendGamepad
     pref: jint,
     pad: jint,
 ) {
-    send_event(
-        handle,
-        InputKind::GamepadArrival,
-        pref as u32,
-        0,
-        0,
-        pad as u32,
-    );
+    jni_guard((), || {
+        send_event(
+            handle,
+            InputKind::GamepadArrival,
+            pref as u32,
+            0,
+            0,
+            pad as u32,
+        );
+    })
 }
 
 /// `NativeBridge.nativePadMotionReaches(handle, declaredPref)` — whether motion sent for a pad that
@@ -394,16 +418,19 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativePadMotionRe
     handle: jlong,
     declared_pref: jint,
 ) -> jboolean {
-    let Some(h) = get_session(handle) else {
-        return true;
-    };
-    let declared =
-        punktfunk_core::config::GamepadPref::from_u8(declared_pref.clamp(0, u8::MAX as jint) as u8);
-    punktfunk_core::config::pad_motion_reaches(
-        declared,
-        h.client.requested_gamepad,
-        h.client.resolved_gamepad,
-    )
+    jni_guard(false, || {
+        let Some(h) = get_session(handle) else {
+            return true;
+        };
+        let declared = punktfunk_core::config::GamepadPref::from_u8(
+            declared_pref.clamp(0, u8::MAX as jint) as u8,
+        );
+        punktfunk_core::config::pad_motion_reaches(
+            declared,
+            h.client.requested_gamepad,
+            h.client.resolved_gamepad,
+        )
+    })
 }
 
 /// `NativeBridge.nativeSendGamepadRemove(handle, pad)` — signal that wire pad index `pad` was
@@ -417,7 +444,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendGamepad
     handle: jlong,
     pad: jint,
 ) {
-    send_event(handle, InputKind::GamepadRemove, 0, 0, 0, pad as u32);
+    jni_guard((), || {
+        send_event(handle, InputKind::GamepadRemove, 0, 0, 0, pad as u32);
+    })
 }
 
 /// `NativeBridge.nativeSendPadHidReport(handle, pad, buf, len)` — one raw HID input report from a
@@ -482,16 +511,18 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendPadTouc
     x: jint,
     y: jint,
 ) {
-    let Some(h) = get_session(handle) else {
-        return;
-    };
-    let _ = h.client.send_rich_input(RichInput::Touchpad {
-        pad: (pad as u32 & 0xF) as u8,
-        finger: (finger as u32 & 0x1) as u8,
-        active,
-        x: (x as i64).clamp(0, 65535) as u16,
-        y: (y as i64).clamp(0, 65535) as u16,
-    });
+    jni_guard((), || {
+        let Some(h) = get_session(handle) else {
+            return;
+        };
+        let _ = h.client.send_rich_input(RichInput::Touchpad {
+            pad: (pad as u32 & 0xF) as u8,
+            finger: (finger as u32 & 0x1) as u8,
+            active,
+            x: (x as i64).clamp(0, 65535) as u16,
+            y: (y as i64).clamp(0, 65535) as u16,
+        });
+    })
 }
 
 /// `NativeBridge.nativeSendPadMotion(handle, pad, gp, gy, gr, ax, ay, az)` — one motion sample
@@ -513,13 +544,15 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendPadMoti
     accel_y: jint,
     accel_z: jint,
 ) {
-    let Some(h) = get_session(handle) else {
-        return;
-    };
-    let c = |v: jint| (v as i64).clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
-    let _ = h.client.send_rich_input(RichInput::Motion {
-        pad: (pad as u32 & 0xF) as u8,
-        gyro: [c(gyro_pitch), c(gyro_yaw), c(gyro_roll)],
-        accel: [c(accel_x), c(accel_y), c(accel_z)],
-    });
+    jni_guard((), || {
+        let Some(h) = get_session(handle) else {
+            return;
+        };
+        let c = |v: jint| (v as i64).clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+        let _ = h.client.send_rich_input(RichInput::Motion {
+            pad: (pad as u32 & 0xF) as u8,
+            gyro: [c(gyro_pitch), c(gyro_yaw), c(gyro_roll)],
+            accel: [c(accel_x), c(accel_y), c(accel_z)],
+        });
+    })
 }

@@ -94,7 +94,8 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeNextRumble(
 ///   Led        → `[pad][0x01][r][g][b]`         (len 5)
 ///   PlayerLeds → `[pad][0x02][bits]`            (len 3)
 ///   Trigger    → `[pad][0x03][which][effect…]`  (len 3 + effect.len())
-/// Returns the byte count written, or `-1` on timeout / session closed / buffer too small.
+/// Returns the byte count written, or `-1` on timeout / session closed / an event with no
+/// Android replay (dropped). A buffer too small for the event is logged.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeNextHidout(
     mut env: EnvUnowned,
@@ -118,77 +119,43 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeNextHidout(
                 Ok(ev) => ev,
                 Err(_) => return Ok(-1), // timeout or closed — Kotlin loops
             };
-
-            // The caller passes a direct ByteBuffer (allocateDirect) so we write its backing store directly.
-            let cap = match env.get_direct_buffer_capacity(&buf) {
-                Ok(c) => c,
-                Err(_) => return Ok(-1),
+            // `[pad][tag][head…][tail…]` — the two slices spare a concat per event.
+            let (pad, tag, head, tail): (u8, u8, &[u8], &[u8]) = match &ev {
+                HidOutput::Led { pad, r, g, b } => (*pad, TAG_LED, &[*r, *g, *b], &[]),
+                HidOutput::PlayerLeds { pad, bits } => (*pad, TAG_PLAYER_LEDS, &[*bits], &[]),
+                HidOutput::Trigger { pad, which, effect } => {
+                    (*pad, TAG_TRIGGER, &[*which], effect.as_slice())
+                }
+                // As-is SC2 passthrough: the host's hidraw consumer (Steam) wrote this report to
+                // the virtual pad; Kotlin replays it verbatim on the physical controller.
+                // `kind` 0 = output report, 1 = feature report.
+                HidOutput::HidRaw { pad, kind, data } => {
+                    (*pad, TAG_HID_RAW, &[*kind], data.as_slice())
+                }
+                // Steam Controller trackpad-coil haptics and DS5 pad-audio routing have no
+                // Android replay path (motor rumble already rides the universal 0xCA plane).
+                HidOutput::TrackpadHaptic { .. } | HidOutput::AudioCtl { .. } => return Ok(-1),
             };
-            let ptr = match env.get_direct_buffer_address(&buf) {
-                Ok(p) if !p.is_null() => p,
-                _ => return Ok(-1),
-            };
+            let n = 2 + head.len() + tail.len();
+            // The caller passes a direct ByteBuffer (allocateDirect) so we write its backing
+            // store directly. A buffer that cannot take the event is a Kotlin-side sizing bug
+            // (reports are ≤ 64 bytes; Kotlin allocates 128), not a transient — say so.
+            let cap = env.get_direct_buffer_capacity(&buf).unwrap_or(0);
+            let ptr = env
+                .get_direct_buffer_address(&buf)
+                .unwrap_or(std::ptr::null_mut());
+            if ptr.is_null() || cap < n {
+                log::warn!(
+                    "feedback: HID event tag {tag} needs {n} bytes, buffer holds {cap} — dropped"
+                );
+                return Ok(-1);
+            }
             // SAFETY: `ptr`/`cap` describe the direct ByteBuffer's backing store, valid for this call.
             let out = unsafe { std::slice::from_raw_parts_mut(ptr, cap) };
-
-            // out[0] = wire pad index; out[1] = kind tag; the rest is the per-kind payload.
-            let n = match ev {
-                HidOutput::Led { pad, r, g, b } => {
-                    if cap < 5 {
-                        return Ok(-1);
-                    }
-                    out[0] = pad;
-                    out[1] = TAG_LED;
-                    out[2] = r;
-                    out[3] = g;
-                    out[4] = b;
-                    5
-                }
-                HidOutput::PlayerLeds { pad, bits } => {
-                    if cap < 3 {
-                        return Ok(-1);
-                    }
-                    out[0] = pad;
-                    out[1] = TAG_PLAYER_LEDS;
-                    out[2] = bits;
-                    3
-                }
-                HidOutput::Trigger { pad, which, effect } => {
-                    let n = 3 + effect.len();
-                    if cap < n {
-                        return Ok(-1); // the raw DS5 trigger block is ~11 bytes; Kotlin allocates 64
-                    }
-                    out[0] = pad;
-                    out[1] = TAG_TRIGGER;
-                    out[2] = which;
-                    out[3..n].copy_from_slice(&effect);
-                    n
-                }
-                HidOutput::TrackpadHaptic { .. } => {
-                    // Steam Controller trackpad-coil haptics — no Android equivalent; drop it (motor
-                    // rumble already rides the universal 0xCA plane).
-                    return Ok(-1);
-                }
-                HidOutput::HidRaw { pad, kind, data } => {
-                    // As-is SC2 passthrough: the host's hidraw consumer (Steam) wrote this report to
-                    // the virtual pad; Kotlin replays it verbatim on the physical controller.
-                    // `[pad][0x05][kind][report…]` — kind 0 = output report, 1 = feature report.
-                    let n = 3 + data.len();
-                    if cap < n {
-                        return Ok(-1); // reports are ≤ 64 bytes; Kotlin allocates 128
-                    }
-                    out[0] = pad;
-                    out[1] = TAG_HID_RAW;
-                    out[2] = kind;
-                    out[3..n].copy_from_slice(&data);
-                    n
-                }
-                HidOutput::AudioCtl { .. } => {
-                    // DS5 pad-audio routing/volumes — no Android replay path yet (the 0xD1 sample
-                    // plane isn't rendered here either); drop it like TrackpadHaptic.
-                    return Ok(-1);
-                }
-            };
+            out[0] = pad;
+            out[1] = tag;
+            out[2..2 + head.len()].copy_from_slice(head);
+            out[2 + head.len()..n].copy_from_slice(tail);
             Ok(n as jint)
         })
         .resolve::<LogErrorAndDefault>()

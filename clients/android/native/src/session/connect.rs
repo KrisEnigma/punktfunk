@@ -34,7 +34,7 @@ fn note_error(e: &punktfunk_core::error::PunktfunkError) {
         E::Io(_) => "io",
         _ => "error",
     };
-    *LAST_ERROR.lock().unwrap() = token.to_string();
+    *lock_recover(&LAST_ERROR) = token.to_string();
 }
 
 /// `NativeBridge.nativeTakeLastError(): String` — the machine token of the most recent failed
@@ -80,7 +80,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSetLowLaten
     _this: JObject,
     enabled: jboolean,
 ) {
-    punktfunk_core::transport::set_dscp_default(enabled);
+    jni_guard((), || {
+        punktfunk_core::transport::set_dscp_default(enabled);
+    })
 }
 
 /// `debug.punktfunk.force_parts` = 1: arm slice-progressive parts delivery even when the
@@ -291,98 +293,133 @@ mod caps_tests {
     }
 }
 
-/// `NativeBridge.nativeConnect(…): Long`. The Kotlin `external fun` mirrors the parameter list
-/// below name for name and in order; only the arguments whose encoding is not obvious follow.
-/// `launch` (empty ⇒ none) is a store-qualified library id to boot straight into a game.
-/// `deviceName` (empty ⇒ none) rides the Hello as `name` — what the host's pending-approval list
-/// and trust store show for this device (Kotlin passes `Build.MODEL`, its `nativePair` convention).
-/// `certPem`/`keyPem` empty = anonymous, else presented as the persistent identity. `pinHex` empty
-/// = TOFU (read `nativeHostFingerprint` after), else 64-hex SHA-256 to pin the host (mismatch → 0).
-/// `bitrateKbps` 0 = host default. `compositorPref`/`gamepadPref` are `CompositorPref`/`GamepadPref`
-/// wire bytes (0 = Auto; unknown → Auto). `audioChannels` is the requested surround layout (2/6/8;
-/// normalized, anything else → stereo) — the host clamps it and the resolved count drives playback.
-/// `audioRateHz`/`audioBits` are the audio FORMAT asked for. **`0`/`0` — and anything unrecognized
-/// — is "did not ask", the legacy Opus request every build has made**; any pair core can carry asks
-/// the host for the lossless `0xD3` plane, `48000`/`16` INCLUDED (that is the cheapest lossless
-/// rung, not a spelling of "default" — see [`resolve_requested_audio_format`], which is where
-/// getting this backwards silently upgraded every Opus session). Only a request; the host's gate may
-/// answer Opus regardless, and this device may not be able to open the rate at all, which is what
-/// [`resolve_requested_audio_format`] settles HERE rather than letting the session negotiate a wire
-/// it cannot play.
-/// `preferredCodec` is the soft codec preference wire byte (0 = Auto). `timeoutMs` is the handshake
-/// budget: the normal path passes a short value, the no-PIN "request access" path a long one (≥ the
-/// host's approval-park window) so a slow operator approval lands on this same parked connection
-/// rather than timing the client out first. Returns an opaque handle, or 0 on failure.
+/// What Kotlin hands `nativeConnect`, as `ConnectRequest.toJson()` writes it (kit/ConnectRequest.kt
+/// carries the per-field contract). Every field is a request the host may answer differently;
+/// `connector.*` after the handshake is what actually happened.
+#[derive(serde::Deserialize)]
+struct ConnectRequest {
+    host: String,
+    port: u16,
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+    /// Both non-empty ⇒ presented as the persistent identity, else anonymous.
+    #[serde(default)]
+    cert_pem: String,
+    #[serde(default)]
+    key_pem: String,
+    /// Empty ⇒ TOFU; else 64-hex SHA-256 of the host cert (mismatch ⇒ 0).
+    #[serde(default)]
+    pin_hex: String,
+    /// 0 = host default.
+    #[serde(default)]
+    bitrate_kbps: u32,
+    /// `CompositorPref` / `GamepadPref` wire bytes (unknown ⇒ Auto).
+    #[serde(default)]
+    compositor_pref: u8,
+    #[serde(default)]
+    gamepad_pref: u8,
+    #[serde(default)]
+    hdr_enabled: bool,
+    #[serde(default)]
+    ten_bit_sdr: bool,
+    #[serde(default)]
+    multi_slice_ok: bool,
+    #[serde(default)]
+    frame_parts_ok: bool,
+    /// Requested surround layout (2/6/8; anything else ⇒ stereo).
+    #[serde(default)]
+    audio_channels: u8,
+    /// The audio FORMAT asked for. `0`/`0` is "did not ask" (the Opus plane); any pair core can
+    /// carry asks for the lossless `0xD3` plane, `48000`/`16` INCLUDED — that is the cheapest
+    /// lossless rung, not a spelling of "default". [`resolve_requested_audio_format`] downgrades
+    /// it here, before the `Hello`, if this device cannot open the rate.
+    #[serde(default)]
+    audio_rate_hz: u32,
+    #[serde(default)]
+    audio_bits: u8,
+    /// `CODEC_*` bits this device decodes; 0 falls back to H.264|HEVC.
+    #[serde(default)]
+    video_codecs: u8,
+    /// Soft codec preference wire byte (0 = Auto).
+    #[serde(default)]
+    preferred_codec: u8,
+    /// Handshake budget: short for a normal connect, long (≥ the host's approval-park window) for
+    /// the no-PIN "request access" path so a slow operator approval lands on this connection.
+    timeout_ms: u64,
+    /// A store-qualified library id to boot straight into a game; rides the Hello as `launch`.
+    #[serde(default)]
+    launch: Option<String>,
+    /// The host's approval-list / trust-store label for this device; rides the Hello as `name`.
+    #[serde(default)]
+    device_name: Option<String>,
+    #[serde(default)]
+    pad_audio_ok: bool,
+    #[serde(default)]
+    keep_host_audio: bool,
+}
+
+/// `NativeBridge.nativeConnect(requestJson): Long` — see [`ConnectRequest`]. Returns an opaque
+/// handle, or 0 on failure (`nativeTakeLastError` carries the cause).
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'local>(
     mut env: EnvUnowned<'local>,
     _this: JObject<'local>,
-    host: JString<'local>,
-    port: jint,
-    width: jint,
-    height: jint,
-    refresh_hz: jint,
-    cert_pem: JString<'local>,
-    key_pem: JString<'local>,
-    pin_hex: JString<'local>,
-    bitrate_kbps: jint,
-    compositor_pref: jint,
-    gamepad_pref: jint,
-    hdr_enabled: jboolean,
-    ten_bit_sdr: jboolean,
-    multi_slice_ok: jboolean,
-    frame_parts_ok: jboolean,
-    audio_channels: jint,
-    audio_rate_hz: jint,
-    audio_bits: jint,
-    video_codecs: jint,
-    preferred_codec: jint,
-    timeout_ms: jint,
-    launch: JString<'local>,
-    device_name: JString<'local>,
-    pad_audio_ok: jboolean,
-    keep_host_audio: jboolean,
+    request: JString<'local>,
 ) -> jlong {
-    // Every JNI string this method needs, read up front in the one `Env` scope jni 0.22 grants a
-    // native method; everything below is pure Rust over owned `String`s. `None` = the mandatory
-    // `host` could not be read, which is the old `Err(_) => return 0` arm.
-    type ConnectStrings = Option<(
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-    )>;
-    let strings: ConnectStrings = env
-        .with_env(|env| -> jni::errors::Result<ConnectStrings> {
-            let Ok(host) = host.try_to_string(env) else {
-                return Ok(None);
-            };
-            let cert: String = cert_pem.try_to_string(env).unwrap_or_default();
-            let key: String = key_pem.try_to_string(env).unwrap_or_default();
-            let pin_hex: String = pin_hex.try_to_string(env).unwrap_or_default();
-            // A store-qualified library id (`steam:<appid>` / `custom:<id>`) to boot straight into a
-            // game; null / empty ⇒ None (a plain desktop connect). Rides the Hello as `launch`.
-            let launch: Option<String> = launch
-                .try_to_string(env)
-                .ok()
-                .filter(|s: &String| !s.is_empty());
-            // The host's approval-list / trust-store label for this device; null / blank ⇒ None (the
-            // host falls back to its fingerprint-derived "device abcd1234" placeholder).
-            let device_name: Option<String> = device_name
-                .try_to_string(env)
-                .ok()
-                .map(|s: String| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            Ok(Some((host, cert, key, pin_hex, launch, device_name)))
+    // The one `Env` scope jni 0.22 grants a native method reads the JSON; everything below is
+    // pure Rust over the owned request.
+    let req: Option<ConnectRequest> = env
+        .with_env(|env| -> jni::errors::Result<Option<ConnectRequest>> {
+            let text = request.try_to_string(env)?;
+            Ok(match serde_json::from_str::<ConnectRequest>(&text) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    log::error!("nativeConnect: bad request JSON from Kotlin: {e}");
+                    None
+                }
+            })
         })
         .resolve::<LogErrorAndDefault>();
-    let Some((host, cert, key, pin_hex, launch, device_name)) = strings else {
+    let Some(req) = req else {
         return 0;
     };
+    jni_guard(0, || connect(req))
+}
 
+/// The connect proper, off the JNI seam.
+fn connect(req: ConnectRequest) -> jlong {
+    let ConnectRequest {
+        host,
+        port,
+        width,
+        height,
+        refresh_hz,
+        cert_pem: cert,
+        key_pem: key,
+        pin_hex,
+        bitrate_kbps,
+        compositor_pref,
+        gamepad_pref,
+        hdr_enabled,
+        ten_bit_sdr,
+        multi_slice_ok,
+        frame_parts_ok,
+        audio_channels,
+        audio_rate_hz,
+        audio_bits,
+        video_codecs,
+        preferred_codec,
+        timeout_ms,
+        launch,
+        device_name,
+        pad_audio_ok,
+        keep_host_audio,
+    } = req;
+    let launch = launch.filter(|s| !s.is_empty());
+    let device_name = device_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let identity: Option<(String, String)> = if cert.is_empty() || key.is_empty() {
         None
     } else {
@@ -419,31 +456,26 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'lo
         }
     };
     let mode = Mode {
-        width: width as u32,
-        height: height as u32,
-        refresh_hz: refresh_hz as u32,
+        width,
+        height,
+        refresh_hz,
     };
     // Requested surround layout (2 = stereo / 6 = 5.1 / 8 = 7.1); anything else is stereo. The
     // host clamps it and echoes the resolved count in `connector.audio_channels`, which drives the
     // decoder + AAudio layout (read in `crate::audio::AudioPlayback::start`).
-    let audio_channels =
-        punktfunk_core::audio::normalize_channels(audio_channels.clamp(0, u8::MAX as jint) as u8);
+    let audio_channels = punktfunk_core::audio::normalize_channels(audio_channels);
     // The audio format, downgraded to something this device has PROVED it can open before the
     // `Hello` carries it — see `resolve_requested_audio_format` for why it cannot wait until
-    // playback. `clamp` first: a negative jint from a corrupted setting must not wrap into a
-    // plausible rate.
-    let (audio_rate_hz, audio_bits) = resolve_requested_audio_format(
-        audio_rate_hz.max(0) as u32,
-        audio_bits.clamp(0, u8::MAX as jint) as u8,
-        audio_channels,
-    );
+    // playback.
+    let (audio_rate_hz, audio_bits) =
+        resolve_requested_audio_format(audio_rate_hz, audio_bits, audio_channels);
     match NativeClient::connect_with_audio_format(
         &host,
-        port as u16,
+        port,
         mode,
-        CompositorPref::from_u8(compositor_pref.clamp(0, u8::MAX as jint) as u8),
-        GamepadPref::from_u8(gamepad_pref.clamp(0, u8::MAX as jint) as u8),
-        bitrate_kbps.max(0) as u32, // 0 = host default
+        CompositorPref::from_u8(compositor_pref),
+        GamepadPref::from_u8(gamepad_pref),
+        bitrate_kbps, // 0 = host default
         video_caps(hdr_enabled, ten_bit_sdr, multi_slice_ok),
         audio_channels,
         // The audio format this session ASKS for (resolved above). A non-default pair is what
@@ -460,7 +492,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'lo
         // Masked to the known bits, falling back to H.264|HEVC on 0 so a bogus value cannot
         // advertise nothing and kill the handshake. The host echoes its pick in `connector.codec`.
         {
-            let bits = (video_codecs.clamp(0, u8::MAX as jint) as u8)
+            let bits = video_codecs
                 & (punktfunk_core::quic::CODEC_H264
                     | punktfunk_core::quic::CODEC_HEVC
                     | punktfunk_core::quic::CODEC_AV1
@@ -471,7 +503,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'lo
                 bits
             }
         },
-        preferred_codec.clamp(0, u8::MAX as jint) as u8,
+        preferred_codec,
         // No display-volume forwarding from Android yet (the panel tone-maps PQ itself via the
         // Surface dataspace + static metadata) — the host keeps its virtual-display EDID defaults.
         None,
@@ -511,7 +543,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConnect<'lo
         identity, // owned (cert, key) PEM, or None (anonymous)
         // Handshake budget from Kotlin: ~10 s for a normal connect, ~185 s for "request access"
         // (the host parks the connection until the operator approves the device — see ConnectScreen).
-        Duration::from_millis(timeout_ms.max(0) as u64),
+        Duration::from_millis(timeout_ms),
         // The Kotlin side cancels by dropping the result (`Dial.cancelled`), not by aborting
         // the dial — its connect runs on a pool thread, so a parked one costs a thread, not a
         // stuck UI. Wire a flag through here if that ever stops being true.

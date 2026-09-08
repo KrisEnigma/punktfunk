@@ -34,8 +34,10 @@ pub(crate) use setup::boost_thread_priority;
 
 use ndk::native_window::NativeWindow;
 use punktfunk_core::client::NativeClient;
+use punktfunk_core::reanchor::ReanchorGate;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Cap on AUs parked in the async loop awaiting a free codec input slot. Matches the connector's
 /// own frame-channel depth; on sustained overflow the oldest is dropped and a keyframe requested
@@ -104,6 +106,97 @@ pub(crate) const NO_VIDEO_PATIENCE: std::time::Duration = std::time::Duration::f
 /// confidently reported the wrong one, and a black-screen field case was diagnosed as a slow decoder
 /// for days (2026-08-20). Keeping the value in core is what stops the two drifting back together.
 const NO_VIDEO_RETRY: std::time::Duration = punktfunk_core::client::NO_VIDEO_RETRY;
+
+/// The keyframe backstops both decode loops run once a pass: a decoder fed but silent
+/// ([`NO_OUTPUT_PATIENCE`]), a session that never received an AU ([`NO_VIDEO_PATIENCE`]), and the
+/// gate's own overdue-freeze re-ask — every intent through one 100 ms throttle so a multi-frame
+/// recovery gap can't flood the control stream.
+pub(super) struct Backstops {
+    last_kf_req: Option<Instant>,
+    /// When the decoder last handed us a frame, and how many AUs it had been fed by then. Seeded
+    /// at start so a decoder that never produces a first frame — the missed opening IDR — is
+    /// caught by the same window.
+    last_output: Instant,
+    fed_at_output: u64,
+    started: Instant,
+    last_no_video_req: Option<Instant>,
+}
+
+impl Backstops {
+    pub(super) fn new() -> Backstops {
+        let now = Instant::now();
+        Backstops {
+            last_kf_req: None,
+            last_output: now,
+            fed_at_output: 0,
+            started: now,
+            last_no_video_req: None,
+        }
+    }
+
+    /// One pass. `had_output` = the decoder produced this pass; `au_parked` = an AU arrived and is
+    /// waiting for an input slot (video IS flowing); `losses` = drops this pass that are a loss in
+    /// their own right (a parked-AU overflow), which arm the gate directly.
+    pub(super) fn poll(
+        &mut self,
+        client: &NativeClient,
+        gate: &mut ReanchorGate,
+        fed: u64,
+        had_output: bool,
+        au_parked: bool,
+        losses: u64,
+    ) {
+        let now = Instant::now();
+        if losses > 0 {
+            gate.arm(now);
+        }
+        // Fed but silent: the decoder is holding nothing it can decode — the opening IDR never
+        // reached it, or its reference chain is gone. Ask for a fresh one and arm the freeze, so
+        // the concealment it may start emitting on the way back is withheld until a clean
+        // re-anchor (`gate.poll` keeps re-asking on the deadline until one arrives).
+        let starved = !had_output
+            && fed > self.fed_at_output
+            && now.duration_since(self.last_output) >= NO_OUTPUT_PATIENCE;
+        if had_output {
+            self.last_output = now;
+            self.fed_at_output = fed;
+        } else if starved {
+            log::warn!(
+                "decode: no output for {} ms with {} AU(s) fed — requesting a re-anchor keyframe",
+                now.duration_since(self.last_output).as_millis(),
+                fed - self.fed_at_output
+            );
+            gate.arm(now);
+            self.last_output = now; // one request per patience window, not per iteration
+            self.fed_at_output = fed;
+        }
+        // Nothing has EVER arrived: not an idle stream but a session that never got a picture —
+        // the `starved` test cannot see it, because it needs `fed` to have moved.
+        if fed == 0
+            && !au_parked
+            && now.duration_since(self.started) >= NO_VIDEO_PATIENCE
+            && self
+                .last_no_video_req
+                .is_none_or(|t| now.duration_since(t) >= NO_VIDEO_RETRY)
+        {
+            log::warn!(
+                "decode: no video received {} ms into the session — requesting a keyframe",
+                now.duration_since(self.started).as_millis()
+            );
+            self.last_no_video_req = Some(now);
+            let _ = client.request_keyframe();
+            self.last_kf_req = Some(now); // share the throttle with the loss-recovery path below
+        }
+        if (gate.poll(client.frames_dropped(), now) || losses > 0 || starved)
+            && self
+                .last_kf_req
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(100))
+        {
+            self.last_kf_req = Some(now);
+            let _ = client.request_keyframe();
+        }
+    }
+}
 
 /// Whether low-latency mode uses the event-driven async decode loop (default) or the synchronous
 /// poll loop. Flip to `false` to A/B the two on the HUD (`design/…`); the async loop presents a

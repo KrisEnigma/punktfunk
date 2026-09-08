@@ -54,7 +54,7 @@ use std::time::Instant;
 
 use super::async_loop::DecodeEvent;
 use super::latency::{now_realtime_ns, p50_max_ms};
-use super::presenter::PresentPriority;
+use super::presenter::{cadence_suffix, PresentPriority};
 use super::surface_control::{Layer, PresentComplete};
 use super::vsync::now_monotonic_ns;
 
@@ -556,25 +556,7 @@ impl AscBackend {
         let (latch_p50, latch_max) = p50_max_ms(std::mem::take(&mut self.latch_us));
         let (pace_p50, pace_max) = p50_max_ms(std::mem::take(&mut self.pace_us));
         let (e2e_p50, e2e_max) = p50_max_ms(std::mem::take(&mut self.e2e_us));
-        // Under the smoothness intent, tail the source-cadence loop's health: `late‰` of all frames
-        // folded (a due time already past when the frame became presentable — the direct signal the
-        // cushion is too small, WP8's acceptance criterion), `jitter` (the loop residual's mean
-        // absolute deviation), `cushion`, and `reanchors`. Absent under latency (no loop). Counters
-        // are cumulative since the last re-anchor, so `late` reads as a rate over enough frames.
-        let cadence = self
-            .cadence
-            .as_ref()
-            .map(CadenceClock::health)
-            .map(|h| {
-                format!(
-                    " late={}‰ jitterMs={:.2} cushionMs={:.2} reanchors={}",
-                    h.late.saturating_mul(1000) / h.frames.max(1),
-                    h.jitter_ns as f64 / 1e6,
-                    h.cushion_ns as f64 / 1e6,
-                    h.reanchors,
-                )
-            })
-            .unwrap_or_default();
+        let cadence = cadence_suffix(self.cadence.as_ref().map(CadenceClock::health));
         log::info!(
             target: "pf.present",
             "asc released={} displays={} inflight={} qDepth={} paceMs p50={:.2} max={:.2} \
