@@ -142,8 +142,9 @@ unwrapped.overrideAttrs (old: {
   '';
 
   # Ship the compositor, renamed, AND the WSI layer built beside it. Everything else nixpkgs
-  # installs (gamescopectl, gamescopereaper, gamescopestream, .desktop files) belongs to the real
-  # gamescope package — duplicating it here would put two of each on PATH.
+  # installs (gamescopectl, gamescopestream, .desktop files) belongs to the real gamescope
+  # package — duplicating it here would put two of each on PATH. Keep gamescopereaper:
+  # wrapProgram bakes $out/bin/gamescopereaper into the compositor.
   #
   # The layer is not dressing: a game nested under this compositor gets its HDR10 swapchain from it
   # or from nowhere, and a layer built for a DIFFERENT gamescope makes the compositor reject the
@@ -186,7 +187,7 @@ unwrapped.overrideAttrs (old: {
     #
     # The launcher references its target by ABSOLUTE path, so renaming the launcher is safe
     # while the target keeps its name.
-    find $out/bin -mindepth 1 ! -name gamescope ! -name '.gamescope-wrapped' -delete
+    find $out/bin -mindepth 1 ! -name gamescope ! -name '.gamescope-wrapped' ! -name gamescopereaper -delete
     mv $out/bin/gamescope $out/bin/punktfunk-gamescope
 
     install -Dm0755 "$TMPDIR/pf-layer.so" \
@@ -238,6 +239,8 @@ unwrapped.overrideAttrs (old: {
       $out/lib/punktfunk/vulkan/implicit_layer.d/punktfunk_gamescope_wsi.json)
     [ -f "$lib" ] \
       || { echo "punktfunk-gamescope: the layer manifest points at $lib, which is not installed"; exit 1; }
+    [ -x $out/bin/gamescopereaper ] \
+      || { echo "punktfunk-gamescope: gamescopereaper is missing; nested Steam launches die"; exit 1; }
     runHook postInstallCheck
   '';
 

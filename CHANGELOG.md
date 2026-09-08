@@ -429,6 +429,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Nix `punktfunk-gamescope` keeps `gamescopereaper`.** wrapProgram bakes that
+  path into the compositor, and the prune dropped it, so Steam exited immediately.
+  Rebuild the gamescope package.
 - **HDR PipeWire capture offers LINEAR as a Choice enum.** A scalar `Long(0)`
   did not intersect gamescope's modifier choice. Nothing to configure.
 - **Gamescope capture omits `SPA_META_Cursor`.** That node only advertises Header
