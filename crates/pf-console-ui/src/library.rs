@@ -726,6 +726,25 @@ impl LibraryGame {
     }
 }
 
+/// The console sorts its own reduced model; the policy is `pf_client_core::collate`.
+impl pf_client_core::collate::Collatable for LibraryGame {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn store(&self) -> &str {
+        &self.store
+    }
+    fn platform(&self) -> Option<&str> {
+        self.platform.as_deref()
+    }
+    fn is_launcher(&self) -> bool {
+        self.launcher
+    }
+}
+
 /// Observation vs memory, and whether a memory is still being fetched.
 ///
 /// Three states because Waking and Offline need different shelf copy. A boolean would
@@ -1030,9 +1049,10 @@ fn order(games: &mut [LibraryGame]) {
     games.sort_by_key(|g| (g.id != DESKTOP_ID, !g.launcher, !g.running));
 }
 
-/// The desktop tile's id. `\0` prefix as Home's Add and Rescan tiles use: a host title id
-/// is a store reference, and none of them can start with a NUL.
-pub const DESKTOP_ID: &str = "\0desktop";
+/// The desktop tile's id, and the store→label table. Both live in `pf-client-core` now, so
+/// the GTK and WinUI dialogs read the same ones; re-exported because the screens name them
+/// through this module.
+pub use pf_client_core::library::{store_label, DESKTOP_ID};
 
 /// Every shelf leads with the host's own desktop, so Library is never a dead end for the
 /// desktop-only user and a plugin-less host is still one press from streaming. Model state
@@ -1049,20 +1069,6 @@ fn desktop_tile() -> LibraryGame {
         year: None,
         genres: Vec::new(),
         running: false,
-    }
-}
-
-/// Store id → display label (the GTK `ui_library` table).
-pub fn store_label(store: &str) -> &'static str {
-    match store {
-        "steam" => "Steam",
-        "custom" => "Custom",
-        "heroic" => "Heroic",
-        "lutris" => "Lutris",
-        "epic" => "Epic",
-        "gog" => "GOG",
-        "xbox" => "Xbox",
-        _ => "Game",
     }
 }
 

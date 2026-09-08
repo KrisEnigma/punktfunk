@@ -1,16 +1,48 @@
-//! Sorting and grouping the library — policy only, no Skia.
+//! Sorting and grouping the library — policy only, no toolkit.
 //!
-//! Identical on every client: Apple and Android implement this file. Pin the groups
-//! with `clients/shared/library-collate-vectors.json` (`vectors_match_the_shared_file`).
-//! Change a rule here, regenerate that file in the same commit.
+//! Identical on every client: Apple and Android implement this file, and every Rust shell
+//! calls it. Pin the groups with `clients/shared/library-collate-vectors.json`
+//! (`vectors_match_the_shared_file`). Change a rule here, regenerate that file in the
+//! same commit.
 //!
 //! Returns indices into the caller's slice. Art cache, fetch pump and cursor arithmetic
 //! all key off the shared model's order.
 
-use crate::library::{store_label, LibraryGame};
+use crate::library::{store_label, GameEntry, DESKTOP_ID};
+
+/// The five fields collation reads. Each shell keeps its own model — the console's
+/// `LibraryGame` carries art and running state, the desktop shells hold `GameEntry` — and
+/// implements this so the policy stays one file rather than one copy per toolkit.
+pub trait Collatable {
+    fn id(&self) -> &str;
+    fn title(&self) -> &str;
+    fn store(&self) -> &str;
+    /// Host free-form display string (`"PC"`, `"PS2"`, …); `None` buckets by store.
+    fn platform(&self) -> Option<&str>;
+    /// Opens the launcher itself, not a title.
+    fn is_launcher(&self) -> bool;
+}
+
+impl Collatable for crate::library::GameEntry {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn store(&self) -> &str {
+        &self.store
+    }
+    fn platform(&self) -> Option<&str> {
+        self.platform.as_deref()
+    }
+    fn is_launcher(&self) -> bool {
+        GameEntry::is_launcher(self)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum SortKey {
+pub enum SortKey {
     /// Default. Must match the host's list so an unused sort is a no-op.
     #[default]
     HostOrder,
@@ -23,7 +55,7 @@ pub(crate) enum SortKey {
 impl SortKey {
     /// Persisted `library_sort`. Unknown strings (a newer client's key) fall back to
     /// [`SortKey::HostOrder`], same as `ui_palette`.
-    pub(crate) fn parse(s: &str) -> SortKey {
+    pub fn parse(s: &str) -> SortKey {
         match s {
             "title" => SortKey::Title,
             "platform" => SortKey::Platform,
@@ -33,7 +65,7 @@ impl SortKey {
     }
 
     /// Persisted id. Renaming one resets every stored sort on next launch.
-    pub(crate) fn id(self) -> &'static str {
+    pub fn id(self) -> &'static str {
         match self {
             SortKey::HostOrder => "host",
             SortKey::Title => "title",
@@ -42,7 +74,7 @@ impl SortKey {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             SortKey::HostOrder => "Default",
             SortKey::Title => "A–Z",
@@ -51,7 +83,7 @@ impl SortKey {
         }
     }
 
-    pub(crate) const ALL: [SortKey; 4] = [
+    pub const ALL: [SortKey; 4] = [
         SortKey::HostOrder,
         SortKey::Title,
         SortKey::Platform,
@@ -61,14 +93,14 @@ impl SortKey {
 
 /// Group identity as data, not a label, so a filter can match without re-parsing.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) enum GroupKey {
+pub enum GroupKey {
     Launchers,
     Platform(String),
     Store(String),
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Group {
+pub struct Group {
     pub key: GroupKey,
     pub label: String,
     /// Indices into the slice passed to [`collate`], display order.
@@ -76,14 +108,14 @@ pub(crate) struct Group {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum GroupBy {
+pub enum GroupBy {
     Platform,
     Store,
 }
 
 /// "The Witcher 3" belongs under W. English articles only — titles are store strings
 /// and we cannot detect language.
-pub(crate) fn sort_title(title: &str) -> String {
+pub fn sort_title(title: &str) -> String {
     let relaxed: String = title
         .to_lowercase()
         .chars()
@@ -114,21 +146,16 @@ pub(crate) fn sort_title(title: &str) -> String {
 
 /// No platform does not mean "Unknown": a Steam library is all platform-less, so
 /// store-front games bucket under the store and only a game with neither is "Other".
-fn bucket(g: &LibraryGame, by: GroupBy) -> GroupKey {
+fn bucket<T: Collatable>(g: &T, by: GroupBy) -> GroupKey {
     match by {
-        GroupBy::Platform => match g
-            .platform
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-        {
+        GroupBy::Platform => match g.platform().map(str::trim).filter(|p| !p.is_empty()) {
             Some(p) => GroupKey::Platform(p.to_string()),
-            None => match store_label(&g.store) {
+            None => match store_label(g.store()) {
                 "Game" => GroupKey::Platform("Other".to_string()),
                 store => GroupKey::Store(store.to_string()),
             },
         },
-        GroupBy::Store => GroupKey::Store(store_label(&g.store).to_string()),
+        GroupBy::Store => GroupKey::Store(store_label(g.store()).to_string()),
     }
 }
 
@@ -140,11 +167,7 @@ fn label_of(key: &GroupKey) -> String {
 }
 
 /// Launchers lead by construction; sort applies inside a group, never across.
-pub(crate) fn collate(
-    games: &[LibraryGame],
-    sort: SortKey,
-    group_by: Option<GroupBy>,
-) -> Vec<Group> {
+pub fn collate<T: Collatable>(games: &[T], sort: SortKey, group_by: Option<GroupBy>) -> Vec<Group> {
     let mut launchers: Vec<usize> = Vec::new();
     // Vec, not a map: first-seen order, so two runs over the same library agree.
     let mut buckets: Vec<(GroupKey, Vec<usize>)> = Vec::new();
@@ -153,10 +176,10 @@ pub(crate) fn collate(
         // The desktop tile is not a title: grouping it would put a "Desktop" platform in
         // Collections and make a one-store library look browsable. [`filtered`] puts it
         // back at the head of an unfiltered shelf, which is the only place it belongs.
-        if g.id == crate::library::DESKTOP_ID {
+        if g.id() == DESKTOP_ID {
             continue;
         }
-        if g.launcher {
+        if g.is_launcher() {
             launchers.push(i);
             continue;
         }
@@ -175,19 +198,18 @@ pub(crate) fn collate(
         let (ga, gb) = (&games[a], &games[b]);
         match sort {
             SortKey::HostOrder => a.cmp(&b),
-            SortKey::Title => sort_title(&ga.title)
-                .cmp(&sort_title(&gb.title))
+            SortKey::Title => sort_title(ga.title())
+                .cmp(&sort_title(gb.title()))
                 .then(a.cmp(&b)),
             SortKey::Platform => ga
-                .platform
-                .as_deref()
+                .platform()
                 .unwrap_or("")
-                .cmp(gb.platform.as_deref().unwrap_or(""))
-                .then_with(|| sort_title(&ga.title).cmp(&sort_title(&gb.title)))
+                .cmp(gb.platform().unwrap_or(""))
+                .then_with(|| sort_title(ga.title()).cmp(&sort_title(gb.title())))
                 .then(a.cmp(&b)),
-            SortKey::Store => store_label(&ga.store)
-                .cmp(store_label(&gb.store))
-                .then_with(|| sort_title(&ga.title).cmp(&sort_title(&gb.title)))
+            SortKey::Store => store_label(ga.store())
+                .cmp(store_label(gb.store()))
+                .then_with(|| sort_title(ga.title()).cmp(&sort_title(gb.title())))
                 .then(a.cmp(&b)),
         }
     };
@@ -219,8 +241,8 @@ pub(crate) fn collate(
 }
 
 /// Indices for a group filter. `None` is the whole library, collated order.
-pub(crate) fn filtered(
-    games: &[LibraryGame],
+pub fn filtered<T: Collatable>(
+    games: &[T],
     sort: SortKey,
     filter: Option<&GroupKey>,
 ) -> Vec<usize> {
@@ -234,7 +256,7 @@ pub(crate) fn filtered(
         // Ahead of the launchers, and ahead of every sort: it is the host itself.
         None => games
             .iter()
-            .position(|g| g.id == crate::library::DESKTOP_ID)
+            .position(|g| g.id() == DESKTOP_ID)
             .into_iter()
             .chain(groups.into_iter().flat_map(|g| g.games))
             .collect(),
@@ -247,7 +269,7 @@ pub(crate) fn filtered(
 }
 
 /// Hide the browse entry when grouping would yield a single tile.
-pub(crate) fn worth_browsing(games: &[LibraryGame]) -> bool {
+pub fn worth_browsing<T: Collatable>(games: &[T]) -> bool {
     collate(games, SortKey::HostOrder, Some(GroupBy::Platform))
         .iter()
         .filter(|g| g.key != GroupKey::Launchers)
@@ -267,18 +289,18 @@ mod tests {
         store: &str,
         platform: Option<&str>,
         launcher: bool,
-    ) -> LibraryGame {
-        LibraryGame {
+    ) -> GameEntry {
+        GameEntry {
             id: id.into(),
-            title: title.into(),
             store: store.into(),
-            launcher,
-            icon: String::new(),
+            title: title.into(),
+            art: Default::default(),
             platform: platform.map(str::to_string),
             developer: None,
-            year: None,
+            release_year: None,
             genres: Vec::new(),
-            running: false,
+            role: launcher.then(|| "launcher".to_string()),
+            icon: None,
         }
     }
 
@@ -368,7 +390,7 @@ mod tests {
 
     #[test]
     fn empty_and_single_group_libraries_are_not_worth_browsing() {
-        assert!(!worth_browsing(&[]));
+        assert!(!worth_browsing::<GameEntry>(&[]));
         assert!(!worth_browsing(&[game("l", "Steam", "steam", None, true)]));
         let one = [
             game("a", "Dota", "steam", None, false),
@@ -411,21 +433,21 @@ mod tests {
             "bump the reader when the file's version moves"
         );
 
-        let games: Vec<LibraryGame> = file["library"]
+        let games: Vec<GameEntry> = file["library"]
             .as_array()
             .expect("library")
             .iter()
-            .map(|e| LibraryGame {
+            .map(|e| GameEntry {
                 id: e["id"].as_str().expect("id").to_string(),
-                title: e["title"].as_str().expect("title").to_string(),
                 store: e["store"].as_str().expect("store").to_string(),
-                launcher: e["role"].as_str() == Some("launcher"),
-                icon: e["icon"].as_str().unwrap_or("").to_string(),
+                title: e["title"].as_str().expect("title").to_string(),
+                art: Default::default(),
                 platform: e["platform"].as_str().map(str::to_string),
                 developer: None,
-                year: None,
+                release_year: None,
                 genres: Vec::new(),
-                running: false,
+                role: e["role"].as_str().map(str::to_string),
+                icon: e["icon"].as_str().map(str::to_string),
             })
             .collect();
         let ids =
@@ -514,7 +536,7 @@ mod tests {
 
         for case in file["worth_browsing"].as_array().expect("worth_browsing") {
             let name = case["name"].as_str().expect("name");
-            let subset: Vec<LibraryGame> = match case["ids"].as_array() {
+            let subset: Vec<GameEntry> = match case["ids"].as_array() {
                 None => games.clone(),
                 Some(want) => want
                     .iter()
