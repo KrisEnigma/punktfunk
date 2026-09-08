@@ -429,6 +429,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The NixOS host unit PATH includes the system profile.** Nested gamescope
+  execs `steam` from `programs.steam`, and a closed PATH of bash/coreutils/pipewire
+  could not see it. Rebuild the NixOS configuration.
 - **Nix `punktfunk-gamescope` keeps `gamescopereaper`.** wrapProgram bakes that
   path into the compositor, and the prune dropped it, so Steam exited immediately.
   Rebuild the gamescope package.

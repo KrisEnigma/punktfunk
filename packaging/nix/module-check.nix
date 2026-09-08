@@ -303,6 +303,10 @@ let
         && has desktop "punktfunk-host" "/pf-stub/punktfunk-scripting/bin";
     }
     {
+      name = "the host unit PATH includes the system profile so nested steam resolves";
+      ok = has desktop "punktfunk-host" "system-path/bin";
+    }
+    {
       # …and only when it is actually installed, so `scripting.enable = false` does not put a
       # package the machine never built onto a unit's PATH.
       name = "a host without the runner does not carry it on PATH";
