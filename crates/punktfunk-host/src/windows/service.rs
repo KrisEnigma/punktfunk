@@ -296,9 +296,13 @@ fn run_service() -> Result<()> {
     std::thread::spawn(warn_if_public_network);
     let result = supervise(stop, session);
 
+    // Report the truth: `running` carries Win32(0), so a failed `supervise` used to stop as
+    // cleanly as an operator-requested stop, and the SCM log — and any failure action keyed on
+    // a non-zero exit — never saw the difference.
     let _ = status_handle.set_service_status(ServiceStatus {
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(u32::from(result.is_err())),
         ..running
     });
     // Leave the OnceLock events open: the SCM handler can still fire until process exit.
