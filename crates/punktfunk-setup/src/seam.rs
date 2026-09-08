@@ -188,6 +188,19 @@ impl SystemRunner {
     // trait so demo mode and the tests cannot be bypassed by accident.
     #[allow(clippy::disallowed_methods)]
     fn command(&self, program: &str) -> std::process::Command {
+        // Windows: a bare tool name becomes its System32 path. The engine runs elevated
+        // from the download directory, which `CreateProcess` searches before `%PATH%`.
+        #[cfg(windows)]
+        let program = &if program.contains(['\\', '/']) {
+            program.to_string()
+        } else {
+            let exe = if program.contains('.') {
+                program.to_string()
+            } else {
+                format!("{program}.exe")
+            };
+            crate::platform::windows::sys::system32(&exe)
+        };
         let mut c = std::process::Command::new(program);
         for (key, value) in &self.exports {
             c.env(key, value);

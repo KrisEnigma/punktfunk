@@ -73,7 +73,11 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// A store a non-admin planted before the first elevated run is a pre-trusted device.
 fn load(path: &Path) -> PairedClients {
+    if crate::planted::quarantine_planted_secret(path) {
+        return PairedClients::default();
+    }
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())

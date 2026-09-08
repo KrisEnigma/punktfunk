@@ -1823,6 +1823,12 @@ impl Encoder for AmfEncoder {
                     }
                 }
             }
+            // The entry goes in BEFORE the component takes the frame: the retrieve thread can
+            // pop for this frame the moment SubmitInput returns, and a late push pairs that AU
+            // with `(0, false, false)` and shifts every later one. A refusal takes it back.
+            lock(&inner.retrieve.out)
+                .pending
+                .push_back((captured.pts_ns, forced, recovery_anchor));
             let mut r = ((*(*inner.comp.0).vtbl).submit_input)(inner.comp.0, surf.0);
             // AMF_INPUT_FULL is "busy, drain and retry", not a wedge. Re-submit the same surface.
             if r == sys::AMF_INPUT_FULL {
@@ -1841,20 +1847,17 @@ impl Encoder for AmfEncoder {
                 // NEED_MORE_INPUT = accepted; no AU owed for this submit alone.
                 sys::AMF_OK | sys::AMF_NEED_MORE_INPUT => {}
                 sys::AMF_INPUT_FULL => {
+                    lock(&inner.retrieve.out).pending.pop_back();
                     self.force_kf = true; // retried frame stays an IDR candidate
                     bail!("AMF SubmitInput stayed AMF_INPUT_FULL past the drain budget — wedged");
                 }
                 other => {
+                    lock(&inner.retrieve.out).pending.pop_back();
                     self.force_kf = true;
                     bail!("AMF SubmitInput failed: {} ({other})", result_name(other));
                 }
             }
         }
-        // Recorded after the submit took, so the retrieve thread can never pair an AU with a
-        // frame the component refused.
-        lock(&inner.retrieve.out)
-            .pending
-            .push_back((captured.pts_ns, forced, recovery_anchor));
         Ok(())
     }
 

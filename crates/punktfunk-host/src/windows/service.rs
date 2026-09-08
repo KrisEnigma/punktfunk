@@ -552,7 +552,7 @@ unsafe fn spawn_host(
     let _ = unsafe { CreateEnvironmentBlock(&mut env_block, Some(primary), false) };
     // SAFETY: `env_block` is either still null (the call above failed) or the double-null-terminated
     // UTF-16 block `CreateEnvironmentBlock` just wrote — exactly the two states the helper accepts.
-    let merged = unsafe { crate::interactive::merged_env_block(env_block as *const u16) };
+    let merged = unsafe { crate::interactive::merged_env_block(env_block as *const u16, false) };
     if !env_block.is_null() {
         // SAFETY: `env_block` is the live block from the call above, destroyed exactly once and not
         // read after — `merged` owns its own copy of the parsed entries.
@@ -1609,8 +1609,9 @@ fn sc(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// System32 path for a bare tool: `service install` runs elevated.
 fn run_quiet(cmd: &str, args: &[&str]) -> bool {
-    std::process::Command::new(cmd)
+    std::process::Command::new(crate::install::resolve_tool(cmd))
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1672,7 +1673,14 @@ fn maybe_boot_loop_rollback(restarts: u32, attempted: &mut bool) {
         );
         return;
     };
-    // Downloaded file was hash/publisher-verified and is DACL-protected. This re-check is signature only.
+    // The re-check is signature only, so the directory must still be admin-only: a planted
+    // `updates\` would otherwise make a self-signed exe the rollback target.
+    if let Some(dir) = previous.parent() {
+        if let Err(e) = crate::install::ensure_admin_only_source(dir) {
+            tracing::error!(dir = %dir.display(), error = %format!("{e:#}"), "not rolling back");
+            return;
+        }
+    }
     if let Err(e) = crate::update::windows::verify_authenticode(&previous, &[], None) {
         tracing::error!(
             installer = %previous.display(),

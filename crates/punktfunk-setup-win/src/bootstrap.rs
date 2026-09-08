@@ -55,12 +55,8 @@ fn extract_and_run(exe: &Path, data: &[u8], payload: &[u8]) -> Result<ExitCode, 
     #[cfg(windows)]
     {
         // Absolute: `CreateProcess` searches the cwd before `%PATH%`, and setup runs elevated.
-        // Never the bare name — that is the search this avoids.
-        let root = std::env::var("SystemRoot")
-            .or_else(|_| std::env::var("WINDIR"))
-            .unwrap_or_else(|_| r"C:\Windows".to_string());
-        let icacls = format!(r"{root}\System32\icacls.exe");
-        let _ = std::process::Command::new(icacls)
+        // The target is `root`, the extract dir — never `SystemRoot`.
+        let _ = std::process::Command::new(sys::system32("icacls.exe"))
             .arg(&root)
             .args(["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"])
             .stdout(std::process::Stdio::null())
@@ -101,7 +97,16 @@ fn fresh_root() -> Result<PathBuf, String> {
     .map(PathBuf::from)
     .ok_or("neither ProgramData nor LOCALAPPDATA is set")?;
     let base = data.join("punktfunk").join("setup");
-    std::fs::create_dir_all(&base).map_err(|e| format!("{}: {e}", base.display()))?;
+    if elevated {
+        // Re-own and lock both ancestors first. `%ProgramData%` lets any account create
+        // `punktfunk\setup` ahead of the first install and keep FILE_DELETE_CHILD over it,
+        // which renames a protected root away mid-extract. Junctions are refused.
+        for dir in [base.parent().unwrap_or(&base), base.as_path()] {
+            pf_paths::create_private_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+    } else {
+        std::fs::create_dir_all(&base).map_err(|e| format!("{}: {e}", base.display()))?;
+    }
     let root = base.join(format!("{}-{}", std::process::id(), sys::random_hex(4)?));
     if elevated {
         protected_dir(&root)?;
