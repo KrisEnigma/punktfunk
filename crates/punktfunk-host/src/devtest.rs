@@ -753,6 +753,7 @@ pub fn audio_probe(args: &[String]) -> Result<()> {
 /// Stamping needs SYSTEM (MMDevices ACL): service account or PsExec.
 #[cfg(target_os = "windows")]
 pub fn pad_endpoint(args: &[String]) -> Result<()> {
+    use crate::audio::pad_capture as pc;
     use crate::audio::pad_endpoint as pe;
     let idx: u8 = args
         .iter()
@@ -818,12 +819,12 @@ pub fn pad_endpoint(args: &[String]) -> Result<()> {
                 .iter()
                 .skip_while(|a| *a != "--pair")
                 .nth(1)
-                .map_or(pe::TonePair::Back, |s| pe::TonePair::parse(s));
+                .map_or(pc::TonePair::Back, |s| pc::TonePair::parse(s));
             println!(
                 "pad-endpoint tone: {hz} Hz into the {} of {endpoint_id} for {secs}s",
                 pair.label()
             );
-            pe::render_test_tone(&endpoint_id, secs, hz, pair)?;
+            pc::render_test_tone(&endpoint_id, secs, hz, pair)?;
             println!(
                 "pad-endpoint tone: done. A connected client with pad audio enabled should have \
                  buzzed; the host log shows whether the gate opened."
@@ -844,7 +845,7 @@ pub fn pad_endpoint(args: &[String]) -> Result<()> {
                 },
             };
             println!("pad-endpoint capture: listening on {endpoint_id} for {secs}s");
-            pe::capture_probe(&endpoint_id, secs)
+            pc::capture_probe(&endpoint_id, secs)
         }
         Some("status") => pe::print_status(idx),
         // DEVICE_STATE_DISABLED. Host parks pads hidden: idle libScePad titles stall on a
