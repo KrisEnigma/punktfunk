@@ -42,10 +42,7 @@ use windows::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
     FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
 };
-use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, SetEvent, WaitForSingleObject, PROCESS_DUP_HANDLE,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-};
+use windows::Win32::System::Threading::{GetCurrentProcess, SetEvent, WaitForSingleObject};
 
 /// `SECTION_MAP_READ | SECTION_MAP_WRITE` — what the pad driver maps. Granted in
 /// [`PadChannel::deliver_to`] instead of `DUPLICATE_SAME_ACCESS`, so the remote handle
@@ -555,33 +552,15 @@ impl PadChannel {
         Some(pid)
     }
 
-    /// Duplicate the DATA section into `pid` after `verify_is_wudfhost`, then publish
-    /// handle value + owning pid, bumping `handle_seq` last. An unconsumed duplicate
-    /// dies with the target (nothing to reap after the duplication).
+    /// Duplicate the DATA section into a verified WUDFHost `pid`, then publish handle
+    /// value + owning pid, bumping `handle_seq` last. An unconsumed duplicate dies with
+    /// the target (nothing to reap after the duplication).
     ///
     /// Returns `(handle_seq, process)` — caller retains the handle so [`Self::pump`]
     /// can tell a UMDF host restart from a different claimant without trusting a pid.
+    /// The `SYNCHRONIZE` right that makes that probe work comes with the shared open.
     fn deliver_to(&self, pid: u32) -> Result<(u32, OwnedHandle)> {
-        // SAFETY: plain FFI; the handle (checked by `?`) is owned solely here and moved into the
-        // `OwnedHandle` (single owner, closes on drop); `verify_is_wudfhost` borrows it for the
-        // synchronous check and forms no lasting alias. `SYNCHRONIZE` is requested so the retained
-        // handle doubles as the incumbent-liveness probe ([`Delivered::exited`]) — the same thing the
-        // frame channel's `ChannelBroker` asks for.
-        let process = unsafe {
-            let h = OpenProcess(
-                PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                false,
-                pid,
-            )
-            .context("OpenProcess(PROCESS_DUP_HANDLE) on the mailbox-reported pid")?;
-            let process = OwnedHandle::from_raw_handle(h.0 as _);
-            pf_capture::verify_is_wudfhost(
-                HANDLE(process.as_raw_handle()),
-                pid,
-                "gamepad-channel",
-            )?;
-            process
-        };
+        let process = pf_capture::open_wudfhost(pid, "gamepad-channel")?;
         let mut remote = HANDLE::default();
         // SAFETY: `self.data.raw_handle()` is the live section handle this channel owns;
         // `process` is the live PROCESS_DUP_HANDLE target; `&mut remote` is a valid out-param.
@@ -930,6 +909,9 @@ fn cm_problem_hint(problem: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
 
     /// Pin [`Delivered::exited`] to the process object, not the pid.
     /// Alive refuses a takeover; exited still lets UMDF restart re-deliver.

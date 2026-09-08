@@ -135,6 +135,33 @@ pub unsafe fn verify_is_wudfhost(process: HANDLE, wudf_pid: u32, what: &str) -> 
     Ok(())
 }
 
+/// Open `pid` as a handle-duplication target and prove it is the system WUDFHost.
+///
+/// The mask and the check travel together: `DUP_HANDLE` to place section handles,
+/// `QUERY_LIMITED_INFORMATION` for the image-path proof, `SYNCHRONIZE` so the
+/// retained handle doubles as the incumbent-liveness probe. `what` names the
+/// channel in the error. Brokers diverge after this point — what they duplicate
+/// and with which rights is theirs.
+pub fn open_wudfhost(pid: u32, what: &str) -> Result<OwnedHandle> {
+    if pid == 0 {
+        bail!("no WUDFHost pid for the {what} sections");
+    }
+    // SAFETY: `pid` is a copy. The handle (`?`-checked) is owned solely here and moved into
+    // `OwnedHandle` (single owner, closes on drop); `verify_is_wudfhost` borrows it for the
+    // synchronous check and forms no lasting alias.
+    unsafe {
+        let h = OpenProcess(
+            PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+        .with_context(|| format!("OpenProcess(PROCESS_DUP_HANDLE) on the {what} pid"))?;
+        let process = OwnedHandle::from_raw_handle(h.0 as _);
+        verify_is_wudfhost(HANDLE(process.as_raw_handle()), pid, what)?;
+        Ok(process)
+    }
+}
+
 // The frame-delivery endpoint: `try_consume` and the `Capturer` surface.
 #[path = "idd_push/capturer.rs"]
 mod capturer;
