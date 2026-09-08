@@ -315,6 +315,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **`punktfunk-host ctl console-url` is back, and now prints a `file://` page instead of a bearer
+  URL.** It writes a 0600 login page under `$XDG_RUNTIME_DIR` carrying the handoff ticket, so the
+  Omarchy launchers open the console already logged in without the ticket ever reaching argv, where
+  `/proc/<pid>/cmdline` shows it to every other local user. Launch a browser at the URL it prints;
+  the verb is Unix-only and fails cleanly when `$XDG_RUNTIME_DIR` is unset, so keep a bare
+  `https://localhost:47992` fallback in any launcher you wrote against it.
 - **Error messages follow one register rule across the stack (`docs/writing.md` §4).** Operator
   lines name the operation, screen text is a plain sentence with the next move, and the
   management API's `error` field is now screen text because the console shows it verbatim —

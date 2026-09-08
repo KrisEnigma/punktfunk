@@ -120,6 +120,14 @@ fn run(args: &[&str], json: bool) -> Result<()> {
             out(json, &v, |_| println!("PIN submitted"));
             Ok(())
         }
+        // Not an API call at all: a stub the console can verify with the token it already holds.
+        // See `console_stub` — the point is that reading the 0600 token IS the proof.
+        #[cfg(unix)]
+        "console-url" => {
+            let url = console_stub()?;
+            out(json, &json!({ "url": url }), move |_| println!("{url}"));
+            Ok(())
+        }
         "clients" => {
             let c = Client::connect(None)?;
             // Both planes, labelled. A one-plane list is how "I unpaired it and it still connects" happens.
@@ -588,6 +596,103 @@ fn render_stats(v: &Value) {
     }
 }
 
+/// Write a one-shot login page for the browser to open, and return its `file://` URL.
+///
+/// **What is being trusted.** The ticket is keyed by the **mgmt token**: a 0600 file inside the
+/// 0700 config dir, readable only by the uid the host runs as. Whoever can read it can already
+/// drive the whole admin API directly — it is the credential the console's own proxy presents —
+/// so letting them skip a password they could simply read widens nothing. A LAN visitor without a
+/// ticket still meets the login page.
+///
+/// **Why a file and not the URL.** `/proc/<pid>/cmdline` is world-readable, so a ticket passed to
+/// the browser as an argument is legible to every other local user for its whole lifetime. The
+/// ticket therefore lives in a 0600 file under `$XDG_RUNTIME_DIR` — per-user, 0700, wiped at
+/// logout — and only its PATH reaches argv. No runtime dir means no private place to put it, so
+/// this fails and the caller opens the bare console URL instead.
+///
+/// TTL and single-use are the console's to enforce, so a stub left behind by an earlier launch is
+/// already spent.
+#[cfg(unix)]
+fn console_stub() -> Result<String> {
+    let dir = pf_paths::config_dir();
+    let token = crate::mgmt_token::read_persisted(&dir).ok_or_else(|| {
+        Failure::unreachable(format!(
+            "no management token in {} — the console shares this file, so without it there is \
+             nothing for a handoff to prove. Start the host once and retry.",
+            dir.join("mgmt-token").display()
+        ))
+    })?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut raw = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut raw);
+    let nonce = hex::encode(raw);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
+        Failure::unreachable(
+            "no XDG_RUNTIME_DIR — there is nowhere to put a ticket that another local user cannot \
+             read. Open the console and log in instead."
+                .to_string(),
+        )
+    })?;
+    let ticket = handoff_ticket(&token, ts, &nonce)?;
+    // The console's own port, not the mgmt one. It is not published anywhere the way
+    // `mgmt-endpoint` is, so the documented default stands until somebody moves it.
+    let target = format!("https://localhost:47992/_auth/handoff?t={ticket}");
+    write_stub(&std::path::Path::new(&runtime).join("punktfunk"), &target)
+}
+
+/// The signed half: `<unix-seconds>.<nonce>.<HMAC-SHA256>` over `pf-console-handoff:v1:ts:nonce`.
+///
+/// Kept alone because it is the cross-language contract — `handoffMessage` in
+/// `web/server/util/handoff.ts` builds the same string, and the console recomputes this MAC with
+/// its own copy of the token. The nonce is what keeps two launches in the same second from
+/// colliding in the console's replay set.
+#[cfg(unix)]
+fn handoff_ticket(token: &str, ts: u64, nonce: &str) -> Result<String> {
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(token.as_bytes())
+        .map_err(|e| Failure::api(format!("key the handoff HMAC: {e}")))?;
+    mac.update(format!("pf-console-handoff:v1:{ts}:{nonce}").as_bytes());
+    Ok(format!(
+        "{ts}.{nonce}.{}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
+}
+
+/// Put `target` behind a 0600 page in `dir`, and return the `file://` URL of that page.
+///
+/// The directory is forced to 0700 because it is the only thing standing between the ticket and
+/// another local user; the file is opened 0600 rather than chmod'ed afterwards, since the window
+/// between create and chmod is the exposure this whole path exists to close.
+#[cfg(unix)]
+fn write_stub(dir: &std::path::Path, target: &str) -> Result<String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let path = dir.join("console-open.html");
+    let io = |e: std::io::Error| Failure::api(format!("write {}: {e}", path.display()));
+    std::fs::create_dir_all(dir).map_err(io)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
+    // No escaping: every byte of the ticket is `[0-9a-f.]` by construction, so it is inert in an
+    // attribute and in a href. The link is the fallback for a browser that ignores refresh.
+    let page = format!(
+        "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Punktfunk console</title>\n\
+         <meta http-equiv=\"refresh\" content=\"0;url={target}\">\n\
+         <p><a href=\"{target}\">Open the Punktfunk console</a>\n"
+    );
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(io)?;
+    f.write_all(page.as_bytes()).map_err(io)?;
+    Ok(format!("file://{}", path.display()))
+}
+
 fn grants_for(preset: &str) -> Result<u32> {
     match preset {
         "full" => Ok(GRANT_PRESET_FULL),
@@ -861,6 +966,11 @@ DEVICES
     access <FP> <full|controller|view>
     unpair <FP> | unpair --all [--yes]
 
+CONSOLE
+    console-url                  write a one-shot login page under $XDG_RUNTIME_DIR and print its
+                                 file:// URL, so a browser opened at it lands already logged in.
+                                 The ticket stays out of argv, where every local user can read it.
+
 DISPLAYS
     display                      the virtual-display policy, every preset, and the live displays.
                                  `displays` is always empty on wlroots — the registry passes those
@@ -893,6 +1003,48 @@ accepted on the command line or from the environment."#;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the cross-language contract. The expected MAC was computed outside this code (openssl
+    /// and python agree), so a change to the signed string fails here instead of silently handing
+    /// the console tickets it will reject.
+    #[cfg(unix)]
+    #[test]
+    fn the_ticket_signs_what_the_console_verifies() {
+        let t = handoff_ticket("test-token", 1_700_000_000, "abc123").unwrap();
+        assert_eq!(
+            t,
+            "1700000000.abc123.754d195691c7b24f4a6b8966541deca3c958919e7d33da9e0d4e3acfebf6df2c"
+        );
+    }
+
+    /// The ticket must never be readable by another local user — that is the whole reason the URL
+    /// stopped being passed as an argument.
+    #[cfg(unix)]
+    #[test]
+    fn the_stub_is_private_and_overwrites_cleanly() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("punktfunk");
+
+        let url = write_stub(&dir, "https://localhost:47992/_auth/handoff?t=1.a.b").unwrap();
+        let path = dir.join("console-open.html");
+        assert_eq!(url, format!("file://{}", path.display()));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let page = std::fs::read_to_string(&path).unwrap();
+        assert!(page.contains("t=1.a.b"), "the ticket reaches the browser");
+
+        // A second launch must not leave the previous ticket behind in the tail of the file.
+        write_stub(&dir, "https://localhost:47992/_auth/handoff?t=2.c.d").unwrap();
+        let page = std::fs::read_to_string(&path).unwrap();
+        assert!(!page.contains("t=1.a.b"), "the spent ticket is gone");
+    }
 
     #[test]
     fn presets_map_to_the_hosts_own_masks() {
