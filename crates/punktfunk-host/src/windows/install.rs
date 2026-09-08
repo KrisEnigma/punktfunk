@@ -464,7 +464,7 @@ fn web_password() -> Result<()> {
             "Couldn't read the console password, which only Administrators may see. Run this from an elevated PowerShell."
         ),
         std::io::ErrorKind::NotFound => anyhow::anyhow!(
-            "This PC has no console password yet. It's written when the host installs, so reinstall the host to get one."
+            "Couldn't find the console password. Run this from an elevated PowerShell — a normal one can't see the file even when it is there."
         ),
         _ => anyhow::anyhow!("Couldn't read the console password — {e}"),
     })?;
