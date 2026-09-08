@@ -429,6 +429,7 @@ impl EncoderProxy {
             pts_ns: pts_from_qpc(t.qpc_pts),
             keyframe: t.flags & au::AU_KEYFRAME != 0,
             recovery_anchor: t.flags & au::AU_RECOVERY_ANCHOR != 0,
+            recovery_point: t.flags & au::AU_RECOVERY_POINT != 0,
             chunk_aligned: t.flags & au::AU_CHUNK_ALIGNED != 0,
             first: t.flags & au::AU_FIRST != 0,
             last: t.flags & au::AU_LAST != 0,
@@ -516,6 +517,7 @@ impl Encoder for EncoderProxy {
             pts_ns: first.pts_ns,
             keyframe: first.keyframe,
             recovery_anchor: first.recovery_anchor,
+            recovery_point: first.recovery_point,
             chunk_aligned: first.chunk_aligned,
         };
         let mut last = first.last;

@@ -53,6 +53,11 @@ pub struct EncodedFrame {
     /// `punktfunk_core::packet::USER_FLAG_RECOVERY_ANCHOR`. After RFI the host
     /// suppresses IDR, so without this flag the freeze only lifts on a later IDR.
     pub recovery_anchor: bool,
+    /// Boundary of an encoder-driven intra refresh wave: its start AU and its close AU.
+    /// The pump tags `punktfunk_core::packet::USER_FLAG_RECOVERY_POINT`; the client lifts
+    /// its freeze on the second mark since a loss, so a wave that starts after the loss
+    /// heals in one cycle. Only the Vulkan backend sets it.
+    pub recovery_point: bool,
     /// Shard-aligned self-delimiting chunks ([`Encoder::set_wire_chunking`]).
     /// The session stamps `punktfunk_core::packet::USER_FLAG_CHUNK_ALIGNED`.
     /// Only PyroWave sets it.
@@ -71,6 +76,8 @@ pub struct AuChunk {
     pub keyframe: bool,
     /// Same meaning as [`EncodedFrame::recovery_anchor`].
     pub recovery_anchor: bool,
+    /// Same meaning as [`EncodedFrame::recovery_point`].
+    pub recovery_point: bool,
     /// Same meaning as [`EncodedFrame::chunk_aligned`].
     pub chunk_aligned: bool,
     pub first: bool,
@@ -87,6 +94,7 @@ impl AuChunk {
             pts_ns: f.pts_ns,
             keyframe: f.keyframe,
             recovery_anchor: f.recovery_anchor,
+            recovery_point: f.recovery_point,
             chunk_aligned: f.chunk_aligned,
             first: true,
             last: true,
@@ -703,6 +711,7 @@ mod tests {
             pts_ns: 42,
             keyframe: true,
             recovery_anchor: true,
+            recovery_point: false,
             chunk_aligned: false,
         });
         assert_eq!(c.data, vec![0, 0, 0, 1, 0x40]);

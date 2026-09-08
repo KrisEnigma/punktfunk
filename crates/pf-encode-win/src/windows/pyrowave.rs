@@ -571,6 +571,7 @@ impl PyroWaveEncoder {
             pts_ns: frame.pts_ns,
             keyframe: true,
             recovery_anchor: false,
+            recovery_point: false,
             chunk_aligned: self.wire_chunk.is_some(),
         });
         Ok(())

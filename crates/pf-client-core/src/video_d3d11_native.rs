@@ -268,6 +268,16 @@ impl NativeD3d11Decoder {
         std::mem::take(&mut self.want_recovery)
     }
 
+    /// The gate lifted on intra refresh marks: the planner's damaged-chain marks are stale
+    /// (`CleanLedger::clear`).
+    pub(crate) fn forgive_unclean(&mut self) {
+        match &mut self.planner {
+            Planner::H264(p) => p.forgive_unclean(),
+            Planner::H265(p) => p.forgive_unclean(),
+            Planner::Av1(p) => p.forgive_unclean(),
+        }
+    }
+
     /// Plan, convert, and submit one access unit.
     ///
     /// `Ok(Some)` is a picture in the hand-off. `Ok(None)` is not an error: concealment

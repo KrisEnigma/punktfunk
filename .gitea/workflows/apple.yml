@@ -169,10 +169,12 @@ jobs:
           "$RUSTUP" target add aarch64-apple-darwin x86_64-apple-darwin
           # The iOS/tvOS simulator slices the two scheme builds below link against.
           "$RUSTUP" target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-          # tvOS is tier-3 (no prebuilt std) — build-xcframework.sh compiles it with nightly
-          # + -Zbuild-std, the same way the distribute and screenshots jobs do.
-          "$RUSTUP" toolchain install nightly --profile minimal
-          "$RUSTUP" component add rust-src --toolchain nightly
+          # tvOS is tier-3 (no prebuilt std) — build-xcframework.sh compiles it with the PINNED
+          # nightly + -Zbuild-std, the same way the distribute and screenshots jobs do. The
+          # date lives in the script; rust-src must land on that toolchain, not the channel.
+          NIGHTLY="$(sed -n 's/^NIGHTLY=//p' scripts/build-xcframework.sh)"
+          "$RUSTUP" toolchain install "$NIGHTLY" --profile minimal
+          "$RUSTUP" component add rust-src --toolchain "$NIGHTLY"
 
       # Shared compile cache. The script handles the macOS side (user-prefix install +
       # GITHUB_PATH, bsdtar globbing) — see scripts/ci/ensure-sccache.sh.

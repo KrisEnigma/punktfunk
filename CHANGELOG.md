@@ -62,6 +62,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`EncodedFrame::recovery_point` marks an encoder-driven intra refresh wave.** Vulkan Video
+  (RADV), the native VAAPI session (AMD and Intel) and NVENC (Windows, Linux and the display
+  driver, whose AU flags gained `AU_RECOVERY_POINT`) answer a reference invalidation they cannot
+  anchor with a row-based wave instead of an IDR, tagging the wave's start and close AU
+  `USER_FLAG_RECOVERY_POINT` so the client's existing two-mark lift heals in one cycle without
+  the bitrate spike. Nothing changes on the wire or for a backend that leaves the field `false`;
+  `PUNKTFUNK_INTRA_REFRESH=0` restores the IDR, `PUNKTFUNK_IR_PERIOD_FRAMES` pins the cycle length
+  in frames. A client with a bitstream planner forgets its damaged-chain marks on such a lift
+  (`ReanchorGate::lifted_by_marks`), or every later host anchor would be refused until an IDR.
 - **`Console::focus_announcement` names the focused row for a screen reader.** The Skia console
   has no accessibility node tree, so the driver hands the host a string for home, the library and
   settings (`None` elsewhere) and Android speaks it through the new `{"announce": …}` event on
@@ -414,6 +423,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Deleting a Moonlight device's access record ends its live session instead of widening it
+  to full control.** The GameStream control thread read the deletion as "no record, ungoverned"
+  and lifted every restriction mid-stream; it now ends the session as the native plane does, and
+  a fresh launch is ungoverned as before. Nothing to do — a record still only exists once the
+  console can create one for a Moonlight row.
 - **AV1 is offered again on AMD and Intel Linux hosts.** The advertisement asked only the native
   VAAPI probe, which answers for H.264 and HEVC, so dropping libavcodec also dropped the AV1 bit
   every packaged build can still open through Vulkan Video; the probe now covers both arms, caches
@@ -771,12 +785,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **NVENC no longer pins a stream at the 10 Mbps floor.** When the bitrate search opened only
   after split encode was disabled, the floor was cached as the codec's bitrate ceiling and
   clamped every later open for the life of the process. Nothing to do.
+- **A refused AMF or QSV submit forces the next frame to an IDR.** The LTR mirror and a queued
+  force were committed before the encoder took the frame, so a failed surface left the mirror
+  claiming a mark the hardware never made, and AMF's drain could pair every later AU with the
+  wrong frame's pts. Nothing to do.
 - **A frame the FEC wire cannot address is dropped, not corrupted.** Past 255 data shards per
   block `255 - k` underflowed and `fecInfo`'s 10-bit k truncated, which a large IDR at the
   ANNOUNCE packetSize floor reaches. Raise the client's packetSize if the log names it.
-- **AMF no longer pairs an access unit with a zero timestamp under load.** The frame's metadata was
-  recorded after the submit, so a preemption between the two let the retrieve thread pop an empty
-  queue and shift every later frame's timestamp and recovery flag by one. Nothing to do.
 - **A browser that opens a session and never speaks gives its slot back.** The WebTransport
   handshake reads were unbounded while holding a session permit, so four idle connections blocked
   every native session; they now time out after 10 s like the native plane. Nothing to do.

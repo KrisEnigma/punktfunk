@@ -1324,6 +1324,9 @@ pub mod encode {
         /// The AU's chunks are cut on the codec's own window boundaries (PyroWave); the host
         /// forwards it as the wire's chunk-aligned user flag.
         pub const AU_CHUNK_ALIGNED: u32 = 1 << 4;
+        /// Start or close of an encoder-driven intra refresh wave; the host forwards it as the
+        /// wire's recovery-point user flag. A driver that never waves leaves it clear.
+        pub const AU_RECOVERY_POINT: u32 = 1 << 5;
 
         /// [`AuSlot::state`]: the encode thread may take this slot. There is no WRITING state —
         /// the encode thread fills the heap before it claims a slot.
@@ -3700,10 +3703,11 @@ mod tests {
             AU_KEYFRAME,
             AU_RECOVERY_ANCHOR,
             AU_CHUNK_ALIGNED,
+            AU_RECOVERY_POINT,
         ];
         println!("AU flags: {flags:?}; states: {FREE} {PUBLISHED} {READING}");
-        assert_eq!(flags, [1, 2, 4, 8, 16]);
-        assert_eq!(flags.iter().fold(0, |a, b| a | b), 0b1_1111);
+        assert_eq!(flags, [1, 2, 4, 8, 16, 32]);
+        assert_eq!(flags.iter().fold(0, |a, b| a | b), 0b11_1111);
         // A whole non-key AU is FIRST|LAST — the two must not alias.
         assert_eq!(AU_FIRST | AU_LAST, 3);
         assert_eq!([FREE, PUBLISHED, READING], [0, 1, 2]);

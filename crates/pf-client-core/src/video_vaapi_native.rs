@@ -451,6 +451,16 @@ impl NativeVaapiDecoder {
         std::mem::take(&mut self.recovery_request)
     }
 
+    /// The gate lifted on intra refresh marks: the planner's damaged-chain marks are stale
+    /// (`CleanLedger::clear`).
+    pub(crate) fn forgive_unclean(&mut self) {
+        match &mut self.planner {
+            Planner::H264(p) => p.forgive_unclean(),
+            Planner::H265(p) => p.forgive_unclean(),
+            Planner::Av1(p) => p.forgive_unclean(),
+        }
+    }
+
     fn drain_releases(&mut self) {
         drain_releases_into(
             &self.release_rx,
