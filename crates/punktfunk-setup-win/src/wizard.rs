@@ -241,7 +241,7 @@ pub struct WizardRoot {
 
 impl WizardRoot {
     pub fn new(preset: WinPreset, seams: Seams) -> WizardRoot {
-        let mut choices = WinChoices::derive(&preset.facts);
+        let mut choices = WinChoices::derive(&preset.facts, preset.artifact);
         // The fresh-host password row arrives pre-filled (D9): real RNG, 24 hex chars — the
         // PowerShell RNG hack dies here. It travels via an ACL'd temp file, never argv.
         if preset.artifact == Artifact::Host

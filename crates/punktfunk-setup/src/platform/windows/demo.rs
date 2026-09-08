@@ -203,7 +203,7 @@ mod tests {
         for name in WIN_PRESETS {
             let preset =
                 win_preset(name).unwrap_or_else(|| panic!("{name} is advertised but not built"));
-            let choices = WinChoices::derive(&preset.facts);
+            let choices = WinChoices::derive(&preset.facts, preset.artifact);
             let built = plan::build(&preset.facts, &choices, preset.artifact, preset.uninstall);
             assert!(!built.phases.is_empty(), "{name} produced no phases");
         }
@@ -242,12 +242,12 @@ mod tests {
         let sunshine = win_preset("win11-sunshine").unwrap();
         assert!(sunshine.facts.needs_coexistence());
         let public = win_preset("win11-public").unwrap();
-        let choices = WinChoices::derive(&public.facts);
+        let choices = WinChoices::derive(&public.facts, Artifact::Host);
         assert!(choices.needs_network_step(&public.facts));
         assert_eq!(public.facts.networks[0].category, NetCategory::Public);
         // The fresh box's Private network must NOT trigger it.
         let fresh = win_preset("win11-fresh").unwrap();
-        let choices = WinChoices::derive(&fresh.facts);
+        let choices = WinChoices::derive(&fresh.facts, Artifact::Host);
         assert!(!choices.needs_network_step(&fresh.facts));
     }
 }

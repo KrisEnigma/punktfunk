@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::seam::Env;
 
 use super::args::{InnoArgs, TaskFlag};
+use super::plan::Artifact;
 use super::{NetCategory, WinFacts};
 
 /// D12. `Skip` is the silent default: a profile change needs a consent surface.
@@ -86,8 +87,14 @@ pub struct WinChoices {
 }
 
 impl WinChoices {
-    pub fn derive(facts: &WinFacts) -> WinChoices {
-        let upgrade = facts.installed.is_some();
+    /// Defaults for installing `artifact`.
+    ///
+    /// The artifact is not decoration: host and client are two products under two registry
+    /// keys (D1), so reading `facts.installed` unconditionally made a client install inherit
+    /// the HOST's upgrade verdict and its install directory.
+    pub fn derive(facts: &WinFacts, artifact: Artifact) -> WinChoices {
+        let installed = facts.installed_for(artifact);
+        let upgrade = installed.is_some();
         WinChoices {
             install_driver: true,
             install_gamepad: true,
@@ -102,9 +109,7 @@ impl WinChoices {
             tray_autostart: if upgrade { facts.tray_autostart } else { true },
             desktop_icon: false,
             web_password: None,
-            dir: facts
-                .installed
-                .as_ref()
+            dir: installed
                 .and_then(|i| i.location.clone())
                 .map(PathBuf::from),
             network: NetworkAnswer::Skip,
@@ -221,7 +226,7 @@ mod tests {
 
     #[test]
     fn fresh_defaults_match_the_iss_task_table() {
-        let c = WinChoices::derive(&fresh_facts());
+        let c = WinChoices::derive(&fresh_facts(), Artifact::Host);
         assert!(c.install_driver && c.install_gamepad && c.install_hdr_layer);
         assert_eq!(c.gamestream, Some(false));
         assert_eq!(c.allow_public_fw, Some(false));
@@ -233,7 +238,7 @@ mod tests {
     // Persisted settings pass nothing; observable ones pre-fill from the box.
     #[test]
     fn upgrade_defaults_leave_box_state_alone() {
-        let c = WinChoices::derive(&upgrade_facts());
+        let c = WinChoices::derive(&upgrade_facts(), Artifact::Host);
         assert_eq!(c.gamestream, None);
         assert_eq!(c.allow_public_fw, None);
         assert!(!c.tray_autostart);
@@ -246,7 +251,7 @@ mod tests {
 
     #[test]
     fn an_explicit_task_overrides_even_on_upgrade() {
-        let mut c = WinChoices::derive(&upgrade_facts());
+        let mut c = WinChoices::derive(&upgrade_facts(), Artifact::Host);
         let args = InnoArgs::parse(&[r#"/MERGETASKS="allowpublicfw""#.to_string()]);
         let warnings = c.apply(&args, &Env::default());
         assert!(warnings.is_empty());
@@ -256,13 +261,13 @@ mod tests {
 
     #[test]
     fn tasks_replaces_and_mergetasks_merges_over_defaults() {
-        let mut c = WinChoices::derive(&fresh_facts());
+        let mut c = WinChoices::derive(&fresh_facts(), Artifact::Host);
         let replace = InnoArgs::parse(&["/TASKS=installdriver".to_string()]);
         c.apply(&replace, &Env::default());
         assert!(c.install_driver);
         assert!(!c.install_gamepad && !c.start_service && !c.tray_autostart);
 
-        let mut c = WinChoices::derive(&fresh_facts());
+        let mut c = WinChoices::derive(&fresh_facts(), Artifact::Host);
         let merge = InnoArgs::parse(&[r#"/MERGETASKS="!trayicon""#.to_string()]);
         c.apply(&merge, &Env::default());
         assert!(!c.tray_autostart);
@@ -271,21 +276,21 @@ mod tests {
 
     #[test]
     fn an_unknown_task_warns_and_changes_nothing() {
-        let mut c = WinChoices::derive(&fresh_facts());
+        let mut c = WinChoices::derive(&fresh_facts(), Artifact::Host);
         let args = InnoArgs::parse(&["/MERGETASKS=frobnicate".to_string()]);
         let warnings = c.apply(&args, &Env::default());
         assert_eq!(warnings, ["unknown task 'frobnicate' ignored"]);
-        assert_eq!(c, WinChoices::derive(&fresh_facts()));
+        assert_eq!(c, WinChoices::derive(&fresh_facts(), Artifact::Host));
     }
 
     #[test]
     fn dir_is_honoured_fresh_and_ignored_with_a_warning_on_upgrade() {
-        let mut c = WinChoices::derive(&fresh_facts());
+        let mut c = WinChoices::derive(&fresh_facts(), Artifact::Host);
         let args = InnoArgs::parse(&[r"/DIR=D:\pf".to_string()]);
         assert!(c.apply(&args, &Env::default()).is_empty());
         assert_eq!(c.dir.as_ref().unwrap().to_str().unwrap(), r"D:\pf");
 
-        let mut c = WinChoices::derive(&upgrade_facts());
+        let mut c = WinChoices::derive(&upgrade_facts(), Artifact::Host);
         let warnings = c.apply(&args, &Env::default());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].starts_with("/DIR ignored"));
@@ -297,13 +302,13 @@ mod tests {
 
     #[test]
     fn env_twins_read_one_and_zero_and_flags_overwrite_them() {
-        let mut c = WinChoices::derive(&fresh_facts());
+        let mut c = WinChoices::derive(&fresh_facts(), Artifact::Host);
         let env = Env::of(&[("PUNKTFUNK_INSTALL_TRAY", "0")]);
         c.apply(&InnoArgs::parse(&[]), &env);
         assert!(!c.tray_autostart);
 
         // A task flag wins over the twin (env, then args).
-        let mut c = WinChoices::derive(&fresh_facts());
+        let mut c = WinChoices::derive(&fresh_facts(), Artifact::Host);
         let args = InnoArgs::parse(&[r#"/MERGETASKS="trayicon""#.to_string()]);
         c.apply(&args, &env);
         assert!(c.tray_autostart);
@@ -316,7 +321,7 @@ mod tests {
             name: "Cafe".into(),
             category: NetCategory::Public,
         }];
-        let mut c = WinChoices::derive(&facts);
+        let mut c = WinChoices::derive(&facts, Artifact::Host);
         assert!(c.needs_network_step(&facts));
         c.allow_public_fw = Some(true);
         assert!(!c.needs_network_step(&facts));
