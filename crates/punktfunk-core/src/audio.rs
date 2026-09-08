@@ -381,11 +381,12 @@ pub struct JitterTuning {
     /// back toward. The adaptive floor may raise the live target above this; it never goes below.
     pub base_target_ms: u32,
     pub max_target_ms: u32,
-    /// Slack above the live target before drop-oldest trimming. Sheds at the middle of this band
-    /// ([`JitterTuning::shed_excess_ms`]). If the trim point sits below the shed point, drift
-    /// correction never fires and every correction is the audible drop it was meant to replace.
+    /// Slack above the live target before the depth AVERAGE is trimmed back. Sheds at the middle
+    /// of this band ([`JitterTuning::shed_excess_ms`]). If the trim point sits below the shed
+    /// point, drift correction never fires and every correction is the audible drop it replaced.
     pub headroom_ms: u32,
-    /// Absolute bound on buffered audio — the only hard guarantee on added latency.
+    /// Absolute bound on buffered audio, trimmed on sight. Wide enough to hold one delivery
+    /// clump: a bunching link parks ~100 ms at once, and that audio is what bridges the hole.
     pub hard_cap_ms: u32,
     /// Starvation before the ring re-primes, in milliseconds — not a callback count. A floor of
     /// `MIN_DEPRIME_CALLBACKS` still applies so a large-quantum device keeps real hysteresis.
@@ -401,7 +402,7 @@ impl JitterTuning {
         base_target_ms: 15,
         max_target_ms: 60,
         headroom_ms: 25,
-        hard_cap_ms: 80,
+        hard_cap_ms: 160,
         deprime_ms: 40,
     };
     /// WASAPI shared-mode event-driven render: the engine buffers for us, but nothing rate-matches.
@@ -409,7 +410,7 @@ impl JitterTuning {
         base_target_ms: 20,
         max_target_ms: 70,
         headroom_ms: 30,
-        hard_cap_ms: 90,
+        hard_cap_ms: 180,
         deprime_ms: 50,
     };
     /// CoreAudio via AVAudioEngine. Same engine as WASAPI; longer `deprime_ms` because wireless
@@ -420,7 +421,7 @@ impl JitterTuning {
         base_target_ms: 20,
         max_target_ms: 70,
         headroom_ms: 30,
-        hard_cap_ms: 90,
+        hard_cap_ms: 180,
         deprime_ms: 60,
     };
     /// AAudio: raw realtime callback, we own the buffer. Starts at 25 ms; the adaptive floor
@@ -429,7 +430,7 @@ impl JitterTuning {
         base_target_ms: 25,
         max_target_ms: 90,
         headroom_ms: 40,
-        hard_cap_ms: 120,
+        hard_cap_ms: 240,
         deprime_ms: 60,
     };
 
@@ -844,21 +845,30 @@ impl JitterPolicy {
         let alpha = (want as f32 / self.ms_samples(EWMA_TAU_MS) as f32).clamp(0.0, 1.0);
         self.depth_avg += (depth as f32 - self.depth_avg) * alpha;
 
-        // The hard cap must leave room to serve this callback, or a large-quantum device
+        // Both caps must leave room to serve this callback, or a large-quantum device
         // trims itself into a permanent underrun.
         let cap = (target + self.ms_samples(self.tuning.headroom_ms))
             .min(self.ms_samples(self.tuning.hard_cap_ms))
             .max(target + want);
+        let hard = self.ms_samples(self.tuning.hard_cap_ms).max(cap);
 
         let mut out = JitterStep::default();
-        if depth > cap {
-            // Burst or wedged: discard down to the cap and reset the drift timer so the trim
-            // is not counted as drift. Faded like any other drop.
-            out.drop_front = depth - cap;
+        // A clump that drains before the next one arrives is the audio bridging the hole, so
+        // the headroom line is judged on the AVERAGE. Only the hard cap trims on sight.
+        let keep = if depth > hard {
+            Some(hard)
+        } else if depth > cap && self.depth_avg > cap as f32 {
+            Some(cap)
+        } else {
+            None
+        };
+        if let Some(keep) = keep {
+            // Wedged: discard down to the line and restart the drift clock from what is left,
+            // so the trim is not counted as drift. Faded like any other drop.
+            out.drop_front = depth - keep;
             out.hard_trim = true;
-            out.crossfade = self
-                .crossfade_samples()
-                .min(depth.saturating_sub(out.drop_front));
+            out.crossfade = self.crossfade_samples().min(keep);
+            self.depth_avg = keep as f32;
             self.over_run = 0;
             self.under_run = 0;
         } else if self.depth_avg > (target + self.ms_samples(self.tuning.shed_excess_ms())) as f32 {
@@ -1933,7 +1943,7 @@ mod tests {
     }
 
     /// The hard cap is the only absolute latency guarantee. It trims immediately, without
-    /// waiting for the drift timer.
+    /// waiting for the depth average.
     #[test]
     fn hard_cap_trims_at_once() {
         let pm = per_ms(2);
@@ -2571,7 +2581,7 @@ mod tests {
     fn a_huge_device_quantum_does_not_panic_the_clamp() {
         // `Ord::clamp` panics when min > max. A quantum above the hard cap pushes the continuity
         // floor above the ceiling, in a realtime callback — so the ceiling yields to the floor.
-        let t = JitterTuning::PIPEWIRE; // hard_cap 80 ms
+        let t = JitterTuning::PIPEWIRE; // hard_cap 160 ms
         let pm = per_ms(2);
         let want = 500 * pm; // a 500 ms quantum: absurd, but not a reason to abort the process
         let mut p = JitterPolicy::new(t, 2);
@@ -2786,6 +2796,7 @@ mod tests {
         /// Audible reads in the second half: non-zero means the policy never converged.
         audible_tail: u32,
         inserts: u32,
+        trims: u32,
         /// Times the ring de-primed after its first prime: each is a `target` of silence.
         reprimes: u32,
         /// Simulated ms when the depth average first came within `INSERT_MARGIN_MS` of the
@@ -2837,6 +2848,9 @@ mod tests {
                 }
             }
             depth -= s.drop_front.min(depth);
+            if s.hard_trim {
+                out.trims += 1;
+            }
             if s.insert_front > 0 {
                 assert!(s.crossfade > 0, "every insert must be faded");
                 assert_eq!(s.drop_front, 0, "a step never drops AND inserts");
@@ -2870,6 +2884,66 @@ mod tests {
             p.note_read(short);
         }
         out
+    }
+
+    /// A link that parks ~100 ms at once every ~100 ms delivers exactly the audio that bridges
+    /// the next hole. Trimming the clump on sight deleted it and then concealed the gap it made
+    /// — ten and more trims a second. The clump fits under the hard cap and drains before the
+    /// average ever crosses the headroom line, so nothing is cut.
+    #[test]
+    fn a_clumping_link_keeps_its_clump() {
+        for (name, t) in [
+            ("COREAUDIO", JitterTuning::COREAUDIO),
+            ("PIPEWIRE", JitterTuning::PIPEWIRE),
+            ("WASAPI", JitterTuning::WASAPI),
+            ("AAUDIO", JitterTuning::AAUDIO),
+        ] {
+            // 90 ms holes every 100 ms, a slightly fast host, ten minutes. (Trimmed on sight this
+            // was 6 000 trims and 6 000 starved reads on COREAUDIO.)
+            let s = simulate_bunching(t, None, 600_000, 90, 100, 50);
+            assert!(s.trims <= 8, "{name}: the clump is being trimmed: {s:?}");
+            assert!(s.audible <= 16, "{name}: {s:?}");
+            assert_eq!(s.audible_tail, 0, "{name}: {s:?}");
+        }
+    }
+
+    /// The headroom line still bounds latency: a backlog that stays in the ring is trimmed once
+    /// the average crosses it, within a couple of EWMA time constants.
+    #[test]
+    fn a_sustained_backlog_is_trimmed_to_the_headroom_line() {
+        let pm = per_ms(2);
+        let want = 5 * pm;
+        let t = JitterTuning::COREAUDIO;
+        let mut p = JitterPolicy::new(t, 2);
+        let cap = (t.base_target_ms + t.headroom_ms) as usize * pm;
+        // Prime at target, then a 120 ms clump lands and the producer keeps pace.
+        let mut depth = t.base_target_ms as usize * pm;
+        assert!(!p.step(depth, want).silence);
+        depth -= want;
+        p.note_read(false);
+        depth += 120 * pm;
+        let mut trimmed_at = None;
+        for cb in 0..1_000 {
+            depth += want;
+            let s = p.step(depth, want);
+            depth -= s.drop_front;
+            if s.hard_trim {
+                trimmed_at = Some(cb * 5);
+                break;
+            }
+            depth -= want;
+            p.note_read(false);
+        }
+        let at = trimmed_at.expect("a backlog that never drains must be trimmed");
+        assert!(
+            at > 100,
+            "trimmed at {at} ms: a clump must be given time to drain"
+        );
+        assert!(at <= 3 * EWMA_TAU_MS as usize, "trimmed only after {at} ms");
+        assert!(
+            depth <= cap,
+            "left {depth} samples above the headroom line {cap}"
+        );
     }
 
     /// A bunching link needs ~30 ms of ring; the sync loop wants less. Near-misses grow the
