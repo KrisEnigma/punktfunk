@@ -2641,8 +2641,9 @@ pub mod cursor {
 
     /// Pack the pitch-strided 32-bpp rows of `raw` (at least `rows * pitch` bytes, see
     /// [`shape_extent`]) into straight RGBA. ALPHA is BGRA (swap R↔B). MASKED_COLOR: `alpha ==
-    /// 0` is opaque color; `0xFF` is XOR, which no blend can honor — mid-gray keeps inversion
-    /// cursors visible instead of vanishing.
+    /// 0` is opaque color; `0xFF` XORs the screen with the color. XOR with black is the
+    /// transparent field around a monochrome shape (the I-beam is mostly that); XOR with
+    /// anything else is an inversion, which no blend can honor — mid-gray keeps it visible.
     #[must_use]
     pub fn shape_rgba(hdr: &CursorShm, raw: &[u8]) -> ShapeRgba {
         let (width, rows, pitch) = shape_extent(hdr);
@@ -2660,6 +2661,8 @@ pub mod cursor {
                 if masked {
                     if a == 0 {
                         rgba.extend_from_slice(&[r, g, b, 0xFF]);
+                    } else if (r, g, b) == (0, 0, 0) {
+                        rgba.extend_from_slice(&[0, 0, 0, 0]);
                     } else {
                         rgba.extend_from_slice(&[0x80, 0x80, 0x80, 0xB4]);
                     }
@@ -3236,8 +3239,8 @@ mod tests {
     }
 
     /// Both readers of the cursor section share one conversion: ALPHA swaps B↔R, MASKED
-    /// turns the mask into opaque colour or the mid-gray XOR stand-in, and a header whose
-    /// extent exceeds the section is clamped rather than indexed.
+    /// turns the mask into opaque colour, the transparent field, or the mid-gray XOR stand-in,
+    /// and a header whose extent exceeds the section is clamped rather than indexed.
     #[test]
     fn cursor_shape_converts_alpha_and_masked_rows() {
         use cursor::*;
@@ -3257,12 +3260,15 @@ mod tests {
         assert_eq!((s.w, s.h, s.hot_x, s.hot_y), (2, 1, 1, 0));
         let masked = CursorShm {
             cursor_type: CURSOR_TYPE_MASKED_COLOR,
+            width: 3,
             ..hdr
         };
-        let raw = [1u8, 2, 3, 0, 5, 6, 7, 0xFF];
+        // Opaque colour, an inversion pixel, and the XOR-with-black field around a
+        // monochrome shape — which must stay transparent, or an I-beam is a gray block.
+        let raw = [1u8, 2, 3, 0, 5, 6, 7, 0xFF, 0, 0, 0, 0xFF];
         assert_eq!(
             shape_rgba(&masked, &raw).rgba,
-            [3, 2, 1, 0xFF, 0x80, 0x80, 0x80, 0xB4]
+            [3, 2, 1, 0xFF, 0x80, 0x80, 0x80, 0xB4, 0, 0, 0, 0]
         );
         // Short rows read as transparent; an oversized header stays inside the section.
         assert_eq!(
