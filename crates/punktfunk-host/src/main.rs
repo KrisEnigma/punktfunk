@@ -61,6 +61,16 @@ mod install;
 #[cfg(target_os = "windows")]
 #[path = "windows/interactive.rs"]
 mod interactive;
+// A secret the host did not write is not a credential. Only Windows can be pre-planted:
+// `%ProgramData%` grants Users create, while the Unix config dir is 0700 from birth.
+mod planted {
+    #[cfg(target_os = "windows")]
+    pub(crate) use crate::install::quarantine_planted_secret;
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn quarantine_planted_secret(_path: &std::path::Path) -> bool {
+        false
+    }
+}
 // What this host reads of the multi-seat contract; unset means the console host.
 #[cfg(target_os = "windows")]
 #[path = "windows/seat.rs"]
