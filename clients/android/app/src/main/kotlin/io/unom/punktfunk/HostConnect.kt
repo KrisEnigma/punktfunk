@@ -3,6 +3,7 @@ package io.unom.punktfunk
 import android.content.Context
 import android.util.Log
 import io.unom.punktfunk.kit.Gamepad
+import io.unom.punktfunk.kit.ConnectRequest
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.VideoDecoders
 import io.unom.punktfunk.kit.security.ClientIdentity
@@ -61,8 +62,8 @@ suspend fun connectToHost(
         NativeBridge.nativeSetLowLatencyMode(settings.lowLatencyMode)
         val multiSlice = VideoDecoders.multiSliceTolerant()
         val partialFrame = VideoDecoders.partialFrameCapable()
-        // Slice-progressive delivery: decoder truth AND the async decode loop — the legacy
-        // sync loop feeds whole AUs only, so parts must never arrive when it is selected.
+        // Slice-progressive delivery: decoder truth AND the low-latency toggle — parts are part of
+        // the fast pipeline, and the toggle's "off" is the conservative configuration throughout.
         val frameParts = settings.lowLatencyMode && partialFrame
         val codecBits = VideoDecoders.decodableCodecBits()
         // Automatic codec (P5, measured NP3 ↔ RTX 4090): AV1 beat HEVC by ~1.2 ms end-to-end at
@@ -82,32 +83,34 @@ suspend fun connectToHost(
                 " → multiSlice=$multiSlice parts=$frameParts prefer=$preferredCodec" +
                 " (lowLatency=${settings.lowLatencyMode})",
         )
-        NativeBridge.nativeConnect(
-            host, port, w, h, hz,
-            identity.certPem, identity.privateKeyPem, pinHex,
-            settings.bitrateKbps, settings.compositor, gamepadPref,
-            hdrEnabled, tenBitSdr, multiSlice,
-            frameParts,
-            settings.audioChannels,
+        val request = ConnectRequest(
+            host = host, port = port, width = w, height = h, refreshHz = hz,
+            certPem = identity.certPem, keyPem = identity.privateKeyPem, pinHex = pinHex,
+            bitrateKbps = settings.bitrateKbps, compositorPref = settings.compositor,
+            gamepadPref = gamepadPref,
+            hdrEnabled = hdrEnabled, tenBitSdr = tenBitSdr, multiSliceOk = multiSlice,
+            framePartsOk = frameParts,
+            audioChannels = settings.audioChannels,
             // The audio format this session asks for. Only ever a request: the host's own gate
             // may resolve it back to Opus, and the native side downgrades it first if AAudio on
             // this device will not open the rate — a rate the wire has committed to cannot be
             // rescued afterwards, so the fallback has to happen before the Hello.
-            audioRateHz, audioBits,
+            audioRateHz = audioRateHz, audioBits = audioBits,
             // What this device can decode (H.264|HEVC always, AV1 when a real decoder exists) +
             // the soft codec preference (user choice, or the Automatic AV1 rule above) — the
             // host resolves the emitted codec from both.
-            codecBits, preferredCodec, timeoutMs,
-            launch,
+            videoCodecs = codecBits, preferredCodec = preferredCodec, timeoutMs = timeoutMs,
+            launch = launch,
             // The host's approval-list / trust-store label for this device — the same
             // user-set device name the pairing dialogs offer for nativePair.
-            deviceName(context),
+            deviceName = deviceName(context),
             // Tier-A pad audio: ask for the 0xD1 plane only when a setting would render it, so a
             // user with it off does not make the host provision endpoints it will never feed.
-            settings.padHaptics || settings.padSpeaker,
+            padAudioOk = settings.padHaptics || settings.padSpeaker,
             // "Keep host audio playing": the host taps its own default output rather than
             // silencing it for the session. Free to ask for — an older host just ignores it.
-            settings.keepHostAudio,
+            keepHostAudio = settings.keepHostAudio,
         )
+        NativeBridge.nativeConnect(request.toJson())
     }
 }

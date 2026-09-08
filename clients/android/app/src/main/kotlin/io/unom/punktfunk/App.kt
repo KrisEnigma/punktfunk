@@ -1,6 +1,8 @@
 package io.unom.punktfunk
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -207,9 +209,10 @@ fun App(forceGamepadUi: Boolean = false) {
         },
         label = "StreamTransition"
     ) { active ->
-        if (active != null) {
-            // Immersive: the stream takes the whole screen, no bottom bar.
-            StreamScreen(active) { reason ->
+        // Read once: `touchLibrary` is a `var`, so it does not smart-cast through the branch.
+        val library = touchLibrary
+        when {
+            active != null -> StreamScreen(active) { reason ->
                 // A game launched from a library exiting is a normal finish, and the player is
                 // almost certainly after the next title — so send them back to that library rather
                 // than all the way out to host selection. The console shell's own screen state does
@@ -224,24 +227,13 @@ fun App(forceGamepadUi: Boolean = false) {
                 // The console keeps its stack across the stream and wants to know how the session
                 // ended — a clean end is no toast, an abnormal one says why (the desktop shell's
                 // exact contract).
-                if (skiaConsole) {
-                    SkiaConsole.sessionEnded(
-                        when (reason) {
-                            SessionEndReason.NONE, SessionEndReason.LOCAL,
-                            SessionEndReason.GAME_EXITED, SessionEndReason.HOST_ENDED -> null
-                            SessionEndReason.HOST_ERROR -> "the host reported an error"
-                            SessionEndReason.LOST -> "the connection was lost"
-                        },
-                    )
-                }
+                if (skiaConsole) SkiaConsole.sessionEnded(abnormalEndMessage(reason))
                 session = null
             }
-        } else if (gamepadUi) {
             // The console: the same Skia shell the Linux/Windows session binary shows, drawn by
-            // native onto a SurfaceView (design/android-skia-console-port.md) — the Compose
-            // console it replaced is gone. `gamepadUi` already folds in whether the native host
-            // is present on this build (see `SkiaConsole.wanted` in the `gamepadUi` resolution).
-            SkiaConsoleShell(
+            // native onto a SurfaceView (design/android-skia-console-port.md). `gamepadUi` already
+            // folds in whether the native host is present on this build.
+            gamepadUi -> SkiaConsoleShell(
                 settings = settings,
                 onSettingsChange = { settings = it; settingsStore.save(it) },
                 onConnected = { session = it },
@@ -250,112 +242,122 @@ fun App(forceGamepadUi: Boolean = false) {
                 reopenLibrary = reopenLibrary,
                 onReopenLibraryHandled = { reopenLibrary = null },
             )
-        } else if (touchLibrary != null) {
-            // The touch shell's library is a PUSHED screen, not a tab: it belongs to one host, and a
-            // third permanent tab for something you reach from a card would be a nav item that is
-            // meaningless until you pick one. So it takes the whole window (bar included) and Back — the arrow or the system gesture — returns to the grid.
-            // Read once: `touchLibrary` is a `var`, so it does not smart-cast through the branch.
-            val (host, pinId) = touchLibrary!!
-            LibraryScreen(
-                host = host,
+            // The touch shell's library is a PUSHED screen, not a tab: it belongs to one host, so
+            // it takes the whole window (bar included) and Back — the arrow or the system gesture —
+            // returns to the grid.
+            library != null -> LibraryScreen(
+                host = library.first,
                 settings = settings,
                 onLaunched = { session = it },
                 onBack = {
                     touchLibrary = null
                     touchAutoStream = false
                 },
-                pinnedProfileId = pinId,
+                pinnedProfileId = library.second,
                 autoStream = touchAutoStream,
             )
-        } else {
-            // Adaptive nav: a bottom bar on phones; on tablets / large windows a side NavigationRail
-            // with its items centred vertically (the common Android tablet idiom, mirroring iPad's
-            // side navigation). A short landscape phone keeps the bottom bar (rail needs height too).
-            // Tabs slide along the axis the nav sits on: horizontally with the bottom bar (phone),
-            // vertically with the side rail (tablet), so the motion tracks the direction you moved.
-            val tabContent: @Composable (vertical: Boolean) -> Unit = { vertical ->
-                AnimatedContent(
-                    targetState = tab,
-                    transitionSpec = {
-                        val forward = targetState.ordinal > initialState.ordinal
-                        when {
-                            vertical && forward ->
-                                slideInVertically { it } + fadeIn() togetherWith
-                                        slideOutVertically { -it } + fadeOut()
-                            vertical ->
-                                slideInVertically { -it } + fadeIn() togetherWith
-                                        slideOutVertically { it } + fadeOut()
-                            forward ->
-                                slideInHorizontally { it } + fadeIn() togetherWith
-                                        slideOutHorizontally { -it } + fadeOut()
-                            else ->
-                                slideInHorizontally { -it } + fadeIn() togetherWith
-                                        slideOutHorizontally { it } + fadeOut()
-                        }
-                    },
-                    label = "TabTransition"
-                ) { targetTab ->
-                    when (targetTab) {
-                        Tab.Connect -> ConnectScreen(
-                            settings = settings,
-                            onConnected = { session = it },
-                            onSettingsChange = { settings = it; settingsStore.save(it) },
-                            deepLink = pendingLink,
-                            onDeepLinkHandled = { activity?.pendingDeepLink = null },
-                            // "Browse library…" in a card's overflow — the touch route to the shelf
-                            // the console shell reaches with Y.
-                            onOpenLibrary = { kh, pinId -> touchLibrary = kh to pinId },
-                        )
-                        Tab.Settings -> SettingsScreen(
-                            initial = settings,
-                            onChange = { settings = it; settingsStore.save(it) },
-                            onBack = { tab = Tab.Connect },
-                        )
-                    }
-                }
-            }
-
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                if (maxWidth >= 600.dp && maxHeight >= 480.dp) {
-                    Row(Modifier.fillMaxSize()) {
-                        NavigationRail(Modifier.fillMaxHeight()) {
-                            Spacer(Modifier.weight(1f)) // centre the rail items vertically
-                            Tab.entries.forEach { t ->
-                                NavigationRailItem(
-                                    selected = tab == t,
-                                    onClick = { tab = t },
-                                    icon = { Icon(t.icon, contentDescription = t.label) },
-                                    label = { Text(t.label) },
-                                )
-                            }
-                            Spacer(Modifier.weight(1f))
-                        }
-                        // The rail handles its own insets; the content pane insets itself (the screens
-                        // don't, since they used to rely on the Scaffold's padding). Cutout included:
-                        // a tablet in landscape puts its punch on exactly this pane's leading edge.
-                        Box(Modifier.weight(1f).fillMaxHeight().consoleSafeArea()) { tabContent(true) }
-                    }
-                } else {
-                    Scaffold(
-                        bottomBar = {
-                            NavigationBar {
-                                Tab.entries.forEach { t ->
-                                    NavigationBarItem(
-                                        selected = tab == t,
-                                        onClick = { tab = t },
-                                        icon = { Icon(t.icon, contentDescription = t.label) },
-                                        label = { Text(t.label) },
-                                    )
-                                }
-                            }
-                        },
-                    ) { innerPadding ->
-                        Box(Modifier.fillMaxSize().padding(innerPadding)) { tabContent(false) }
-                    }
+            else -> TouchTabs(tab, onTab = { tab = it }) { targetTab ->
+                when (targetTab) {
+                    Tab.Connect -> ConnectScreen(
+                        settings = settings,
+                        onConnected = { session = it },
+                        onSettingsChange = { settings = it; settingsStore.save(it) },
+                        deepLink = pendingLink,
+                        onDeepLinkHandled = { activity?.pendingDeepLink = null },
+                        // "Browse library…" in a card's overflow — the touch route to the shelf
+                        // the console shell reaches with Y.
+                        onOpenLibrary = { kh, pinId -> touchLibrary = kh to pinId },
+                    )
+                    Tab.Settings -> SettingsScreen(
+                        initial = settings,
+                        onChange = { settings = it; settingsStore.save(it) },
+                        onBack = { tab = Tab.Connect },
+                    )
                 }
             }
         }
     }
+    }
+}
+
+/** What the console toasts when a session ends; null for a clean end. */
+private fun abnormalEndMessage(reason: SessionEndReason): String? = when (reason) {
+    SessionEndReason.NONE, SessionEndReason.LOCAL,
+    SessionEndReason.GAME_EXITED, SessionEndReason.HOST_ENDED -> null
+    SessionEndReason.HOST_ERROR -> "the host reported an error"
+    SessionEndReason.LOST -> "the connection was lost"
+}
+
+/**
+ * The touch shell's adaptive nav around [content]: a bottom bar on phones; on tablets / large
+ * windows a side NavigationRail with its items centred vertically (the common Android tablet
+ * idiom, mirroring iPad's side navigation). A short landscape phone keeps the bottom bar (the
+ * rail needs height too).
+ */
+@Composable
+private fun TouchTabs(tab: Tab, onTab: (Tab) -> Unit, content: @Composable (Tab) -> Unit) {
+    // Tabs slide along the axis the nav sits on: horizontally with the bottom bar (phone),
+    // vertically with the side rail (tablet), so the motion tracks the direction you moved.
+    val tabContent: @Composable (vertical: Boolean) -> Unit = { vertical ->
+        AnimatedContent(
+            targetState = tab,
+            transitionSpec = { tabTransition(vertical) },
+            label = "TabTransition",
+        ) { content(it) }
+    }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        if (maxWidth >= 600.dp && maxHeight >= 480.dp) {
+            Row(Modifier.fillMaxSize()) {
+                NavigationRail(Modifier.fillMaxHeight()) {
+                    Spacer(Modifier.weight(1f)) // centre the rail items vertically
+                    Tab.entries.forEach { t ->
+                        NavigationRailItem(
+                            selected = tab == t,
+                            onClick = { onTab(t) },
+                            icon = { Icon(t.icon, contentDescription = t.label) },
+                            label = { Text(t.label) },
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                }
+                // The rail handles its own insets; the content pane insets itself (the screens
+                // don't, since they used to rely on the Scaffold's padding). Cutout included:
+                // a tablet in landscape puts its punch on exactly this pane's leading edge.
+                Box(Modifier.weight(1f).fillMaxHeight().consoleSafeArea()) { tabContent(true) }
+            }
+        } else {
+            Scaffold(
+                bottomBar = {
+                    NavigationBar {
+                        Tab.entries.forEach { t ->
+                            NavigationBarItem(
+                                selected = tab == t,
+                                onClick = { onTab(t) },
+                                icon = { Icon(t.icon, contentDescription = t.label) },
+                                label = { Text(t.label) },
+                            )
+                        }
+                    }
+                },
+            ) { innerPadding ->
+                Box(Modifier.fillMaxSize().padding(innerPadding)) { tabContent(false) }
+            }
+        }
+    }
+}
+
+/** Slide forward along the nav's axis, back the other way; fade either way. */
+private fun AnimatedContentTransitionScope<Tab>.tabTransition(vertical: Boolean): ContentTransform {
+    val forward = targetState.ordinal > initialState.ordinal
+    return when {
+        vertical && forward ->
+            slideInVertically { it } + fadeIn() togetherWith slideOutVertically { -it } + fadeOut()
+        vertical ->
+            slideInVertically { -it } + fadeIn() togetherWith slideOutVertically { it } + fadeOut()
+        forward ->
+            slideInHorizontally { it } + fadeIn() togetherWith slideOutHorizontally { -it } + fadeOut()
+        else ->
+            slideInHorizontally { -it } + fadeIn() togetherWith slideOutHorizontally { it } + fadeOut()
     }
 }
 

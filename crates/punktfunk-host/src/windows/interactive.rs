@@ -113,7 +113,7 @@ pub fn spawn_as_current_session_user(cmdline: &str, workdir: Option<&Path>) -> R
     let _ = unsafe { CreateEnvironmentBlock(&mut env_block, Some(primary), false) };
     // SAFETY: `env_block` is either still null (the call above failed) or the double-null-terminated
     // UTF-16 block `CreateEnvironmentBlock` just wrote — exactly the two states the helper accepts.
-    let merged_env = unsafe { merged_env_block(env_block as *const u16) };
+    let merged_env = unsafe { merged_env_block(env_block as *const u16, true) };
     if !env_block.is_null() {
         // SAFETY: `env_block` is the live block from the call above, destroyed exactly once and not
         // read after — `merged_env` owns its own copy of the parsed entries.
@@ -190,12 +190,14 @@ pub fn spawn_as_current_session_user(cmdline: &str, workdir: Option<&Path>) -> R
 /// the target session's `user_block` (`CreateEnvironmentBlock`) with this
 /// process's `PUNKTFUNK_*` and `RUST_LOG` overlaid, so the child inherits
 /// host settings rather than the target shell's. Shared with
-/// [`crate::service`].
+/// [`crate::service`]. `strip_secrets` drops `*TOKEN*`/`*PASSWORD*` keys: a
+/// session-user child (game, hook, tray) must not receive the admin token
+/// an operator set through host.env.
 ///
 /// # Safety
 /// `user_block` must be null or a valid pointer to a UTF-16,
 /// double-null-terminated environment block, readable for its whole length.
-pub(crate) unsafe fn merged_env_block(user_block: *const u16) -> Vec<u16> {
+pub(crate) unsafe fn merged_env_block(user_block: *const u16, strip_secrets: bool) -> Vec<u16> {
     let mut entries: Vec<String> = Vec::new();
     if !user_block.is_null() {
         let mut p = user_block;
@@ -221,8 +223,12 @@ pub(crate) unsafe fn merged_env_block(user_block: *const u16) -> Vec<u16> {
         }
     }
     let is_ours = |k: &str| k.starts_with("PUNKTFUNK_") || k == "RUST_LOG";
+    let is_secret = |k: &str| k.contains("TOKEN") || k.contains("PASSWORD");
     entries.retain(|e| !is_ours(e.split('=').next().unwrap_or("")));
     for (k, v) in std::env::vars().filter(|(k, _)| is_ours(k)) {
+        if strip_secrets && is_secret(&k) {
+            continue;
+        }
         entries.push(format!("{k}={v}"));
     }
     let mut block: Vec<u16> = Vec::new();

@@ -94,6 +94,27 @@ object Gamepad {
     const val PREF_STEAMCONTROLLER2 = 9
     const val PREF_STEAMCONTROLLER2_PUCK = 10
 
+    /** One pad type: its wire byte, the console's stored spelling, and the label people see. */
+    class Pref(val wire: Int, val name: String, val label: String)
+
+    /** Every pad type, in wire order — the one table the pickers and labels draw from. */
+    val PREFS: List<Pref> = listOf(
+        Pref(PREF_AUTO, "auto", "Automatic"),
+        Pref(PREF_XBOX360, "xbox360", "Xbox 360"),
+        Pref(PREF_DUALSENSE, "dualsense", "DualSense"),
+        Pref(PREF_XBOXONE, "xboxone", "Xbox One"),
+        Pref(PREF_DUALSHOCK4, "dualshock4", "DualShock 4"),
+        Pref(PREF_STEAMCONTROLLER, "steamcontroller", "Steam Controller"),
+        Pref(PREF_STEAMDECK, "steamdeck", "Steam Deck"),
+        Pref(PREF_DUALSENSEEDGE, "dualsenseedge", "DualSense Edge"),
+        Pref(PREF_SWITCHPRO, "switchpro", "Switch Pro"),
+        Pref(PREF_STEAMCONTROLLER2, "steamcontroller2", "Steam Controller 2"),
+        Pref(PREF_STEAMCONTROLLER2_PUCK, "steamcontroller2puck", "Steam Controller 2 Puck"),
+    )
+
+    /** The label for a wire byte; an unknown one reads as Automatic. */
+    fun prefLabel(pref: Int): String = PREFS.getOrNull(pref)?.label ?: "Automatic"
+
     // USB vendor ids of the controllers we can identify by VID/PID.
     private const val VID_SONY = 0x054C
     private const val VID_MICROSOFT = 0x045E

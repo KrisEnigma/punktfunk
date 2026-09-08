@@ -122,7 +122,7 @@ export default LauncherIcon;
 # --- Android ---------------------------------------------------------------------------------
 
 rows = "\n".join(
-    f'    "{t}" to LauncherGlyph(\n'
+    f'    "{t}" to Glyph(\n'
     f"        viewportWidth = {w:g}f,\n"
     f"        viewportHeight = {h:g}f,\n"
     f'        d = "{d}",\n'
@@ -135,33 +135,18 @@ write(
 
 {comment("//")}
 
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.PathParser
-import androidx.compose.ui.unit.dp
-import kotlin.math.max
 
 /**
- * The brand mark a `role: "launcher"` tile draws, resolved from the entry's `icon` token.
- * Material ships no brand icons, so this is a curated registry — the sibling of [OsIcons],
- * which does the equivalent job for the host cards.
- *
- * Held as raw SVG path strings rather than transcribed ImageVector DSL: [PathParser] builds
- * the vector once and [launcherIcon] caches it. Viewports are the masters' own and are NOT
- * all square, so the builder letterboxes — a mark forced into a square box is a squashed mark.
+ * The brand mark a `role: "launcher"` tile draws, resolved from the entry's `icon` token — the
+ * sibling of [resolveOsIcon], which does the equivalent job for the host cards. Viewports are
+ * the masters' own and are NOT all square; [GlyphCache] keeps each mark's ratio.
  */
-private class LauncherGlyph(
-    val viewportWidth: Float,
-    val viewportHeight: Float,
-    val d: String,
-)
-
-private val GLYPHS: Map<String, LauncherGlyph> = mapOf(
+private val GLYPHS: Map<String, Glyph> = mapOf(
 {rows}
 )
 
-private val CACHE = HashMap<String, ImageVector>()
+private val CACHE = GlyphCache("launcher", GLYPHS)
 
 /**
  * The [ImageVector] for an `icon` token, or null when the entry carries none or names a mark
@@ -170,30 +155,7 @@ private val CACHE = HashMap<String, ImageVector>()
  *
  * Tinted by the caller via `tint`, so one mark serves every palette.
  */
-fun launcherIcon(token: String?): ImageVector? {{
-    val glyph = GLYPHS[token ?: return null] ?: return null
-    return CACHE.getOrPut(token) {{
-        // Square the box and centre the mark in it, so a wide or tall master keeps its aspect
-        // ratio instead of being stretched to the tile.
-        val side = max(glyph.viewportWidth, glyph.viewportHeight)
-        val dx = (side - glyph.viewportWidth) / 2f
-        val dy = (side - glyph.viewportHeight) / 2f
-        ImageVector.Builder(
-            name = "launcher_$token",
-            defaultWidth = 24.dp,
-            defaultHeight = 24.dp,
-            viewportWidth = side,
-            viewportHeight = side,
-        ).apply {{
-            addGroup(translationX = dx, translationY = dy)
-            addPath(
-                pathData = PathParser().parsePathString(glyph.d).toNodes(),
-                fill = SolidColor(Color.White),
-            )
-            clearGroup()
-        }}.build()
-    }}
-}}
+fun launcherIcon(token: String?): ImageVector? = CACHE[token ?: return null]
 """,
 )
 

@@ -17,7 +17,7 @@ use ndk::audio::{
     AudioCallbackResult, AudioContentType, AudioDirection, AudioFormat, AudioPerformanceMode,
     AudioSharingMode, AudioStream, AudioStreamBuilder, AudioUsage,
 };
-use punktfunk_core::client::NativeClient;
+use punktfunk_core::client::{AudioPacket, NativeClient};
 use punktfunk_core::error::PunktfunkError;
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -582,7 +582,13 @@ fn open_any(ladder: &[OpenRung], ctx: &OpenCtx) -> Option<LiveStream> {
     log::warn!(
         "audio: no rung proved it was pulling — falling back to {rung:?} unproven; if this device is silent, this line is where to look"
     );
-    let live = try_open(rung, ctx).ok()?;
+    let live = match try_open(rung, ctx) {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!("audio: unproven {rung:?} did not open either: {e:?} — no playback");
+            return None;
+        }
+    };
     match arm(&live, ctx.fmt, ctx.counters, false) {
         Ok(()) => {
             log_started(&live, false);
@@ -755,21 +761,7 @@ fn supervise(
                 continue;
             }
             None => {
-                // Name the format, because at 96 kHz it is the likeliest cause and the cure is a
-                // setting rather than a rebuild. It should be near-unreachable — `connect` proves
-                // the rate is openable BEFORE the `Hello` (see `output_rate_is_openable`), so
-                // getting here on a hi-res session means the device changed underneath one that
-                // did open, and the reopen attempts above have already ridden out the settle.
-                log::error!(
-                    "audio: no AAudio configuration on the ladder could be opened and started at {} Hz / {} ch — audio disabled for this session (video unaffected){}",
-                    fmt.rate_hz,
-                    fmt.channels,
-                    if fmt.rate_hz == punktfunk_core::audio::SAMPLE_RATE_HZ {
-                        ""
-                    } else {
-                        "; this device would not give us the rate the host resolved — turn hi-res audio off in Settings to run this session at 48 kHz"
-                    },
-                );
+                log_no_configuration(fmt);
                 return;
             }
         };
@@ -838,72 +830,69 @@ fn nap(shutdown: &AtomicBool, total_ms: u64) {
     }
 }
 
-/// Open one ladder rung with fresh callback state.
-///
-/// `open_stream` consumes its builder and callback, so channels, buffering, and jitter policy are
-/// rebuilt on every attempt. Invalid callback pointer/length pairs stop before a slice is formed.
-fn try_open(rung: OpenRung, ctx: &OpenCtx) -> ndk::audio::Result<LiveStream> {
-    let OpenCtx {
-        fmt,
-        tuning,
-        hard_cap_max,
-        game_audio,
-        ..
-    } = *ctx;
-    let channels = fmt.channels;
-    let (tx, rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
-    // Recycle free-list: drained PCM buffers go BACK to the decode thread to be refilled, so
-    // the realtime callback never frees heap (Android's Scudo allocator has unbounded free()
-    // tail latency — a free on the audio thread is an XRun = a click) and the decode thread
-    // rarely allocates. Same depth as the data channel.
-    let (free_tx, free_rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
+/// The realtime consumer, owned by the AAudio data callback (FnMut) — no lock: AAudio calls it
+/// from a single high-priority thread, and the decode thread only touches `tx`/`free_rx`.
+struct Render {
+    counters: Arc<Counters>,
+    sync: Arc<punktfunk_core::audio::AudioSyncCell>,
+    rx: Receiver<Vec<f32>>,
+    free_tx: SyncSender<Vec<f32>>,
+    channels: usize,
+    ring: VecDeque<f32>,
+    policy: punktfunk_core::audio::JitterPolicy,
+    /// Callbacks since open (throttles the XRun grow check).
+    cb_count: u32,
+    /// Last AAudio XRun count we grew the buffer for.
+    last_xrun: i32,
+}
 
-    // Realtime consumer state, owned by the callback (FnMut) — no lock: AAudio calls it from
-    // a single high-priority thread, and the decode thread only touches `tx`/`free_rx`.
-    let cb_counters = ctx.counters.clone();
-    let cb_sync = ctx.sync.clone();
-    // Pre-reserve the ring so `extend` never reallocates on the realtime thread. Worst
-    // transient before the trim below = the hard cap plus one full channel of the plane's OWN
-    // frame — 5 ms on Opus (the protocol's fixed size, host `audio_thread`), the negotiated
-    // `audio_frame_us` on `0xD3`, which at 96 kHz/24-bit stereo is 2 ms and on 24-bit surround
-    // 1 ms. Sized from the resolved format — rate, depth AND channel count — rather than from a
-    // 5 ms constant: at 96 kHz a 5 ms reserve is DOUBLE what it should be, which is merely
-    // wasteful, but the same constant used the other way round (a plane whose frames were longer
-    // than the reserve, which a surround session's are per frame even while being shorter in time)
-    // would force a one-time realloc on the RT thread — asserted, not silently corrupted, in
-    // `decode_loop`.
-    let mut ring: VecDeque<f32> =
-        VecDeque::with_capacity(hard_cap_max + RING_CHUNKS * fmt.frame_samples());
-    // Shared de-jitter policy — prime depth, drift correction, de-prime hysteresis — told the
-    // RESOLVED format on both axes, because it is denominated in both:
-    //
-    // - `new_at_rate`: every depth, target, shed threshold and the `buffer_ms`/`target_ms` this
-    //   client reports are milliseconds converted to interleaved samples at the session's own rate
-    //   and layout, so a 96 kHz session's figures must be in 96-sample milliseconds or every one of
-    //   them is half what the tuning asked for. Core converts by multiplying first and dividing
-    //   last (as `SessionAudio` does), which is why the 44.1 kHz family can be passed here at all —
-    //   pre-dividing turned 44 100 Hz into 44 samples/ms and put all of them 2.3 % out.
-    // - `set_frame_us`: two of its decisions are denominated in FRAMES, not milliseconds — the
-    //   floor under the effective target (a device quantum plus one frame) and the smooth shed
-    //   (drop exactly one frame) — and both were written when 5 ms was the only frame this
-    //   protocol had. Left at the default a 96 kHz/24-bit session would shed 2.5 frames at a time
-    //   and crossfade across a whole one, which is not a crossfade.
-    //
-    // Microseconds throughout: the ladder has sub-millisecond rungs and `audio_frame_us` is the
-    // negotiated figure, so routing it through integer ms would truncate 2 500 µs to 2. An Opus
-    // session passes 5 000, which is the constructor's own default — so the ordinary session is
-    // bit-identical by construction rather than by a branch.
-    let mut policy =
-        punktfunk_core::audio::JitterPolicy::new_at_rate(tuning, channels as u8, fmt.rate_hz);
-    policy.set_frame_us(fmt.frame_us);
-    let mut cb_count: u32 = 0; // callbacks since open (throttles the XRun grow check)
-    let mut last_xrun: i32 = 0; // last AAudio XRun count we grew the buffer for
-    let callback = move |s: &AudioStream, data: *mut c_void, num_frames: i32| {
+impl Render {
+    fn new(ctx: &OpenCtx, rx: Receiver<Vec<f32>>, free_tx: SyncSender<Vec<f32>>) -> Render {
+        let OpenCtx {
+            fmt,
+            tuning,
+            hard_cap_max,
+            ..
+        } = *ctx;
+        let channels = fmt.channels;
+        // Pre-reserve the ring so `extend` never reallocates on the realtime thread. Worst
+        // transient before a trim = the hard cap plus one full channel of the plane's OWN frame,
+        // sized from the resolved format — rate, depth AND channel count — so a surround
+        // session's longer-per-frame chunks never force a one-time realloc on the RT thread
+        // (asserted in `decode_loop`).
+        let ring = VecDeque::with_capacity(hard_cap_max + RING_CHUNKS * fmt.frame_samples());
+        // The de-jitter policy is told the RESOLVED format on both axes: depths are milliseconds
+        // converted to samples at the session's rate (multiplying first, so 44.1 kHz stays
+        // exact), and the target floor plus the smooth shed are denominated in FRAMES, so a 2 ms
+        // lossless frame is shed and crossfaded as one frame. Microseconds: sub-ms rungs exist.
+        let mut policy =
+            punktfunk_core::audio::JitterPolicy::new_at_rate(tuning, channels as u8, fmt.rate_hz);
+        policy.set_frame_us(fmt.frame_us);
+        Render {
+            counters: ctx.counters.clone(),
+            sync: ctx.sync.clone(),
+            rx,
+            free_tx,
+            channels,
+            ring,
+            policy,
+            cb_count: 0,
+            last_xrun: 0,
+        }
+    }
+
+    fn callback(
+        &mut self,
+        s: &AudioStream,
+        data: *mut c_void,
+        num_frames: i32,
+    ) -> AudioCallbackResult {
         // Proof of life for `arm`'s start watchdog, and the one counter that separates
         // "the device never pulled" from "the device pulled silence": bumped before any
         // early-out, primed or not.
-        cb_counters.callbacks.fetch_add(1, Ordering::Relaxed);
-        let Some(want) = crate::audio_format::callback_sample_count(num_frames, channels) else {
+        self.counters.callbacks.fetch_add(1, Ordering::Relaxed);
+        let Some(want) = crate::audio_format::callback_sample_count(num_frames, self.channels)
+        else {
             return AudioCallbackResult::Continue;
         };
         if data.is_null() {
@@ -913,76 +902,119 @@ fn try_open(rung: OpenRung, ctx: &OpenCtx) -> ndk::audio::Result<LiveStream> {
         // `arm` verified the granted channel count and PCM_Float format; checked arithmetic above
         // rejected nonpositive or unrepresentable lengths before this slice was formed.
         let out = unsafe { std::slice::from_raw_parts_mut(data.cast::<f32>(), want) };
-        // Drain decoded chunks into the ring WITHOUT freeing on the RT thread: `drain(..)`
-        // empties each Vec but keeps its capacity, then the empty buffer is handed back for
-        // reuse. The only RT-thread free is the rare case where the recycle channel is
-        // momentarily full.
-        while let Ok(mut chunk) = rx.try_recv() {
-            ring.extend(chunk.drain(..));
-            let _ = free_tx.try_send(chunk);
+        self.fill(out, num_frames);
+        self.grow_on_xrun(s);
+        AudioCallbackResult::Continue
+    }
+
+    /// Drain the decoded chunks into the ring, run the jitter policy, and hand AAudio `out`.
+    fn fill(&mut self, out: &mut [f32], num_frames: i32) {
+        // Drain WITHOUT freeing on the RT thread: `drain(..)` empties each Vec but keeps its
+        // capacity, then the empty buffer is handed back for reuse. The only RT-thread free is
+        // the rare case where the recycle channel is momentarily full.
+        while let Ok(mut chunk) = self.rx.try_recv() {
+            self.ring.extend(chunk.drain(..));
+            let _ = self.free_tx.try_send(chunk);
         }
         // A/V sync: take whatever depth the decode thread's sync loop last asked for, and
-        // publish where the ring actually is so it can measure the result. The policy
-        // clamps the request between its own underrun floor and the hard cap — continuity
-        // outranks sync, always (see `JitterPolicy::set_sync_target`). Read AFTER the
-        // drain, so the depth is everything a frame queued right now must wait behind.
-        policy.set_sync_target(cb_sync.target());
-        cb_sync.publish_depth(ring.len());
-        // Jitter buffer: the shared policy decides prime/silence, trims a burst, and —
-        // new here — sheds ONE crossfaded frame when the depth average has sat above target
-        // long enough to be drift rather than jitter. Without that shed this ring had no
-        // way back down: it clamped at 120 ms and stayed pinned there. "One frame" is a
-        // REAL frame of this session, not a fixed 5 ms — `set_frame_us` above told the
-        // policy the negotiated length, and it also caps the seam crossfade at half of it,
-        // so a 2 ms lossless frame is not faded across its whole length.
-        let step = policy.step(ring.len(), want);
+        // publish where the ring actually is so it can measure the result. The policy clamps
+        // the request between its own underrun floor and the hard cap — continuity outranks
+        // sync. Read AFTER the drain, so the depth is everything a frame queued now waits behind.
+        self.policy.set_sync_target(self.sync.target());
+        self.sync.publish_depth(self.ring.len());
+        // The policy decides prime/silence, trims a burst, sheds ONE crossfaded frame when the
+        // depth has sat above target long enough to be drift, and — the mirror — duplicates one
+        // frame when the sync loop asked for a DEEPER ring. Inserts stay inside the ring's
+        // reserve: the policy only inserts below its target.
+        let step = self.policy.step(self.ring.len(), out.len());
         if step.drop_front > 0 {
-            punktfunk_core::audio::crossfade_drop(&mut ring, step.drop_front, step.crossfade);
+            punktfunk_core::audio::crossfade_drop(&mut self.ring, step.drop_front, step.crossfade);
         }
-        // The mirror: the sync loop asked for a DEEPER ring, answered with one duplicated,
-        // crossfaded frame instead of a de-prime (see `JitterStep::insert_front`). Stays inside
-        // the ring's reserve on this RT thread — `with_capacity` above leaves `RING_CHUNKS`
-        // frames past the hard cap, and the policy only inserts BELOW its target.
         if step.insert_front > 0 {
-            punktfunk_core::audio::crossfade_insert(&mut ring, step.insert_front, step.crossfade);
-            cb_counters.inserts.fetch_add(1, Ordering::Relaxed);
+            punktfunk_core::audio::crossfade_insert(
+                &mut self.ring,
+                step.insert_front,
+                step.crossfade,
+            );
+            self.counters.inserts.fetch_add(1, Ordering::Relaxed);
         }
         let mut ran_short = false;
         if !step.silence {
             for slot in out.iter_mut() {
-                *slot = ring.pop_front().unwrap_or_else(|| {
+                *slot = self.ring.pop_front().unwrap_or_else(|| {
                     ran_short = true;
                     0.0
                 });
             }
-            cb_counters
+            self.counters
                 .pcm_written
                 .fetch_add(num_frames as u64, Ordering::Relaxed);
         } else {
             out.fill(0.0);
-            cb_counters.underruns.fetch_add(1, Ordering::Relaxed);
+            self.counters.underruns.fetch_add(1, Ordering::Relaxed);
         }
         // No-op while un-primed, so a deliberate priming silence is never counted as an
         // underrun (which would otherwise drive the adaptive floor up for no reason).
-        policy.note_read(ran_short);
-        cb_counters
+        self.policy.note_read(ran_short);
+        self.counters
             .target_ms
-            .store(policy.target_ms() as u64, Ordering::Relaxed);
-        // Google's AAudio anti-glitch technique: when the device reports new XRuns, grow the
-        // HW buffer by one burst (up to capacity). getXRunCount + setBufferSizeInFrames are
-        // both callback-safe / non-blocking, and set clamps to capacity so it self-limits.
-        // Throttled.
-        cb_count = cb_count.wrapping_add(1);
-        if cb_count % XRUN_CHECK_EVERY == 0 {
-            let xr = s.x_run_count();
-            if xr > last_xrun {
-                last_xrun = xr;
-                let burst = s.frames_per_burst().max(1);
-                let grown = (s.buffer_size_in_frames() + burst).min(s.buffer_capacity_in_frames());
-                let _ = s.set_buffer_size_in_frames(grown);
-            }
+            .store(self.policy.target_ms() as u64, Ordering::Relaxed);
+    }
+
+    /// Google's AAudio anti-glitch technique: when the device reports new XRuns, grow the HW
+    /// buffer by one burst (up to capacity). Both calls are callback-safe and `set` clamps to
+    /// capacity, so it self-limits. Throttled to every `XRUN_CHECK_EVERY` callbacks.
+    fn grow_on_xrun(&mut self, s: &AudioStream) {
+        self.cb_count = self.cb_count.wrapping_add(1);
+        if self.cb_count % XRUN_CHECK_EVERY != 0 {
+            return;
         }
-        AudioCallbackResult::Continue
+        let xr = s.x_run_count();
+        if xr > self.last_xrun {
+            self.last_xrun = xr;
+            let burst = s.frames_per_burst().max(1);
+            let grown = (s.buffer_size_in_frames() + burst).min(s.buffer_capacity_in_frames());
+            let _ = s.set_buffer_size_in_frames(grown);
+        }
+    }
+}
+
+/// Every rung refused. Name the format, because at 96 kHz it is the likeliest cause and the
+/// cure is a setting rather than a rebuild. Near-unreachable — `connect` proves the rate is
+/// openable BEFORE the `Hello` — so getting here on a hi-res session means the device changed
+/// underneath one that did open.
+fn log_no_configuration(fmt: SessionAudio) {
+    log::error!(
+        "audio: no AAudio configuration on the ladder could be opened and started at {} Hz / {} ch — audio disabled for this session (video unaffected){}",
+        fmt.rate_hz,
+        fmt.channels,
+        if fmt.rate_hz == punktfunk_core::audio::SAMPLE_RATE_HZ {
+            ""
+        } else {
+            "; this device would not give us the rate the host resolved — turn hi-res audio off in Settings to run this session at 48 kHz"
+        },
+    );
+}
+
+/// Open one ladder rung with fresh callback state.
+///
+/// `open_stream` consumes its builder and callback, so channels, buffering, and jitter policy are
+/// rebuilt on every attempt. Invalid callback pointer/length pairs stop before a slice is formed.
+fn try_open(rung: OpenRung, ctx: &OpenCtx) -> ndk::audio::Result<LiveStream> {
+    let OpenCtx {
+        fmt, game_audio, ..
+    } = *ctx;
+    let channels = fmt.channels;
+    let (tx, rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
+    // Recycle free-list: drained PCM buffers go BACK to the decode thread to be refilled, so
+    // the realtime callback never frees heap (Android's Scudo allocator has unbounded free()
+    // tail latency — a free on the audio thread is an XRun = a click) and the decode thread
+    // rarely allocates. Same depth as the data channel.
+    let (free_tx, free_rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
+
+    let mut render = Render::new(ctx, rx, free_tx);
+    let callback = move |s: &AudioStream, data: *mut c_void, num_frames: i32| {
+        render.callback(s, data, num_frames)
     };
 
     let builder = AudioStreamBuilder::new()?
@@ -1057,248 +1089,271 @@ fn decode_loop(
     fmt: SessionAudio,
     sync: &punktfunk_core::audio::AudioSyncCell,
 ) -> DecodeExit {
-    let tx = &live.tx;
-    let free_rx = &live.free_rx;
-    let channels = fmt.channels;
-    // Decode scratch, sized for the LARGEST frame the running plane can hand us — and only for
-    // that plane, because they differ by more than an order of magnitude:
-    //
-    // - Opus: libopus's largest legal frame is 120 ms (5760 samples/ch), and it is always 48 kHz.
-    // - `0xD3`: the longest rung of `pcm::FRAME_US_LADDER` at the negotiated rate. The frame
-    //   duration is chosen from the path MTU at session start and this plane is never fragmented,
-    //   so nothing longer can arrive from a conforming host.
-    //
-    // Sizing BOTH from the Opus worst case (the `5760 * channels` this replaces) would have been
-    // 24× too big at 96 kHz, and — the reason the task called it out — sizing both from the PCM
-    // one would be far too SMALL for Opus. Either way the copies into it are clamped, so a
-    // non-conforming host truncates a frame rather than overrunning the decode thread's buffer.
-    let scratch_samples = if fmt.is_pcm() {
-        punktfunk_core::audio::pcm::samples_per_frame(
-            fmt.rate_hz,
-            punktfunk_core::audio::pcm::FRAME_US_LADDER[0],
-            channels as u8,
-        )
-    } else {
-        5760 * channels
+    let mut plane = match Plane::new(client, live, counters, fmt, sync) {
+        Ok(p) => p,
+        Err(exit) => return exit,
     };
-    let mut dec = match AudioDec::new(fmt) {
-        Ok(d) => d,
-        Err(e) => {
+    // One tick = one frame of THIS plane, which is what makes the drought arm conceal at the rate
+    // the callback drains at rather than racing it or falling behind: 5 ms on Opus, as little as
+    // 1 ms on a `0xD3` session at the short end of the ladder. Also the poll period for both exit
+    // flags, so a disconnect is still noticed within one packet time on a silent link.
+    let tick = Duration::from_micros(fmt.frame_us.max(1) as u64);
+    while !shutdown.load(Ordering::Relaxed) {
+        if disconnected.load(Ordering::Relaxed) {
+            return DecodeExit::Disconnected;
+        }
+        let step = match client.next_audio(tick) {
+            Ok(pkt) => plane.on_packet(client, &pkt),
+            Err(PunktfunkError::NoFrame) => plane.on_quiet(),
+            Err(_) => return DecodeExit::SessionClosed,
+        };
+        if let Err(exit) = step {
+            return exit;
+        }
+    }
+    DecodeExit::Shutdown
+}
+
+/// One decoding audio plane: the decoder and its scratch, the gap + drought concealment, the
+/// A/V placement, and the ring it pushes into.
+struct Plane<'a> {
+    live: &'a LiveStream,
+    counters: &'a Counters,
+    fmt: SessionAudio,
+    sync: &'a punktfunk_core::audio::AudioSyncCell,
+    dec: AudioDec,
+    pcm: Vec<f32>,
+    channels: usize,
+    /// Per-channel samples of the last decoded frame — the PLC unit. 0 until something has
+    /// decoded: there is no state to extrapolate from before then.
+    frame_samples: usize,
+    /// Loudest |sample| since the last log — tells a tone from silence.
+    window_peak: f32,
+    gaps: punktfunk_core::audio::AudioGapTracker,
+    drought: punktfunk_core::audio::DroughtConceal,
+    last_packet: std::time::Instant,
+    av_sync_enabled: bool,
+    av: punktfunk_core::audio::AvSync,
+    video_e2e: Arc<AtomicU64>,
+    av_offset_out: Arc<std::sync::atomic::AtomicI64>,
+    buffer_ms_out: Arc<std::sync::atomic::AtomicU32>,
+    /// The dead-stream warning is a DURATION, not a packet count — see `DEAD_STREAM_WARN_MS`.
+    dead_stream_warn_packets: u64,
+}
+
+impl<'a> Plane<'a> {
+    fn new(
+        client: &NativeClient,
+        live: &'a LiveStream,
+        counters: &'a Counters,
+        fmt: SessionAudio,
+        sync: &'a punktfunk_core::audio::AudioSyncCell,
+    ) -> Result<Plane<'a>, DecodeExit> {
+        let channels = fmt.channels;
+        // Decode scratch, sized for the LARGEST frame THIS plane can hand us: libopus's legal
+        // maximum is 120 ms (5760 samples/ch at 48 kHz); `0xD3`'s is the longest rung of
+        // `pcm::FRAME_US_LADDER` at the negotiated rate. The two differ by more than an order
+        // of magnitude. Copies into it are clamped, so a non-conforming host truncates a frame.
+        let scratch_samples = if fmt.is_pcm() {
+            punktfunk_core::audio::pcm::samples_per_frame(
+                fmt.rate_hz,
+                punktfunk_core::audio::pcm::FRAME_US_LADDER[0],
+                channels as u8,
+            )
+        } else {
+            5760 * channels
+        };
+        let dec = AudioDec::new(fmt).map_err(|e| {
             log::error!(
                 "audio: decoder init for codec={} rate={} ch={}: {e} — audio disabled",
                 fmt.codec,
                 fmt.rate_hz,
                 channels,
             );
-            return DecodeExit::Fatal;
+            DecodeExit::Fatal
+        })?;
+        // Everything denominated in FRAMES is told this plane's frame: `MAX_CONCEAL_MS` caps a
+        // single loss event at 50 ms of synthesized audio and derives the packet count from it;
+        // the drought's wall-clock fuse and `plc_ms` are spent at the rate this session paces.
+        let mut gaps = punktfunk_core::audio::AudioGapTracker::new();
+        gaps.set_frame_us(fmt.frame_us);
+        let drought = punktfunk_core::audio::DroughtConceal::new_at_frame_us(
+            punktfunk_core::audio::JitterTuning::AAUDIO.plc_max_ms(),
+            fmt.frame_us,
+        );
+        // A/V sync: this thread is the only place holding all three ingredients at once — the
+        // packet's host capture `pts_ns`, the ring depth (via the sync cell) and the video plane's
+        // end-to-end figure. At the RESOLVED rate, for the same reason `JitterPolicy` is: the
+        // proposal is denominated in the ring's own samples-per-millisecond.
+        let av_sync_enabled = av_sync_enabled();
+        if !av_sync_enabled {
+            log::info!(
+                "audio: A/V sync disabled (PUNKTFUNK_NO_AV_SYNC / debug.punktfunk.no_av_sync)"
+            );
         }
-    };
-    let mut pcm = vec![0f32; scratch_samples];
-    let mut window_peak = 0f32; // loudest |sample| since the last log — tells a tone from silence
-    let mut gaps = punktfunk_core::audio::AudioGapTracker::new();
-    // The third thing in this loop denominated in FRAMES that had to be told what a frame is — the
-    // same shape as `JitterPolicy::set_frame_us` and `DroughtConceal::new_at_frame_us` below.
-    // `MAX_CONCEAL_MS` caps a single loss event at 50 ms of synthesized audio, and it derives the
-    // packet count from this: left at the protocol's 5 ms it would be ten packets, which on a 2 ms
-    // lossless frame is 20 ms — the cap tightening by two and a half times on precisely the
-    // sessions whose packet rate went UP. Identical on every Opus session, which passes 5 000.
-    gaps.set_frame_us(fmt.frame_us);
-    let mut frame_samples = 0usize; // per-channel samples of the last decoded frame — the PLC unit
-                                    // WP-C1 — the drought half of concealment. The loop below already conceals a SEQ GAP, but only
-                                    // when a later packet arrives to reveal it; when the wire simply goes quiet — Wi-Fi power-save
-                                    // bunching, the shape this preset already runs deeper for — nothing arrives to reveal anything
-                                    // and the ring drains into an underrun and a de-prime whose re-prime is a longer artifact than
-                                    // the audio that was missing.
-                                    // Told the plane's real frame, so its wall-clock fuse and its `plc_ms` are spent at the rate
-                                    // this session actually paces. It used to assume 5 ms, which on a 2 ms lossless frame blew the
-                                    // fuse after two fifths of the time the tuning intends.
-    let mut drought = punktfunk_core::audio::DroughtConceal::new_at_frame_us(
-        punktfunk_core::audio::JitterTuning::AAUDIO.plc_max_ms(),
-        fmt.frame_us,
-    );
-    let mut last_packet = std::time::Instant::now();
+        Ok(Plane {
+            live,
+            counters,
+            fmt,
+            sync,
+            dec,
+            pcm: vec![0f32; scratch_samples],
+            channels,
+            frame_samples: 0,
+            window_peak: 0.0,
+            gaps,
+            drought,
+            last_packet: std::time::Instant::now(),
+            av_sync_enabled,
+            av: punktfunk_core::audio::AvSync::new_at_rate(channels as u8, fmt.rate_hz),
+            video_e2e: client.video_e2e_shared(),
+            av_offset_out: client.audio_av_offset_shared(),
+            buffer_ms_out: client.audio_buffer_ms_shared(),
+            dead_stream_warn_packets: (DEAD_STREAM_WARN_MS * 1000 / fmt.frame_us.max(1) as u64)
+                .max(1),
+        })
+    }
 
-    // A/V sync (audio latency overhaul). This thread is the only place holding all three
-    // ingredients at once: the packet's host capture `pts_ns`, the ring depth (via the sync cell)
-    // and the video plane's end-to-end figure. `pts_ns` arrived in every `AudioPacket` and was
-    // dropped on the floor here for the plane's whole existence, which is why audio ran at whatever
-    // depth its jitter ring settled at with nothing ever placing it against the picture.
-    let av_sync_enabled = av_sync_enabled();
-    // At the RESOLVED rate, for the same reason `JitterPolicy` is: this type's proposal is
-    // denominated in the ring's own samples-per-millisecond, so the two have to agree about what a
-    // millisecond is or every correction is out by the rate ratio.
-    let mut av = punktfunk_core::audio::AvSync::new_at_rate(channels as u8, fmt.rate_hz);
-    let video_e2e = client.video_e2e_shared();
-    let av_offset_out = client.audio_av_offset_shared();
-    let buffer_ms_out = client.audio_buffer_ms_shared();
-    if !av_sync_enabled {
-        log::info!("audio: A/V sync disabled (PUNKTFUNK_NO_AV_SYNC / debug.punktfunk.no_av_sync)");
-    }
-    // One tick = one frame of THIS plane, which is what makes the drought arm below conceal at the
-    // rate the callback drains at rather than racing it or falling behind. 5 ms on Opus (unchanged);
-    // as little as 1 ms on a `0xD3` session at the short end of the ladder, where a 5 ms tick would
-    // have synthesized one frame of cover per five owed and lost ground for the whole drought. Also
-    // the poll period
-    // for both exit flags, so a disconnect is still noticed within one packet time on a silent link.
-    let tick = Duration::from_micros(fmt.frame_us.max(1) as u64);
-    // The dead-stream warning is a DURATION, not a packet count — see `DEAD_STREAM_WARN_MS`.
-    let dead_stream_warn_packets = (DEAD_STREAM_WARN_MS * 1000 / fmt.frame_us.max(1) as u64).max(1);
-    while !shutdown.load(Ordering::Relaxed) {
-        if disconnected.load(Ordering::Relaxed) {
-            return DecodeExit::Disconnected;
-        }
-        match client.next_audio(tick) {
-            Ok(pkt) => {
-                // Place this frame against the picture it belongs with, BEFORE it is queued:
-                // `buffered_ahead` is everything that must still play first, so the depth read here
-                // is exactly what delays it.
-                let depth = sync.depth();
-                // Published unconditionally — the ring's depth is worth seeing even with sync off,
-                // and it is what makes a "the audio delay is way too high" report triageable at all.
-                // Converted through the format, never by a samples-per-millisecond divisor: at
-                // 44 100 Hz that divisor is 44.1 and an integer one reported this 2.3 % DEEP, which
-                // is the one direction that makes a healthy ring look like the reported fault.
-                buffer_ms_out.store(fmt.samples_ms(depth), Ordering::Relaxed);
-                if av_sync_enabled {
-                    let ve2e = video_e2e.load(Ordering::Relaxed);
-                    av.observe(punktfunk_core::audio::AvSyncObservation {
-                        pts_ns: pkt.pts_ns,
-                        now_local_ns: punktfunk_core::client::now_realtime_ns(),
-                        clock_offset_ns: client.clock_offset_now_ns(),
-                        buffered_ahead: depth,
-                        // 0 = nothing confirmed on the glass yet (no render callback below API 33,
-                        // or the stream has not presented a frame); no reference, no correction.
-                        video_e2e_ns: (ve2e > 0).then_some(ve2e),
-                    });
-                    sync.set_target(av.desired_depth(depth));
-                    av_offset_out.store(av.offset_ms() as i64, Ordering::Relaxed);
-                }
-                last_packet = std::time::Instant::now();
-                // Anything the drought path already covered is audio the stream now has;
-                // concealing it a second time here would insert samples it never carried and push
-                // everything after them later.
-                let already = drought.packet();
-                // Conceal lost packets (a seq gap) before decoding the one that arrived: one
-                // synthesized frame per missing packet — an inaudible fade instead of the click a
-                // hard gap makes in the ring. libopus interpolates from its own state on `0xC9`;
-                // `0xD3` has none to interpolate from, so `PcmConceal` repeats-and-fades and
-                // decays a run to silence (§4.5). `AudioDec::conceal` hides which.
-                for _ in 0..gaps.missing_before(pkt.seq).saturating_sub(already) {
-                    if frame_samples == 0 {
-                        break; // no decoded frame yet to size the concealment from
-                    }
-                    match dec.conceal(&mut pcm, frame_samples, channels) {
-                        Ok(0) => break, // nothing to build from — let the ring carry the gap
-                        Ok(samples) => {
-                            let mut buf = free_rx
-                                .try_recv()
-                                .unwrap_or_else(|_| Vec::with_capacity(scratch_samples));
-                            buf.clear();
-                            buf.extend_from_slice(&pcm[..samples * channels]);
-                            match tx.try_send(buf) {
-                                Ok(()) | Err(TrySendError::Full(_)) => {}
-                                Err(TrySendError::Disconnected(_)) => return DecodeExit::Shutdown,
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                match dec.decode_float(&pkt.data, &mut pcm, channels) {
-                    Ok(samples) => {
-                        frame_samples = samples;
-                        let n = samples * channels;
-                        for &s in &pcm[..n] {
-                            window_peak = window_peak.max(s.abs());
-                        }
-                        // The ring's pre-reservation in `try_open` is one frame of THIS plane per
-                        // queued chunk; a larger frame would force a one-time realloc on the RT
-                        // thread. Catch a host that changed its frame size — or a `Welcome` whose
-                        // `audio_frame_us` disagrees with what it then sends — here in debug,
-                        // rather than as a silent audio glitch.
-                        debug_assert!(
-                            n <= fmt.frame_samples(),
-                            "audio frame {n} f32 exceeds the {} f32 ring reserve ({} µs at {} Hz)",
-                            fmt.frame_samples(),
-                            fmt.frame_us,
-                            fmt.rate_hz,
-                        );
-                        let count = counters.frames_decoded.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Reuse a recycled buffer if the callback handed one back; only allocate when the
-                        // free-list is momentarily empty (startup / after a backpressure drop).
-                        let mut buf = free_rx
-                            .try_recv()
-                            .unwrap_or_else(|_| Vec::with_capacity(scratch_samples));
-                        buf.clear();
-                        buf.extend_from_slice(&pcm[..n]);
-                        match tx.try_send(buf) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {} // drop-newest under backpressure
-                            Err(TrySendError::Disconnected(_)) => return DecodeExit::Shutdown,
-                        }
-                        // The fingerprint of a stream that opened into a device which is not
-                        // playing: we are decoding steadily and AAudio has never taken a single
-                        // sample. `arm`'s watchdog catches it at open, so reaching this means the
-                        // device stopped pulling AFTER it started — say so loudly, because from
-                        // the outside it is indistinguishable from "the app has no sound".
-                        if count == dead_stream_warn_packets
-                            && counters.pcm_written.load(Ordering::Relaxed) == 0
-                        {
-                            log::error!(
-                                "audio: {count} frames decoded ({DEAD_STREAM_WARN_MS} ms) but AAudio has not taken one sample — {:?} opened into a device that is not playing",
-                                live.rung,
-                            );
-                        }
-                        if count % 600 == 0 {
-                            // `av_ms` is the sync loop's smoothed placement error (+ = audio behind
-                            // the picture); 0 with sync off, or before it has a video reference.
-                            // Logged next to the depth because a deep ring on a jittery link is
-                            // correct and only the offset separates that from audio held late.
-                            // `plc_ms` is concealment synthesized for packet droughts: a healthy
-                            // `underruns` bought with a climbing `plc_ms` is a link in trouble,
-                            // not a link that is fine.
-                            log::info!(
-                                "audio: {}={count} pcm_frames={} underruns={} buffer_ms={} target_ms={} av_ms={} plc_ms={} drift_inserts={} peak={window_peak:.3}",
-                                plane_counter_key(fmt),
-                                counters.pcm_written.load(Ordering::Relaxed),
-                                counters.underruns.load(Ordering::Relaxed),
-                                fmt.samples_ms(depth),
-                                counters.target_ms.load(Ordering::Relaxed),
-                                av.offset_ms(),
-                                drought.total_ms(),
-                                counters.inserts.load(Ordering::Relaxed),
-                            );
-                            window_peak = 0.0;
-                        }
-                    }
-                    Err(e) => log::debug!("audio: decode: {e}"),
-                }
-            }
-            Err(PunktfunkError::NoFrame) => {
-                // Nothing on the wire. If the ring is draining with it, conceal — the same
-                // synthesis the loss path uses, bounded by this preset's de-prime fuse so a
-                // genuinely dead stream is not papered over. ONE frame per tick, not a burst:
-                // this arm fires once per `tick`, which is one frame of this plane and therefore
-                // the rate the callback drains at, so concealment keeps pace with playout instead
-                // of racing ahead of a depth reading it has already invalidated. `frame_samples`
-                // is 0 until something has decoded — there is no state to extrapolate from
-                // before then.
-                let depth_ms = fmt.samples_ms(sync.depth());
-                if frame_samples > 0 && drought.conceal(last_packet.elapsed(), depth_ms) {
-                    if let Ok(samples @ 1..) = dec.conceal(&mut pcm, frame_samples, channels) {
-                        let mut buf = free_rx
-                            .try_recv()
-                            .unwrap_or_else(|_| Vec::with_capacity(scratch_samples));
-                        buf.clear();
-                        buf.extend_from_slice(&pcm[..samples * channels]);
-                        match tx.try_send(buf) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
-                            Err(TrySendError::Disconnected(_)) => return DecodeExit::Shutdown,
-                        }
-                    }
-                    sync.publish_plc_ms(drought.total_ms());
-                }
-            }
-            Err(_) => return DecodeExit::SessionClosed,
+    /// Hand `pcm[..n]` to the ring in a recycled buffer (allocating only when the free-list is
+    /// momentarily empty: startup / after a backpressure drop). Full = drop-newest.
+    fn push(&mut self, n: usize) -> Result<(), DecodeExit> {
+        let mut buf = self
+            .live
+            .free_rx
+            .try_recv()
+            .unwrap_or_else(|_| Vec::with_capacity(self.pcm.len()));
+        buf.clear();
+        buf.extend_from_slice(&self.pcm[..n]);
+        match self.live.tx.try_send(buf) {
+            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Disconnected(_)) => Err(DecodeExit::Shutdown),
         }
     }
-    DecodeExit::Shutdown
+
+    /// One synthesized frame into the ring: an inaudible fade instead of the click a hard gap
+    /// makes. libopus interpolates from its own state on `0xC9`; `0xD3` has none to interpolate
+    /// from, so `PcmConceal` repeats-and-fades and decays a run to silence (§4.5). `Ok(false)` =
+    /// nothing to build from — let the ring carry the gap.
+    fn conceal_one(&mut self) -> Result<bool, DecodeExit> {
+        if self.frame_samples == 0 {
+            return Ok(false);
+        }
+        match self
+            .dec
+            .conceal(&mut self.pcm, self.frame_samples, self.channels)
+        {
+            Ok(samples @ 1..) => self.push(samples * self.channels).map(|()| true),
+            _ => Ok(false),
+        }
+    }
+
+    /// Place the packet against the picture, conceal any seq gap in front of it, decode it into
+    /// the ring, and keep the 1 Hz line.
+    fn on_packet(&mut self, client: &NativeClient, pkt: &AudioPacket) -> Result<(), DecodeExit> {
+        // BEFORE it is queued: `buffered_ahead` is everything that must still play first, so
+        // the depth read here is exactly what delays it. Published unconditionally — the ring's
+        // depth is what makes a "the audio delay is way too high" report triageable at all.
+        // Converted through the format, never by an integer samples-per-millisecond divisor
+        // (44.1 at 44 100 Hz reported a healthy ring 2.3 % DEEP).
+        let depth = self.sync.depth();
+        self.buffer_ms_out
+            .store(self.fmt.samples_ms(depth), Ordering::Relaxed);
+        if self.av_sync_enabled {
+            let ve2e = self.video_e2e.load(Ordering::Relaxed);
+            self.av.observe(punktfunk_core::audio::AvSyncObservation {
+                pts_ns: pkt.pts_ns,
+                now_local_ns: punktfunk_core::client::now_realtime_ns(),
+                clock_offset_ns: client.clock_offset_now_ns(),
+                buffered_ahead: depth,
+                // 0 = nothing confirmed on the glass yet (no render callback below API 33, or
+                // the stream has not presented a frame); no reference, no correction.
+                video_e2e_ns: (ve2e > 0).then_some(ve2e),
+            });
+            self.sync.set_target(self.av.desired_depth(depth));
+            self.av_offset_out
+                .store(self.av.offset_ms() as i64, Ordering::Relaxed);
+        }
+        self.last_packet = std::time::Instant::now();
+        // Anything the drought path already covered is audio the stream now has; concealing it
+        // a second time would insert samples it never carried and push everything after later.
+        let already = self.drought.packet();
+        for _ in 0..self.gaps.missing_before(pkt.seq).saturating_sub(already) {
+            if !self.conceal_one()? {
+                break;
+            }
+        }
+        let samples = match self
+            .dec
+            .decode_float(&pkt.data, &mut self.pcm, self.channels)
+        {
+            Ok(s) => s,
+            Err(e) => {
+                log::debug!("audio: decode: {e}");
+                return Ok(());
+            }
+        };
+        self.frame_samples = samples;
+        let n = samples * self.channels;
+        for &s in &self.pcm[..n] {
+            self.window_peak = self.window_peak.max(s.abs());
+        }
+        // The ring's pre-reservation in `try_open` is one frame of THIS plane per queued chunk; a
+        // larger frame would force a one-time realloc on the RT thread. Catch a host that changed
+        // its frame size — or a `Welcome` whose `audio_frame_us` disagrees with what it sends.
+        debug_assert!(
+            n <= self.fmt.frame_samples(),
+            "audio frame {n} f32 exceeds the {} f32 ring reserve ({} µs at {} Hz)",
+            self.fmt.frame_samples(),
+            self.fmt.frame_us,
+            self.fmt.rate_hz,
+        );
+        let count = self.counters.frames_decoded.fetch_add(1, Ordering::Relaxed) + 1;
+        self.push(n)?;
+        // The fingerprint of a stream that opened into a device which is not playing: decoding
+        // steadily and AAudio has never taken a single sample. `arm`'s watchdog catches it at
+        // open, so reaching this means the device stopped pulling AFTER it started — from the
+        // outside indistinguishable from "the app has no sound".
+        if count == self.dead_stream_warn_packets
+            && self.counters.pcm_written.load(Ordering::Relaxed) == 0
+        {
+            log::error!(
+                "audio: {count} frames decoded ({DEAD_STREAM_WARN_MS} ms) but AAudio has not taken one sample — {:?} opened into a device that is not playing",
+                self.live.rung,
+            );
+        }
+        if count % 600 == 0 {
+            // `av_ms` is the smoothed placement error (+ = audio behind the picture; 0 with
+            // sync off or no video reference) — a deep ring on a jittery link is correct, and
+            // only the offset separates that from audio held late. `plc_ms` is drought
+            // concealment: healthy `underruns` bought with a climbing `plc_ms` is a link in trouble.
+            log::info!(
+                "audio: {}={count} pcm_frames={} underruns={} buffer_ms={} target_ms={} av_ms={} plc_ms={} drift_inserts={} peak={:.3}",
+                plane_counter_key(self.fmt),
+                self.counters.pcm_written.load(Ordering::Relaxed),
+                self.counters.underruns.load(Ordering::Relaxed),
+                self.fmt.samples_ms(depth),
+                self.counters.target_ms.load(Ordering::Relaxed),
+                self.av.offset_ms(),
+                self.drought.total_ms(),
+                self.counters.inserts.load(Ordering::Relaxed),
+                self.window_peak,
+            );
+            self.window_peak = 0.0;
+        }
+        Ok(())
+    }
+
+    /// Nothing on the wire this tick. If the ring is draining with it, conceal — the same
+    /// synthesis the loss path uses, bounded by this preset's de-prime fuse so a genuinely dead
+    /// stream is not papered over. ONE frame per tick, not a burst: the tick is one frame of this
+    /// plane and therefore the rate the callback drains at, so concealment keeps pace with playout
+    /// instead of racing ahead of a depth reading it has already invalidated.
+    fn on_quiet(&mut self) -> Result<(), DecodeExit> {
+        let depth_ms = self.fmt.samples_ms(self.sync.depth());
+        if self.frame_samples > 0 && self.drought.conceal(self.last_packet.elapsed(), depth_ms) {
+            self.conceal_one()?;
+            self.sync.publish_plc_ms(self.drought.total_ms());
+        }
+        Ok(())
+    }
 }

@@ -110,9 +110,8 @@ fn present_seat_display(stop: HANDLE) {
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(1);
     // Driver-owned, not a host's: the OS started the adapter, and pid 0 is never a requestor, so
-    // this cannot collide with a real host. It is a PLACEHOLDER — it gives the remoting stack a
-    // display until a host brings one, and `create_monitor` departs it then. It also stays out of
-    // the owner-gone reap: it lives with the adapter.
+    // this cannot collide with a real host. It stays for the session's life (see
+    // `SEAT_PLACEHOLDER_OWNER`) and out of the owner-gone reap: it lives with the adapter.
     let made = crate::monitor::create_monitor(
         crate::monitor::SEAT_PLACEHOLDER_OWNER,
         &pf_driver_proto::control::AddRequest {

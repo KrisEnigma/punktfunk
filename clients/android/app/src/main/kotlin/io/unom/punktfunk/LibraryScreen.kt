@@ -1,5 +1,6 @@
 package io.unom.punktfunk
 
+import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -54,7 +55,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import android.content.res.Configuration
@@ -75,8 +75,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.ImageLoader
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import io.unom.punktfunk.components.launcherIcon
 import io.unom.punktfunk.kit.link.DeepLinks
 import io.unom.punktfunk.kit.NativeBridge
@@ -244,104 +242,7 @@ fun LibraryScreen(
     // still the right ones to choose from, and replacing them with an error because a box is asleep
     // is precisely what the cache exists to prevent.
     LaunchedEffect(host.address, host.port, host.fpHex, host.effectiveMgmtPort, reloadKey) {
-        state = LibState.Loading
-        val cache = LibraryCache.standard(context.cacheDir)
-        // The identity and the art loader are needed whether or not the host ever answers — cached
-        // posters have to render behind a cached catalog with the box still down.
-        val prepared = withContext(Dispatchers.IO) {
-            val id = runCatching { obtainIdentity(IdentityStore(context)) }.getOrNull()
-            val loader = id?.let {
-                runCatching {
-                    ImageLoader.Builder(context)
-                        .okHttpClient(mtlsHttpClient(it.certPem, it.privateKeyPem, host.address, host.fpHex))
-                        .build()
-                }.getOrNull()
-            }
-            if (id != null && loader != null) id to loader else null
-        }
-        if (prepared == null) {
-            state = LibState.Message("Identity unavailable — re-pair may be required")
-            return@LaunchedEffect
-        }
-        val (identity, loader) = prepared
-
-        // Keyed on the host RECORD id, not its address: a box that came back on a new DHCP lease
-        // is the same host with the same library, and keying on where it lives would lose the
-        // cache exactly when a cold-booted machine needs it most.
-        val cached = withContext(Dispatchers.IO) { cache.load(host.id)?.games }?.takeIf { it.isNotEmpty() }
-        if (cached != null) {
-            state = LibState.Ready(cached, loader, identity, stale = Stale.Waking)
-        }
-
-        // Fire-and-forget, and deliberately unconditional rather than only when the host looks
-        // offline: a magic packet is one datagram an already-awake machine ignores, so finding out
-        // whether it is needed costs more than sending it.
-        val macs = host.mac.joinToString(",")
-        val waking = host.mac.isNotEmpty()
-        if (waking) {
-            withContext(Dispatchers.IO) { NativeBridge.nativeWakeOnLan(macs, host.address) }
-        }
-
-        val attempts = if (waking) WAKE_ATTEMPTS else 1
-        var last: LibraryResult? = null
-        for (attempt in 0 until attempts) {
-            val res = withContext(Dispatchers.IO) {
-                LibraryClient.fetch(
-                    address = host.address,
-                    mgmtPort = host.effectiveMgmtPort,
-                    certPem = identity.certPem,
-                    keyPem = identity.privateKeyPem,
-                    fpHex = host.fpHex,
-                )
-            }
-            last = res
-            // Anything other than "can't reach it" is settled — see `LibraryResult.isTransient`.
-            if (res is LibraryResult.Ok || !res.isTransient || attempt + 1 >= attempts) break
-            if (attempt % WAKE_RESEND_EVERY == WAKE_RESEND_EVERY - 1) {
-                withContext(Dispatchers.IO) { NativeBridge.nativeWakeOnLan(macs, host.address) }
-            }
-            delay(WAKE_RETRY_MS)
-        }
-
-        when (val res = last) {
-            is LibraryResult.Ok -> if (res.games.isEmpty()) {
-                state = LibState.Message("No games found on this host.")
-            } else {
-                state = LibState.Ready(res.games, loader, identity)
-                // Remembered AFTER it is on screen: the disk write is not on the path to a shelf.
-                withContext(Dispatchers.IO) { cache.store(host.id, res.games) }
-                val running = withContext(Dispatchers.IO) {
-                    LibraryClient.fetchRunning(
-                        address = host.address,
-                        mgmtPort = host.effectiveMgmtPort,
-                        certPem = identity.certPem,
-                        keyPem = identity.privateKeyPem,
-                        fpHex = host.fpHex,
-                    )
-                }
-                    .filter { it.isUp }
-                    // Two sessions can have the same title up (the host admits concurrent
-                    // sessions); for a Resume badge either one is the same answer.
-                    .mapNotNull { g -> g.appId?.let { it to g } }
-                    .toMap()
-                (state as? LibState.Ready)?.let { state = it.copy(running = running) }
-            }
-            // The shelf stays if we have one; only the words change. The player can still pick a
-            // title — the launch dials and wakes the host on its own.
-            else -> state = if (cached != null) {
-                LibState.Ready(cached, loader, identity, stale = Stale.Offline)
-            } else {
-                // The fetch reports a phrase, not a sentence — this screen has no separate
-                // title to carry the frame, so it supplies one (SkiaConsole passes its own).
-                LibState.Message(
-                    when (res) {
-                        is LibraryResult.Unauthorized -> "Couldn't load the library — ${res.message}"
-                        is LibraryResult.Error -> "Couldn't load the library — ${res.message}"
-                        else -> "Couldn't load the library"
-                    },
-                )
-            }
-        }
+        loadLibrary(context, host) { state = it }
     }
 
     // A pinned card's shelf says so, in the card's own `host · profile` shape: what a launch here
@@ -448,6 +349,124 @@ fun LibraryScreen(
         onCopyLink = { game -> copyLink(game) },
         resumeAt = resumeAt,
     )
+}
+
+/**
+ * Fill the shelf. Four things happen and the ORDER is the point:
+ *   1. the CACHED catalog goes up immediately, marked stale — a library is the screen a player
+ *      uses to decide what to play, and an empty one while a sleeping box boots is the opposite
+ *      of useful;
+ *   2. a magic packet goes out, so the box warms while they are still choosing;
+ *   3. the live fetch runs, retrying across the boot window, and replaces the cached shelf;
+ *   4. `/status` says which titles are already up, AFTER the catalog so a slow answer can never
+ *      hold the titles back.
+ * A cached catalog also outranks a failure: if the host never answers, the titles on screen are
+ * still the right ones to choose from.
+ */
+private suspend fun loadLibrary(context: Context, host: KnownHost, set: (LibState) -> Unit) {
+    set(LibState.Loading)
+    val cache = LibraryCache.standard(context.cacheDir)
+    val (identity, loader) = prepareLoader(context, host) ?: run {
+        set(LibState.Message("Identity unavailable — re-pair may be required"))
+        return
+    }
+    // Keyed on the host RECORD id, not its address: a box that came back on a new DHCP lease is
+    // the same host with the same library, and keying on where it lives would lose the cache
+    // exactly when a cold-booted machine needs it most.
+    val cached = withContext(Dispatchers.IO) { cache.load(host.id)?.games }?.takeIf { it.isNotEmpty() }
+    if (cached != null) {
+        set(LibState.Ready(cached, loader, identity, stale = Stale.Waking))
+    }
+    when (val res = fetchAcrossWake(host, identity)) {
+        is LibraryResult.Ok -> if (res.games.isEmpty()) {
+            set(LibState.Message("No games found on this host."))
+        } else {
+            set(LibState.Ready(res.games, loader, identity))
+            // Remembered AFTER it is on screen: the disk write is not on the path to a shelf.
+            withContext(Dispatchers.IO) { cache.store(host.id, res.games) }
+            val running = withContext(Dispatchers.IO) {
+                LibraryClient.fetchRunning(
+                    address = host.address,
+                    mgmtPort = host.effectiveMgmtPort,
+                    certPem = identity.certPem,
+                    keyPem = identity.privateKeyPem,
+                    fpHex = host.fpHex,
+                )
+            }
+                .filter { it.isUp }
+                // Two sessions can have the same title up (the host admits concurrent
+                // sessions); for a Resume badge either one is the same answer.
+                .mapNotNull { g -> g.appId?.let { it to g } }
+                .toMap()
+            set(LibState.Ready(res.games, loader, identity, running = running))
+        }
+        // The shelf stays if we have one; only the words change. The player can still pick a
+        // title — the launch dials and wakes the host on its own.
+        else -> set(
+            if (cached != null) {
+                LibState.Ready(cached, loader, identity, stale = Stale.Offline)
+            } else {
+                // The fetch reports a phrase, not a sentence — this screen has no separate
+                // title to carry the frame, so it supplies one (SkiaConsole passes its own).
+                LibState.Message(
+                    when (res) {
+                        is LibraryResult.Unauthorized -> "Couldn't load the library — ${res.message}"
+                        is LibraryResult.Error -> "Couldn't load the library — ${res.message}"
+                        else -> "Couldn't load the library"
+                    },
+                )
+            },
+        )
+    }
+}
+
+/**
+ * The identity and the art loader, needed whether or not the host ever answers — cached posters
+ * have to render behind a cached catalog with the box still down. Null = no identity.
+ */
+private suspend fun prepareLoader(context: Context, host: KnownHost): Pair<ClientIdentity, ImageLoader>? =
+    withContext(Dispatchers.IO) {
+        val id = runCatching { obtainIdentity(IdentityStore(context)) }.getOrNull() ?: return@withContext null
+        val loader = runCatching {
+            ImageLoader.Builder(context)
+                .okHttpClient(mtlsHttpClient(id.certPem, id.privateKeyPem, host.address, host.fpHex))
+                .build()
+        }.getOrNull() ?: return@withContext null
+        id to loader
+    }
+
+/**
+ * The catalog fetch, with a magic packet ahead of it and resends across the boot window. The
+ * packet is deliberately unconditional rather than only when the host looks offline: it is one
+ * datagram an already-awake machine ignores, so finding out whether it is needed costs more than
+ * sending it. Anything other than "can't reach it" is settled — see `LibraryResult.isTransient`.
+ */
+private suspend fun fetchAcrossWake(host: KnownHost, identity: ClientIdentity): LibraryResult? {
+    val macs = host.mac.joinToString(",")
+    val waking = host.mac.isNotEmpty()
+    if (waking) {
+        withContext(Dispatchers.IO) { NativeBridge.nativeWakeOnLan(macs, host.address) }
+    }
+    val attempts = if (waking) WAKE_ATTEMPTS else 1
+    var last: LibraryResult? = null
+    for (attempt in 0 until attempts) {
+        val res = withContext(Dispatchers.IO) {
+            LibraryClient.fetch(
+                address = host.address,
+                mgmtPort = host.effectiveMgmtPort,
+                certPem = identity.certPem,
+                keyPem = identity.privateKeyPem,
+                fpHex = host.fpHex,
+            )
+        }
+        last = res
+        if (res is LibraryResult.Ok || !res.isTransient || attempt + 1 >= attempts) break
+        if (attempt % WAKE_RESEND_EVERY == WAKE_RESEND_EVERY - 1) {
+            withContext(Dispatchers.IO) { NativeBridge.nativeWakeOnLan(macs, host.address) }
+        }
+        delay(WAKE_RETRY_MS)
+    }
+    return last
 }
 
 /**
@@ -769,38 +788,27 @@ private fun TouchPoster(
  */
 @Composable
 private fun TouchPosterArt(game: GameEntry, loader: ImageLoader) {
-    val candidates = game.art.posterCandidates
-    var idx by remember(game.id) { mutableIntStateOf(0) }
-    if (idx < candidates.size) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(candidates[idx]).build(),
-            imageLoader = loader,
-            contentDescription = game.title,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-            onError = { idx++ }, // this candidate failed — try the next, or fall to the placeholder
-        )
-        return
-    }
-    // A launcher ships no poster by design, so its brand mark IS the poster; falling back to the
-    // launcher's NAME says "opens Steam", where a title would read as "a cover that failed to load".
-    val mark = launcherIcon(game.iconToken)
-    if (mark != null) {
-        Icon(
-            imageVector = mark,
-            contentDescription = game.title,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.fillMaxSize(0.45f),
-        )
-    } else {
-        Text(
-            if (game.isLauncher) game.storeLabel else game.title,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(12.dp),
-        )
+    PosterArt(game, loader) {
+        // A launcher ships no poster by design, so its brand mark IS the poster; falling back to the
+        // launcher's NAME says "opens Steam", where a title would read as "a cover that failed to load".
+        val mark = launcherIcon(game.iconToken)
+        if (mark != null) {
+            Icon(
+                imageVector = mark,
+                contentDescription = game.title,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxSize(0.45f),
+            )
+        } else {
+            Text(
+                if (game.isLauncher) game.storeLabel else game.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(12.dp),
+            )
+        }
     }
 }
 

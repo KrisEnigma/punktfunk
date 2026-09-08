@@ -191,7 +191,7 @@ pub fn stop() -> bool {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     }
-    let _ = std::process::Command::new("taskkill")
+    let _ = std::process::Command::new(crate::install::resolve_tool("taskkill"))
         .args(["/F", "/IM", TRAY_EXE])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

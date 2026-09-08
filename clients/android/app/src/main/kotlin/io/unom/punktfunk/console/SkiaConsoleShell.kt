@@ -412,10 +412,12 @@ private fun padAction(activity: MainActivity?, action: String, padKey: String) {
     val settings = SettingsStore(activity).load()
     val usb = activity.getSystemService(Context.USB_SERVICE) as UsbManager
     when (action) {
-        "rumble" ->
-            Gamepad.pads()
+        "rumble" -> {
+            val pulsed = Gamepad.pads()
                 .firstOrNull { "${it.vendorId}:${it.productId}:${it.name}" == padKey }
-                ?.let(::testRumble)
+                ?.let(::testRumble) == true
+            if (!pulsed) SkiaConsole.notice("No motor answered.")
+        }
         "sc2_bluetooth" -> when {
             !settings.sc2Capture ->
                 SkiaConsole.notice("Enable \"Steam Controller 2 passthrough\" in Settings first.")

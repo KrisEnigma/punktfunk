@@ -773,11 +773,15 @@ fn paired_path() -> Option<std::path::PathBuf> {
     Some(pf_paths::config_dir().join("paired.json"))
 }
 
-/// Load persisted paired-client certificate DERs. Empty on first run or parse failure.
+/// Load persisted paired-client certificate DERs. Empty on first run, parse failure, or a
+/// store a non-admin planted before the first elevated run.
 fn load_paired() -> Vec<Vec<u8>> {
     let Some(path) = paired_path() else {
         return Vec::new();
     };
+    if crate::planted::quarantine_planted_secret(&path) {
+        return Vec::new();
+    }
     let Ok(raw) = std::fs::read(&path) else {
         return Vec::new();
     };

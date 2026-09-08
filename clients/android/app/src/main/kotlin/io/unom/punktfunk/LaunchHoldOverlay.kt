@@ -25,7 +25,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -317,18 +316,7 @@ fun LaunchHoldOverlay(hold: LaunchHold, onShow: () -> Unit) {
 /** The shelf's poster: each candidate in turn, the title when none loads. */
 @Composable
 private fun HoldPosterArt(game: GameEntry, loader: ImageLoader) {
-    val candidates = game.art.posterCandidates
-    var idx by remember(game.id) { mutableIntStateOf(0) }
-    if (idx < candidates.size) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(candidates[idx]).build(),
-            imageLoader = loader,
-            contentDescription = game.title,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-            onError = { idx++ },
-        )
-    } else {
+    PosterArt(game, loader) {
         Text(
             game.title,
             color = Color.White.copy(alpha = 0.7f),

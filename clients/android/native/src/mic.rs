@@ -73,6 +73,110 @@ pub struct MicCapture {
 // non-callback JNI thread. The session mutex prevents concurrent application-side stream access.
 unsafe impl Send for MicCapture {}
 
+/// The open ladder: Exclusive first — MMAP-exclusive is AAudio's lowest-latency path — falling
+/// back to Shared when the device refuses (no MMAP, mic claimed, …); and each sharing mode with
+/// the voice preset before without it, because some HALs reject VoiceCommunication (or a session
+/// id) outright and a mic without echo cancellation still beats no mic. The started-log prints
+/// what the device actually GRANTED (`share=`/`session=`).
+fn capture_rungs(echo_cancel: bool) -> &'static [(AudioSharingMode, bool)] {
+    if echo_cancel {
+        &[
+            (AudioSharingMode::Exclusive, true),
+            (AudioSharingMode::Shared, true),
+            (AudioSharingMode::Exclusive, false),
+            (AudioSharingMode::Shared, false),
+        ]
+    } else {
+        &[
+            (AudioSharingMode::Exclusive, false),
+            (AudioSharingMode::Shared, false),
+        ]
+    }
+}
+
+/// One open attempt at a given sharing mode (same pattern as [`crate::audio`]: `open_stream`
+/// consumes the builder AND the callback, so each try rebuilds the channels it captures).
+/// `captured`/`dropped` are the counters the realtime callback bumps.
+fn open_capture(
+    sharing: AudioSharingMode,
+    voice: bool,
+    captured: &Arc<AtomicU64>,
+    dropped: &Arc<AtomicU64>,
+) -> OpenedCapture {
+    let (tx, rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
+    // Recycle free-list, mirroring the playback path: the realtime capture callback must
+    // not touch the allocator (Android's Scudo has unbounded malloc/free tail latency — an
+    // allocation here is a missed burst), so it pops a pre-allocated buffer, copies the
+    // burst in and sends it; the encode worker returns drained buffers. Pool empty = DROP
+    // the chunk (counted) rather than allocate.
+    let (free_tx, free_rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
+    for _ in 0..RING_CHUNKS {
+        let _ = free_tx.try_send(Vec::with_capacity(CHUNK_CAP_SAMPLES));
+    }
+    let cb_captured = captured.clone();
+    let cb_dropped = dropped.clone();
+    let cb_free_tx = free_tx.clone(); // returns the buffer when the data channel is full
+
+    let callback = move |_s: &AudioStream, data: *mut c_void, num_frames: i32| {
+        let Some(n) = crate::audio_format::callback_sample_count(num_frames, CHANNELS) else {
+            return AudioCallbackResult::Continue;
+        };
+        if data.is_null() {
+            return AudioCallbackResult::Stop;
+        }
+        // SAFETY: AAudio supplies `n` captured f32 samples at non-null `data`; the shared
+        // length validator rejected nonpositive or unrepresentable callback counts.
+        let inp = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), n) };
+        cb_captured.fetch_add(num_frames as u64, Ordering::Relaxed);
+        match free_rx.try_recv() {
+            Ok(mut buf) => {
+                buf.clear();
+                buf.extend_from_slice(inp); // retained capacity — no realloc past the first
+                match tx.try_send(buf) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(buf)) => {
+                        // Encoder lagging: drop the chunk, hand the buffer straight back.
+                        let _ = cb_free_tx.try_send(buf);
+                        cb_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(TrySendError::Disconnected(_)) => return AudioCallbackResult::Stop,
+                }
+            }
+            // Pool empty (every buffer in flight): drop, never allocate on this thread.
+            Err(_) => {
+                cb_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        AudioCallbackResult::Continue
+    };
+
+    // NOTE: no `.frames_per_data_callback(...)`: AAudio's own docs call leaving it unset
+    // the lowest-latency path (the callback then runs at the device's optimal burst,
+    // while pinning a size inserts an adaptation buffer), and the encode side re-chunks
+    // to 10 ms frames regardless of how the bursts arrive.
+    let mut builder = AudioStreamBuilder::new()?
+        .direction(AudioDirection::Input)
+        .sample_rate(SAMPLE_RATE)
+        .channel_count(CHANNELS as i32)
+        .format(AudioFormat::PCM_Float)
+        .performance_mode(AudioPerformanceMode::LowLatency)
+        .sharing_mode(sharing);
+    if voice {
+        // VoiceCommunication routes the capture through the HAL's AEC/NS; the allocated
+        // session id (`None` = allocate) is what Kotlin attaches the Java effects to.
+        builder = builder
+            .input_preset(AudioInputPreset::VoiceCommunication)
+            .session_id(None);
+    }
+    let stream = builder
+        .data_callback(Box::new(callback))
+        .error_callback(Box::new(|_s, e| {
+            log::warn!("mic: AAudio error (device reroute/disconnect?): {e:?}");
+        }))
+        .open_stream()?;
+    Ok((stream, rx, free_tx))
+}
+
 impl MicCapture {
     /// Open low-latency 48 kHz mono capture and start the Opus uplink worker.
     ///
@@ -90,106 +194,9 @@ impl MicCapture {
         // throttled from the encode worker.
         let dropped = Arc::new(AtomicU64::new(0));
 
-        // One open attempt at a given sharing mode (same pattern as [`crate::audio`]: `open_stream`
-        // consumes the builder AND the callback, so each try rebuilds the channels it captures).
-        let try_open = |sharing: AudioSharingMode, voice: bool| -> OpenedCapture {
-            let (tx, rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
-            // Recycle free-list, mirroring the playback path: the realtime capture callback must
-            // not touch the allocator (Android's Scudo has unbounded malloc/free tail latency — an
-            // allocation here is a missed burst), so it pops a pre-allocated buffer, copies the
-            // burst in and sends it; the encode worker returns drained buffers. Pool empty = DROP
-            // the chunk (counted) rather than allocate.
-            let (free_tx, free_rx) = sync_channel::<Vec<f32>>(RING_CHUNKS);
-            for _ in 0..RING_CHUNKS {
-                let _ = free_tx.try_send(Vec::with_capacity(CHUNK_CAP_SAMPLES));
-            }
-            let cb_captured = captured.clone();
-            let cb_dropped = dropped.clone();
-            let cb_free_tx = free_tx.clone(); // returns the buffer when the data channel is full
-
-            let callback = move |_s: &AudioStream, data: *mut c_void, num_frames: i32| {
-                let Some(n) = crate::audio_format::callback_sample_count(num_frames, CHANNELS)
-                else {
-                    return AudioCallbackResult::Continue;
-                };
-                if data.is_null() {
-                    return AudioCallbackResult::Stop;
-                }
-                // SAFETY: AAudio supplies `n` captured f32 samples at non-null `data`; the shared
-                // length validator rejected nonpositive or unrepresentable callback counts.
-                let inp = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), n) };
-                cb_captured.fetch_add(num_frames as u64, Ordering::Relaxed);
-                match free_rx.try_recv() {
-                    Ok(mut buf) => {
-                        buf.clear();
-                        buf.extend_from_slice(inp); // retained capacity — no realloc past the first
-                        match tx.try_send(buf) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(buf)) => {
-                                // Encoder lagging: drop the chunk, hand the buffer straight back.
-                                let _ = cb_free_tx.try_send(buf);
-                                cb_dropped.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(TrySendError::Disconnected(_)) => return AudioCallbackResult::Stop,
-                        }
-                    }
-                    // Pool empty (every buffer in flight): drop, never allocate on this thread.
-                    Err(_) => {
-                        cb_dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                AudioCallbackResult::Continue
-            };
-
-            // NOTE: no `.frames_per_data_callback(...)`: AAudio's own docs call leaving it unset
-            // the lowest-latency path (the callback then runs at the device's optimal burst,
-            // while pinning a size inserts an adaptation buffer), and the encode side re-chunks
-            // to 10 ms frames regardless of how the bursts arrive.
-            let mut builder = AudioStreamBuilder::new()?
-                .direction(AudioDirection::Input)
-                .sample_rate(SAMPLE_RATE)
-                .channel_count(CHANNELS as i32)
-                .format(AudioFormat::PCM_Float)
-                .performance_mode(AudioPerformanceMode::LowLatency)
-                .sharing_mode(sharing);
-            if voice {
-                // VoiceCommunication routes the capture through the HAL's AEC/NS; the allocated
-                // session id (`None` = allocate) is what Kotlin attaches the Java effects to.
-                builder = builder
-                    .input_preset(AudioInputPreset::VoiceCommunication)
-                    .session_id(None);
-            }
-            let stream = builder
-                .data_callback(Box::new(callback))
-                .error_callback(Box::new(|_s, e| {
-                    log::warn!("mic: AAudio error (device reroute/disconnect?): {e:?}");
-                }))
-                .open_stream()?;
-            Ok((stream, rx, free_tx))
-        };
-
-        // Exclusive first — MMAP-exclusive is AAudio's lowest-latency path — falling back to
-        // Shared when the device refuses (no MMAP, mic claimed, …); and each sharing mode with
-        // the voice preset before without it, because some HALs reject VoiceCommunication (or a
-        // session id) outright and a mic without echo cancellation still beats no mic. The
-        // ladder's last rungs are exactly the preset-less open this always did. The started-log
-        // below prints what the device actually GRANTED (`share=`/`session=`).
-        let attempts: &[(AudioSharingMode, bool)] = if echo_cancel {
-            &[
-                (AudioSharingMode::Exclusive, true),
-                (AudioSharingMode::Shared, true),
-                (AudioSharingMode::Exclusive, false),
-                (AudioSharingMode::Shared, false),
-            ]
-        } else {
-            &[
-                (AudioSharingMode::Exclusive, false),
-                (AudioSharingMode::Shared, false),
-            ]
-        };
         let mut opened = None;
-        for &(sharing, voice) in attempts {
-            match try_open(sharing, voice) {
+        for &(sharing, voice) in capture_rungs(echo_cancel) {
+            match open_capture(sharing, voice, &captured, &dropped) {
                 Ok(o) => {
                     opened = Some(o);
                     break;
@@ -296,13 +303,20 @@ fn encode_loop(
             return;
         }
     };
-    let _ = enc.set_bitrate(opus::Bitrate::Bits(MIC_BITRATE));
     // Speech tuning: complexity 5 roughly halves encode cost for no audible loss at this rate,
     // and in-band FEC at an assumed 10% loss lets the host's decoder reconstruct a dropped
     // datagram from its successor instead of playing a hole (the uplink is fire-and-forget).
-    let _ = enc.set_complexity(5);
-    let _ = enc.set_inband_fec(true);
-    let _ = enc.set_packet_loss_perc(10);
+    // A refused setter leaves the encoder on libopus defaults — audible, so say which.
+    for (what, r) in [
+        ("bitrate", enc.set_bitrate(opus::Bitrate::Bits(MIC_BITRATE))),
+        ("complexity", enc.set_complexity(5)),
+        ("inband_fec", enc.set_inband_fec(true)),
+        ("packet_loss_perc", enc.set_packet_loss_perc(10)),
+    ] {
+        if let Err(e) = r {
+            log::warn!("mic: opus {what} not applied: {e}");
+        }
+    }
 
     let frame = FRAME_SAMPLES * CHANNELS;
     let mut ring: VecDeque<f32> = VecDeque::with_capacity(frame * 4);

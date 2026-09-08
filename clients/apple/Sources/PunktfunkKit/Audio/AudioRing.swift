@@ -70,44 +70,34 @@ func audioSamplesPerFrame(rateHz: Int, frameUs: Int, channels: Int) -> Int {
 }
 
 /// SPSC-ish jitter ring (interleaved float, `channels` per frame), drain thread → render
-/// callback. The unfair lock is held for microseconds; fine at render-callback rates. Priming:
-/// reads return silence until enough is buffered (at least the target, and at least one
-/// packet more than the device's render quantum — large-buffer devices would otherwise
-/// chronically out-demand the prefill and oscillate prime → dropout → re-prime).
-/// All counts stay whole frames (multiples of `channels`), so the interleave can never slip.
+/// callback, under an unfair lock held for microseconds. The Swift half of the shared policy
+/// (`punktfunk_core::audio::JitterPolicy`); keep the constants in step with
+/// `JitterTuning.COREAUDIO`. All counts stay whole frames, so the interleave can never slip.
 ///
-/// **Drift correction.** Both ends run at the same nominal rate but on different crystals, so
-/// backlog from a network stall or plain host-vs-DAC skew never drains on its own: without
-/// correction one 300 ms hiccup leaves audio 300 ms behind video for the rest of the session. This
-/// used to be handled by a `highWater` shed that dropped a whole `2 × prefill` at once — its own
-/// comment called that "one audible blip". It is now the same two-stage scheme the Rust clients
-/// share (`punktfunk_core::audio::JitterPolicy`): a slow depth average that sits above target for a
-/// sustained window sheds exactly ONE audio frame with a crossfade — the session's real frame, see
-/// `setFrameUs` — and the hard cap is only a backstop.
+/// **Priming.** Reads return silence until the target is banked, plus one frame over the device
+/// quantum, or a large-buffer device oscillates prime → dropout → re-prime.
 ///
-/// **Adaptive depth.** The target is a floor, not a constant: a NEAR-MISS — a read served with
-/// less than one frame left over — grows it a step BEFORE anything was audible, repeated genuine
-/// underruns grow it too (`noteRead`, mirroring `JitterPolicy::note_read`) up to `maxTargetMS`,
-/// and a long quiet spell relaxes it back toward the base — so a session on Wi-Fi that bunches
-/// arrivals deepens until it stops crackling, while a clean LAN keeps the tight base latency.
-/// Growth only raises a promise; the one thing that re-banks real depth is a re-prime, so an
-/// underrun while the ring is HOLLOW (depth average far below the target) re-primes at once,
-/// spending the click it already cost on the whole refill. Every shrink is armed as a PROBE:
-/// answered by an underrun or near-miss within its window, it is undone on the spot, and a
-/// failed sync-driven shrink is not retried for a growing backoff. Keep the constants here in
-/// step with `JitterTuning.COREAUDIO`.
+/// **Drift.** Different crystals mean backlog never drains on its own. A depth average that sits
+/// above target for a sustained window sheds ONE crossfaded frame (`setFrameUs`). The headroom
+/// line trims only a sustained excess of that average, so a delivery clump the ring drains
+/// before the next one is never cut; only the hard cap trims on sight.
 ///
-/// **A/V sync.** On top of all that the depth can be STEERED, by `setSyncTarget` from the drain
-/// thread's `AvSync` — because a ring that is the right depth for the link is not thereby the
-/// right depth for the picture. Continuity still outranks sync: the request is clamped between
-/// the underrun-driven floor above and the hard cap, so the loop can never buy alignment with a
-/// dropout. `nil` (the default) is exactly the pre-sync behaviour.
+/// **Adaptive depth.** The target is a floor: a near-miss or repeated underruns grow it a step
+/// (`noteRead`) up to `maxTargetMS`, and a long quiet spell relaxes it. Growth only raises a
+/// promise; a HOLLOW ring (average far below target) re-primes on its first underrun. Every
+/// shrink is a probe, undone on the spot if answered by an underrun or near-miss.
+///
+/// **A/V sync.** `setSyncTarget` steers the depth toward the picture. Continuity outranks it:
+/// the request is clamped between the adaptive floor and the hard cap. `nil` is no steering.
 final class AudioRing: @unchecked Sendable {
     /// Mirrors `JitterTuning::COREAUDIO` — see that type for the rationale.
     private static let targetMS = 20
     private static let maxTargetMS = 70
+    /// Slack above the live target before the depth AVERAGE is trimmed back.
     private static let headroomMS = 30
-    private static let hardCapMS = 90
+    /// Absolute bound on buffered audio, trimmed on sight. Wide enough to hold one delivery
+    /// clump: a bunching link parks ~100 ms at once, and that audio is what bridges the hole.
+    private static let hardCapMS = 180
     /// How long the ring may run short before it goes back to priming, in MILLISECONDS of
     /// starvation — not a count of callbacks. As a count (it was 4) the hysteresis meant a
     /// different span of time on every device, because a callback is not a unit of time: 4 of them
@@ -482,17 +472,29 @@ final class AudioRing: @unchecked Sendable {
             buf[(writeIdx + i) % capacity] = samples[i]
         }
         writeIdx += count
-        // Backstop only: the smooth shed in `read` is what normally holds the depth down. The
-        // hard cap must always leave room for one device quantum past the target (mirrors the
-        // Rust policy's `.max(target + want)`) or a large-quantum device would trim itself into
-        // a permanent underrun.
+        // Both caps must leave room for one device quantum past the target (mirrors the Rust
+        // policy's `.max(target + want)`) or a large-quantum device would trim itself into a
+        // permanent underrun.
         let cap = max(
             min(target + msSamples(Self.headroomMS), msSamples(Self.hardCapMS)),
             target + renderQuantum)
-        if writeIdx - readIdx > cap {
-            // Crossfaded, like the smooth shed — see `dropFront`. This is the correction a
-            // bunching link actually pays, so it is the one that most needs not to click.
-            dropFront(writeIdx - readIdx - cap)
+        let hard = max(msSamples(Self.hardCapMS), cap)
+        let depth = writeIdx - readIdx
+        // A clump that drains before the next one arrives is the audio bridging the hole, so
+        // the headroom line is judged on the AVERAGE. Only the hard cap trims on sight.
+        // Mirrors `JitterPolicy::step`.
+        let keep: Int?
+        if depth > hard {
+            keep = hard
+        } else if depth > cap, depthAvg > Double(cap) {
+            keep = cap
+        } else {
+            keep = nil
+        }
+        if let keep {
+            // Crossfaded, like the smooth shed — see `dropFront`. Restart the drift clock from
+            // what is left, so the trim is not counted as drift.
+            dropFront(depth - keep)
             depthAvg = Double(writeIdx - readIdx)
             overRun = 0
             underRun = 0

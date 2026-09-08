@@ -22,6 +22,7 @@ android {
         }
 
         applicationId = "io.unom.punktfunk"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Android 9. Reaches older Android TV boxes (e.g. Amlogic streamers still on Android 9–11);
         // the handful of API 31+ APIs we use are runtime-gated (Material You → brand palette, rumble
         // → legacy Vibrator, NEARBY_WIFI/lights/ADPF already gated), so nothing is lost above 28.
@@ -159,6 +160,14 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("io.github.takahirom.roborazzi:roborazzi:1.64.0")
     testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.64.0")
+
+    // --- On-device tests (`:app:connectedDebugAndroidTest` against an emulator or a phone). The
+    // stream screen needs the real JNI core underneath it — its native calls run against a zero
+    // session handle — so its tests cannot be Robolectric ones. ---
+    androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }
 
 // Record (write) the screenshots when the unit tests run. These tests exist to GENERATE marketing

@@ -9,7 +9,7 @@ import {
 	setResponseHeader,
 	setResponseStatus,
 } from "h3";
-import { isLoopbackUrl, mgmtToken, mgmtUrl } from "./auth";
+import { loopbackTls, mgmtToken, mgmtUrl } from "./auth";
 
 /** Forward a JSON body to `path` on the management API and relay the upstream response verbatim.
  * Omit `body` for a bodiless method (GET) — a read whose RESPONSE we rewrite. */
@@ -34,12 +34,8 @@ export async function forwardJson(
 		},
 		body: body === undefined ? undefined : JSON.stringify(body),
 	};
-	if (isLoopbackUrl(base)) {
-		// Bun.fetch extension — scoped per request, never process-wide (see routes/api/[...].ts).
-		(init as unknown as { tls: { rejectUnauthorized: boolean } }).tls = {
-			rejectUnauthorized: false,
-		};
-	}
+	// Bun.fetch extension — pinned per request, never process-wide (see routes/api/[...].ts).
+	Object.assign(init, loopbackTls(base));
 	// A dead/unstarted host makes `fetch` reject. The generic passthrough answers 502 for that, so
 	// these routes must too — an unreachable upstream is not a console bug, and letting the
 	// rejection escape would surface it as a bare 500 "Server Error".

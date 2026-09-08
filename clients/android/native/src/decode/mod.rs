@@ -20,12 +20,10 @@ mod latency;
 mod presenter;
 mod setup;
 mod surface_control;
-mod sync_loop;
 mod vsync;
 
 use async_loop::run_async;
 pub(crate) use setup::{codec_label, codec_mime};
-use sync_loop::run_sync;
 // Shared with the PyroWave lane, which exists only where the codec is built (see `crate::pyro`).
 #[cfg(target_pointer_width = "64")]
 pub(crate) use latency::now_realtime_ns;
@@ -34,8 +32,10 @@ pub(crate) use setup::boost_thread_priority;
 
 use ndk::native_window::NativeWindow;
 use punktfunk_core::client::NativeClient;
+use punktfunk_core::reanchor::ReanchorGate;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Cap on AUs parked in the async loop awaiting a free codec input slot. Matches the connector's
 /// own frame-channel depth; on sustained overflow the oldest is dropped and a keyframe requested
@@ -105,12 +105,96 @@ pub(crate) const NO_VIDEO_PATIENCE: std::time::Duration = std::time::Duration::f
 /// for days (2026-08-20). Keeping the value in core is what stops the two drifting back together.
 const NO_VIDEO_RETRY: std::time::Duration = punktfunk_core::client::NO_VIDEO_RETRY;
 
-/// Whether low-latency mode uses the event-driven async decode loop (default) or the synchronous
-/// poll loop. Flip to `false` to A/B the two on the HUD (`design/…`); the async loop presents a
-/// decoded frame the instant it's ready instead of waiting out a poll interval. Only consulted when
-/// the user's "Low-latency mode" toggle is ON (now the default) — off, the sync loop always runs (the
-/// original pipeline, kept as the per-device escape hatch).
-const USE_ASYNC_DECODE: bool = true;
+/// The keyframe backstops both decode loops run once a pass: a decoder fed but silent
+/// ([`NO_OUTPUT_PATIENCE`]), a session that never received an AU ([`NO_VIDEO_PATIENCE`]), and the
+/// gate's own overdue-freeze re-ask — every intent through one 100 ms throttle so a multi-frame
+/// recovery gap can't flood the control stream.
+pub(super) struct Backstops {
+    last_kf_req: Option<Instant>,
+    /// When the decoder last handed us a frame, and how many AUs it had been fed by then. Seeded
+    /// at start so a decoder that never produces a first frame — the missed opening IDR — is
+    /// caught by the same window.
+    last_output: Instant,
+    fed_at_output: u64,
+    started: Instant,
+    last_no_video_req: Option<Instant>,
+}
+
+impl Backstops {
+    pub(super) fn new() -> Backstops {
+        let now = Instant::now();
+        Backstops {
+            last_kf_req: None,
+            last_output: now,
+            fed_at_output: 0,
+            started: now,
+            last_no_video_req: None,
+        }
+    }
+
+    /// One pass. `had_output` = the decoder produced this pass; `au_parked` = an AU arrived and is
+    /// waiting for an input slot (video IS flowing); `losses` = drops this pass that are a loss in
+    /// their own right (a parked-AU overflow), which arm the gate directly.
+    pub(super) fn poll(
+        &mut self,
+        client: &NativeClient,
+        gate: &mut ReanchorGate,
+        fed: u64,
+        had_output: bool,
+        au_parked: bool,
+        losses: u64,
+    ) {
+        let now = Instant::now();
+        if losses > 0 {
+            gate.arm(now);
+        }
+        // Fed but silent: the decoder is holding nothing it can decode — the opening IDR never
+        // reached it, or its reference chain is gone. Ask for a fresh one and arm the freeze, so
+        // the concealment it may start emitting on the way back is withheld until a clean
+        // re-anchor (`gate.poll` keeps re-asking on the deadline until one arrives).
+        let starved = !had_output
+            && fed > self.fed_at_output
+            && now.duration_since(self.last_output) >= NO_OUTPUT_PATIENCE;
+        if had_output {
+            self.last_output = now;
+            self.fed_at_output = fed;
+        } else if starved {
+            log::warn!(
+                "decode: no output for {} ms with {} AU(s) fed — requesting a re-anchor keyframe",
+                now.duration_since(self.last_output).as_millis(),
+                fed - self.fed_at_output
+            );
+            gate.arm(now);
+            self.last_output = now; // one request per patience window, not per iteration
+            self.fed_at_output = fed;
+        }
+        // Nothing has EVER arrived: not an idle stream but a session that never got a picture —
+        // the `starved` test cannot see it, because it needs `fed` to have moved.
+        if fed == 0
+            && !au_parked
+            && now.duration_since(self.started) >= NO_VIDEO_PATIENCE
+            && self
+                .last_no_video_req
+                .is_none_or(|t| now.duration_since(t) >= NO_VIDEO_RETRY)
+        {
+            log::warn!(
+                "decode: no video received {} ms into the session — requesting a keyframe",
+                now.duration_since(self.started).as_millis()
+            );
+            self.last_no_video_req = Some(now);
+            let _ = client.request_keyframe();
+            self.last_kf_req = Some(now); // share the throttle with the loss-recovery path below
+        }
+        if (gate.poll(client.frames_dropped(), now) || losses > 0 || starved)
+            && self
+                .last_kf_req
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(100))
+        {
+            self.last_kf_req = Some(now);
+            let _ = client.request_keyframe();
+        }
+    }
+}
 
 /// Per-session decode configuration, resolved by the JNI layer (`nativeStartVideo`) and passed to
 /// the decode loop. Bundled so the loop entry points don't sprout a wide argument list.
@@ -121,10 +205,9 @@ pub(crate) struct DecodeOptions {
     /// Whether Kotlin found the chosen decoder advertises `FEATURE_LowLatency` (queryable only via
     /// the Java `CodecCapabilities` API) — surfaced on the HUD next to the decoder name.
     pub ll_feature: bool,
-    /// The user's "Low-latency mode" master toggle. On (default) ⇒ the full fast pipeline: async
-    /// decode loop, per-SoC vendor keys, pipeline thread boosts, ADPF max-performance, forced TV
-    /// mode switch. Off ⇒ the original synchronous pre-overhaul pipeline, kept as the per-device
-    /// escape hatch.
+    /// The user's "Low-latency mode" master toggle. On (default) ⇒ the aggressive vendor keys,
+    /// pipeline thread boosts, ADPF max-performance and the forced TV mode switch. Off ⇒ the same
+    /// loop and presenter with plain keys and no boosts — the per-device escape hatch.
     pub low_latency_mode: bool,
     /// TV form factor (Kotlin's `UiModeManager`): actively drive the HDMI output into the stream's
     /// refresh mode, vs. the softer seamless hint on a phone/tablet.
@@ -170,9 +253,5 @@ pub fn run(
         crate::pyro::run(client, window, shutdown, stats, opts);
         return;
     }
-    if opts.low_latency_mode && USE_ASYNC_DECODE {
-        run_async(client, window, shutdown, stats, opts);
-    } else {
-        run_sync(client, window, shutdown, stats, opts);
-    }
+    run_async(client, window, shutdown, stats, opts);
 }

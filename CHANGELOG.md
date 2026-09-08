@@ -324,6 +324,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **Android "Low-latency mode" off.** The toggle no longer switches to the old polling decode
+  loop; it runs the same event-driven loop and presenter with the aggressive keys and thread
+  boosts off, so "Prefer smoothness" now applies in both states. Nothing to do unless you kept the
+  toggle off for a device the fast loop misbehaved on — try it on again, and report the device if
+  it still does.
+
 - **`pf_client_core::collate` is where library sort and grouping live now.** The module was
   private to `pf-console-ui`, so the GTK and WinUI shelves could not reach it; it moves behind
   a `Collatable` trait each shell implements for its own model, and `store_label` and
@@ -423,6 +429,32 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A Windows pointer gesture no longer rests one step behind.** The driver spent the pointer's
+  move mark before checking that the stash slot was free, so a move landing while its access unit
+  was still owed was never re-encoded; the mark is now spent only when a slot is taken, and a
+  composed frame that draws the pointer spends it too, so the redundant re-encode after every
+  compose is gone. Nothing to do; install the driver.
+- **A QSV session ending with a frame in flight no longer frees the bitstream under the runtime.**
+  `Inner` dropped its retrieve queue, and with it the boxes the runtime was still writing into,
+  before the encoder was closed; the close now comes first, as `reset` already did it.
+- **An NVENC opening frame keeps its IDR flag across a transient first-submit failure.** The pool
+  counter advanced before the register/map/encode calls, so a retry lost `opening`, and with it the
+  in-band HDR SEI on the stream's first IDR; the counter now advances once the picture is queued, and
+  a forced IDR or anchor spent on a refused picture is carried to the retry.
+- **An AMF encoder rebuilt in place flags its first AU as the keyframe it is.** `reset` re-Inited
+  the component without zeroing the ring counter, so `opening` stayed false and a driver that
+  refuses `ForcePictureType` shipped the post-rebuild IDR as a P.
+- **The NVENC split arbiter refuses the completion-event session.** It only refused the two-thread
+  mode, but the driver's event mode keeps two frames in flight too, so `PUNKTFUNK_NVENC_SPLIT_ARBITRATE`
+  measured the newest submit against the oldest AU and cached a verdict on the wrong span.
+- **A detached driver encode thread no longer frees its successor's pool slot.** A poll failure
+  after the detach released the slot the new session was encoding into the free list.
+- **The audio ring no longer trims a delivery clump on sight.** A link that parks ~100 ms at
+  once every ~100 ms had its clump cut at `target + headroom` ten and more times a second, then
+  concealed the hole that audio would have bridged; the headroom line now trims only a sustained
+  excess of the depth average, and the hard cap that still trims on sight doubles to 180 ms
+  (160 PipeWire, 240 AAudio) so one clump fits. Nothing to do — the Apple ring mirrors it, and
+  every Rust client's ring reserve follows `hard_cap_ms`.
 - **Deleting a Moonlight device's access record ends its live session instead of widening it
   to full control.** The GameStream control thread read the deletion as "no record, ungoverned"
   and lifted every restriction mid-stream; it now ends the session as the native plane does, and
@@ -433,6 +465,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   every packaged build can still open through Vulkan Video; the probe now covers both arms, caches
   per selected GPU like its Windows twin, and feeds `/serverinfo` the same narrowed answer. Nothing
   to configure — clients that prefer AV1 negotiate it again.
+- **`Select+A` opens the Android client's quick-action ring on any controller.** The chord keyed on
+  the hold-Select guide gesture's pending timer, which is off by default there, so the one shortcut
+  the start banner promises every pad user did nothing — and a gamepad-only session, with no
+  touchscreen twist and Back forwarded to the host, had no route to the ring at all. Nothing to do;
+  the buttons the chord swallowed no longer strand themselves down on the host either.
+- **An Android profile's 10-bit SDR override resets.** `ten_bit_sdr` was missing from the overlay's
+  known-key set, so the load filed it under "a newer build wrote this" as well as into its own
+  field and wrote it straight back out — resetting that row to inherited never survived a reload.
+  Reset it once more and it stays; every other profile field was already correct.
 - **Trackpad scrolling on a KDE host moves the page as far as the fingers went.** KWin's
   `fake_input` carries a bare axis with no source, which every toolkit reads as ten units per
   wheel click, so injecting a measured distance there spent one click per 10 px and scrolled
@@ -792,6 +833,15 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **A frame the FEC wire cannot address is dropped, not corrupted.** Past 255 data shards per
   block `255 - k` underflowed and `fecInfo`'s 10-bit k truncated, which a large IDR at the
   ANNOUNCE packetSize floor reaches. Raise the client's packetSize if the log names it.
+- **A browser that opens a session and never speaks gives its slot back.** The WebTransport
+  handshake reads were unbounded while holding a session permit, so four idle connections blocked
+  every native session; they now time out after 10 s like the native plane. Nothing to do.
+- **One client stalling its handshake no longer holds every other client off.** The accept loop
+  waited for each connection's handshake before taking the next, so a stalled peer blocked
+  connects for up to 8 s; the handshake now runs per session. Nothing to do.
+- **A virtual monitor torn down during a mode or cursor call no longer closes the event that
+  call still holds.** The reap and a swap-chain reassignment could run against the same monitor
+  from another thread; teardown now waits for the call to return. Nothing to do.
 - **A timed-out virtual microphone stops leaking its render thread.** The open path returned an
   error without setting the stop flag and built no owner to drop, so each retry left another
   thread holding a render client. Nothing to do.
@@ -826,9 +876,40 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `%PATH%`. Nothing to do.
 - **`atiadlxx.dll` loads from System32 only.** The unqualified load searched the exe's directory,
   the working directory and `%PATH%` first, in a process running as SYSTEM. Nothing to do.
+- **A seat display answers punktfunk verbs only from inside its session.** The seat device's
+  access list admits NETWORK SERVICE for the remoting stack, and every verb answered it, so any
+  such service could add or remove seat monitors; a session-0 requestor is now refused. Nothing
+  to do.
+- **A plugin's launch port must still belong to the plugin runner.** The host dialled the
+  registered loopback port with the UI secret for up to 90 s after the plugin died, so whoever
+  bound the freed port received it; on Windows the listener must run as LocalService. Nothing
+  to do.
+- **One address cannot churn every browser's sign-in challenge.** The challenge pool was one
+  global cap, and a paired device could grow the token map for an hour; each address and each
+  device now has its own budget. Nothing to do.
+- **The console pins the host's identity on its loopback hop.** The proxy relaxed certificate
+  checks for `127.0.0.1`; it now verifies against the host's own cert, and the streaming and
+  management listeners refuse a second socket beside them. Nothing to do.
 - **A planted web-console password is no longer kept.** `web setup` hardened the config directory
   before testing the file's owner, and that pass re-owns the contents, so the check always passed.
   Nothing to do; the installer now rotates to a fresh password instead.
+- **A planted secret that cannot be moved aside fails the install instead of receiving the new
+  one.** A file held open by its planter blocked the rename and the fresh token was written into
+  it; the write now unlinks and creates new, and the pairing stores and `hooks.json` get the same
+  owner check. Nothing to do.
+- **Hardening a planted directory resets its own ACL.** An explicit `Everyone` grant survived the
+  inheritance strip, and the update staging directory was created with default rights, so a
+  pre-planted `updates\` stayed writable to whoever made it; SYSTEM now re-checks that directory
+  before running an installer from it, on apply and on rollback. Nothing to do.
+- **The installer resolves every system tool to System32.** The setup engine and the service's
+  firewall step still spawned `netsh`, `taskkill`, `reg`, `schtasks` and `curl` by bare name while
+  elevated, and the Windows App Runtime download runs only after its Microsoft signature checks.
+  Nothing to do.
+- **A plugin can no longer have SYSTEM end a process outside the streamed session.** The provider
+  liveness report accepted any pid and the end-of-session ladder terminated it as SYSTEM. Nothing
+  to do.
+- **Games and hooks no longer inherit the admin token.** A `PUNKTFUNK_MGMT_TOKEN` or UI password
+  set in `host.env` was copied into every session-user child's environment. Nothing to do.
 - **A GameStream pairing ceremony belongs to one peer.** Phases 2-4 were keyed on the
   client-chosen `uniqueid` alone, so any host that saw one could re-roll the ceremony's secrets
   and strand the real client. Nothing to do — the address is the one the PIN was already bound to.

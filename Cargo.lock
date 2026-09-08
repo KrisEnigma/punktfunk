@@ -3847,6 +3847,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -3898,6 +3899,7 @@ dependencies = [
 name = "punktfunk-setup-win"
 version = "0.34.0"
 dependencies = [
+ "pf-paths",
  "punktfunk-setup",
  "serde",
  "serde_json",
