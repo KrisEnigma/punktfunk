@@ -3604,7 +3604,8 @@ impl WsiPlan {
         }
     }
 
-    /// The environment this plan needs, as `(name, value)` pairs.
+    /// Nested-client environment. Implicit-layer search belongs here, never on the compositor:
+    /// gamescope's own Vulkan loads every implicit layer in its process env.
     fn env(self) -> Vec<(&'static str, String)> {
         match self {
             // `VK_ADD_IMPLICIT_LAYER_PATH` ADDS to the loader's implicit-layer search (loader
@@ -3618,6 +3619,17 @@ impl WsiPlan {
             ],
             Self::DistroKept => Vec::new(),
             Self::DistroDisabled => WSI_OFF_ENV
+                .iter()
+                .map(|(name, value)| (*name, (*value).to_string()))
+                .collect(),
+        }
+    }
+
+    /// Compositor process: force the distro layer off. Do not add our layer path.
+    fn compositor_env(self) -> Vec<(&'static str, String)> {
+        match self {
+            Self::DistroKept => Vec::new(),
+            Self::Ours | Self::DistroDisabled => WSI_OFF_ENV
                 .iter()
                 .map(|(name, value)| (*name, (*value).to_string()))
                 .collect(),
@@ -4015,8 +4027,8 @@ fn resolved_spawn_app(cmd: Option<&str>) -> Option<String> {
 }
 
 /// `None` app is `sleep infinity`. Wrapper relays `LIBEI_SOCKET` and optionally backgrounds splash
-/// — gamescope pushes capture buffers only when it composites. WSI env on this process is how
-/// nested Vulkan games get HDR10 swapchains.
+/// — gamescope pushes capture buffers only when it composites. The WSI layer is exported into
+/// the nested command, not this process: gamescope's Vulkan must not load it.
 fn spawn(
     w: u32,
     h: u32,
@@ -4049,7 +4061,17 @@ fn spawn(
         });
     let mut cmd = Command::new(gamescope_bin());
     add_bare_gamescope_args(&mut cmd, w, h, hz, steam_mode, grab_cursor, hdr);
-    let script = nested_wrapper_script(&relay, splash_exe.is_some());
+    let wsi = WsiPlan::resolve();
+    if wsi == WsiPlan::DistroDisabled {
+        // `hdr` is a field, not a gate: the layer is missing either way, and so is the fix.
+        tracing::warn!(
+            hdr,
+            "gamescope: this box's VkLayer_FROG_gamescope_wsi was built for a different gamescope \
+             than the one we run, so it is disabled for this session and no nested game can get \
+             an HDR10 swapchain. The punktfunk-gamescope package ships a matching layer."
+        );
+    }
+    let script = nested_wrapper_script(&relay, splash_exe.is_some(), &wsi.env());
     cmd.args(["sh", "-c", &script, "sh"]);
     if let Some(exe) = &splash_exe {
         cmd.arg(exe);
@@ -4063,23 +4085,13 @@ fn spawn(
             cmd.env("PULSE_SOURCE", src);
         }
     }
-    let wsi = WsiPlan::resolve();
-    if wsi == WsiPlan::DistroDisabled {
-        // `hdr` is a field, not a gate: the layer is missing either way, and so is the fix.
-        tracing::warn!(
-            hdr,
-            "gamescope: this box's VkLayer_FROG_gamescope_wsi was built for a different gamescope \
-             than the one we run, so it is disabled for this session and no nested game can get \
-             an HDR10 swapchain. The punktfunk-gamescope package ships a matching layer."
-        );
-    }
     cmd.args(app.split_whitespace())
         // Prefer the NVIDIA GL vendor for the nested session (harmless on a pure-NVIDIA box).
         .env("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
         // The box's keyboard layout — see [`xkb_env`]. Empty on an unconfigured box.
         .envs(xkb_env())
-        // Nested Vulkan clients load this layer for HDR10 swapchains.
-        .envs(wsi.env())
+        // Distro WSI off on the compositor. Ours is in the nested wrapper, not here.
+        .envs(wsi.compositor_env())
         // Headless must not attach. Stale WAYLAND_DISPLAY in the manager env aborts gamescope
         // before its PipeWire node appears. Nested apps get gamescope's own DISPLAY.
         .env_remove("DISPLAY")
@@ -4104,17 +4116,33 @@ fn spawn(
 }
 
 /// `"$1"` is the host executable — an argv, so the path never needs shell-escaping.
-fn nested_wrapper_script(relay: &std::path::Path, with_splash: bool) -> String {
+fn nested_wrapper_script(
+    relay: &std::path::Path,
+    with_splash: bool,
+    nested_env: &[(&'static str, String)],
+) -> String {
+    let env_kv = nested_env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let run = if env_kv.is_empty() {
+        "exec \"$@\"".to_string()
+    } else {
+        format!("exec env {env_kv} \"$@\"")
+    };
     if with_splash {
+        let splash = if env_kv.is_empty() {
+            "\"$1\" gamescope-splash &".to_string()
+        } else {
+            format!("env {env_kv} \"$1\" gamescope-splash &")
+        };
         format!(
-            "printf %s \"$LIBEI_SOCKET\" > '{}'; \"$1\" gamescope-splash & shift; exec \"$@\"",
+            "printf %s \"$LIBEI_SOCKET\" > '{}'; {splash} shift; {run}",
             relay.display()
         )
     } else {
-        format!(
-            "printf %s \"$LIBEI_SOCKET\" > '{}'; exec \"$@\"",
-            relay.display()
-        )
+        format!("printf %s \"$LIBEI_SOCKET\" > '{}'; {run}", relay.display())
     }
 }
 
@@ -4392,15 +4420,21 @@ mod tests {
     fn nested_wrapper_script_shapes() {
         let relay = std::path::Path::new("/run/user/1000/pf-ei");
         // Plain: relay + exec, no splash machinery.
-        let plain = nested_wrapper_script(relay, false);
+        let plain = nested_wrapper_script(relay, false, &[]);
         assert!(plain.contains("/run/user/1000/pf-ei"));
         assert!(plain.ends_with("exec \"$@\""));
         assert!(!plain.contains("gamescope-splash"));
         // Splash: `"$1"` is the host exe (an argv, never shell-interpolated), backgrounded and
         // shifted away so `exec "$@"` still runs the untouched app tokens.
-        let splash = nested_wrapper_script(relay, true);
+        let splash = nested_wrapper_script(relay, true, &[]);
         assert!(splash.contains("\"$1\" gamescope-splash &"));
         assert!(splash.contains("shift; exec \"$@\""));
+        let wsi = nested_wrapper_script(
+            relay,
+            false,
+            &[("PUNKTFUNK_GAMESCOPE_WSI", "1".to_string())],
+        );
+        assert!(wsi.contains("exec env PUNKTFUNK_GAMESCOPE_WSI=1 \"$@\""));
     }
 
     #[test]
@@ -5201,5 +5235,21 @@ mod tests {
         // to touch, so a stray variable there would change behaviour we promised not to change.
         assert!(WsiPlan::DistroKept.env().is_empty());
         assert!(WsiPlan::DistroKept.unit_lines().is_empty());
+    }
+
+    #[test]
+    fn ours_layer_does_not_load_into_the_compositor() {
+        let env = WsiPlan::Ours.compositor_env();
+        assert!(
+            !env.iter()
+                .any(|(k, _)| *k == "VK_ADD_IMPLICIT_LAYER_PATH" || *k == "PUNKTFUNK_GAMESCOPE_WSI"),
+            "the compositor must not search or enable our WSI layer"
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| *k == "DISABLE_GAMESCOPE_WSI")
+                .map(|(_, v)| v.as_str()),
+            Some("1")
+        );
     }
 }
