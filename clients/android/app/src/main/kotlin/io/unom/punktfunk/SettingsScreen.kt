@@ -259,87 +259,123 @@ fun SettingsScreen(
                 onReset = ::resetField,
             ),
         ) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                val twoPane = maxWidth >= 640.dp
-                // A two-column layout must never show an empty detail — land on the first category.
-                LaunchedEffect(twoPane, categories) {
-                    if (twoPane && selected == null) selectedName = categories.first().name
-                }
-
-                val detail: @Composable (SettingsCategory, (() -> Unit)?) -> Unit = { cat, back ->
-                    // Keyed on the scope: switching chips rebuilds the page rather than recomposing
-                    // it in place. Correctness no longer depends on it (see [scopeProfile]), but a
-                    // row's own `remember` is per-scope state too — "Custom…" picked while editing
-                    // a profile has no business still being picked over on the defaults.
-                    key(active?.id) {
-                        CategoryDetail(
-                            category = cat,
-                            settings = s,
-                            onChange = ::update,
-                            context = context,
-                            onMicChange = onMicChange,
-                            onOpenControllers = { showControllers = true },
-                            onOpenQuickActions = { showQuickActions = true },
-                            onOpenLicenses = { showLicenses = true },
-                            onBack = back,
-                        )
-                    }
-                }
-
-                if (twoPane) {
-                    BackHandler(onBack = onBack)
-                    Row(Modifier.fillMaxSize()) {
-                        CategoryList(
-                            categories = categories,
-                            selected = selected,
-                            twoPane = true,
-                            onSelect = { selectedName = it.name },
-                            modifier = Modifier.width(300.dp).fillMaxHeight(),
-                        )
-                        VerticalDivider()
-                        Box(Modifier.weight(1f).fillMaxHeight()) {
-                            // Cross-fade the detail pane as the selected category changes.
-                            AnimatedContent(
-                                targetState = selected ?: categories.first(),
-                                transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) },
-                                label = "SettingsPane",
-                            ) { cat -> detail(cat, null) }
-                        }
-                    }
-                } else {
-                    // Compact: the category list pushes to a full-screen detail and back, like the
-                    // iOS / Android system settings — a horizontal slide tracking the drill-in.
-                    BackHandler { if (selected != null) selectedName = null else onBack() }
-                    AnimatedContent(
-                        targetState = selected,
-                        transitionSpec = {
-                            if (targetState != null) {
-                                slideInHorizontally { it } + fadeIn() togetherWith
-                                    slideOutHorizontally { -it } + fadeOut()
-                            } else {
-                                slideInHorizontally { -it } + fadeIn() togetherWith
-                                    slideOutHorizontally { it } + fadeOut()
-                            }
-                        },
-                        label = "SettingsPush",
-                    ) { sel ->
-                        if (sel == null) {
-                            CategoryList(
-                                categories = categories,
-                                selected = null,
-                                twoPane = false,
-                                onSelect = { selectedName = it.name },
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                        } else {
-                            detail(sel) { selectedName = null }
-                        }
-                    }
+            CategoryPanes(
+                categories = categories,
+                selected = selected,
+                onSelect = { selectedName = it?.name },
+                onBack = onBack,
+            ) { cat, back ->
+                // Keyed on the scope: switching chips rebuilds the page rather than recomposing
+                // it in place. Correctness no longer depends on it (see [scopeProfile]), but a
+                // row's own `remember` is per-scope state too — "Custom…" picked while editing
+                // a profile has no business still being picked over on the defaults.
+                key(active?.id) {
+                    CategoryDetail(
+                        category = cat,
+                        settings = s,
+                        onChange = ::update,
+                        context = context,
+                        onMicChange = onMicChange,
+                        onOpenControllers = { showControllers = true },
+                        onOpenQuickActions = { showQuickActions = true },
+                        onOpenLicenses = { showLicenses = true },
+                        onBack = back,
+                    )
                 }
             }
         }
     }
 
+    ProfileDialogs(
+        editing = editing,
+        deleting = deleting,
+        profileStore = profileStore,
+        hostStore = hostStore,
+        onSaved = { id -> profiles = profileStore.all(); scopeId = id; editing = null },
+        onDeleted = { profiles = profileStore.all(); scopeId = null; deleting = null },
+        onDismiss = { editing = null; deleting = null },
+    )
+}
+
+/**
+ * The category list beside (≥ 640 dp) or in front of the detail page. Two-pane: a side list with
+ * a cross-fading detail, never an empty one. Compact: the list pushes to a full-screen detail
+ * and back, like the iOS / Android system settings — a horizontal slide tracking the drill-in.
+ */
+@Composable
+private fun CategoryPanes(
+    categories: List<SettingsCategory>,
+    selected: SettingsCategory?,
+    onSelect: (SettingsCategory?) -> Unit,
+    onBack: () -> Unit,
+    detail: @Composable (SettingsCategory, (() -> Unit)?) -> Unit,
+) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val twoPane = maxWidth >= 640.dp
+        LaunchedEffect(twoPane, categories) {
+            if (twoPane && selected == null) onSelect(categories.first())
+        }
+        if (twoPane) {
+            BackHandler(onBack = onBack)
+            Row(Modifier.fillMaxSize()) {
+                CategoryList(
+                    categories = categories,
+                    selected = selected,
+                    twoPane = true,
+                    onSelect = onSelect,
+                    modifier = Modifier.width(300.dp).fillMaxHeight(),
+                )
+                VerticalDivider()
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    AnimatedContent(
+                        targetState = selected ?: categories.first(),
+                        transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) },
+                        label = "SettingsPane",
+                    ) { cat -> detail(cat, null) }
+                }
+            }
+        } else {
+            BackHandler { if (selected != null) onSelect(null) else onBack() }
+            AnimatedContent(
+                targetState = selected,
+                transitionSpec = {
+                    if (targetState != null) {
+                        slideInHorizontally { it } + fadeIn() togetherWith
+                            slideOutHorizontally { -it } + fadeOut()
+                    } else {
+                        slideInHorizontally { -it } + fadeIn() togetherWith
+                            slideOutHorizontally { it } + fadeOut()
+                    }
+                },
+                label = "SettingsPush",
+            ) { sel ->
+                if (sel == null) {
+                    CategoryList(
+                        categories = categories,
+                        selected = null,
+                        twoPane = false,
+                        onSelect = onSelect,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    detail(sel) { onSelect(null) }
+                }
+            }
+        }
+    }
+}
+
+/** The profile editor and the delete confirmation, whichever intent is pending. */
+@Composable
+private fun ProfileDialogs(
+    editing: EditIntent?,
+    deleting: StreamProfile?,
+    profileStore: ProfileStore,
+    hostStore: KnownHostStore,
+    onSaved: (id: String) -> Unit,
+    onDeleted: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     editing?.let { intent ->
         val existing = (intent as? EditIntent.Existing)?.profile
         ProfileEditorDialog(
@@ -353,14 +389,11 @@ fun SettingsScreen(
                 val saved = existing?.copy(name = name, accent = accent)
                     ?: newProfile(name, accent)
                 profileStore.save(saved)
-                profiles = profileStore.all()
-                scopeId = saved.id
-                editing = null
+                onSaved(saved.id)
             },
-            onDismiss = { editing = null },
+            onDismiss = onDismiss,
         )
     }
-
     deleting?.let { profile ->
         val hosts = hostStore.all()
         DeleteProfileDialog(
@@ -369,14 +402,12 @@ fun SettingsScreen(
             pinnedCards = hosts.count { profile.id in it.pinnedProfileIds },
             onConfirm = {
                 profileStore.delete(profile.id)
-                profiles = profileStore.all()
-                scopeId = null
-                deleting = null
                 // Bindings and pins are left dangling on purpose: they resolve to "no profile" and
                 // to "no card", which is exactly right, and rewriting every host record here would
                 // be a second write pass over data the user didn't ask us to touch.
+                onDeleted()
             },
-            onDismiss = { deleting = null },
+            onDismiss = onDismiss,
         )
     }
 }
