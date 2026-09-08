@@ -172,16 +172,12 @@ data class Settings(
      */
     val uiPalette: String = "violet",
     /**
-     * "Low-latency mode" — the master switch over the latency pipeline: the async decode loop
-     * (native; burst-feed + present-newest-per-vsync, the Apple client's discipline), decoder ranking
-     * + per-SoC vendor keys, pipeline thread boosts + ADPF max-performance, game-tagged AAudio, DSCP
-     * marking on the media sockets, HDMI ALLM, and the forced TV mode switch. (The Wi-Fi locks are NOT
-     * part of this — both are always held while streaming; see StreamScreen.) On (default): the fast
-     * pipeline. Off restores the original synchronous decode loop byte-for-byte, kept as a per-device
-     * escape hatch. Promoted to default once the receive-side latency ratchet the overhaul interacted
-     * badly with was fixed in the shared core — the pump now jumps to live on a standing backlog
-     * instead of accumulating it (see `punktfunk-core` `FrameChannel`), so the async loop no longer
-     * feeds a queue that only grows.
+     * "Low-latency mode" — the master switch over the fast pipeline: decoder ranking + per-SoC
+     * vendor keys, slice-progressive delivery, pipeline thread boosts + ADPF max-performance,
+     * game-tagged AAudio, DSCP marking on the media sockets, HDMI ALLM, and the forced TV mode
+     * switch. (The Wi-Fi locks are NOT part of this — both are always held while streaming; see
+     * StreamScreen.) Off keeps the same decode loop and presenter — so [presentPriority] applies
+     * either way — with plain keys and no boosts: the per-device escape hatch.
      */
     val lowLatencyMode: Boolean = true,
     /**

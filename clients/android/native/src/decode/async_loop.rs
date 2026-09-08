@@ -156,10 +156,9 @@ fn install_async_callbacks(codec: &mut MediaCodec, ev_tx: &mpsc::Sender<DecodeEv
     true
 }
 
-/// The event-driven async decode loop (default; see [`run`]/[`USE_ASYNC_DECODE`]). The codec drives
-/// us: an async-notify callback fires the instant an input buffer frees or a frame finishes
-/// decoding, so a decoded frame is presented immediately instead of waiting out a poll interval (the
-/// latency the sync loop left on the table). The callbacks run on the codec's internal looper thread
+/// The event-driven decode loop (see [`run`]). The codec drives us: an async-notify callback fires
+/// the instant an input buffer frees or a frame finishes decoding, so a decoded frame is presented
+/// immediately instead of waiting out a poll interval. The callbacks run on the codec's internal looper thread
 /// and only *push events* — every `AMediaCodec` buffer op stays on this thread, which owns the codec,
 /// sidestepping the self-reference that would arise from a callback calling back into the codec it's
 /// stored in. A small `pf-decode-feed` thread blocks on the network so this loop never does.
@@ -290,7 +289,7 @@ pub(super) fn run_async(
     let mut hint: Option<crate::adpf::HintSession> = None;
     let mut hint_tried = false;
     // Productive (dispatch+feed+present) time between displayed frames; reported to ADPF once one is
-    // presented. The blocking event wait is excluded (idle, not work) — same accounting as the sync loop.
+    // presented. The blocking event wait is excluded (idle, not work).
     let mut work_accum_ns: i64 = 0;
 
     while !shutdown.load(Ordering::Relaxed) && !state.fatal {
