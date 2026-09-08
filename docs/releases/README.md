@@ -80,7 +80,7 @@ versionCode shipped.
 
 ## Voice & format
 
-Voice: `docs/writing.md` §2. Name the thing. Then stop.
+Voice: `docs/writing.md` §2. Name the thing, then what the reader gets.
 
 **Write for the people who USE Punktfunk to stream their games and desktops — not for the people who
 build it.** A non-engineer should finish knowing what's new and whether it affects them.
@@ -103,8 +103,11 @@ build it.** A non-engineer should finish knowing what's new and whether it affec
 6. **No protocol / ABI / driver / embedder detail in this file at all.** It goes in the root
    `CHANGELOG.md` (see below), and the notes carry a single short `## For developers` section
    linking there. Nothing else in `vX.Y.Z.md` may use an internal name.
-7. **Group as New / Improved / Fixed / Security**, one line per theme. If something needs the
-   reader to *act*, it belongs in the lead-in and in `## Before you update`.
+7. **Group as New / Improved / Fixed / Security**, one bullet per fact a user could notice,
+   grouped by platform or theme. If something needs the reader to *act*, it belongs in the
+   lead-in and in `## Before you update`.
+8. **`## Thanks` names every contributor outside the team** and what they built. The work is
+   theirs; the notes say so.
 
 ## The technical half: root `CHANGELOG.md`
 

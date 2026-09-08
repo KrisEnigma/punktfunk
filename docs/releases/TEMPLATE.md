@@ -4,6 +4,8 @@ Wire-compatible with X.Y.x except where Before you update says otherwise.
 - **<Highlight two.>**
 - **<Three to eight, one line each. This block is the Discord embed.>**
 
+<Optional: one short paragraph of warning, if the release needs one.>
+
 ## Before you update
 
 ## New
@@ -11,6 +13,12 @@ Wire-compatible with X.Y.x except where Before you update says otherwise.
 ## Improved
 
 ## Fixed
+
+## Security
+
+## Thanks
+
+<Every contributor outside the team, by name, with what they built. Delete only if there were none.>
 
 ## For developers
 

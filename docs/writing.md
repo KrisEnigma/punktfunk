@@ -76,18 +76,24 @@ who runs the skill — is `.agents/skills/write-release-notes/SKILL.md`.
 
 Shape:
 
-1. Compatibility line + **3–8 highlight bullets BEFORE the first `##`**. Discord
-   (`scripts/ci/discord-announce.sh`) posts that prefix (1800 chars).
+1. Compatibility line + **3–8 highlight bullets BEFORE the first `##`**, plus one short
+   paragraph if the release needs a warning. Discord (`scripts/ci/discord-announce.sh`)
+   posts that prefix (1800 chars).
 2. `## Before you update` — delete if nothing. Windows host+driver matching is not
    “update one side at a time.”
-3. `## New` / `## Improved` / `## Fixed` / `## Security` — one line per theme.
-4. `## For developers` — CHANGELOG at the tag + `git log vPrev..vThis`.
+3. `## New` / `## Improved` / `## Fixed` / `## Security` — one bullet per fact a user could
+   notice, grouped by platform or theme. A group heading collects bullets; it never replaces
+   them.
+4. `## Thanks` — every contributor outside the team, by name, with what they built.
+5. `## For developers` — CHANGELOG at the tag + `git log vPrev..vThis`.
 
-Voice: Name the thing. Then stop. No metaphor, origin story, lab, SKU, soak,
-“we watched”. No crate names, protocol hex, or API symbols on the user page.
+Voice: Name the thing, then what the reader gets. No metaphor, origin story, lab, SKU,
+soak, “we watched”. A fact about the build with no reader in it is not a bullet. No crate names, protocol hex, or API symbols on the user page.
 
 Bad: `The headline is a control surface for everyone who streams to a screen they hold.`
+Bad: `**No bundled FFmpeg.** The host encodes with your GPU's own encoder.`
 Good: `**Quick-action ring.** A two-finger twist on the stream opens six buttons.`
+Good: `**The packages carry no FFmpeg.** Fedora needs no RPM Fusion.`
 
 ### `CHANGELOG.md` — embedders, packagers, plugin authors
 
