@@ -711,10 +711,10 @@ private fun PadRow(info: PadInfo, gamepadSetting: Int) {
             val resolved = info.resolvedPref
             Text(
                 if (gamepadSetting == Gamepad.PREF_AUTO) {
-                    "Streams as: ${prefLabel(resolved)} (automatic)"
+                    "Streams as: ${Gamepad.prefLabel(resolved)} (automatic)"
                 } else {
-                    "Streams as: ${prefLabel(gamepadSetting)} (set in Settings; " +
-                        "automatic would pick ${prefLabel(resolved)})"
+                    "Streams as: ${Gamepad.prefLabel(gamepadSetting)} (set in Settings; " +
+                        "automatic would pick ${Gamepad.prefLabel(resolved)})"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -912,21 +912,6 @@ private fun sourcesLabel(sources: Int): String {
         if (has(InputDevice.SOURCE_ROTARY_ENCODER)) add("rotary")
     }
     return if (names.isEmpty()) "sources 0x%08X".format(sources) else names.joinToString(" · ")
-}
-
-/** [Gamepad] PREF_* wire byte → user-facing label (mirrors GAMEPAD_OPTIONS, plus the Steam types). */
-private fun prefLabel(pref: Int): String = when (pref) {
-    Gamepad.PREF_XBOX360 -> "Xbox 360"
-    Gamepad.PREF_DUALSENSE -> "DualSense"
-    Gamepad.PREF_XBOXONE -> "Xbox One"
-    Gamepad.PREF_DUALSHOCK4 -> "DualShock 4"
-    Gamepad.PREF_STEAMCONTROLLER -> "Steam Controller"
-    Gamepad.PREF_STEAMDECK -> "Steam Deck"
-    Gamepad.PREF_DUALSENSEEDGE -> "DualSense Edge"
-    Gamepad.PREF_SWITCHPRO -> "Switch Pro"
-    Gamepad.PREF_STEAMCONTROLLER2 -> "Steam Controller 2"
-    Gamepad.PREF_STEAMCONTROLLER2_PUCK -> "Steam Controller 2 Puck"
-    else -> "Automatic"
 }
 
 /** Buttons shown in the test grid (label → Android keycode). */

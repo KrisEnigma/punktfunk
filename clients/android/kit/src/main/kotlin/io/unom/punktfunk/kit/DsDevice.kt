@@ -223,42 +223,58 @@ object DsDevice {
         val touchY = IntArray(2)
     }
 
-    // DS5 USB input report 0x01 (64 B) — offsets mirror the host serializer
-    // (`dualsense_proto.rs::serialize_state`): [1..7) sticks + triggers, [8] hat|face,
-    // [9]/[10] buttons, [16..28) gyro+accel, [33..41) two 4-byte touch points.
-    private const val DS5_INPUT_ID = 0x01
-    // report[8] high nibble (`dualsense_proto::btn0`).
-    private const val DS5_SQUARE = 0x10
-    private const val DS5_CROSS = 0x20
-    private const val DS5_CIRCLE = 0x40
-    private const val DS5_TRIANGLE = 0x80
-    // report[9] (`btn1`).
-    private const val DS5_L1 = 0x01
-    private const val DS5_R1 = 0x02
-    private const val DS5_CREATE = 0x10
-    private const val DS5_OPTIONS = 0x20
-    private const val DS5_L3 = 0x40
-    private const val DS5_R3 = 0x80
-    // report[10] (`btn2`); the FN/BACK bits exist only on the Edge.
-    private const val DS5_PS = 0x01
-    private const val DS5_TOUCHPAD = 0x02
+    private const val INPUT_ID = 0x01 // USB input report id, DS5 and DS4 alike
+
+    /**
+     * Where one model's USB input report 0x01 (64 B) keeps each field — the offsets mirror the
+     * host serializers (`dualsense_proto.rs` / `dualshock4_proto.rs` `serialize_state`). The
+     * button BITS are the same on both pads; only the bytes they sit in move.
+     */
+    private class Layout(
+        val minLen: Int,
+        /** Two stick bytes each, then the two trigger bytes. */
+        val sticks: Int,
+        val lt: Int,
+        val rt: Int,
+        /** hat nibble | face buttons; the next two bytes are `btn1` (shoulders, menu, sticks)
+         *  and `btn2` (PS, touchpad, and on the DS5 mute + the Edge paddles). */
+        val face: Int,
+        val motionLen: Int,
+        val gyro: Int,
+        val accel: Int,
+        val touchLen: Int,
+        val touch: Int,
+    )
+
+    private val DS5_LAYOUT = Layout(
+        minLen = 11, sticks = 1, lt = 5, rt = 6, face = 8,
+        motionLen = 28, gyro = 16, accel = 22, touchLen = 41, touch = 33,
+    )
+    private val DS4_LAYOUT = Layout(
+        minLen = 10, sticks = 1, lt = 8, rt = 9, face = 5,
+        motionLen = 25, gyro = 13, accel = 19, touchLen = 43, touch = 35,
+    )
+
+    // face byte high nibble (`btn0`).
+    private const val BTN_SQUARE = 0x10
+    private const val BTN_CROSS = 0x20
+    private const val BTN_CIRCLE = 0x40
+    private const val BTN_TRIANGLE = 0x80
+    // `btn1`: L1, R1, Create/Share, Options, L3, R3.
+    private const val BTN_L1 = 0x01
+    private const val BTN_R1 = 0x02
+    private const val BTN_CREATE = 0x10
+    private const val BTN_OPTIONS = 0x20
+    private const val BTN_L3 = 0x40
+    private const val BTN_R3 = 0x80
+    // `btn2`; mute is DS5-only, the FN/BACK bits exist only on the Edge.
+    private const val BTN_PS = 0x01
+    private const val BTN_TOUCHPAD = 0x02
     private const val DS5_MUTE = 0x04
     private const val EDGE_FN_LEFT = 0x10
     private const val EDGE_FN_RIGHT = 0x20
     private const val EDGE_BACK_LEFT = 0x40
     private const val EDGE_BACK_RIGHT = 0x80
-
-    // DS4 USB input report 0x01 (64 B) — offsets mirror `dualshock4_proto.rs::serialize_state`:
-    // [1..5) sticks, [5] hat|face, [6]/[7] buttons, [8]/[9] triggers, [13..25) gyro+accel,
-    // [35..43) two touch points (same 4-byte packing as the DS5).
-    private const val DS4_L1 = 0x01
-    private const val DS4_R1 = 0x02
-    private const val DS4_SHARE = 0x10
-    private const val DS4_OPTIONS = 0x20
-    private const val DS4_L3 = 0x40
-    private const val DS4_R3 = 0x80
-    private const val DS4_PS = 0x01
-    private const val DS4_TOUCHPAD = 0x02
 
     /**
      * Parse one USB input report (`0x01`) into [out]. Returns false for any other report id or a
@@ -276,91 +292,50 @@ object DsDevice {
         len: Int,
         out: State,
         cal: MotionCal = MotionCal.NOMINAL,
-    ): Boolean =
-        if (model == Model.DUALSHOCK4) {
-            parseDs4(report, len, out, cal)
-        } else {
-            parseDs5(model, report, len, out, cal)
-        }
-
-    private fun parseDs5(model: Model, r: ByteArray, len: Int, out: State, cal: MotionCal): Boolean {
-        if (len < 11 || (r[0].toInt() and 0xFF) != DS5_INPUT_ID) return false
-        out.lsX = stickX(u8(r, 1))
-        out.lsY = stickY(u8(r, 2))
-        out.rsX = stickX(u8(r, 3))
-        out.rsY = stickY(u8(r, 4))
-        out.lt = u8(r, 5)
-        out.rt = u8(r, 6)
-        val b8 = u8(r, 8)
-        val b9 = u8(r, 9)
-        val b10 = u8(r, 10)
-        var w = hatBits(b8 and 0x0F)
-        if (b8 and DS5_CROSS != 0) w = w or Gamepad.BTN_A
-        if (b8 and DS5_CIRCLE != 0) w = w or Gamepad.BTN_B
-        if (b8 and DS5_SQUARE != 0) w = w or Gamepad.BTN_X
-        if (b8 and DS5_TRIANGLE != 0) w = w or Gamepad.BTN_Y
-        if (b9 and DS5_L1 != 0) w = w or Gamepad.BTN_LB
-        if (b9 and DS5_R1 != 0) w = w or Gamepad.BTN_RB
+    ): Boolean {
+        val r = report
+        val l = if (model == Model.DUALSHOCK4) DS4_LAYOUT else DS5_LAYOUT
+        if (len < l.minLen || (r[0].toInt() and 0xFF) != INPUT_ID) return false
+        out.lsX = stickX(u8(r, l.sticks))
+        out.lsY = stickY(u8(r, l.sticks + 1))
+        out.rsX = stickX(u8(r, l.sticks + 2))
+        out.rsY = stickY(u8(r, l.sticks + 3))
+        out.lt = u8(r, l.lt)
+        out.rt = u8(r, l.rt)
+        val b0 = u8(r, l.face)
+        val b1 = u8(r, l.face + 1)
+        val b2 = u8(r, l.face + 2)
+        var w = hatBits(b0 and 0x0F)
+        if (b0 and BTN_CROSS != 0) w = w or Gamepad.BTN_A
+        if (b0 and BTN_CIRCLE != 0) w = w or Gamepad.BTN_B
+        if (b0 and BTN_SQUARE != 0) w = w or Gamepad.BTN_X
+        if (b0 and BTN_TRIANGLE != 0) w = w or Gamepad.BTN_Y
+        if (b1 and BTN_L1 != 0) w = w or Gamepad.BTN_LB
+        if (b1 and BTN_R1 != 0) w = w or Gamepad.BTN_RB
         // L2/R2 digital bits ride the analog axes instead (wire convention).
-        if (b9 and DS5_CREATE != 0) w = w or Gamepad.BTN_BACK
-        if (b9 and DS5_OPTIONS != 0) w = w or Gamepad.BTN_START
-        if (b9 and DS5_L3 != 0) w = w or Gamepad.BTN_LS_CLICK
-        if (b9 and DS5_R3 != 0) w = w or Gamepad.BTN_RS_CLICK
-        if (b10 and DS5_PS != 0) w = w or Gamepad.BTN_GUIDE
-        if (b10 and DS5_TOUCHPAD != 0) w = w or Gamepad.BTN_TOUCHPAD
-        if (b10 and DS5_MUTE != 0) w = w or Gamepad.BTN_MISC1
+        if (b1 and BTN_CREATE != 0) w = w or Gamepad.BTN_BACK
+        if (b1 and BTN_OPTIONS != 0) w = w or Gamepad.BTN_START
+        if (b1 and BTN_L3 != 0) w = w or Gamepad.BTN_LS_CLICK
+        if (b1 and BTN_R3 != 0) w = w or Gamepad.BTN_RS_CLICK
+        if (b2 and BTN_PS != 0) w = w or Gamepad.BTN_GUIDE
+        if (b2 and BTN_TOUCHPAD != 0) w = w or Gamepad.BTN_TOUCHPAD
+        if (model != Model.DUALSHOCK4 && b2 and DS5_MUTE != 0) w = w or Gamepad.BTN_MISC1
         if (model == Model.DUALSENSE_EDGE) {
             // Wire paddle order matches the host's `edge_paddle_bits` inverse: PADDLE1/2 =
             // right/left BACK (the primary pair, Steam R4/L4 convention), PADDLE3/4 = right/left Fn.
-            if (b10 and EDGE_BACK_RIGHT != 0) w = w or Gamepad.BTN_PADDLE1
-            if (b10 and EDGE_BACK_LEFT != 0) w = w or Gamepad.BTN_PADDLE2
-            if (b10 and EDGE_FN_RIGHT != 0) w = w or Gamepad.BTN_PADDLE3
-            if (b10 and EDGE_FN_LEFT != 0) w = w or Gamepad.BTN_PADDLE4
+            if (b2 and EDGE_BACK_RIGHT != 0) w = w or Gamepad.BTN_PADDLE1
+            if (b2 and EDGE_BACK_LEFT != 0) w = w or Gamepad.BTN_PADDLE2
+            if (b2 and EDGE_FN_RIGHT != 0) w = w or Gamepad.BTN_PADDLE3
+            if (b2 and EDGE_FN_LEFT != 0) w = w or Gamepad.BTN_PADDLE4
         }
         out.buttons = w
-        if (len >= 28) {
-            for (i in 0 until 3) out.gyro[i] = cal.gyroToWire(i, i16(r, 16 + 2 * i))
-            for (i in 0 until 3) out.accel[i] = cal.accelToWire(i, i16(r, 22 + 2 * i))
+        if (len >= l.motionLen) {
+            for (i in 0 until 3) out.gyro[i] = cal.gyroToWire(i, i16(r, l.gyro + 2 * i))
+            for (i in 0 until 3) out.accel[i] = cal.accelToWire(i, i16(r, l.accel + 2 * i))
         }
-        if (len >= 41) {
-            unpackTouch(r, 33, out, 0)
-            unpackTouch(r, 37, out, 1)
-        }
-        return true
-    }
-
-    private fun parseDs4(r: ByteArray, len: Int, out: State, cal: MotionCal): Boolean {
-        if (len < 10 || (r[0].toInt() and 0xFF) != DS5_INPUT_ID) return false // DS4 shares id 0x01
-        out.lsX = stickX(u8(r, 1))
-        out.lsY = stickY(u8(r, 2))
-        out.rsX = stickX(u8(r, 3))
-        out.rsY = stickY(u8(r, 4))
-        val b5 = u8(r, 5)
-        val b6 = u8(r, 6)
-        val b7 = u8(r, 7)
-        out.lt = u8(r, 8)
-        out.rt = u8(r, 9)
-        var w = hatBits(b5 and 0x0F)
-        if (b5 and DS5_CROSS != 0) w = w or Gamepad.BTN_A
-        if (b5 and DS5_CIRCLE != 0) w = w or Gamepad.BTN_B
-        if (b5 and DS5_SQUARE != 0) w = w or Gamepad.BTN_X
-        if (b5 and DS5_TRIANGLE != 0) w = w or Gamepad.BTN_Y
-        if (b6 and DS4_L1 != 0) w = w or Gamepad.BTN_LB
-        if (b6 and DS4_R1 != 0) w = w or Gamepad.BTN_RB
-        if (b6 and DS4_SHARE != 0) w = w or Gamepad.BTN_BACK
-        if (b6 and DS4_OPTIONS != 0) w = w or Gamepad.BTN_START
-        if (b6 and DS4_L3 != 0) w = w or Gamepad.BTN_LS_CLICK
-        if (b6 and DS4_R3 != 0) w = w or Gamepad.BTN_RS_CLICK
-        if (b7 and DS4_PS != 0) w = w or Gamepad.BTN_GUIDE
-        if (b7 and DS4_TOUCHPAD != 0) w = w or Gamepad.BTN_TOUCHPAD
-        out.buttons = w
-        if (len >= 25) {
-            for (i in 0 until 3) out.gyro[i] = cal.gyroToWire(i, i16(r, 13 + 2 * i))
-            for (i in 0 until 3) out.accel[i] = cal.accelToWire(i, i16(r, 19 + 2 * i))
-        }
-        if (len >= 43) {
-            unpackTouch(r, 35, out, 0)
-            unpackTouch(r, 39, out, 1)
+        if (len >= l.touchLen) {
+            unpackTouch(r, l.touch, out, 0)
+            unpackTouch(r, l.touch + 4, out, 1)
         }
         return true
     }
