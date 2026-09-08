@@ -33,7 +33,9 @@
 pub mod anim;
 pub mod art_stats;
 pub mod brand;
-mod collate;
+// The sort/group policy moved to pf-client-core so the GTK and WinUI dialogs share it rather
+// than growing a second order. Aliased here because every screen names `crate::collate`.
+pub(crate) use pf_client_core::collate;
 pub mod console;
 pub mod glyphs;
 pub mod icons;

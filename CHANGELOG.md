@@ -315,6 +315,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **`pf_client_core::collate` is where library sort and grouping live now.** The module was
+  private to `pf-console-ui`, so the GTK and WinUI shelves could not reach it; it moves behind
+  a `Collatable` trait each shell implements for its own model, and `store_label` and
+  `DESKTOP_ID` move to `pf_client_core::library` beside `GameEntry`. Nothing to do unless you
+  named `pf_console_ui::collate` — the console's own paths still resolve through a re-export.
 - **`punktfunk-host ctl console-url` is back, and now prints a `file://` page instead of a bearer
   URL.** It writes a 0600 login page under `$XDG_RUNTIME_DIR` carrying the handoff ticket, so the
   Omarchy launchers open the console already logged in without the ticket ever reaching argv, where

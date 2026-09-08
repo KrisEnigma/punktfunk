@@ -91,6 +91,27 @@ pub struct GameEntry {
     pub icon: Option<String>,
 }
 
+/// The console's desktop-tile id. `\0` prefix as Home's Add and Rescan tiles use: a host
+/// title id is a store reference, and none of them can start with a NUL. Lives here, not in
+/// the console, because [`crate::collate`] has to keep the tile out of every group and the
+/// shells that have no such tile simply never match it.
+pub const DESKTOP_ID: &str = "\0desktop";
+
+/// Store id → display label. One table: the console, the GTK dialog and the WinUI dialog all
+/// drew this from a copy of their own, and a store added to one never reached the others.
+pub fn store_label(store: &str) -> &'static str {
+    match store {
+        "steam" => "Steam",
+        "custom" => "Custom",
+        "heroic" => "Heroic",
+        "lutris" => "Lutris",
+        "epic" => "Epic",
+        "gog" => "GOG",
+        "xbox" => "Xbox",
+        _ => "Game",
+    }
+}
+
 impl GameEntry {
     pub fn is_launcher(&self) -> bool {
         self.role.as_deref() == Some("launcher")
