@@ -449,8 +449,7 @@ fn cleanup() -> Result<()> {
 
 /// `pnputil /remove-device` — same teardown as `pad-endpoint remove`.
 fn remove_devnode(inst: &str) {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
-    match std::process::Command::new(format!(r"{windir}\System32\pnputil.exe"))
+    match std::process::Command::new(crate::install::sys32("pnputil.exe"))
         .args(["/remove-device", inst])
         .output()
     {

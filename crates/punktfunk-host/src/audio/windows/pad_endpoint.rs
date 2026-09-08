@@ -1202,8 +1202,7 @@ pub fn ensure(pad_index: u8) -> Result<PadEndpoint> {
 /// Best-effort teardown (`pnputil /remove-device`). Tests and the
 /// `pad-endpoint remove` hatch only; endpoints are persistent.
 pub fn remove(pe: &PadEndpoint) {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
-    let pnputil = format!(r"{windir}\System32\pnputil.exe");
+    let pnputil = crate::install::sys32("pnputil.exe");
     match std::process::Command::new(&pnputil)
         .args(["/remove-device", &pe.device_instance])
         .output()

@@ -23,21 +23,28 @@ fn flag_val(args: &[String], name: &str) -> Option<String> {
 fn flag_present(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
-/// Absolute `%SystemRoot%\System32` path for a bare tool name; a name that already carries a
-/// separator (the staged `nefconc.exe`) is its own path and passes through.
+/// `%SystemRoot%\System32\<rel>` — the one place the System32 rule lives.
 ///
-/// `CreateProcess` searches the calling process's directory and cwd before `%PATH%`. These run
-/// elevated, so a `certutil.exe` planted beside the installer would run with its privileges.
-/// Never falls back to the bare name — that is the PATH search this exists to avoid — so an
-/// unset `SystemRoot` walks to `WINDIR` and then to the literal default, as the audio path does.
-pub(crate) fn resolve_tool(cmd: &str) -> String {
-    if cmd.contains('\\') || cmd.contains('/') {
-        return cmd.to_string();
-    }
+/// `CreateProcess` searches the calling process's directory and the working directory before
+/// `%PATH%`, and everything routed through here runs elevated or as SYSTEM: a `certutil.exe`
+/// planted beside the installer would otherwise win. `SystemRoot`, then `WINDIR`, then the
+/// literal default — never a bare name, which is the PATH search this exists to avoid.
+///
+/// `rel` may carry a subdirectory, as PowerShell does.
+pub(crate) fn sys32(rel: &str) -> String {
     let root = std::env::var("SystemRoot")
         .or_else(|_| std::env::var("WINDIR"))
         .unwrap_or_else(|_| r"C:\Windows".to_string());
-    format!("{root}\\System32\\{cmd}.exe")
+    format!(r"{root}\System32\{rel}")
+}
+
+/// [`sys32`] for a bare tool name. A name that already carries a separator (the staged
+/// `nefconc.exe`) is its own path and passes through.
+fn resolve_tool(cmd: &str) -> String {
+    if cmd.contains('\\') || cmd.contains('/') {
+        return cmd.to_string();
+    }
+    sys32(&format!("{cmd}.exe"))
 }
 fn run_quiet(cmd: &str, args: &[&str]) -> bool {
     Command::new(resolve_tool(cmd))

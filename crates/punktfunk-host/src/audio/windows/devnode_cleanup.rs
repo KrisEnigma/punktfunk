@@ -186,8 +186,7 @@ fn is_removable_instance(instance_id: &str) -> bool {
 
 /// `pnputil /remove-device` by absolute path: an uninstaller must not depend on `%PATH%`.
 fn remove_devnode(instance_id: &str) -> bool {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
-    match std::process::Command::new(format!(r"{windir}\System32\pnputil.exe"))
+    match std::process::Command::new(crate::install::sys32("pnputil.exe"))
         .args(["/remove-device", instance_id])
         .output()
     {

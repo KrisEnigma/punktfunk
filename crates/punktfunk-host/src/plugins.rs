@@ -721,9 +721,7 @@ fn revoke_runner_secret_reads() {
 /// System32 `icacls`, not PATH — same planted-binary rule as [`powershell_path`].
 #[cfg(target_os = "windows")]
 fn icacls_path() -> String {
-    std::env::var("SystemRoot")
-        .map(|r| format!(r"{r}\System32\icacls.exe"))
-        .unwrap_or_else(|_| "icacls".to_string())
+    crate::install::sys32("icacls.exe")
 }
 
 /// System32 powershell, not PATH. CreateProcess searches the launching EXE's
@@ -731,9 +729,7 @@ fn icacls_path() -> String {
 /// with these privileges.
 #[cfg(target_os = "windows")]
 fn powershell_path() -> String {
-    std::env::var("SystemRoot")
-        .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
-        .unwrap_or_else(|_| "powershell.exe".to_string())
+    crate::install::sys32(r"WindowsPowerShell\v1.0\powershell.exe")
 }
 
 #[cfg(target_os = "windows")]

@@ -1561,9 +1561,7 @@ fn set_fw_public_marker(allow_public: bool) {
 fn active_network_is_public() -> Option<bool> {
     // Full System32 path: CreateProcess searches the launching EXE's directory first, so a
     // planted `powershell.exe` next to the host would run as SYSTEM.
-    let ps = std::env::var("SystemRoot")
-        .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
-        .unwrap_or_else(|_| "powershell.exe".to_string());
+    let ps = crate::install::sys32(r"WindowsPowerShell\v1.0\powershell.exe");
     let out = std::process::Command::new(&ps)
         .args([
             "-NoProfile",
