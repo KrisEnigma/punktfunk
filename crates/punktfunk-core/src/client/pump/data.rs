@@ -186,6 +186,9 @@ impl DataPump {
         // a re-sync (`pump_clock_gen`). First no-op also asks for re-sync.
         let mut noop_clock_flushes: u32 = 0;
         let mut clock_detector_armed = true;
+        // AUs dropped while nothing popped the channel (embedder decoder not
+        // started yet). The first pop after one owes the host a keyframe.
+        let mut unconsumed_aus: u64 = 0;
         let mut resync_wanted = false;
         let mut seen_clock_gen = pump_clock_gen.load(Ordering::Relaxed);
         let mut seen_mode_gen = pump_mode_gen.load(Ordering::Relaxed);
@@ -624,6 +627,25 @@ impl DataPump {
                                     .push((now - prev).as_micros().min(u32::MAX as u128) as u32);
                             }
                         }
+                    }
+                    // No decoder yet (the embedder starts it on its stream
+                    // view; a console launch hold delays that up to 15 s).
+                    // Queued AUs would be reference-broken by then, and a
+                    // queue nobody drains is not link distress — so no push,
+                    // no detector, and one keyframe once something pops.
+                    if !frames.consumer_seen() {
+                        unconsumed_aus += u64::from(is_au);
+                        stale_since = None;
+                        standing_since = None;
+                        continue;
+                    }
+                    if unconsumed_aus > 0 {
+                        tracing::info!(
+                            dropped_aus = unconsumed_aus,
+                            "decoder attached after the stream started — asking for a keyframe"
+                        );
+                        unconsumed_aus = 0;
+                        let _ = ctrl_tx.try_send(CtrlRequest::Keyframe);
                     }
                     // Jump-to-live. In-order consume never catches up;
                     // infinite GOP cannot drop a frame. Clock: > FLUSH_LATENCY
