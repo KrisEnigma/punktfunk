@@ -37,7 +37,7 @@ use wdk_sys::{
     NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, PWDFDEVICE_INIT, ULONG, WDF_DRIVER_CONFIG,
     WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, WDF_OBJECT_ATTRIBUTES,
     WDF_TIMER_CONFIG, WDFDEVICE, WDFDRIVER, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER,
-    call_unsafe_wdf_function_binding, windows::OutputDebugStringA,
+    call_unsafe_wdf_function_binding,
 };
 
 // ---- NTSTATUS values ----
@@ -181,58 +181,20 @@ fn channel_cfg() -> ChannelConfig {
     }
 }
 
-/// Whether the bring-up file log is enabled (resolved once). OPT-IN — debug builds, or the
-/// `PFMOUSE_DEBUG_LOG` (system-wide) env var — the same policy as the pad drivers (audit §4.4):
-/// a RELEASE driver never writes it. DebugView can't see the UMDF host across session 0, so the
-/// file stays the bring-up diagnostic when enabled.
-fn file_log_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| cfg!(debug_assertions) || std::env::var_os("PFMOUSE_DEBUG_LOG").is_some())
-}
+/// The bring-up file log. OPT-IN — debug builds, or the `PFMOUSE_DEBUG_LOG` env var — so a RELEASE
+/// driver never writes the file and never traps into the debugger. The path and the sink live
+/// in [`pf_umdf_util::log`], one copy for all four drivers.
+static FILE_LOG: pf_umdf_util::log::FileLog =
+    pf_umdf_util::log::FileLog::new("pfmouse-driver.log", || {
+        cfg!(debug_assertions) || std::env::var_os("PFMOUSE_DEBUG_LOG").is_some()
+    });
 
-/// Process-lifetime append handle to the bring-up log, opened ONCE and shared via a `Mutex`
-/// (pf-vdisplay's pattern) — no per-line open/close.
-fn file_appender() -> Option<&'static std::sync::Mutex<std::fs::File>> {
-    use std::sync::OnceLock;
-    static APPENDER: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
-    APPENDER
-        .get_or_init(|| {
-            if !file_log_enabled() {
-                return None;
-            }
-            // Write to the WUDFHost's own (LocalService) temp dir — NOT world-writable/readable
-            // `C:\Users\Public`, where any local reader gets the diagnostics and a non-admin can
-            // pre-create the path as a hard link to redirect this LocalService appender's writes
-            // (security-review 2026-07-17; pf-xusb/pf-gamepad/pf-vdisplay were moved then, this
-            // driver was missed — security-review 2026-07-28). Opt-in/debug only.
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(std::env::temp_dir().join("pfmouse-driver.log"))
-                .ok()
-                .map(std::sync::Mutex::new)
-        })
-        .as_ref()
+fn file_log_enabled() -> bool {
+    FILE_LOG.enabled()
 }
 
 fn log(s: &str) {
-    // Gated as a whole on [`file_log_enabled`]: `OutputDebugStringA` used to fire unconditionally
-    // — a syscall + CString alloc per logged event in a RELEASE driver, on paths that run per
-    // IOCTL. Debug builds and the env-var opt-in keep the full debug-string + file tee.
-    if !file_log_enabled() {
-        return;
-    }
-    if let Ok(c) = std::ffi::CString::new(s) {
-        // SAFETY: `c` is a valid NUL-terminated string for the duration of the call.
-        unsafe { OutputDebugStringA(c.as_ptr().cast()) };
-    }
-    use std::io::Write;
-    if let Some(m) = file_appender()
-        && let Ok(mut f) = m.lock()
-    {
-        let _ = writeln!(f, "{s}");
-    }
+    FILE_LOG.write(s);
 }
 // The `file_log_enabled()` pre-check skips the `format!` alloc too when logging is off.
 macro_rules! dbglog { ($($a:tt)*) => { if file_log_enabled() { log(&format!($($a)*)) } } }
