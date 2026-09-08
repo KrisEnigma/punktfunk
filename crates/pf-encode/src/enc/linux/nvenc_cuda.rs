@@ -649,6 +649,11 @@ pub struct NvencCudaEncoder {
     /// Timestamps `[start, close)` of the latest wave: part-dirty pictures the driver would
     /// otherwise serve as an RFI anchor. The close and everything after are clean.
     wave_span: Option<(i64, i64)>,
+    /// A loss landed inside the wave in flight. The driver ignores a re-force mid-sweep, so
+    /// the sweep runs on with damage behind it: its close carries no mark, and a fresh wave
+    /// starts on the frame after it (`wave_queued`).
+    wave_spoiled: bool,
+    wave_queued: bool,
     inited: bool,
     /// `nvEncGetEncodeCaps` — probed once before configure.
     rfi_supported: bool,
@@ -783,6 +788,8 @@ impl NvencCudaEncoder {
             pending_anchor: false,
             wave: None,
             wave_span: None,
+            wave_spoiled: false,
+            wave_queued: false,
             vk_blend: None,
             blend_wanted: cursor_blend,
             cursor_tried: false,
@@ -915,6 +922,8 @@ impl NvencCudaEncoder {
         self.distrusted = false;
         self.wave = None;
         self.wave_span = None;
+        self.wave_spoiled = false;
+        self.wave_queued = false;
     }
 
     /// A real loss with no clean frame old enough left: a wave heals without an anchor.
@@ -924,6 +933,18 @@ impl NvencCudaEncoder {
         let cycle = self.wave_cycle();
         if cycle == 0 || first < 0 || first > last || first >= self.frame_idx {
             return false;
+        }
+        if self.wave.is_some() {
+            // The driver ignores a re-force mid-sweep (measured on the RTX box): let this
+            // one run out unmarked and queue a fresh wave behind it.
+            self.wave_spoiled = true;
+            self.wave_queued = true;
+            tracing::debug!(
+                first,
+                last,
+                "nvenc RFI: loss mid-wave — wave queued behind it"
+            );
+            return true;
         }
         self.wave = Some(Wave::start(cycle));
         tracing::debug!(
@@ -1968,17 +1989,30 @@ impl NvencCudaEncoder {
             // First frame after RFI. A simultaneous forced IDR is itself the re-anchor — drop
             // the tag.
             let anchor = std::mem::take(&mut self.pending_anchor) && flags == 0;
-            // The wave: an IDR flushes it; its start frame asks the driver for the sweep.
+            // The wave: an IDR flushes it, queue and all; its start frame asks the driver
+            // for the sweep.
             if flags != 0 {
                 self.wave = None;
+                self.wave_spoiled = false;
+                self.wave_queued = false;
             }
             let wave = self.wave;
-            let mark = wave.is_some_and(Wave::marks);
+            let mark = wave.is_some_and(|w| w.marks() && !(w.closes() && self.wave_spoiled));
             if let Some(w) = wave {
+                let ts = pts as i64;
                 if w.index == 0 {
-                    self.wave_span = Some((pts as i64, pts as i64 + i64::from(w.cycle) - 1));
+                    // A wave after a spoiled one keeps the spoiled pictures dirty too.
+                    let start = match self.wave_span {
+                        Some((s, _)) if self.wave_spoiled => s,
+                        _ => ts,
+                    };
+                    self.wave_span = Some((start, ts + i64::from(w.cycle) - 1));
+                    self.wave_spoiled = false;
                 }
                 self.wave = w.next();
+                if self.wave.is_none() && std::mem::take(&mut self.wave_queued) {
+                    self.wave = Some(Wave::start(w.cycle));
+                }
             }
             let mut pic = nv::NV_ENC_PIC_PARAMS {
                 version: nv::NV_ENC_PIC_PARAMS_VER,

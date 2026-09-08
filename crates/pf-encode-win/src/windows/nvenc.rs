@@ -517,6 +517,11 @@ pub struct NvencD3d11Encoder {
     /// Timestamps `[start, close)` of the latest wave: part-dirty pictures the driver would
     /// otherwise serve as an RFI anchor. The close and everything after are clean.
     wave_span: Option<(i64, i64)>,
+    /// A loss landed inside the wave in flight. The driver ignores a re-force mid-sweep, so
+    /// the sweep runs on with damage behind it: its close carries no mark, and a fresh wave
+    /// starts on the frame after it (`wave_queued`).
+    wave_spoiled: bool,
+    wave_queued: bool,
     inited: bool,
     /// From `query_caps`. Gates RFI instead of failing later as opaque `InvalidParam`.
     rfi_supported: bool,
@@ -676,6 +681,8 @@ impl NvencD3d11Encoder {
             pending_anchor: false,
             wave: None,
             wave_span: None,
+            wave_spoiled: false,
+            wave_queued: false,
             inited: false,
             rfi_supported: false,
             custom_vbv: false,
@@ -777,6 +784,8 @@ impl NvencD3d11Encoder {
         self.distrusted = false;
         self.wave = None;
         self.wave_span = None;
+        self.wave_spoiled = false;
+        self.wave_queued = false;
     }
 
     /// A real loss with no clean frame old enough left: a wave heals without an anchor.
@@ -786,6 +795,18 @@ impl NvencD3d11Encoder {
         let cycle = self.wave_cycle();
         if cycle == 0 || first < 0 || first > last || first >= self.frame_idx {
             return false;
+        }
+        if self.wave.is_some() {
+            // The driver ignores a re-force mid-sweep (measured on the RTX box): let this
+            // one run out unmarked and queue a fresh wave behind it.
+            self.wave_spoiled = true;
+            self.wave_queued = true;
+            tracing::debug!(
+                first,
+                last,
+                "nvenc RFI: loss mid-wave — wave queued behind it"
+            );
+            return true;
         }
         self.wave = Some(Wave::start(cycle));
         tracing::debug!(
@@ -1655,17 +1676,30 @@ impl Encoder for NvencD3d11Encoder {
             // Recovery anchor (armed by a successful invalidate_ref_frames): this frame is the
             // first encoded after invalidation. A simultaneous forced IDR is itself the re-anchor.
             let anchor = std::mem::take(&mut self.pending_anchor) && flags == 0;
-            // The wave: an IDR flushes it; its start frame asks the driver for the sweep.
+            // The wave: an IDR flushes it, queue and all; its start frame asks the driver
+            // for the sweep.
             if flags != 0 {
                 self.wave = None;
+                self.wave_spoiled = false;
+                self.wave_queued = false;
             }
             let wave = self.wave;
-            let mark = wave.is_some_and(Wave::marks);
+            let mark = wave.is_some_and(|w| w.marks() && !(w.closes() && self.wave_spoiled));
             if let Some(w) = wave {
+                let ts = pts as i64;
                 if w.index == 0 {
-                    self.wave_span = Some((pts as i64, pts as i64 + i64::from(w.cycle) - 1));
+                    // A wave after a spoiled one keeps the spoiled pictures dirty too.
+                    let start = match self.wave_span {
+                        Some((s, _)) if self.wave_spoiled => s,
+                        _ => ts,
+                    };
+                    self.wave_span = Some((start, ts + i64::from(w.cycle) - 1));
+                    self.wave_spoiled = false;
                 }
                 self.wave = w.next();
+                if self.wave.is_none() && std::mem::take(&mut self.wave_queued) {
+                    self.wave = Some(Wave::start(w.cycle));
+                }
             }
             // Chunked poll must flag early chunks before the driver reports `pictureType`.
             // Under P-only + infinite GOP, IDRs happen only when forced, or on the opening
@@ -2623,9 +2657,10 @@ mod tests {
 
     /// The wave on NVENC, one HEVC stream: a loss with no anchor starts wave A (marks on
     /// its start and close, no IDR); a loss of the plain P after it anchors on the close; a
-    /// loss whose anchor would be a dirty picture of A waves again (B); a loss mid-B
-    /// restarts (C). Dumps the stream and two client views for the decode check:
-    /// `-dropA` loses frames 1–2 ahead of A, `-dropC` loses 14–15 ahead of the restart.
+    /// loss whose anchor would be a dirty picture of A waves again (B); a loss mid-B spoils
+    /// it (no close mark) and queues C on the frame after B closes. Dumps the stream and two
+    /// client views for the decode check: `-dropA` loses frames 1–2 ahead of A, `-dropC`
+    /// loses the two frames ahead of the mid-B loss; C's close must decode identical.
     ///
     /// `cargo test -p pf-encode-win --features nvenc nvenc_wave_smoke -- --ignored --nocapture`
     #[test]
@@ -2694,12 +2729,14 @@ mod tests {
             assert!(cycle >= 2, "the wave is on");
             println!("nvenc_wave_smoke: cycle {cycle} frames");
             // Wave A at 3 (loss with no anchor), anchor P after it, wave B off a dirty
-            // anchor, wave C restarting B three frames in, then a plain P after C.
+            // anchor, a loss three frames into B that queues C behind it, a plain P after C.
             let a_start = 3;
             let a_close = a_start + cycle - 1;
             let anchor_p = a_close + 2;
             let b_start = anchor_p + 1;
-            let c_start = b_start + 3;
+            let b_close = b_start + cycle - 1;
+            let spoil_at = b_start + 3;
+            let c_start = b_close + 1;
             let c_close = c_start + cycle - 1;
             let last = c_close + 1;
             let mut aus = Vec::new();
@@ -2722,10 +2759,14 @@ mod tests {
                     assert!(enc.invalidate_ref_frames(lost, lost));
                     assert_eq!(enc.wave.map(|w| w.index), Some(0), "dirty anchor: wave B");
                 }
-                if i == c_start {
-                    let lost = (c_start - 1) as i64;
+                if i == spoil_at {
+                    let lost = (spoil_at - 1) as i64;
                     assert!(enc.invalidate_ref_frames(lost, lost));
-                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "mid-wave loss: restart");
+                    assert_eq!(enc.wave.map(|w| w.index), Some(3), "B runs on");
+                    assert!(enc.wave_spoiled && enc.wave_queued, "C queued behind B");
+                }
+                if i == c_start {
+                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "C starts as B closes");
                 }
                 let tex = texture(i);
                 let frame = CapturedFrame {
@@ -2754,7 +2795,7 @@ mod tests {
                 assert_eq!(
                     au.recovery_point,
                     marks.contains(&i),
-                    "AU {i}: marks on every wave's start and close"
+                    "AU {i}: marks on every start and close but the spoiled close {b_close}"
                 );
                 assert_eq!(au.recovery_anchor, i == anchor_p, "AU {i}: one anchor P");
             }
@@ -2771,12 +2812,13 @@ mod tests {
             std::fs::write(format!("{dir}/nvenc-wave-dropA.h265"), view(1..3)).expect("write");
             std::fs::write(
                 format!("{dir}/nvenc-wave-dropC.h265"),
-                view(c_start - 2..c_start),
+                view(spoil_at - 2..spoil_at),
             )
             .expect("write");
             println!(
                 "nvenc_wave_smoke: {} AUs, {} bytes; A {a_start}..={a_close}, anchor {anchor_p}, \
-                 B {b_start}, C {c_start}..={c_close}; wrote {dir}/nvenc-wave{{,-dropA,-dropC}}.h265",
+                 B {b_start}..={b_close} spoiled at {spoil_at}, C {c_start}..={c_close}; wrote \
+                 {dir}/nvenc-wave{{,-dropA,-dropC}}.h265",
                 aus.len(),
                 full.len()
             );
