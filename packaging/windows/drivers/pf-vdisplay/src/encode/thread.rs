@@ -16,7 +16,7 @@ use std::time::Duration;
 use pf_driver_proto::encode::DRV_STATUS_OPENED;
 use pf_driver_proto::encode::au::{self, AuHeader};
 use pf_driver_proto::encode::{
-    self as wire, backend, EncoderCapsWire, SetEncodeReply, SetEncodeRequest,
+    self as wire, EncoderCapsWire, SetEncodeReply, SetEncodeRequest, backend,
 };
 use pf_encode_win::{ChromaFormat, Codec, Encoder, EncoderCaps};
 use pf_frame::HdrMeta;
