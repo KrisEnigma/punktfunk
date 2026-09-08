@@ -43,7 +43,8 @@ certificate is the host's own, so your browser warns once — continue) and log 
 - **Linux:** the password was generated on first start — print it with
   `sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' ~/.config/punktfunk/web-password`
   (SteamOS: the install script printed it; it's in `~/.config/punktfunk/web.env`).
-- **Windows:** the installer showed it on its last page.
+- **Windows:** the wizard showed it on its last page. Installed with winget, or silently? There was
+  no wizard, so print it from an **elevated** PowerShell with `punktfunk-host web password`.
 
 ![The console sign-in card: one password field](/img/console-login.png)
 
