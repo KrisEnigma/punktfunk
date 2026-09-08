@@ -12,8 +12,9 @@ release is born complete and the announcement always has something to say.
 
 ## The flow
 
-1. **Write the notes.** Add `docs/releases/vX.Y.Z.md` in the same commit (or PR) as the version
-   bump. Copy `TEMPLATE.md` and fill it in. This file is the single source of truth for the body.
+1. **Write the notes.** Run skill `write-release-notes` (rules in `docs/writing.md` §2).
+   Add `docs/releases/vX.Y.Z.md` in the same commit (or PR) as the version bump. This file is
+   the single source of truth for the body.
    **Docs freshness, while you have the diff in front of you:** every user-facing fact the release
    changes has its docs-site page updated (CONTRIBUTING.md "Where facts live" — `docs-drift` in CI
    catches renamed knobs and dead links, not a stale sentence). If an install command, repo URL or
@@ -79,9 +80,10 @@ versionCode shipped.
 
 ## Voice & format
 
+Voice: `docs/writing.md` §2. Name the thing, then what the reader gets.
+
 **Write for the people who USE Punktfunk to stream their games and desktops — not for the people who
-build it.** A non-engineer should finish knowing what's new and whether it affects them; an engineer
-should never be confused or forced to decode internals. (See any recent `vX.Y.Z.md` for the target.)
+build it.** A non-engineer should finish knowing what's new and whether it affects them.
 
 1. **Lead with the benefit.** Each entry = what the user can now *do*, what now *works*, or what
    stopped *going wrong* — in their words. Implementation is not the story.
@@ -89,44 +91,44 @@ should never be confused or forced to decode internals. (See any recent `vX.Y.Z.
    hardware IDs, crate/component names, or API symbols. Translate any essential detail to plain
    language. Name things users recognize (iPad, Apple Pencil, Steam Deck, Android TV, the Windows
    sign-in screen) — not subsystems.
-3. **Group as New / Improved / Fixed**, each a bold one-line lead-in + a tight plain explanation.
-   Skimmable. The lead-in text before the first `##` is what the Discord announcement shows, so make
-   it a real, plain-language summary.
+3. **Discord embed = text before the first `##` = the highlight bullets.** Put 3–8 one-line
+   highlights in that lead-in. `scripts/ci/discord-announce.sh` posts everything before the first
+   `## `. A later `## Highlights` heading is optional duplication; prefer no heading so Discord
+   gets the scan.
 4. **Be specific and honest** — no vague "various improvements"; a reader should know exactly what
    changed.
 5. **Compatibility line up top, in plain terms:** can they update one side at a time? does their
-   existing setup keep working? No version numbers in the lead.
+   existing setup keep working? No version numbers in the lead. Windows host+driver matching is
+   not “update one side at a time.”
 6. **No protocol / ABI / driver / embedder detail in this file at all.** It goes in the root
    `CHANGELOG.md` (see below), and the notes carry a single short `## For developers` section
    linking there. Nothing else in `vX.Y.Z.md` may use an internal name.
-7. **Open with a `## TL;DR`** — three to six bullets naming only what most readers would be sorry to
-   miss, each one line. A large release is exactly where a reader gives up, and the TL;DR is what
-   they read instead of giving up. If something needs the reader to *act*, it belongs here and in
-   `## Before you update`, not buried in `## Fixed`.
+7. **Group as New / Improved / Fixed / Security**, one bullet per fact a user could notice,
+   grouped by platform or theme. If something needs the reader to *act*, it belongs in the
+   lead-in and in `## Before you update`.
+8. **`## Thanks` names every contributor outside the team** and what they built. The work is
+   theirs; the notes say so.
 
 ## The technical half: root `CHANGELOG.md`
 
-**Why it is separate.** Through v0.24.0 the engineering detail lived in an `## Under the hood (for
-developers)` section at the bottom of each release's notes. That worked while releases were small.
-It stopped working: v0.25.0 is 300+ commits, and the section had grown long enough to bury the
-user-facing half it was appended to — the exact failure the voice rules exist to prevent. The two
-audiences also want different shapes. A user reads one release and wants prose; an embedder wants to
+**Why it is separate.** A user reads one release and wants prose; an embedder wants to
 diff *across* releases and see when the ABI moved, which is a table, not a paragraph.
 
-So: `vX.Y.Z.md` is for people who use Punktfunk, `CHANGELOG.md` is for people who build against it,
-and neither has to compromise for the other.
+`CHANGELOG.md` is a **compat card**, not a Keep-a-Changelog diary. Ordinary PRs do not
+edit it. The record is the commit (and a `BREAKING CHANGE:` footer when the reader must act).
 
-**Format.** Newest release first, one `## vX.Y.Z` section each. Lead with a version table (wire
-protocol, C ABI, driver protocol, gamepad channel — every row, marked *unchanged* where it did not
-move, because "unchanged" is the answer an embedder most often needs). Then breaking changes, then
-whatever else matters: capability bits, new environment variables, wire additions, workspace
-members. Internal names are the point here — use them.
+**Format.** Newest first, one `## vX.Y.Z` card each (or `## Unreleased` until the bump
+retitles it). Lead, version table (every row from the previous card, unchanged marked),
+**Breaking**, then a short **Knobs** list (env, JNI arity, CLI) for actions that do not
+move a version integer. No Added/Changed/Fixed diary. Internal names are the point here —
+use them.
 
 **Linking.** The notes link to the file **at the tag**, not at `main`:
 `https://git.unom.io/unom/punktfunk/src/tag/vX.Y.Z/CHANGELOG.md`. A release's notes are frozen; a
 link to `main` would silently start describing a later release.
 
-**Same freeze rule.** Add the release's section in the version-bump commit, alongside the notes.
+**Same freeze rule.** Add the release's card in the version-bump commit, alongside the notes.
+While crate version is still the previous tag, the newest card stays `## Unreleased` (short).
 
 The short annotated-**tag** message stays separate and short (a headline + a paragraph); it is the
 tag object's message, not this file.

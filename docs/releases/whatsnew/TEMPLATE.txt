@@ -22,6 +22,6 @@ RULES THE CI GATE ENFORCES (.gitea/workflows/android.yml)
 RULES NOTHING ENFORCES
   * Plain text. No markdown — Play renders none of it, so `**bold**` ships as asterisks.
   * One `•` bullet per line.
-  * Same voice as ../README.md: lead with what the user can now do, no internal vocabulary.
+  * Same voice as docs/writing.md §2: name the thing; Android app only. Count characters, not bytes.
   * Frozen once the tag exists. Editing it later does not change what already shipped; it only
     misleads the next person who reads it as the record of that versionCode.
