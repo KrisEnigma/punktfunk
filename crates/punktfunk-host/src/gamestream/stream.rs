@@ -326,8 +326,6 @@ fn run(
             },
             None => None,
         };
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        let _ = adopt_launch;
         if let Some(c) = launch_claim.as_ref() {
             if spawned_now {
                 c.launched();
@@ -681,23 +679,12 @@ fn open_gs_virtual_source(
     vd.set_gamescope_route(gamescope_route.clone());
     // Register an unread stop flag so a later session can preempt (3 s grace, then force).
     // Anonymous slot 0 — only another slot-0 connect preempts it.
-    #[cfg(target_os = "windows")]
-    let _idd_setup_guard = match matches!(
+    let _idd_setup_guard = crate::windows::idd::setup_guard(
         crate::session_plan::CaptureBackend::resolve(),
-        crate::session_plan::CaptureBackend::IddPush
-    ) {
-        false => None,
-        true => {
-            // GameStream has no client identity, so it takes the anonymous slot — which under a
-            // seats reservation resolves to this host's own connector, not a bare 0.
-            let slot = crate::vdisplay::manager::slot_id_for(None, (cfg.width, cfg.height))
-                .context("pf-vdisplay refused this process's connector slot")?;
-            Some(crate::vdisplay::manager::vdm().begin_idd_setup(
-                slot,
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            ))
-        }
-    };
+        None,
+        (cfg.width, cfg.height),
+        &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
     let vout = crate::vdisplay::registry::acquire(
         &mut vd,
         punktfunk_core::Mode {
@@ -755,9 +742,8 @@ fn gs_open_encoder(
     cursor_blend: bool,
     wire_seq_base: u32,
 ) -> Result<Box<dyn encode::Encoder>> {
-    #[cfg(target_os = "windows")]
     if plan.capture == crate::session_plan::CaptureBackend::IddPush {
-        return crate::capture::open_driver_encoder(
+        return crate::windows::idd::open_driver_encoder(
             plan,
             capturer,
             (frame.width, frame.height),
@@ -767,7 +753,6 @@ fn gs_open_encoder(
             wire_seq_base,
         );
     }
-    let _ = (plan, capturer, wire_seq_base);
     let (enc, _) = crate::session_plan::open_encoder_fitted(
         frame,
         (cfg.width, cfg.height),

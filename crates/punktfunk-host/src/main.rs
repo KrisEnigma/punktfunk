@@ -27,10 +27,70 @@ mod diagnostics;
 mod discovery;
 #[forbid(unsafe_code)]
 mod wol;
-// `#[path]` keeps `crate::*` names flat while files live under `src/linux/` / `src/windows/`.
+// `#[path]` keeps `crate::*` names flat while files live under `src/linux/`.
 #[cfg(target_os = "linux")]
 #[path = "linux/drm_sync.rs"]
 mod drm_sync;
+// Everything Windows-only lives under `src/windows/`; the flat names below keep every
+// `crate::install::*` path unchanged. Off Windows, `windows::entry` is the no-op twin.
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::{game_term, install, interactive, seat, service, tray};
+#[cfg(not(target_os = "windows"))]
+mod windows {
+    pub(crate) mod entry {
+        pub(crate) fn service_run_requested() -> bool {
+            false
+        }
+        pub(crate) fn init_file_logging(_filter: tracing_subscriber::EnvFilter) {}
+        pub(crate) fn install_crash_handler() {}
+        pub(crate) fn preflight(_management_cli: bool) {}
+        pub(crate) fn serve_startup_recover() {}
+        pub(crate) fn subcommand(_cmd: &str, _args: &[String]) -> Option<anyhow::Result<()>> {
+            None
+        }
+        pub(crate) fn print_usage() {}
+    }
+    /// No IDD-push display here: no slot to reserve, no topology watchdog, no driver encoder.
+    pub(crate) mod idd {
+        use anyhow::Result;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        pub(crate) fn setup_guard(
+            _capture: crate::session_plan::CaptureBackend,
+            _identity: Option<[u8; 32]>,
+            _size: (u32, u32),
+            _stop: &Arc<AtomicBool>,
+        ) -> Result<Option<()>> {
+            Ok(None)
+        }
+        pub(crate) fn topology_reassert_gen() -> u64 {
+            0
+        }
+        pub(crate) fn hw_cursor_capable() -> bool {
+            false
+        }
+        pub(crate) fn open_driver_encoder(
+            _plan: &crate::session_plan::SessionPlan,
+            _capturer: &dyn crate::capture::Capturer,
+            _size: (u32, u32),
+            _fps: u32,
+            _bitrate_bps: u64,
+            _bit_depth: u8,
+            _wire_seq_base: u32,
+        ) -> Result<Box<dyn crate::encode::Encoder>> {
+            anyhow::bail!("the in-driver encoder is Windows IDD-push only")
+        }
+    }
+    /// Only Windows can be pre-planted: the Unix config dir is 0700 from birth.
+    pub(crate) mod planted {
+        pub(crate) fn quarantine_planted_secret(_path: &std::path::Path) -> bool {
+            false
+        }
+    }
+}
+use windows::planted;
 // Shim: encode backends live in `pf-encode`; keep `crate::encode::*` for this crate's callers.
 mod encode {
     pub(crate) use pf_encode::*;
@@ -55,10 +115,6 @@ mod encode {
 mod events;
 // Session⇄game lifetime — design/session-game-lifetime.md.
 mod gamelease;
-// WM_CLOSE on the interactive desktop, then TerminateProcess.
-#[cfg(target_os = "windows")]
-#[path = "windows/game_term.rs"]
-mod game_term;
 mod gamestream;
 #[cfg(target_os = "linux")]
 #[path = "linux/gpuclocks.rs"]
@@ -72,26 +128,6 @@ mod inject {
     pub(crate) use pf_inject::*;
 }
 mod client_logs;
-#[cfg(target_os = "windows")]
-#[path = "windows/install.rs"]
-mod install;
-#[cfg(target_os = "windows")]
-#[path = "windows/interactive.rs"]
-mod interactive;
-// A secret the host did not write is not a credential. Only Windows can be pre-planted:
-// `%ProgramData%` grants Users create, while the Unix config dir is 0700 from birth.
-mod planted {
-    #[cfg(target_os = "windows")]
-    pub(crate) use crate::install::quarantine_planted_secret;
-    #[cfg(not(target_os = "windows"))]
-    pub(crate) fn quarantine_planted_secret(_path: &std::path::Path) -> bool {
-        false
-    }
-}
-// What this host reads of the multi-seat contract; unset means the console host.
-#[cfg(target_os = "windows")]
-#[path = "windows/seat.rs"]
-mod seat;
 // Re-`Hello::launch` must not start a second copy — design/session-game-lifetime.md.
 mod launchreg;
 mod library;
@@ -117,9 +153,6 @@ mod procscan;
 // Plugin-reported liveness; `procscan` only sees the process table.
 mod runstate;
 mod send_pacing;
-#[cfg(target_os = "windows")]
-#[path = "windows/service.rs"]
-mod service;
 mod session_plan;
 // Operator policy for session⇄game binding (`session-settings.json`).
 mod session_settings;
@@ -127,20 +160,12 @@ mod session_status;
 mod sleep_inhibit;
 mod spike;
 mod stats_recorder;
-// Per-user tray start/stop/status — the only recovery path after a crash or upgrade.
-#[cfg(target_os = "windows")]
-#[path = "windows/tray.rs"]
-mod tray;
 // Signed catalogs and install jobs via the `plugins` runner — design/plugin-store.md.
 mod store;
 mod stream_marker;
 mod update;
 // The browser plane (design/web-client-implementation-plan.md Phase 1). Runtime opt-in.
 mod webtransport;
-#[cfg(target_os = "windows")]
-use pf_win_display::monitor_devnode;
-#[cfg(target_os = "windows")]
-use pf_win_display::win_display::isolate_journal;
 // Shim: virtual-display lives in `pf-vdisplay`; keep `crate::vdisplay::*` for this crate's callers.
 mod vdisplay {
     pub(crate) use pf_vdisplay::*;
@@ -162,18 +187,8 @@ fn main() {
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     // SCM `service run` has no console; log to a file, not stderr.
-    #[cfg(target_os = "windows")]
-    let service_run = {
-        let a: Vec<String> = std::env::args().skip(1).take(2).collect();
-        a.first().map(String::as_str) == Some("service")
-            && a.get(1).map(String::as_str) == Some("run")
-    };
-    #[cfg(not(target_os = "windows"))]
-    let service_run = false;
-
-    if service_run {
-        #[cfg(target_os = "windows")]
-        service::init_file_logging(filter);
+    if windows::entry::service_run_requested() {
+        windows::entry::init_file_logging(filter);
     } else {
         // stderr so stdout stays machine-readable (`openapi > spec.json`). The ring tees DEBUG+
         // ungated by RUST_LOG so the console Logs tab works without a restart.
@@ -227,9 +242,7 @@ fn main() {
         );
         default_panic(info);
     }));
-    // SEH last-resort: a GPU-runtime AV otherwise kills the process with no ring entry.
-    #[cfg(target_os = "windows")]
-    punktfunk_core::crash::install();
+    windows::entry::install_crash_handler();
 
     if let Err(e) = real_main() {
         tracing::error!("{e:#}");
@@ -365,12 +378,7 @@ fn real_main() -> Result<()> {
         }
     }));
 
-    // Before DXGI: virtual-display setup creates a factory. Hybrid-GPU boxes otherwise reparent
-    // the virtual output off the capture GPU (ACCESS_LOST). Idempotent Once.
-    #[cfg(target_os = "windows")]
-    if !management_cli {
-        crate::capture::dxgi::install_gpu_pref_hook();
-    }
+    windows::entry::preflight(management_cli);
 
     // P2-cap driver profile only. Clock pin is per live client (`gpuclocks::session_pin`), not
     // host-lifetime, so idle clocks stay down. No-op off NVIDIA.
@@ -385,25 +393,8 @@ fn real_main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("serve") => {
             let (mgmt_opts, native, gamestream) = parse_serve(&args[1..])?;
-            // First-comer-wins: claim before any client, or an idle service loses the driver to a stray host.
-            #[cfg(target_os = "windows")]
-            vdisplay::manager::claim_instance_eagerly();
-            // Re-enable PnP monitors a prior Exclusive session disabled and never restored.
             // Must run before any new session touches the topology.
-            #[cfg(target_os = "windows")]
-            monitor_devnode::startup_recover();
-            // Unpin AMD connector emulation a prior host locked. The pin outlives the process
-            // (and can outlive a reboot).
-            #[cfg(target_os = "windows")]
-            pf_win_display::adl_emul::startup_recover();
-            // Re-light Exclusive CCD-isolate panels. After the devnode leg so re-enabled
-            // monitors exist for the EXTEND preset (the snapshot was process memory).
-            #[cfg(target_os = "windows")]
-            isolate_journal::startup_recover();
-            // The display actor (cached CCD snapshot) — up before the first session or management
-            // read, so nothing else has to touch the display-config lock for inventory.
-            #[cfg(target_os = "windows")]
-            pf_win_display::display_events::spawn_once();
+            windows::entry::serve_startup_recover();
             gamestream::serve(mgmt_opts, native, gamestream)
         }
         Some("detect-conflicts") => {
@@ -445,33 +436,6 @@ fn real_main() -> Result<()> {
         Some("gamescope-splash") => vdisplay::gamescope_splash_client(),
         #[cfg(target_os = "linux")]
         Some("nv12-selftest") => zerocopy::nv12_selftest(),
-        #[cfg(target_os = "windows")]
-        Some("hdr-p010-selftest") => {
-            // `WxH` (default 64×64) and vendor. 1080 is not 16-aligned — a different driver path.
-            // Dual-GPU boxes otherwise test the default adapter, not the encoder.
-            let mut size = (64u32, 64u32);
-            let mut vendor = None;
-            // `args` starts at the subcommand (`skip(1)`), so optionals begin at index 1.
-            for a in args.iter().skip(1) {
-                match a.as_str() {
-                    "intel" => vendor = Some(0x8086),
-                    "nvidia" => vendor = Some(0x10de),
-                    "amd" => vendor = Some(0x1002),
-                    s => {
-                        let parsed = s
-                            .split_once('x')
-                            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
-                        match parsed {
-                            Some(wh) => size = wh,
-                            None => anyhow::bail!(
-                                "hdr-p010-selftest: unrecognized arg {s:?} (want WxH or intel|nvidia|amd)"
-                            ),
-                        }
-                    }
-                }
-            }
-            crate::capture::dxgi::hdr_p010_selftest_at(size.0, size.1, vendor)
-        }
         #[cfg(target_os = "linux")]
         Some("hdr-probe") => {
             let monitor_hdr = pf_capture::gnome_hdr_monitor_active();
@@ -567,18 +531,6 @@ fn real_main() -> Result<()> {
         Some("pad-usbip-test") => devtest::pad_usbip_test(&args),
         #[cfg(target_os = "linux")]
         Some("switchpro-test") => devtest::switchpro_test(&args),
-        #[cfg(target_os = "windows")]
-        Some("deck-windows-spike") => devtest::deck_windows_spike(&args),
-        #[cfg(target_os = "windows")]
-        Some("vmouse-spike") => devtest::vmouse_spike(&args),
-        #[cfg(target_os = "windows")]
-        Some("channel-proof-probe") => devtest::channel_proof_probe(&args),
-        #[cfg(target_os = "windows")]
-        Some("dualsense-windows-test") => devtest::dualsense_windows_test(&args),
-        #[cfg(target_os = "windows")]
-        Some("pad-endpoint") => devtest::pad_endpoint(&args),
-        #[cfg(target_os = "windows")]
-        Some("audio-probe") => devtest::audio_probe(&args),
         Some("spike") => spike::run(parse_spike(&args[1..])?),
         Some("punktfunk1-host") => {
             let get = |flag: &str| {
@@ -626,22 +578,15 @@ fn real_main() -> Result<()> {
                 mdns: !args.iter().any(|a| a == "--no-mdns") && discovery::mdns_enabled(),
             })
         }
-        #[cfg(target_os = "windows")]
-        Some("service") => service::main(&args[1..]),
-        // Installer work in-process: locale-parsed PowerShell files break on ANSI codepages.
-        #[cfg(target_os = "windows")]
-        Some("driver") => install::driver_main(&args[1..]),
-        #[cfg(target_os = "windows")]
-        Some("web") => install::web_main(&args[1..]),
-        // HKLM Run fires only at sign-in; this is how an upgrade/crash gets the icon back.
-        #[cfg(target_os = "windows")]
-        Some("tray") => tray::main(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print_usage();
             Ok(())
         }
         // No implicit `serve`; bare invocation is `None` above and prints help.
-        Some(other) => bail!("unknown command '{other}' (try --help)"),
+        Some(other) => match windows::entry::subcommand(other, &args) {
+            Some(result) => result,
+            None => bail!("unknown command '{other}' (try --help)"),
+        },
     }
 }
 
@@ -1043,15 +988,5 @@ NOTES:
     Both 'serve' and 'punktfunk1-host' advertise the native service over mDNS
     (_punktfunk._udp) for client auto-discovery — 'punktfunk-probe --discover' lists them."
     );
-    #[cfg(target_os = "windows")]
-    eprintln!(
-        "\nWINDOWS SERVICE (end-user deployment — replaces a manual launch):\n\
-        \x20   punktfunk-host service install    register an auto-start SYSTEM service + firewall rules\n\
-        \x20   punktfunk-host service uninstall  remove the service + firewall rules\n\
-        \x20   punktfunk-host service start|stop|restart|status\n\
-        \x20   config: %ProgramData%\\punktfunk\\host.env\n\
-        \nWINDOWS DIAGNOSTICS:\n\
-        \x20   punktfunk-host hdr-p010-selftest  GPU colour check for the PUNKTFUNK_HDR_SHADER_P010 path\n\
-        \x20                                     (scRGB FP16 -> P010 BT.2020 PQ shader vs an f64 reference)"
-    );
+    windows::entry::print_usage();
 }

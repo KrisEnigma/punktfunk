@@ -10,6 +10,15 @@
 
 use super::*;
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use self::windows as plat;
+#[cfg(not(windows))]
+mod posix;
+#[cfg(not(windows))]
+use self::posix as plat;
+
 /// Fetch one cover URL as `(bytes, content-type)`. `data:` is decoded inline (Lutris inlines art);
 /// `http(s)` is a GET with an 8 MiB cap so a huge URL cannot balloon host memory. `None` on any
 /// other scheme, error, or empty body. Blocking (`ureq`) — call off the async runtime.
@@ -146,53 +155,8 @@ fn art_roots() -> Vec<PathBuf> {
             roots.push(PathBuf::from(drive).join("Users"));
         }
     }
-    #[cfg(windows)]
-    roots.extend(steam_art_roots());
-    // Portable Playnite keeps `library\files\…` beside the exe, outside every profile.
-    #[cfg(windows)]
-    roots.extend(super::launch::playnite_art_roots());
-    // `$HOME` is the POSIX analogue of the Windows users base. An empty list here would
-    // silently serve no plugin art: POSIX absolute paths are classified as local.
-    #[cfg(not(windows))]
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        if !home.as_os_str().is_empty() {
-            roots.push(home);
-        }
-    }
+    roots.extend(plat::extra_roots());
     roots
-}
-
-/// Windows: Steam install roots. Steam art lives under the install, not the users base
-/// (`appcache\librarycache\…` and `userdata\<id>\config\grid\`). POSIX needs no equivalent —
-/// native and Flatpak layouts are already under `$HOME`.
-#[cfg(windows)]
-fn steam_art_roots() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    let mut push = |p: PathBuf| {
-        // `is_dir` before dedup: `%ProgramFiles%` and `%ProgramW6432%` are the same directory
-        // on a 64-bit host, and the registry often repeats whichever Steam sits in.
-        if p.is_dir() && !out.contains(&p) {
-            out.push(p);
-        }
-    };
-    for var in ["ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"] {
-        if let Some(pf) = std::env::var_os(var) {
-            push(PathBuf::from(pf).join("Steam"));
-        }
-    }
-    // Off-default Steam (second drive) is only in the registry. HKLM, not HKCU: the host is
-    // SYSTEM and its own hive does not know where the operator installed anything.
-    for key in [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"] {
-        if let Some(p) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
-            .open_subkey(key)
-            .ok()
-            .and_then(|k| k.get_value::<String, _>("InstallPath").ok())
-        {
-            push(PathBuf::from(p));
-        }
-    }
-    out
 }
 
 /// Canonicalize first so a junction out of the root is resolved before the containment test.
@@ -225,62 +189,6 @@ fn resolved_art_path_is_confined(real: &Path) -> bool {
         .iter()
         .filter_map(|r| r.canonicalize().ok())
         .any(|root| real.starts_with(&root))
-}
-
-/// Link-resolved path of the object `f` is open on. Re-run confinement on that object, not on
-/// a path that a rename after open could retarget.
-#[cfg(target_os = "linux")]
-fn final_path_of(f: &std::fs::File) -> Option<std::path::PathBuf> {
-    use std::os::fd::AsRawFd as _;
-    std::fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd())).ok()
-}
-
-/// Windows twin of Linux `final_path_of`: `GetFinalPathNameByHandleW` in normalized DOS form,
-/// which carries the same `\\?\` prefix `canonicalize` produces, so `starts_with` matches.
-#[cfg(windows)]
-fn final_path_of(f: &std::fs::File) -> Option<std::path::PathBuf> {
-    use std::os::windows::ffi::OsStringExt as _;
-    use std::os::windows::io::AsRawHandle as _;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{
-        GetFinalPathNameByHandleW, GETFINALPATHNAMEBYHANDLE_FLAGS,
-    };
-    let mut buf = vec![0u16; 512];
-    loop {
-        // SAFETY: the handle is a live open File for the whole call, and `buf` is a valid
-        // mutable u16 buffer of the length the API is told about.
-        let n = unsafe {
-            GetFinalPathNameByHandleW(
-                HANDLE(f.as_raw_handle()),
-                &mut buf,
-                GETFINALPATHNAMEBYHANDLE_FLAGS(0), // FILE_NAME_NORMALIZED | VOLUME_NAME_DOS
-            )
-        } as usize;
-        if n == 0 {
-            return None;
-        }
-        if n < buf.len() {
-            return Some(std::ffi::OsString::from_wide(&buf[..n]).into());
-        }
-        buf.resize(n + 1, 0); // n = required length (incl. NUL) when the buffer was too small
-    }
-}
-
-/// macOS twin (dev builds only — the shipped hosts are Linux and Windows): `F_GETPATH`.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn final_path_of(f: &std::fs::File) -> Option<std::path::PathBuf> {
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::ffi::OsStrExt as _;
-    let mut buf = [0u8; libc::PATH_MAX as usize];
-    // SAFETY: the fd is a live open File and `buf` is the PATH_MAX-sized buffer F_GETPATH
-    // requires; the kernel NUL-terminates what it writes.
-    if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
-        return None;
-    }
-    let len = buf.iter().position(|&b| b == 0)?;
-    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
-        &buf[..len],
-    )))
 }
 
 /// Serve what the bytes are, not what the extension claims — an extensionless secret or a
@@ -402,7 +310,7 @@ pub fn local_art_bytes(path: &str) -> Option<(Vec<u8>, String)> {
     // A link swap cannot substitute a different file between validation and consumption.
     let p = std::path::Path::new(&*path);
     let mut f = std::fs::File::open(p).ok()?;
-    let real = final_path_of(&f)?;
+    let real = plat::final_path_of(&f)?;
     if !resolved_art_path_is_confined(&real) {
         tracing::debug!(
             path = %path,
@@ -586,7 +494,7 @@ mod tests {
         assert_eq!(art.portrait, before);
     }
 
-    const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+    pub(super) const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
 
     /// Art-root env vars are process-global and cargo runs tests as threads, so mutating tests
     /// must not overlap. Poison is recovered: a panic here must not cascade as `PoisonError`.
@@ -594,14 +502,14 @@ mod tests {
 
     /// Holds `ART_ROOTS_LOCK` and the overrides one test needs; restores previous values on
     /// drop, including unwind. The only writer of these env vars in the binary.
-    struct ArtRootsEnv {
+    pub(super) struct ArtRootsEnv {
         _lock: std::sync::MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 
     impl ArtRootsEnv {
         /// `None` unsets the variable for the test's duration.
-        fn set(vars: &[(&'static str, Option<&Path>)]) -> Self {
+        pub(super) fn set(vars: &[(&'static str, Option<&Path>)]) -> Self {
             let _lock = ART_ROOTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let mut saved = Vec::new();
             for (key, value) in vars {
@@ -724,7 +632,7 @@ mod tests {
     /// Kit-shaped `file://` for both platforms. POSIX keeps two slashes (`file:///home/…`);
     /// Windows needs three (`file:///C:/…`). `format!("file://{path}")` on Windows is
     /// `file://C:\…`, whose authority is `C:` — a UNC reference, not a local file.
-    fn file_url(p: &std::path::Path) -> String {
+    pub(super) fn file_url(p: &std::path::Path) -> String {
         let posix = p.to_str().unwrap().replace('\\', "/");
         if posix.starts_with('/') {
             format!("file://{posix}")
@@ -866,95 +774,6 @@ mod tests {
         assert!(validate_art_paths(&art).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A Steam cover under Program Files is servable with no `PUNKTFUNK_LIBRARY_ART_ROOTS`.
-    /// Hermetic: `%ProgramFiles(x86)%` is pointed at a temp tree. Asserting over whatever
-    /// Steam this box has would pass vacuously on CI.
-    #[cfg(windows)]
-    #[test]
-    fn steam_librarycache_cover_is_servable_without_configuration() {
-        let base = std::env::temp_dir().join(format!("pf-art-steam-{}", std::process::id()));
-        let hero = base
-            .join("Steam")
-            .join("appcache")
-            .join("librarycache")
-            .join("570")
-            .join("abcdef")
-            .join("library_hero.jpg");
-        std::fs::create_dir_all(hero.parent().unwrap()).unwrap();
-        std::fs::write(&hero, PNG).unwrap();
-
-        // No configured roots; `%ProgramFiles(x86)%` is a real variable later tests may read.
-        let _env = ArtRootsEnv::set(&[
-            ("PUNKTFUNK_LIBRARY_ART_ROOTS", None),
-            ("ProgramFiles(x86)", Some(&base)),
-        ]);
-
-        let steam_root = base.join("Steam");
-        assert!(
-            steam_art_roots().contains(&steam_root),
-            "the Program Files probe must find the Steam install"
-        );
-        assert!(
-            art_roots().contains(&steam_root),
-            "the DEFAULT art roots must include it — the whole point is that no env var is needed"
-        );
-
-        let url = file_url(&hero);
-        assert!(art_path_is_servable(&url), "{url} must be servable");
-        assert!(
-            validate_art_paths(&Artwork {
-                hero: Some(url.clone()),
-                ..Default::default()
-            })
-            .is_ok(),
-            "a Steam-shaped payload must reconcile"
-        );
-        assert!(
-            sanitize_art_paths(&mut Artwork {
-                hero: Some(url.clone()),
-                ..Default::default()
-            })
-            .is_empty(),
-            "and nothing about it is dropped"
-        );
-        assert_eq!(
-            local_art_bytes(&url).expect("read time serves it too").0,
-            PNG
-        );
-
-        let secret = base.join("Steam").join("config").join("config.vdf");
-        std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
-        std::fs::write(&secret, b"\"Accounts\"\n{\n\"user\" \"token\"\n}\n").unwrap();
-        assert!(
-            local_art_bytes(secret.to_str().unwrap()).is_none(),
-            "Steam's own credential blob must not be servable from an art root"
-        );
-        let disguised = base.join("Steam").join("config.png");
-        std::fs::write(&disguised, b"\"Accounts\" { \"user\" \"token\" }").unwrap();
-        assert!(
-            local_art_bytes(disguised.to_str().unwrap()).is_none(),
-            "an image extension is still not enough — the bytes must BE an image"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// Playnite roots must be in the default confinement with no `PUNKTFUNK_LIBRARY_ART_ROOTS`.
-    /// Vacuous on a box with no Playnite — the registry half cannot be faked from here.
-    #[cfg(windows)]
-    #[test]
-    fn playnite_roots_reach_the_art_confinement() {
-        let _env = ArtRootsEnv::set(&[("PUNKTFUNK_LIBRARY_ART_ROOTS", None)]);
-        let roots = art_roots();
-        for root in crate::library::launch::playnite_art_roots() {
-            assert!(root.is_dir(), "{root:?} is offered as an art root");
-            assert!(
-                roots.contains(&root),
-                "{root:?} must be an allowed art root with no env var set"
-            );
-        }
     }
 
     #[test]

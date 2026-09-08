@@ -1,0 +1,346 @@
+//! Linux (and every non-Windows) launch: the host runs a resolved shell command, nested in
+//! gamescope or into the live session. [`command_for`] is the pure `LaunchSpec` → command map;
+//! [`launch_session_command`] is the spawn.
+
+use super::*;
+
+#[cfg(target_os = "linux")]
+pub(super) const LAUNCHER_UI_STORES: &[&str] = &["heroic", "heroic-console", "lutris"];
+#[cfg(not(target_os = "linux"))]
+pub(super) const LAUNCHER_UI_STORES: &[&str] = &[];
+
+/// No command ⇒ nothing to launch; same `None` as an unknown id.
+pub(super) fn launch_target(
+    entry: GameEntry,
+    game: crate::gamelease::GameRef,
+) -> Option<LaunchTarget> {
+    let command = plugin_recipe(&entry)
+        .map(|l| l.command)
+        .or_else(|| entry.launch.as_ref().and_then(command_for))?;
+    Some(LaunchTarget {
+        game,
+        launcher: entry.role == GameRole::Launcher,
+        detect: entry.detect,
+        command: Some(command),
+    })
+}
+
+/// Can this box open a known `launcher_ui` value now? Both Heroic tiles share
+/// `heroic_launch_prefix`. Plugin `detect` is only `~/.config/heroic`, which can survive
+/// uninstall — so probe the binary.
+pub(super) fn launcher_ui_installed(value: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    if matches!(value, "heroic" | "heroic-console") {
+        return heroic_launch_prefix().is_some();
+    }
+    let _ = value;
+    true
+}
+
+/// Cheap "will this launch" bit for handshake routing. Async path: never asks
+/// a plugin. For `plugin` kind, a live provider plus a well-formed key is
+/// enough; a later refuse fails like any other unresolvable entry.
+pub fn launch_is_resolvable(id: &str) -> bool {
+    let Some(entry) = all_games().into_iter().find(|g| g.id == id) else {
+        return false;
+    };
+    let Some(spec) = entry.launch.as_ref() else {
+        return false;
+    };
+    if spec.kind == "plugin" {
+        return valid_plugin_entry_key(&spec.value)
+            && entry
+                .provider
+                .as_deref()
+                .is_some_and(|p| crate::mgmt::ui_credential(p).is_some());
+    }
+    command_for(spec).is_some()
+}
+
+/// Pure map from [`LaunchSpec`] to a shell command. `plugin` is absent: that
+/// answer is another process, resolved by [`plugin_recipe`] first.
+fn command_for(spec: &LaunchSpec) -> Option<String> {
+    match spec.kind.as_str() {
+        "steam_appid" => valid_steam_appid(&spec.value)
+            .then(|| format!("steam steam://rungameid/{}", spec.value)),
+        #[cfg(target_os = "linux")]
+        "lutris_id" => (!spec.value.is_empty() && spec.value.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| format!("lutris lutris:rungameid/{}", spec.value)),
+        #[cfg(target_os = "linux")]
+        "heroic" => heroic_command(&spec.value),
+        // Steam client UI (design D4). Nested in gamescope this is SteamOS game-mode.
+        "steam_ui" => match spec.value.as_str() {
+            "bigpicture" => Some("steam -gamepadui".into()),
+            "desktop" => Some("steam".into()),
+            _ => None,
+        },
+        // Other launcher UIs (design D4). Host builds the command; the plugin names the launcher.
+        #[cfg(target_os = "linux")]
+        "launcher_ui" => match spec.value.as_str() {
+            // Same prefix as a game launch, minus `--no-gui` and URI: the window is the tile.
+            "heroic" => heroic_launch_prefix(),
+            // Both flags: `--console` routes the UI; `--fullscreen` fills the screen.
+            // `heroic://` has only ping/launch, so a URI cannot open console mode.
+            // Heroic < 2.21.0 ignores `--console` and still honours `--fullscreen`.
+            "heroic-console" => {
+                heroic_launch_prefix().map(|p| format!("{p} --console --fullscreen"))
+            }
+            // Bare `lutris` opens the window; a `lutris:rungameid/…` URI would launch a game.
+            "lutris" => Some("lutris".into()),
+            _ => None,
+        },
+        "command" => (!spec.value.trim().is_empty()).then(|| spec.value.clone()),
+        _ => None,
+    }
+}
+
+/// `<runner>:<appName>` → Heroic command, nested in gamescope.
+///
+/// Heroic is single-instance Electron. Fresh gamescope: boot, launch, stay
+/// hidden (`--no-gui`). An already-running GUI forwards the URI and exits,
+/// which would tear the session — validated only for the fresh-session case.
+#[cfg(target_os = "linux")]
+pub(crate) fn heroic_command(value: &str) -> Option<String> {
+    let (runner, app) = value.split_once(':')?;
+    if !matches!(runner, "legendary" | "gog" | "nile") {
+        return None;
+    }
+    // appName charset: keep the URI a single token (Epic/Amazon alnum, GOG digits).
+    if app.is_empty()
+        || !app
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    let prefix = heroic_launch_prefix()?;
+    // No quotes: gamescope splits on whitespace. URI has no spaces; `&` is exec'd, not a shell.
+    Some(format!(
+        "{prefix} --no-gui heroic://launch?appName={app}&runner={runner}"
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn heroic_launch_prefix() -> Option<String> {
+    let on_path = std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join("heroic").is_file()));
+    if on_path {
+        return Some("heroic".into());
+    }
+    let flatpak = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .is_some_and(|h| h.join(".var/app/com.heroicgameslauncher.hgl").is_dir());
+    flatpak.then(|| "flatpak run com.heroicgameslauncher.hgl".into())
+}
+
+/// Child from a session launch, for lifetime tracking
+/// (design/session-game-lifetime.md).
+#[cfg(target_os = "linux")]
+pub struct SpawnedLaunch {
+    pub child: std::process::Child,
+    /// Own process group (plain session spawn) vs host group (gamescope).
+    /// A non-leader must never be signalled by negative pid
+    /// ([`crate::gamelease::OwnedChild::group_leader`]).
+    pub group_leader: bool,
+}
+
+/// Host-resolved command into the live Linux session, after capture is up.
+/// Shared by native and GameStream. Best-effort: failure leaves the user on
+/// the streamed desktop rather than tearing the stream down.
+///
+/// * **KWin / Mutter** — session env already retargeted, virtual output is
+///   primary; a plain spawn lands on the stream.
+/// * **Hyprland / wlroots (sway)** — EXTEND-only: the streamed head sits
+///   beside the operator's. [`crate::vdisplay::focus_streamed_output`] claims
+///   it here; capture also focused it, but portal handshake / encoder / first
+///   frame sit in between and can steal focus back.
+/// * **gamescope (managed / SteamOS / attach)** — spawn inside the running
+///   session ([`crate::vdisplay::launch_into_gamescope_session`]). `steam
+///   steam://…` also forwards over Steam's pipe.
+/// * **gamescope (bare spawn)** — only after a keep-alive reuse, which spawned
+///   nothing. A fresh spawn nests via `set_launch_command`
+///   ([`crate::vdisplay::launch_is_nested`]).
+#[cfg(target_os = "linux")]
+pub fn launch_session_command(
+    compositor: crate::vdisplay::Compositor,
+    cmd: &str,
+    seat: Option<&str>,
+) -> Result<SpawnedLaunch> {
+    use std::os::unix::process::CommandExt;
+    let cmd = cmd.trim();
+    anyhow::ensure!(!cmd.is_empty(), "empty command");
+    // Focus the streamed head first (no-op off EXTEND). Same slot as the
+    // absolute-input pointer, so focus and cursor share one head.
+    if let Some(out) = crate::inject::stream_output() {
+        if crate::vdisplay::focus_streamed_output(compositor, &out) {
+            tracing::debug!(output = %out, "claimed focus for the streamed head before launching");
+        }
+    }
+    let (child, group_leader) = match compositor {
+        crate::vdisplay::Compositor::Gamescope => (
+            crate::vdisplay::launch_into_gamescope_session(cmd, seat)?,
+            false,
+        ),
+        _ => (
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                // Own process group: later teardown signals the shell and its
+                // children, and not the host's group.
+                .process_group(0)
+                .spawn()
+                .context("spawn launch command")?,
+            true,
+        ),
+    };
+    tracing::info!(
+        command = %cmd,
+        pid = child.id(),
+        compositor = compositor.id(),
+        "launched app into the live session"
+    );
+    Ok(SpawnedLaunch {
+        child,
+        group_leader,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launcher_ui_accepts_only_launchers_this_host_can_open() {
+        assert!(known_launcher_ui("heroic"));
+        assert!(known_launcher_ui("heroic-console"));
+        assert!(known_launcher_ui("lutris"));
+        assert!(!known_launcher_ui("gog"));
+        // Both Heroic tiles share one probe; a miss drops both, not one dead tile.
+        assert_eq!(
+            resolvable_launcher_ui("heroic"),
+            heroic_launch_prefix().is_some()
+        );
+        assert_eq!(
+            resolvable_launcher_ui("heroic-console"),
+            heroic_launch_prefix().is_some()
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn launcher_ui_knows_nothing_off_linux() {
+        assert!(!known_launcher_ui("heroic"));
+        assert!(!known_launcher_ui("gog"));
+    }
+
+    #[test]
+    fn launch_command_resolves_and_guards() {
+        let steam = LaunchSpec {
+            kind: "steam_appid".into(),
+            value: "570".into(),
+        };
+        assert_eq!(
+            command_for(&steam).as_deref(),
+            Some("steam steam://rungameid/570")
+        );
+        let evil = LaunchSpec {
+            kind: "steam_appid".into(),
+            value: "570; rm -rf ~".into(),
+        };
+        assert_eq!(command_for(&evil), None);
+        let custom = LaunchSpec {
+            kind: "command".into(),
+            value: "dolphin-emu --batch".into(),
+        };
+        assert_eq!(command_for(&custom).as_deref(), Some("dolphin-emu --batch"));
+        assert_eq!(
+            command_for(&LaunchSpec {
+                kind: "command".into(),
+                value: "  ".into()
+            }),
+            None
+        );
+        assert_eq!(
+            command_for(&LaunchSpec {
+                kind: "wat".into(),
+                value: "x".into()
+            }),
+            None
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn command_for_lutris_and_heroic_guards() {
+        assert_eq!(
+            command_for(&LaunchSpec {
+                kind: "lutris_id".into(),
+                value: "42".into()
+            })
+            .as_deref(),
+            Some("lutris lutris:rungameid/42")
+        );
+        assert_eq!(
+            command_for(&LaunchSpec {
+                kind: "lutris_id".into(),
+                value: "42; rm -rf ~".into()
+            }),
+            None
+        );
+        assert_eq!(heroic_command("badrunner:Quail"), None);
+        assert_eq!(heroic_command("legendary:bad name"), None);
+        assert_eq!(heroic_command("nile:"), None);
+        // Prefix exists only on boxes with Heroic; assert URI shape only then.
+        if let Some(cmd) = heroic_command("legendary:Quail-1.2_x") {
+            assert!(cmd.contains("heroic://launch?appName=Quail-1.2_x&runner=legendary"));
+            assert!(cmd.contains("--no-gui"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launcher_ui_opens_the_launcher_itself() {
+        let ui = |v: &str| {
+            command_for(&LaunchSpec {
+                kind: "launcher_ui".into(),
+                value: v.into(),
+            })
+        };
+        // Bare `lutris` opens the window; the URI form is `lutris_id` and launches a game.
+        assert_eq!(ui("lutris").as_deref(), Some("lutris"));
+        assert!(!ui("lutris").unwrap().contains("rungameid"));
+        // Same prefix as a game launch, no `--no-gui` / URI. `None` without Heroic is correct.
+        if let Some(cmd) = ui("heroic") {
+            assert!(!cmd.contains("--no-gui"), "the GUI is the point: {cmd:?}");
+            assert!(!cmd.contains("heroic://"), "no game URI: {cmd:?}");
+            assert!(
+                !cmd.contains("--console"),
+                "that is the other tile: {cmd:?}"
+            );
+        }
+        // Both flags: `--console` alone does not fill the screen. Same prefix as `heroic`.
+        assert_eq!(ui("heroic-console").is_some(), ui("heroic").is_some());
+        if let Some(cmd) = ui("heroic-console") {
+            assert!(cmd.contains("--console"), "{cmd:?}");
+            assert!(cmd.contains("--fullscreen"), "{cmd:?}");
+            assert!(!cmd.contains("--no-gui"), "the GUI is the point: {cmd:?}");
+            // Gamescope spawns by `split_whitespace`, so every token must stand alone.
+            assert!(cmd.split_whitespace().any(|t| t == "--console"), "{cmd:?}");
+        }
+        assert_eq!(ui("nonsense"), None);
+        assert_eq!(ui(""), None);
+    }
+    #[test]
+    fn steam_ui_resolves_to_the_client_ui_on_linux() {
+        let ui = |v: &str| {
+            command_for(&LaunchSpec {
+                kind: "steam_ui".into(),
+                value: v.into(),
+            })
+        };
+        // Nested in gamescope this is the SteamOS `--steam` game-mode shape.
+        assert_eq!(ui("bigpicture").as_deref(), Some("steam -gamepadui"));
+        assert_eq!(ui("desktop").as_deref(), Some("steam"));
+        assert_eq!(ui("nonsense"), None);
+        assert_eq!(ui(""), None);
+    }
+}

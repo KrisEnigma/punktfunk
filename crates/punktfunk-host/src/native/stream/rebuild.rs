@@ -201,10 +201,13 @@ impl StreamState {
         // This resize moved the topology itself, so the watchdog's re-assert lands as a
         // bump the eviction check would read as somebody else's. Capture just rebuilt at
         // the new mode, which is what that check would do anyway.
-        #[cfg(target_os = "windows")]
-        {
-            self.seen_reassert_gen = crate::vdisplay::manager::topology_reassert_gen();
-        }
+        self.seen_reassert_gen = crate::windows::idd::topology_reassert_gen();
+    }
+
+    /// Only Windows IDD-push has a topology watchdog to follow.
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn on_topology_reassert(&mut self) -> Result<()> {
+        Ok(())
     }
 
     /// An exclusive-topology eviction bounced the virtual display's modes: re-attach capture in
@@ -215,7 +218,7 @@ impl StreamState {
         if self.plan.capture != crate::session_plan::CaptureBackend::IddPush {
             return Ok(());
         }
-        let reassert_gen = crate::vdisplay::manager::topology_reassert_gen();
+        let reassert_gen = crate::windows::idd::topology_reassert_gen();
         if reassert_gen == self.seen_reassert_gen {
             return Ok(());
         }
