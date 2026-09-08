@@ -288,7 +288,8 @@ pub(super) struct PadChannel {
     /// Must match the proof so a mis-resolved interface cannot cross-wire two pads.
     pad_index: u32,
     last_probe: Option<Instant>,
-    /// Last pid delivered or rejected — never retry the same value (hot-loop trap).
+    /// Last pid delivered or rejected — never retry the same value within a probe interval
+    /// (hot-loop trap). A failed delivery clears it so the next probe tries again.
     last_seen_pid: u32,
     attempts: u32,
     /// WUDFHost that holds the DATA handle. `Some` ⇒ no other process is served while it lives.
@@ -462,6 +463,10 @@ impl PadChannel {
                     error = %format!("{e:#}"),
                     "sealed gamepad channel delivery failed"
                 );
+                // `last_seen_pid` was stamped before the attempt, so leaving it set retires
+                // this pid for the pad's life and one transient failure strands the pad.
+                // Clearing it retries at the next probe; the attempt cap still bounds it.
+                self.last_seen_pid = 0;
             }
         }
     }
