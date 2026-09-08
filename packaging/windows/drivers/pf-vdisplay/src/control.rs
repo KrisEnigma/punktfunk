@@ -19,7 +19,10 @@ use pf_driver_proto::vdisplay::valid_mode;
 use pf_umdf_util::wdf::Request;
 use wdk_sys::WDFREQUEST;
 
-use crate::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND, STATUS_SUCCESS};
+use crate::{
+    STATUS_ACCESS_DENIED, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_PARAMETER, STATUS_NOT_FOUND,
+    STATUS_SUCCESS,
+};
 
 /// Dispatch one control IOCTL and complete the request.
 ///
@@ -32,6 +35,17 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
     // The calling process owns what this IOCTL creates and reaches only what it owns. Every
     // IOCTL is liveness for that owner, so its watchdog fires only once it has gone silent.
     let owner = request.requestor_pid();
+    // A seat device admits NETWORK SERVICE for the remoting stack's transport. Every NS service
+    // lives in session 0 and the seat host runs inside its seat session, so punktfunk verbs on
+    // that device answer only a requestor outside session 0.
+    if crate::adapter::is_seat_role()
+        && ioctl_code != IOCTL_RDPIDD_TRANSPORT
+        && session_of(owner) == Some(0)
+    {
+        dbglog!("[pf-vd] seat: refusing IOCTL {ioctl_code:#010x} from session-0 pid {owner}");
+        request.complete(STATUS_ACCESS_DENIED);
+        return;
+    }
     crate::watchdog::ping(owner, request.file_object());
     match ioctl_code {
         control::IOCTL_GET_INFO => {
@@ -78,6 +92,18 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
             request.complete(STATUS_NOT_FOUND)
         }
     }
+}
+
+/// Session id of `pid`, `None` when the lookup fails (pid gone). No handle is opened, so
+/// this works from WUDFHost's LocalService token against a SYSTEM requestor.
+fn session_of(pid: u32) -> Option<u32> {
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    let mut session = 0u32;
+    // SAFETY: `session` is a live local out-param; the call reads a table by pid and touches no
+    // memory of ours.
+    unsafe { ProcessIdToSessionId(pid, &mut session) }
+        .ok()
+        .map(|()| session)
 }
 
 /// The private transport the remoting stack drives a seat display over.
