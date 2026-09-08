@@ -146,6 +146,11 @@ fn run(
         if last_attach.elapsed() >= CursorPoller::REATTACH {
             last_attach = Instant::now();
             desktop.reattach();
+            // Let a failed handle be tried again. The skip below is cleared only by a
+            // SUCCESSFUL rasterise of a DIFFERENT handle, and the arrow's HCURSOR is stable
+            // for the session — so a transient GDI failure (a null `GetDC` across a desktop
+            // switch) otherwise froze the shape until the session ended.
+            failed_handle = 0;
             // …and re-read the target's desktop rect from the display actor's snapshot (no CCD
             // call here): a resize, an HDR recreate or the user moving this display changes BOTH
             // the origin positions are made relative to and the extent `in_rect` tests against,
