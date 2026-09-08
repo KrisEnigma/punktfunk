@@ -30,6 +30,24 @@ pub(crate) struct PeerCertFingerprint(pub Option<String>);
 #[derive(Clone, Copy)]
 pub(crate) struct PeerAddr(pub SocketAddr);
 
+/// A listening socket nothing else on the box can bind beside.
+///
+/// Windows lets a second socket bind a specific address on a port a wildcard socket holds,
+/// and the specific one then takes that traffic; the cross-account refusal is the only thing
+/// in the way. `SO_EXCLUSIVEADDRUSE` closes it for every account. Unix keeps std's
+/// `SO_REUSEADDR` so a restart does not wait out TIME_WAIT.
+pub(crate) fn bind_exclusive(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    #[cfg(windows)]
+    socket.set_exclusiveaddruse(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    Ok(socket.into())
+}
+
 /// Caps on the HTTP(S) acceptors. Without them a LAN peer holding sockets
 /// (incomplete TLS, idle connections) exhausts fds with no authentication.
 /// 256 / 32 is generous: a console browser holds a handful, a paired client a few.
@@ -85,8 +103,11 @@ async fn serve_governed(
     tls: Option<Arc<ServerConfig>>,
 ) -> Result<()> {
     let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
+    let listener = bind_exclusive(bind)
+        .and_then(|l| {
+            l.set_nonblocking(true)?;
+            tokio::net::TcpListener::from_std(l)
+        })
         .with_context(|| format!("bind HTTP(S) {bind}"))?;
     let conns = Arc::new(tokio::sync::Semaphore::new(MAX_CONNS));
     let per_ip: Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>> =

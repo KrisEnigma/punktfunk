@@ -170,7 +170,12 @@ struct Session {
     client_hash: Vec<u8>,
     /// Set after the one RSA sign. A repeat would harvest signing-time samples (`.cargo/audit.toml`).
     responded: bool,
+    /// Phase 1 time. A client that stops after phase 1 never reaches the phase-4 removal.
+    started: std::time::Instant,
 }
+
+/// A ceremony that has not reached phase 4 by then is abandoned and pruned on the next phase 1.
+const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 pub struct Pairing {
     sessions: Mutex<HashMap<String, Session>>,
@@ -241,7 +246,9 @@ impl Pairing {
             .ok_or_else(|| anyhow!("no PIN submitted within 120s"))?;
         let aes_key = crypto::pin_key(&salt, &pin);
 
-        self.sessions.lock().unwrap().insert(
+        let mut map = self.sessions.lock().unwrap();
+        map.retain(|_, s| s.started.elapsed() < SESSION_TTL);
+        map.insert(
             uniqueid.to_string(),
             Session {
                 peer_ip,
@@ -253,8 +260,10 @@ impl Pairing {
                 server_challenge: [0; 16],
                 client_hash: Vec::new(),
                 responded: false,
+                started: std::time::Instant::now(),
             },
         );
+        drop(map);
         tracing::info!(
             uniqueid,
             "pairing phase 1 — PIN accepted, returning host cert"

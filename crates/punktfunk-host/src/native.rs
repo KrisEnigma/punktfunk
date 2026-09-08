@@ -425,34 +425,23 @@ pub(crate) async fn serve(
     }
     let mut sessions = tokio::task::JoinSet::new();
     let max_sessions = opts.max_sessions;
-    let mut accepted = 0u32;
+    // Handshakes that completed. `--max-sessions` counts those, not attempts, so the task that
+    // finishes the N-th one wakes the accept loop through `done`.
+    let accepted = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let done = Arc::new(tokio::sync::Notify::new());
     tracing::info!(
         max_concurrent = opts.max_concurrent,
         "accepting sessions (concurrent)"
     );
 
     loop {
-        let incoming = match ep.accept().await {
-            Some(i) => i,
-            None => break,
+        let incoming = tokio::select! {
+            i = ep.accept() => match i {
+                Some(i) => i,
+                None => break,
+            },
+            () = done.notified(), if max_sessions != 0 => break,
         };
-        // Handshake here (~1 RTT): a pin mismatch must not consume a session slot.
-        let conn = match incoming.await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "QUIC accept failed");
-                continue;
-            }
-        };
-        // Slot after handshake: a full host still accepts, so the waiter sees a live path
-        // (keep-alive) instead of a silent dial timeout.
-        let permit = sem
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("session semaphore is never closed");
-        let peer = conn.remote_address();
-        tracing::info!(%peer, "punktfunk/1 client connected");
         let opts = opts.clone();
         let audio_cap = audio_cap.clone();
         let np = np.clone();
@@ -460,11 +449,37 @@ pub(crate) async fn serve(
         let stats = stats.clone();
         let inj_tx = injector.sender();
         let mic_tx = mic_service.sender();
-        // `serve_session` owns the permit: released while a knock is parked, re-acquired on approval.
-        let sem_session = sem.clone();
-        // `serve_session` consumes `conn`; a setup failure still needs a typed close (cheap clone).
-        let conn_err = conn.clone();
+        let sem = sem.clone();
+        let accepted = accepted.clone();
+        let done = done.clone();
         sessions.spawn(async move {
+            // Handshake off the accept loop: a peer that stalls it holds only its own task, not
+            // every other client, up to the idle timeout. A pin mismatch still ends here, before
+            // a session slot is taken.
+            let conn = match incoming.await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "QUIC accept failed");
+                    return;
+                }
+            };
+            let n = accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if max_sessions != 0 && n >= max_sessions {
+                done.notify_one();
+            }
+            // Slot after handshake: a full host still accepts, so the waiter sees a live path
+            // (keep-alive) instead of a silent dial timeout.
+            let permit = sem
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("session semaphore is never closed");
+            let peer = conn.remote_address();
+            tracing::info!(%peer, "punktfunk/1 client connected");
+            // `serve_session` owns the permit: released while a knock is parked, re-acquired on
+            // approval. A setup failure still needs a typed close (cheap clone).
+            let sem_session = sem;
+            let conn_err = conn.clone();
             match serve_session(
                 conn.into(),
                 &opts,
@@ -501,10 +516,6 @@ pub(crate) async fn serve(
                 }
             }
         });
-        accepted += 1;
-        if max_sessions != 0 && accepted >= max_sessions {
-            break;
-        }
     }
     // Drain in-flight sessions (max_sessions reached or endpoint closed).
     while sessions.join_next().await.is_some() {}
