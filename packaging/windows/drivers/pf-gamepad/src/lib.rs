@@ -848,6 +848,10 @@ static PNP_DEVTYPE: AtomicU32 = AtomicU32::new(u32::MAX);
 /// Timer ticks since load — picks the [`PUMP_EVERY_N_TICKS`] ticks that also do the channel
 /// handshake and health marks. Wrapping is fine: only its residue matters.
 static TICK: AtomicU32 = AtomicU32::new(0);
+/// Last pump verdict, as in pf-xusb. `data()` returns the adopted view whatever the mailbox
+/// says, so the three ticks between pumps would otherwise keep serving a departed host's last
+/// report — a detached pad frozen mid-input instead of neutral.
+static HOST_LIVE: AtomicBool = AtomicBool::new(false);
 
 /// Map a devnode's hardware-id list (lowercase, `;`-separated — see
 /// [`wdf::query_hardware_ids`](pf_umdf_util::wdf::query_hardware_ids)) to the `device_type` the host
@@ -1643,9 +1647,15 @@ extern "C" fn evt_timer(timer: WDFTIMER) {
     let housekeeping = tick.is_multiple_of(PUMP_EVERY_N_TICKS);
     let view = if housekeeping {
         // Publish our pid / adopt a delivery / detect host-gone.
-        CHANNEL.pump(&channel_cfg())
-    } else {
+        let v = CHANNEL.pump(&channel_cfg());
+        HOST_LIVE.store(v.is_some(), Ordering::Relaxed);
+        v
+    } else if HOST_LIVE.load(Ordering::Relaxed) {
         CHANNEL.data()
+    } else {
+        // Host gone at the last pump: serve neutral until one says otherwise, rather than
+        // re-latching its final report for the next three ticks.
+        None
     };
     match view {
         Some(view) => {
