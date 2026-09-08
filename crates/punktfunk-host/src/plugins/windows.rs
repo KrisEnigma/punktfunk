@@ -357,11 +357,11 @@ pub(crate) fn listener_is_runner(port: u16) -> bool {
 
 /// Owning pid of the IPv4 listener on `127.0.0.1:port`, if there is one.
 fn loopback_listener_pid(port: u16) -> Option<u32> {
-    use windows::Win32::NetworkManagement::IpHelper::{
+    use ::windows::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
         TCP_TABLE_OWNER_PID_LISTENER,
     };
-    use windows::Win32::Networking::WinSock::AF_INET;
+    use ::windows::Win32::Networking::WinSock::AF_INET;
 
     let mut size: u32 = 0;
     // SAFETY: a null table with a zero size is the documented size query; `size` is a live local.
@@ -419,11 +419,11 @@ fn loopback_listener_pid(port: u16) -> Option<u32> {
 
 /// Whether `pid`'s primary token belongs to `NT AUTHORITY\LocalService`.
 fn runs_as_local_service(pid: u32) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::Security::{
+    use ::windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use ::windows::Win32::Security::{
         GetTokenInformation, IsWellKnownSid, TokenUser, WinLocalServiceSid, TOKEN_QUERY, TOKEN_USER,
     };
-    use windows::Win32::System::Threading::{
+    use ::windows::Win32::System::Threading::{
         OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 

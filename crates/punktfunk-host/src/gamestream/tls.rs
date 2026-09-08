@@ -40,7 +40,26 @@ pub(crate) fn bind_exclusive(addr: SocketAddr) -> std::io::Result<std::net::TcpL
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     #[cfg(windows)]
-    socket.set_exclusiveaddruse(true)?;
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Networking::WinSock::{
+            setsockopt, SOCKET, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+        };
+        let on = 1i32.to_ne_bytes();
+        // SAFETY: `socket` is a live, unbound socket we own; `on` is a 4-byte int the option
+        // expects, borrowed for the call only.
+        let rc = unsafe {
+            setsockopt(
+                SOCKET(socket.as_raw_socket() as usize),
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                Some(&on),
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
     #[cfg(unix)]
     socket.set_reuse_address(true)?;
     socket.bind(&addr.into())?;
