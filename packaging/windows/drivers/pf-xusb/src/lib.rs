@@ -190,12 +190,8 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     };
 
     // Manual queue for the ASYNC input wait (`IOCTL_XUSB_WAIT_FOR_INPUT`), completed by the timer.
-    //
-    // Declining that IOCTL is enough for CLASSIC XInput — `xinput1_4` just falls back to synchronous
-    // GET_STATE polling, which is why the pad has always worked there. It is NOT enough for
-    // WGI/GameInput: those poll asynchronously, so to them the decline is not a fallback but a
-    // refusal, and the device is never admitted. Measured 2026-08-09 on .173 — the pad reaches
-    // XInput slot 1 with live data while WGI/GameInput never see it at all.
+    // Classic XInput falls back to GET_STATE polling when it is declined; WGI/GameInput poll
+    // asynchronously and never admit a device that declines it.
     // SAFETY: `device` is the live device just created.
     let wait_queue = match unsafe { skeleton::create_manual_queue(device) } {
         Ok(q) => q,
