@@ -792,6 +792,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **A frame the FEC wire cannot address is dropped, not corrupted.** Past 255 data shards per
   block `255 - k` underflowed and `fecInfo`'s 10-bit k truncated, which a large IDR at the
   ANNOUNCE packetSize floor reaches. Raise the client's packetSize if the log names it.
+- **One client stalling its handshake no longer holds every other client off.** The accept loop
+  waited for each connection's handshake before taking the next, so a stalled peer blocked
+  connects for up to 8 s; the handshake now runs per session. Nothing to do.
+- **A virtual monitor torn down during a mode or cursor call no longer closes the event that
+  call still holds.** The reap and a swap-chain reassignment could run against the same monitor
+  from another thread; teardown now waits for the call to return. Nothing to do.
 - **A timed-out virtual microphone stops leaking its render thread.** The open path returned an
   error without setting the stop flag and built no owner to drop, so each retry left another
   thread holding a render client. Nothing to do.
@@ -826,6 +832,20 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   `%PATH%`. Nothing to do.
 - **`atiadlxx.dll` loads from System32 only.** The unqualified load searched the exe's directory,
   the working directory and `%PATH%` first, in a process running as SYSTEM. Nothing to do.
+- **A seat display answers punktfunk verbs only from inside its session.** The seat device's
+  access list admits NETWORK SERVICE for the remoting stack, and every verb answered it, so any
+  such service could add or remove seat monitors; a session-0 requestor is now refused. Nothing
+  to do.
+- **A plugin's launch port must still belong to the plugin runner.** The host dialled the
+  registered loopback port with the UI secret for up to 90 s after the plugin died, so whoever
+  bound the freed port received it; on Windows the listener must run as LocalService. Nothing
+  to do.
+- **One address cannot churn every browser's sign-in challenge.** The challenge pool was one
+  global cap, and a paired device could grow the token map for an hour; each address and each
+  device now has its own budget. Nothing to do.
+- **The console pins the host's identity on its loopback hop.** The proxy relaxed certificate
+  checks for `127.0.0.1`; it now verifies against the host's own cert, and the streaming and
+  management listeners refuse a second socket beside them. Nothing to do.
 - **A planted web-console password is no longer kept.** `web setup` hardened the config directory
   before testing the file's owner, and that pass re-owns the contents, so the check always passed.
   Nothing to do; the installer now rotates to a fresh password instead.
