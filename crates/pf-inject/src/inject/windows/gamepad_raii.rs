@@ -108,7 +108,9 @@ impl Shm {
     /// that carries this process's access without re-checking the DACL (`design/idd-push-security.md`).
     pub(super) fn create_unnamed(size: usize) -> Result<Shm> {
         let sa = sddl_sa(w!("D:P(A;;GA;;;SY)"))?;
+        // Unnamed: nothing to collide with, so the flag is always false.
         Self::create_inner(&sa.sa, PCWSTR::null(), size)
+            .map(|(shm, _)| shm)
             .context("create unnamed gamepad DATA section")
     }
 
@@ -130,13 +132,13 @@ impl Shm {
             }
             // SAFETY: clearing the thread error slot so ERROR_ALREADY_EXISTS below is unambiguous.
             unsafe { SetLastError(WIN32_ERROR(0)) };
-            let shm = match Self::create_inner(&sa.sa, PCWSTR(name.as_ptr()), size) {
-                Ok(shm) => shm,
+            let (shm, existed) = match Self::create_inner(&sa.sa, PCWSTR(name.as_ptr()), size) {
+                Ok(pair) => pair,
                 Err(e) => return Err(classify_named_create_failure(name, e)),
             };
-            // SAFETY: read immediately after the create; windows-rs only touches the error slot on
-            // failure, so a success here preserves CreateFileMappingW's ALREADY_EXISTS signal.
-            if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            // The verdict comes from the create itself, not from a re-read of the error slot
+            // after the mapping call — and a section we merely opened was not zeroed.
+            if !existed {
                 return Ok(shm);
             }
             // `shm` drops here → unmap + close our handle to the foreign object, then retry.
@@ -149,7 +151,10 @@ impl Shm {
         .context(PadCreateFault::IndexOwnedElsewhere))
     }
 
-    fn create_inner(sa: &SECURITY_ATTRIBUTES, name: PCWSTR, size: usize) -> Result<Shm> {
+    /// `true` in the tuple means `CreateFileMappingW` OPENED an existing section rather than
+    /// creating one — the caller decides what to do about it. Read here, immediately after the
+    /// create, because the mapping call below can clobber the thread error slot.
+    fn create_inner(sa: &SECURITY_ATTRIBUTES, name: PCWSTR, size: usize) -> Result<(Shm, bool)> {
         // SAFETY: an anonymous (pagefile-backed) section of `size` bytes with the caller's SDDL; the
         // descriptor behind `sa` outlives this call (owned by the caller's `SecAttr`, freed only once
         // every create that borrows it has returned).
@@ -163,6 +168,8 @@ impl Shm {
                 name,
             )?
         };
+        // SAFETY: read before anything else can touch the thread error slot.
+        let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         // SAFETY: `map` is a fresh section handle we own; take ownership immediately so the early
         // return (and drop) closes it. `map` is `Copy`; `from_raw_handle` only copies the pointer.
         let handle = unsafe { OwnedHandle::from_raw_handle(map.0) };
@@ -172,9 +179,14 @@ impl Shm {
             // `handle` drops here → closes the section. No view to unmap.
             return Err(anyhow!("MapViewOfFile failed"));
         }
-        // SAFETY: `view` points at `size` writable bytes (just mapped).
-        unsafe { core::ptr::write_bytes(view.Value as *mut u8, 0, size) };
-        Ok(Shm { handle, view })
+        if !existed {
+            // Only ours. Windows zero-fills a new pagefile-backed section, so this is belt —
+            // but running it on a section we merely OPENED would wipe a live mailbox that
+            // belongs to another host instance, which the caller is about to back away from.
+            // SAFETY: `view` points at `size` writable bytes (just mapped).
+            unsafe { core::ptr::write_bytes(view.Value as *mut u8, 0, size) };
+        }
+        Ok((Shm { handle, view }, existed))
     }
 
     /// Mapped base. Stable for this `Shm`'s lifetime — `MapViewOfFile` pins the address.
