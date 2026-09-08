@@ -72,6 +72,8 @@ Deep dive: `git log v0.34.0..v0.35.0`
 - `--host` / `--client`, `--demo`, `PUNKTFUNK_SETUP_BIN`, `PUNKTFUNK_INSTALL_OMARCHY_SETUP`,
   `--no-console-cert`.
 - `PUNKTFUNK_SEAT_SESSION`, `PUNKTFUNK_SEAT_ID`, `PUNKTFUNK_SEAT_DISPLAY_SLOT`.
+- `PUNKTFUNK_GAMESCOPE_ISOLATE=0` puts concurrent dedicated gamescope sessions back on the
+  shared input/audio/mic plane.
 - `punktfunk-host plugins grant <dir>`.
 - `nativeConsoleNextEvent` may emit `{"announce": …}`. `nativeConsoleAdvanceSpeed` for
   `ConsoleCmd::SpeedTest` — handle it or the row never leaves Connecting.
