@@ -231,9 +231,8 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     // READ_REPORT completion. 8 ms — the proven pf-gamepad cadence; the mouse is presence-first
     // (SendInput injects), so a 125 Hz ceiling on the validation/report path is fine.
     // SAFETY: `manual_queue` is the live queue just created.
-    if let Err(st) =
-        unsafe { skeleton::create_periodic_timer(manual_queue.cast(), Some(evt_timer), 8) }
-    {
+    let timer = unsafe { skeleton::create_periodic_timer(manual_queue.cast(), Some(evt_timer), 8) };
+    if let Err(st) = timer {
         dbglog!("[pf-mouse] WdfTimerCreate failed 0x{:08x}", st as u32);
         return st;
     }

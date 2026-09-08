@@ -888,9 +888,9 @@ fn pad_index() -> u8 {
         & 0xFF) as u8
 }
 
-/// The bring-up file log. OPT-IN — debug builds, or the `PFGAMEPAD_DEBUG_LOG` env var — so a RELEASE
-/// driver never writes the file and never traps into the debugger. The path and the sink live
-/// in [`pf_umdf_util::log`], one copy for all four drivers.
+// The bring-up file log. OPT-IN — debug builds, or the `PFGAMEPAD_DEBUG_LOG` env var — so a RELEASE
+// driver never writes the file and never traps into the debugger. Path, sink and the gate live
+// in `pf_umdf_util::log`, one copy for all four drivers.
 pf_umdf_util::file_log!("pf_gamepad-driver.log", "PFGAMEPAD_DEBUG_LOG");
 
 #[unsafe(export_name = "DriverEntry")]
@@ -974,9 +974,10 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
 
     // Periodic timer (parent = manual queue) completes pended reads with the neutral report.
     // SAFETY: `manual_queue` is the live queue just created.
-    if let Err(st) = unsafe {
+    let timer = unsafe {
         skeleton::create_periodic_timer(manual_queue.cast(), Some(evt_timer), TIMER_PERIOD_MS)
-    } {
+    };
+    if let Err(st) = timer {
         dbglog!("[pf-gamepad] WdfTimerCreate failed 0x{:08x}", st as u32);
         return st;
     }

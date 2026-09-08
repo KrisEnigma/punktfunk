@@ -227,7 +227,8 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     // owns the mailbox pump — adoption, re-delivery, host-gone — so the XInput IOCTL path never
     // re-opens the mailbox (see `evt_io_device_control`).
     // SAFETY: `queue` is the live default queue just created.
-    if let Err(st) = unsafe { skeleton::create_periodic_timer(queue.cast(), Some(evt_timer), 8) } {
+    let timer = unsafe { skeleton::create_periodic_timer(queue.cast(), Some(evt_timer), 8) };
+    if let Err(st) = timer {
         dbglog!("[pf-xusb] WdfTimerCreate failed 0x{:08x}", st as u32);
         return st;
     }
