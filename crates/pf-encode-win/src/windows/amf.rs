@@ -703,9 +703,9 @@ fn retrieve_loop(
             }
             Ok(DrainOutcome::Eof) => {
                 lock(&out).pending.clear();
-                // Once drained, every later call returns EOF, and the loop only exits on `stop`
-                // — without this the thread spins a core until the session ends. Same interval
-                // the NotReady arm uses; a re-armed component surfaces its next AU one tick on.
+                // EOF repeats on every call while the component sits drained, and the loop only
+                // exits on `stop`, so this arm was a busy spin for as long as that lasts. Same
+                // interval the NotReady arm uses; the next AU surfaces one tick later.
                 if !blocking {
                     std::thread::sleep(std::time::Duration::from_micros(250));
                 }
@@ -2152,9 +2152,10 @@ impl Encoder for AmfEncoder {
                 "AMF Drain returned non-OK at flush"
             );
         }
-        // Drain leaves the component at end-of-stream, where it accepts no further input. Flush
-        // takes it back out, so a session that flushes can encode again — the same re-arm the
-        // Media Foundation backend does with START_OF_STREAM after its own drain.
+        // Drain puts the component at end-of-stream; Flush takes it back out, the same re-arm
+        // Media Foundation does with START_OF_STREAM. Belt: measured on a Radeon (2026-09-08),
+        // this driver keeps accepting input after a bare Drain, so it is not a fix for an
+        // observed hang — it stops the contract depending on that.
         // SAFETY: same live component and owning thread as the drain above.
         let r = unsafe { ((*(*inner.comp.0).vtbl).flush)(inner.comp.0) };
         if r != sys::AMF_OK {
