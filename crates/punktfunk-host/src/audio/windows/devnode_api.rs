@@ -9,7 +9,7 @@
 //! property store that takes the payload, so dropping it here would free bytes the store
 //! still points at.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::mem::ManuallyDrop;
 use windows::core::{w, GUID, PCWSTR, PWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{

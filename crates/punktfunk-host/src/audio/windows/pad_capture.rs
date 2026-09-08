@@ -7,7 +7,7 @@
 
 use super::pad_endpoint::{open_wasapi_device, probe_activation};
 use super::{AudioCapturer, SAMPLE_RATE};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
-use windows::Win32::Media::Audio::IAudioClient;
 
 pub const PAD_CHANNELS: u32 = 4;
 /// 4-ch pad layout (FL FR BL BR). Not `punktfunk_core::audio::wasapi_channel_mask`,

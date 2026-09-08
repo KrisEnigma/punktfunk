@@ -27,12 +27,10 @@ use super::devnode_api::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashSet;
-use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use windows::core::{w, GUID, PCWSTR, PWSTR};
+use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiEnumDeviceInfo, SPDRP_HARDWAREID, SP_DEVINFO_DATA,
 };
@@ -40,10 +38,9 @@ use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
     IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
 };
-use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
+use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ, STGM_READWRITE};
-use windows::Win32::System::Registry::{RegCloseKey, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD};
-use windows::Win32::System::Variant::{VT_BLOB, VT_CLSID};
+use windows::Win32::System::Registry::{RegCloseKey, KEY_QUERY_VALUE, KEY_SET_VALUE};
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
 /// Data1 of the per-pad container GUID. Must equal pf-inject's `container_tag`
