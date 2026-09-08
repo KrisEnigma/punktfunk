@@ -15,6 +15,7 @@
 
 use crate::session::Frame;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -246,6 +247,9 @@ pub(crate) struct EncodeLatAcc {
 pub(crate) struct FrameChannel {
     inner: Mutex<FrameQueue>,
     ready: Condvar,
+    /// Set by the first [`Self::pop`]. Until then no decoder exists (a console
+    /// launch hold keeps it away for up to 15 s) and the pump drops AUs unqueued.
+    consumer_seen: AtomicBool,
 }
 
 struct FrameQueue {
@@ -276,7 +280,15 @@ impl FrameChannel {
                 skipped_total: 0,
             }),
             ready: Condvar::new(),
+            consumer_seen: AtomicBool::new(false),
         }
+    }
+
+    /// Whether anything has ever popped. False = no decoder yet; queued AUs
+    /// would be reference-broken by the time one starts, so the pump keeps the
+    /// queue empty and asks for a keyframe when the first pop lands.
+    pub(crate) fn consumer_seen(&self) -> bool {
+        self.consumer_seen.load(Ordering::Relaxed)
     }
 
     pub(crate) fn set_all_intra(&self, all_intra: bool) {
@@ -338,6 +350,7 @@ impl FrameChannel {
     /// in AUs. Streamed AUs ([`crate::quic::VIDEO_CAP_STREAMED_AU`]) still
     /// arrive as one `Frame`.
     pub(crate) fn pop(&self, timeout: Duration) -> FramePop {
+        self.consumer_seen.store(true, Ordering::Relaxed);
         let mut st = self.inner.lock().unwrap();
         if st.q.is_empty() && !st.closed {
             st = self.ready.wait_timeout(st, timeout).unwrap().0;
@@ -462,6 +475,25 @@ mod frame_channel_tests {
         // Queued frames still drain BEFORE the Closed signal.
         assert_eq!(popped(&ch), Some(7));
         assert!(matches!(ch.pop(Duration::from_millis(1)), FramePop::Closed));
+    }
+
+    #[test]
+    fn consumer_is_seen_on_first_pop_only() {
+        let ch = FrameChannel::new();
+        ch.push(frame(1));
+        assert!(!ch.consumer_seen(), "a push is not a consumer");
+        assert!(matches!(
+            ch.pop(Duration::from_millis(0)),
+            FramePop::Frame(_)
+        ));
+        assert!(ch.consumer_seen());
+        // A timed-out pop counts too: the decoder is waiting, not absent.
+        let ch = FrameChannel::new();
+        assert!(matches!(
+            ch.pop(Duration::from_millis(0)),
+            FramePop::Timeout
+        ));
+        assert!(ch.consumer_seen());
     }
 
     #[test]
