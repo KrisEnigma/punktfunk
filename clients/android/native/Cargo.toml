@@ -38,6 +38,11 @@ log = "0.4"
 # cross-compiles to the Android targets AND builds on the host (the JNI seam links into
 # `cargo build --workspace`). Kotlin keeps only the Wi-Fi `MulticastLock` + permission UX.
 mdns-sd = "0.21"
+# Shared, NOT in the Android table below: `session::connect` parses the `ConnectRequest`
+# JSON Kotlin hands `nativeConnect`, and that module compiles on the host too — CI's
+# workspace clippy builds this crate as a host cdylib.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Android-only deps. Gated so `cargo build --workspace` on the Linux/macOS dev boxes + CI still
 # compiles this crate (as a host cdylib) — the Android-framework glue (logging, AMediaCodec + AAudio
@@ -123,8 +128,6 @@ ash = { version = "0.38", features = ["loaded"] }
 # `gl` + `textlayout` = the prebuilt key `gl-jpegd-jpege-pdf-textlayout` (verify
 # `DOWNLOAD AND INSTALL SUCCEEDED` in the build log on every bump — see pf-console-ui/Cargo.toml).
 skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 anyhow = "1"
 
 [lints]
