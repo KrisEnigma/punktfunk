@@ -1062,9 +1062,10 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                 Modifier.fillMaxSize().pointerInput(handle, touchMode, pointerOk) {
                     when {
                         !pointerOk -> {} // no capture — the Access chip is what says why
-                        touchMode == TouchMode.TOUCH -> streamTouchPassthrough(handle, stylus, videoAspect)
+                        touchMode == TouchMode.TOUCH ->
+                            streamTouchPassthrough(NativeTouchSink(handle), stylus, videoAspect)
                         else -> streamTouchInput(
-                            handle,
+                            NativeTouchSink(handle),
                             stylus,
                             videoAspect,
                             trackpad = touchMode == TouchMode.TRACKPAD,
