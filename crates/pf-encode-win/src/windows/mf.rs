@@ -1103,7 +1103,7 @@ impl Encoder for MfEncoder {
         }
         // SAFETY: the MFT is live on this thread; flush + stream restart is the documented
         // recovery order, and each message is a synchronous no-argument call.
-        let restarted = unsafe {
+        let stopped = unsafe {
             inner
                 .mft
                 .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)
@@ -1112,19 +1112,12 @@ impl Encoder for MfEncoder {
                         .mft
                         .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0)
                 })
-                .and_then(|()| {
-                    inner
-                        .mft
-                        .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-                })
-                .and_then(|()| {
-                    inner
-                        .mft
-                        .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-                })
         };
         // The flush voided every in-flight frame and the queued events that named them. The
-        // callback stays armed across it — the generator is the MFT's, not the stream's.
+        // callback stays armed across it — the generator is the MFT's, not the stream's — so
+        // this clear belongs BETWEEN the stop and the restart: re-arming issues fresh
+        // METransformNeedInput on the MFT's thread, and clearing afterwards discarded the
+        // input credit the restart had just granted.
         {
             let mut g = lock(&inner.shared.out);
             g.pending.clear();
@@ -1133,6 +1126,17 @@ impl Encoder for MfEncoder {
             g.err = None;
         }
         inner.shared.have.clear();
+        // SAFETY: as above — synchronous no-argument messages on a live MFT.
+        let restarted = stopped.and_then(|()| unsafe {
+            inner
+                .mft
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                .and_then(|()| {
+                    inner
+                        .mft
+                        .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                })
+        });
         inner.frames_submitted = 0;
         inner.first_au_logged = false;
         if let Err(e) = restarted {
@@ -1186,13 +1190,15 @@ impl Encoder for MfEncoder {
         let _ = wait_until(inner, "drain", |o| o.pending.is_empty());
         // End-of-stream zeroed the MFT's input credit and it issues no more until a fresh
         // start-of-stream, so without this a later submit stalls out its whole budget.
+        // Drop the stale count FIRST: the restart issues fresh METransformNeedInput on the
+        // MFT's thread, and zeroing afterwards threw away the credit it had just granted.
+        lock(&inner.shared.out).need_input = 0;
         // SAFETY: the MFT is live on this thread; a synchronous no-argument message.
         unsafe {
             let _ = inner
                 .mft
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
         }
-        lock(&inner.shared.out).need_input = 0;
         Ok(())
     }
 }
