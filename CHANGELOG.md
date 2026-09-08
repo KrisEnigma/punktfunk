@@ -67,7 +67,7 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   (`VK_KHR_video_encode_intra_refresh`, RADV on AMD) instead of an IDR, tagging the wave's start
   and close AU `USER_FLAG_RECOVERY_POINT` so the client's existing two-mark lift heals in one
   cycle without the bitrate spike. Nothing changes on the wire or for a backend that leaves the
-  field `false`; `PUNKTFUNK_VK_INTRA_REFRESH=0` restores the IDR, `PUNKTFUNK_VK_IR_CYCLE` pins
+  field `false`; `PUNKTFUNK_INTRA_REFRESH=0` restores the IDR, `PUNKTFUNK_IR_CYCLE` pins
   the cycle length in frames. A client with a bitstream planner forgets its damaged-chain marks
   on such a lift (`ReanchorGate::lifted_by_marks`), or every later host anchor would be refused
   until an IDR.

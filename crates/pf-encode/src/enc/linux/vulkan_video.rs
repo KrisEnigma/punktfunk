@@ -19,6 +19,7 @@ use super::vk_util::{
     color_range, find_mem, import_failure_feeds_latch, make_host_buffer, make_plain_image,
     make_view, normalize_cpu_rgb, pixel_to_vk,
 };
+use crate::rfi::Wave;
 use crate::{Codec, EncodedFrame, Encoder, EncoderCaps};
 use anyhow::{bail, Context, Result};
 use ash::vk;
@@ -134,25 +135,6 @@ struct IntraRefreshCaps {
     max_cycle: u32,
 }
 
-/// An on-demand intra refresh wave in flight. `index` is the frame about to be encoded; the
-/// wave closes when it reaches `cycle`. Replaces the IDR an RFI decline used to force: the
-/// picture heals over `cycle` frames with no bitrate spike. The start AU and the close AU
-/// carry `recovery_point`, which the client counts as its two-mark lift.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Wave {
-    cycle: u32,
-    index: u32,
-}
-
-/// Frames per wave: one 64-px CTB row per frame at most (RADV refreshes nothing on indices
-/// past the row count), a quarter second at most (the freeze the client holds during the
-/// wave), the driver's ceiling, and never below the spec's 2. `PUNKTFUNK_VK_IR_CYCLE` pins it.
-fn wave_cycle(coded_height: u32, fps: u32, max_cycle: u32, pinned: Option<u32>) -> u32 {
-    let rows = coded_height.div_ceil(64).max(2);
-    let wanted = pinned.unwrap_or((fps / 4).max(2));
-    wanted.min(rows).min(max_cycle).max(2)
-}
-
 /// The two per-frame structs of a wave frame, built unconditionally so a record path can
 /// chain them only when the frame carries the refresh bit. Zero-valued without a wave.
 fn intra_refresh_chain(
@@ -180,15 +162,15 @@ fn intra_refresh_chain(
 
 /// Whether this session may run a row-based intra refresh wave. Needs the extension, its
 /// feature, `BLOCK_ROW_BASED`, regions independent of our single slice, a cycle of at least 2
-/// and one active reference. `PUNKTFUNK_VK_INTRA_REFRESH=0` opts out. `Err` is the log reason.
+/// and one active reference. `PUNKTFUNK_INTRA_REFRESH=0` opts out. `Err` is the log reason.
 fn intra_refresh_caps(
     advertised: bool,
     feature: bool,
     caps: &super::vk_intra_refresh::VideoEncodeIntraRefreshCapabilitiesKHR,
 ) -> std::result::Result<IntraRefreshCaps, &'static str> {
     use super::vk_intra_refresh as vir;
-    if std::env::var("PUNKTFUNK_VK_INTRA_REFRESH").as_deref() == Ok("0") {
-        return Err("off(PUNKTFUNK_VK_INTRA_REFRESH=0)");
+    if !crate::rfi::wave_enabled() {
+        return Err("off(PUNKTFUNK_INTRA_REFRESH=0)");
     }
     if !advertised {
         return Err("unsupported(extension not advertised)");
@@ -2074,15 +2056,14 @@ impl VulkanVideoEncoder {
                         // A wave in flight restarts: the client re-armed at this loss and
                         // counts marks from there, so only a fresh start + close lift it.
                         Some(ir) => {
-                            let cycle = wave_cycle(
-                                self.height,
+                            // RADV's stripe unit is the 64-px CTB row for HEVC and AV1.
+                            let cycle = crate::rfi::wave_cycle(
+                                self.height.div_ceil(64),
                                 self.fps,
                                 ir.max_cycle,
-                                std::env::var("PUNKTFUNK_VK_IR_CYCLE")
-                                    .ok()
-                                    .and_then(|v| v.parse().ok()),
+                                crate::rfi::pinned_cycle(),
                             );
-                            self.wave = Some(Wave { cycle, index: 0 });
+                            self.wave = Some(Wave::start(cycle));
                             tracing::debug!(
                                 loss_first = lf,
                                 cycle,
@@ -2904,23 +2885,22 @@ impl VulkanVideoEncoder {
         // The wave's start and close are the client's two marks. Every wave picture but the
         // close is part dirty, so it never becomes an RFI anchor: `slot_wire` stays -1.
         let wave = self.wave;
-        let closes = wave.is_some_and(|w| w.index + 1 == w.cycle);
-        self.frames[slot].recovery_point = wave.is_some_and(|w| w.index == 0) || closes;
+        self.frames[slot].recovery_point = wave.is_some_and(Wave::marks);
         if is_idr {
             self.slot_wire.iter_mut().for_each(|s| *s = -1);
             self.slot_poc.iter_mut().for_each(|s| *s = -1);
         }
-        self.slot_wire[setup_idx] = if wave.is_some() && !closes { -1 } else { wire };
+        let dirty = wave.is_some_and(|w| !w.closes());
+        self.slot_wire[setup_idx] = if dirty { -1 } else { wire };
         self.slot_poc[setup_idx] = poc;
-        if let Some(w) = &mut self.wave {
-            w.index += 1;
-            if closes {
+        if let Some(w) = wave {
+            self.wave = w.next();
+            if self.wave.is_none() {
                 tracing::debug!(
                     cycle = w.cycle,
                     wire,
                     "vulkan-encode: intra refresh wave closed"
                 );
-                self.wave = None;
             }
         }
         self.prev_slot = setup_idx;
@@ -4104,9 +4084,7 @@ use self::build::{
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_h265_rps_s0, intra_refresh_caps, parse_rgb_request, wave_cycle, VulkanVideoEncoder,
-    };
+    use super::{build_h265_rps_s0, intra_refresh_caps, parse_rgb_request, VulkanVideoEncoder};
     use crate::{Codec, Encoder};
     use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 
@@ -4361,20 +4339,6 @@ mod tests {
         }
     }
 
-    /// Rows cap the cycle (1080p = 17 rows), a quarter second caps it at 60 fps, the driver
-    /// ceiling and the pin override, never below 2.
-    #[test]
-    fn wave_cycle_caps() {
-        assert_eq!(wave_cycle(1080, 60, 256, None), 15);
-        assert_eq!(wave_cycle(1080, 120, 256, None), 17);
-        assert_eq!(wave_cycle(2160, 120, 256, None), 30);
-        assert_eq!(wave_cycle(1080, 60, 8, None), 8);
-        assert_eq!(wave_cycle(1080, 60, 256, Some(4)), 4);
-        assert_eq!(wave_cycle(1080, 60, 256, Some(0)), 2);
-        assert_eq!(wave_cycle(64, 60, 256, None), 2);
-        assert_eq!(wave_cycle(256, 60, 256, None), 4);
-    }
-
     /// Wave smoke frame plan, 256×256 (4 CTB rows → cycle 4): IDR + 2 P, then an RFI with
     /// every reference tainted, which used to force an IDR and now starts a wave.
     const WAVE_START: usize = 3;
@@ -4421,7 +4385,7 @@ mod tests {
             if i == WAVE_START {
                 assert_eq!(
                     enc.wave,
-                    Some(super::Wave {
+                    Some(crate::rfi::Wave {
                         cycle: WAVE_CYCLE as u32,
                         index: 1
                     })
