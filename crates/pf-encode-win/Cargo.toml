@@ -13,6 +13,8 @@ publish = false
 
 [dependencies]
 pf-frame = { path = "../pf-frame" }
+# The `EncodeKnobs` block the host sends in SET_ENCODE; this crate reads its knobs from it.
+pf-driver-proto = { path = "../pf-driver-proto" }
 anyhow = "1"
 tracing = "0.1"
 # Shared `nvEncodeAPI` glue (`nvenc_core`/`nvenc_status`) also serves the Linux direct-SDK

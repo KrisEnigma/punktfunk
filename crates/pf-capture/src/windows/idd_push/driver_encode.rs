@@ -270,6 +270,9 @@ pub fn open_driver_encoder(
         backends: params.backends,
         flags: 0,
         _pad_tail: 0,
+        // The host process carries `host.env`, so its environment is the knob source; the
+        // driver reads these instead of WUDFHost's own (machine) environment.
+        knobs: pf_encode_win::knobs::dev_override::from_env(),
     };
     let reply = match set_encode(&req) {
         Ok(r) => r,

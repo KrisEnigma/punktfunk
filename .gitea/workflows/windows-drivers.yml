@@ -188,6 +188,10 @@ jobs:
         # `// SAFETY:` proof. Both invariants are lint-gated (`unsafe_op_in_unsafe_fn` +
         # `undocumented_unsafe_blocks`); this step keeps them from regressing.
         run: ../drivers-cargo.ps1 'clippy --locked -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --all-targets -- -D warnings'
+      - name: cargo test pf-umdf-util (the safe helpers the drivers share)
+        # A plain lib links no WDF import libs, so its tests run where the cdylib drivers' cannot:
+        # the HID IOCTL table, descriptor lengths, string replies and the channel state machine.
+        run: ../drivers-cargo.ps1 'test --locked -p pf-umdf-util'
       - name: cargo fmt --check the driver workspace
         run: cargo fmt -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --check
       - name: Inspect /INTEGRITYCHECK (before) — expect FORCE_INTEGRITY set by wdk-build

@@ -50,11 +50,10 @@ pub fn resolve_slices(codec: Codec, default_slices: u32) -> u32 {
     if !matches!(codec, Codec::H264 | Codec::H265) {
         return 1;
     }
-    std::env::var("PUNKTFUNK_NVENC_SLICES")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .filter(|n| (1..=32).contains(n))
-        .unwrap_or(default_slices)
+    match crate::knobs::get().nvenc_slices {
+        0 => default_slices,
+        n => u32::from(n),
+    }
 }
 
 /// Sub-frame readback tri-state (`enableSubFrameWrite` + `reportSliceOffsets`,
@@ -62,9 +61,9 @@ pub fn resolve_slices(codec: Codec, default_slices: u32) -> u32 {
 /// `0` never, `1` force, unset = `default_on` (the GPU's `SUBFRAME_READBACK`
 /// cap on both backends).
 pub fn resolve_subframe(default_on: bool) -> bool {
-    match std::env::var("PUNKTFUNK_NVENC_SUBFRAME").as_deref() {
-        Ok("0") => false,
-        Ok("1") => true,
+    match crate::knobs::get().nvenc_subframe {
+        1 => false,
+        2 => true,
         _ => default_on,
     }
 }
@@ -73,10 +72,7 @@ pub fn resolve_subframe(default_on: bool) -> bool {
 /// subframe flag — a re-read at reconfigure would diverge from open.
 #[cfg(any(target_os = "linux", windows))]
 pub fn subframe_env_forced() -> bool {
-    matches!(
-        std::env::var("PUNKTFUNK_NVENC_SUBFRAME").as_deref(),
-        Ok("1")
-    )
+    crate::knobs::get().nvenc_subframe == 2
 }
 
 /// Split-encode × sub-frame arbitration (`nvEncodeAPI.h` `splitEncodeMode`).

@@ -1,0 +1,462 @@
+//! Rate and recovery control between frames: the FEC-driven encoder-rate re-derivation, the
+//! client's bitrate requests (in place, or an encoder rebuild), and the keyframe/RFI coalescing
+//! with its recovery-cadence diagnosis.
+
+use super::pipeline::open_session_encoder;
+use super::state::{announce_pipeline_gap, Inflight, StreamState};
+use super::*;
+
+impl StreamState {
+    /// Adaptive FEC moved: re-derive the encoder rate inside the unchanged wire budget.
+    pub(super) fn on_fec_moved(&mut self) {
+        if self.budget_identity {
+            return;
+        }
+        let fec_now = self.fec_target.load(Ordering::Relaxed);
+        if fec_now == self.last_fec {
+            return;
+        }
+        let prev = self.enc_derive(self.last_fec).enc_kbps(self.bitrate_kbps);
+        let want = self.enc_derive(fec_now).enc_kbps(self.bitrate_kbps);
+        self.last_fec = fec_now;
+        if want != prev && self.enc.reconfigure_bitrate(want as u64 * 1000) {
+            tracing::debug!(
+                fec_pct = fec_now,
+                encoder_kbps = want,
+                budget_kbps = self.bitrate_kbps,
+                "adaptive FEC moved — encoder rate re-derived within the wire budget"
+            );
+        }
+    }
+
+    /// The client's latest bitrate ask, clamped to a known encoder ceiling: reconfigure in place
+    /// when the encoder can, else rebuild it at the new rate.
+    pub(super) fn on_bitrate_request(&mut self) {
+        let mut want_kbps = None;
+        while let Ok(k) = self.bitrate_rx.try_recv() {
+            want_kbps = Some(k);
+        }
+        self.enc
+            .set_send_spread_us(self.send_spread_us.load(Ordering::Relaxed));
+        if let Some(k) = want_kbps.as_mut() {
+            let ceiling = self.encoder_ceiling_kbps.load(Ordering::Relaxed);
+            if ceiling != 0 && *k > ceiling {
+                tracing::info!(
+                    requested_kbps = *k,
+                    ceiling_kbps = ceiling,
+                    "bitrate request clamped to the known encoder ceiling"
+                );
+                *k = ceiling;
+            }
+        }
+        let Some(new_kbps) = want_kbps.filter(|&k| k != self.bitrate_kbps) else {
+            return;
+        };
+        let ed = self.enc_now();
+        if self
+            .enc
+            .reconfigure_bitrate(ed.enc_kbps(new_kbps) as u64 * 1000)
+        {
+            let applied_kbps = self
+                .enc
+                .applied_bitrate_bps()
+                .map(|b| (b / 1000) as u32)
+                .filter(|&k| k > 0)
+                .map(|k| ed.applied_budget_kbps(new_kbps, k))
+                .unwrap_or(new_kbps);
+            tracing::info!(
+                from_kbps = self.bitrate_kbps,
+                to_kbps = applied_kbps,
+                requested_kbps = new_kbps,
+                "encoder bitrate reconfigured in place (adaptive bitrate — no IDR)"
+            );
+            if applied_kbps < new_kbps {
+                self.encoder_ceiling_kbps
+                    .store(applied_kbps, Ordering::Relaxed);
+                let _ = self.retarget_tx.send(applied_kbps);
+            }
+            if applied_kbps < self.bitrate_kbps {
+                self.behind_score = 0;
+            }
+            self.bitrate_kbps = applied_kbps;
+            self.live_bitrate.store(applied_kbps, Ordering::Relaxed);
+            return;
+        }
+        let hz = interval_hz(self.interval);
+        let rebuild_t0 = std::time::Instant::now();
+        match open_session_encoder(
+            &self.plan,
+            &*self.capturer,
+            &self.frame,
+            (self.negotiated.width, self.negotiated.height),
+            hz,
+            |_, _| ed.enc_kbps(new_kbps) as u64 * 1000,
+            self.bit_depth,
+            self.au_seq,
+        ) {
+            Ok((new_enc, _)) => {
+                let applied_kbps = new_enc
+                    .applied_bitrate_bps()
+                    .map(|b| (b / 1000) as u32)
+                    .filter(|&k| k > 0)
+                    .map(|k| ed.applied_budget_kbps(new_kbps, k))
+                    .unwrap_or(new_kbps);
+                tracing::info!(
+                    from_kbps = self.bitrate_kbps,
+                    to_kbps = applied_kbps,
+                    requested_kbps = new_kbps,
+                    "encoder rebuilt at new bitrate (adaptive bitrate)"
+                );
+                self.enc = new_enc;
+                if applied_kbps < new_kbps {
+                    self.encoder_ceiling_kbps
+                        .store(applied_kbps, Ordering::Relaxed);
+                    let _ = self.retarget_tx.send(applied_kbps);
+                }
+                self.bitrate_kbps = applied_kbps;
+                self.live_bitrate.store(applied_kbps, Ordering::Relaxed);
+                self.inflight.clear();
+                self.last_au_at = std::time::Instant::now();
+                self.encoder_resets = 0;
+                self.last_forced_idr = Some(std::time::Instant::now());
+                self.behind_score = 0;
+                self.depth_frames = 0;
+                self.ahead_run = 0;
+                announce_pipeline_gap(
+                    &self.gap_tx,
+                    rebuild_t0.elapsed().as_millis().min(u32::MAX as u128) as u32,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), to_kbps = new_kbps,
+                    "bitrate-change encoder rebuild failed — keeping the current rate");
+                let _ = self.retarget_tx.send(self.bitrate_kbps);
+            }
+        }
+    }
+
+    /// Publish capture health, then fold every pending recovery ask (a recovered source stall,
+    /// keyframe requests, `/status` force-IDR, RFI ranges) into at most one encoder action: an
+    /// RFI when the encoder can anchor, else one IDR per cooldown.
+    pub(super) fn on_recovery_requests(&mut self) {
+        let mut want_kf = false;
+        // Staged recovery closed on real source frames (WP14): the client held the last image
+        // through the hole, so the next AU is an IDR, owed in-flight records are invalid, and
+        // the measured local outage is announced so the straddling window is not scored as
+        // congestion.
+        if self.health_published_at.elapsed() >= std::time::Duration::from_millis(500) {
+            self.health_published_at = std::time::Instant::now();
+            *self
+                .capture_health
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = self.capturer.health();
+        }
+        if let Some(outage) = self.capturer.take_recovered_outage() {
+            let outage_ms = outage.as_millis().min(u32::MAX as u128) as u32;
+            tracing::info!(
+                outage_ms,
+                "capture recovered from a source stall — forcing an IDR, announcing the gap"
+            );
+            want_kf = true;
+            self.inflight.clear();
+            self.last_forced_idr = Some(std::time::Instant::now());
+            announce_pipeline_gap(&self.gap_tx, outage_ms);
+        }
+        while self.keyframe.try_recv().is_ok() {
+            want_kf = true;
+        }
+        if self.force_idr.swap(false, Ordering::Relaxed) {
+            want_kf = true;
+        }
+        let mut rfi_range: Option<(u32, u32)> = None;
+        while let Ok((first, last)) = self.rfi.try_recv() {
+            rfi_range = Some(match rfi_range {
+                Some((pf, pl)) => (pf.min(first), pl.max(last)),
+                None => (first, last),
+            });
+        }
+        if self.plan.codec == crate::encode::Codec::PyroWave && (want_kf || rfi_range.is_some()) {
+            tracing::debug!(
+                want_kf,
+                ?rfi_range,
+                "PyroWave session: recovery request ignored (all-intra — next frame is the recovery)"
+            );
+            want_kf = false;
+            rfi_range = None;
+        }
+        // An RFI the encoder declined is proof that recovery needs an IDR — the anchor
+        // itself was lost, or every surviving reference is tainted. Not an echo.
+        let mut rfi_declined = false;
+        if !want_kf {
+            if let Some((first, last)) = rfi_range {
+                let width = last.wrapping_sub(first);
+                if width > punktfunk_core::packet::RFI_MAX_RANGE {
+                    tracing::debug!(first, last, width, "RFI range too wide — keyframe instead");
+                    want_kf = true;
+                } else if self.enc.caps().supports_rfi
+                    && self.enc.invalidate_ref_frames(first as i64, last as i64)
+                {
+                    self.last_rfi = Some(std::time::Instant::now());
+                } else {
+                    want_kf = true;
+                    rfi_declined = true;
+                }
+            }
+        }
+        if want_kf {
+            self.force_keyframe(rfi_declined);
+        }
+    }
+
+    /// One forced IDR per cooldown. A stream whose recovery marks the client can lift on heals
+    /// over ~0.5 s (2 s window); every other stream's only repair is the IDR, so the window is
+    /// short — swallow the round-trip echo, re-issue a lost IDR promptly.
+    fn force_keyframe(&mut self, rfi_declined: bool) {
+        const IDR_COOLDOWN_INTRA: std::time::Duration = std::time::Duration::from_secs(2);
+        const IDR_COOLDOWN_FULL: std::time::Duration = std::time::Duration::from_millis(750);
+        const RFI_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+        const RFI_ECHO_MAX_SWALLOWED: u32 = 2;
+        const KF_EPISODE_RESET: std::time::Duration = std::time::Duration::from_secs(1);
+        let window = if self.enc.caps().intra_refresh_recovery {
+            IDR_COOLDOWN_INTRA
+        } else {
+            IDR_COOLDOWN_FULL
+        };
+        let now = std::time::Instant::now();
+        if self
+            .last_kf_request
+            .is_some_and(|t| now.duration_since(t) > KF_EPISODE_RESET)
+        {
+            self.rfi_echo_swallowed = 0;
+        }
+        self.last_kf_request = Some(now);
+        let idr_recent = self.last_forced_idr.is_some_and(|t| t.elapsed() < window);
+        let rfi_echo = !rfi_declined
+            && self.last_rfi.is_some_and(|t| t.elapsed() < RFI_ECHO_WINDOW)
+            && self.rfi_echo_swallowed < RFI_ECHO_MAX_SWALLOWED;
+        if idr_recent {
+            // In-flight IDR has not repaired the client yet — do not RFI-anchor over that damage.
+            self.enc.distrust_references();
+            tracing::debug!(
+                "keyframe request coalesced — within the IDR cooldown; RFI anchor trust \
+                 withdrawn until the IDR repairs the client"
+            );
+        } else if rfi_echo {
+            // Do not distrust: the recovery frame is still in flight. Hedge is RFI_ECHO_MAX_SWALLOWED.
+            self.rfi_echo_swallowed += 1;
+            tracing::debug!(
+                swallowed = self.rfi_echo_swallowed,
+                "keyframe request coalesced — echo of an RFI-recovered loss"
+            );
+        } else {
+            let rfi_unhealed = self.rfi_echo_swallowed > 0;
+            tracing::debug!(rfi_unhealed, "forcing keyframe (client decode recovery)");
+            if rfi_unhealed {
+                self.enc.distrust_references();
+            }
+            self.enc.request_keyframe();
+            self.last_forced_idr = Some(now);
+            self.rfi_echo_swallowed = 0;
+            if let Some(period) = self.recovery_cadence.note(now) {
+                self.diagnose_recovery_cadence(period);
+            }
+        }
+    }
+
+    /// Forced keyframes have become periodic: say which side is at fault, from the client's
+    /// delivery count and the wire re-key history — never a guess at the display.
+    fn diagnose_recovery_cadence(&self, period: std::time::Duration) {
+        let client_rx = self.client_packets_received.load(Ordering::Relaxed);
+        let sent = self.sent;
+        if client_rx == 0 {
+            tracing::error!(
+                period_s = format!("{:.1}", period.as_secs_f64()),
+                frames_sent = sent,
+                "THE VIDEO DATA PLANE IS NOT REACHING THE CLIENT — it reports 0 \
+                 packets received all session while this host has sent the frames \
+                 counted here, so the picture is black and every keyframe we force is \
+                 wasted. The control plane is healthy (this report arrived on it), so \
+                 the session looks alive: audio, input and the library keep working. \
+                 READ THE 'data plane bound' LINE ABOVE — it says which leg failed, \
+                 and this line cannot. `punched=false`: the client's hole-punch never \
+                 arrived, so inbound UDP to this host's per-session data port is \
+                 blocked — open it (the ports are ephemeral, so the rule must be \
+                 program-scoped, not port-scoped). `punched=true`: inbound is FINE and \
+                 the failure is on the return leg — compare that line's `local=` \
+                 source address against the host address this client dialed, because \
+                 its data socket is connected and its kernel silently drops video from \
+                 any other source. If those match, the datagrams left this host \
+                 correctly and the client either never received them (a hop on the \
+                 path) or received them and could not open them: this counter is \
+                 incremented AFTER decrypt and replay checks, so a session whose every \
+                 datagram failed to open reports exactly this same zero"
+            );
+        } else if matches_client_recovery_cooldown(period) {
+            if client_rx == u32::MAX {
+                tracing::warn!(
+                    period_s = format!("{:.1}", period.as_secs_f64()),
+                    frames_sent = sent,
+                    "client keyframe recoveries land on a client software cooldown, \
+                     but this client is too old to report whether any video reached \
+                     it — so this is EITHER a client that cannot sustain the stream \
+                     and is shedding a standing receive queue, OR a client that has \
+                     received nothing at all and is re-asking on its no-video timer. \
+                     They are opposite faults; the host cannot tell them apart from \
+                     the period. Its log does: 'receive backlog stopped draining' \
+                     (with queue_depth) means the first, 'no video received … into \
+                     the session' means the second. Upgrading the client makes this \
+                     line decide on its own"
+                );
+            } else {
+                tracing::warn!(
+                    period_s = format!("{:.1}", period.as_secs_f64()),
+                    client_packets_received = client_rx,
+                    "client keyframe recoveries match the client's jump-to-live \
+                     cooldown, and it confirms video IS arriving — the CLIENT cannot \
+                     sustain the stream and is shedding a standing receive queue \
+                     (check its log for 'receive backlog stopped draining' with \
+                     queue_depth, and for a decode rung that demoted); a slower \
+                     decode path or a link below the bitrate does this, and it is NOT \
+                     a host display disturbance"
+                );
+            }
+        } else if self.wire_rekeys.load(Ordering::Relaxed) > 0 {
+            tracing::warn!(
+                period_s = format!("{:.1}", period.as_secs_f64()),
+                wire_rekeys = self.wire_rekeys.load(Ordering::Relaxed),
+                "client keyframe recoveries are METRONOMIC on a session whose wire \
+                 MTU had to be re-keyed mid-stream — a constrained path (VPN/overlay \
+                 adapter, lowered NIC MTU) black-holing full-size video is the prime \
+                 suspect, NOT a host/display disturbance; see the 'wire MTU' lines \
+                 above, and pin PUNKTFUNK_WIRE_MTU to skip the lossy discovery window \
+                 on this path"
+            );
+        } else {
+            tracing::warn!(
+                period_s = format!("{:.1}", period.as_secs_f64()),
+                "client keyframe recoveries are METRONOMIC — a periodic host/display \
+                 disturbance (display-topology churn, display-poller software, \
+                 virtual-display timing) is the likely cause, not random network \
+                 loss; correlate with 'slow display-descriptor poll' / 'display \
+                 descriptor changed' / 'IDD-push capture stall' lines"
+            );
+        }
+    }
+}
+
+/// Rebuild the encoder in place and drop owed in-flight AUs. `false` = no in-place reset.
+pub(super) fn reset_stalled_encoder(
+    enc: &mut Box<dyn crate::encode::Encoder>,
+    inflight: &mut Inflight,
+) -> bool {
+    if !enc.reset() {
+        return false;
+    }
+    inflight.clear();
+    enc.request_keyframe();
+    true
+}
+
+/// The ladder rungs whose actuator this loop owns because the encoder or the display manager
+/// does. `EncoderReset` is [`reset_stalled_encoder`] plus a bounded wait for the first access
+/// unit — the rung's whole cost, one IDR included. `DriverCycle` reaps the WUDFHost and reloads
+/// the adapter (seconds, the display black for the cycle); its `Applied` ends the capturer so
+/// the pipeline rebuild reopens SET_ENCODE and the ring against the fresh host.
+pub(super) fn run_loop_stage(
+    stage: pf_frame::recovery::Stage,
+    enc: &mut Box<dyn crate::encode::Encoder>,
+    inflight: &mut Inflight,
+) -> pf_frame::recovery::StageOutcome {
+    use pf_frame::recovery::{Stage, StageOutcome, ENCODER_RESET_FIRST_AU};
+    match stage {
+        Stage::EncoderReset => {
+            let t0 = std::time::Instant::now();
+            if !reset_stalled_encoder(enc, inflight) {
+                return StageOutcome::Failed;
+            }
+            let first_au = enc.ready_aus(t0 + ENCODER_RESET_FIRST_AU).map(|n| n > 0);
+            tracing::warn!(
+                cost_ms = t0.elapsed().as_millis() as u64,
+                first_au,
+                "recovery: encoder reset applied — one IDR plus the first-AU wait"
+            );
+            StageOutcome::Applied
+        }
+        #[cfg(target_os = "windows")]
+        Stage::DriverCycle => {
+            let t0 = std::time::Instant::now();
+            match crate::vdisplay::driver::force_driver_cycle() {
+                Ok(()) => {
+                    tracing::warn!(
+                        cost_ms = t0.elapsed().as_millis() as u64,
+                        "recovery: driver cycle — adapter reloaded, display black for the cycle; \
+                         the session rebuilds against the fresh WUDFHost"
+                    );
+                    StageOutcome::Applied
+                }
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "recovery: driver cycle failed");
+                    StageOutcome::Failed
+                }
+            }
+        }
+        _ => StageOutcome::Unsupported,
+    }
+}
+
+/// ±10 % of [`FLUSH_COOLDOWN`]: a software cooldown is the most periodic thing in the system.
+fn matches_client_flush_cadence(period: std::time::Duration) -> bool {
+    let flush = punktfunk_core::client::FLUSH_COOLDOWN;
+    period.abs_diff(flush) < flush / 10
+}
+
+/// ±10 % of [`NO_VIDEO_RETRY`]. Opposite fault from flush cadence; only the delivery count tells which.
+fn matches_client_no_video_cadence(period: std::time::Duration) -> bool {
+    let no_video = punktfunk_core::client::NO_VIDEO_RETRY;
+    period.abs_diff(no_video) < no_video / 10
+}
+
+fn matches_client_recovery_cooldown(period: std::time::Duration) -> bool {
+    matches_client_flush_cadence(period) || matches_client_no_video_cadence(period)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 2026-08-13 field log's exact reading — `period_s=2.0` — must be attributed to the
+    /// client's backlog shedding, not to a host display disturbance. The whole point of routing
+    /// on the shared constant is that this stays true if the cooldown is ever retuned, so the
+    /// test derives its cases from `FLUSH_COOLDOWN` instead of hardcoding two seconds.
+    #[test]
+    fn a_recovery_cadence_on_the_clients_cooldown_is_not_blamed_on_the_display() {
+        let flush = punktfunk_core::client::FLUSH_COOLDOWN;
+        assert!(matches_client_flush_cadence(flush), "the field reading");
+        assert!(matches_client_flush_cadence(flush + flush / 20));
+        assert!(matches_client_flush_cadence(flush - flush / 20));
+
+        assert!(!matches_client_flush_cadence(flush / 2));
+        assert!(!matches_client_flush_cadence(flush * 2));
+        assert!(!matches_client_flush_cadence(flush + flush / 5));
+        assert!(!matches_client_flush_cadence(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn the_two_client_cooldowns_are_distinguishable_and_both_excluded_from_display_blame() {
+        let flush = punktfunk_core::client::FLUSH_COOLDOWN;
+        let no_video = punktfunk_core::client::NO_VIDEO_RETRY;
+        assert_ne!(
+            flush, no_video,
+            "identical cooldowns make the host's verdict a coin flip"
+        );
+        // Neither may fall inside the other's ±10% band, or the period stops discriminating.
+        assert!(!matches_client_flush_cadence(no_video));
+        assert!(!matches_client_no_video_cadence(flush));
+        // Both are client software cooldowns: never the metronomic display-disturbance branch.
+        assert!(matches_client_recovery_cooldown(flush));
+        assert!(matches_client_recovery_cooldown(no_video));
+        // A real periodic disturbance still reaches that branch.
+        assert!(!matches_client_recovery_cooldown(flush * 3));
+        assert!(!matches_client_recovery_cooldown(std::time::Duration::ZERO));
+    }
+}

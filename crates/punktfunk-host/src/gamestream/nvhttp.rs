@@ -12,10 +12,11 @@ use super::tls::{PeerAddr, PeerCertFingerprint};
 use super::{serverinfo, AppState, LaunchSession, HTTPS_PORT, HTTP_PORT, RTSP_PORT};
 use anyhow::{anyhow, Context, Result};
 use axum::{
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::{header, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, MethodRouter},
     Extension, Router,
 };
 use punktfunk_core::quic::{GRANT_ALL, GRANT_LAUNCH};
@@ -93,17 +94,76 @@ fn peer_may_control_session(peer: &Option<Extension<PeerCertFingerprint>>, st: &
     }
 }
 
+/// What a route demands of its caller. Every route is built from [`routes`], so one cannot
+/// exist without a row here; the classification test drives each row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gate {
+    /// Either listener, any peer: the answer is what pairing itself needs.
+    Open,
+    /// A pinned HTTPS client cert, else the nvhttp error XML.
+    Paired,
+    /// Same gate, refused with a bare 403: the body would be read as an image.
+    PairedAsset,
+}
+
+/// The whole nvhttp surface, each route with its gate.
+fn routes() -> [(&'static str, Gate, MethodRouter<Arc<AppState>>); 7] {
+    [
+        ("/serverinfo", Gate::Open, get(h_serverinfo)),
+        ("/pair", Gate::Open, get(h_pair)),
+        ("/applist", Gate::Paired, get(h_applist)),
+        ("/appasset", Gate::PairedAsset, get(h_appasset)),
+        ("/launch", Gate::Paired, get(h_launch)),
+        ("/resume", Gate::Paired, get(h_resume)),
+        ("/cancel", Gate::Paired, get(h_cancel)),
+    ]
+}
+
+fn gate_for(path: &str) -> Option<Gate> {
+    routes()
+        .iter()
+        .find(|(p, _, _)| *p == path)
+        .map(|(_, g, _)| *g)
+}
+
+/// The open routes plus the paired ones behind one [`require_paired`] layer.
 fn router(state: Arc<AppState>, https: bool) -> Router {
-    Router::new()
-        .route("/serverinfo", get(h_serverinfo))
-        .route("/pair", get(h_pair))
-        .route("/applist", get(h_applist))
-        .route("/appasset", get(h_appasset))
-        .route("/launch", get(h_launch))
-        .route("/resume", get(h_resume))
-        .route("/cancel", get(h_cancel))
+    let mut open = Router::new();
+    let mut paired = Router::new();
+    for (path, gate, handler) in routes() {
+        match gate {
+            Gate::Open => open = open.route(path, handler),
+            Gate::Paired | Gate::PairedAsset => paired = paired.route(path, handler),
+        }
+    }
+    let paired = paired.route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        require_paired,
+    ));
+    open.merge(paired)
         .layer(Extension(Https(https)))
         .with_state(state)
+}
+
+/// The paired gate, once, ahead of every [`Gate::Paired`] handler: a pinned HTTPS client cert
+/// ([`peer_is_paired`]) or the route's rejection. Handlers behind it still read the
+/// fingerprint for grants and ownership.
+async fn require_paired(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let peer = req
+        .extensions()
+        .get::<PeerCertFingerprint>()
+        .cloned()
+        .map(Extension);
+    if peer_is_paired(&peer, &st) {
+        return next.run(req).await;
+    }
+    let path = req.uri().path();
+    tracing::warn!(path, "nvhttp request rejected — client is not paired");
+    if gate_for(path) == Some(Gate::PairedAsset) {
+        StatusCode::FORBIDDEN.into_response()
+    } else {
+        xml(error_xml()).into_response()
+    }
 }
 
 fn xml(body: String) -> impl IntoResponse {
@@ -140,28 +200,13 @@ fn owner_current_game(launch: &Option<LaunchSession>, caller: Option<[u8; 32]>) 
     }
 }
 
-async fn h_applist(
-    State(st): State<Arc<AppState>>,
-    peer: Option<Extension<PeerCertFingerprint>>,
-) -> impl IntoResponse {
-    if !peer_is_paired(&peer, &st) {
-        tracing::warn!("applist rejected — client is not paired");
-        return xml(error_xml());
-    }
+async fn h_applist() -> impl IntoResponse {
     xml(super::apps::applist_xml())
 }
 
 /// Cover bytes for `appid`. Fetch is disk+network, so `spawn_blocking`. 404 (Desktop, no art,
 /// or fetch failure) is Moonlight's title-only placeholder.
-async fn h_appasset(
-    State(st): State<Arc<AppState>>,
-    peer: Option<Extension<PeerCertFingerprint>>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Response {
-    if !peer_is_paired(&peer, &st) {
-        tracing::warn!("appasset rejected — client is not paired");
-        return StatusCode::FORBIDDEN.into_response();
-    }
+async fn h_appasset(Query(q): Query<HashMap<String, String>>) -> Response {
     let Some(appid) = q.get("appid").and_then(|s| s.parse::<u32>().ok()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -177,10 +222,6 @@ async fn h_launch(
     addr: Option<Extension<PeerAddr>>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if !peer_is_paired(&peer, &st) {
-        tracing::warn!("launch rejected — client is not paired");
-        return xml(error_xml()).into_response();
-    }
     // GRANT_LAUNCH + unexpired, besides pairing. GameStream has no join of an owner-launched
     // session, and no reject vocabulary — the client sees the generic error XML.
     match peer_grants(&peer, &st) {
@@ -264,10 +305,6 @@ async fn h_resume(
     addr: Option<Extension<PeerAddr>>,
     Query(q): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if !peer_is_paired(&peer, &st) {
-        tracing::warn!("resume rejected — client is not paired");
-        return xml(error_xml());
-    }
     // Resume re-attaches input and media, so the same GRANT_LAUNCH + expiry gate as `/launch`.
     match peer_grants(&peer, &st) {
         Some(g) if g & GRANT_LAUNCH != 0 => {}
@@ -349,10 +386,6 @@ async fn h_cancel(
     State(st): State<Arc<AppState>>,
     peer: Option<Extension<PeerCertFingerprint>>,
 ) -> impl IntoResponse {
-    if !peer_is_paired(&peer, &st) {
-        tracing::warn!("cancel rejected — client is not paired");
-        return xml(error_xml());
-    }
     // Expiry fails closed; GRANT_LAUNCH does not apply. Cancel is Quit App for the owner
     // (`peer_may_control_session`); denying it wedges the session they are ending.
     if peer_grants(&peer, &st).is_none() {
@@ -565,6 +598,76 @@ mod tests {
 
     fn fp_of(der: &[u8]) -> String {
         hex::encode(punktfunk_core::quic::endpoint::cert_fingerprint(der))
+    }
+
+    /// One request through the router as the TLS layer would deliver it.
+    async fn drive(
+        st: &Arc<AppState>,
+        path: &str,
+        peer: Option<PeerCertFingerprint>,
+    ) -> (StatusCode, String) {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder()
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        if let Some(p) = peer {
+            req.extensions_mut().insert(p);
+        }
+        let resp = router(st.clone(), true).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// Every route has a gate row, and the layer enforces it: an unpaired peer gets each
+    /// paired route's own rejection and every open route's answer, while a pinned cert
+    /// passes the layer. A route added without a row cannot compile (`routes` is the router).
+    #[tokio::test]
+    async fn every_nvhttp_route_is_classified_and_the_gate_enforces_it() {
+        let st = test_state();
+        let der = b"a-client-cert-der".to_vec();
+        st.paired.lock().unwrap().push(der.clone());
+        let pinned = PeerCertFingerprint(Some(fp_of(&der)));
+        let stranger = PeerCertFingerprint(Some(fp_of(b"someone-else")));
+
+        let table = routes();
+        let mut seen = std::collections::HashSet::new();
+        for (path, _, _) in &table {
+            assert!(seen.insert(*path), "{path} is routed twice");
+        }
+        for (path, gate, _) in &table {
+            assert_eq!(gate_for(path), Some(*gate));
+            let (status, body) = drive(&st, path, Some(stranger.clone())).await;
+            let (certless, _) = drive(&st, path, None).await;
+            match gate {
+                Gate::Open => {
+                    assert_eq!(status, StatusCode::OK, "{path} is open to a stranger");
+                    assert_eq!(certless, StatusCode::OK, "{path} is open without a cert");
+                }
+                Gate::Paired => {
+                    assert_eq!(status, StatusCode::OK, "{path}: the nvhttp error is a 200");
+                    assert_eq!(
+                        body,
+                        error_xml(),
+                        "{path} must answer a stranger with the error XML"
+                    );
+                }
+                Gate::PairedAsset => {
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{path} must 403 a stranger");
+                    assert_eq!(certless, StatusCode::FORBIDDEN);
+                }
+            }
+        }
+        // The pinned cert passes the layer: `/applist` answers, `/appasset` reaches its own
+        // argument check (400, not the gate's 403).
+        let (status, body) = drive(&st, "/applist", Some(pinned.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(body, error_xml(), "a pinned cert must not be rejected");
+        let (status, _) = drive(&st, "/appasset", Some(pinned)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[test]

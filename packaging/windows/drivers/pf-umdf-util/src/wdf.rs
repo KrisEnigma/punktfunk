@@ -119,6 +119,11 @@ impl Request {
         Ok((bytes, len))
     }
 
+    /// Answer a `GET_STRING` with `s` as NUL-terminated UTF-16 ([`crate::hid::utf16z`]).
+    pub fn copy_utf16z_to_output(&self, s: &str) -> NTSTATUS {
+        self.copy_to_output(&crate::hid::utf16z(s))
+    }
+
     /// The request's output-buffer LENGTH (0 if unavailable) — UMDF HID marshalling carries the
     /// output-report id in it.
     pub fn output_buffer_len(&self) -> usize {

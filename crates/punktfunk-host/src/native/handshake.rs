@@ -240,18 +240,13 @@ pub(super) fn cursor_forward(
         compositor.is_some_and(|c| c != crate::vdisplay::Compositor::Gamescope)
             && crate::encode::cursor_blend_capable(codec, cuda_planned, bit_depth == 10)
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "linux"))]
     {
-        // v5 IddCx hardware-cursor channel. Without it DWM paints the pointer into the IDD
-        // frame and a second copy doubles it. Encoder is not consulted: the IDD capturer
-        // composites on the capture-mouse flip; no Windows encode backend blends.
+        // Windows: the v5 IddCx hardware-cursor channel. Without it DWM paints the pointer
+        // into the IDD frame and a second copy doubles it. The encoder is not consulted: the
+        // IDD capturer composites on the capture-mouse flip; no Windows encode backend blends.
         let _ = (compositor, codec, bit_depth);
-        crate::vdisplay::manager::hw_cursor_capable()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        let _ = (compositor, codec, bit_depth);
-        false
+        crate::windows::idd::hw_cursor_capable()
     }
 }
 
@@ -599,9 +594,8 @@ pub(super) async fn negotiate(
     // the punched socket. The prep thread becomes the stream thread. Windows only — Linux
     // binds launch before create (gamescope nests the command), which must not run if Start
     // never arrives. A dropped channel releases the monitor into keep-alive like a normal end.
-    #[cfg(target_os = "windows")]
     let prep: Option<super::stream::PrepHandle> = match (source, compositor) {
-        (Punktfunk1Source::Virtual, Some(comp)) => {
+        (Punktfunk1Source::Virtual, Some(comp)) if cfg!(target_os = "windows") => {
             let (ctx_tx, ctx_rx) = std::sync::mpsc::sync_channel::<SessionContext>(1);
             let client_identity = conn.peer_fingerprint();
             let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
@@ -664,10 +658,6 @@ pub(super) async fn negotiate(
         }
         _ => None,
     };
-    #[cfg(not(target_os = "windows"))]
-    let prep: Option<super::stream::PrepHandle> = None;
-    #[cfg(not(target_os = "windows"))]
-    let _ = (quit, stop);
 
     let start =
         Start::decode(&io::read_msg(recv).await?).map_err(|e| anyhow!("Start decode: {e:?}"))?;
@@ -702,13 +692,10 @@ async fn negotiate_compositor(
             // Dedicated gamescope only if the launch id resolves to a command; an unknown id
             // must not spawn a blank "sleep infinity" gamescope. `launch_is_resolvable`, not
             // `resolve_launch`: a plugin command is loopback I/O and this is the async path.
-            #[cfg(not(target_os = "windows"))]
             let has_resolvable_launch = hello
                 .launch
                 .as_deref()
                 .is_some_and(crate::library::launch_is_resolvable);
-            #[cfg(target_os = "windows")]
-            let has_resolvable_launch = false;
             let dedicated = crate::vdisplay::wants_dedicated_game_session(has_resolvable_launch);
             Some(
                 tokio::task::spawn_blocking(move || resolve_compositor(pref, dedicated))

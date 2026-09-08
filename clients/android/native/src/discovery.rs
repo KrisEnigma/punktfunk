@@ -4,8 +4,9 @@
 //! folds resolve/remove events into a shared map, and returns a newline-delimited snapshot on poll.
 //!
 //! Start returns an opaque integer key into an `Arc<Discovery>` table. Poll retains the browse while
-//! it reads, stop removes the key, and final drop shuts down the daemon and joins its fold thread.
-//! This makes stop-vs-poll races safe without JVM callbacks or Rust pointers crossing JNI.
+//! it reads, rescan re-queries on the live daemon, stop removes the key, and final drop shuts the
+//! daemon down and joins its fold thread. This makes stop-vs-poll races safe without JVM callbacks
+//! or Rust pointers crossing JNI.
 
 use crate::session::jni_guard;
 use jni::errors::LogErrorAndDefault;
@@ -14,9 +15,10 @@ use jni::sys::jlong;
 use jni::EnvUnowned;
 use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// DNS-SD service type punktfunk hosts advertise (host side: `punktfunk_host::discovery`).
 const SERVICE_TYPE: &str = "_punktfunk._udp.local.";
@@ -24,6 +26,8 @@ const SERVICE_TYPE: &str = "_punktfunk._udp.local.";
 const PROTO: &str = "punktfunk/1";
 /// Field separator inside one serialized record (ASCII Unit Separator — never in a field value).
 const FIELD_SEP: char = '\u{1f}';
+/// How long the fold thread waits for an event before it looks at the rescan flag.
+const RESCAN_POLL: Duration = Duration::from_millis(250);
 
 /// One resolved host, serialized to Kotlin as `key␟name␟addr␟port␟fp␟pair␟mac␟os␟mgmt`
 /// (`␟` = [`FIELD_SEP`]). Records are newline-joined in a poll snapshot; [`Host::encode`] strips
@@ -72,10 +76,12 @@ impl Host {
     }
 }
 
-/// One table-owned browse: its daemon, fullname-keyed host map, and event-fold thread.
+/// One table-owned browse: its daemon, fullname-keyed host map, rescan flag, and event-fold thread.
 struct Discovery {
     daemon: ServiceDaemon,
     hosts: Arc<Mutex<HashMap<String, Host>>>,
+    /// Set by [`Discovery::rescan`], cleared by the fold thread when it re-browses.
+    rescan: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -98,12 +104,39 @@ impl Discovery {
         };
         let hosts: Arc<Mutex<HashMap<String, Host>>> = Arc::new(Mutex::new(HashMap::new()));
         let map = hosts.clone();
+        let rescan = Arc::new(AtomicBool::new(false));
+        let requested = rescan.clone();
+        let browser = daemon.clone();
         let spawned = std::thread::Builder::new()
             .name("pf-mdns".into())
             .spawn(move || {
-                // Exits when the daemon is shut down (the browse channel closes → recv errors).
-                while let Ok(event) = rx.recv() {
+                let mut rx = rx;
+                // What the last SearchStarted named. mDNS is invisible from a bug report
+                // otherwise: this line is what says whether the browse has any interface at all.
+                let mut announced = String::new();
+                loop {
+                    if requested.swap(false, Ordering::Relaxed) {
+                        // Re-browse REPLACES the listener: replays the cache, puts a PTR on the
+                        // wire now, and resets the doubling re-query backoff.
+                        match browser.browse(SERVICE_TYPE) {
+                            Ok(r) => rx = r,
+                            Err(e) => log::warn!("mDNS rescan failed: {e}"),
+                        }
+                    }
+                    // Polled, not blocking: a rescan has to be able to swap `rx`. Shutdown
+                    // disconnects the channel and is seen at once, so teardown never waits.
+                    let event = match rx.recv_timeout(RESCAN_POLL) {
+                        Ok(event) => event,
+                        Err(_) if rx.is_disconnected() => break,
+                        Err(_) => continue,
+                    };
                     match event {
+                        ServiceEvent::SearchStarted(what) => {
+                            if what != announced {
+                                log::info!("mDNS browse on {what}");
+                                announced = what;
+                            }
+                        }
                         ServiceEvent::ServiceResolved(info) => {
                             if let Some(host) = resolve(&info) {
                                 crate::session::lock_recover(&map)
@@ -131,6 +164,7 @@ impl Discovery {
         Some(Discovery {
             daemon,
             hosts,
+            rescan,
             thread: Some(thread),
         })
     }
@@ -144,6 +178,13 @@ impl Discovery {
             .collect();
         records.sort();
         records.join("\n")
+    }
+
+    /// Ask the fold thread to re-browse: a PTR back on the wire and the backoff reset, without
+    /// rebuilding the daemon. Rebuilding re-binds :5353 and re-joins the groups, and a daemon that
+    /// loses that race leaves the client with no discovery at all.
+    fn rescan(&self) {
+        self.rescan.store(true, Ordering::Relaxed);
     }
 
     /// Shut down the daemon and join the event-fold thread once.
@@ -264,6 +305,20 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeDiscoveryPo
         env.new_string(out)
     })
     .resolve::<LogErrorAndDefault>()
+}
+
+/// Re-query on a live browse. A missing or concurrently stopped key is a no-op.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeDiscoveryRescan(
+    _env: EnvUnowned,
+    _this: JObject,
+    handle: jlong,
+) {
+    jni_guard((), || {
+        if let Some(discovery) = get_discovery(handle) {
+            discovery.rescan();
+        }
+    })
 }
 
 /// Remove one browse key; final drop shuts down its daemon and joins the fold thread.

@@ -86,6 +86,9 @@ pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, 
     if !valid {
         return Err(STATUS_INVALID_PARAMETER);
     }
+    // The host's `host.env` knobs, before any backend reads them. An old host sent none and
+    // this is the defaults; the machine environment still overlays either (dev override).
+    pf_encode_win::knobs::set(req.knobs);
     let Some(monitor) = registry::find(|m| m.owner == owner && m.target_id() == req.target_id)
     else {
         return Err(STATUS_NOT_FOUND);

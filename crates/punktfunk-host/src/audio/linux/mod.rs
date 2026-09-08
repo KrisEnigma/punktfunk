@@ -1432,6 +1432,52 @@ fn pw_thread(
     result
 }
 
+// ---- the platform seam `audio.rs` calls through ---------------------------------------------
+
+/// Open a live capturer for system output. Default: host-owned stream sink claimed as
+/// the default, advertising `channels` so apps can produce real surround.
+/// `PUNKTFUNK_STREAM_SINK=0`: default-sink monitor, missing positions filled with
+/// silence. `rate_hz` is a request; the grant is [`AudioCapturer::sample_rate`].
+pub(super) fn open_audio_capture(channels: u32, rate_hz: u32) -> Result<Box<dyn AudioCapturer>> {
+    PwAudioCapturer::open(channels, rate_hz).map(|c| Box::new(c) as Box<dyn AudioCapturer>)
+}
+
+/// [`open_audio_capture`] pinned to a sink `node.name` (`design/gamescope-multiuser.md`):
+/// gamescope apps get `PULSE_SINK` and we capture that sink's monitor. `None` =
+/// [`open_audio_capture`].
+pub(super) fn open_audio_capture_named(
+    channels: u32,
+    rate_hz: u32,
+    sink: Option<&str>,
+) -> Result<Box<dyn AudioCapturer>> {
+    PwAudioCapturer::open_named(channels, rate_hz, sink)
+        .map(|c| Box::new(c) as Box<dyn AudioCapturer>)
+}
+
+/// Stream/null-sink mode can mint a per-session sink; monitor mode shares the default output.
+pub(super) fn per_session_sink_possible() -> bool {
+    sink_capture_active()
+}
+
+/// PipeWire `Audio/Source`, the shared `punktfunk-mic`.
+pub(super) fn open_virtual_mic(channels: u32) -> Result<Box<dyn VirtualMic>> {
+    open_virtual_mic_named(channels, None)
+}
+
+/// [`open_virtual_mic`] pinned to a source `node.name` (`design/gamescope-multiuser.md`:
+/// `punktfunk-mic-{id}`, gamescope `PULSE_SOURCE`). `None` = shared `punktfunk-mic`.
+pub(super) fn open_virtual_mic_named(
+    channels: u32,
+    source: Option<&str>,
+) -> Result<Box<dyn VirtualMic>> {
+    PwMicSource::open_named(channels, source).map(|m| Box::new(m) as Box<dyn VirtualMic>)
+}
+
+/// No wiring pass on Linux.
+pub(super) fn wiring_snapshot() -> Option<super::wiring_plan::Wiring> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

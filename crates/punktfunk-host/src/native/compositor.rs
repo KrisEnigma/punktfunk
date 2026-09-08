@@ -82,14 +82,12 @@ fn no_live_session(pinned: Option<&str>) -> anyhow::Error {
 /// shared-desktop backends want shared planes. `PUNKTFUNK_GAMESCOPE_ISOLATE`
 /// turns it off. The resolve paths and `serve_session`'s plane setup must
 /// never disagree about this predicate.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub(super) fn session_is_isolated(
     compositor: crate::vdisplay::Compositor,
     route: Option<&crate::vdisplay::GamescopeRoute>,
 ) -> bool {
-    // Non-Linux builds compile this path; they answer the way an off knob does.
-    cfg!(target_os = "linux")
-        && compositor == crate::vdisplay::Compositor::Gamescope
+    compositor == crate::vdisplay::Compositor::Gamescope
         && matches!(route, Some(crate::vdisplay::GamescopeRoute::Spawn))
         && pf_host_config::config().gamescope_isolate
 }

@@ -707,6 +707,7 @@ dependencies = [
  "anyhow",
  "libvpl-sys",
  "nvidia-video-codec-sdk",
+ "pf-driver-proto",
  "pf-frame",
  "pyrowave-sys",
  "tracing",

@@ -24,7 +24,7 @@ use crate::cursor_worker::CursorChannel;
 use crate::encode::section::EncodeSession;
 use crate::registry::{self, lock};
 use crate::swap_chain_processor::SwapChainProcessor;
-use crate::worker::{OwnedHandle, Worker};
+use crate::worker::{OwnedHandle, Sendable, Worker};
 
 /// The advertised mode list and its flattening (the order the mode DDIs emit). Both live in
 /// [`pf_driver_proto::vdisplay`], where they run under `cargo test` on any OS; re-exported so the
@@ -32,12 +32,7 @@ use crate::worker::{OwnedHandle, Worker};
 pub use pf_driver_proto::vdisplay::{Mode, flatten};
 
 /// The IddCx monitor handle, set once `IddCxMonitorCreate` returns.
-struct SendMonitor(iddcx::IDDCX_MONITOR);
-// SAFETY: an opaque IddCx handle, only ever passed by value to IddCx DDIs (themselves the
-// synchronisation point) and never dereferenced in Rust, so moving it between threads is sound.
-unsafe impl Send for SendMonitor {}
-// SAFETY: as above — a shared `&SendMonitor` yields only a by-value copy of the handle.
-unsafe impl Sync for SendMonitor {}
+type SendMonitor = Sendable<iddcx::IDDCX_MONITOR>;
 
 /// What `IddCxMonitorArrival` reported: the OS target id — the key the host addresses every
 /// later delivery by — and the render-adapter LUID for the ADD reply.
@@ -773,7 +768,7 @@ pub fn create_monitor(
         return None;
     }
     let object = create_out.MonitorObject;
-    let _ = monitor.object.set(SendMonitor(object));
+    let _ = monitor.object.set(Sendable(object));
 
     // Tell the OS the monitor is plugged in.
     let mut arrival_out = pod_init!(iddcx::IDARG_OUT_MONITORARRIVAL);

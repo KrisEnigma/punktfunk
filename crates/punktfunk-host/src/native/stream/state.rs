@@ -1,0 +1,995 @@
+//! The virtual-display stream loop's state. [`StreamState::new`] is bring-up (display,
+//! pipeline, launch, game lease, send thread); [`StreamState::run`] is the tick loop, one
+//! method per concern:
+//!
+//! - `rebuild.rs`: session switch, mode switch, topology re-assert, capture loss, source-mode
+//!   follow — everything that swaps the pipeline under the loop.
+//! - `recovery.rs`: FEC/bitrate re-derivation and the keyframe/RFI coalescing.
+//! - `encode.rs`: capture tick, submit, poll, stall watch, depth adaptation, pacing sleep.
+//! - `cursor.rs`: cursor forwarding, host composite, the seat-pointer park.
+//! - `resize.rs`: the Windows in-place resize.
+//!
+//! Fields are the loop's former locals. A per-tick value (`repeat`, `t_cap`, `owed`) travels in
+//! [`Tick`], not here.
+
+use super::cursor::composite_plan;
+#[cfg(target_os = "linux")]
+use super::cursor::settle_portal_cursor;
+use super::pipeline::{build_pipeline_with_retry, Pipeline};
+use super::*;
+
+/// Non-blocking poll returning None forever while submits succeed. 2 s also sizes the backlog bound.
+pub(super) const ENCODE_STALL_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+pub(super) const MAX_ENCODER_RESETS: u32 = 5;
+pub(super) const MAX_CAPTURE_REBUILDS: u32 = 5;
+/// (capture_ns, submit_ns, send deadline) per frame handed to the encoder and not yet polled.
+pub(super) type Inflight = std::collections::VecDeque<(u64, u64, std::time::Instant)>;
+
+/// What one tick's capture phase hands to its encode phase.
+#[derive(Clone, Copy)]
+pub(super) struct Tick {
+    pub(super) t_cap: std::time::Instant,
+    pub(super) cap_us: u32,
+    /// `try_latest` had nothing: the previous frame is re-encoded.
+    pub(super) repeat: bool,
+    pub(super) measure: bool,
+}
+
+/// After the encode phase: `Next` runs the tail of the tick, the others skip it.
+pub(super) enum Flow {
+    Next,
+    Continue,
+    Break,
+}
+
+pub(super) struct StreamState {
+    // ---- loop bookkeeping ----
+    pub(super) deadline: std::time::Instant,
+    pub(super) next: std::time::Instant,
+    pub(super) sent: u64,
+    /// Survives in-loop rebuilds so a mid-stream rebuild keeps the acquired lock.
+    pub(super) phase_ctl: PhaseController,
+    /// Same: a rebuild must not reopen the overshoot.
+    pub(super) pace: CaptureCredit,
+    /// Predicted as `au_seq + inflight.len()`. Encoder-internal counters desync on the first ABR rebuild.
+    pub(super) au_seq: u32,
+    /// A chunked AU's FIRST went out and its LAST has not: `au_seq` still names that frame.
+    pub(super) wire_frame_open: bool,
+    pub(super) capture_rebuilds: u32,
+    /// Topology re-assert generation this loop last saw. Only Windows IDD-push moves it.
+    pub(super) seen_reassert_gen: u64,
+    pub(super) encoder_resets: u32,
+    pub(super) last_au_at: std::time::Instant,
+    pub(super) last_hdr_meta: Option<pf_frame::HdrMeta>,
+    pub(super) inflight: Inflight,
+    /// NEW source frames / REPEATS / cursor REGENS since `diag_at`. Logged every 2 s under `PUNKTFUNK_PERF`.
+    pub(super) diag_new: u64,
+    pub(super) diag_repeat: u64,
+    pub(super) diag_regen: u64,
+    pub(super) diag_at: std::time::Instant,
+    #[cfg(target_os = "linux")]
+    pub(super) parked_display: Option<(u32, Option<u64>)>,
+    #[cfg(target_os = "linux")]
+    pub(super) park_attempts: u32,
+    #[cfg(target_os = "linux")]
+    pub(super) next_park_at: std::time::Instant,
+    /// Each host-composite outcome is logged once.
+    pub(super) composite_log: super::cursor::CompositeLog,
+    pub(super) last_forced_idr: Option<std::time::Instant>,
+    /// Never re-anchors the IDR cooldown: sustained loss + RFI would swallow IDR pleas forever.
+    pub(super) last_rfi: Option<std::time::Instant>,
+    pub(super) rfi_echo_swallowed: u32,
+    pub(super) last_kf_request: Option<std::time::Instant>,
+    pub(super) recovery_cadence: pf_frame::metronome::Metronome,
+    pub(super) ir_wave_pos: u32,
+    pub(super) st_cap: Vec<u32>,
+    pub(super) st_submit: Vec<u32>,
+    pub(super) st_wait: Vec<u32>,
+    pub(super) st_queue: Vec<u32>,
+    pub(super) cur_depth: usize,
+    pub(super) behind_score: u32,
+    pub(super) last_fec: u8,
+    pub(super) depth_frames: u64,
+    /// EMA of real-frame arrivals. Negotiated refresh is the wrong deadline when the game is slower.
+    pub(super) src_period_ns: Option<u64>,
+    pub(super) last_real_cap: Option<std::time::Instant>,
+    pub(super) was_degraded: bool,
+    pub(super) last_cadence_log: Option<std::time::Instant>,
+    pub(super) cadence_flips_suppressed: u32,
+    pub(super) pipeline_asked: bool,
+    pub(super) pipelined_active: bool,
+    pub(super) deescalating: bool,
+    pub(super) ahead_run: u32,
+    pub(super) deescalate_not_before: Option<std::time::Instant>,
+    pub(super) deescalate_backoff: std::time::Duration,
+
+    // ---- teardown order, which is field order: the status registration ends first, then
+    // the send thread, then game policy, then capture, encoder, display ----
+    _watcher: Option<std::thread::JoinHandle<()>>,
+    pub(super) live_session: crate::session_status::LiveSessionGuard,
+    // ---- the send thread ----
+    pub(super) frame_tx: std::sync::mpsc::SyncSender<SendMsg>,
+    pub(super) send_thread: std::thread::JoinHandle<()>,
+    pub(super) send_spread_us: Arc<AtomicU32>,
+    pub(super) wire_rekeys: Arc<AtomicU32>,
+    pub(super) live_mode: Arc<AtomicU64>,
+    pub(super) force_idr: Arc<AtomicBool>,
+    pub(super) capture_health: Arc<std::sync::Mutex<Option<pf_capture::CaptureHealth>>>,
+    pub(super) health_published_at: std::time::Instant,
+    _game_life: Option<crate::gamelease::SessionGuard>,
+
+    // ---- the live pipeline ----
+    pub(super) capturer: Box<dyn crate::capture::Capturer>,
+    pub(super) enc: Box<dyn crate::encode::Encoder>,
+    pub(super) frame: crate::capture::CapturedFrame,
+    pub(super) interval: std::time::Duration,
+    pub(super) cur_node_id: u32,
+    pub(super) cur_display_gen: Option<u64>,
+    /// Source can change format/size with no client Reconfigure; in-place encoder reset cannot follow.
+    pub(super) enc_src: (pf_frame::PixelFormat, u32, u32),
+    /// The mode a rebuild reopens at: the client's latest ask, or the source's delivered size.
+    pub(super) cur_mode: punktfunk_core::Mode,
+    /// Total wire budget (kbps). Only encoder opens convert via [`EncDerive`].
+    pub(super) bitrate_kbps: u32,
+    pub(super) vd: Box<dyn crate::vdisplay::VirtualDisplay>,
+    pub(super) compositor: crate::vdisplay::Compositor,
+    pub(super) cursor_fwd: Option<super::super::cursor_fwd::CursorForwarder>,
+    /// Starts true so the first composite request triggers the capturer hook.
+    pub(super) cursor_client_drew: bool,
+    pub(super) gamescope_composite: bool,
+    pub(super) metadata_composite: bool,
+    #[cfg(target_os = "linux")]
+    pub(super) no_overlay_means_off_output: bool,
+
+    // ---- fixed for the session ----
+    pub(super) plan: crate::session_plan::SessionPlan,
+    pub(super) stop: Arc<AtomicBool>,
+    pub(super) quit: Arc<AtomicBool>,
+    pub(super) conn: super::super::link::SessionLink,
+    /// The client's ask. Encoders fit to it; the display may deliver another size.
+    pub(super) negotiated: punktfunk_core::Mode,
+    pub(super) bitrate_auto: bool,
+    pub(super) bit_depth: u8,
+    pub(super) audio_reserved_kbps: u32,
+    pub(super) shard_payload: u16,
+    /// PyroWave: the wire budget is the encoder rate.
+    pub(super) budget_identity: bool,
+    pub(super) streamed_wire: bool,
+    pub(super) perf: bool,
+    pub(super) launch: Option<String>,
+    pub(super) client_hdr: Option<pf_frame::HdrMeta>,
+    pub(super) bringup: Arc<crate::bringup::Trace>,
+    pub(super) resize_ms: Arc<AtomicU32>,
+    pub(super) stats: Arc<StatsRecorder>,
+    pub(super) phase: Arc<PhaseCtl>,
+    pub(super) fec_target: Arc<AtomicU8>,
+    pub(super) live_bitrate: Arc<AtomicU32>,
+    pub(super) encoder_ceiling_kbps: Arc<AtomicU32>,
+    pub(super) cadence_degraded: Arc<AtomicBool>,
+    pub(super) cadence_behind_score: Arc<AtomicU32>,
+    pub(super) client_packets_received: Arc<AtomicU32>,
+    pub(super) cursor_shape_tx:
+        tokio::sync::watch::Sender<Option<punktfunk_core::quic::CursorShape>>,
+    pub(super) cursor_client_draws: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    pub(super) gamescope_route: Option<crate::vdisplay::GamescopeRoute>,
+    #[cfg(target_os = "linux")]
+    pub(super) input_tx: std::sync::mpsc::SyncSender<super::super::input::ClientInput>,
+    #[cfg(target_os = "linux")]
+    pub(super) isolation: Option<crate::vdisplay::SessionIsolation>,
+    #[cfg(target_os = "linux")]
+    pub(super) input_route: super::super::input::InputRoute,
+    #[cfg(target_os = "linux")]
+    pub(super) inj_shared_tx: std::sync::mpsc::Sender<punktfunk_core::input::InputEvent>,
+    #[cfg(target_os = "linux")]
+    pub(super) inj_session_tx: Option<std::sync::mpsc::Sender<punktfunk_core::input::InputEvent>>,
+
+    // ---- control-plane inputs ----
+    pub(super) reconfig: std::sync::mpsc::Receiver<punktfunk_core::Mode>,
+    pub(super) keyframe: std::sync::mpsc::Receiver<()>,
+    pub(super) rfi: std::sync::mpsc::Receiver<(u32, u32)>,
+    pub(super) bitrate_rx: std::sync::mpsc::Receiver<u32>,
+    pub(super) session_rx: std::sync::mpsc::Receiver<SessionSwitch>,
+    pub(super) reconfig_result_tx: tokio::sync::mpsc::UnboundedSender<Reconfigured>,
+    pub(super) retarget_tx: tokio::sync::mpsc::UnboundedSender<u32>,
+    pub(super) gap_tx: tokio::sync::mpsc::UnboundedSender<u32>,
+}
+
+impl StreamState {
+    /// The encoder-rate derivation for a FEC percentage.
+    pub(super) fn enc_derive(&self, fec: u8) -> super::super::EncDerive {
+        super::super::EncDerive {
+            audio_kbps: self.audio_reserved_kbps,
+            shard_payload: self.shard_payload,
+            fec_percent: fec,
+            identity: self.budget_identity,
+        }
+    }
+
+    /// [`Self::enc_derive`] at the FEC target in force now.
+    pub(super) fn enc_now(&self) -> super::super::EncDerive {
+        self.enc_derive(self.fec_target.load(Ordering::Relaxed))
+    }
+
+    /// Swap the built pipeline in and forget every owed AU. The caller retires the old lease,
+    /// re-arms the IDR clock, and re-reads `enc_src` as its path requires.
+    pub(super) fn adopt_pipeline(&mut self, p: Pipeline) {
+        self.capturer = p.capturer;
+        self.enc = p.enc;
+        self.frame = p.frame;
+        self.interval = p.interval;
+        self.cur_node_id = p.node_id;
+        self.cur_display_gen = p.display_gen;
+        self.inflight.clear();
+        self.last_au_at = std::time::Instant::now();
+        self.encoder_resets = 0;
+    }
+
+    /// Lease drop looks like a disconnect to keep-alive; retire or linger accumulates.
+    pub(super) fn retire_replaced_gen(&self, old: Option<u64>) {
+        if let Some(g) = old.filter(|g| self.cur_display_gen != Some(*g)) {
+            crate::vdisplay::registry::retire(g);
+        }
+    }
+
+    pub(super) fn adopt_built_bitrate(&mut self, built: u32) {
+        adopt_built_bitrate(
+            &mut self.bitrate_kbps,
+            built,
+            &self.live_bitrate,
+            &self.retarget_tx,
+        );
+    }
+
+    pub(super) fn delivered_mode(&self) -> punktfunk_core::Mode {
+        delivered_mode(self.frame.width, self.frame.height, self.interval)
+    }
+
+    /// Publish the delivered mode to `/status` and correct the client when it differs from `asked`.
+    pub(super) fn publish_delivered_mode(&self, asked: punktfunk_core::Mode) {
+        let actual = self.delivered_mode();
+        self.live_mode.store(
+            pack_mode(actual.width, actual.height, actual.refresh_hz),
+            Ordering::Relaxed,
+        );
+        if actual != asked {
+            let _ = self.reconfig_result_tx.send(Reconfigured {
+                accepted: true,
+                mode: actual,
+            });
+        }
+    }
+
+    /// Bring the session up: display, pipeline, library launch, game lease, send thread.
+    pub(super) fn new(ctx: SessionContext, prepared: Option<PreparedDisplay>) -> Result<Self> {
+        let mut plan = crate::session_plan::SessionPlan::resolve(
+            ctx.bit_depth,
+            ctx.hdr,
+            ctx.chroma,
+            ctx.codec,
+            crate::session_plan::cursor_blend_for(
+                ctx.cursor_forward,
+                ctx.compositor == pf_vdisplay::Compositor::Gamescope,
+                ctx.codec,
+                ctx.bit_depth,
+            ),
+            ctx.cursor_forward,
+            ctx.multi_slice,
+        );
+        // After resolve: a self-painting gamescope node would otherwise get a second XFixes pointer.
+        plan.gamescope_cursor = crate::session_plan::gamescope_cursor_for(
+            ctx.compositor == pf_vdisplay::Compositor::Gamescope,
+        );
+        if ctx.codec == crate::encode::Codec::PyroWave {
+            plan.wire_chunk = Some(ctx.session.shard_payload());
+        }
+        tracing::info!(?plan, "resolved session plan");
+        let SessionContext {
+            session,
+            mode,
+            seconds,
+            stop,
+            quit,
+            reconfig,
+            keyframe,
+            rfi,
+            bitrate_rx,
+            shard_rx,
+            compositor,
+            gamescope_route,
+            mut bitrate_kbps,
+            audio_reserved_kbps,
+            shard_payload,
+            live_bitrate,
+            encoder_ceiling_kbps,
+            cadence_degraded,
+            cadence_behind_score,
+            client_packets_received,
+            bitrate_auto,
+            bit_depth,
+            hdr,
+            chroma: _,
+            codec: _,
+            probe_rx,
+            probe_result_tx,
+            reconfig_result_tx,
+            retarget_tx,
+            gap_tx,
+            fec_target,
+            conn,
+            timing_conn,
+            phase,
+            cursor_forward,
+            cursor_shape_tx,
+            cursor_client_draws,
+            probe_seq,
+            streamed_au,
+            multi_slice,
+            stats,
+            client_label,
+            client_name,
+            launch,
+            launch_target,
+            client_hdr,
+            bringup,
+            resize_ms,
+            #[cfg(target_os = "linux")]
+            input_tx,
+            #[cfg(target_os = "linux")]
+            isolation,
+            #[cfg(target_os = "linux")]
+            input_route,
+            #[cfg(target_os = "linux")]
+            inj_shared_tx,
+            #[cfg(target_os = "linux")]
+            inj_session_tx,
+        } = ctx;
+        // Stamp before the display exists: a reading after launch would reject the process it is meant to find.
+        let fresh_stamp = crate::gamelease::launch_clock();
+        // Re-dial re-sends `Hello::launch` verbatim. Adopt against the original stamp or procscan refuses it.
+        let launch_claim = launch_target.as_ref().map(|t| {
+            crate::launchreg::claim(
+                conn.peer_fingerprint().map(hex::encode).as_deref(),
+                t.game.id.as_deref(),
+                fresh_stamp,
+            )
+        });
+        let launch_stamp = launch_claim.as_ref().map_or(fresh_stamp, |c| c.stamp());
+        // `PUNKTFUNK_STREAMED_AU=0` reverts to whole-AU sends. Encoder chunking is per-AU.
+        // `bitrate_kbps` is the total wire budget; only encoder opens convert via EncDerive.
+        let budget_identity = plan.codec == crate::encode::Codec::PyroWave;
+        let enc_derive = move |fec: u8| super::super::EncDerive {
+            audio_kbps: audio_reserved_kbps,
+            shard_payload,
+            fec_percent: fec,
+            identity: budget_identity,
+        };
+        let streamed_wire =
+            streamed_au && std::env::var("PUNKTFUNK_STREAMED_AU").as_deref() != Ok("0");
+        let slice_wire = streamed_wire
+            && multi_slice
+            && std::env::var("PUNKTFUNK_SLICE_STREAM").as_deref() != Ok("0");
+        let cursor_fwd = cursor_forward.then(super::super::cursor_fwd::CursorForwarder::new);
+        if cursor_forward {
+            tracing::info!("cursor channel negotiated — forwarding shape/state, encoder blend off");
+        }
+        #[allow(unused_mut)] // Linux settles it against the portal below.
+        let (gamescope_composite, mut metadata_composite) = composite_plan(
+            &plan,
+            cursor_fwd.is_some(),
+            compositor == pf_vdisplay::Compositor::Gamescope,
+        );
+        if gamescope_composite {
+            tracing::info!(
+                "gamescope cursor: compositing the XFixes-sourced pointer into the video"
+            );
+        }
+        if metadata_composite {
+            tracing::info!(
+                "no cursor channel — compositing the metadata cursor into the video (embedded \
+                 fallback is unreliable on virtual streams)"
+            );
+        }
+        if streamed_wire {
+            tracing::info!(
+                "client accepts streamed AUs (VIDEO_CAP_STREAMED_AU) — used if this session's \
+                 encoder supports chunked output"
+            );
+        }
+        // Adopt a mode accepted before bring-up and build once. Two RecordVirtual monitors ~400 ms
+        // apart segfault mutter inside `meta_monitor_manager_rebuild`. Prepared pipelines stay as-is.
+        let mut mode = mode;
+        let mut adopted_at_bringup = false;
+        if prepared.is_none() {
+            let mut queued = None;
+            while let Ok(m) = reconfig.try_recv() {
+                queued = Some(m);
+            }
+            if let Some(m) = queued.filter(|m| *m != mode) {
+                adopted_at_bringup = true;
+                tracing::info!(
+                    stale = ?mode,
+                    adopted = ?m,
+                    "a mode switch was accepted before bring-up finished — building at the new mode \
+                     instead of building twice"
+                );
+                mode = m;
+                if bitrate_auto && plan.codec == crate::encode::Codec::PyroWave {
+                    bitrate_kbps =
+                        resolve_bitrate_kbps_for(plan.codec, 0, &mode, plan.chroma, plan.bit_depth);
+                }
+            }
+        }
+        tracing::info!(
+            compositor = compositor.id(),
+            ?mode,
+            bitrate_kbps,
+            bit_depth,
+            "punktfunk/1 virtual display"
+        );
+        let (vd, pipe) = match prepared {
+            Some(p) => (p.vd, p.pipeline),
+            None => {
+                // Open first: Windows `open` inits the manager; `vdm()` before that panics.
+                let mut vd = crate::vdisplay::open(compositor)?;
+                vd.set_client_identity(conn.peer_fingerprint());
+                vd.set_client_hdr(client_hdr);
+                // HDR verdict, not the depth — a 10-bit SDR session leaves the output SDR.
+                vd.set_hdr(hdr);
+                vd.set_hw_cursor(cursor_forward || metadata_composite);
+                vd.set_quit_flag(quit.clone());
+                vd.set_launch_command(launch.clone());
+                vd.set_gamescope_route(gamescope_route.clone());
+                #[cfg(target_os = "linux")]
+                vd.set_session_isolation(isolation.clone());
+                // Slot-scoped: preempt only a prior session on THIS client's slot. Held before create.
+                let _idd_setup_guard = crate::windows::idd::setup_guard(
+                    plan.capture,
+                    conn.peer_fingerprint(),
+                    (mode.width, mode.height),
+                    &stop,
+                )?;
+                let pipe = build_pipeline_with_retry(
+                    &mut vd,
+                    mode,
+                    bitrate_kbps,
+                    bitrate_auto,
+                    bit_depth,
+                    enc_derive(fec_target.load(Ordering::Relaxed)),
+                    plan,
+                    &quit,
+                    &stop,
+                    None,
+                    8,
+                    Some(bringup.as_ref()),
+                    0,
+                )?;
+                (vd, pipe)
+            }
+        };
+        let Pipeline {
+            capturer,
+            enc,
+            frame,
+            interval,
+            node_id: cur_node_id,
+            display_gen: cur_display_gen,
+            bitrate_kbps: built_bitrate,
+        } = pipe;
+        let enc_src = (frame.format, frame.width, frame.height);
+        #[cfg(target_os = "linux")]
+        let no_overlay_means_off_output = settle_portal_cursor(&*vd, &mut metadata_composite);
+        adopt_built_bitrate(
+            &mut bitrate_kbps,
+            built_bitrate,
+            &live_bitrate,
+            &retarget_tx,
+        );
+        if adopted_at_bringup {
+            let actual = delivered_mode(frame.width, frame.height, interval);
+            if actual != mode {
+                let _ = reconfig_result_tx.send(Reconfigured {
+                    accepted: true,
+                    mode: actual,
+                });
+            }
+        }
+
+        // Once per launch, not per session. Mid-stream rebuilds must not re-spawn.
+        let adopt_launch = launch_claim.as_ref().is_some_and(|c| !c.must_spawn());
+        #[allow(unused_mut)]
+        let mut spawned_now = false;
+        // A forwarder's pid (`WinRecipe::owns_game` false) is not a lifetime signal.
+        #[allow(unused_mut)]
+        let mut spawned_pid: Option<u32> = None;
+        if !adopt_launch {
+            if let Some(t) = launch_target.as_ref() {
+                crate::gamelease::end_others_for_new_launch(
+                    conn.peer_fingerprint().map(hex::encode).as_deref(),
+                    t.game.id.as_deref(),
+                );
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(id) = launch.as_deref() {
+            if adopt_launch {
+                tracing::info!(
+                    launch_id = id,
+                    "this client's copy of this title is already running from an earlier session — not \
+                     starting a second one"
+                );
+            } else {
+                match crate::library::launch_title(id) {
+                    Ok(launched) => {
+                        spawned_pid = launched.tracked_pid();
+                        spawned_now = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(launch_id = id, error = %e, "requested library title not launched")
+                    }
+                }
+            }
+        }
+        // This session's compositor, by pool generation: a concurrent seat's gamescope is equally
+        // discoverable in `/proc`, so an unscoped launch or watch lands on somebody else's screen.
+        #[cfg(target_os = "linux")]
+        let seat: Option<String> = cur_display_gen.and_then(crate::vdisplay::registry::seat_for);
+        #[cfg(target_os = "linux")]
+        let spawned_launch = match launch.as_deref() {
+            Some(cmd) if adopt_launch => {
+                tracing::info!(
+                    command = %cmd,
+                    "this client's copy of this title is already running from an earlier session — not \
+                     starting a second one"
+                );
+                None
+            }
+            // Nested only when this acquire actually spawned gamescope — then `cmd` is already its
+            // primary child. A keep-alive reuse spawned nothing, so it falls through and launches
+            // into the live session below; without that, a second launch showed an idle session.
+            Some(cmd)
+                if crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref())
+                    && vd.nested_launch_started() =>
+            {
+                tracing::info!(command = %cmd, "launch nested into the per-session gamescope");
+                spawned_now = true;
+                None
+            }
+            Some(cmd) => {
+                match crate::library::launch_session_command(compositor, cmd, seat.as_deref()) {
+                    Ok(spawned) => {
+                        spawned_now = true;
+                        Some(spawned)
+                    }
+                    Err(e) => {
+                        tracing::warn!(command = %cmd, error = %e, "requested title not launched into the session");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        if let Some(c) = launch_claim.as_ref() {
+            if spawned_now {
+                c.launched();
+                if let Some(id) = c.credits() {
+                    crate::library::record_launch(id);
+                }
+            } else if c.must_spawn() {
+                c.abandon();
+            }
+        }
+
+        // A dedicated Steam session ends on gamescope's own root atoms, never on process shape:
+        // Steam wraps its pre-launch work (shader precompile, the install-script evaluator) in the
+        // same `SteamLaunch AppId=` reaper the game gets, so a scan adopts a tree that was never the
+        // game and reads its exit as the game exiting, seconds before the game starts.
+        #[cfg(target_os = "linux")]
+        let steam_exit_appid: Option<u32> = launch
+            .as_deref()
+            .filter(|_| crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref()))
+            .and_then(crate::vdisplay::steam_appid_from_launch);
+        #[cfg(not(target_os = "linux"))]
+        let steam_exit_appid: Option<u32> = None;
+
+        let end_on_game_exit = {
+            let conn = conn.clone();
+            let stop = stop.clone();
+            let quit = quit.clone();
+            move || {
+                if !crate::session_settings::get().session_on_game_exit {
+                    tracing::info!(
+                        "the launched game exited, but ending the session on game exit is off — \
+                         leaving the stream up"
+                    );
+                    return;
+                }
+                tracing::info!(
+                    "the launched game exited — ending the session cleanly (APP_EXITED)"
+                );
+                conn.close(punktfunk_core::quic::APP_EXITED_CLOSE_CODE, b"game exited");
+                quit.store(true, Ordering::SeqCst);
+                stop.store(true, Ordering::SeqCst);
+            }
+        };
+
+        // The atom watcher owns the end for a dedicated Steam session; `gamelease` keeps running, so
+        // the console still shows what is playing, but it no longer closes the connection.
+        #[cfg(target_os = "linux")]
+        if let Some(appid) = steam_exit_appid {
+            let stop = stop.clone();
+            let end = end_on_game_exit.clone();
+            let seat = seat.clone();
+            let spawned = std::thread::Builder::new()
+                .name("pf1-steamexit".into())
+                .spawn(move || {
+                    if crate::vdisplay::watch_steam_game_exit(appid, seat.as_deref(), &stop) {
+                        end();
+                    }
+                });
+            if let Err(e) = spawned {
+                tracing::warn!(error = %e, "dedicated Steam exit watcher not started");
+            }
+        }
+
+        let game_lease = launch_target.as_ref().map(|target| {
+            #[cfg(target_os = "linux")]
+            let nested = crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref());
+            #[cfg(not(target_os = "linux"))]
+            let nested = false;
+            #[cfg(target_os = "linux")]
+            let child = spawned_launch.map(|s| (s.child, s.group_leader));
+            #[cfg(not(target_os = "linux"))]
+            let child = None;
+
+            let on_exit: crate::gamelease::OnExit = if steam_exit_appid.is_some() {
+                Box::new(|| {
+                    tracing::info!(
+                        "game lease: the launched game exited (status only — this dedicated Steam \
+                         session ends on gamescope's atoms)"
+                    );
+                })
+            } else {
+                Box::new(end_on_game_exit)
+            };
+            crate::gamelease::open(
+                crate::gamelease::LeaseRequest {
+                    game: target.game.clone(),
+                    client: client_label.clone(),
+                    plane: crate::events::Plane::Native,
+                    spec: target.detect.clone(),
+                    nested,
+                    launcher: target.launcher,
+                    child,
+                    spawned: spawned_pid,
+                    launch_stamp,
+                    procs: launch_claim.as_ref().and_then(|c| c.procs()),
+                },
+                on_exit,
+            )
+        });
+        let game_shared = game_lease.as_ref().map(|l| l.shared());
+        let game_life = game_lease.map(|lease| {
+            crate::gamelease::SessionGuard::new(
+                lease,
+                quit.clone(),
+                conn.peer_fingerprint().map(hex::encode),
+                launch_claim,
+            )
+        });
+
+        let perf = pf_host_config::config().perf;
+        let burst_cap: Option<usize> = std::env::var("PUNKTFUNK_PACE_BURST_KB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|kb| kb * 1024);
+
+        // Depth 3: encode blocks if send falls behind, rather than drop a frame (infinite GOP freeze).
+        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<SendMsg>(3);
+        // Stats slot only — an ordinary connect is not owed a corrective Reconfigured.
+        let delivered = delivered_mode(frame.width, frame.height, interval);
+        let live_mode = Arc::new(AtomicU64::new(pack_mode(
+            delivered.width,
+            delivered.height,
+            delivered.refresh_hz,
+        )));
+        let force_idr = Arc::new(AtomicBool::new(false));
+        let send_spread_us = Arc::new(AtomicU32::new(0));
+        let send_spread_send = Arc::clone(&send_spread_us);
+        let wire_rekeys = Arc::new(AtomicU32::new(0));
+        let wire_rekeys_send = Arc::clone(&wire_rekeys);
+        let send_stats = SendStats {
+            rec: stats.clone(),
+            mode: live_mode.clone(),
+            codec: plan.codec.label(),
+            client: client_label.clone(),
+            bitrate_kbps: live_bitrate.clone(),
+            bringup: bringup.clone(),
+        };
+        let send_thread = std::thread::Builder::new()
+            .name("punktfunk-send".into())
+            .spawn({
+                let stop = stop.clone();
+                let phase_send = phase.clone();
+                let fec_target_send = fec_target.clone();
+                move || {
+                    send_loop(
+                        session,
+                        frame_rx,
+                        probe_rx,
+                        probe_result_tx,
+                        stop,
+                        perf,
+                        send_spread_send,
+                        wire_rekeys_send,
+                        slice_wire,
+                        burst_cap,
+                        fec_target_send,
+                        shard_rx,
+                        send_stats,
+                        timing_conn,
+                        phase_send,
+                        probe_seq,
+                    )
+                }
+            })
+            .context("spawn send thread")?;
+
+        let capture_health: Arc<std::sync::Mutex<Option<pf_capture::CaptureHealth>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let live_session = crate::session_status::register(crate::session_status::Registration {
+            mode: live_mode.clone(),
+            bitrate_kbps: live_bitrate.clone(),
+            codec: plan.codec,
+            stop: stop.clone(),
+            quit: quit.clone(),
+            force_idr: force_idr.clone(),
+            client: client_label,
+            client_name,
+            hdr: plan.hdr,
+            ttff_ms: bringup.total_slot(),
+            last_resize_ms: resize_ms.clone(),
+            game: game_shared,
+            capture_health: capture_health.clone(),
+        });
+
+        // Replaced by `spawn_session_watcher` inside the session span; disconnected until then.
+        let (_, session_rx) = std::sync::mpsc::channel::<SessionSwitch>();
+
+        let now = std::time::Instant::now();
+        Ok(Self {
+            plan,
+            stop,
+            quit,
+            conn,
+            negotiated: mode,
+            bitrate_auto,
+            bit_depth,
+            audio_reserved_kbps,
+            shard_payload,
+            budget_identity,
+            streamed_wire,
+            perf,
+            launch,
+            client_hdr,
+            bringup,
+            resize_ms,
+            stats,
+            phase,
+            fec_target: fec_target.clone(),
+            live_bitrate,
+            encoder_ceiling_kbps,
+            cadence_degraded,
+            cadence_behind_score,
+            client_packets_received,
+            cursor_shape_tx,
+            cursor_client_draws,
+            #[cfg(target_os = "linux")]
+            gamescope_route,
+            #[cfg(target_os = "linux")]
+            input_tx,
+            #[cfg(target_os = "linux")]
+            isolation,
+            #[cfg(target_os = "linux")]
+            input_route,
+            #[cfg(target_os = "linux")]
+            inj_shared_tx,
+            #[cfg(target_os = "linux")]
+            inj_session_tx,
+            reconfig,
+            keyframe,
+            rfi,
+            bitrate_rx,
+            session_rx,
+            reconfig_result_tx,
+            retarget_tx,
+            gap_tx,
+            frame_tx,
+            send_thread,
+            send_spread_us,
+            wire_rekeys,
+            live_mode,
+            force_idr,
+            capture_health,
+            health_published_at: now,
+            vd,
+            compositor,
+            capturer,
+            enc,
+            frame,
+            interval,
+            cur_node_id,
+            cur_display_gen,
+            enc_src,
+            cur_mode: mode,
+            bitrate_kbps,
+            cursor_fwd,
+            cursor_client_drew: true,
+            gamescope_composite,
+            metadata_composite,
+            #[cfg(target_os = "linux")]
+            no_overlay_means_off_output,
+            deadline: now + std::time::Duration::from_secs(seconds as u64),
+            next: now,
+            sent: 0,
+            phase_ctl: PhaseController::new(),
+            pace: CaptureCredit::new(now),
+            au_seq: 0,
+            wire_frame_open: false,
+            capture_rebuilds: 0,
+            seen_reassert_gen: crate::windows::idd::topology_reassert_gen(),
+            encoder_resets: 0,
+            last_au_at: now,
+            last_hdr_meta: None,
+            inflight: Inflight::new(),
+            diag_new: 0,
+            diag_repeat: 0,
+            diag_regen: 0,
+            diag_at: now,
+            #[cfg(target_os = "linux")]
+            parked_display: None,
+            #[cfg(target_os = "linux")]
+            park_attempts: 0,
+            #[cfg(target_os = "linux")]
+            next_park_at: now,
+            composite_log: super::cursor::CompositeLog::default(),
+            // Pipeline opened on an IDR — start the clock so the cold-GOP keyframe storm coalesces.
+            last_forced_idr: Some(now),
+            last_rfi: None,
+            rfi_echo_swallowed: 0,
+            last_kf_request: None,
+            recovery_cadence: pf_frame::metronome::Metronome::new(),
+            ir_wave_pos: 0,
+            st_cap: Vec::new(),
+            st_submit: Vec::new(),
+            st_wait: Vec::new(),
+            st_queue: Vec::new(),
+            cur_depth: 1,
+            behind_score: 0,
+            last_fec: fec_target.load(Ordering::Relaxed),
+            depth_frames: 0,
+            src_period_ns: None,
+            last_real_cap: None,
+            was_degraded: false,
+            last_cadence_log: None,
+            cadence_flips_suppressed: 0,
+            pipeline_asked: false,
+            pipelined_active: false,
+            deescalating: false,
+            ahead_run: 0,
+            deescalate_not_before: None,
+            deescalate_backoff: super::encode::DEESCALATE_BACKOFF_START,
+            live_session,
+            _watcher: None,
+            _game_life: game_life,
+        })
+    }
+
+    /// Follow a mid-stream Gaming↔Desktop switch unless `PUNKTFUNK_COMPOSITOR` pins the backend.
+    fn spawn_session_watcher(&mut self) {
+        if !(session_watch_enabled() && pf_host_config::config().compositor.is_none()) {
+            return;
+        }
+        tracing::info!("session watcher on — following a mid-stream Gaming↔Desktop switch");
+        let (session_tx, session_rx) = std::sync::mpsc::channel::<SessionSwitch>();
+        self.session_rx = session_rx;
+        let stop = self.stop.clone();
+        self._watcher = std::thread::Builder::new()
+            .name("punktfunk1-watcher".into())
+            .spawn(move || session_watcher_loop(session_tx, stop))
+            .ok();
+    }
+
+    /// The tick loop, then the drain. Every phase is a method; the order is the contract.
+    pub(super) fn run(mut self) -> Result<()> {
+        // Concurrent sessions interleave in one log; this stamps every line below with
+        // the id `/status` reports. Sync body, so the guard never straddles an await.
+        let _session_span = tracing::info_span!("session", id = self.live_session.id).entered();
+        self.spawn_session_watcher();
+        while !self.stop.load(Ordering::SeqCst) && std::time::Instant::now() < self.deadline {
+            self.on_session_switch();
+            self.on_mode_switch();
+            self.on_topology_reassert()?;
+            self.on_fec_moved();
+            self.on_bitrate_request();
+            self.on_recovery_requests();
+            let Some(tick) = self.capture_tick()? else {
+                break;
+            };
+            self.tick_cursor();
+            #[cfg(target_os = "linux")]
+            self.park_seat_pointer();
+            self.log_diag();
+            if !self.follow_source_mode()? {
+                continue;
+            }
+            match self.encode_and_send(tick)? {
+                Flow::Next => {}
+                Flow::Continue => continue,
+                Flow::Break => break,
+            }
+            self.adapt_depth();
+            self.sleep_to_next(tick.t_cap);
+        }
+        self.drain();
+        drop(self.frame_tx);
+        let _ = self.send_thread.join();
+        // Source against wire: `source_seq` is what DWM composed into the driver's pool,
+        // `dropped` what the pool refused. A source under the refresh rate is the desktop.
+        let src = self.capturer.health();
+        tracing::info!(
+            sent = self.sent,
+            source_seq = src.as_ref().map_or(0, |h| h.source_seq),
+            published = src.as_ref().map_or(0, |h| h.published_total),
+            dropped = src.as_ref().map_or(0, |h| h.dropped_total),
+            "punktfunk/1 virtual stream complete"
+        );
+        Ok(())
+    }
+}
+
+/// Store the encoder's opened rate and tell the client. Silent when nothing changed.
+pub(super) fn adopt_built_bitrate(
+    current: &mut u32,
+    built: u32,
+    live: &Arc<AtomicU32>,
+    retarget: &tokio::sync::mpsc::UnboundedSender<u32>,
+) {
+    if built == *current {
+        return;
+    }
+    tracing::info!(
+        from_kbps = *current,
+        to_kbps = built,
+        "adopted the rebuilt pipeline's bitrate (re-resolved for what it actually encodes)"
+    );
+    *current = built;
+    live.store(built, Ordering::Relaxed);
+    let _ = retarget.send(built);
+}
+
+/// Announce a host-local rebuild gap so the client does not score a straddling window as congestion.
+pub(super) fn announce_pipeline_gap(gap: &tokio::sync::mpsc::UnboundedSender<u32>, gap_ms: u32) {
+    if gap_ms == 0 {
+        return;
+    }
+    let _ = gap.send(gap_ms);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adopting_a_rebuilt_rate_tells_the_client() {
+        let live = Arc::new(AtomicU32::new(20_000));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        let mut current = 20_000;
+        adopt_built_bitrate(&mut current, 20_000, &live, &tx);
+        assert_eq!(rx.try_recv().ok(), None);
+        adopt_built_bitrate(&mut current, 60_000, &live, &tx);
+        assert_eq!(current, 60_000);
+        assert_eq!(live.load(Ordering::Relaxed), 60_000);
+        assert_eq!(rx.try_recv().ok(), Some(60_000));
+    }
+}
