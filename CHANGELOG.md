@@ -414,6 +414,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Deleting a Moonlight device's access record ends its live session instead of widening it
+  to full control.** The GameStream control thread read the deletion as "no record, ungoverned"
+  and lifted every restriction mid-stream; it now ends the session as the native plane does, and
+  a fresh launch is ungoverned as before. Nothing to do — a record still only exists once the
+  console can create one for a Moonlight row.
 - **Trackpad scrolling on a KDE host moves the page as far as the fingers went.** KWin's
   `fake_input` carries a bare axis with no source, which every toolkit reads as ten units per
   wheel click, so injecting a measured distance there spent one click per 10 px and scrolled
