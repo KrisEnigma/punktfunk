@@ -114,39 +114,10 @@ pub fn host_wire_caps() -> u8 {
             | punktfunk_core::quic::CODEC_AV1;
         #[cfg(target_os = "linux")]
         {
-            if backend == LinuxBackend::Software {
-                break 'base punktfunk_core::quic::CODEC_H264;
-            }
-            // Forced-vulkan pref is a ceiling, never a replacement: the arm
-            // encodes HEVC/AV1 only (H.264 dies at open). A static HEVC|AV1
-            // would add AV1 on GPUs whose probe withholds it. No
-            // `vulkan-encode` feature → advertise nothing.
-            let pref_ceiling: u8 = match backend {
-                // Resolver knows the pref is vulkan; only this cfg! knows
-                // the build can open it. Else: advertise-then-die-at-open.
-                LinuxBackend::Vulkan => {
-                    if cfg!(feature = "vulkan-encode") {
-                        punktfunk_core::quic::CODEC_HEVC | punktfunk_core::quic::CODEC_AV1
-                    } else {
-                        0
-                    }
-                }
-                _ => GPU_SUPERSET,
-            };
-            if linux_zero_copy_is_vaapi_for(backend) {
-                if let Some(m) = codec_support_wire_mask(vaapi_codec_support()) {
-                    break 'base m & pref_ceiling;
-                }
-            }
-            // Driver GUID list, like the VAAPI arm. Fail-open: `None` leaves
-            // the historical superset, so this can only narrow.
-            #[cfg(feature = "nvenc")]
-            if backend == LinuxBackend::Nvenc {
-                if let Some(m) = codec_support_wire_mask(nvenc_codec_support()) {
-                    break 'base m & pref_ceiling;
-                }
-            }
-            GPU_SUPERSET & pref_ceiling
+            let _ = GPU_SUPERSET;
+            // Shared with `/serverinfo`, so the two advertisements cannot drift.
+            break 'base codec_support_wire_mask(linux_advertised_codec_support_for(backend))
+                .unwrap_or(0);
         }
         #[cfg(target_os = "windows")]
         {
@@ -1004,27 +975,115 @@ pub fn nvenc_codec_support() -> CodecSupport {
     probed.codecs
 }
 
-/// VAAPI encode probe (tiny encoder per codec, cached once). NVIDIA uses
+/// What the AMD/Intel plane can encode: the native VAAPI session for H.264 and
+/// HEVC, Vulkan Video for HEVC and AV1 — the two arms [`open_video`] tries, so
+/// nothing is advertised that would die at open. NVIDIA uses
 /// [`nvenc_codec_support`]; callers gate on [`linux_zero_copy_is_vaapi`].
+///
+/// Cached per selected GPU, like [`windows_codec_support`]: a console
+/// preference change moves the render node and the Vulkan device both probes
+/// open.
 #[cfg(target_os = "linux")]
 pub fn vaapi_codec_support() -> CodecSupport {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<CodecSupport> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        let probe = |c| vaapi_native::probe_can_encode(c, false);
-        let caps = CodecSupport {
-            h264: probe(Codec::H264),
-            h265: probe(Codec::H265),
-            av1: probe(Codec::Av1),
-        };
-        tracing::info!(
-            h264 = caps.h264,
-            h265 = caps.h265,
-            av1 = caps.av1,
-            "VAAPI encode capabilities probed"
-        );
-        caps
-    })
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, CodecSupport>>> = OnceLock::new();
+    let key = pf_gpu::selection_key();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(c) = cache.lock().unwrap().get(&key) {
+        return *c;
+    }
+    // The same query the open makes, at the depth it opens with. AV1 has no
+    // native VAAPI path at all, so this is the only thing that can say yes.
+    let vulkan = |c| {
+        #[cfg(feature = "vulkan-encode")]
+        {
+            vulkan_encode_enabled() && vulkan_encode_available_at(c, false)
+        }
+        #[cfg(not(feature = "vulkan-encode"))]
+        {
+            let _: Codec = c;
+            false
+        }
+    };
+    let probe = |c| vaapi_native::probe_can_encode(c, false);
+    let caps = CodecSupport {
+        h264: probe(Codec::H264),
+        h265: probe(Codec::H265) || vulkan(Codec::H265),
+        av1: vulkan(Codec::Av1),
+    };
+    tracing::info!(
+        h264 = caps.h264,
+        h265 = caps.h265,
+        av1 = caps.av1,
+        "VAAPI encode capabilities probed"
+    );
+    cache.lock().unwrap().insert(key, caps);
+    caps
+}
+
+/// The codec set a Linux host may advertise: the resolved backend's probe,
+/// narrowed to what that backend can open.
+#[cfg(target_os = "linux")]
+pub fn linux_advertised_codec_support() -> CodecSupport {
+    linux_advertised_codec_support_for(linux_resolved_backend())
+}
+
+/// [`linux_advertised_codec_support`] for an already-resolved backend, so a
+/// polled caller pays for resolution once.
+#[cfg(target_os = "linux")]
+fn linux_advertised_codec_support_for(backend: LinuxBackend) -> CodecSupport {
+    let probed = match backend {
+        // openh264, and it never probes.
+        LinuxBackend::Software => None,
+        _ if linux_zero_copy_is_vaapi_for(backend) => Some(vaapi_codec_support()),
+        // Driver GUID list, like the VAAPI arm.
+        #[cfg(feature = "nvenc")]
+        LinuxBackend::Nvenc => Some(nvenc_codec_support()),
+        _ => None,
+    };
+    narrow_to_openable(backend, probed)
+}
+
+/// A probe narrowed by what `backend` can open at all. An all-`false` probe
+/// means the GPU was unusable at probe time, not that it encodes nothing, so
+/// it fails open to the superset — narrowing can then only take codecs away.
+/// Pure, so the ceilings are testable without a GPU.
+#[cfg(target_os = "linux")]
+fn narrow_to_openable(backend: LinuxBackend, probed: Option<CodecSupport>) -> CodecSupport {
+    // A forced-vulkan pref is a ceiling, never a replacement: the arm encodes
+    // HEVC/AV1 only (H.264 dies at open), and only in a build that has it.
+    // A static HEVC|AV1 would add AV1 on GPUs whose probe withholds it.
+    let ceiling = match backend {
+        LinuxBackend::Software => CodecSupport {
+            h264: true,
+            h265: false,
+            av1: false,
+        },
+        // The resolver knows the pref is vulkan; only this `cfg!` knows the
+        // build can open it. Else: advertise-then-die-at-open.
+        LinuxBackend::Vulkan => {
+            let built = cfg!(feature = "vulkan-encode");
+            CodecSupport {
+                h264: false,
+                h265: built,
+                av1: built,
+            }
+        }
+        _ => CodecSupport {
+            h264: true,
+            h265: true,
+            av1: true,
+        },
+    };
+    let caps = probed
+        .filter(|c| c.h264 || c.h265 || c.av1)
+        .unwrap_or(ceiling);
+    CodecSupport {
+        h264: caps.h264 && ceiling.h264,
+        h265: caps.h265 && ceiling.h265,
+        av1: caps.av1 && ceiling.av1,
+    }
 }
 
 /// Whether the active backend can emit 4:4:4 HEVC. Cached per selected GPU
@@ -1673,6 +1732,40 @@ mod tests {
             av1: false,
         };
         assert_eq!(codec_support_wire_mask(none), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_advertisement_never_offers_what_the_backend_cannot_open() {
+        use LinuxBackend::*;
+        let caps = |h264, h265, av1| CodecSupport { h264, h265, av1 };
+        let probed = caps(true, true, false);
+        // A GPU probe passes through on the vendor backends.
+        assert_eq!(
+            (
+                narrow_to_openable(AmdIntel, Some(probed)).h264,
+                narrow_to_openable(AmdIntel, Some(probed)).av1
+            ),
+            (true, false)
+        );
+        // A vulkan pin drops H.264 (it bails at open) and keeps what the probe found.
+        let vulkan = narrow_to_openable(Vulkan, Some(caps(true, true, true)));
+        assert_eq!(
+            (vulkan.h264, vulkan.h265, vulkan.av1),
+            (
+                false,
+                cfg!(feature = "vulkan-encode"),
+                cfg!(feature = "vulkan-encode")
+            )
+        );
+        // openh264 is H.264 whatever a GPU probe says.
+        let sw = narrow_to_openable(Software, Some(caps(true, true, true)));
+        assert_eq!((sw.h264, sw.h265, sw.av1), (true, false, false));
+        // An unusable probe fails open to the superset, still narrowed.
+        let unprobed = narrow_to_openable(AmdIntel, None);
+        assert!(unprobed.h264 && unprobed.h265 && unprobed.av1);
+        let empty = narrow_to_openable(AmdIntel, Some(caps(false, false, false)));
+        assert!(empty.h264 && empty.h265 && empty.av1);
     }
 
     #[cfg(target_os = "linux")]

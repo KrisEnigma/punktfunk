@@ -111,19 +111,12 @@ fn base_codec_mode_support() -> u32 {
     ) {
         return super::SCM_H264;
     }
+    // The same narrowed probe `host_wire_caps` advertises, so Moonlight is never
+    // offered a codec the native path withholds. Fail-open: `probed_mask` is
+    // None → the static superset below.
     #[cfg(target_os = "linux")]
-    if crate::encode::linux_zero_copy_is_vaapi() {
-        if let Some(m) = probed_mask(crate::encode::vaapi_codec_support()) {
-            return m;
-        }
-    }
-    // Same GUID probe `host_wire_caps` uses (one cached throwaway session). Fail-open:
-    // `probed_mask` is None → the static superset below.
-    #[cfg(all(target_os = "linux", feature = "nvenc"))]
-    if !crate::encode::linux_zero_copy_is_vaapi() {
-        if let Some(m) = probed_mask(crate::encode::nvenc_codec_support()) {
-            return m;
-        }
+    if let Some(m) = probed_mask(crate::encode::linux_advertised_codec_support()) {
+        return m;
     }
     // AMF probes with no extra feature; QSV needs the `qsv` build and NVENC the
     // `nvenc` one. Unprobed → superset, same fail-open as the Linux arms.
