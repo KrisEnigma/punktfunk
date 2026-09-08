@@ -46,8 +46,9 @@ const ST_FAILED: u32 = 4;
 const SLOTS: usize = 3;
 /// Submits allowed ahead of the oldest AU — the host's pipeline depth.
 const MAX_INFLIGHT: usize = 2;
-const BACKENDS: [&str; 5] = ["nvenc", "amf", "qsv", "pyrowave", "mf"];
-const CODECS: [&str; 4] = ["h264", "hevc", "av1", "pyrowave"];
+use pf_driver_proto::encode::backend::NAMES as BACKENDS;
+use pf_driver_proto::encode::codec::NAMES as CODECS;
+use pf_driver_proto::encode::{backend, codec};
 
 /// What the first acquired surface told the hook: the ring's shape and the GPU behind it.
 #[derive(Clone, Copy)]
@@ -127,10 +128,10 @@ pub fn arm(req: &EncodeProbeRequest) -> NTSTATUS {
     if matches!(p.reply.state, ST_ARMED | ST_RUNNING) {
         return STATUS_DEVICE_BUSY;
     }
-    // PyroWave is backend 4 and codec 4 or neither; every other pairing is free.
+    // PyroWave is its own backend and codec, or neither; every other pairing is free.
     let valid = (1..=BACKENDS.len() as u32).contains(&req.backend)
         && (1..=CODECS.len() as u32).contains(&req.codec)
-        && (req.backend == 4) == (req.codec == 4);
+        && (req.backend == backend::PYROWAVE) == (req.codec == codec::PYROWAVE);
     if !valid {
         return STATUS_INVALID_PARAMETER;
     }

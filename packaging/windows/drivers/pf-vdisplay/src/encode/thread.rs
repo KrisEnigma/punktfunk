@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use pf_driver_proto::encode::DRV_STATUS_OPENED;
 use pf_driver_proto::encode::au::{self, AuHeader};
-use pf_driver_proto::encode::{self as wire, EncoderCapsWire, SetEncodeReply, SetEncodeRequest};
+use pf_driver_proto::encode::{
+    self as wire, backend, EncoderCapsWire, SetEncodeReply, SetEncodeRequest,
+};
 use pf_encode_win::{ChromaFormat, Codec, Encoder, EncoderCaps};
 use pf_frame::HdrMeta;
 use windows::Win32::Foundation::HANDLE;
@@ -324,7 +326,7 @@ pub fn open_backend(
     // ids here and the host falls through to Media Foundation.
     let opened: anyhow::Result<Box<dyn Encoder>> = match spec.backend {
         #[cfg(target_arch = "x86_64")]
-        1 => pf_encode_win::nvenc::NvencD3d11Encoder::open(
+        backend::NVENC => pf_encode_win::nvenc::NvencD3d11Encoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, 1, luid,
         )
         .and_then(|mut e| {
@@ -339,7 +341,7 @@ pub fn open_backend(
             e.prepare_d3d11(device, format, w, h)?;
             Ok(Box::new(e) as Box<dyn Encoder>)
         }),
-        2 => pf_encode_win::amf::AmfEncoder::open(
+        backend::AMF => pf_encode_win::amf::AmfEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
         .and_then(|mut e| {
@@ -347,7 +349,7 @@ pub fn open_backend(
             Ok(Box::new(e) as Box<dyn Encoder>)
         }),
         #[cfg(target_arch = "x86_64")]
-        3 => pf_encode_win::qsv::QsvEncoder::open(
+        backend::QSV => pf_encode_win::qsv::QsvEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
         .and_then(|mut e| {
@@ -355,7 +357,7 @@ pub fn open_backend(
             Ok(Box::new(e) as Box<dyn Encoder>)
         }),
         #[cfg(target_arch = "x86_64")]
-        4 => {
+        backend::PYROWAVE => {
             // Layers were disabled at `driver_entry`; doing it here would race the live threads.
             pf_encode_win::pyrowave::PyroWaveEncoder::open(
                 w,
@@ -369,7 +371,7 @@ pub fn open_backend(
             )
             .map(|e| Box::new(e) as Box<dyn Encoder>)
         }
-        5 => pf_encode_win::mf::MfEncoder::open(
+        backend::MEDIA_FOUNDATION => pf_encode_win::mf::MfEncoder::open(
             spec.codec, format, w, h, fps, bps, depth, chroma, luid,
         )
         .map(|e| Box::new(e) as Box<dyn Encoder>),
