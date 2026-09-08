@@ -88,7 +88,7 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   ask for Main10 under SDR. Rebuild the kit against the matching native library; an unchanged
   caller will not link.
 - **`start_in` and `default_host` are cross-client settings keys.** The client settings record
-  gained where a bare launch opens (`"hosts"`, `"library"`, `"stream"`; unknown reads as library)
+  gained where a bare launch opens (`"hosts"`, `"library"`, `"stream"`; unknown reads as hosts)
   and which saved-host id it opens on. Resolve them through `pf_client_core::start`, never by
   reading either alone: with one paired host the default is derived and `default_host` is empty.
   The Swift and Kotlin ports are held to it by `clients/shared/start-screen-vectors.json`.

@@ -12,7 +12,7 @@ import io.unom.punktfunk.kit.security.KnownHost
  */
 
 /**
- * The `start_in` setting. Unknown reads as [LIBRARY], the `library_view` convention: a value a
+ * The `start_in` setting. Unknown reads as [HOSTS], the `library_view` convention: a value a
  * newer client wrote degrades, it never ends a launch.
  */
 enum class StartIn(val stored: String, val label: String) {
@@ -24,7 +24,7 @@ enum class StartIn(val stored: String, val label: String) {
     companion object {
         /** Stored → value, with the unknown fallback. */
         fun parse(raw: String?): StartIn =
-            entries.firstOrNull { it.stored == raw } ?: LIBRARY
+            entries.firstOrNull { it.stored == raw } ?: HOSTS
     }
 }
 

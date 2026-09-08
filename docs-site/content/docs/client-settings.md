@@ -268,8 +268,8 @@ screen), a Steam Deck (real sticks) or the desktop clients (a keyboard).
 
 ## Behavior
 
-**Start in** — *default: Library.* Where the app opens. **Library** lands on your default host's
-games, **Stream** goes on to its desktop, and **Host list** is the old first screen. Back leaves
+**Start in** — *default: Host list.* Where the app opens. **Host list** is the first screen,
+**Library** lands on your default host's games, and **Stream** goes on to its desktop. Back leaves
 either landing on the host list, so a wrong guess costs one press. With one paired host saved, that
 host is the default and there is nothing to set; with several, use **Make default host** on a
 host's card or ▲ menu, and until you do, every value opens the host list. Naming one explicitly
