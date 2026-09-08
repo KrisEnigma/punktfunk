@@ -524,7 +524,7 @@ mod tests {
             // not intersect gamescope's `{default:0, alt:0}` modifier choice.
             assert!(
                 pod.windows(4)
-                    .any(|w| w == (spa::sys::SPA_TYPE_Choice as u32).to_ne_bytes()),
+                    .any(|w| w == spa::sys::SPA_TYPE_Choice.to_ne_bytes()),
                 "{fmt:?} HDR modifier must be a Choice, not a scalar Long"
             );
         }
