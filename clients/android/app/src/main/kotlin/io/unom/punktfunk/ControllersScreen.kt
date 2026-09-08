@@ -7,9 +7,11 @@ import android.os.CombinedVibration
 import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
+import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -113,129 +116,7 @@ internal fun ControllersScreen(
         onDispose { im.unregisterInputDeviceListener(listener) }
     }
 
-    // Live input test. While `testing`, the MainActivity probes consume pad events (so they show up
-    // here instead of driving focus navigation); holding B releases, since the pad can no longer
-    // reach the Switch.
-    val held = remember { mutableStateMapOf<Int, Boolean>() }
-    val axes = remember { mutableStateMapOf<String, Float>() }
-    var lastInput by remember { mutableStateOf<String?>(null) }
-    var bHeld by remember { mutableStateOf(false) }
-    // The hold has lasted long enough; the test ends when B is let go (see the probe).
-    var holdSatisfied by remember { mutableStateOf(false) }
-    // The probes below are built ONCE and then read these for the life of the screen, so
-    // capturing `testing` plainly would freeze the value it had when the probe was made — the
-    // test would consume nothing.
-    val consuming by rememberUpdatedState(testing)
-    // The console's refusal thud, on whatever actuator the driving pad or this device has.
-    val haptics by rememberUpdatedState(rememberConsoleHaptics())
-
-    DisposableEffect(Unit) {
-        // One entry on the MainActivity probe stack, removed by identity on the way out — the rule
-        // GamepadNavEffect2D follows. During the console shell's push/pop BOTH screens are briefly
-        // composed, and only the identity removal keeps this screen's teardown from taking the
-        // arriving screen's claim with it. The same teardown also runs when this screen hands the
-        // pad to its own input test and back.
-        val keyProbe: (KeyEvent) -> Boolean = probe@{ event ->
-            if (!Gamepad.isPad(event.device)) return@probe false
-            // Read ONCE, up front: the test can end inside this very event, and the release that
-            // ended it still has to be swallowed here — see the B branch below.
-            val consume = consuming
-            // The CORRECTED keycode, so this screen shows the button the stream will send and not
-            // the one Android guessed for a pad it has no key layout for — the two differ on every
-            // controller [Gamepad.padKeyCode] exists for, and a tester that disagrees with the
-            // stream is worse than no tester. The raw pair is still reported in "Last input".
-            val code = Gamepad.padKeyCode(event)
-            when (event.action) {
-                KeyEvent.ACTION_DOWN -> {
-                    held[code] = true
-                    if (code == KeyEvent.KEYCODE_BUTTON_B) bHeld = true
-                }
-                KeyEvent.ACTION_UP -> {
-                    held[code] = false
-                    if (code == KeyEvent.KEYCODE_BUTTON_B) {
-                        bHeld = false
-                        if (consume) {
-                            if (event.eventTime - event.downTime >= HOLD_TO_FINISH_MS) {
-                                // The hold ends the test HERE, on the release, and NOT the moment
-                                // the 1.2 s elapsed: end it a moment earlier and this release falls
-                                // through unconsumed to the activity's B→BACK remap, which takes the
-                                // whole screen with it. Finishing the test and leaving the screen on
-                                // one press is not what "hold B to finish" says.
-                                onTestingChange(false)
-                                held.clear()
-                            } else {
-                                // A short B is not swallowed either. While the test owns the pad, B
-                                // is a BUTTON UNDER TEST — it lights its chip like every other — so
-                                // a tap can't also mean "leave", and in the console B is otherwise
-                                // the universal back. The press gets the boundary thud instead, the
-                                // same answer a refused step gets on the settings screen: heard, and
-                                // it means something else here.
-                                haptics.boundary()
-                            }
-                        }
-                    }
-                }
-            }
-            // Raw scancode AND keycode, plus the correction when one fired: this line is what a
-            // field report needs to pin an unmapped pad's report order without the device in hand.
-            val raw = KeyEvent.keyCodeToString(event.keyCode).removePrefix("KEYCODE_")
-            val fixed = KeyEvent.keyCodeToString(code).removePrefix("KEYCODE_")
-            lastInput = "${event.device?.name}: scan 0x%X · %s%s".format(
-                event.scanCode,
-                raw,
-                if (code != event.keyCode) " → $fixed" else "",
-            )
-            consume
-        }
-        val motionProbe: (MotionEvent) -> Boolean = probe@{ event ->
-            if (!Gamepad.isPad(event.device)) return@probe false
-            // Through the device's resolved map, exactly as `Gamepad.AxisMapper` reads it while
-            // streaming — on a pad Android has no key layout for, the right stick and the triggers
-            // are not on the axes their names suggest.
-            val map = Gamepad.padMap(event.device)
-            axes["LX"] = event.getAxisValue(MotionEvent.AXIS_X)
-            axes["LY"] = event.getAxisValue(MotionEvent.AXIS_Y)
-            axes["RX"] = event.getAxisValue(map.rightStickX)
-            axes["RY"] = event.getAxisValue(map.rightStickY)
-            axes["LT"] = if (map.leftTrigger == Gamepad.AXIS_NONE) {
-                maxOf(
-                    event.getAxisValue(MotionEvent.AXIS_LTRIGGER),
-                    event.getAxisValue(MotionEvent.AXIS_BRAKE),
-                )
-            } else {
-                map.level(event.getAxisValue(map.leftTrigger))
-            }
-            axes["RT"] = if (map.rightTrigger == Gamepad.AXIS_NONE) {
-                maxOf(
-                    event.getAxisValue(MotionEvent.AXIS_RTRIGGER),
-                    event.getAxisValue(MotionEvent.AXIS_GAS),
-                )
-            } else {
-                map.level(event.getAxisValue(map.rightTrigger))
-            }
-            axes["HX"] = event.getAxisValue(MotionEvent.AXIS_HAT_X)
-            axes["HY"] = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
-            consuming
-        }
-        val probes = MainActivity.PadProbes(keyProbe, motionProbe)
-        activity?.pushPadProbes(probes)
-        onDispose { activity?.removePadProbes(probes) }
-    }
-    // Hold-B-to-exit: with events consumed, the pad can't reach the Switch — a 1.2 s hold ends the
-    // test instead (touch still works). This half only ANSWERS the hold once it is long enough; the
-    // release is what ends the test (see the probe). Letting go early cancels the effect before the
-    // delay fires, so nothing is announced.
-    LaunchedEffect(bHeld, testing) {
-        if (bHeld && testing) {
-            delay(HOLD_TO_FINISH_MS)
-            holdSatisfied = true
-            // A hold with no answer at the moment it lands is a hold you keep holding. Say it in
-            // both channels a couch user has: a pulse in the hands, a changed line on the screen.
-            haptics.confirm()
-        } else {
-            holdSatisfied = false
-        }
-    }
+    val test = rememberInputTest(activity, testing, onTestingChange)
 
     Column(
         modifier = Modifier
@@ -250,23 +131,7 @@ internal fun ControllersScreen(
         // (lizard mode is kb/mouse; the capture claims even those away) so it's enumerated from
         // the USB device list + bonded BLE; a Sony pad IS an InputDevice until claimed, so its
         // row supplements the PadRow below with the capture status + the USB grant.
-        var usbGeneration by remember { mutableIntStateOf(0) }
-        DisposableEffect(Unit) {
-            val receiver = object : android.content.BroadcastReceiver() {
-                override fun onReceive(c: Context?, i: android.content.Intent?) { usbGeneration++ }
-            }
-            val filter = android.content.IntentFilter().apply {
-                addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED)
-                addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED)
-            }
-            if (Build.VERSION.SDK_INT >= 33) {
-                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                @Suppress("UnspecifiedRegisterReceiverFlag")
-                context.registerReceiver(receiver, filter)
-            }
-            onDispose { runCatching { context.unregisterReceiver(receiver) } }
-        }
+        var usbGeneration by rememberUsbGeneration(context)
         val sc2Probe = remember { Sc2Capture(context) }
         val sc2Usb = remember(usbGeneration) { sc2Probe.findUsbDevice() }
         // Answers null without the Bluetooth grant (and logs why) — see Sc2BleLink.
@@ -326,7 +191,7 @@ internal fun ControllersScreen(
                     Text("Test inputs", style = MaterialTheme.typography.bodyLarge)
                     Text(
                         when {
-                            holdSatisfied -> "Release B to finish"
+                            test.holdSatisfied -> "Release B to finish"
                             testing -> "Controller input stays on this screen — hold B to finish"
                             else -> "Show button presses and stick motion live"
                         },
@@ -336,14 +201,14 @@ internal fun ControllersScreen(
                 }
                 Switch(
                     checked = testing,
-                    onCheckedChange = { on -> onTestingChange(on); if (!on) held.clear() },
+                    onCheckedChange = { on -> onTestingChange(on); if (!on) test.held.clear() },
                 )
             }
             if (testing) {
-                ButtonGrid(held)
-                AXIS_LABELS.forEach { label -> AxisBar(label, axes[label] ?: 0f) }
+                ButtonGrid(test.held)
+                AXIS_LABELS.forEach { label -> AxisBar(label, test.axes[label] ?: 0f) }
             }
-            lastInput?.let {
+            test.lastInput?.let {
                 Text(
                     "Last input — $it",
                     style = MaterialTheme.typography.bodySmall,
@@ -372,6 +237,169 @@ internal fun ControllersScreen(
             }
         }
     }
+}
+
+/** What the live input test shows: the lit buttons, the axis bars, the last raw event line. */
+private class InputTest {
+    val held = mutableStateMapOf<Int, Boolean>()
+    val axes = mutableStateMapOf<String, Float>()
+    var lastInput by mutableStateOf<String?>(null)
+    var bHeld by mutableStateOf(false)
+    /** The hold has lasted long enough; the test ends when B is let go (see the probe). */
+    var holdSatisfied by mutableStateOf(false)
+}
+
+/**
+ * The live input test. While [testing], the MainActivity probes consume pad events (so they show
+ * up here instead of driving focus navigation); holding B releases, since the pad can no longer
+ * reach the Switch. Off, events are OBSERVED, which keeps the "Last input" line live while browsing.
+ */
+@Composable
+private fun rememberInputTest(
+    activity: MainActivity?,
+    testing: Boolean,
+    onTestingChange: (Boolean) -> Unit,
+): InputTest {
+    val test = remember { InputTest() }
+    // The probes below are built ONCE and then read these for the life of the screen, so
+    // capturing `testing` plainly would freeze the value it had when the probe was made — the
+    // test would consume nothing.
+    val consuming by rememberUpdatedState(testing)
+    // The console's refusal thud, on whatever actuator the driving pad or this device has.
+    val haptics by rememberUpdatedState(rememberConsoleHaptics())
+    DisposableEffect(Unit) {
+        // One entry on the MainActivity probe stack, removed by identity on the way out — the rule
+        // GamepadNavEffect2D follows. During the console shell's push/pop BOTH screens are briefly
+        // composed, and only the identity removal keeps this screen's teardown from taking the
+        // arriving screen's claim with it. The same teardown also runs when this screen hands the
+        // pad to its own input test and back.
+        val keyProbe: (KeyEvent) -> Boolean = probe@{ event ->
+            if (!Gamepad.isPad(event.device)) return@probe false
+            // Read ONCE, up front: the test can end inside this very event, and the release that
+            // ended it still has to be swallowed here — see the B branch below.
+            val consume = consuming
+            // The CORRECTED keycode, so this screen shows the button the stream will send and not
+            // the one Android guessed for a pad it has no key layout for — the two differ on every
+            // controller [Gamepad.padKeyCode] exists for, and a tester that disagrees with the
+            // stream is worse than no tester. The raw pair is still reported in "Last input".
+            val code = Gamepad.padKeyCode(event)
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    test.held[code] = true
+                    if (code == KeyEvent.KEYCODE_BUTTON_B) test.bHeld = true
+                }
+                KeyEvent.ACTION_UP -> {
+                    test.held[code] = false
+                    if (code == KeyEvent.KEYCODE_BUTTON_B) {
+                        test.bHeld = false
+                        if (consume) {
+                            if (event.eventTime - event.downTime >= HOLD_TO_FINISH_MS) {
+                                // The hold ends the test HERE, on the release, and NOT the moment
+                                // the 1.2 s elapsed: end it a moment earlier and this release falls
+                                // through unconsumed to the activity's B→BACK remap, which takes the
+                                // whole screen with it. Finishing the test and leaving the screen on
+                                // one press is not what "hold B to finish" says.
+                                onTestingChange(false)
+                                test.held.clear()
+                            } else {
+                                // A short B is not swallowed either. While the test owns the pad, B
+                                // is a BUTTON UNDER TEST — it lights its chip like every other — so
+                                // a tap can't also mean "leave", and in the console B is otherwise
+                                // the universal back. The press gets the boundary thud instead, the
+                                // same answer a refused step gets on the settings screen: heard, and
+                                // it means something else here.
+                                haptics.boundary()
+                            }
+                        }
+                    }
+                }
+            }
+            // Raw scancode AND keycode, plus the correction when one fired: this line is what a
+            // field report needs to pin an unmapped pad's report order without the device in hand.
+            val raw = KeyEvent.keyCodeToString(event.keyCode).removePrefix("KEYCODE_")
+            val fixed = KeyEvent.keyCodeToString(code).removePrefix("KEYCODE_")
+            test.lastInput = "${event.device?.name}: scan 0x%X · %s%s".format(
+                event.scanCode,
+                raw,
+                if (code != event.keyCode) " → $fixed" else "",
+            )
+            consume
+        }
+        val motionProbe: (MotionEvent) -> Boolean = probe@{ event ->
+            if (!Gamepad.isPad(event.device)) return@probe false
+            test.axes.putAll(padAxes(event))
+            consuming
+        }
+        val probes = MainActivity.PadProbes(keyProbe, motionProbe)
+        activity?.pushPadProbes(probes)
+        onDispose { activity?.removePadProbes(probes) }
+    }
+    // Hold-B-to-exit: with events consumed, the pad can't reach the Switch — a 1.2 s hold ends the
+    // test instead (touch still works). This half only ANSWERS the hold once it is long enough; the
+    // release is what ends the test (see the probe). Letting go early cancels the effect before the
+    // delay fires, so nothing is announced.
+    LaunchedEffect(test.bHeld, testing) {
+        if (test.bHeld && testing) {
+            delay(HOLD_TO_FINISH_MS)
+            test.holdSatisfied = true
+            // A hold with no answer at the moment it lands is a hold you keep holding. Say it in
+            // both channels a couch user has: a pulse in the hands, a changed line on the screen.
+            haptics.confirm()
+        } else {
+            test.holdSatisfied = false
+        }
+    }
+
+    return test
+}
+
+/**
+ * The USB hot-plug generation: bumps on every attach/detach so capture-side detection re-runs.
+ */
+@Composable
+private fun rememberUsbGeneration(context: Context): MutableState<Int> {
+    val generation = remember { mutableIntStateOf(0) }
+    DisposableEffect(Unit) {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: Context?, i: android.content.Intent?) { generation.intValue++ }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
+    }
+    return generation
+}
+
+/**
+ * The eight test axes, read through the device's resolved map exactly as `Gamepad.AxisMapper`
+ * reads it while streaming — on a pad Android has no key layout for, the right stick and the
+ * triggers are not on the axes their names suggest.
+ */
+private fun padAxes(event: MotionEvent): Map<String, Float> {
+    val map = Gamepad.padMap(event.device)
+    fun trigger(mapped: Int, a: Int, b: Int) = if (mapped == Gamepad.AXIS_NONE) {
+        maxOf(event.getAxisValue(a), event.getAxisValue(b))
+    } else {
+        map.level(event.getAxisValue(mapped))
+    }
+    return mapOf(
+        "LX" to event.getAxisValue(MotionEvent.AXIS_X),
+        "LY" to event.getAxisValue(MotionEvent.AXIS_Y),
+        "RX" to event.getAxisValue(map.rightStickX),
+        "RY" to event.getAxisValue(map.rightStickY),
+        "LT" to trigger(map.leftTrigger, MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE),
+        "RT" to trigger(map.rightTrigger, MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS),
+        "HX" to event.getAxisValue(MotionEvent.AXIS_HAT_X),
+        "HY" to event.getAxisValue(MotionEvent.AXIS_HAT_Y),
+    )
 }
 
 /**
@@ -709,10 +737,10 @@ private fun PadRow(info: PadInfo, gamepadSetting: Int) {
             val resolved = info.resolvedPref
             Text(
                 if (gamepadSetting == Gamepad.PREF_AUTO) {
-                    "Streams as: ${prefLabel(resolved)} (automatic)"
+                    "Streams as: ${Gamepad.prefLabel(resolved)} (automatic)"
                 } else {
-                    "Streams as: ${prefLabel(gamepadSetting)} (set in Settings; " +
-                        "automatic would pick ${prefLabel(resolved)})"
+                    "Streams as: ${Gamepad.prefLabel(gamepadSetting)} (set in Settings; " +
+                        "automatic would pick ${Gamepad.prefLabel(resolved)})"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -728,7 +756,12 @@ private fun PadRow(info: PadInfo, gamepadSetting: Int) {
                 )
             }
             if (info.canRumble) {
-                OutlinedButton(onClick = { info.dev?.let(::testRumble) }) { Text("Test rumble") }
+                val context = LocalContext.current
+                OutlinedButton(onClick = {
+                    if (info.dev?.let(::testRumble) != true) {
+                        Toast.makeText(context, "No motor answered", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("Test rumble") }
             } else {
                 Text(
                     "No rumble motors reported — host rumble will be silent",
@@ -851,20 +884,26 @@ private fun deviceHasVibrator(dev: InputDevice): Boolean =
         dev.vibrator.hasVibrator()
     }
 
-/** A short pulse on the pad's own motor. Also the console's `PadAction::Rumble`. */
-internal fun testRumble(dev: InputDevice) {
-    runCatching {
-        if (Build.VERSION.SDK_INT >= 31) {
-            val vm = dev.vibratorManager
-            if (vm.vibratorIds.isEmpty()) return
-            vm.vibrate(CombinedVibration.createParallel(VibrationEffect.createOneShot(300, 200)))
-        } else {
-            @Suppress("DEPRECATION")
-            val v = dev.vibrator
-            if (!v.hasVibrator()) return
-            v.vibrate(VibrationEffect.createOneShot(300, 200))
-        }
+/**
+ * A short pulse on the pad's own motor. Also the console's `PadAction::Rumble`. `false` when
+ * nothing was pulsed — no motor, or the platform refused — so the caller can say so instead of
+ * leaving "Test" indistinguishable from a pad that has no motor.
+ */
+internal fun testRumble(dev: InputDevice): Boolean = runCatching {
+    if (Build.VERSION.SDK_INT >= 31) {
+        val vm = dev.vibratorManager
+        if (vm.vibratorIds.isEmpty()) return false
+        vm.vibrate(CombinedVibration.createParallel(VibrationEffect.createOneShot(300, 200)))
+    } else {
+        @Suppress("DEPRECATION")
+        val v = dev.vibrator
+        if (!v.hasVibrator()) return false
+        v.vibrate(VibrationEffect.createOneShot(300, 200))
     }
+    true
+}.getOrElse {
+    Log.w("Controllers", "rumble on ${dev.name}", it)
+    false
 }
 
 /** Identity line: VID:PID + the source classes Android assigned. */
@@ -899,21 +938,6 @@ private fun sourcesLabel(sources: Int): String {
         if (has(InputDevice.SOURCE_ROTARY_ENCODER)) add("rotary")
     }
     return if (names.isEmpty()) "sources 0x%08X".format(sources) else names.joinToString(" · ")
-}
-
-/** [Gamepad] PREF_* wire byte → user-facing label (mirrors GAMEPAD_OPTIONS, plus the Steam types). */
-private fun prefLabel(pref: Int): String = when (pref) {
-    Gamepad.PREF_XBOX360 -> "Xbox 360"
-    Gamepad.PREF_DUALSENSE -> "DualSense"
-    Gamepad.PREF_XBOXONE -> "Xbox One"
-    Gamepad.PREF_DUALSHOCK4 -> "DualShock 4"
-    Gamepad.PREF_STEAMCONTROLLER -> "Steam Controller"
-    Gamepad.PREF_STEAMDECK -> "Steam Deck"
-    Gamepad.PREF_DUALSENSEEDGE -> "DualSense Edge"
-    Gamepad.PREF_SWITCHPRO -> "Switch Pro"
-    Gamepad.PREF_STEAMCONTROLLER2 -> "Steam Controller 2"
-    Gamepad.PREF_STEAMCONTROLLER2_PUCK -> "Steam Controller 2 Puck"
-    else -> "Automatic"
 }
 
 /** Buttons shown in the test grid (label → Android keycode). */

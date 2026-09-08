@@ -25,12 +25,9 @@ use std::thread::JoinHandle;
 /// Run a JNI body, catching any panic at the FFI boundary and returning `default` instead.
 ///
 /// A panic unwinding out of an `extern "system"` function aborts the whole process on Rust ≥ 1.81 —
-/// a hard crash of the embedding Android app with no logcat trace. This mirrors the discipline the C
-/// ABI already enforces (`punktfunk_core::abi` wraps every entry point in `catch_unwind`); the
+/// a hard crash of the embedding Android app with no logcat trace. Every entry point that does not
+/// go through `EnvUnowned::with_env` (which carries its own catch) wraps its body in this; the
 /// `panic = "unwind"` profile in the workspace `Cargo.toml` exists precisely so these guards work.
-/// We apply it to the teardown + background-thread shims (the "leaving a stream" path), where an
-/// unexpected panic (e.g. a poisoned `Mutex` during concurrent teardown) must degrade to a logged
-/// no-op rather than kill the app.
 pub(crate) fn jni_guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     std::panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
         log::error!("punktfunk JNI: caught a panic at the FFI boundary (returning default)");

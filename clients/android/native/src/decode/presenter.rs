@@ -286,6 +286,24 @@ impl PresentMeter {
     }
 }
 
+/// The 1 Hz line's cadence-loop tail under the smoothness intent: `late‰` of all frames folded
+/// (a due time already past when the frame became presentable — the direct signal the cushion
+/// is too small), the loop residual's jitter, the cushion, and re-anchors. Empty under latency
+/// (no loop). Counters are cumulative since the last re-anchor, so `late` reads as a rate.
+pub(super) fn cadence_suffix(health: Option<CadenceHealth>) -> String {
+    health
+        .map(|h| {
+            format!(
+                " late={}‰ jitterMs={:.2} cushionMs={:.2} reanchors={}",
+                h.late.saturating_mul(1000) / h.frames.max(1),
+                h.jitter_ns as f64 / 1e6,
+                h.cushion_ns as f64 / 1e6,
+                h.reanchors,
+            )
+        })
+        .unwrap_or_default()
+}
+
 pub(super) struct Presenter {
     /// 0 = newest-wins; 1..=3 = the holding store's capacity, a bound against a burst rather than
     /// a pacing depth (design §4.3).
@@ -686,18 +704,7 @@ impl Presenter {
         // Cumulative over the session rather than this window (the loop's counters survive
         // `reset`): `late` is a RATE question, and one second of it is too few frames to read a
         // sub-percent criterion off.
-        let cadence = self
-            .cadence_health()
-            .map(|h| {
-                format!(
-                    " late={}‰ jitterMs={:.2} cushionMs={:.2} reanchors={}",
-                    h.late.saturating_mul(1000) / h.frames.max(1),
-                    h.jitter_ns as f64 / 1e6,
-                    h.cushion_ns as f64 / 1e6,
-                    h.reanchors,
-                )
-            })
-            .unwrap_or_default();
+        let cadence = cadence_suffix(self.cadence_health());
         log::info!(
             target: "pf.present",
             "released={} displays={} paced={} noBudget={} forced={} qDry={} \

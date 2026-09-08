@@ -192,86 +192,10 @@ internal fun ConnectGrid(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Spacer(Modifier.height(8.dp))
-                    Text("Punktfunk", style = MaterialTheme.typography.headlineLarge)
-                    Text(
-                        "stream a remote desktop",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(24.dp))
-
-                    notice?.let {
-                        Surface(
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            shape = MaterialTheme.shapes.medium,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                it,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                            )
-                        }
-                        Spacer(Modifier.height(16.dp))
-                    }
-
-                    status?.let {
-                        // In-flight progress (connecting / waking) is the full-screen ConnectOverlay's
-                        // job now, so `status` only ever carries a result/error here — a filled error
-                        // container reads as a real failure banner, not just red text lost in the layout.
-                        Surface(
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            shape = MaterialTheme.shapes.medium,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                it,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                            )
-                        }
-                        Spacer(Modifier.height(16.dp))
-                    }
-                }
-            }
+            item(span = { GridItemSpan(maxLineSpan) }) { GridHeader(notice, status) }
 
             if (!lnpGranted) {
-                // Local network access denied: discovery can't ever find anything and every connect
-                // would time out — say so at the top, with the fix one tap away, instead of letting
-                // the screen look idle/broken.
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(
-                            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Text(
-                                "Local network access is off",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                            )
-                            Text(
-                                "Android blocks Punktfunk from finding or reaching hosts until you allow it.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                textAlign = TextAlign.Center,
-                            )
-                            TextButton(onClick = onAskLocalNetwork) { Text("Allow…") }
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                }
+                item(span = { GridItemSpan(maxLineSpan) }) { LocalNetworkBanner(onAskLocalNetwork) }
             }
 
             if (savedHosts.isEmpty() && discoveredUnsaved.isEmpty()) {
@@ -353,25 +277,7 @@ internal fun ConnectGrid(
             // deaf (blocked when it started, or backed off to its hour-long re-query) looks
             // exactly like a network without that host on it.
             if (lnpGranted && !connecting) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (discovered.isEmpty()) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "Searching the local network…",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Spacer(Modifier.width(8.dp))
-                        }
-                        TextButton(onClick = onRescan) { Text("Scan again") }
-                    }
-                }
+                item(span = { GridItemSpan(maxLineSpan) }) { SearchRow(discovered.isEmpty(), onRescan) }
             }
 
             item(span = { GridItemSpan(maxLineSpan) }) {
@@ -388,5 +294,107 @@ internal fun ConnectGrid(
                 .align(Alignment.BottomEnd)
                 .padding(20.dp),
         )
+    }
+}
+
+/** The grid's masthead plus the two result banners: a confirmation, then the failure line. */
+@Composable
+private fun GridHeader(notice: String?, status: String?) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Spacer(Modifier.height(8.dp))
+        Text("Punktfunk", style = MaterialTheme.typography.headlineLarge)
+        Text(
+            "stream a remote desktop",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(24.dp))
+        notice?.let {
+            Banner(it, error = false)
+            Spacer(Modifier.height(16.dp))
+        }
+        // In-flight progress (connecting / waking) is the full-screen ConnectOverlay's job, so
+        // `status` only ever carries a result/error here — a filled error container reads as a
+        // real failure banner, not just red text lost in the layout.
+        status?.let {
+            Banner(it, error = true)
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun Banner(text: String, error: Boolean) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        color = if (error) scheme.errorContainer else scheme.secondaryContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (error) scheme.onErrorContainer else scheme.onSecondaryContainer,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+        )
+    }
+}
+
+/**
+ * Local network access denied: discovery can't ever find anything and every connect would time
+ * out — say so at the top, with the fix one tap away, instead of letting the screen look broken.
+ */
+@Composable
+private fun LocalNetworkBanner(onAsk: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                "Local network access is off",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Text(
+                "Android blocks Punktfunk from finding or reaching hosts until you allow it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                textAlign = TextAlign.Center,
+            )
+            TextButton(onClick = onAsk) { Text("Allow…") }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+}
+
+/**
+ * Discovery runs whenever the grid is up: while nothing has turned up, show it working rather
+ * than idle. Scan again is offered either way — the case that sends people here is ONE expected
+ * host missing, and a browse that quietly went deaf looks exactly like a network without it.
+ */
+@Composable
+private fun SearchRow(searching: Boolean, onRescan: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (searching) {
+            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Searching the local network…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        TextButton(onClick = onRescan) { Text("Scan again") }
     }
 }

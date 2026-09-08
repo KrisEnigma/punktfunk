@@ -74,34 +74,8 @@ data class SettingsOverlay(
     val extra: Map<String, Any> = emptyMap(),
 ) {
     /** The one resolution seam: this overlay on top of [base]. Pure, so it is fully testable. */
-    fun apply(base: Settings): Settings = base.copy(
-        width = width ?: base.width,
-        height = height ?: base.height,
-        hz = hz ?: base.hz,
-        bitrateKbps = bitrateKbps ?: base.bitrateKbps,
-        renderScale = renderScale ?: base.renderScale,
-        codec = codec ?: base.codec,
-        hdrEnabled = hdrEnabled ?: base.hdrEnabled,
-        tenBitSdr = tenBitSdr ?: base.tenBitSdr,
-        compositor = compositor ?: base.compositor,
-        audioChannels = audioChannels ?: base.audioChannels,
-        audioFormat = audioFormat ?: base.audioFormat,
-        micEnabled = micEnabled ?: base.micEnabled,
-        echoCancel = echoCancel ?: base.echoCancel,
-        keepHostAudio = keepHostAudio ?: base.keepHostAudio,
-        touchMode = touchMode ?: base.touchMode,
-        mouseMode = mouseMode ?: base.mouseMode,
-        invertScroll = invertScroll ?: base.invertScroll,
-        overlayActions = overlayActions ?: base.overlayActions,
-        gamepad = gamepad ?: base.gamepad,
-        gamepadForwarding = gamepadForwarding ?: base.gamepadForwarding,
-        systemButtons = systemButtons ?: base.systemButtons,
-        guideGesture = guideGesture ?: base.guideGesture,
-        statsVerbosity = statsVerbosity ?: base.statsVerbosity,
-        lowLatencyMode = lowLatencyMode ?: base.lowLatencyMode,
-        presentPriority = presentPriority ?: base.presentPriority,
-        smoothBuffer = smoothBuffer ?: base.smoothBuffer,
-    )
+    fun apply(base: Settings): Settings =
+        SettingsFields.PROFILE.fold(base) { s, f -> f.applyOverlay(this, s) }
 
     /**
      * Record, as overrides, every tier-P field that differs between two settings snapshots.
@@ -115,38 +89,8 @@ data class SettingsOverlay(
      * whatever the global happens to be still records an override — the pin. It only ever adds
      * overrides; removing one is [clear], a different, explicit operation.
      */
-    fun absorb(before: Settings, after: Settings): SettingsOverlay = copy(
-        width = if (after.width != before.width) after.width else width,
-        height = if (after.height != before.height) after.height else height,
-        hz = if (after.hz != before.hz) after.hz else hz,
-        bitrateKbps = if (after.bitrateKbps != before.bitrateKbps) after.bitrateKbps else bitrateKbps,
-        renderScale = if (after.renderScale != before.renderScale) after.renderScale else renderScale,
-        codec = if (after.codec != before.codec) after.codec else codec,
-        hdrEnabled = if (after.hdrEnabled != before.hdrEnabled) after.hdrEnabled else hdrEnabled,
-        tenBitSdr = if (after.tenBitSdr != before.tenBitSdr) after.tenBitSdr else tenBitSdr,
-        compositor = if (after.compositor != before.compositor) after.compositor else compositor,
-        audioChannels = if (after.audioChannels != before.audioChannels) after.audioChannels else audioChannels,
-        audioFormat = if (after.audioFormat != before.audioFormat) after.audioFormat else audioFormat,
-        micEnabled = if (after.micEnabled != before.micEnabled) after.micEnabled else micEnabled,
-        echoCancel = if (after.echoCancel != before.echoCancel) after.echoCancel else echoCancel,
-        keepHostAudio =
-            if (after.keepHostAudio != before.keepHostAudio) after.keepHostAudio else keepHostAudio,
-        touchMode = if (after.touchMode != before.touchMode) after.touchMode else touchMode,
-        mouseMode = if (after.mouseMode != before.mouseMode) after.mouseMode else mouseMode,
-        invertScroll = if (after.invertScroll != before.invertScroll) after.invertScroll else invertScroll,
-        overlayActions =
-            if (after.overlayActions != before.overlayActions) after.overlayActions else overlayActions,
-        gamepad = if (after.gamepad != before.gamepad) after.gamepad else gamepad,
-        gamepadForwarding =
-            if (after.gamepadForwarding != before.gamepadForwarding) after.gamepadForwarding
-            else gamepadForwarding,
-        systemButtons = if (after.systemButtons != before.systemButtons) after.systemButtons else systemButtons,
-        guideGesture = if (after.guideGesture != before.guideGesture) after.guideGesture else guideGesture,
-        statsVerbosity = if (after.statsVerbosity != before.statsVerbosity) after.statsVerbosity else statsVerbosity,
-        lowLatencyMode = if (after.lowLatencyMode != before.lowLatencyMode) after.lowLatencyMode else lowLatencyMode,
-        presentPriority = if (after.presentPriority != before.presentPriority) after.presentPriority else presentPriority,
-        smoothBuffer = if (after.smoothBuffer != before.smoothBuffer) after.smoothBuffer else smoothBuffer,
-    )
+    fun absorb(before: Settings, after: Settings): SettingsOverlay =
+        SettingsFields.PROFILE.fold(this) { o, f -> f.absorb(o, before, after) }
 
     /**
      * Drop one override by its field name, putting the row back to inheriting. [FIELD_RESOLUTION]
@@ -155,61 +99,14 @@ data class SettingsOverlay(
      */
     fun clear(field: String): SettingsOverlay = when (field) {
         FIELD_RESOLUTION -> copy(width = null, height = null)
-        "refresh_hz" -> copy(hz = null)
-        "bitrate_kbps" -> copy(bitrateKbps = null)
-        "render_scale" -> copy(renderScale = null)
-        "codec" -> copy(codec = null)
-        "hdr_enabled" -> copy(hdrEnabled = null)
-        "ten_bit_sdr" -> copy(tenBitSdr = null)
-        "compositor" -> copy(compositor = null)
-        "audio_channels" -> copy(audioChannels = null)
-        "audio_format" -> copy(audioFormat = null)
-        "mic_enabled" -> copy(micEnabled = null)
-        "echo_cancel" -> copy(echoCancel = null)
-        "keep_host_audio" -> copy(keepHostAudio = null)
-        "touch_mode" -> copy(touchMode = null)
-        "mouse_mode" -> copy(mouseMode = null)
-        "invert_scroll" -> copy(invertScroll = null)
-        "overlay_actions" -> copy(overlayActions = null)
-        "gamepad" -> copy(gamepad = null)
-        "gamepad_forwarding" -> copy(gamepadForwarding = null)
-        "system_buttons" -> copy(systemButtons = null)
-        "guide_gesture" -> copy(guideGesture = null)
-        "stats_verbosity" -> copy(statsVerbosity = null)
-        "low_latency_mode" -> copy(lowLatencyMode = null)
-        "present_priority" -> copy(presentPriority = null)
-        "smooth_buffer" -> copy(smoothBuffer = null)
-        else -> this
+        else -> SettingsFields.PROFILE.firstOrNull { it.key == field }?.clear(this) ?: this
     }
 
     /** The field names this overlay overrides — what the settings rows draw their markers from. */
-    fun overridden(): Set<String> = buildSet {
-        if (width != null || height != null) add(FIELD_RESOLUTION)
-        if (hz != null) add("refresh_hz")
-        if (bitrateKbps != null) add("bitrate_kbps")
-        if (renderScale != null) add("render_scale")
-        if (codec != null) add("codec")
-        if (hdrEnabled != null) add("hdr_enabled")
-        if (tenBitSdr != null) add("ten_bit_sdr")
-        if (compositor != null) add("compositor")
-        if (audioChannels != null) add("audio_channels")
-        if (audioFormat != null) add("audio_format")
-        if (micEnabled != null) add("mic_enabled")
-        if (echoCancel != null) add("echo_cancel")
-        if (keepHostAudio != null) add("keep_host_audio")
-        if (touchMode != null) add("touch_mode")
-        if (mouseMode != null) add("mouse_mode")
-        if (invertScroll != null) add("invert_scroll")
-        if (overlayActions != null) add("overlay_actions")
-        if (gamepad != null) add("gamepad")
-        if (gamepadForwarding != null) add("gamepad_forwarding")
-        if (systemButtons != null) add("system_buttons")
-        if (guideGesture != null) add("guide_gesture")
-        if (statsVerbosity != null) add("stats_verbosity")
-        if (lowLatencyMode != null) add("low_latency_mode")
-        if (presentPriority != null) add("present_priority")
-        if (smoothBuffer != null) add("smooth_buffer")
-    }
+    fun overridden(): Set<String> = SettingsFields.PROFILE
+        .filter { it.isOverridden(this) }
+        .map { if (it.key == "width" || it.key == "height") FIELD_RESOLUTION else it.key }
+        .toSet()
 
     /**
      * True when the profile overrides nothing — "inherits everything", the state a freshly created
@@ -221,82 +118,21 @@ data class SettingsOverlay(
         val j = JSONObject()
         // Unknown keys first, so a modelled field always wins over a stale carried-through one.
         extra.forEach { (k, v) -> j.put(k, v) }
-        width?.let { j.put("width", it) }
-        height?.let { j.put("height", it) }
-        hz?.let { j.put("refresh_hz", it) }
-        bitrateKbps?.let { j.put("bitrate_kbps", it) }
-        renderScale?.let { j.put("render_scale", it) }
-        codec?.let { j.put("codec", it) }
-        hdrEnabled?.let { j.put("hdr_enabled", it) }
-        tenBitSdr?.let { j.put("ten_bit_sdr", it) }
-        compositor?.let { j.put("compositor", it) }
-        audioChannels?.let { j.put("audio_channels", it) }
-        audioFormat?.let { j.put("audio_format", it) }
-        micEnabled?.let { j.put("mic_enabled", it) }
-        echoCancel?.let { j.put("echo_cancel", it) }
-        keepHostAudio?.let { j.put("keep_host_audio", it) }
-        touchMode?.let { j.put("touch_mode", it.name) }
-        mouseMode?.let { j.put("mouse_mode", it.storedName) }
-        invertScroll?.let { j.put("invert_scroll", it) }
-        overlayActions?.let { j.put("overlay_actions", it) }
-        gamepad?.let { j.put("gamepad", it) }
-        gamepadForwarding?.let { j.put("gamepad_forwarding", it) }
-        systemButtons?.let { j.put("system_buttons", it) }
-        guideGesture?.let { j.put("guide_gesture", it) }
-        statsVerbosity?.let { j.put("stats_verbosity", it.name) }
-        lowLatencyMode?.let { j.put("low_latency_mode", it) }
-        presentPriority?.let { j.put("present_priority", it) }
-        smoothBuffer?.let { j.put("smooth_buffer", it) }
+        SettingsFields.PROFILE.forEach { it.overlayToJson(this, j) }
         return j
     }
 
     companion object {
         /** The width/height pair, which one control drives — the reset alias, as on every client. */
-        const val FIELD_RESOLUTION = "resolution"
+        const val FIELD_RESOLUTION = SettingsFields.FIELD_RESOLUTION
 
-        /** Keys this build models; everything else in a stored overlay is carried through. */
-        private val KNOWN = setOf(
-            "width", "height", "refresh_hz", "bitrate_kbps", "render_scale", "codec",
-            "hdr_enabled", "ten_bit_sdr", "compositor",
-            "audio_channels", "audio_format", "mic_enabled", "echo_cancel", "keep_host_audio",
-            "touch_mode", "mouse_mode", "invert_scroll", "overlay_actions", "gamepad", "gamepad_forwarding",
-            "system_buttons", "guide_gesture",
-            "stats_verbosity",
-            "low_latency_mode", "present_priority", "smooth_buffer",
-        )
-
-        internal fun fromJson(j: JSONObject): SettingsOverlay = SettingsOverlay(
-            width = j.optIntOrNull("width"),
-            height = j.optIntOrNull("height"),
-            hz = j.optIntOrNull("refresh_hz"),
-            bitrateKbps = j.optIntOrNull("bitrate_kbps"),
-            renderScale = if (j.has("render_scale")) j.optDouble("render_scale") else null,
-            codec = j.optStringOrNull("codec"),
-            hdrEnabled = j.optBooleanOrNull("hdr_enabled"),
-            tenBitSdr = j.optBooleanOrNull("ten_bit_sdr"),
-            compositor = j.optIntOrNull("compositor"),
-            audioChannels = j.optIntOrNull("audio_channels"),
-            audioFormat = j.optStringOrNull("audio_format"),
-            micEnabled = j.optBooleanOrNull("mic_enabled"),
-            echoCancel = j.optBooleanOrNull("echo_cancel"),
-            keepHostAudio = j.optBooleanOrNull("keep_host_audio"),
-            touchMode = j.optStringOrNull("touch_mode")
-                ?.let { n -> TouchMode.entries.firstOrNull { it.name == n } },
-            mouseMode = j.optStringOrNull("mouse_mode")
-                ?.let { n -> MouseMode.entries.firstOrNull { it.storedName == n } },
-            invertScroll = j.optBooleanOrNull("invert_scroll"),
-            overlayActions = j.optStringOrNull("overlay_actions"),
-            gamepad = j.optIntOrNull("gamepad"),
-            gamepadForwarding = j.optBooleanOrNull("gamepad_forwarding"),
-            systemButtons = j.optStringOrNull("system_buttons"),
-            guideGesture = j.optStringOrNull("guide_gesture"),
-            statsVerbosity = j.optStringOrNull("stats_verbosity")
-                ?.let { n -> StatsVerbosity.entries.firstOrNull { it.name == n } },
-            lowLatencyMode = j.optBooleanOrNull("low_latency_mode"),
-            presentPriority = j.optStringOrNull("present_priority"),
-            smoothBuffer = j.optIntOrNull("smooth_buffer"),
-            extra = j.keys().asSequence().filter { it !in KNOWN }.associateWith { j.get(it) },
-        )
+        internal fun fromJson(j: JSONObject): SettingsOverlay {
+            // Keys this build models are read below; everything else is carried through.
+            val extra = j.keys().asSequence()
+                .filter { it !in SettingsFields.PROFILE_KEYS }
+                .associateWith { j.get(it) }
+            return SettingsFields.PROFILE.fold(SettingsOverlay(extra = extra)) { o, f -> f.overlayFromJson(o, j) }
+        }
     }
 }
 
@@ -473,9 +309,6 @@ fun Settings.effectiveFor(profile: StreamProfile?): Settings =
 
 // ---- org.json null-vs-absent helpers (optInt and friends can't tell 0 from "not there") ---------
 
-private fun JSONObject.optIntOrNull(key: String): Int? = if (has(key)) optInt(key) else null
-private fun JSONObject.optBooleanOrNull(key: String): Boolean? =
-    if (has(key)) optBoolean(key) else null
 
 private fun JSONObject.optStringOrNull(key: String): String? =
     if (has(key)) optString(key).ifEmpty { null } else null

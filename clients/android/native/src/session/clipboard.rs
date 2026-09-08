@@ -24,7 +24,7 @@ use punktfunk_core::clipboard::ClipEventCore;
 use punktfunk_core::error::PunktfunkError;
 use punktfunk_core::quic::{ClipKind, CLIP_FILE_INDEX_NONE, HOST_CAP_CLIPBOARD};
 
-use super::{get_session, SessionHandle};
+use super::{get_session, jni_guard, SessionHandle};
 
 /// The portable wire MIME both ends map to their platform text type.
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
@@ -41,7 +41,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeClipSupport
     _this: JObject,
     handle: jlong,
 ) -> jboolean {
-    client(handle).is_some_and(|h| h.client.host_caps() & HOST_CAP_CLIPBOARD != 0)
+    jni_guard(false, || {
+        client(handle).is_some_and(|h| h.client.host_caps() & HOST_CAP_CLIPBOARD != 0)
+    })
 }
 
 /// `NativeBridge.nativeHostMgmtPort(handle)` — the management-API port the host reported in this
@@ -56,7 +58,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeHostMgmtPor
     _this: JObject,
     handle: jlong,
 ) -> jint {
-    client(handle).map_or(0, |h| jint::from(h.client.mgmt_port()))
+    jni_guard(0, || {
+        client(handle).map_or(0, |h| jint::from(h.client.mgmt_port()))
+    })
 }
 
 /// `NativeBridge.nativeClipControl(handle, enabled)` — session-level opt-in/out. Nothing
@@ -68,9 +72,11 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeClipControl
     handle: jlong,
     enabled: jboolean,
 ) {
-    if let Some(h) = client(handle) {
-        let _ = h.client.clip_control(enabled, 0);
-    }
+    jni_guard((), || {
+        if let Some(h) = client(handle) {
+            let _ = h.client.clip_control(enabled, 0);
+        }
+    })
 }
 
 /// `NativeBridge.nativeClipOfferText(handle, seq)` — announce "the Android clipboard now holds
@@ -83,15 +89,17 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeClipOfferTe
     handle: jlong,
     seq: jint,
 ) {
-    if let Some(h) = client(handle) {
-        let _ = h.client.clip_offer(
-            seq as u32,
-            vec![ClipKind {
-                mime: TEXT_MIME.into(),
-                size_hint: 0,
-            }],
-        );
-    }
+    jni_guard((), || {
+        if let Some(h) = client(handle) {
+            let _ = h.client.clip_offer(
+                seq as u32,
+                vec![ClipKind {
+                    mime: TEXT_MIME.into(),
+                    size_hint: 0,
+                }],
+            );
+        }
+    })
 }
 
 /// `NativeBridge.nativeClipFetchText(handle, seq)` — pull the text of the host's offer `seq`.
@@ -103,13 +111,15 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeClipFetchTe
     handle: jlong,
     seq: jint,
 ) -> jint {
-    client(handle)
-        .and_then(|h| {
-            h.client
-                .clip_fetch(seq as u32, TEXT_MIME.into(), CLIP_FILE_INDEX_NONE)
-                .ok()
-        })
-        .map_or(-1, |xfer| xfer as jint)
+    jni_guard(-1, || {
+        client(handle)
+            .and_then(|h| {
+                h.client
+                    .clip_fetch(seq as u32, TEXT_MIME.into(), CLIP_FILE_INDEX_NONE)
+                    .ok()
+            })
+            .map_or(-1, |xfer| xfer as jint)
+    })
 }
 
 /// `NativeBridge.nativeClipServeText(handle, reqId, text)` — answer a `fetch:` event with the
@@ -146,9 +156,11 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeClipCancel(
     handle: jlong,
     id: jint,
 ) {
-    if let Some(h) = client(handle) {
-        let _ = h.client.clip_cancel(id as u32);
-    }
+    jni_guard((), || {
+        if let Some(h) = client(handle) {
+            let _ = h.client.clip_cancel(id as u32);
+        }
+    })
 }
 
 /// `NativeBridge.nativeNextClip(handle)` — block ≤250 ms for the next clipboard event, encoded
