@@ -10,10 +10,11 @@ pub fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `PUNKTFUNK_INTRA_REFRESH` — opt into the intra-refresh wave: a moving
-/// intra band heals FEC-unrecoverable loss without a 20-40× IDR spike.
-/// Linux ANDs its `IR_UNSUPPORTED` latch on top. On Windows this also
-/// selects LTR vs IR (the wave sweeps the picture; LTR pins references).
+/// `PUNKTFUNK_INTRA_REFRESH=1` — opt into the periodic intra-refresh wave on
+/// AMF/QSV: a moving intra band heals FEC-unrecoverable loss without a
+/// 20-40× IDR spike, and selects IR over LTR there (the wave sweeps the
+/// picture; LTR pins references). `0` also turns off the on-demand wave every
+/// backend runs where an RFI declines (`rfi::wave_enabled`).
 pub fn intra_refresh_requested() -> bool {
     env_flag("PUNKTFUNK_INTRA_REFRESH")
 }
