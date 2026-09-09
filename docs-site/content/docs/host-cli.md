@@ -15,6 +15,7 @@ command — [`punktfunk`](#punktfunk-on-the-client-machine), which ships with th
 | [`service`](#service-windows) | Register, start, stop and remove the Windows service. | Windows |
 | [`tray`](#tray-windows) | Start, stop or query the status-tray icon. | Windows |
 | [`driver`](#driver-windows) | Install or remove the bundled virtual-display / virtual-gamepad drivers. | Windows |
+| [`web`](#web-windows) | Print the web-console login password. | Windows |
 | [`plugins`](#plugins) | Install, remove and list plugins, and switch the runner on. | all |
 | [`list-monitors`](#list-monitors) | List the physical monitors, by connector name. | Linux |
 | `mirror-test` | Prove capture works from one of them — see [`list-monitors`](#list-monitors). | Linux |
@@ -279,6 +280,19 @@ punktfunk-host driver uninstall --gamepad  # the virtual-gamepad driver instead
 
 `driver install --dir <stage> [--gamepad]` is the install half; it takes the staged driver files the
 installer lays down, which is why it isn't something you run by hand.
+
+## `web` (Windows)
+
+Print the [web console](/docs/web-console) login password, from an **elevated** PowerShell — the
+file it reads is ACL'd to Administrators and SYSTEM, so an ordinary prompt gets access denied:
+
+```powershell
+punktfunk-host web password
+```
+
+This is how you get the password after a **silent** install (winget, `/VERYSILENT`), which generates
+one and displays nothing. The wizard shows it on its final page instead, so you only need this later.
+`web setup` is the install half and takes the staged console payload, so it isn't run by hand.
 
 ## `plugins`
 
