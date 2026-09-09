@@ -54,6 +54,25 @@ sealed interface RingNav {
     data class Sector(val slot: Int?) : RingNav
 }
 
+/**
+ * The ring's other input vocabulary: a TV remote's or keyboard's keys, mapped the way the router
+ * maps a pad's buttons. A remote is not a gamepad — no `SOURCE_GAMEPAD`, no `BUTTON_*` — so it
+ * reaches the router through nothing, and the ring it just opened would be undrivable without
+ * this. Null means the ring has no meaning for the key; the caller swallows it either way, because
+ * a key aimed at a menu must not reach the game under it.
+ */
+fun ringNavForKey(keyCode: Int): RingNav? = when (keyCode) {
+    KeyEvent.KEYCODE_DPAD_UP -> RingNav.Up
+    KeyEvent.KEYCODE_DPAD_DOWN -> RingNav.Down
+    KeyEvent.KEYCODE_DPAD_LEFT -> RingNav.Left
+    KeyEvent.KEYCODE_DPAD_RIGHT -> RingNav.Right
+    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+    KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_SPACE,
+    -> RingNav.Confirm
+    KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> RingNav.Back
+    else -> null
+}
+
 class GamepadRouter(
     context: Context,
     private val handle: Long,

@@ -34,8 +34,10 @@ import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.GamepadRouter
 import io.unom.punktfunk.kit.Keymap
 import io.unom.punktfunk.kit.NativeBridge
+import io.unom.punktfunk.kit.RingNav
 import io.unom.punktfunk.kit.Sc2BleLink
 import io.unom.punktfunk.kit.SessionAccess
+import io.unom.punktfunk.kit.ringNavForKey
 import io.unom.punktfunk.kit.link.DeepLinkResult
 import io.unom.punktfunk.kit.link.DeepLinks
 import io.unom.punktfunk.kit.link.HostResolution
@@ -46,6 +48,14 @@ private const val SC2_MENU_PERMISSION = "io.unom.punktfunk.SC2_MENU_USB_PERMISSI
 
 /** Request code for the SC2's Bluetooth grant (see [MainActivity.maybeAskSc2BtPermission]). */
 private const val REQ_SC2_BLUETOOTH = 0x5C2B
+
+/** Never ours, however modal the thing on screen is: the box's own volume and power. */
+private val SYSTEM_KEYS = intArrayOf(
+    KeyEvent.KEYCODE_VOLUME_UP,
+    KeyEvent.KEYCODE_VOLUME_DOWN,
+    KeyEvent.KEYCODE_VOLUME_MUTE,
+    KeyEvent.KEYCODE_POWER,
+)
 
 /**
  * Keeps ONE window-insets reader alive for as long as the app's UI exists — the fix for the menus
@@ -140,6 +150,14 @@ class MainActivity : ComponentActivity() {
      * overrides below route every SOURCE_MOUSE event here while streaming. Null while not streaming.
      */
     var mouseForwarder: MouseForwarder? = null
+
+    /**
+     * The quick-action ring's claim on the keyboard/remote — non-null exactly while the ring is up
+     * (set from its open/close edge, beside the pad router's own mask). A pad reaches the ring
+     * through [gamepadRouter]; every other device reaches it through here, which is what makes the
+     * ring drivable from a TV remote.
+     */
+    var ringKeys: ((RingNav) -> Unit)? = null
 
     /**
      * TV remote-as-pointer for the active session (StreamScreen builds it on TV devices only):
@@ -640,6 +658,18 @@ class MainActivity : ComponentActivity() {
                     return true // consumed
                 }
             }
+            // The ring is modal: its scrim owns every finger, the router masks the pad behind it,
+            // and this is the same claim for keys. A remote/keyboard reaches neither of those, so
+            // its D-pad used to open the ring and then walk the game underneath it. Non-nav keys
+            // are swallowed rather than sent: nothing aimed at the menu reaches the host.
+            ringKeys?.let { nav ->
+                if (!fromPad(event) && event.keyCode !in SYSTEM_KEYS) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        ringNavForKey(event.keyCode)?.let(nav)
+                    }
+                    return true
+                }
+            }
             // TV remote-as-pointer sees non-gamepad keys first (SELECT long-press toggles it;
             // while active it owns the D-pad/SELECT/PLAY-PAUSE/BACK).
             if (!event.isFromSource(InputDevice.SOURCE_GAMEPAD)) {
@@ -671,10 +701,7 @@ class MainActivity : ComponentActivity() {
                     }
                 // Leave these to the system even while streaming.
                 // (BACK above → BackHandler leaves the stream.)
-                KeyEvent.KEYCODE_VOLUME_UP,
-                KeyEvent.KEYCODE_VOLUME_DOWN,
-                KeyEvent.KEYCODE_VOLUME_MUTE,
-                KeyEvent.KEYCODE_POWER -> {}
+                in SYSTEM_KEYS -> {}
                 else -> {
                     val down = when (event.action) {
                         KeyEvent.ACTION_DOWN -> true
