@@ -28,6 +28,8 @@ import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.discovery.HostDiscovery
+import io.unom.punktfunk.kit.discovery.Presence
+import io.unom.punktfunk.kit.discovery.PresenceTracker
 import io.unom.punktfunk.kit.library.LibraryCache
 import io.unom.punktfunk.kit.link.StartScreen
 import io.unom.punktfunk.kit.link.host
@@ -102,7 +104,10 @@ object SkiaConsole {
     private var identity: ClientIdentity? = null
     private var discovery: HostDiscovery? = null
     private var discovered: List<DiscoveredHost> = emptyList()
+
+    /** Record ids that answered the probe — the whole of presence. See [sweep]. */
     private var reachable: Set<String> = emptySet()
+    private val presence = PresenceTracker()
     private var settings: Settings = Settings()
 
     /** What each paired host last said this device may do TO it, by fingerprint, and when we
@@ -281,20 +286,70 @@ object SkiaConsole {
     }
 
     /**
-     * Subscribe to the shared browse and ask it for a fresh answer — the console is back on screen,
-     * or a dial that was holding the radio let go. Paired with [pauseDiscovery], which drops the
-     * subscription; the browse itself ends only once nobody has claimed it back.
+     * Subscribe to the shared browse, ask it for a fresh answer and probe every saved host now —
+     * the console is back on screen, or a dial that was holding the radio let go. Paired with
+     * [pauseDiscovery], which drops the subscription; the browse itself ends only once nobody has
+     * claimed it back.
      */
     private fun resumeDiscovery() {
         discovery?.let {
             it.addListener(onDiscovered)
             it.rescan()
         }
+        sweepNow()
     }
 
     /** Let the browse go, so the radio belongs to the stream that is about to start. */
     private fun pauseDiscovery() {
         discovery?.removeListener(onDiscovered)
+    }
+
+    /** The device landed on another network: the browse was rebuilt, now ask the hosts. */
+    private val onNetworkChanged: () -> Unit = { sweepNow() }
+
+    /**
+     * The reachability sweep — the whole of presence, every ~12 s (the desktop's cadence), and at
+     * once on [sweepNow]. Every saved host, including the ones on mDNS: an advert is a cache entry
+     * with a 75-minute TTL that a suspending host sends no goodbye for, so trusting it left a
+     * sleeping machine reading Online and, since Wake is gated on `!online`, unwakeable.
+     *
+     * Only while the console is ON SCREEN (attached): parked behind the touch UI or a stream
+     * there is nobody to show the pips to — and mid-stream the radio belongs to the session. The
+     * timer keeps ticking so probes resume within a cadence of re-attach.
+     */
+    private val sweep = object : Runnable {
+        override fun run() {
+            if (handle == 0L) return
+            main.removeCallbacks(this)
+            main.postDelayed(this, SWEEP_MS)
+            if (onConnected == null) return
+            val saved = knownHostStore.all()
+            val live = discovered
+            ioPool.execute {
+                val up = Presence.sweep(
+                    saved,
+                    liveFor = { kh -> live.firstOrNull { kh.matches(it) } },
+                    probe = { addr, port -> NativeBridge.nativeProbe(addr, port, Presence.PROBE_MS) },
+                )
+                // A pinned host that answered somewhere else has moved: follow it, so the dial
+                // and the library fetch go where it lives.
+                val moved = saved.any { kh -> up[kh.id]?.let { knownHostStore.learnAddress(kh.fpHex, it.address, it.port) } == true }
+                main.post {
+                    val next = presence.apply(saved.map { it.id }.toSet(), up.keys)
+                    if (next != reachable || moved) {
+                        reachable = next
+                        pushHosts()
+                        if (moved) pushKnownHosts()
+                    }
+                }
+            }
+        }
+    }
+
+    /** Probe now rather than at the next tick; the cadence restarts from here. */
+    private fun sweepNow() {
+        main.removeCallbacks(sweep)
+        main.post(sweep)
     }
 
     private fun startServices(app: Context) {
@@ -303,37 +358,8 @@ object SkiaConsole {
                 .onFailure { Log.w(TAG, "identity unavailable: ${it.message}") }
                 .getOrNull()
         }
-        discovery = HostDiscovery.shared(app)
+        discovery = HostDiscovery.shared(app).also { it.addNetworkListener(onNetworkChanged) }
         resumeDiscovery()
-        // The reachability sweep — the whole of presence, every ~12 s (the desktop's cadence).
-        // Every saved host, including the ones on mDNS: an advert is a cache entry with a
-        // 75-minute TTL that a suspending host sends no goodbye for, so trusting it left a
-        // sleeping machine reading Online and, since Wake is gated on `!online`, unwakeable.
-        main.post(object : Runnable {
-            override fun run() {
-                if (handle == 0L) return
-                // Only while the console is ON SCREEN (attached): parked behind the touch UI
-                // or a stream there is nobody to show the presence pips to — and mid-stream
-                // the radio belongs to the session, which is exactly why discovery stops for
-                // it. The timer keeps ticking so probes resume within a cadence of re-attach.
-                if (onConnected == null) {
-                    main.postDelayed(this, 12_000)
-                    return
-                }
-                // Probed at the address its live advert claims (a cold boot can land on a new
-                // DHCP lease), keyed by the saved one, which is what every caller looks up.
-                val targets = knownHostStore.all().map { kh ->
-                    val live = discovered.firstOrNull { kh.matches(it) }
-                    Triple("${kh.address}:${kh.port}", live?.host ?: kh.address, live?.port ?: kh.port)
-                }
-                ioPool.execute {
-                    val up = targets.filter { NativeBridge.nativeProbe(it.second, it.third, 3_000) }
-                        .map { it.first }.toSet()
-                    main.post { if (up != reachable) { reachable = up; pushHosts() } }
-                }
-                main.postDelayed(this, 12_000)
-            }
-        })
         // Commands from the console, drained on a short cadence.
         main.post(object : Runnable {
             override fun run() {
@@ -530,7 +556,7 @@ object SkiaConsole {
             if (!h.paired || h.fpHex.isEmpty()) continue
             // Reachable means it answered the probe — an advert would say yes for a host that
             // is asleep, and this asks it a question only a live host can answer.
-            if ("${h.address}:${h.port}" !in reachable) continue
+            if (h.id !in reachable) continue
             val (addr, mgmt, fp) = Triple(h.address, h.effectiveMgmtPort, h.fpHex)
             // Stamp BEFORE the request, so a slow host cannot make every push spawn another.
             if (now - (nowPlayingAt[fp] ?: 0L) >= NOW_PLAYING_TTL_MS) {
@@ -640,9 +666,13 @@ object SkiaConsole {
      */
     private fun launch(a: JSONObject) {
         val app = appContext ?: return
-        val addr = a.optString("addr")
-        val port = a.optInt("port")
         val fp = a.optString("fp_hex")
+        // The record by its pin first, and dialled where IT says: the row was built before the
+        // last sweep, which may have followed the host to a new address.
+        val kh = knownHostStore.all().firstOrNull { fp.isNotEmpty() && it.fpHex.equals(fp, ignoreCase = true) }
+            ?: knownHostStore.get(a.optString("addr"), a.optInt("port"))
+        val addr = kh?.address ?: a.optString("addr")
+        val port = kh?.port ?: a.optInt("port")
         val launchId = a.optString("launch").takeIf { a.has("launch") && !a.isNull("launch") && it.isNotEmpty() }
         val profileId = a.optString("profile").takeIf { a.has("profile") && !a.isNull("profile") && it.isNotEmpty() }
         val requestAccess = a.optBoolean("request_access", false)
@@ -651,7 +681,6 @@ object SkiaConsole {
             NativeBridge.nativeConsoleSessionPhase(handle, 2, "Identity not ready yet — try again in a moment")
             return
         }
-        val kh = knownHostStore.get(addr, port)
         // The shell raises its hold for a GAME launch off a shelf; a desktop connect and a
         // launcher tile go straight through, so the session is handed over at once. Mirrors
         // `Shell::launch_hold`, and reads the same cached catalog the shelf was drawn from.
@@ -1076,6 +1105,9 @@ object SkiaConsole {
      *  `pf_client_core::host_actions::TTL`. Long on purpose: what it governs changes when an
      *  operator edits access, not minute to minute, and each refresh is a TLS handshake. */
     private const val HOST_ACTIONS_TTL_MS = 300_000L
+
+    /** The presence cadence — the desktop's. */
+    private const val SWEEP_MS = 12_000L
 
     /** How long a host's running title stays fresh — `pf_client_core::library::RUNNING_TTL`.
      *  Short: this is the one host fact that changes while somebody is looking at the tile. */

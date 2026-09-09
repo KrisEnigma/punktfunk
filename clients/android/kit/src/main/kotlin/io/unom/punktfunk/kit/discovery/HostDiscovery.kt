@@ -1,6 +1,9 @@
 package io.unom.punktfunk.kit.discovery
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
@@ -100,6 +103,10 @@ fun osIconTokens(chain: String): List<String> =
  * We hold a Wi-Fi [WifiManager.MulticastLock] for the browse lifetime — raw multicast *reception*
  * needs it. (The Android emulator's SLIRP NAT drops multicast, so on the emulator discovery starts
  * but never finds a LAN host — same as before; that's the network, not the API.)
+ *
+ * The daemon's sockets belong to the interface they were built on. A TV that moves from Wi-Fi to
+ * Ethernet never backgrounds the app, so nothing else would rebuild them: the default-network
+ * watch below does, and tells [addNetworkListener] subscribers to probe again.
  */
 class HostDiscovery private constructor(context: Context) {
     private val appCtx = context.applicationContext
@@ -118,6 +125,44 @@ class HostDiscovery private constructor(context: Context) {
     /** Failed [start] calls since the last good one; see [MAX_START_ATTEMPTS]. */
     private var attempt = 0
     private val retry = Runnable { start() }
+
+    /** Told, on the main thread, once the device is on a different network. */
+    private val networkListeners = mutableListOf<() -> Unit>()
+
+    /** Interface + addresses of the default network as last seen; null before the first one. */
+    private var linkSignature: String? = null
+
+    /** The default network went away; whatever comes next is a change, even the same SSID. */
+    private var lost = false
+
+    /** The pending [networkChanged], held back while the new link settles. */
+    private val settle = Runnable { networkChanged() }
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+            // IPv4 and link-local only: IPv6 privacy addresses rotate on a network that is
+            // the same for every purpose this browse has.
+            val addrs = lp.linkAddresses
+                .filter { it.address is java.net.Inet4Address || it.address.isLinkLocalAddress }
+                .map { it.toString() }
+                .sorted()
+            val sig = lp.interfaceName + "|" + addrs
+            val changed = lost || (linkSignature != null && linkSignature != sig)
+            linkSignature = sig
+            lost = false
+            if (changed) scheduleNetworkChanged()
+        }
+
+        override fun onLost(network: Network) {
+            lost = true
+        }
+    }
+
+    init {
+        val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        runCatching { cm?.registerDefaultNetworkCallback(networkCallback, handler) }
+            .onFailure { Log.w(TAG, "default network watch unavailable", it) }
+    }
 
     /** See [removeListener]: tears the browse down once nobody has come back for it. */
     private val quiesce = Runnable { if (listeners.isEmpty()) stop() }
@@ -163,9 +208,40 @@ class HostDiscovery private constructor(context: Context) {
     }
 
     /**
-     * Spin the browse up, retrying a failed daemon on a short cadence. A start can fail for a
-     * reason that is over in a second — its :5353 bind losing a race with the daemon we just tore
-     * down — and giving up on it once left the device with no discovery for the rest of the run.
+     * Be told when the device lands on a different network — a new interface, or new addresses on
+     * the one it had. The browse has already been rebuilt by then; a subscriber uses it to probe
+     * its saved hosts at once instead of waiting out its cadence.
+     */
+    fun addNetworkListener(listener: () -> Unit) {
+        if (networkListeners.none { it === listener }) networkListeners += listener
+    }
+
+    fun removeNetworkListener(listener: () -> Unit) {
+        networkListeners.removeAll { it === listener }
+    }
+
+    /** Hold the rebuild until the link stops changing: DHCP lands its lease a beat after link-up. */
+    private fun scheduleNetworkChanged() {
+        handler.removeCallbacks(settle)
+        handler.postDelayed(settle, NETWORK_SETTLE_MS)
+    }
+
+    /**
+     * The device is on a different network. A running browse is rebuilt on it — its sockets were
+     * bound on the old interface — and one that gave up is given its retries back. Then every
+     * network subscriber is told, so the presence pips follow within a probe, not a cadence.
+     */
+    private fun networkChanged() {
+        Log.i(TAG, "default network changed — rebuilding the browse")
+        if (listeners.isNotEmpty()) restart()
+        networkListeners.toList().forEach { it() }
+    }
+
+    /**
+     * Spin the browse up, retrying a failed daemon on a short cadence, then a slow one. A start
+     * can fail for a reason that is over in a second — its :5353 bind losing a race with the
+     * daemon we just tore down — and one that stays failed is retried for as long as anyone is
+     * subscribed: a TV has no foreground/background trip to ask again with.
      */
     private fun start() {
         if (running) return
@@ -176,13 +252,10 @@ class HostDiscovery private constructor(context: Context) {
             .getOrDefault(0L)
         if (h == 0L) {
             releaseMulticastLock()
-            if (attempt < MAX_START_ATTEMPTS) {
-                attempt++
-                Log.w(TAG, "native mDNS discovery failed to start — retry $attempt")
-                handler.postDelayed(retry, RETRY_MS)
-            } else {
-                Log.e(TAG, "native mDNS discovery failed to start")
-            }
+            attempt++
+            val wait = if (attempt <= MAX_START_ATTEMPTS) RETRY_MS else SLOW_RETRY_MS
+            Log.w(TAG, "native mDNS discovery did not start — retry $attempt in $wait ms")
+            handler.postDelayed(retry, wait)
             return
         }
         attempt = 0
@@ -256,7 +329,8 @@ class HostDiscovery private constructor(context: Context) {
     }
 
     private fun acquireMulticastLock() {
-        val wifi = appCtx.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        // Wi-Fi only: an Ethernet-only box has no WifiManager, and needs no lock to receive.
+        val wifi = appCtx.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
         multicastLock = wifi.createMulticastLock("punktfunk-mdns").apply {
             setReferenceCounted(true)
             runCatching { acquire() }
@@ -273,6 +347,8 @@ class HostDiscovery private constructor(context: Context) {
         private const val RETRY_MS = 2000L
         private const val IDLE_LINGER_MS = 3000L
         private const val MAX_START_ATTEMPTS = 5
+        private const val SLOW_RETRY_MS = 30_000L
+        private const val NETWORK_SETTLE_MS = 1500L
 
         @Volatile
         private var instance: HostDiscovery? = null
