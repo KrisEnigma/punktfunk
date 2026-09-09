@@ -17,7 +17,7 @@
 //! Pure `std` so it compiles on the host build too (the decode thread is android-only, but
 //! `SessionHandle` holds the shared handle unconditionally).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -36,6 +36,11 @@ pub struct VideoStats {
     /// decode thread creates the codec (`set_decoder`), read one-shot by `nativeVideoDecoderLabel`.
     /// Separate from `inner` (never touched per-frame) so naming it costs nothing on the hot path.
     decoder: Mutex<Option<DecoderInfo>>,
+    /// The presenter's last 1 s cadence window: off-mode present intervals in ‰ and frames the
+    /// compositor coalesced onto one vsync (stats indices 38/39). Gauges, not window-drained —
+    /// the presenter owns the window.
+    judder_permille: AtomicU32,
+    coalesced: AtomicU64,
     inner: Mutex<Inner>,
 }
 
@@ -171,6 +176,8 @@ impl VideoStats {
             enabled: AtomicBool::new(false),
             presenter_active: AtomicBool::new(false),
             decoder: Mutex::new(None),
+            judder_permille: AtomicU32::new(0),
+            coalesced: AtomicU64::new(0),
             inner: Mutex::new(Inner {
                 window_start: Instant::now(),
                 frames: 0,
@@ -202,6 +209,24 @@ impl VideoStats {
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// The presenter's 1 s cadence readout: judder (off-mode present intervals, ‰) and the frames
+    /// SurfaceFlinger coalesced onto one vsync. Always on — the log line is the model.
+    // Driven only by the android-only decode thread; unreferenced on the host build — expected.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn note_cadence(&self, judder_permille: u32, coalesced: u64) {
+        self.judder_permille
+            .store(judder_permille, Ordering::Relaxed);
+        self.coalesced.store(coalesced, Ordering::Relaxed);
+    }
+
+    pub fn judder_permille(&self) -> u32 {
+        self.judder_permille.load(Ordering::Relaxed)
+    }
+
+    pub fn coalesced(&self) -> u64 {
+        self.coalesced.load(Ordering::Relaxed)
     }
 
     /// Record whether the timeline presenter runs this session (decode thread, once at start).

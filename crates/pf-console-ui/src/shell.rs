@@ -224,6 +224,10 @@ pub struct ConsoleOptions {
     /// Host has another UI when the console is off (phone/tablet touch shell).
     /// False on desktop and Android TV — offering "off" would strand the user.
     pub fallback_ui: bool,
+    /// This device's GPU decodes PyroWave. Answer from the same probe that gates the
+    /// client's `CODEC_PYROWAVE` advertisement: a row that offers what the Hello never
+    /// asks for is a setting that silently does nothing.
+    pub pyrowave_ok: bool,
     /// Settings and profile catalog. `None` uses the desktop file store
     /// (`pf_client_core::trust`); every other host must supply one.
     pub store: Option<Arc<dyn SettingsStore>>,
@@ -240,6 +244,9 @@ impl ConsoleOptions {
             device_name,
             deck,
             fallback_ui: false,
+            // The desktop probe reads the session's Vulkan device, which the console does
+            // not own yet. A GPU that runs this shell is a Vulkan 1.3 one, so it is yes.
+            pyrowave_ok: true,
             store: None,
             platform: Platform::Desktop,
             gpu_cache_bytes: DEFAULT_GPU_CACHE_BYTES,
@@ -270,6 +277,7 @@ pub(crate) struct Shell {
     device_name: String,
     deck: bool,
     fallback_ui: bool,
+    pyrowave_ok: bool,
     pub(crate) in_stream: bool,
     connecting: Option<Connecting>,
     launching: Option<Launching>,
@@ -382,6 +390,7 @@ impl Shell {
             device_name: opts.device_name,
             deck: opts.deck,
             fallback_ui: opts.fallback_ui,
+            pyrowave_ok: opts.pyrowave_ok,
             in_stream: false,
             connecting: None,
             launching: None,
@@ -618,6 +627,7 @@ impl Shell {
             pads: &self.pads,
             deck: self.deck,
             fallback_ui: self.fallback_ui,
+            pyrowave_ok: self.pyrowave_ok,
             device_name: &self.device_name,
             t,
         };
@@ -1131,6 +1141,7 @@ impl Shell {
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
+                pyrowave_ok: self.pyrowave_ok,
                 device_name: &self.device_name,
                 t: self.t0.elapsed().as_secs_f64(),
             };
@@ -1220,6 +1231,7 @@ impl Shell {
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
+                pyrowave_ok: self.pyrowave_ok,
                 device_name: &self.device_name,
                 t: self.t0.elapsed().as_secs_f64(),
             };
@@ -1253,6 +1265,7 @@ impl Shell {
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
+                pyrowave_ok: self.pyrowave_ok,
                 device_name: &self.device_name,
                 t: self.t0.elapsed().as_secs_f64(),
             };

@@ -159,9 +159,11 @@ fn truncate_msg(mut msg: String) -> String {
 }
 
 /// DEBUG/TRACE from these modules is steady chatter and would evict the tail.
+/// `rustls` narrates four lines per accepted connection, and the console polls
+/// this ring over TLS, so it outruns everything the ring exists to keep.
 /// The ring keeps their INFO-and-up; the file/stderr EnvFilter caps them
 /// separately. Prefix-matched on module-path boundaries.
-const NOISY_DEBUG_TARGETS: &[&str] = &["mdns_sd", "wasapi"];
+const NOISY_DEBUG_TARGETS: &[&str] = &["mdns_sd", "rustls", "wasapi"];
 
 fn is_noisy_debug(target: &str) -> bool {
     NOISY_DEBUG_TARGETS.iter().any(|t| {
@@ -409,6 +411,7 @@ mod tests {
             log::debug!(target: "mdns_sd::service_daemon", "Invalid incoming DNS message: flood");
             log::warn!(target: "mdns_sd::service_daemon", "a real mdns problem");
             log::debug!(target: "mdns_sdx", "not actually mdns-sd");
+            log::debug!(target: "rustls::server::hs", "decided upon suite");
         });
 
         let page = ring().since(cur, MAX_PAGE);
@@ -424,6 +427,13 @@ mod tests {
         assert_eq!(warn.target, "mdns_sd::service_daemon");
         assert!(!warn.msg.contains("log.target"), "msg: {}", warn.msg);
         assert!(page.entries.iter().any(|e| e.target == "mdns_sdx"));
+        assert!(
+            !page
+                .entries
+                .iter()
+                .any(|e| e.msg.contains("decided upon suite")),
+            "rustls handshake DEBUG must not reach the ring"
+        );
     }
 
     #[test]

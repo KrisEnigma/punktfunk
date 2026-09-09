@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -27,6 +28,8 @@ import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.discovery.HostDiscovery
+import io.unom.punktfunk.kit.discovery.Presence
+import io.unom.punktfunk.kit.discovery.PresenceTracker
 import io.unom.punktfunk.kit.link.DeepLinkResult
 import io.unom.punktfunk.kit.link.DeepLinks
 import io.unom.punktfunk.kit.link.HostResolution
@@ -230,27 +233,25 @@ fun ConnectScreen(
     LaunchedEffect(discovered) {
         val learned = withContext(Dispatchers.IO) {
             var any = false
+            // Matched the way the list de-dupes (fingerprint first), so a host advertising
+            // from a new lease still teaches its record.
+            val saved = knownHostStore.all()
             discovered.forEach { dh ->
-                if (dh.mac.isNotEmpty() &&
-                    knownHostStore.get(dh.host, dh.port)?.let { it.mac != dh.mac } == true
-                ) {
-                    knownHostStore.learnMac(dh.host, dh.port, dh.mac)
+                val kh = saved.firstOrNull { it.matches(dh) } ?: return@forEach
+                if (dh.mac.isNotEmpty() && kh.mac != dh.mac) {
+                    knownHostStore.learnMac(kh, dh.mac)
                     any = true
                 }
                 // Same for the OS-identity chain, so the card's icon survives the host sleeping.
-                if (dh.os.isNotEmpty() &&
-                    knownHostStore.get(dh.host, dh.port)?.let { it.os != dh.os } == true
-                ) {
-                    knownHostStore.learnOs(dh.host, dh.port, dh.os)
+                if (dh.os.isNotEmpty() && kh.os != dh.os) {
+                    knownHostStore.learnOs(kh, dh.os)
                     any = true
                 }
                 // And the mgmt port, so a host that moved off 47990 keeps its library once this
                 // device can no longer see the advert (VPN, routed subnet, multicast-dead Wi-Fi).
                 val mgmt = dh.mgmtPort
-                if (mgmt != null &&
-                    knownHostStore.get(dh.host, dh.port)?.let { it.mgmtPort != mgmt } == true
-                ) {
-                    knownHostStore.learnMgmtPort(dh.host, dh.port, mgmt)
+                if (mgmt != null && kh.mgmtPort != mgmt) {
+                    knownHostStore.learnMgmtPort(kh, mgmt)
                     any = true
                 }
             }
@@ -258,32 +259,45 @@ fun ConnectScreen(
         }
         if (learned) savedHosts = knownHostStore.all()
     }
-    // Saved hosts proven reachable by a QUIC probe this cycle, keyed "address:port" — and the ONLY
-    // thing [isOnline] reads. An mDNS advert is not proof of life: it is a cache entry with a
-    // 75-minute TTL that a host suspending sends no goodbye for, so a sleeping machine kept every
-    // pip green and every "not advertising" wake gate shut. Every saved host is probed, at the
-    // address its live advert claims when there is one (a cold boot can land on a new DHCP lease),
-    // off the main thread, every ~12 s; gated on LNP (blocked UDP would just time out).
-    // `rememberUpdatedState` keeps the 1 Hz mDNS updates from restarting the loop.
+    // Saved hosts proven reachable by a QUIC probe, by record id — and the ONLY thing [isOnline]
+    // reads. An mDNS advert is not proof of life: it is a cache entry with a 75-minute TTL that a
+    // host suspending sends no goodbye for, so a sleeping machine kept every pip green and every
+    // "not advertising" wake gate shut. [Presence] probes every saved host at its live address
+    // and its saved one, off the main thread, every ~12 s, and at once when the device lands on
+    // another network; gated on LNP (blocked UDP would just time out). `rememberUpdatedState`
+    // keeps the 1 Hz mDNS updates from restarting the loop.
     var reachable by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val presence = remember { PresenceTracker() }
     val discoveredNow by rememberUpdatedState(discovered)
-    LaunchedEffect(savedHosts, lnpGranted) {
+    var networkGen by remember { mutableIntStateOf(0) }
+    DisposableEffect(Unit) {
+        val onNetwork: () -> Unit = { networkGen++ }
+        discovery.addNetworkListener(onNetwork)
+        onDispose { discovery.removeNetworkListener(onNetwork) }
+    }
+    LaunchedEffect(savedHosts, lnpGranted, networkGen) {
         if (!lnpGranted) {
             reachable = emptySet()
             return@LaunchedEffect
         }
         while (true) {
-            // Keyed by the SAVED address whichever one answered, so the key stays the one every
-            // caller looks up.
-            val targets = savedHosts.map { kh ->
-                val live = discoveredNow.firstOrNull { kh.matches(it) }
-                Triple("${kh.address}:${kh.port}", live?.host ?: kh.address, live?.port ?: kh.port)
+            val saved = savedHosts
+            val up = withContext(Dispatchers.IO) {
+                Presence.sweep(
+                    saved,
+                    liveFor = { kh -> discoveredNow.firstOrNull { kh.matches(it) } },
+                    probe = { addr, port -> NativeBridge.nativeProbe(addr, port, Presence.PROBE_MS) },
+                )
             }
-            reachable = withContext(Dispatchers.IO) {
-                targets
-                    .filter { (_, addr, port) -> NativeBridge.nativeProbe(addr, port, 3_000) }
-                    .map { (key, _, _) -> key }
-                    .toSet()
+            reachable = presence.apply(saved.map { it.id }.toSet(), up.keys)
+            // A pinned host that answered somewhere else has moved: follow it, so the dial and
+            // the library fetch go where it lives. The list refresh restarts this loop.
+            val moved = withContext(Dispatchers.IO) {
+                saved.any { kh -> up[kh.id]?.let { knownHostStore.learnAddress(kh.fpHex, it.address, it.port) } == true }
+            }
+            if (moved) {
+                savedHosts = knownHostStore.all()
+                return@LaunchedEffect
             }
             delay(12_000)
         }
@@ -369,7 +383,7 @@ fun ConnectScreen(
         // advertised, and learnMgmtPort ignores it.
         if (record != null) {
             NativeBridge.nativeHostMgmtPort(handle).takeIf { it > 0 }?.let {
-                knownHostStore.learnMgmtPort(record.address, record.port, it)
+                knownHostStore.learnMgmtPort(record, it)
             }
         }
         return ActiveSession(
@@ -583,8 +597,9 @@ fun ConnectScreen(
     }
 
     // Decide pinned-reconnect vs fp-changed vs TOFU vs pairing before connecting. Trust state is
-    // keyed by address:port, so a discovered and a manually-typed connection to the same host share
-    // one record. Trust-on-first-use is permitted ONLY when the host advertised pair=optional; a
+    // keyed by the pinned fingerprint, falling back to address:port for a host typed in by hand,
+    // so a discovered and a manually-typed connection to the same host share one record.
+    // Trust-on-first-use is permitted ONLY when the host advertised pair=optional; a
     // pair=required host, or a manual/unknown-policy host, must pair — either by no-PIN request
     // access (approve in the console) or by the SPAKE2 PIN ceremony.
     fun connect(
@@ -605,8 +620,13 @@ fun ConnectScreen(
             lnpPrompt = true
             return
         }
-        val known = knownHostStore.get(targetHost, targetPort)
         val adv = dh?.fingerprint?.lowercase()
+        // The record this dial is about: the one carrying the advertised pin, else — only when
+        // nothing there is pinned — what the address answers with. Both OS installs of a
+        // dual-boot box answer at one lease, so a record pinned to another fingerprint is a
+        // different host, and its name and profile are not this one's.
+        val known = adv?.let { knownHostStore.getByFp(it) }
+            ?: knownHostStore.get(targetHost, targetPort)?.takeIf { adv == null || it.fpHex.isEmpty() }
         // Label precedence: a saved host keeps its (possibly user-renamed) name; else the discovered
         // mDNS name; else the name typed in the Add-host sheet; else the bare address.
         val name = known?.name ?: dh?.name ?: manualName?.trim()?.takeIf { it.isNotEmpty() } ?: targetHost
@@ -1060,13 +1080,16 @@ internal fun hasLocalNetworkPermission(context: Context): Boolean =
         PackageManager.PERMISSION_GRANTED
 
 /**
- * True when a saved host and a discovered advert are the same machine — matched by certificate
- * fingerprint when both carry it (so it survives a DHCP address change), else by address:port.
- * Mirrors the Apple client's `StoredHost.matches`; de-dupes "Discovered" against "Saved hosts".
+ * True when a saved host and a discovered advert are the same machine. Two known fingerprints
+ * decide it alone — it survives a DHCP address change, and it keeps the other OS of a dual-boot
+ * box (one lease, one MAC, a certificate each) out of the record already saved for the first.
+ * Only when one side is unpinned does the address answer. Mirrors the Apple client's
+ * `StoredHost.matches` and the Rust `discovery::same_host`; de-dupes "Discovered" against
+ * "Saved hosts".
  */
 internal fun KnownHost.matches(dh: DiscoveredHost): Boolean {
     val advFp = dh.fingerprint?.lowercase()
-    if (!advFp.isNullOrEmpty() && fpHex.isNotEmpty() && fpHex.lowercase() == advFp) return true
+    if (!advFp.isNullOrEmpty() && fpHex.isNotEmpty()) return fpHex.lowercase() == advFp
     return address == dh.host && port == dh.port
 }
 
@@ -1080,5 +1103,4 @@ internal fun KnownHost.matches(dh: DiscoveredHost): Boolean {
  * `internal`, not private: the touch grid draws the same pip in its own file now, and the console's
  * tile builder is handed this as a lambda so it never has to know what "reachable" is made of.
  */
-internal fun KnownHost.isOnline(reachable: Set<String>): Boolean =
-    reachable.contains("$address:$port")
+internal fun KnownHost.isOnline(reachable: Set<String>): Boolean = id in reachable

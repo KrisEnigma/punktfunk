@@ -25,6 +25,7 @@ mod data;
 mod datagram_task;
 mod handshake;
 mod input_task;
+mod rx_gap;
 
 pub(super) async fn run_pump(args: WorkerArgs) {
     let hs = match handshake::connect_and_handshake(&args).await {

@@ -1132,7 +1132,11 @@ pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec 
         RowId::Codec => (
             None,
             "Video codec",
-            label_for(codecs(ctx.platform), &s.codec).into(),
+            if s.codec == "pyrowave" && !ctx.pyrowave_ok {
+                "PyroWave (unsupported)".into()
+            } else {
+                label_for(codecs(ctx.platform), &s.codec).into()
+            },
         ),
         // Migrate before lookup or a legacy store (`vulkan`/`vaapi`) shows "—".
         RowId::Decoder => (
@@ -1368,6 +1372,10 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         }
         RowId::Compositor => {
             "Which compositor drives the virtual output — honored only if available on the host."
+        }
+        RowId::Codec if ctx.settings.codec == "pyrowave" && !ctx.pyrowave_ok => {
+            "This device can't decode PyroWave — it needs a Vulkan 1.3 GPU, which most TV \
+             boxes don't have. The session streams HEVC instead."
         }
         RowId::Codec => "A preference — the host falls back if it can't encode this one.",
         RowId::Decoder => "Automatic picks the best hardware decoder for this GPU, then software.",
@@ -1984,6 +1992,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2019,6 +2028,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2080,6 +2090,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2123,6 +2134,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2155,6 +2167,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2194,6 +2207,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2222,6 +2236,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2256,6 +2271,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: true,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2265,6 +2281,42 @@ pub(crate) mod tests {
         ctx.settings.codec = "h264".into();
         assert!(adjust(RowId::Codec, 1, true, &mut ctx));
         assert_eq!(ctx.settings.codec, "av1");
+    }
+
+    /// A GPU without the codec's compute set says so on the row, in both places a user
+    /// reads: the value and the line under the list. The other codecs are untouched.
+    #[test]
+    fn pyrowave_reads_unsupported_where_the_gpu_cannot_decode_it() {
+        let (mut settings, pads) = ctx_parts();
+        settings.codec = "pyrowave".into();
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::Android,
+            pads: &pads,
+            deck: false,
+            fallback_ui: false,
+            pyrowave_ok: false,
+            device_name: "t",
+            t: 0.0,
+        };
+        let value = row_spec(RowId::Codec, &ctx, &[]).value.unwrap();
+        assert!(value.contains("unsupported"), "value said {value}");
+        assert!(detail(RowId::Codec, &ctx).contains("can't decode PyroWave"));
+
+        ctx.settings.codec = "hevc".into();
+        assert_eq!(row_spec(RowId::Codec, &ctx, &[]).value.unwrap(), "HEVC");
+        assert!(!detail(RowId::Codec, &ctx).contains("PyroWave"));
+
+        ctx.settings.codec = "pyrowave".into();
+        ctx.pyrowave_ok = true;
+        assert_eq!(
+            row_spec(RowId::Codec, &ctx, &[]).value.unwrap(),
+            "PyroWave (wired LAN)"
+        );
     }
 
     #[test]
@@ -2282,6 +2334,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2312,6 +2365,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2381,6 +2435,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2413,6 +2468,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2443,6 +2499,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2472,6 +2529,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2502,6 +2560,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2589,6 +2648,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2639,6 +2699,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2669,6 +2730,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2933,6 +2995,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2973,6 +3036,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3008,6 +3072,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3047,6 +3112,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3117,6 +3183,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3167,6 +3234,7 @@ pub(crate) mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };

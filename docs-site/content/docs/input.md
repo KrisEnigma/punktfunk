@@ -248,12 +248,15 @@ one controller arrive when it appears and one leave when it goes, exactly as for
 next free pad index beside any real controller you have connected. A finger on one of its controls
 drives the game; a finger anywhere else still drives the touch mode, so tap-to-click keeps working
 beside it. A stick follows your thumb from wherever it lands, the D-pad reads eight directions, and a
-trigger reads how far down its pill your finger sits, so a slow press is a slow press. **Layout**,
-**Opacity** and **Scale** live under Quick actions in the [client settings](/docs/client-settings#input):
-Full (two sticks, D-pad, face buttons, bumpers and triggers), Sticks and shoulders, or D-pad and
-face buttons. **Edit layout** there rearranges the preset by hand — drag any control where your
-thumbs actually sit, grow or shrink it, or hide the ones a game never needs — with separate
-arrangements for wide and upright screens. Not on Apple TV, a Steam Deck or the desktop clients.
+trigger reads how far down its pill your finger sits, so a slow press is a slow press. **L3** and
+**R3** are discs of their own, beside the triggers: a stick and its click are separate controls
+here, so a thumb can hold a direction while another finger clicks. **Layout**, **Opacity** and
+**Scale** live under Quick actions in the [client settings](/docs/client-settings#input):
+Full (two sticks, D-pad, face buttons, bumpers, triggers and the stick clicks), Sticks and
+shoulders, or D-pad and face buttons. **Edit layout** there rearranges the preset by hand — drag
+any control where your thumbs actually sit, grow or shrink it, or hide the ones a game never
+needs — with separate arrangements for wide and upright screens. Not on Apple TV, a Steam Deck
+or the desktop clients.
 
 ## Pen and stylus
 
