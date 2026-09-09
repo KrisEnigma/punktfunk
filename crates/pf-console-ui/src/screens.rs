@@ -62,6 +62,9 @@ pub struct Ctx<'a> {
     /// Host has a fallback UI ([`crate::shell::ConsoleOptions::fallback_ui`]); gates the
     /// console-off row.
     pub fallback_ui: bool,
+    /// This device decodes PyroWave ([`crate::shell::ConsoleOptions::pyrowave_ok`]).
+    /// False marks the codec row's PyroWave value unsupported.
+    pub pyrowave_ok: bool,
     /// Name the host stores this client under when pairing.
     pub device_name: &'a str,
     /// Shell clock in seconds (spinners, pulses).

@@ -164,6 +164,7 @@ impl Shell {
             pads: &self.pads,
             deck: self.deck,
             fallback_ui: self.fallback_ui,
+            pyrowave_ok: self.pyrowave_ok,
             device_name: &self.device_name,
             t,
             glyphs: self.glyphs,
@@ -304,6 +305,7 @@ struct LayerEnv<'a> {
     pads: &'a [PadInfo],
     deck: bool,
     fallback_ui: bool,
+    pyrowave_ok: bool,
     device_name: &'a str,
     t: f64,
     glyphs: GlyphStyle,
@@ -347,6 +349,7 @@ impl LayerEnv<'_> {
             pads: self.pads,
             deck: self.deck,
             fallback_ui: self.fallback_ui,
+            pyrowave_ok: self.pyrowave_ok,
             device_name: self.device_name,
             t: self.t,
         };
