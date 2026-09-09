@@ -954,12 +954,14 @@ pub struct PresentPref {
 
 /// First offered mode from this ladder; FIFO always last (spec-guaranteed).
 ///
-/// V-sync off: IMMEDIATE, FIFO_RELAXED, MAILBOX.
+/// V-sync on admits no tearing rung: IMMEDIATE and FIFO_RELAXED stay out, so a
+/// surface offering neither MAILBOX nor LATEST_READY lands on FIFO.
 /// V-sync + VRR + fullscreen with LATEST_READY or `PUNKTFUNK_VRR_FIFO=1`:
 /// vblank-locked family first — MAILBOX would re-quantize to the compositor.
 /// LATEST_READY is newest-wins in the driver; plain FIFO waits a full refresh,
 /// so without LATEST_READY that rung is opt-in.
 /// Otherwise MAILBOX first so an arrival-paced presenter does not block.
+/// V-sync off: IMMEDIATE, FIFO_RELAXED, MAILBOX.
 fn present_mode_chain(pref: PresentPref) -> Vec<vk::PresentModeKHR> {
     use vk::PresentModeKHR as M;
     let flr = pref.fifo_latest_ready.then_some(fifo_latest_ready::MODE);
@@ -967,23 +969,17 @@ fn present_mode_chain(pref: PresentPref) -> Vec<vk::PresentModeKHR> {
         vec![M::IMMEDIATE, M::FIFO_RELAXED, M::MAILBOX]
     } else if pref.allow_vrr && pref.fullscreen && (pref.fifo_latest_ready || pref.vrr_fifo_opt_in)
     {
-        vec![]
-            .into_iter()
-            .chain(flr)
-            .chain([M::FIFO, M::MAILBOX, M::FIFO_RELAXED, M::IMMEDIATE])
-            .collect()
+        flr.into_iter().chain([M::FIFO, M::MAILBOX]).collect()
     } else {
-        vec![M::MAILBOX]
-            .into_iter()
-            .chain(flr)
-            .chain([M::FIFO_RELAXED, M::IMMEDIATE])
-            .collect()
+        vec![M::MAILBOX].into_iter().chain(flr).collect()
     };
     if !pref.vsync {
         chain.extend(flr);
     }
     // FIFO last: the spec guarantees it, so the chain always lands.
-    chain.push(M::FIFO);
+    if !chain.contains(&M::FIFO) {
+        chain.push(M::FIFO);
+    }
     chain
 }
 
@@ -1156,6 +1152,39 @@ mod tests {
             assert!(
                 present_mode_chain(p).contains(&M::FIFO),
                 "FIFO is the guaranteed landing"
+            );
+        }
+    }
+
+    /// V-sync on may hold no tearing rung. The field surface offers only
+    /// `[IMMEDIATE, FIFO]`, and a ladder that lists IMMEDIATE ahead of its FIFO
+    /// landing tears on every such client.
+    #[test]
+    fn vsync_never_lands_on_a_tearing_mode() {
+        let offered = [M::IMMEDIATE, M::FIFO];
+        for (allow_vrr, fullscreen, vrr_fifo_opt_in, fifo_latest_ready) in [
+            (false, false, false, false),
+            (true, true, false, false),
+            (true, true, true, false),
+            (true, true, false, true),
+            (true, false, true, true),
+            (false, true, true, true),
+        ] {
+            let chain = present_mode_chain(PresentPref {
+                vsync: true,
+                allow_vrr,
+                fullscreen,
+                vrr_fifo_opt_in,
+                fifo_latest_ready,
+            });
+            assert!(
+                !chain.contains(&M::IMMEDIATE) && !chain.contains(&M::FIFO_RELAXED),
+                "tear-free intent, tearing rung in {chain:?}"
+            );
+            assert_eq!(
+                chain.iter().find(|m| offered.contains(m)),
+                Some(&M::FIFO),
+                "{chain:?} on an IMMEDIATE/FIFO surface"
             );
         }
     }
