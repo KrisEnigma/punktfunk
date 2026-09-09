@@ -1,5 +1,5 @@
 {
-  "$comment": "Single source for the install/port facts that used to drift across four surfaces (docs-and-onboarding-overhaul WP1). Consumers: docs-site install pages (<Install platform=…/> and <Ports/> in docs-site/src/components/platforms.tsx, reading the byte-identical snapshot docs-site/src/data/platforms.json that check-docs-drift.sh gates), the website download page (WP3), the guided install script (WP4). A port number, repo URL or install command lives HERE and nowhere else — pages quote it, they don't restate it. `install` is the shell snippet that puts the package on the box (lines, in order); `url` is a download/store link where there is no command. Validated by scripts/ci/check-docs-drift.sh (parse + snapshot sync; ponytail: cross-check against code literals when a consumer exists).",
+  "$comment": "Single source for the install/port facts that used to drift across four surfaces (docs-and-onboarding-overhaul WP1). Consumers: docs-site install pages (<Install platform=…/> and <Ports/> in docs-site/src/components/platforms.tsx, reading the byte-identical snapshot docs-site/src/data/platforms.json that check-docs-drift.sh gates), the website download page (WP3), the guided install script (WP4). A port number, repo URL or install command lives HERE and nowhere else — pages quote it, they don't restate it. `install` is the shell snippet that puts the package on the box (lines, in order); `url` is a download/store link — the canonical download when a platform ships one, with or without an `install` snippet beside it. Validated by scripts/ci/check-docs-drift.sh (parse + snapshot sync; ponytail: cross-check against code literals when a consumer exists).",
 
   "ports": {
     "mgmt": {
@@ -175,8 +175,9 @@
       "id": "windows",
       "name": "Windows 11 (22H2+)",
       "installs": "host",
-      "packageManager": "winget",
+      "packageManager": "installer",
       "docs": "/docs/windows-host",
+      "url": "https://git.unom.io/api/packages/unom/generic/punktfunk-host-windows/latest/punktfunk-host-setup.exe",
       "install": [
         "winget source add -n punktfunk https://winget.punktfunk.unom.io -t Microsoft.Rest",
         "winget install unom.PunktfunkHost"
