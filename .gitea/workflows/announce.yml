@@ -101,12 +101,33 @@ jobs:
             echo "ERROR: set AUTHENTICODE_SUBJECT to the stable signing certificate CN" >&2
             exit 1
           fi
+          # Azure Trusted Signing chains to the Microsoft Identity Verification Root CA 2020, which
+          # the Mozilla bundle does not carry, so the root is vendored and pinned; the timestamp
+          # chain roots there too. The pin is what keeps a verified signature past the 3-day leaf.
+          ROOT=ci/certs/microsoft-identity-verification-root-2020.pem
           VERIFY="$(osslsigncode verify \
-            -CAfile /etc/ssl/certs/ca-certificates.crt \
+            -CAfile "$ROOT" -TSA-CAfile "$ROOT" \
             -require-leaf-hash "sha256:$LEAF_SHA" \
-            -in /tmp/installer.exe 2>&1)"
+            -in /tmp/installer.exe 2>&1)" || {
+            printf '%s\n' "$VERIFY"
+            echo "ERROR: Authenticode verification of the x64 installer failed" >&2
+            exit 1
+          }
           printf '%s\n' "$VERIFY"
-          SIGNER="$(printf '%s\n' "$VERIFY" | sed -n 's#.*CN=\([^/]*\).*#\1#p' | sed -n '1p')"
+          # The CN comes from the certificate carrying the pinned leaf hash, decoded by openssl:
+          # a BMPString CN (any non-ASCII byte) prints \x-escaped in osslsigncode's own listing.
+          osslsigncode extract-signature -pem -in /tmp/installer.exe -out /tmp/sig.pem >/dev/null
+          openssl pkcs7 -in /tmp/sig.pem -print_certs -out /tmp/chain.pem >/dev/null
+          rm -rf /tmp/chain && mkdir /tmp/chain
+          awk '/-----BEGIN CERTIFICATE-----/{n++} n{print > ("/tmp/chain/" n ".pem")}' /tmp/chain.pem
+          SIGNER=""
+          for c in /tmp/chain/*.pem; do
+            if [ "$(openssl x509 -in "$c" -outform DER | sha256sum | awk '{print $1}')" = "$LEAF_SHA" ]; then
+              SIGNER="$(openssl x509 -in "$c" -noout -subject -nameopt utf8,-esc_msb,sep_multiline \
+                | sed -n 's/^ *CN=//p' | sed -n '1p')"
+              break
+            fi
+          done
           if [ -z "$SIGNER" ] || [ "$SIGNER" != "$AUTHENTICODE_SUBJECT" ]; then
             echo "ERROR: installer signer '$SIGNER' is not '$AUTHENTICODE_SUBJECT'" >&2
             exit 1
@@ -115,7 +136,7 @@ jobs:
           A64_URL="https://git.unom.io/unom/punktfunk/releases/download/${TAG}/punktfunk-host-setup-${VER}_arm64.exe"
           if curl -fsSL "$A64_URL" -o /tmp/installer-arm64.exe; then
             A64_SHA="$(sha256sum /tmp/installer-arm64.exe | awk '{print $1}')"
-            osslsigncode verify -CAfile /etc/ssl/certs/ca-certificates.crt \
+            osslsigncode verify -CAfile "$ROOT" -TSA-CAfile "$ROOT" \
               -require-leaf-hash "sha256:$LEAF_SHA" -in /tmp/installer-arm64.exe >/dev/null || {
               echo "ERROR: the arm64 installer is not signed by leaf $LEAF_SHA" >&2; exit 1; }
           else
