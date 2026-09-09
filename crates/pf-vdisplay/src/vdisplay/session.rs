@@ -457,6 +457,91 @@ pub(crate) fn sway_socket() -> Option<String> {
     find_sway_socket(&probe, &runtime, crate::proc::current_uid(), None)
 }
 
+/// `(DISPLAY, XAUTHORITY)` for an X11 child of the live session — Steam, Lutris, most native
+/// games. Per-spawn like [`hypr_signature`]: [`apply_session_env`] cannot carry it, and a systemd
+/// `--user` host has no `DISPLAY` of its own (the unit starts before the session exports one, and
+/// `import-environment` never reaches a running unit).
+///
+/// Inherited first when its socket is still there, else read off a same-uid process already inside
+/// the session. `/proc` holds the exec-time block, so the compositor's own late `setenv` is
+/// invisible: what answers is something the session launched (plasmashell, the polkit agent).
+#[cfg(target_os = "linux")]
+pub fn session_x11_env() -> Option<(String, Option<String>)> {
+    use std::os::unix::fs::MetadataExt;
+    let (display, xauthority) = crate::with_env_lock(|| {
+        let v = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+        (v("DISPLAY"), v("XAUTHORITY"))
+    });
+    if let Some(d) = display.filter(|d| x11_socket_live(d)) {
+        return Some((d, xauthority));
+    }
+    let want_wayland = EnvProbe::sample().wayland_display;
+    let uid = crate::proc::current_uid();
+    let mut any = None;
+    for e in std::fs::read_dir("/proc").ok()?.flatten() {
+        let name = e.file_name();
+        if !name.as_encoded_bytes().iter().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(md) = e.metadata() else { continue };
+        if md.uid() != uid {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(e.path().join("environ")) else {
+            continue;
+        };
+        let Some((d, xauth, wayland)) = x11_env_from_environ(&raw) else {
+            continue;
+        };
+        if !x11_socket_live(&d) {
+            continue;
+        }
+        // The compositor we stream is the certain answer; another session's is a last resort.
+        if want_wayland.is_some() && want_wayland == wayland {
+            return Some((d, xauth));
+        }
+        any.get_or_insert((d, xauth));
+    }
+    any
+}
+
+/// `(DISPLAY, XAUTHORITY, WAYLAND_DISPLAY)` from one `/proc/<pid>/environ` block. `None` when the
+/// block names no display, or when it belongs to a nested gamescope — that Xwayland dies with the
+/// game, and a desktop launch aimed at it lands nowhere.
+#[cfg(target_os = "linux")]
+fn x11_env_from_environ(raw: &[u8]) -> Option<(String, Option<String>, Option<String>)> {
+    let (mut display, mut xauth, mut wayland) = (None, None, None);
+    for kv in raw.split(|&b| b == 0) {
+        let kv = String::from_utf8_lossy(kv);
+        let take = |k: &str| {
+            kv.strip_prefix(k)
+                .filter(|v| !v.is_empty())
+                .map(String::from)
+        };
+        if kv.starts_with("GAMESCOPE_WAYLAND_DISPLAY=") {
+            return None;
+        } else if let Some(v) = take("DISPLAY=") {
+            display = Some(v);
+        } else if let Some(v) = take("XAUTHORITY=") {
+            xauth = Some(v);
+        } else if let Some(v) = take("WAYLAND_DISPLAY=") {
+            wayland = Some(v);
+        }
+    }
+    Some((display?, xauth, wayland))
+}
+
+/// Does this `DISPLAY` still have a socket? Guards against a value inherited from an X server that
+/// is gone. Only the local `:N[.S]` form is checkable; a `host:N` passes on trust.
+#[cfg(target_os = "linux")]
+fn x11_socket_live(display: &str) -> bool {
+    let Some(rest) = display.strip_prefix(':') else {
+        return true;
+    };
+    let n = rest.split('.').next().unwrap_or(rest);
+    !n.is_empty() && std::path::Path::new(&format!("/tmp/.X11-unix/X{n}")).exists()
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn detect_active_session() -> ActiveSession {
     ActiveSession::none()
@@ -812,5 +897,65 @@ mod tests {
         // ownership guard and this test is vacuous.
         let got = find_sway_socket(&no_inherited_env(), rt.path(), rt.uid, Some(999));
         assert_eq!(got, None, "a socket owned by another uid must be rejected");
+    }
+
+    fn environ(vars: &[&str]) -> Vec<u8> {
+        vars.join("\0").into_bytes()
+    }
+
+    /// The session's own display, with the auth file that goes with it.
+    #[test]
+    fn a_session_process_yields_its_display_and_auth() {
+        let raw = environ(&[
+            "HOME=/home/u",
+            "WAYLAND_DISPLAY=wayland-kde",
+            "DISPLAY=:0",
+            "XAUTHORITY=/run/user/1000/xauth_ab",
+        ]);
+        assert_eq!(
+            x11_env_from_environ(&raw),
+            Some((
+                ":0".into(),
+                Some("/run/user/1000/xauth_ab".into()),
+                Some("wayland-kde".into())
+            ))
+        );
+    }
+
+    /// A nested gamescope's Xwayland dies with the game — launching a desktop app at it lands
+    /// nowhere, so its block must not answer even though it carries a perfectly good `DISPLAY`.
+    #[test]
+    fn a_gamescope_display_is_refused() {
+        let raw = environ(&["DISPLAY=:1", "GAMESCOPE_WAYLAND_DISPLAY=gamescope-0"]);
+        assert_eq!(x11_env_from_environ(&raw), None);
+    }
+
+    /// Every Wayland-only process has an empty or absent `DISPLAY`. Neither is a display.
+    #[test]
+    fn no_usable_display_reports_none() {
+        assert_eq!(x11_env_from_environ(&environ(&["DISPLAY="])), None);
+        assert_eq!(
+            x11_env_from_environ(&environ(&["WAYLAND_DISPLAY=w-1"])),
+            None
+        );
+    }
+
+    /// `WAYLAND_DISPLAY` starts with the same letters as no key we read — a Wayland-only session
+    /// must not be mistaken for an X11 one.
+    #[test]
+    fn wayland_display_is_not_read_as_display() {
+        let raw = environ(&["WAYLAND_DISPLAY=:0"]);
+        assert_eq!(x11_env_from_environ(&raw), None);
+    }
+
+    /// A dead X server leaves the value behind; the socket is what says it is gone.
+    #[test]
+    fn only_a_display_with_a_socket_is_live() {
+        assert!(!x11_socket_live(":99999"));
+        assert!(!x11_socket_live(":"));
+        assert!(
+            x11_socket_live("box.lan:0"),
+            "remote displays pass on trust"
+        );
     }
 }
