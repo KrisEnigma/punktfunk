@@ -167,9 +167,10 @@ private fun disc(id: String, label: String, glyph: String, bit: Int, cx: Float, 
  * The preset's controls for a layer [w] × [h] dp (the container divided by the scale). Positions
  * are fixed per preset (§4.3): sticks in the bottom corners, the D-pad beside the left stick, the
  * face buttons in the bottom-right corner with the right stick beside them, the shoulders in the
- * top corners, Select, Guide and Start along the bottom edge. A narrow layer lifts the D-pad and
- * the right stick above their neighbours; the middle three keep the bottom edge only while the
- * clusters leave it free, and take the top edge when they do not. An unknown preset is `full`.
+ * top corners with the stick clicks beside them, Select, Guide and Start along the bottom edge. A
+ * narrow layer lifts the D-pad and the right stick above their neighbours; the middle three keep
+ * the bottom edge only while the clusters leave it free, and take the top edge when they do not.
+ * An unknown preset is `full`.
  */
 internal fun padControls(layout: String, w: Float, h: Float): List<PadControl> {
     val narrow = w < NARROW
@@ -182,6 +183,12 @@ internal fun padControls(layout: String, w: Float, h: Float): List<PadControl> {
         out += PadControl.Trigger("lt", "Left trigger", PadRect(MARGIN, MARGIN + 2 * BUMPER_R + 8, TRIGGER_W, TRIGGER_H), Gamepad.AXIS_LT)
         out += disc("rb", "Right bumper", "RB", Gamepad.BTN_RB, w - MARGIN - BUMPER_R, MARGIN + BUMPER_R, BUMPER_R)
         out += PadControl.Trigger("rt", "Right trigger", PadRect(w - MARGIN - TRIGGER_W, MARGIN + 2 * BUMPER_R + 8, TRIGGER_W, TRIGGER_H), Gamepad.AXIS_RT)
+        // The stick clicks sit inboard of the triggers, level with them: the index finger already
+        // rests there, and the thumb keeps the stick — which is what L3-to-sprint asks for.
+        val clickY = MARGIN + 2 * BUMPER_R + 8 + TRIGGER_H / 2
+        val clickX = MARGIN + TRIGGER_W + 8 + SMALL_R
+        out += disc("l3", "Left stick click", "L3", Gamepad.BTN_LS_CLICK, clickX, clickY, SMALL_R)
+        out += disc("r3", "Right stick click", "R3", Gamepad.BTN_RS_CLICK, w - clickX, clickY, SMALL_R)
         out += PadControl.Stick("ls", "Left stick", PadRect(MARGIN, bottom - STICK_HIT, STICK_HIT, STICK_HIT), Gamepad.AXIS_LS_X, Gamepad.AXIS_LS_Y)
     }
     if (face) {
