@@ -106,9 +106,9 @@ private func disc(_ id: String, _ label: String, _ glyph: String, _ bit: UInt32,
 /// The preset's controls for a layer `w` × `h` points (the container divided by the scale).
 /// Positions are fixed per preset (§4.3): sticks in the bottom corners, the D-pad beside the left
 /// stick, the face buttons in the bottom-right corner with the right stick beside them, the
-/// shoulders in the top corners, Select, Guide and Start along the bottom edge. A narrow layer
-/// lifts the D-pad and the right stick above their neighbours and puts the middle three along the
-/// top edge instead. An unknown preset is `full`.
+/// shoulders in the top corners with the stick clicks beside them, Select, Guide and Start along
+/// the bottom edge. A narrow layer lifts the D-pad and the right stick above their neighbours and
+/// puts the middle three along the top edge instead. An unknown preset is `full`.
 public func padControls(layout: String, w: Float, h: Float) -> [PadControl] {
     typealias P = VirtualPad
     let narrow = w < P.narrow
@@ -125,6 +125,12 @@ public func padControls(layout: String, w: Float, h: Float) -> [PadControl] {
         out.append(PadControl(id: "rt", label: "Right trigger",
                               rect: PadRect(w - P.margin - P.triggerW, P.margin + 2 * P.bumperRadius + 8, P.triggerW, P.triggerH),
                               kind: .trigger(axis: GamepadWire.axisRT)))
+        // The stick clicks sit inboard of the triggers, level with them: the index finger already
+        // rests there, and the thumb keeps the stick — which is what L3-to-sprint asks for.
+        let clickY = P.margin + 2 * P.bumperRadius + 8 + P.triggerH / 2
+        let clickX = P.margin + P.triggerW + 8 + P.smallRadius
+        out.append(disc("l3", "Left stick click", "L3", GamepadWire.leftStickClick, clickX, clickY, P.smallRadius))
+        out.append(disc("r3", "Right stick click", "R3", GamepadWire.rightStickClick, w - clickX, clickY, P.smallRadius))
         out.append(PadControl(id: "ls", label: "Left stick",
                               rect: PadRect(P.margin, bottom - P.stickHit, P.stickHit, P.stickHit),
                               kind: .stick(axisX: GamepadWire.axisLSX, axisY: GamepadWire.axisLSY)))
