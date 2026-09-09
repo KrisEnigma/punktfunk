@@ -159,6 +159,10 @@ pub struct WlrootsInjector {
     /// Buttons held on `pointer`. Released before destroy; the compositor will not.
     pressed: Vec<u32>,
     keyboard: ZwpVirtualKeyboardV1,
+    /// Keys held on `keyboard` (evdev). Only a transition reaches `xkb_state`: it counts
+    /// presses per key, and this injector outlives the session, so an unmatched down
+    /// would pin its modifier for the host's lifetime.
+    held_keys: Vec<u16>,
     xkb_state: xkb::State,
     _keymap_file: std::fs::File, // compositor mmaps this memfd; drop would unmap it
     text: Option<TextKeyboard>,
@@ -279,6 +283,7 @@ impl WlrootsInjector {
             bound_output,
             pressed: Vec::new(),
             keyboard,
+            held_keys: Vec::new(),
             xkb_state,
             _keymap_file: file,
             text: None,
@@ -401,14 +406,9 @@ impl WlrootsInjector {
         Ok(())
     }
 
-    fn send_modifiers(&mut self, evdev: u16, down: bool) {
-        let kc = xkb::Keycode::new(evdev as u32 + 8); // xkb keycodes are evdev + 8
-        let dir = if down {
-            xkb::KeyDirection::Down
-        } else {
-            xkb::KeyDirection::Up
-        };
-        self.xkb_state.update_key(kc, dir);
+    /// Re-assert the modifier mask after every key, repeats included: the compositor's own
+    /// per-key press count can drift, and `modifiers` is what overrides it.
+    fn send_modifiers(&mut self) {
         let depressed = self.xkb_state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
         let latched = self.xkb_state.serialize_mods(xkb::STATE_MODS_LATCHED);
         let locked = self.xkb_state.serialize_mods(xkb::STATE_MODS_LOCKED);
@@ -497,7 +497,11 @@ impl InputInjector for WlrootsInjector {
                 let down = event.kind == InputKind::KeyDown;
                 if let Some(evdev) = vk_to_evdev(event.code as u8) {
                     self.keyboard.key(t, evdev as u32, if down { 1 } else { 0 });
-                    self.send_modifiers(evdev, down);
+                    if note_key(&mut self.held_keys, evdev, down) {
+                        self.xkb_state
+                            .update_key(xkb_keycode(evdev), key_direction(down));
+                    }
+                    self.send_modifiers();
                 } else {
                     tracing::debug!(vk = event.code, "unmapped VK keycode — dropped");
                 }
@@ -514,6 +518,31 @@ impl InputInjector for WlrootsInjector {
             InputKind::TouchDown | InputKind::TouchMove | InputKind::TouchUp => {}
         }
         self.pump()
+    }
+}
+
+/// Record a key on the held set; `true` when it is a transition. A down for a held key is a
+/// repeat (or the up was lost to the client OS); an up for a key not held is stale. Neither
+/// may reach `xkb_state`, whose per-key press count only unwinds with matching ups.
+fn note_key(held: &mut Vec<u16>, evdev: u16, down: bool) -> bool {
+    let was_held = held.contains(&evdev);
+    if down && !was_held {
+        held.push(evdev);
+    } else if !down {
+        held.retain(|&k| k != evdev);
+    }
+    down != was_held
+}
+
+fn xkb_keycode(evdev: u16) -> xkb::Keycode {
+    xkb::Keycode::new(evdev as u32 + 8) // xkb keycodes are evdev + 8
+}
+
+fn key_direction(down: bool) -> xkb::KeyDirection {
+    if down {
+        xkb::KeyDirection::Down
+    } else {
+        xkb::KeyDirection::Up
     }
 }
 
@@ -591,6 +620,61 @@ mod tests {
         assert_eq!(take_detents(&mut rem, -300), -2);
         assert_eq!(take_detents(&mut rem, -60), -1);
         assert_eq!(rem, 0);
+    }
+
+    const KEY_LEFTMETA: u16 = 125;
+    const KEY_A: u16 = 30;
+
+    /// A repeated down and a stale up are not transitions; the one up after repeats is.
+    #[test]
+    fn repeats_and_stale_ups_are_not_transitions() {
+        let mut held = Vec::new();
+        assert!(note_key(&mut held, KEY_LEFTMETA, true));
+        assert!(!note_key(&mut held, KEY_LEFTMETA, true), "auto-repeat");
+        assert!(!note_key(&mut held, KEY_LEFTMETA, true));
+        assert!(note_key(&mut held, KEY_A, true));
+        assert!(note_key(&mut held, KEY_LEFTMETA, false));
+        assert!(
+            !note_key(&mut held, KEY_LEFTMETA, false),
+            "session-end release after a real up"
+        );
+        assert_eq!(held, [KEY_A]);
+    }
+
+    /// The trap the gate exists for: xkb counts presses per key, so two Super downs and one up
+    /// leave Super depressed for good. Gated on transitions, the same stream clears it.
+    #[test]
+    fn xkb_counts_presses_so_only_transitions_may_feed_it() {
+        let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let Some(keymap) = xkb::Keymap::new_from_names(
+            &ctx,
+            "evdev",
+            "pc105",
+            "us",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        ) else {
+            eprintln!("no xkb data on this box — skipped");
+            return;
+        };
+        let stream = [
+            (KEY_LEFTMETA, true),
+            (KEY_LEFTMETA, true),
+            (KEY_LEFTMETA, false),
+        ];
+        let depressed = |gate: bool| {
+            let mut st = xkb::State::new(&keymap);
+            let mut held = Vec::new();
+            for (k, down) in stream {
+                if !gate || note_key(&mut held, k, down) {
+                    st.update_key(xkb_keycode(k), key_direction(down));
+                }
+            }
+            st.serialize_mods(xkb::STATE_MODS_DEPRESSED)
+        };
+        assert_ne!(depressed(false), 0, "ungated: Super pinned after the up");
+        assert_eq!(depressed(true), 0, "gated: the one up clears it");
     }
 
     /// Physical head first, session head later — advertisement order on a real box.
