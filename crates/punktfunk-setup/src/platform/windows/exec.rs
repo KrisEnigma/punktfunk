@@ -215,7 +215,10 @@ impl WinExecutor<'_> {
                     return Ok(());
                 }
                 for path in paths {
-                    match std::fs::remove_file(path) {
+                    // `<start menu>` and friends resolve here, not in the dry run: the
+                    // transcript keeps the placeholder, the real run needs the folder.
+                    let path = self.sub(path);
+                    match std::fs::remove_file(&path) {
                         Ok(()) => self.ui.ok(&format!("deleted {path}")),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                             self.ui.detail(&format!("{path} — already gone"));
