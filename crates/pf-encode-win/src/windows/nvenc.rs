@@ -2459,7 +2459,9 @@ mod tests {
     use windows::Win32::Graphics::Direct3D11::{
         D3D11_BIND_RENDER_TARGET, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     };
-    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+    use windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_SAMPLE_DESC,
+    };
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
     };
@@ -2467,9 +2469,7 @@ mod tests {
     #[test]
     #[ignore = "requires an RTX GPU with HEVC/AV1 encode and the default synchronous retrieve mode"]
     fn nvenc_prepare_publishes_caps_before_submit() {
-        use windows::Win32::Graphics::Dxgi::Common::{
-            DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM,
-        };
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_FORMAT_P010};
 
         // SAFETY: DXGI factory creation borrows nothing and has no preconditions.
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI factory");
@@ -2672,16 +2672,33 @@ mod tests {
     /// The wave on NVENC, one HEVC stream: a loss with no anchor starts wave A (marks on
     /// its start and close, no IDR); a loss of the plain P after it anchors on the close; a
     /// loss whose anchor would be a dirty picture of A waves again (B); a loss mid-B spoils
-    /// it (no close mark) and queues C on the frame after B closes. Dumps the stream and two
-    /// client views for the decode check: `-dropA` loses frames 1–2 ahead of A, `-dropC`
-    /// loses the two frames ahead of the mid-B loss; C's close must decode identical.
+    /// it (no close mark) and queues C on the frame after B closes. Dumps the stream and
+    /// four client views for the decode check: `-dropA` loses frames 1–2 ahead of A,
+    /// `-dropL` the frame the anchor P answers, `-dropP` the anchor P ahead of B, `-dropC`
+    /// the two frames ahead of the mid-B loss; the anchor P, B's close and C's close must
+    /// decode identical. `PF_WAVE_SMOKE=WxH[:bits[:fps]]` runs a production shape
+    /// (`3840x2160:10:120`); 10-bit feeds R10G10B10A2 textures.
     ///
     /// `cargo test -p pf-encode-win --features nvenc nvenc_wave_smoke -- --ignored --nocapture`
     #[test]
     #[ignore = "requires an NVIDIA GPU + driver — run manually on the RTX box (.173)"]
     fn nvenc_wave_smoke() {
-        const W: u32 = 256;
-        const H: u32 = 256;
+        let shape = std::env::var("PF_WAVE_SMOKE").unwrap_or_else(|_| "256x256:8:60".into());
+        let mut parts = shape.split(':');
+        let (w, h) = parts
+            .next()
+            .and_then(|s| s.split_once('x'))
+            .map(|(w, h)| (w.parse::<u32>().unwrap(), h.parse::<u32>().unwrap()))
+            .expect("PF_WAVE_SMOKE=WxH[:bits[:fps]]");
+        let ten_bit = parts.next().is_some_and(|b| b == "10");
+        let fps: u32 = parts.next().map_or(60, |f| f.parse().unwrap());
+        #[allow(non_snake_case)]
+        let (W, H) = (w, h);
+        let (format, dxgi) = if ten_bit {
+            (PixelFormat::Rgb10a2Sdr, DXGI_FORMAT_R10G10B10A2_UNORM)
+        } else {
+            (PixelFormat::Bgra, DXGI_FORMAT_B8G8R8A8_UNORM)
+        };
         // SAFETY: test-only D3D11/DXGI COM calls on one thread; every out-pointer is checked
         // before use; every texture outlives the encoder call that reads it.
         unsafe {
@@ -2692,7 +2709,15 @@ mod tests {
                 .expect("NVIDIA adapter");
             let (device, _ctx) = pf_frame::dxgi::make_device(&adapter).expect("make_device");
             let texture = |i: usize| {
-                let bytes = scroll_pattern(W as usize, H as usize, i * 6);
+                let mut bytes = scroll_pattern(W as usize, H as usize, i * 6);
+                if ten_bit {
+                    // BGRA8 -> R10G10B10A2 in place: each channel to its 10-bit lane.
+                    for px in bytes.chunks_exact_mut(4) {
+                        let (b, g, r) = (px[0] as u32, px[1] as u32, px[2] as u32);
+                        let v = (r << 2) | ((g << 2) << 10) | ((b << 2) << 20) | (3 << 30);
+                        px.copy_from_slice(&v.to_le_bytes());
+                    }
+                }
                 let init = D3D11_SUBRESOURCE_DATA {
                     pSysMem: bytes.as_ptr() as *const _,
                     SysMemPitch: W * 4,
@@ -2703,7 +2728,7 @@ mod tests {
                     Height: H,
                     MipLevels: 1,
                     ArraySize: 1,
-                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    Format: dxgi,
                     SampleDesc: DXGI_SAMPLE_DESC {
                         Count: 1,
                         Quality: 0,
@@ -2721,27 +2746,29 @@ mod tests {
             };
             let mut enc = NvencD3d11Encoder::open(
                 Codec::H265,
-                PixelFormat::Bgra,
+                format,
                 W,
                 H,
-                60,
-                10_000_000,
-                8,
+                fps,
+                if W >= 1920 { 86_000_000 } else { 10_000_000 },
+                if ten_bit { 10 } else { 8 },
                 ChromaFormat::Yuv420,
                 1,
                 None,
             )
             .expect("NVENC open");
             // Caps, RFI included, exist only once the session is prepared on a device.
-            enc.prepare_d3d11(&device, PixelFormat::Bgra, W, H)
-                .expect("prepare");
+            enc.prepare_d3d11(&device, format, W, H).expect("prepare");
             assert!(
                 enc.caps().supports_rfi,
                 "the RTX box invalidates references"
             );
             let cycle = enc.wave_cycle() as usize;
             assert!(cycle >= 2, "the wave is on");
-            println!("nvenc_wave_smoke: cycle {cycle} frames");
+            println!(
+                "nvenc_wave_smoke: {W}x{H} {}-bit {fps} fps, cycle {cycle} frames",
+                if ten_bit { 10 } else { 8 }
+            );
             // Wave A at 3 (loss with no anchor), anchor P after it, wave B off a dirty
             // anchor, a loss three frames into B that queues C behind it, a plain P after C.
             let a_start = 3;
@@ -2787,8 +2814,8 @@ mod tests {
                     provenance: Default::default(),
                     width: W,
                     height: H,
-                    pts_ns: i as u64 * 16_666_667,
-                    format: PixelFormat::Bgra,
+                    pts_ns: i as u64 * 1_000_000_000 / u64::from(fps),
+                    format,
                     payload: FramePayload::D3d11(D3d11Frame {
                         texture: tex,
                         device: device.clone(),
@@ -2825,6 +2852,16 @@ mod tests {
             std::fs::write(format!("{dir}/nvenc-wave.h265"), &full).expect("write");
             std::fs::write(format!("{dir}/nvenc-wave-dropA.h265"), view(1..3)).expect("write");
             std::fs::write(
+                format!("{dir}/nvenc-wave-dropL.h265"),
+                view(anchor_p - 1..anchor_p),
+            )
+            .expect("write");
+            std::fs::write(
+                format!("{dir}/nvenc-wave-dropP.h265"),
+                view(anchor_p..anchor_p + 1),
+            )
+            .expect("write");
+            std::fs::write(
                 format!("{dir}/nvenc-wave-dropC.h265"),
                 view(spoil_at - 2..spoil_at),
             )
@@ -2832,7 +2869,7 @@ mod tests {
             println!(
                 "nvenc_wave_smoke: {} AUs, {} bytes; A {a_start}..={a_close}, anchor {anchor_p}, \
                  B {b_start}..={b_close} spoiled at {spoil_at}, C {c_start}..={c_close}; wrote \
-                 {dir}/nvenc-wave{{,-dropA,-dropC}}.h265",
+                 {dir}/nvenc-wave{{,-dropA,-dropL,-dropP,-dropC}}.h265",
                 aus.len(),
                 full.len()
             );
