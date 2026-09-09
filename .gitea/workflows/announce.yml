@@ -114,8 +114,20 @@ jobs:
             exit 1
           }
           printf '%s\n' "$VERIFY"
-          # osslsigncode prints the DN comma-separated; stop the CN at either separator.
-          SIGNER="$(printf '%s\n' "$VERIFY" | sed -n 's#.*CN=\([^/,]*\).*#\1#p' | sed -n '1p')"
+          # The CN comes from the certificate carrying the pinned leaf hash, decoded by openssl:
+          # a BMPString CN (any non-ASCII byte) prints \x-escaped in osslsigncode's own listing.
+          osslsigncode extract-signature -pem -in /tmp/installer.exe -out /tmp/sig.pem >/dev/null
+          openssl pkcs7 -in /tmp/sig.pem -print_certs -out /tmp/chain.pem >/dev/null
+          rm -rf /tmp/chain && mkdir /tmp/chain
+          awk '/-----BEGIN CERTIFICATE-----/{n++} n{print > ("/tmp/chain/" n ".pem")}' /tmp/chain.pem
+          SIGNER=""
+          for c in /tmp/chain/*.pem; do
+            if [ "$(openssl x509 -in "$c" -outform DER | sha256sum | awk '{print $1}')" = "$LEAF_SHA" ]; then
+              SIGNER="$(openssl x509 -in "$c" -noout -subject -nameopt utf8,-esc_msb,sep_multiline \
+                | sed -n 's/^ *CN=//p' | sed -n '1p')"
+              break
+            fi
+          done
           if [ -z "$SIGNER" ] || [ "$SIGNER" != "$AUTHENTICODE_SUBJECT" ]; then
             echo "ERROR: installer signer '$SIGNER' is not '$AUTHENTICODE_SUBJECT'" >&2
             exit 1
