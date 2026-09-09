@@ -104,9 +104,23 @@ class KnownHostStore(context: Context) {
         migrateIfNeeded(context)
     }
 
-    /** The trusted record for [address]:[port], or `null` if this host has never been trusted. */
-    fun get(address: String, port: Int): KnownHost? =
-        all().firstOrNull { it.address == address && it.port == port }
+    /**
+     * The trusted record for [address]:[port], or `null` if this host has never been trusted.
+     * A pinned record beats an unpinned placeholder saved at the same address. An address can
+     * carry more than one identity — both OS installs of a dual-boot box answer at one lease —
+     * so a caller holding a fingerprint asks [getByFp] instead.
+     */
+    fun get(address: String, port: Int): KnownHost? {
+        val at = all().filter { it.address == address && it.port == port }
+        return at.firstOrNull { it.fpHex.isNotEmpty() } ?: at.firstOrNull()
+    }
+
+    /**
+     * The trusted record pinned to [fpHex], or `null`. An empty fingerprint is not a key: it
+     * would match the first unpinned placeholder, which is never the one meant.
+     */
+    fun getByFp(fpHex: String): KnownHost? =
+        if (fpHex.isEmpty()) null else all().firstOrNull { it.fpHex.equals(fpHex, true) }
 
     /** The trusted record with this stable [id], or `null` — the lookup a binding or link uses. */
     fun byId(id: String): KnownHost? = prefs.getString(id, null)?.let(::parse)
@@ -128,9 +142,16 @@ class KnownHostStore(context: Context) {
      * `punktfunk://` shortcut still point at it), the per-host clipboard decision, the binding,
      * the pins and the learned MACs. Only the name, pin and paired flag are refreshed. Returns the
      * stored record.
+     *
+     * A record there pinned to a DIFFERENT fingerprint is a different host and is left alone —
+     * a dual-boot box answers at one lease with one MAC and a certificate per OS, so trusting
+     * the second OS would otherwise overwrite the first one's record.
      */
     fun trust(address: String, port: Int, name: String, fpHex: String, paired: Boolean): KnownHost {
-        val existing = get(address, port)
+        val existing = all().firstOrNull {
+            it.address == address && it.port == port &&
+                (it.fpHex.isEmpty() || it.fpHex.equals(fpHex, true))
+        }
         val host = existing?.copy(name = name, fpHex = fpHex, paired = paired)
             ?: KnownHost(address, port, name, fpHex, paired)
         save(host)

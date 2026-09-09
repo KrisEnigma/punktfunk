@@ -1258,15 +1258,9 @@ impl HostsPage {
     /// spinner — in one straight-line pass.
     fn rebuild(&mut self) {
         let known = KnownHosts::load();
-        // A saved host is ONLINE iff a live advert matches it. Two known fingerprints decide
-        // it alone: falling back to the address there would let whoever inherits a sleeping
-        // host's DHCP lease be treated AS that host, and learn its record.
-        let matches = |k: &KnownHost, a: &DiscoveredHost| {
-            if !a.fp_hex.is_empty() && !k.fp_hex.is_empty() {
-                return a.fp_hex == k.fp_hex;
-            }
-            a.addr == k.addr && a.port == k.port
-        };
+        // A saved host is ONLINE iff a live advert matches it — `same_host` holds the rule
+        // (two known fingerprints decide it alone) for every client that browses mDNS.
+        let matches = |k: &KnownHost, a: &DiscoveredHost| discovery::same_host(k, a);
         let most_recent = known
             .hosts
             .iter()

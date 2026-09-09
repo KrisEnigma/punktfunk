@@ -78,10 +78,9 @@ pub fn run(target: Option<&str>) -> u8 {
     let (entry, window_label) = match target {
         Some(target) => {
             let (addr, port) = parse_host_port(target);
-            let k = known
-                .hosts
-                .iter()
-                .find(|h| h.addr == addr && h.port == port);
+            // `find_by_addr`, not a scan: a pinned record beats a placeholder saved at the
+            // same address, and an address can carry more than one identity.
+            let k = known.find_by_addr(&addr, port);
             let mut row = seed_row(k, &addr, port);
             row.paired |= fake;
             let label = row.name.clone();
@@ -401,16 +400,6 @@ struct Service {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Is this advert this saved host? Two known fingerprints settle it on their own — falling
-/// back to the address there would let whoever inherits a sleeping host's DHCP lease be
-/// treated AS that host, and hide the real one from the discovered shelf.
-fn same_host(h: &trust::KnownHost, d: &pf_client_core::discovery::DiscoveredHost) -> bool {
-    if !h.fp_hex.is_empty() && !d.fp_hex.is_empty() {
-        return h.fp_hex == d.fp_hex;
-    }
-    h.addr == d.addr && h.port == d.port
-}
-
 impl Service {
     fn start(
         console: ConsoleShared,
@@ -529,10 +518,10 @@ impl ServiceState {
                 // point they have chosen a title and are sitting through a cold boot. Resolved
                 // the same way `Wake` does, and empty for a host with no MAC on record, which
                 // simply means the fetch asks once instead of retrying across a boot window.
-                let macs = trust::KnownHosts::load()
-                    .hosts
-                    .iter()
-                    .find(|h| (!fp_hex.is_empty() && h.fp_hex == fp_hex) || h.addr == addr)
+                let known = trust::KnownHosts::load();
+                let macs = known
+                    .find_by_fp(&fp_hex)
+                    .or_else(|| known.hosts.iter().find(|h| h.addr == addr))
                     .map(|h| h.mac.clone())
                     .unwrap_or_default();
                 spawn_fetch(
@@ -983,7 +972,10 @@ impl ServiceState {
                 } else {
                     h.fp_hex.clone()
                 };
-                let advert = self.discovered.values().find(|d| same_host(h, d));
+                let advert = self
+                    .discovered
+                    .values()
+                    .find(|d| discovery::same_host(h, d));
                 let online = probed.get(&key).copied().unwrap_or(false);
                 // Everything the advert teaches, while it is visible: mgmt port, OS chain, wake
                 // MAC — a Deck in Gaming Mode runs only this console and the Decky panel, and a
@@ -1077,7 +1069,7 @@ impl ServiceState {
         let mut extra: Vec<HostRow> = self
             .discovered
             .values()
-            .filter(|d| !known.hosts.iter().any(|h| same_host(h, d)))
+            .filter(|d| !known.hosts.iter().any(|h| discovery::same_host(h, d)))
             .map(|d| HostRow {
                 key: if d.fp_hex.is_empty() {
                     format!("{}:{}", d.addr, d.port)

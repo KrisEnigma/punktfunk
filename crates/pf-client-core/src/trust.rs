@@ -537,14 +537,16 @@ impl KnownHosts {
     }
 
     /// [`upsert`](Self::upsert) for an authorised trust decision (PIN, TOFU accept,
-    /// delegated, headless pair). Also retires every other record claiming the same
-    /// `addr:port`.
+    /// delegated, headless pair). Also retires the fp-less placeholders claiming the
+    /// same `addr:port`, whose pin this decision is.
     ///
-    /// `upsert` keys on fingerprint so a moved address keeps its record. A re-keyed
-    /// host would otherwise sit beside the dead pin, and later connects would pick
-    /// the older one. Box fields (MAC, OS, profile, pins, last_used) ride onto the
-    /// survivor. Not carried: `paired`, `clipboard_sync` (cert decisions), and the
-    /// stable id (a deep link must not silently retarget).
+    /// A record carrying a DIFFERENT fingerprint survives: an address is not an
+    /// identity. Both OS installs of a dual-boot box answer at one lease with one MAC
+    /// and a certificate each, so retiring by address takes the sibling the user
+    /// paired. A re-keyed host leaves its old card behind for one Forget.
+    /// Box fields (MAC, OS, profile, pins, last_used) ride onto the survivor. Not
+    /// carried: `paired`, `clipboard_sync` (cert decisions), and the stable id (a deep
+    /// link must not silently retarget).
     ///
     /// Discovery and wake re-key stay on plain `upsert` — an unauthenticated advert
     /// must not delete a saved host by claiming its address.
@@ -557,7 +559,7 @@ impl KnownHosts {
         }
         let (keep, retired): (Vec<KnownHost>, Vec<KnownHost>) = std::mem::take(&mut self.hosts)
             .into_iter()
-            .partition(|h| !(h.addr == addr && h.port == port && h.fp_hex != fp_hex));
+            .partition(|h| !(h.addr == addr && h.port == port && h.fp_hex.is_empty()));
         self.hosts = keep;
         if retired.is_empty() {
             return;
@@ -567,9 +569,8 @@ impl KnownHosts {
         };
         for old in retired {
             tracing::info!(
-                addr = %addr, port,
-                retired_fp = %old.fp_hex, kept_fp = %fp_hex,
-                "host re-keyed — retiring the superseded record for this address"
+                addr = %addr, port, kept_fp = %fp_hex,
+                "retiring the unpinned placeholder this decision pins"
             );
             if h.mac.is_empty() {
                 h.mac = old.mac;
@@ -1846,9 +1847,17 @@ mod tests {
         let round: KnownHosts = serde_json::from_str(&serde_json::to_string(&k).unwrap()).unwrap();
         assert_eq!(round.hosts[0].mgmt_port, Some(47991));
 
-        // Re-key must carry the port onto the survivor, else it drops back to 47990.
+        // A placeholder's learned port rides onto the pin that retires it, else it
+        // drops back to 47990.
         let fresh = fp('a');
-        let mut k2 = k;
+        let mut k2 = KnownHosts {
+            hosts: vec![KnownHost {
+                addr: "192.168.1.50".into(),
+                port: 9777,
+                mgmt_port: Some(47991),
+                ..Default::default()
+            }],
+        };
         k2.upsert_trusted(KnownHost {
             name: "Gaming PC".into(),
             addr: "192.168.1.50".into(),
@@ -1858,20 +1867,25 @@ mod tests {
             ..Default::default()
         });
         let kept = k2.hosts.iter().find(|h| h.fp_hex == fresh).unwrap();
-        assert_eq!(kept.mgmt_port, Some(47991), "re-key must not lose the port");
+        assert_eq!(
+            kept.mgmt_port,
+            Some(47991),
+            "the pin must not lose the port"
+        );
     }
 
-    /// A re-keyed host ends up with one record for its address — the live pin.
-    /// `upsert` keys on fingerprint, so a second record would leave the dead pin winning.
+    /// Two identities at one address are two records. A dual-boot box answers on one
+    /// lease with one MAC and a certificate per OS, so pairing the second OS must not
+    /// retire the first: it took the user's name, profiles and pins with it.
     #[test]
-    fn upsert_trusted_supersedes_a_rekeyed_host() {
-        let (dead, live) = (fp('c'), fp('a'));
+    fn upsert_trusted_keeps_a_second_identity_at_one_address() {
+        let (first, second) = (fp('c'), fp('a'));
         let mut k = KnownHosts {
             hosts: vec![KnownHost {
                 name: "ENRICOS-DESKTOP (local)".into(),
                 addr: "127.0.0.1".into(),
                 port: 9777,
-                fp_hex: dead.clone(),
+                fp_hex: first.clone(),
                 paired: true,
                 last_used: Some(1000),
                 mac: vec!["aa:bb:cc:dd:ee:ff".into()],
@@ -1884,33 +1898,31 @@ mod tests {
                 id: Some("11111111-2222-4333-8444-555555555555".into()),
             }],
         };
-        // Same box, same address, a certificate the client has never seen.
+        // The other OS on that box: same address, a certificate the client has never seen.
         k.upsert_trusted(KnownHost {
             name: "127.0.0.1".into(),
             addr: "127.0.0.1".into(),
             port: 9777,
-            fp_hex: live.clone(),
+            fp_hex: second.clone(),
             paired: true,
             ..Default::default()
         });
-        assert_eq!(k.hosts.len(), 1);
-        let h = &k.hosts[0];
-        assert_eq!(h.fp_hex, live);
-        assert_eq!(k.find_by_addr("127.0.0.1", 9777).unwrap().fp_hex, live);
-        assert!(k.find_by_fp(&dead).is_none());
-        // Box fields ride along; cert decisions (`clipboard_sync`, record id) do not.
-        assert_eq!(h.mac, vec!["aa:bb:cc:dd:ee:ff".to_string()]);
-        assert_eq!(h.os, "windows");
-        assert_eq!(h.mgmt_port, Some(47991));
-        assert_eq!(h.profile_id.as_deref(), Some("aaaaaaaaaaaa"));
-        assert_eq!(h.pinned_profiles, vec!["bbbbbbbbbbbb".to_string()]);
-        assert_eq!(h.profile_for_game("halo"), Some("cccccccccccc"));
-        assert_eq!(h.last_used, Some(1000));
-        assert!(!h.clipboard_sync);
-        assert_ne!(
-            h.id.as_deref(),
-            Some("11111111-2222-4333-8444-555555555555")
+        assert_eq!(k.hosts.len(), 2);
+        let kept = k.find_by_fp(&first).expect("the first OS keeps its record");
+        assert_eq!(kept.name, "ENRICOS-DESKTOP (local)");
+        assert_eq!(kept.mac, vec!["aa:bb:cc:dd:ee:ff".to_string()]);
+        assert_eq!(kept.profile_id.as_deref(), Some("aaaaaaaaaaaa"));
+        assert_eq!(kept.pinned_profiles, vec!["bbbbbbbbbbbb".to_string()]);
+        assert_eq!(kept.profile_for_game("halo"), Some("cccccccccccc"));
+        assert!(kept.clipboard_sync);
+        assert_eq!(
+            kept.id.as_deref(),
+            Some("11111111-2222-4333-8444-555555555555"),
+            "a deep link to the first OS still resolves"
         );
+        assert!(k.find_by_fp(&second).is_some());
+        // The address alone can only answer with one of them: the newest decision.
+        assert_eq!(k.find_by_addr("127.0.0.1", 9777).unwrap().fp_hex, second);
     }
 
     /// A host that only moved address keeps its one record, `paired`, clipboard, and id.
@@ -2049,8 +2061,13 @@ mod tests {
             paired: true,
             ..Default::default()
         });
-        assert_eq!(k.hosts.len(), 1);
-        assert_eq!(k.hosts[0].fp_hex, live);
+        assert_eq!(
+            k.hosts.len(),
+            2,
+            "the placeholder goes, the other pin stays"
+        );
+        assert!(k.find_by_fp(&dead).is_some());
+        assert_eq!(k.find_by_addr("127.0.0.1", 9777).unwrap().fp_hex, live);
     }
 
     /// An advert lands on the fingerprint match, not a stale namesake earlier in the file.
