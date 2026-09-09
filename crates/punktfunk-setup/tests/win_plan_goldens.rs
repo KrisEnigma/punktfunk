@@ -184,6 +184,33 @@ fn golden_client_fresh() {
     );
 }
 
+/// A Windows 10 box must be refused before anything moves, or it takes the whole install and
+/// then fails every session on a virtual display that never starts. The plan holds NOTHING else:
+/// a refusal that still deploys files is worse than none.
+#[test]
+fn a_host_install_below_the_os_floor_refuses_and_touches_nothing() {
+    let facts = WinFacts {
+        os_build: plan::MIN_HOST_BUILD - 1,
+        ..fresh()
+    };
+    let choices = WinChoices::derive(&facts, Artifact::Host);
+    let built = plan::build(&facts, &choices, Artifact::Host, false);
+    let steps: Vec<&WinAction> = built.steps().collect();
+    assert!(
+        matches!(steps.as_slice(), [WinAction::Refuse(_)]),
+        "{steps:?}"
+    );
+
+    // The client runs on Windows 10, and an uninstall must work whatever the box is.
+    let client = WinChoices::derive(&facts, Artifact::Client);
+    assert!(!plan::build(&facts, &client, Artifact::Client, false)
+        .steps()
+        .any(|s| matches!(s, WinAction::Refuse(_))));
+    assert!(!plan::build(&facts, &choices, Artifact::Host, true)
+        .steps()
+        .any(|s| matches!(s, WinAction::Refuse(_))));
+}
+
 fn client_upgrade() -> WinFacts {
     WinFacts {
         client_installed: Some(WinInstall {

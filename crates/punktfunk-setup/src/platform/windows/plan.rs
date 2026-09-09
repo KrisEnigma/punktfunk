@@ -27,6 +27,11 @@ pub const DEFAULT_CLIENT_DIR: &str = r"%LocalAppData%\Programs\Punktfunk";
 /// Client ARP key. Keep Inno's `_is1`: winget ProductCode tracks this exact name.
 pub const CLIENT_ARP_KEY: &str = r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{52464E61-68A1-4621-B6B3-5B8BBB823D1A}_is1";
 
+/// The host's OS floor. pf-vdisplay is built against IddCx 1.10, which first shipped in
+/// Windows 11 22H2: below this the driver package installs and the device never starts.
+/// The client has no floor — it runs on Windows 10.
+pub const MIN_HOST_BUILD: u32 = 22621;
+
 /// Every link the client install can lay down. The uninstall deletes all three unconditionally:
 /// `desktop_icon` is recorded nowhere on the box, and a link that was never made is a no-op.
 const CLIENT_LINKS: [&str; 3] = [
@@ -59,6 +64,8 @@ pub enum WinAction {
     Run(Vec<String>),
     /// Same spawn; a non-zero exit is fine. Absence (no process, no task, no key) is the goal.
     RunLenient(Vec<String>),
+    /// Stop the run before it touches the box. A dry run renders it and carries on.
+    Refuse(String),
     Note(Level, String),
     /// One `KEY=VALUE` line in `%ProgramData%\punktfunk\host.env`.
     SetEnv {
@@ -239,6 +246,19 @@ fn app_dir(choices: &WinChoices, artifact: Artifact) -> String {
 
 fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
     let mut plan = WinPlan::default();
+    // Before anything else, and before any file moves: an older Windows takes the whole install
+    // and then fails every session on a driver that will not start.
+    if facts.os_build < MIN_HOST_BUILD {
+        plan.push(
+            "Checking Windows",
+            vec![WinAction::Refuse(format!(
+                "The Punktfunk host needs Windows 11 22H2 (build {MIN_HOST_BUILD}) or newer — this \
+                 PC reports build {}, where the virtual display can't start. Nothing was installed.",
+                facts.os_build
+            ))],
+        );
+        return plan;
+    }
     let app = app_dir(choices, Artifact::Host);
     let host_exe = format!("{app}\\punktfunk-host.exe");
     let upgrade = facts.installed.is_some();

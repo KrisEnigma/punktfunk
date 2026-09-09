@@ -175,6 +175,14 @@ impl WinExecutor<'_> {
         match action {
             WinAction::Run(argv) => self.spawn(argv, false),
             WinAction::RunLenient(argv) => self.spawn(argv, true),
+            // A dry run reports it like any other step; only a real one stops here.
+            WinAction::Refuse(msg) => {
+                if self.dry {
+                    self.ui.warn(&format!("would refuse: {msg}"));
+                    return Ok(());
+                }
+                Err(Failed(msg.clone()))
+            }
             WinAction::Note(Level::Ok, text) => {
                 self.ui.ok(text);
                 Ok(())
