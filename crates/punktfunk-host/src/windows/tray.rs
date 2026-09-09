@@ -14,6 +14,10 @@
 //! * **From an interactive shell** — the caller already has the right user and
 //!   session token, so `WTSQueryUserToken` fails and a plain spawn is correct.
 //!
+//! Only that second caller may fall back. A tray spawned under a SYSTEM token owns
+//! the session's mutex with no icon a user can reach, so SYSTEM waits for a
+//! signed-in user instead.
+//!
 //! Seat hosts do not supervise a tray: the seat manager is their control surface.
 //! An explicit seat-local start still uses that session's user and mutex.
 
@@ -151,14 +155,18 @@ pub fn start() -> Result<(Option<u32>, &'static str)> {
     }
     // Quoting preserves an operator-chosen install path that contains spaces.
     let quoted = format!("\"{}\"", exe.display());
-    match crate::interactive::spawn_as_current_session_user(&quoted, None) {
+    let declined = match crate::interactive::spawn_as_current_session_user(&quoted, None) {
         Ok(pid) => return Ok((Some(pid), "as this session's user")),
-        // The fallback below runs the tray under THIS token; say why, or a SYSTEM-owned tray
-        // reads as healthy in the log.
-        Err(e) => {
-            tracing::debug!(error = %format!("{e:#}"), "status tray: user-token spawn declined — falling back to this token")
-        }
+        Err(e) => e,
+    };
+    // The fallback below runs the tray under THIS token, which is only ever right for an
+    // interactive caller. As SYSTEM it plants a tray with no usable icon that holds the
+    // session's `Local\PunktfunkTray` for good, and the user's own tray then has to fight it
+    // for the name. Nothing to do but wait for a signed-in user; the watcher retries.
+    if crate::hooks::running_as_system() {
+        return Err(declined).context("no signed-in user in this session yet");
     }
+    tracing::debug!(error = %format!("{declined:#}"), "status tray: user-token spawn declined — falling back to this token");
     // WTSQueryUserToken is privileged; an interactive caller's plain spawn preserves its seat.
     let child = std::process::Command::new(&exe)
         .spawn()

@@ -530,11 +530,13 @@ fn shell_tokens(cmd: &str) -> Vec<String> {
     out
 }
 
-/// True if this process is `NT AUTHORITY\SYSTEM` (S-1-5-18), i.e. the SCM service.
-/// Fail closed: an unreadable token is treated as SYSTEM — a skipped hook beats a
-/// SYSTEM command. The in-process fallback is only acceptable as the operator.
+/// True if this process is `NT AUTHORITY\SYSTEM` (S-1-5-18) — the SCM service, or the `serve`
+/// child it launches into the interactive session.
+///
+/// Fail closed: an unreadable token reads as SYSTEM. Both callers want the cautious answer —
+/// a skipped hook beats a SYSTEM command, and no tray beats a SYSTEM-owned one.
 #[cfg(windows)]
-fn running_as_system() -> bool {
+pub(crate) fn running_as_system() -> bool {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::{
         CreateWellKnownSid, EqualSid, GetTokenInformation, TokenUser, WinLocalSystemSid, PSID,
