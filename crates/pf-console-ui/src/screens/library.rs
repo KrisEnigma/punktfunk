@@ -1834,6 +1834,7 @@ mod tests {
             pads: &[],
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "test",
             t: 0.0,
         }

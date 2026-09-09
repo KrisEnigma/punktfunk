@@ -352,6 +352,7 @@ mod tests {
             pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -403,6 +404,7 @@ mod tests {
                 pads,
                 deck: false,
                 fallback_ui: false,
+                pyrowave_ok: true,
                 device_name: "t",
                 t: 0.0,
             }
