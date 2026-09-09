@@ -54,12 +54,12 @@ pub(crate) mod proc;
 
 #[path = "vdisplay/session.rs"]
 pub(crate) mod session;
-#[cfg(target_os = "linux")]
-pub use session::session_epoch;
 pub use session::{
     apply_session_env, compositor_for_kind, detect_active_session, observe_session_instance,
     settle_desktop_portal, try_recover_session, ActiveKind, ActiveSession, SessionEnv,
 };
+#[cfg(target_os = "linux")]
+pub use session::{session_epoch, session_x11_env};
 
 #[path = "vdisplay/routing.rs"]
 pub(crate) mod routing;

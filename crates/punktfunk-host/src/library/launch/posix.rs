@@ -181,17 +181,30 @@ pub fn launch_session_command(
             crate::vdisplay::launch_into_gamescope_session(cmd, seat)?,
             false,
         ),
-        _ => (
-            std::process::Command::new("sh")
-                .arg("-c")
+        _ => {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c")
                 .arg(cmd)
                 // Own process group: later teardown signals the shell and its
                 // children, and not the host's group.
-                .process_group(0)
-                .spawn()
-                .context("spawn launch command")?,
-            true,
-        ),
+                .process_group(0);
+            // X11 apps (Steam, Lutris, most native games) need a display of their own. A systemd
+            // `--user` host has none to pass on, so take the session's — without it Steam opens
+            // "Unable to open a connection to X" instead of the game.
+            match crate::vdisplay::session_x11_env() {
+                Some((x11, xauthority)) => {
+                    c.env("DISPLAY", &x11);
+                    if let Some(x) = xauthority {
+                        c.env("XAUTHORITY", x);
+                    }
+                    tracing::debug!(x11_display = %x11, "handed the launch the session's display");
+                }
+                None => tracing::warn!(
+                    "no X display for the launch — an X11 app (Steam, Lutris) will refuse to start"
+                ),
+            }
+            (c.spawn().context("spawn launch command")?, true)
+        }
     };
     tracing::info!(
         command = %cmd,
