@@ -145,6 +145,7 @@ mod ctl;
 mod native;
 #[forbid(unsafe_code)]
 mod native_pairing;
+mod net_health;
 mod osinfo;
 mod plugins;
 mod power;
