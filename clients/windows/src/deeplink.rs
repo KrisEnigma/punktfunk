@@ -261,7 +261,7 @@ pub(crate) fn has_package_identity() -> bool {
 /// being a container for a URL rather than a second launch mechanism
 /// (design/client-deep-links.md §5). Which exe reference is durable depends on how we were
 /// installed: under MSIX the install path changes on every update but the app execution alias
-/// doesn't, so packaged runs target the alias; the Inno Setup / portable installs have no alias
+/// doesn't, so packaged runs target the alias; the installer and portable builds have no alias
 /// but a stable install dir, so unpackaged runs target the absolute exe path.
 pub(crate) fn write_shortcut(label: &str, url: &str) -> Result<std::path::PathBuf, String> {
     use windows::core::{Interface, HSTRING};

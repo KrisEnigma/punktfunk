@@ -8,7 +8,7 @@
 //! Placeholders (`<staging>`, `<temp>`, `<version>`, and the client's `%LocalAppData%`,
 //! `<start menu>`, `<desktop>`) render verbatim in a dry run and are substituted from
 //! `Subst` on a real one — except in the PATH edit, where `%LocalAppData%` stays literal on
-//! purpose (`REG_EXPAND_SZ` expands it per user, the way the `.iss` wrote it). Goldens enter through [`render`].
+//! purpose: `REG_EXPAND_SZ` expands it per user. Goldens enter through [`render`].
 
 use std::path::{Path, PathBuf};
 
@@ -175,6 +175,14 @@ impl WinExecutor<'_> {
         match action {
             WinAction::Run(argv) => self.spawn(argv, false),
             WinAction::RunLenient(argv) => self.spawn(argv, true),
+            // A dry run reports it like any other step; only a real one stops here.
+            WinAction::Refuse(msg) => {
+                if self.dry {
+                    self.ui.warn(&format!("would refuse: {msg}"));
+                    return Ok(());
+                }
+                Err(Failed(msg.clone()))
+            }
             WinAction::Note(Level::Ok, text) => {
                 self.ui.ok(text);
                 Ok(())
@@ -215,7 +223,10 @@ impl WinExecutor<'_> {
                     return Ok(());
                 }
                 for path in paths {
-                    match std::fs::remove_file(path) {
+                    // `<start menu>` and friends resolve here, not in the dry run: the
+                    // transcript keeps the placeholder, the real run needs the folder.
+                    let path = self.sub(path);
+                    match std::fs::remove_file(&path) {
                         Ok(()) => self.ui.ok(&format!("deleted {path}")),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                             self.ui.detail(&format!("{path} — already gone"));

@@ -13,7 +13,7 @@
   SHA-256-verify it (it provides nefconc.exe, used to create the root-enumerated device node - pnputil
   can't).
 
-  Output (consumed by punktfunk-host.iss): -OutDir gets pf_vdisplay.inf/.cat/.dll + punktfunk-driver.cer
+  Output (packed into the installer's staging tree): -OutDir gets pf_vdisplay.inf/.cat/.dll + punktfunk-driver.cer
   and nefconc.exe (x64).
 
 .EXAMPLE

@@ -1,10 +1,11 @@
-# Build the punktfunk Windows HOST as a signed Inno Setup installer and publish it to Gitea's generic
-# package registry, so a Windows GPU box can install the streaming host (SYSTEM service + bundled
+# Build the punktfunk Windows HOST as a signed punktfunk-setup-win installer and publish it to Gitea's
+# generic package registry, so a Windows GPU box can install the streaming host (SYSTEM service + bundled
 # pf-vdisplay virtual-display driver + the web management console + the opt-in plugin/script runner,
 # run by scheduled tasks on a bundled bun) from one signed setup.exe. Runs on a self-hosted
 # windows-amd64 runner
 # (host mode; same MSVC/Windows-SDK/LLVM env as windows-client.yml — generic from unom/infra's
-# windows-runner/, Inno Setup self-provisions via the "Ensure Windows toolchain" step below).
+# windows-runner/; the WDK and the ARM64 target self-provision via the "Ensure Windows toolchain"
+# step below).
 #
 # Why an installer and not MSIX (like the client): the host installs a LocalSystem SCM service that
 # CreateProcessAsUserW's into the interactive session for secure-desktop capture, and bundles a
@@ -48,8 +49,8 @@
 # carries the ARM64 cross compiler and aarch64-pc-windows-msvc has host tools. The arm64 leg builds
 # `--no-default-features --features gamestream` — NVENC (cudarc), QSV (Intel dispatcher) and
 # PyroWave (Granite has no MSVC-ARM64 SIMD path) do not exist there, and
-# Media Foundation, which needs no feature, is its only encoder. Tests, the silent dry-run, the
-# Inno revert gate and winget stay x64: the arm64 binaries cannot run on this runner, and the arm64
+# Media Foundation, which needs no feature, is its only encoder. Tests, the silent dry-run and
+# winget stay x64: the arm64 binaries cannot run on this runner, and the arm64
 # installer ships to the `canary/` alias only until it has run on a Snapdragon box.
 name: windows-host
 # One pending run per workflow+ref: a newer push supersedes the queued/running one and cancels
@@ -171,7 +172,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Ensure Windows toolchain (WDK, Inno Setup, ARM64 target)
+      - name: Ensure Windows toolchain (WDK, ARM64 target)
         run: ./scripts/ci/ensure-windows-toolchain.ps1
 
       - name: Configure
@@ -266,7 +267,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Ensure Windows toolchain (WDK, Inno Setup, ARM64 target)
+      - name: Ensure Windows toolchain (WDK, ARM64 target)
         shell: pwsh
         run: ./scripts/ci/ensure-windows-toolchain.ps1
 
@@ -641,13 +642,12 @@ jobs:
           DRIVER_CERT_PFX_B64: ${{ secrets.DRIVER_CERT_PFX_B64 }}
           DRIVER_CERT_PASSWORD: ${{ secrets.DRIVER_CERT_PASSWORD }}
         run: |
-          # M5 (design/installer-v2-windows-implementation-plan.md): the published artifact is
-          # the engine exe (punktfunk-setup-win + payload). Same name, same signing, same silent
-          # flags (D5), same ARP key + unins000.exe (D6), so the updater, winget and every
-          # fielded Inno install upgrade onto it unchanged.
+          # The engine exe (punktfunk-setup-win + payload). It keeps the Inno silent flags (D5)
+          # and the ARP key + unins000.exe (D6), so the updater, winget and every fielded Inno
+          # install upgrade onto it unchanged.
           & packaging/windows/pack-host-installer.ps1 `
             -Version $env:HOST_VERSION -TargetDir ${{ matrix.td }}\${{ matrix.target }}\release -OutDir ${{ matrix.td }}\out `
-            -Engine -Arch ${{ matrix.arch }} -BunExe $env:BUN_SHIP_EXE
+            -Arch ${{ matrix.arch }} -BunExe $env:BUN_SHIP_EXE
 
       # WP3.3's smoke, now on the artifact that ships: the sandwich inspects, the file carries a
       # signature, and the packed exe's silent dry-run — the exact fielded updater spawn plus
@@ -686,29 +686,6 @@ jobs:
           }
           Get-Content $log
           Write-Output "installer: $([math]::Round((Get-Item $setup).Length / 1MB, 1)) MB"
-
-      # M5's revert gate: the .iss stays buildable in-tree for one release (WP5.2 -> WP5.3), so
-      # a stable tag also packs it — its own OutDir, GITHUB_ENV withheld, nothing published.
-      - name: Pack with Inno Setup (revert gate, stable tags only)
-        if: startsWith(gitea.ref, 'refs/tags/v') && matrix.arch == 'x64'
-        shell: pwsh
-        env:
-          AZURE_CODESIGNING_ENDPOINT: https://neu.codesigning.azure.net/
-          AZURE_CODESIGNING_ACCOUNT: unomsigning
-          AZURE_CODESIGNING_PROFILE: unom-io
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          MSIX_CERT_PFX_B64: ${{ secrets.MSIX_CERT_PFX_B64 }}
-          MSIX_CERT_PASSWORD: ${{ secrets.MSIX_CERT_PASSWORD }}
-          DRIVER_CERT_PFX_B64: ${{ secrets.DRIVER_CERT_PFX_B64 }}
-          DRIVER_CERT_PASSWORD: ${{ secrets.DRIVER_CERT_PASSWORD }}
-        run: |
-          Remove-Item Env:GITHUB_ENV -ErrorAction SilentlyContinue
-          & packaging/windows/pack-host-installer.ps1 `
-            -Version $env:HOST_VERSION -TargetDir ${{ matrix.td }}\${{ matrix.target }}\release -OutDir ${{ matrix.td }}\out-inno
-          $inno = "${{ matrix.td }}\out-inno\punktfunk-host-setup-$env:HOST_VERSION.exe"
-          Write-Output "Inno Setup build (not published): $([math]::Round((Get-Item $inno).Length / 1MB, 1)) MB"
 
       - name: Report stable Authenticode identity
         if: startsWith(gitea.ref, 'refs/tags/v')

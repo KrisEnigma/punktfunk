@@ -5,8 +5,8 @@
 //! harness (`design/installer-v2-windows.md`).
 //!
 //! Every path in a step is a literal string, never a `PathBuf::join` — goldens
-//! must render byte-identically on every OS. Phase order matches the `.iss` and
-//! is load-bearing: stop → files → registry → network → coexistence → drivers →
+//! must render byte-identically on every OS. Phase order is load-bearing:
+//! stop → files → registry → network → coexistence → drivers →
 //! service → web → plugin runner → restore → tray. `<staging>` and `<temp>` are
 //! placeholders the executor substitutes; dry-run renders them verbatim.
 
@@ -27,6 +27,28 @@ pub const DEFAULT_CLIENT_DIR: &str = r"%LocalAppData%\Programs\Punktfunk";
 /// Client ARP key. Keep Inno's `_is1`: winget ProductCode tracks this exact name.
 pub const CLIENT_ARP_KEY: &str = r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{52464E61-68A1-4621-B6B3-5B8BBB823D1A}_is1";
 
+/// The host's OS floor. pf-vdisplay is built against IddCx 1.10, which first shipped in
+/// Windows 11 22H2: below this the driver package installs and the device never starts.
+/// The client has no floor — it runs on Windows 10.
+pub const MIN_HOST_BUILD: u32 = 22621;
+
+/// Every link the client install can lay down. The uninstall deletes all three unconditionally:
+/// `desktop_icon` is recorded nowhere on the box, and a link that was never made is a no-op.
+const CLIENT_LINKS: [&str; 3] = [
+    r"<start menu>\Punktfunk.lnk",
+    r"<start menu>\Punktfunk Console.lnk",
+    r"<desktop>\Punktfunk.lnk",
+];
+
+/// Anything in `{app}` that can hold the tree open. Install stops them to replace the files,
+/// uninstall to delete them.
+const CLIENT_EXES: [&str; 4] = [
+    "punktfunk-client.exe",
+    "punktfunk-session.exe",
+    "punktfunk-console.exe",
+    "punktfunk.exe",
+];
+
 /// Which payload this exe carries; the embedded manifest decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -42,6 +64,8 @@ pub enum WinAction {
     Run(Vec<String>),
     /// Same spawn; a non-zero exit is fine. Absence (no process, no task, no key) is the goal.
     RunLenient(Vec<String>),
+    /// Stop the run before it touches the box. A dry run renders it and carries on.
+    Refuse(String),
     Note(Level, String),
     /// One `KEY=VALUE` line in `%ProgramData%\punktfunk\host.env`.
     SetEnv {
@@ -55,7 +79,8 @@ pub enum WinAction {
     RemoveFiles {
         dir: String,
     },
-    /// Delete specific files; absent is fine (the WP3.2 Inno leftovers).
+    /// Delete specific files; absent is fine (the client's shortcuts, the WP3.2 Inno leftovers).
+    /// Paths may carry the `<start menu>` placeholders — the executor substitutes them.
     DeleteFiles {
         paths: Vec<String>,
     },
@@ -221,6 +246,19 @@ fn app_dir(choices: &WinChoices, artifact: Artifact) -> String {
 
 fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
     let mut plan = WinPlan::default();
+    // Before anything else, and before any file moves: an older Windows takes the whole install
+    // and then fails every session on a driver that will not start.
+    if facts.os_build < MIN_HOST_BUILD {
+        plan.push(
+            "Checking Windows",
+            vec![WinAction::Refuse(format!(
+                "The Punktfunk host needs Windows 11 22H2 (build {MIN_HOST_BUILD}) or newer — this \
+                 PC reports build {}, where the virtual display can't start. Nothing was installed.",
+                facts.os_build
+            ))],
+        );
+        return plan;
+    }
     let app = app_dir(choices, Artifact::Host);
     let host_exe = format!("{app}\\punktfunk-host.exe");
     let upgrade = facts.installed.is_some();
@@ -588,8 +626,8 @@ fn host_uninstall(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
             WinAction::ArpRemove {
                 key: super::HOST_ARP_KEY.into(),
             },
-            // The `.iss`'s uninsdelete* set: the tray autostart, its toast AUMID, the HDR
-            // layer's registration. Lenient — a Custom install may never have laid one down.
+            // The tray autostart, its toast AUMID, the HDR layer's registration. Lenient —
+            // a Custom install may never have laid one down.
             run_lenient(&[
                 "reg",
                 "delete",
@@ -629,15 +667,10 @@ fn client_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
 
     plan.push(
         "Stopping running punktfunk apps",
-        [
-            "punktfunk-client.exe",
-            "punktfunk-session.exe",
-            "punktfunk-console.exe",
-            "punktfunk.exe",
-        ]
-        .iter()
-        .map(|exe| run_lenient(&["taskkill", "/F", "/IM", exe]))
-        .collect(),
+        CLIENT_EXES
+            .iter()
+            .map(|exe| run_lenient(&["taskkill", "/F", "/IM", exe]))
+            .collect(),
     );
     plan.push(
         format!("Files → {app}"),
@@ -698,19 +731,20 @@ fn client_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
     ];
     plan.push("Registry", std::mem::take(&mut registry));
 
+    let [start, console, desktop] = CLIENT_LINKS;
     let mut shortcuts = vec![
         WinAction::Shortcut {
-            link: r"<start menu>\Punktfunk.lnk".into(),
+            link: start.into(),
             target: client_exe.clone(),
         },
         WinAction::Shortcut {
-            link: r"<start menu>\Punktfunk Console.lnk".into(),
+            link: console.into(),
             target: format!("{app}\\punktfunk-console.exe"),
         },
     ];
     if choices.desktop_icon {
         shortcuts.push(WinAction::Shortcut {
-            link: r"<desktop>\Punktfunk.lnk".into(),
+            link: desktop.into(),
             target: client_exe.clone(),
         });
     }
@@ -739,19 +773,27 @@ fn client_uninstall(choices: &WinChoices) -> WinPlan {
     let mut plan = WinPlan::default();
     plan.push(
         format!("Uninstalling the client ({DOCS}/uninstall)"),
-        vec![
-            run_lenient(&["taskkill", "/F", "/IM", "punktfunk-client.exe"]),
-            run_lenient(&["taskkill", "/F", "/IM", "punktfunk-session.exe"]),
-            run_lenient(&["reg", "delete", r"HKCU\Software\Classes\punktfunk", "/f"]),
-            WinAction::PathRemove {
-                machine: false,
-                dir: app.clone(),
-            },
-            WinAction::ArpRemove {
-                key: CLIENT_ARP_KEY.into(),
-            },
-            WinAction::RemoveFiles { dir: app },
-        ],
+        CLIENT_EXES
+            .iter()
+            .map(|exe| run_lenient(&["taskkill", "/F", "/IM", exe]))
+            .chain([
+                run_lenient(&["reg", "delete", r"HKCU\Software\Classes\punktfunk", "/f"]),
+                // Inno tracked its `[Icons]` and swept them for free; the engine lays them
+                // down itself, so it owes the same sweep — a link left behind points at a
+                // deleted exe.
+                WinAction::DeleteFiles {
+                    paths: CLIENT_LINKS.iter().map(|l| (*l).to_string()).collect(),
+                },
+                WinAction::PathRemove {
+                    machine: false,
+                    dir: app.clone(),
+                },
+                WinAction::ArpRemove {
+                    key: CLIENT_ARP_KEY.into(),
+                },
+                WinAction::RemoveFiles { dir: app },
+            ])
+            .collect(),
     );
     plan
 }

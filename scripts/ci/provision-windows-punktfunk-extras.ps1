@@ -1,9 +1,8 @@
-# Layers punktfunk-specific tooling onto the shared unom Windows CI runner: Inno Setup (the host
-# installer) and the aarch64-pc-windows-msvc
-# rustup target (windows-client.yml's ARM64 leg). The runner itself - act_runner, Node, rustup,
-# VS Build Tools/NASM/CMake/LLVM - is provisioned generically by unom/infra
-# (windows-runner/windows-runner.pkr.hcl + proxmox/windows-runner's Terraform clone); this script
-# is what punktfunk adds on top, since Inno Setup and the ARM64 target aren't every project's
+# Layers punktfunk-specific tooling onto the shared unom Windows CI runner: the
+# aarch64-pc-windows-msvc rustup target (windows-client.yml's ARM64 leg). The runner itself -
+# act_runner, Node, rustup, VS Build Tools/NASM/CMake/LLVM - is provisioned generically by
+# unom/infra (windows-runner/windows-runner.pkr.hcl + proxmox/windows-runner's Terraform clone);
+# this script is what punktfunk adds on top, since the ARM64 target isn't every project's
 # concern. See also provision-windows-wdk.ps1 for the driver-build toolchain (also punktfunk-only).
 #
 # Idempotent - safe to re-run. Run ELEVATED (admin) on the runner.
@@ -37,18 +36,9 @@ if (Test-Path $rustup) {
 # which is a GPU-driver component. A stale C:\Users\Public\vulkan-headers is harmless; delete it
 # by hand if you want the disk back. ---
 
-# --- Inno Setup (ISCC.exe) for the host installer build (windows-host.yml). pack-host-installer.ps1
-# locates it at its fixed Program Files path, so it need not be on PATH - just present. The .iss
-# uses the 6.6+ styling (WizardStyle dark/dynamic + the windows11 style); an older 6.x compiles a
-# plain-modern fallback, so upgrade a pre-6.6 install rather than silently shipping the old look. ---
-$isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-$innoVer = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1' -ErrorAction SilentlyContinue).DisplayVersion
-if (-not (Test-Path $isccPath) -or ($innoVer -and [version]$innoVer -lt [version]'6.6.0')) {
-  if (Get-Command choco -ErrorAction SilentlyContinue) {
-    info "installing/upgrading Inno Setup (ISCC; found: $innoVer)"
-    choco upgrade innosetup -y --no-progress
-  } else { Write-Warning "Inno Setup missing or pre-6.6 ($innoVer) and choco unavailable - install/upgrade it for windows-host.yml." }
-}
+# --- Inno Setup provisioning removed: the installers are packed by punktfunk-setup-win, which is
+# a workspace crate and needs nothing on the runner. A leftover Inno Setup 6 install is harmless;
+# uninstall it by hand if you want the disk back. ---
 
 # VB-CABLE provisioning removed (the audio-substrate program, 2026-08): the installer no longer
 # bundles a cable - the host mints its audio endpoints from Steam's streaming drivers on the

@@ -1,10 +1,9 @@
-//! Install-time `driver install|uninstall` and `web setup` that Inno `[Run]`/`[UninstallRun]`
-//! delegates to this EXE instead of BOM-less `.ps1` files.
+//! Install-time `driver install|uninstall` and `web setup`: the installer's plan spawns this
+//! EXE rather than a `.ps1` file.
 //!
 //! PowerShell 5.1 reads a `.ps1` *file* in the machine ANSI codepage; a non-ASCII byte on a
 //! non-English locale aborts as "unterminated string". A compiled subcommand has no such
 //! surface: `certutil`/`pnputil`/`nefconc`/`schtasks`/`netsh`/`icacls` are string literals.
-//! Inline `-Command` PowerShell in the `.iss` is a command-line string, not a file, so it stays.
 //! Same pattern as `service install` in `service.rs`.
 //!
 //! Best-effort: a hiccup warns but returns `Ok`. A non-zero exit aborts the installer; a

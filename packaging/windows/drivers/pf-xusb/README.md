@@ -75,7 +75,7 @@ the whole build/sign/stage flow in CI. The manual steps:
 section over the sealed channel (`PadChannel`), writes
 the XInput state from the client's gamepad frame (already XInput-convention) and forwards rumble. There
 is **no ViGEmBus dependency** anymore. The driver is built + signed from source in CI
-(`build-gamepad-drivers.ps1`) and installed by the Inno Setup installer via
+(`build-gamepad-drivers.ps1`) and installed by the host installer via
 `punktfunk-host.exe driver install --gamepad`.
 
 ## Multi-pad

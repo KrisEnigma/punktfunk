@@ -1,19 +1,20 @@
 <#
 .SYNOPSIS
-  Pack + sign the punktfunk Windows client as an Inno Setup setup.exe (the default download) and a
-  portable .zip, from the layout pack-msix.ps1 already assembled.
+  Pack + sign the punktfunk Windows client as a punktfunk-setup-client exe (the default download)
+  and a portable .zip, from the layout pack-msix.ps1 already assembled.
 
 .DESCRIPTION
   Runs AFTER pack-msix.ps1 in the same job and consumes its $OutDir\layout verbatim — one assembly,
   three artifacts (.msix, setup.exe, portable .zip). Why the installer exists at all: the MSIX
   install shape (WindowsApps ACLs + alias-only activation) breaks Steam's non-Steam-game picker,
-  the Steam overlay's injection, and Big Picture launching — see punktfunk-client.iss's header.
+  the Steam overlay's injection, and Big Picture launching; the installer's stable
+  %LOCALAPPDATA%\Programs\Punktfunk path is what fixes all three.
 
   Steps:
     1. stage the runtime file set from -LayoutDir (drops AppxManifest.xml + the tile Assets),
     2. sign the four exes individually (the MSIX only signs its container),
     3. zip the stage -> the portable build,
-    4. ISCC punktfunk-client.iss over the same stage, sign the setup.exe,
+    4. pack the unelevated client wizard over the same stage, sign the setup.exe,
     5. emit CLIENT_SETUP_PATH / CLIENT_ZIP_PATH to GITHUB_ENV for the publish step.
 
   Signing backend precedence is identical to pack-msix.ps1 / pack-host-installer.ps1 (Azure
@@ -40,12 +41,7 @@ param(
     [string]$AzureProfile = $env:AZURE_CODESIGNING_PROFILE,
     [string]$AzureDlib = $env:AZURE_CODESIGNING_DLIB,
     [ValidateSet('auto', 'true', 'false')][string]$RequireSignedCert = 'auto',
-    [switch]$NoSign,                                                # skip signing (local debug)
-    # M4 (design/installer-v2-windows.md D1): pack with the unelevated punktfunk-setup-client
-    # twin instead of ISCC. Same stage, same output name, same signing. Since M5 the workflow
-    # passes it for the published artifact; ISCC (the default here) is the one-release revert
-    # path.
-    [switch]$Engine
+    [switch]$NoSign                                                 # skip signing (local debug)
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -58,19 +54,8 @@ if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
 }
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$iss = Join-Path $here 'punktfunk-client.iss'
 
-# --- locate ISCC (Inno Setup) + signtool (Windows SDK) — same finders as the sibling scripts ---
-function Find-Iscc {
-    foreach ($p in @(
-            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
-            'C:\Program Files\Inno Setup 6\ISCC.exe')) {
-        if (Test-Path $p) { return $p }
-    }
-    $c = Get-Command iscc -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    throw "ISCC.exe (Inno Setup 6, any 6.x) not found - install it (choco install innosetup -y)."
-}
+# --- locate signtool (Windows SDK) — same finder as the sibling scripts -----------------------
 function Find-SdkTool([string]$name) {
     $root = 'C:\Program Files (x86)\Windows Kits\10\bin'
     $hit = Get-ChildItem -Path $root -Recurse -Filter $name -ErrorAction SilentlyContinue |
@@ -99,8 +84,6 @@ function Find-AzureDlib([string]$Explicit) {
     }
     $hit.FullName
 }
-$iscc = if ($Engine) { $null } else { Find-Iscc }
-if ($iscc) { Write-Host "ISCC: $iscc" }
 
 # --- stage the runtime file set (the portable layout = what the installer lays down) ----------
 # Explicit list, not a wildcard copy: the MSIX layout also holds AppxManifest.xml and the tile
@@ -212,65 +195,39 @@ if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
 Write-Host "==> portable zip: $zip"
 
-# Stage the .iss + branding next to each other under $OutDir: ISCC is a 32-bit process, and on the
-# SYSTEM-profile runner WOW64 redirection breaks reads from the checkout path (see
-# pack-host-installer.ps1's staging note) — everything ISCC touches must live under C:\t.
-$issLocal = Join-Path $OutDir 'punktfunk-client.iss'
-Copy-Item -LiteralPath $iss -Destination $issLocal -Force
-$brandSrc = (Resolve-Path (Join-Path $here '..\..\..\packaging\windows\branding')).Path
-$brandStage = Join-Path $OutDir 'branding'
-if (Test-Path $brandStage) { Remove-Item $brandStage -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $brandStage | Out-Null
-Copy-Item (Join-Path $brandSrc '*.bmp') $brandStage -Force
-Copy-Item (Join-Path $brandSrc 'punktfunk.ico') $brandStage -Force
-
-$defines = @(
-    "/DMyAppVersion=$Version",
-    "/DArch=$Arch",
-    "/DLayoutDir=$stage",
-    "/DBrandingDir=$brandStage",
-    "/DOutputDir=$OutDir"
-)
 $setup = Join-Path $OutDir "punktfunk-client-setup-${Version}_${Arch}.exe"
-if ($Engine) {
-    # The wizard crate builds for this arch into a target dir of its own; the packer takes the
-    # self-contained runtime staged there and the CLIENT twin (asInvoker - never elevates).
-    $triple = if ($Arch -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
-    $repoRoot = (Resolve-Path (Join-Path $here '..\..\..')).Path
-    $wizTarget = Join-Path $OutDir 'wizard-target'
-    Write-Host "==> building punktfunk-setup-client ($triple) -> $wizTarget"
-    $prevTarget = $env:CARGO_TARGET_DIR
-    $env:CARGO_TARGET_DIR = $wizTarget
-    Push-Location $repoRoot
-    & cargo build --release -p punktfunk-setup-win --target $triple
+# The wizard crate builds for this arch into a target dir of its own; the packer takes the
+# self-contained runtime staged there and the CLIENT twin (asInvoker - never elevates).
+$triple = if ($Arch -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+$repoRoot = (Resolve-Path (Join-Path $here '..\..\..')).Path
+$wizTarget = Join-Path $OutDir 'wizard-target'
+Write-Host "==> building punktfunk-setup-client ($triple) -> $wizTarget"
+$prevTarget = $env:CARGO_TARGET_DIR
+$env:CARGO_TARGET_DIR = $wizTarget
+Push-Location $repoRoot
+& cargo build --release -p punktfunk-setup-win --target $triple
+$wizExit = $LASTEXITCODE
+if ($wizExit -eq 0 -and $triple -ne 'x86_64-pc-windows-msvc') {
+    # The packer itself runs on the (x64) runner, whatever arch it packs for.
+    & cargo build --release -p punktfunk-setup-win --bin punktfunk-setup-pack --target x86_64-pc-windows-msvc
     $wizExit = $LASTEXITCODE
-    if ($wizExit -eq 0 -and $triple -ne 'x86_64-pc-windows-msvc') {
-        # The packer itself runs on the (x64) runner, whatever arch it packs for.
-        & cargo build --release -p punktfunk-setup-win --bin punktfunk-setup-pack --target x86_64-pc-windows-msvc
-        $wizExit = $LASTEXITCODE
-    }
-    Pop-Location
-    if ($prevTarget) { $env:CARGO_TARGET_DIR = $prevTarget } else { Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
-    if ($wizExit -ne 0) { throw "punktfunk-setup-win build failed ($wizExit)" }
-    $wizRel = Join-Path $wizTarget "$triple\release"
-    $wizExe = Join-Path $wizRel 'punktfunk-setup-client.exe'
-    $packer = Join-Path $wizTarget 'x86_64-pc-windows-msvc\release\punktfunk-setup-pack.exe'
-    # D6: the payload-less uninstaller lands in {app} (the stage IS the {app} tree; the portable
-    # zip above was cut before it arrived), signed before it is packed.
-    $unins = Join-Path $stage 'unins000.exe'
-    & $packer pack-uninstaller --exe $wizExe --runtime $wizRel --version $Version --artifact client --out $unins
-    if ($LASTEXITCODE -ne 0) { throw "pack-uninstaller failed ($LASTEXITCODE)" }
-    Sign-File $unins
-    & $packer pack --exe $wizExe --runtime $wizRel --app $stage --version $Version --artifact client --out $setup
-    if ($LASTEXITCODE -ne 0) { throw "pack failed ($LASTEXITCODE)" }
-    & $packer inspect $setup
-    if ($LASTEXITCODE -ne 0) { throw "inspect failed ($LASTEXITCODE)" }
 }
-else {
-    Write-Host "==> ISCC $($defines -join ' ') $issLocal"
-    & $iscc @defines $issLocal
-    if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
-}
+Pop-Location
+if ($prevTarget) { $env:CARGO_TARGET_DIR = $prevTarget } else { Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
+if ($wizExit -ne 0) { throw "punktfunk-setup-win build failed ($wizExit)" }
+$wizRel = Join-Path $wizTarget "$triple\release"
+$wizExe = Join-Path $wizRel 'punktfunk-setup-client.exe'
+$packer = Join-Path $wizTarget 'x86_64-pc-windows-msvc\release\punktfunk-setup-pack.exe'
+# D6: the payload-less uninstaller lands in {app} (the stage IS the {app} tree; the portable
+# zip above was cut before it arrived), signed before it is packed.
+$unins = Join-Path $stage 'unins000.exe'
+& $packer pack-uninstaller --exe $wizExe --runtime $wizRel --version $Version --artifact client --out $unins
+if ($LASTEXITCODE -ne 0) { throw "pack-uninstaller failed ($LASTEXITCODE)" }
+Sign-File $unins
+& $packer pack --exe $wizExe --runtime $wizRel --app $stage --version $Version --artifact client --out $setup
+if ($LASTEXITCODE -ne 0) { throw "pack failed ($LASTEXITCODE)" }
+& $packer inspect $setup
+if ($LASTEXITCODE -ne 0) { throw "inspect failed ($LASTEXITCODE)" }
 if (-not (Test-Path $setup)) { throw "expected installer not produced: $setup" }
 Sign-File $setup
 Remove-Item $pfxPath -Force -ErrorAction SilentlyContinue
