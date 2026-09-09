@@ -146,8 +146,8 @@ pub struct RefPic {
 
 /// The three "current" 8.3.2 reference picture sets, resolved to stored pictures.
 ///
-/// Unresolvable entries are ABSENT (flagged [`PlanWarning::MissingReference`]).
-/// Per-slice lists conceal by substitution instead: `ref_idx` is positional.
+/// An entry the DPB lacks is flagged [`PlanWarning::MissingReference`] and
+/// carries a stand-in picture, so every position the slices can index binds.
 #[derive(Debug, Clone, Default)]
 pub struct RpsPlan {
     /// `RefPicSetStCurrBefore`: short-term, POC below current, nearest first.
@@ -308,6 +308,28 @@ fn dpb_limit(sps: &Sps) -> usize {
 ///
 /// Upstream uses `[_; 16]` plus counts. `Vec`s here avoid the OOB panic a
 /// hostile header can reach (a slice may name more RPS entries than the DPB).
+/// Stand in for every `None` of a current RPS set: the nearest present entry of
+/// the set, else the DPB reference closest in POC to the named picture.
+fn fill_missing(dpb: &Dpb<PicId>, set: &mut [Option<DpbEntry<PicId>>], pocs: &[i32]) {
+    for i in 0..set.len() {
+        if set[i].is_some() {
+            continue;
+        }
+        let neighbour = set[..i]
+            .iter()
+            .rev()
+            .chain(set[i + 1..].iter())
+            .flatten()
+            .next()
+            .cloned();
+        set[i] = neighbour.or_else(|| {
+            dpb.get_all_references()
+                .into_iter()
+                .min_by_key(|e| (e.0.borrow().pic_order_cnt_val - pocs[i]).abs())
+        });
+    }
+}
+
 #[derive(Default)]
 struct RefPicSet {
     /// `PocStCurrBefore` / `PocStCurrAfter` / `PocStFoll` (equation 8-5).
@@ -318,8 +340,8 @@ struct RefPicSet {
     poc_lt_curr: Vec<(i32, bool)>,
     poc_lt_foll: Vec<(i32, bool)>,
 
-    /// Resolved sets (8-6/8-7). `None` = DPB miss; kept positional so list
-    /// construction can substitute in place.
+    /// Resolved sets (8-6/8-7). `None` = DPB miss, positional; `fill_missing`
+    /// stands a real picture in before the plan is built.
     ref_pic_set_st_curr_before: Vec<Option<DpbEntry<PicId>>>,
     ref_pic_set_st_curr_after: Vec<Option<DpbEntry<PicId>>>,
     ref_pic_set_lt_curr: Vec<Option<DpbEntry<PicId>>>,
@@ -960,6 +982,24 @@ impl H265Planner {
             self.rps.ref_pic_set_st_foll.push(reference);
         }
 
+        // A named picture the DPB lacks takes a stand-in at its position, so the
+        // decode binds a real picture wherever the slice can point: the nearest
+        // present entry of its set, else the DPB reference closest in POC. The
+        // MissingReference above still conceals the AU. Hardware fed an inter
+        // slice with an empty list corrupts its DPB for the rest of the GOP.
+        fill_missing(
+            &self.dpb,
+            &mut self.rps.ref_pic_set_st_curr_before,
+            &self.rps.poc_st_curr_before,
+        );
+        fill_missing(
+            &self.dpb,
+            &mut self.rps.ref_pic_set_st_curr_after,
+            &self.rps.poc_st_curr_after,
+        );
+        let lt_pocs: Vec<i32> = self.rps.poc_lt_curr.iter().map(|&(poc, _)| poc).collect();
+        fill_missing(&self.dpb, &mut self.rps.ref_pic_set_lt_curr, &lt_pocs);
+
         // 8.3.2 step 4: DPB pictures in none of the five sets become unused.
         // Identity by Rc, not POC — a corrupt-stream collision must not keep
         // the wrong picture alive.
@@ -1277,7 +1317,7 @@ impl H265Planner {
     /// Fill holes a lost reference leaves, preserving list positions: every
     /// `ref_idx` indexes the returned Vec 1:1. A hole takes the previous existing
     /// entry, else the first. Compacting would shift later `ref_idx`s. An all-hole
-    /// list collapses to empty (caller warns).
+    /// list collapses to empty (caller warns); `fill_missing` leaves none.
     fn substitute_in_place(list: Vec<Option<RefPic>>) -> Vec<RefPic> {
         let first_existing = list.iter().flatten().next().copied();
         let mut out = Vec::with_capacity(list.len());
@@ -2286,8 +2326,43 @@ mod tests {
             vec![p1_id, p1_id, idr_id],
             "substitution must preserve list length and positions"
         );
-        // RPS omits the unresolvable entry rather than fabricating one.
-        assert_eq!(p3.rps.st_curr_before.len(), 2);
+        // The RPS carries the stand-in at the lost position, so the decode binds it.
+        let rps_ids: Vec<PicId> = p3.rps.st_curr_before.iter().map(|r| r.id).collect();
+        assert_eq!(rps_ids, vec![p1_id, p1_id, idr_id]);
+    }
+
+    /// Every current reference lost: the list still binds a real picture (the DPB
+    /// reference nearest the lost POC) instead of an empty list, and the AU is
+    /// still flagged concealed.
+    #[test]
+    fn an_all_missing_current_set_stands_in_the_nearest_dpb_picture() {
+        let mut planner = H265Planner::new();
+        planner
+            .plan_au(&opening_idr_au(&SpsOpts::default()))
+            .unwrap();
+        let p1 = planner.plan_au(&trail_p(1, &[(0, true)], 1)).unwrap();
+        let p1_id = p1.dpb.stored.unwrap();
+        // poc 2 lost; p3 names only poc 2.
+        let p3 = planner.plan_au(&trail_p(3, &[(0, true)], 1)).unwrap();
+        assert!(
+            p3.warnings
+                .iter()
+                .any(|w| matches!(w, PlanWarning::MissingReference { .. })),
+            "{:?}",
+            p3.warnings
+        );
+        assert!(
+            !p3.warnings.iter().any(|w| matches!(
+                w,
+                PlanWarning::MissingReference { context, .. } if context.contains("no usable")
+            )),
+            "{:?}",
+            p3.warnings
+        );
+        let ids: Vec<PicId> = p3.slices[0].ref_list0.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![p1_id]);
+        let rps_ids: Vec<PicId> = p3.rps.st_curr_before.iter().map(|r| r.id).collect();
+        assert_eq!(rps_ids, vec![p1_id]);
     }
 
     #[test]
