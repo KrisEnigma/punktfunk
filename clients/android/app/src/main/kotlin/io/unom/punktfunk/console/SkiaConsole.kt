@@ -275,10 +275,10 @@ object SkiaConsole {
             for (dh in list) {
                 val kh = knownHostStore.all().firstOrNull { it.matches(dh) } ?: continue
                 if (dh.mac.isNotEmpty() && dh.mac.toSet() != kh.mac.toSet()) {
-                    knownHostStore.learnMac(kh.address, kh.port, dh.mac); changed = true
+                    knownHostStore.learnMac(kh, dh.mac); changed = true
                 }
-                dh.mgmtPort?.let { if (it != kh.mgmtPort) { knownHostStore.learnMgmtPort(kh.address, kh.port, it); changed = true } }
-                if (dh.os.isNotEmpty() && dh.os != kh.os) { knownHostStore.learnOs(kh.address, kh.port, dh.os); changed = true }
+                dh.mgmtPort?.let { if (it != kh.mgmtPort) { knownHostStore.learnMgmtPort(kh, it); changed = true } }
+                if (dh.os.isNotEmpty() && dh.os != kh.os) { knownHostStore.learnOs(kh, dh.os); changed = true }
             }
             main.post { pushHosts(); if (changed) pushKnownHosts() }
         }
@@ -669,7 +669,7 @@ object SkiaConsole {
         val fp = a.optString("fp_hex")
         // The record by its pin first, and dialled where IT says: the row was built before the
         // last sweep, which may have followed the host to a new address.
-        val kh = knownHostStore.all().firstOrNull { fp.isNotEmpty() && it.fpHex.equals(fp, ignoreCase = true) }
+        val kh = knownHostStore.getByFp(fp)
             ?: knownHostStore.get(a.optString("addr"), a.optInt("port"))
         val addr = kh?.address ?: a.optString("addr")
         val port = kh?.port ?: a.optInt("port")
@@ -720,7 +720,7 @@ object SkiaConsole {
                     }
                     if (record != null) {
                         NativeBridge.nativeHostMgmtPort(h).takeIf { it > 0 }?.let {
-                            knownHostStore.learnMgmtPort(record.address, record.port, it)
+                            knownHostStore.learnMgmtPort(record, it)
                         }
                     }
                     val session = ActiveSession(

@@ -239,19 +239,19 @@ fun ConnectScreen(
             discovered.forEach { dh ->
                 val kh = saved.firstOrNull { it.matches(dh) } ?: return@forEach
                 if (dh.mac.isNotEmpty() && kh.mac != dh.mac) {
-                    knownHostStore.learnMac(kh.address, kh.port, dh.mac)
+                    knownHostStore.learnMac(kh, dh.mac)
                     any = true
                 }
                 // Same for the OS-identity chain, so the card's icon survives the host sleeping.
                 if (dh.os.isNotEmpty() && kh.os != dh.os) {
-                    knownHostStore.learnOs(kh.address, kh.port, dh.os)
+                    knownHostStore.learnOs(kh, dh.os)
                     any = true
                 }
                 // And the mgmt port, so a host that moved off 47990 keeps its library once this
                 // device can no longer see the advert (VPN, routed subnet, multicast-dead Wi-Fi).
                 val mgmt = dh.mgmtPort
                 if (mgmt != null && kh.mgmtPort != mgmt) {
-                    knownHostStore.learnMgmtPort(kh.address, kh.port, mgmt)
+                    knownHostStore.learnMgmtPort(kh, mgmt)
                     any = true
                 }
             }
@@ -383,7 +383,7 @@ fun ConnectScreen(
         // advertised, and learnMgmtPort ignores it.
         if (record != null) {
             NativeBridge.nativeHostMgmtPort(handle).takeIf { it > 0 }?.let {
-                knownHostStore.learnMgmtPort(record.address, record.port, it)
+                knownHostStore.learnMgmtPort(record, it)
             }
         }
         return ActiveSession(

@@ -143,40 +143,47 @@ class KnownHostStore(context: Context) {
      * the pins and the learned MACs. Only the name, pin and paired flag are refreshed. Returns the
      * stored record.
      *
-     * A record there pinned to a DIFFERENT fingerprint is a different host and is left alone —
-     * a dual-boot box answers at one lease with one MAC and a certificate per OS, so trusting
-     * the second OS would otherwise overwrite the first one's record.
+     * The record is found by its PIN wherever it now answers, so re-pairing a host that moved
+     * lease re-points the one record instead of forking a second with the same fingerprint;
+     * failing that, an unpinned placeholder saved at this address takes the pin. A record
+     * pinned to a DIFFERENT fingerprint is a different host and is left alone — a dual-boot box
+     * answers at one lease with one MAC and a certificate per OS, so trusting the second OS
+     * would otherwise overwrite the first one's record.
      */
     fun trust(address: String, port: Int, name: String, fpHex: String, paired: Boolean): KnownHost {
-        val existing = all().firstOrNull {
-            it.address == address && it.port == port &&
-                (it.fpHex.isEmpty() || it.fpHex.equals(fpHex, true))
-        }
-        val host = existing?.copy(name = name, fpHex = fpHex, paired = paired)
+        val existing = getByFp(fpHex)
+            ?: all().firstOrNull { it.address == address && it.port == port && it.fpHex.isEmpty() }
+        val host = existing?.copy(address = address, port = port, name = name, fpHex = fpHex, paired = paired)
             ?: KnownHost(address, port, name, fpHex, paired)
         save(host)
         return host
     }
 
     /**
-     * Learn/refresh a saved host's Wake-on-LAN MAC(s) from its live advert (called while online).
-     * No-op when the host isn't saved, the list is empty, or it's unchanged — so it doesn't churn
+     * Learn/refresh [host]'s Wake-on-LAN MAC(s) from its live advert (called while online).
+     * No-op when the record is gone, the list is empty, or it's unchanged — so it doesn't churn
      * prefs on every discovery tick.
+     *
+     * Keyed by the record the caller matched, re-read by its id: an address names more than one
+     * record once a dual-boot box has both its OS installs saved, and the advert of one used to
+     * teach whichever of them the address answered with.
      */
-    fun learnMac(address: String, port: Int, mac: List<String>) {
+    fun learnMac(host: KnownHost, mac: List<String>) {
         if (mac.isEmpty()) return
-        val h = get(address, port) ?: return
+        val h = byId(host.id) ?: return
         if (h.mac == mac) return
         save(h.copy(mac = mac))
     }
 
     /**
-     * Learn/refresh a saved host's OS-identity chain from its live advert — same contract as
-     * [learnMac]: no-op when unsaved, empty, or unchanged.
+     * Learn/refresh [host]'s OS-identity chain from its live advert — same contract as
+     * [learnMac]: no-op when the record is gone, empty, or unchanged. Keyed by the record for
+     * the same reason, and it matters most here: the chain draws the card's OS mark, so the
+     * wrong record took the neighbouring OS's icon.
      */
-    fun learnOs(address: String, port: Int, os: String) {
+    fun learnOs(host: KnownHost, os: String) {
         if (os.isEmpty()) return
-        val h = get(address, port) ?: return
+        val h = byId(host.id) ?: return
         if (h.os == os) return
         save(h.copy(os = os))
     }
@@ -185,9 +192,9 @@ class KnownHostStore(context: Context) {
      * Learn/refresh a saved host's management-API port from its live advert — same contract as
      * [learnMac]. This is the one that keeps a moved mgmt port working once mDNS isn't reachable.
      */
-    fun learnMgmtPort(address: String, port: Int, mgmtPort: Int) {
+    fun learnMgmtPort(host: KnownHost, mgmtPort: Int) {
         if (mgmtPort <= 0) return
-        val h = get(address, port) ?: return
+        val h = byId(host.id) ?: return
         if (h.mgmtPort == mgmtPort) return
         save(h.copy(mgmtPort = mgmtPort))
     }
@@ -201,7 +208,7 @@ class KnownHostStore(context: Context) {
      */
     fun learnAddress(fpHex: String, address: String, port: Int): Boolean {
         if (fpHex.isEmpty() || address.isBlank() || port !in 1..65535) return false
-        val h = all().firstOrNull { it.fpHex.equals(fpHex, ignoreCase = true) } ?: return false
+        val h = getByFp(fpHex) ?: return false
         if (h.address == address && h.port == port) return false
         save(h.copy(address = address, port = port))
         return true

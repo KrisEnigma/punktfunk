@@ -57,6 +57,27 @@ class DualBootHostsTest {
         assertEquals(2, store.all().size)
     }
 
+    /**
+     * An advert teaches the record it matched, not whichever sibling the address answers with.
+     * The OS chain draws the card's icon, so crossing it swaps the two cards' marks.
+     */
+    @Test
+    fun an_advert_teaches_only_its_own_record() {
+        val store = KnownHostStore(context)
+        val first = store.trust("192.168.1.9", 9777, "Desk (Windows)", windows, paired = true)
+        val second = store.trust("192.168.1.9", 9777, "Desk (Linux)", linux, paired = true)
+        // BOTH are taught, so a lookup that resolves by address fails whichever sibling it
+        // happens to land on — with only one taught, prefs order decides and the test flakes.
+        store.learnOs(first, "windows")
+        store.learnMgmtPort(first, 47990)
+        store.learnOs(second, "linux/fedora/bazzite")
+        store.learnMgmtPort(second, 47991)
+        assertEquals("windows", store.byId(first.id)?.os)
+        assertEquals(47990, store.byId(first.id)?.mgmtPort)
+        assertEquals("linux/fedora/bazzite", store.byId(second.id)?.os)
+        assertEquals(47991, store.byId(second.id)?.mgmtPort)
+    }
+
     /** An empty fingerprint is not a key — it would match the first unpinned placeholder. */
     @Test
     fun an_unpinned_placeholder_takes_the_first_pin_offered_at_its_address() {
