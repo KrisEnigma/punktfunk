@@ -73,6 +73,22 @@ public struct DiscoveredHost: Identifiable, Sendable, Equatable {
     public let mgmtPort: UInt16?
 }
 
+public extension DiscoveredHost {
+    /// Is this advert the saved host pinned to `pin` at `address`:`port`?
+    ///
+    /// Two known fingerprints decide it alone: it survives a DHCP address change, and it keeps
+    /// the other OS of a dual-boot box — one lease, one MAC, a certificate each — from reading
+    /// as the OS already saved, which is what keeps it in the discovered section where it can
+    /// be added. Only when one side is unpinned does address:port answer. The Rust clients hold
+    /// the same rule in `discovery::same_host`.
+    func matches(pin: String?, address: String, port: UInt16) -> Bool {
+        if let pin, !pin.isEmpty, let fp = fingerprintHex, !fp.isEmpty {
+            return pin.lowercased() == fp.lowercased()
+        }
+        return address == host && port == self.port
+    }
+}
+
 @MainActor
 public final class HostDiscovery: ObservableObject {
     /// Currently-visible hosts, deduped by `id`, sorted by name. Main-actor.

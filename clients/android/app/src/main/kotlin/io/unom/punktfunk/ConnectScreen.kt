@@ -239,19 +239,19 @@ fun ConnectScreen(
             discovered.forEach { dh ->
                 val kh = saved.firstOrNull { it.matches(dh) } ?: return@forEach
                 if (dh.mac.isNotEmpty() && kh.mac != dh.mac) {
-                    knownHostStore.learnMac(kh.address, kh.port, dh.mac)
+                    knownHostStore.learnMac(kh, dh.mac)
                     any = true
                 }
                 // Same for the OS-identity chain, so the card's icon survives the host sleeping.
                 if (dh.os.isNotEmpty() && kh.os != dh.os) {
-                    knownHostStore.learnOs(kh.address, kh.port, dh.os)
+                    knownHostStore.learnOs(kh, dh.os)
                     any = true
                 }
                 // And the mgmt port, so a host that moved off 47990 keeps its library once this
                 // device can no longer see the advert (VPN, routed subnet, multicast-dead Wi-Fi).
                 val mgmt = dh.mgmtPort
                 if (mgmt != null && kh.mgmtPort != mgmt) {
-                    knownHostStore.learnMgmtPort(kh.address, kh.port, mgmt)
+                    knownHostStore.learnMgmtPort(kh, mgmt)
                     any = true
                 }
             }
@@ -383,7 +383,7 @@ fun ConnectScreen(
         // advertised, and learnMgmtPort ignores it.
         if (record != null) {
             NativeBridge.nativeHostMgmtPort(handle).takeIf { it > 0 }?.let {
-                knownHostStore.learnMgmtPort(record.address, record.port, it)
+                knownHostStore.learnMgmtPort(record, it)
             }
         }
         return ActiveSession(
@@ -597,8 +597,9 @@ fun ConnectScreen(
     }
 
     // Decide pinned-reconnect vs fp-changed vs TOFU vs pairing before connecting. Trust state is
-    // keyed by address:port, so a discovered and a manually-typed connection to the same host share
-    // one record. Trust-on-first-use is permitted ONLY when the host advertised pair=optional; a
+    // keyed by the pinned fingerprint, falling back to address:port for a host typed in by hand,
+    // so a discovered and a manually-typed connection to the same host share one record.
+    // Trust-on-first-use is permitted ONLY when the host advertised pair=optional; a
     // pair=required host, or a manual/unknown-policy host, must pair — either by no-PIN request
     // access (approve in the console) or by the SPAKE2 PIN ceremony.
     fun connect(
@@ -619,8 +620,13 @@ fun ConnectScreen(
             lnpPrompt = true
             return
         }
-        val known = knownHostStore.get(targetHost, targetPort)
         val adv = dh?.fingerprint?.lowercase()
+        // The record this dial is about: the one carrying the advertised pin, else — only when
+        // nothing there is pinned — what the address answers with. Both OS installs of a
+        // dual-boot box answer at one lease, so a record pinned to another fingerprint is a
+        // different host, and its name and profile are not this one's.
+        val known = adv?.let { knownHostStore.getByFp(it) }
+            ?: knownHostStore.get(targetHost, targetPort)?.takeIf { adv == null || it.fpHex.isEmpty() }
         // Label precedence: a saved host keeps its (possibly user-renamed) name; else the discovered
         // mDNS name; else the name typed in the Add-host sheet; else the bare address.
         val name = known?.name ?: dh?.name ?: manualName?.trim()?.takeIf { it.isNotEmpty() } ?: targetHost
@@ -1074,13 +1080,16 @@ internal fun hasLocalNetworkPermission(context: Context): Boolean =
         PackageManager.PERMISSION_GRANTED
 
 /**
- * True when a saved host and a discovered advert are the same machine — matched by certificate
- * fingerprint when both carry it (so it survives a DHCP address change), else by address:port.
- * Mirrors the Apple client's `StoredHost.matches`; de-dupes "Discovered" against "Saved hosts".
+ * True when a saved host and a discovered advert are the same machine. Two known fingerprints
+ * decide it alone — it survives a DHCP address change, and it keeps the other OS of a dual-boot
+ * box (one lease, one MAC, a certificate each) out of the record already saved for the first.
+ * Only when one side is unpinned does the address answer. Mirrors the Apple client's
+ * `StoredHost.matches` and the Rust `discovery::same_host`; de-dupes "Discovered" against
+ * "Saved hosts".
  */
 internal fun KnownHost.matches(dh: DiscoveredHost): Boolean {
     val advFp = dh.fingerprint?.lowercase()
-    if (!advFp.isNullOrEmpty() && fpHex.isNotEmpty() && fpHex.lowercase() == advFp) return true
+    if (!advFp.isNullOrEmpty() && fpHex.isNotEmpty()) return fpHex.lowercase() == advFp
     return address == dh.host && port == dh.port
 }
 

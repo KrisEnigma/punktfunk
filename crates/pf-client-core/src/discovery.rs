@@ -46,6 +46,17 @@ impl DiscoveredHost {
     }
 }
 
+/// Is this advert that saved host? Two known fingerprints settle it on their own — falling
+/// back to the address there would let whoever inherits a sleeping host's DHCP lease be
+/// treated AS that host, and reads the other OS of a dual-boot box (one lease, one MAC, a
+/// certificate each) as the OS already saved, so it never reaches the discovered shelf.
+pub fn same_host(k: &crate::trust::KnownHost, d: &DiscoveredHost) -> bool {
+    if !k.fp_hex.is_empty() && !d.fp_hex.is_empty() {
+        return k.fp_hex.eq_ignore_ascii_case(&d.fp_hex);
+    }
+    k.addr == d.addr && k.port == d.port
+}
+
 pub enum DiscoveryEvent {
     /// Appeared or refreshed (new address, pairing, …).
     Resolved(DiscoveredHost),
@@ -241,6 +252,41 @@ mod tests {
             mac: vec![],
             os: String::new(),
         }
+    }
+
+    /// A dual-boot box: one lease, one MAC, a certificate per OS. The advert of the OS
+    /// that is up is not the saved record of the other one, so it still reaches the
+    /// discovered shelf and can be added.
+    #[test]
+    fn a_second_os_at_one_address_is_not_the_saved_host() {
+        let saved = crate::trust::KnownHost {
+            name: "Desk (Windows)".into(),
+            addr: "192.168.1.9".into(),
+            port: 9777,
+            fp_hex: "bb".into(),
+            ..Default::default()
+        };
+        let other_os = host("id-2", "desk-linux._punktfunk._udp.local.", "192.168.1.9");
+        assert!(
+            !same_host(&saved, &other_os),
+            "a different pin is a different host"
+        );
+
+        // The same host, on a lease it has moved to, still matches on its pin alone.
+        let mut moved = other_os.clone();
+        moved.fp_hex = "BB".into();
+        moved.addr = "192.168.1.20".into();
+        assert!(same_host(&saved, &moved));
+
+        // Neither side pinned: the address is all there is to go on.
+        let placeholder = crate::trust::KnownHost {
+            addr: "192.168.1.9".into(),
+            port: 9777,
+            ..Default::default()
+        };
+        let mut unpinned = other_os.clone();
+        unpinned.fp_hex = String::new();
+        assert!(same_host(&placeholder, &unpinned));
     }
 
     #[test]

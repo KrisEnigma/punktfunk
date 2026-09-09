@@ -21,16 +21,12 @@ import WidgetKit
 
 extension StoredHost {
     /// True when a live mDNS advert (`DiscoveredHost`) describes THIS saved host — drives the
-    /// "online" indicator and de-dupes the discovered section. Matched by certificate
-    /// fingerprint when both sides carry it (so it survives a DHCP address change), otherwise
-    /// by address:port. Online detection is LAN-scoped: a host not advertising on this network
-    /// (off, or a remote/cross-subnet address) simply won't match — "not seen", not proven off.
+    /// "online" indicator and de-dupes the discovered section. The rule is
+    /// `DiscoveredHost.matches(pin:address:port:)`. Online detection is LAN-scoped: a host not
+    /// advertising on this network (off, or a remote/cross-subnet address) simply won't match —
+    /// "not seen", not proven off.
     func matches(_ discovered: DiscoveredHost) -> Bool {
-        if let pin = pinnedSHA256, let fp = discovered.fingerprintHex,
-           pin.hexLower == fp.lowercased() {
-            return true
-        }
-        return address == discovered.host && port == discovered.port
+        discovered.matches(pin: pinnedSHA256?.hexLower, address: address, port: port)
     }
 }
 
