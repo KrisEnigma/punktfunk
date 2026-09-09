@@ -15,7 +15,7 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -471,26 +471,46 @@ impl Drop for DevInfoList {
 /// mid-transition devnode (registered, not started) from a missing one. Only the latter is
 /// worth reloading; cycling the former lengthens the outage it is waiting out.
 struct Probe {
-    handle: Option<OwnedHandle>,
+    /// An open control handle and the driver's `IOCTL_GET_INFO` reply: the device answered.
+    opened: Option<(OwnedHandle, control::InfoReply)>,
     /// `SPINT_ACTIVE` set — owning device is started.
     active: u32,
     /// `SPINT_ACTIVE` clear — registered, owning device not started.
     inactive: u32,
     last_err: Option<anyhow::Error>,
+    /// The open or the handshake did not return within [`PROBE_BUDGET`]: WUDFHost is not
+    /// serving requests. Neither absent nor not-ready — only a reload clears it.
+    wedged: bool,
 }
 
 impl Probe {
+    fn wedged() -> Self {
+        Probe {
+            opened: None,
+            active: 0,
+            inactive: 0,
+            last_err: None,
+            wedged: true,
+        }
+    }
+
     /// No instance of any kind. With an adapter present this is a hostless WUDFHost crash; with
     /// none, the driver is not installed. Waiting alone will not fix either.
     fn is_absent(&self) -> bool {
-        self.handle.is_none() && self.active == 0 && self.inactive == 0
+        !self.wedged && self.opened.is_none() && self.active == 0 && self.inactive == 0
     }
 
     /// Why no handle came back, naming what was seen. "0 interfaces" and "1 inactive" are
     /// different diagnoses; call only on a miss.
     fn into_error(self) -> anyhow::Error {
+        if self.wedged {
+            return anyhow::anyhow!(
+                "pf-vdisplay control device did not answer within {PROBE_BUDGET:?} — its \
+                 WUDFHost process is wedged; an adapter reload or a reboot clears it"
+            );
+        }
         let seen = format!("{} active, {} inactive", self.active, self.inactive);
-        if self.handle.is_some() {
+        if self.opened.is_some() {
             return anyhow::anyhow!("pf-vdisplay device interface opened ({seen})");
         }
         match self.last_err {
@@ -502,9 +522,9 @@ impl Probe {
         }
     }
 
-    fn into_result(mut self) -> Result<OwnedHandle> {
-        match self.handle.take() {
-            Some(h) => Ok(h),
+    fn into_result(mut self) -> Result<(OwnedHandle, control::InfoReply)> {
+        match self.opened.take() {
+            Some(o) => Ok(o),
             None => Err(self.into_error()),
         }
     }
@@ -512,7 +532,56 @@ impl Probe {
 
 /// Open the pf-vdisplay control device. Safe and owning: no caller obligation, close is `Drop`.
 fn open_device() -> Result<OwnedHandle> {
-    probe_device().into_result()
+    probe_device().into_result().map(|(h, _)| h)
+}
+
+/// Bound on one open + `IOCTL_GET_INFO`. Both are sub-second; the driver's own silence watchdog
+/// is 3 s, so a device that has not answered in 10 s has already departed every monitor and an
+/// adapter reload costs nothing.
+const PROBE_BUDGET: Duration = Duration::from_secs(10);
+
+/// Probe workers abandoned past their budget and still blocked in the driver. While non-zero,
+/// [`probe_device`] reports wedged without spawning another — each would only add a thread that
+/// unblocks together with the first, when a reload kills the host process.
+static WEDGED_PROBES: AtomicUsize = AtomicUsize::new(0);
+
+/// [`probe_sync`] on a worker, abandoned after [`PROBE_BUDGET`]. `CreateFileW` and
+/// `DeviceIoControl` on a hung WUDFHost never return and take no timeout; the calling thread
+/// must not be the one that waits.
+fn probe_device() -> Probe {
+    bounded_probe(PROBE_BUDGET, probe_sync)
+}
+
+/// [`probe_device`] with the probe and its budget as parameters, so a test can wedge one.
+fn bounded_probe(budget: Duration, probe: fn() -> Probe) -> Probe {
+    if WEDGED_PROBES.load(Ordering::SeqCst) > 0 {
+        return Probe::wedged();
+    }
+    // Rendezvous: a `send` after the receiver gave up blocks until `rx` drops, then fails, so
+    // the worker's decrement can never precede the increment below.
+    let (tx, rx) = std::sync::mpsc::sync_channel(0);
+    let spawned = std::thread::Builder::new()
+        .name("vdisplay-probe".into())
+        .spawn(move || {
+            if tx.send(probe()).is_err() {
+                WEDGED_PROBES.fetch_sub(1, Ordering::SeqCst);
+            }
+        });
+    if spawned.is_err() {
+        return probe(); // no thread to be had — unbounded is still better than no probe
+    }
+    match rx.recv_timeout(budget) {
+        Ok(p) => p,
+        Err(_) => {
+            WEDGED_PROBES.fetch_add(1, Ordering::SeqCst);
+            tracing::error!(
+                budget_s = budget.as_secs(),
+                "pf-vdisplay control device did not answer — WUDFHost is WEDGED; sessions get \
+                 audio and no video until the adapter reloads"
+            );
+            Probe::wedged()
+        }
+    }
 }
 
 /// [`open_device`], reporting what was found rather than only success.
@@ -530,12 +599,15 @@ fn instance_id_from_path(path: &str) -> Option<String> {
     Some(id.replace('#', "\\"))
 }
 
-fn probe_device() -> Probe {
+/// Enumerate, open the first active interface, and complete the version handshake — one
+/// synchronous unit so [`probe_device`] can bound it. "Openable" means the driver answered.
+fn probe_sync() -> Probe {
     let mut probe = Probe {
-        handle: None,
+        opened: None,
         active: 0,
         inactive: 0,
         last_err: None,
+        wedged: false,
     };
     // SAFETY: SetupAPI enumeration; the returned list is solely owned by the RAII wrapper.
     let hdev = match unsafe {
@@ -625,14 +697,48 @@ fn probe_device() -> Probe {
                 }
                 // SAFETY: `h` is the handle `CreateFileW` just returned to this call and nothing
                 // else holds it; `OwnedHandle` is the single owner that closes it on drop.
-                probe.handle = Some(unsafe { OwnedHandle::from_raw_handle(h.0 as _) });
-                return probe;
+                let device = unsafe { OwnedHandle::from_raw_handle(h.0 as _) };
+                // A handle that opens but does not answer is a miss like any other: the next
+                // interface may be the live one.
+                match get_info(&device) {
+                    Ok(info) => {
+                        probe.opened = Some((device, info));
+                        return probe;
+                    }
+                    Err(e) => probe.last_err = Some(e),
+                }
             }
-            // Raced-away or wedged device — remember the error, try the next interface.
+            // Raced-away device — remember the error, try the next interface.
             Err(e) => probe.last_err = Some(e),
         }
     }
     probe
+}
+
+/// `IOCTL_GET_INFO` on a freshly opened control handle. Fails closed on a short reply:
+/// `protocol_version` gates host behaviour and zeros from an under-written buffer must not pass.
+fn get_info(device: &OwnedHandle) -> Result<control::InfoReply> {
+    let mut info_buf = [0u8; size_of::<control::InfoReply>()];
+    // SAFETY: `device` is live for this synchronous call. `IOCTL_GET_INFO` takes no input and
+    // writes into `info_buf`, whose length is the output size, so the write cannot go OOB.
+    let n = unsafe {
+        ioctl(
+            HANDLE(device.as_raw_handle()),
+            control::IOCTL_GET_INFO,
+            &[],
+            &mut info_buf,
+        )
+    }
+    .context("pf-vdisplay IOCTL_GET_INFO (version handshake)")?;
+    if (n as usize) < size_of::<control::InfoReply>() {
+        anyhow::bail!(
+            "pf-vdisplay IOCTL_GET_INFO returned {n} bytes, expected {}",
+            size_of::<control::InfoReply>()
+        );
+    }
+    Ok(bytemuck::pod_read_unaligned(
+        &info_buf[..size_of::<control::InfoReply>()],
+    ))
 }
 
 /// The installed driver speaks a protocol this host cannot drive. Typed so a session can name
@@ -641,6 +747,16 @@ fn probe_device() -> Probe {
 pub struct DriverOutdated {
     pub driver: u32,
     pub host: u32,
+}
+
+impl DriverOutdated {
+    /// v7 replaced the video transport outright, so the floor equals this host's version: a
+    /// v6 driver has no encoder to open and a future one may have moved the section again.
+    fn check(driver: u32) -> Option<Self> {
+        let host = pf_driver_proto::PROTOCOL_VERSION;
+        (driver < pf_driver_proto::MIN_DRIVER_PROTOCOL_VERSION || driver > host)
+            .then_some(DriverOutdated { driver, host })
+    }
 }
 
 impl std::fmt::Display for DriverOutdated {
@@ -669,36 +785,13 @@ impl VdisplayDriver for PfVdisplayDriver {
         // Brief re-probe, no adapter reload. `ensure_available` already ran; leftover is a race.
         // `hw_cursor_capable` also lands here mid-handshake. Reloading would deadlock:
         // `ensure_device` calls us holding the manager `device` mutex (`RECOVERY` lock order).
-        let device = wait_for_interface(BRIEF_RETRY, false).0?;
+        // The probe already ran `IOCTL_GET_INFO`; a wedged host is an error here, never a wait.
+        let (device, info) = wait_for_interface(BRIEF_RETRY, false).0?;
         // `OwnedHandle` so every `?` closes the device. Wrapping later leaked when GET_INFO failed.
         let raw = HANDLE(device.as_raw_handle());
         // Hard version check: a mismatch must not proceed to corrupt the IOCTL stream.
-        let mut info_buf = [0u8; size_of::<control::InfoReply>()];
-        // SAFETY: `raw` borrows the live `OwnedHandle` above for this synchronous call.
-        // `IOCTL_GET_INFO` takes no input (`&[]`) and writes into `info_buf`, a stack
-        // `[u8; size_of::<InfoReply>()]` whose length is the output size — so the write cannot
-        // go OOB — and which outlives the call.
-        let n = unsafe { ioctl(raw, control::IOCTL_GET_INFO, &[], &mut info_buf) }
-            .context("pf-vdisplay IOCTL_GET_INFO (version handshake)")?;
-        // Fail closed on a short reply: `protocol_version` (and the ADD reply below) gate host
-        // behaviour; zeros from an under-written buffer must not be trusted.
-        if (n as usize) < size_of::<control::InfoReply>() {
-            anyhow::bail!(
-                "pf-vdisplay IOCTL_GET_INFO returned {n} bytes, expected {}",
-                size_of::<control::InfoReply>()
-            );
-        }
-        let info: control::InfoReply =
-            bytemuck::pod_read_unaligned(&info_buf[..size_of::<control::InfoReply>()]);
-        // v7 replaced the video transport outright, so the floor equals this host's version: a
-        // v6 driver has no encoder to open and a future one may have moved the section again.
-        if info.protocol_version < pf_driver_proto::MIN_DRIVER_PROTOCOL_VERSION
-            || info.protocol_version > pf_driver_proto::PROTOCOL_VERSION
-        {
-            return Err(anyhow::Error::new(DriverOutdated {
-                driver: info.protocol_version,
-                host: pf_driver_proto::PROTOCOL_VERSION,
-            }));
+        if let Some(outdated) = DriverOutdated::check(info.protocol_version) {
+            return Err(anyhow::Error::new(outdated));
         }
         let watchdog_s = info.watchdog_timeout_s.max(1);
         // Only log of the negotiated watchdog; pinger cadence is `watchdog/3`.
@@ -1033,6 +1126,30 @@ pub fn probe() -> Result<()> {
     open_device().map(|_| ())
 }
 
+/// One bounded probe for the diagnostics row: no reload, no lock, nothing cached. A wedged
+/// host answers within [`PROBE_BUDGET`] the first time and at once after.
+pub fn health() -> crate::DriverHealth {
+    use crate::DriverHealth;
+    let probe = probe_device();
+    if probe.wedged {
+        return DriverHealth::Wedged;
+    }
+    if let Some((_, info)) = &probe.opened {
+        return match DriverOutdated::check(info.protocol_version) {
+            Some(DriverOutdated { driver, host }) => DriverHealth::Outdated { driver, host },
+            None => DriverHealth::Ok {
+                protocol: info.protocol_version,
+            },
+        };
+    }
+    if probe.is_absent() {
+        return DriverHealth::Absent;
+    }
+    DriverHealth::NotReady {
+        detail: format!("{:#}", probe.into_error()),
+    }
+}
+
 pub fn is_available() -> bool {
     open_device().is_ok()
 }
@@ -1109,25 +1226,31 @@ pub fn force_driver_cycle() -> Result<()> {
     }
 }
 
-/// Wait for an openable control interface; reload if `reload` and the devnode looks hostless.
-/// Returns the handle (so the manager's open can keep it) and whether a reload ran.
+/// Wait for a control interface that answers; reload if `reload` and the devnode looks hostless
+/// or wedged. Returns the handle with its handshake reply (so the manager's open can keep both)
+/// and whether a reload ran.
 ///
-/// Two states want opposite treatment:
+/// Three states want different treatment:
 /// * **Not ready** — instances registered, none active (or open refused). The devnode is
 ///   coming up; reloading lengthens the outage.
 /// * **Absent** — no instance. Hostless WUDFHost crash; only a reload clears it.
+/// * **Wedged** — the interface opens but the host never answers. Waiting cannot help; the
+///   reload kills the host process, which fails the blocked request and clears the state.
 ///
-/// Probe, wait out not-ready, reload absent after [`ABSENT_SETTLE`], then
+/// Probe, wait out not-ready, reload absent after [`ABSENT_SETTLE`] or wedged at once, then
 /// [`ARRIVAL_AFTER_RELOAD`]. A reload is still attempted at the end of `not_ready_grace`
 /// (wedged not-ready). No adapter devnode fails immediately.
-fn wait_for_interface(not_ready_grace: Duration, reload: bool) -> (Result<OwnedHandle>, bool) {
+fn wait_for_interface(
+    not_ready_grace: Duration,
+    reload: bool,
+) -> (Result<(OwnedHandle, control::InfoReply)>, bool) {
     let started = Instant::now();
     let mut deadline = started + not_ready_grace;
     let mut absent_since: Option<Instant> = None;
     let mut reloaded = false;
     loop {
         let mut probe = probe_device();
-        if let Some(h) = probe.handle.take() {
+        if let Some(opened) = probe.opened.take() {
             if reloaded || started.elapsed() > PROBE_INTERVAL {
                 tracing::info!(
                     waited_ms = started.elapsed().as_millis() as u64,
@@ -1135,7 +1258,11 @@ fn wait_for_interface(not_ready_grace: Duration, reload: bool) -> (Result<OwnedH
                     "pf-vdisplay: control interface available"
                 );
             }
-            return (Ok(h), reloaded);
+            return (Ok(opened), reloaded);
+        }
+        // A wedge is not waited out. Without the reload lever there is nothing to do but say so.
+        if probe.wedged && !reload {
+            return (Err(probe.into_error()), reloaded);
         }
         // Reset by any sighting: flicker between absent and not-ready is a transition.
         if probe.is_absent() {
@@ -1154,7 +1281,8 @@ fn wait_for_interface(not_ready_grace: Duration, reload: bool) -> (Result<OwnedH
             absent_since = None;
         }
         let absent_long_enough = absent_since.is_some_and(|t| t.elapsed() >= ABSENT_SETTLE);
-        if reload && !reloaded && (absent_long_enough || Instant::now() >= deadline) {
+        if reload && !reloaded && (probe.wedged || absent_long_enough || Instant::now() >= deadline)
+        {
             // Not-ready never took the absent-sighting release; drop the ref now (idempotent).
             super::manager::invalidate_cached_device(
                 "adapter reload imminent — releasing the host's own device handle (open handles \
@@ -1203,6 +1331,54 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    /// A probe past its budget is reported wedged and later probes fail fast without a second
+    /// worker; the count clears when the abandoned worker returns, and probing resumes. A count
+    /// stuck at one would fail every session forever after one hang.
+    #[test]
+    fn an_abandoned_probe_fails_fast_until_it_returns() {
+        use std::sync::atomic::AtomicBool;
+        static RELEASE: AtomicBool = AtomicBool::new(false);
+        fn stuck() -> Probe {
+            while !RELEASE.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Probe {
+                opened: None,
+                active: 1,
+                inactive: 0,
+                last_err: None,
+                wedged: false,
+            }
+        }
+        let budget = Duration::from_millis(50);
+        let started = Instant::now();
+        assert!(bounded_probe(budget, stuck).wedged);
+        assert!(started.elapsed() >= budget);
+        let started = Instant::now();
+        assert!(
+            bounded_probe(budget, stuck).wedged,
+            "must fail fast while one is abandoned"
+        );
+        assert!(
+            started.elapsed() < budget,
+            "a fail-fast probe must not wait out a budget"
+        );
+        assert_eq!(WEDGED_PROBES.load(Ordering::SeqCst), 1);
+
+        RELEASE.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while WEDGED_PROBES.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            WEDGED_PROBES.load(Ordering::SeqCst),
+            0,
+            "the returned worker must clear it"
+        );
+        let probe = bounded_probe(budget, stuck);
+        assert!(!probe.wedged && probe.active == 1);
+    }
 
     /// Every ADD needs its own key: the preempt path adds after a removal that
     /// may not have landed, and a reused key would depart the incumbent.
@@ -1311,12 +1487,17 @@ mod tests {
     #[test]
     fn only_a_total_absence_counts_as_absent() {
         let probe = |active, inactive| Probe {
-            handle: None,
+            opened: None,
             active,
             inactive,
             last_err: None,
+            wedged: false,
         };
         assert!(probe(0, 0).is_absent(), "no instances at all = absent");
+        assert!(
+            !Probe::wedged().is_absent(),
+            "a wedged host saw nothing, yet it is not a missing device"
+        );
         assert!(
             !probe(0, 1).is_absent(),
             "a registered-but-inactive instance is a device coming up, not a missing one"

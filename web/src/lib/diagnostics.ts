@@ -23,6 +23,7 @@ const TITLES: Record<string, () => string> = {
 	virtual_deck_vhci: () => m.diag_virtual_deck_vhci_title(),
 	uinput_access: () => m.diag_uinput_access_title(),
 	server_conflict: () => m.diag_server_conflict_title(),
+	vdisplay_driver: () => m.diag_vdisplay_driver_title(),
 };
 
 /**

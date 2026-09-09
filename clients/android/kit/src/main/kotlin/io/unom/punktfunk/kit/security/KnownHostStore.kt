@@ -192,6 +192,21 @@ class KnownHostStore(context: Context) {
         save(h.copy(mgmtPort = mgmtPort))
     }
 
+    /**
+     * Re-point a pinned host at the address it just answered a probe from, matched by
+     * fingerprint — the record's identity, which a new DHCP lease does not change. Every dial,
+     * library fetch and wake reads the saved address, so a host that moved was unreachable from
+     * all of them until re-paired. Unpinned records are left alone: the address is all that
+     * names them. No-op, and no write, when unchanged. Returns whether anything moved.
+     */
+    fun learnAddress(fpHex: String, address: String, port: Int): Boolean {
+        if (fpHex.isEmpty() || address.isBlank() || port !in 1..65535) return false
+        val h = all().firstOrNull { it.fpHex.equals(fpHex, ignoreCase = true) } ?: return false
+        if (h.address == address && h.port == port) return false
+        save(h.copy(address = address, port = port))
+        return true
+    }
+
     /** Forget [host] (the next connect re-pairs / re-TOFUs). */
     fun remove(host: KnownHost) {
         prefs.edit().remove(host.id).apply()
