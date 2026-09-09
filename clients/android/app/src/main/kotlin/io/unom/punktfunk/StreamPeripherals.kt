@@ -103,7 +103,13 @@ internal class StreamPeripherals(
             ring.openAt(Offset(containerSize().width / 2f, containerSize().height / 2f))
         }
         router.onRingNav = { ring.nav(it) }
-        ring.onOpenChange = { open -> router.setRingOpen(open) }
+        // Both of the ring's claims on its input, taken and dropped on the same edge: the pad
+        // through the router, everything key-shaped through the activity. A TV remote is neither a
+        // finger nor a pad, so without the second one the ring opens and cannot be driven.
+        ring.onOpenChange = { open ->
+            router.setRingOpen(open)
+            activity?.ringKeys = if (open) ({ nav -> ring.nav(nav) }) else null
+        }
         // Physical mouse: uncaptured hover/click/wheel forwards as absolute pointing; captured
         // (setting or the Ctrl+Alt+Shift+Q chord) raw deltas forward as relative mouse-look.
         // The local cursor is hidden over the stream — the host's own cursor, composited into
@@ -354,6 +360,7 @@ internal class StreamPeripherals(
         router.onRingChord = null
         router.onRingNav = null
         ring.onOpenChange = null
+        activity?.ringKeys = null // a session torn down with the ring up must not keep the keys
         router.onMotionUnreachable = null // same: no notice raised by a slot closing at teardown
         router.release() // flush every slot (nothing sticks host-side) + drop the hot-plug listener
         activity?.gamepadRouter = null
