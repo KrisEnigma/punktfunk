@@ -8,7 +8,7 @@
 //! Placeholders (`<staging>`, `<temp>`, `<version>`, and the client's `%LocalAppData%`,
 //! `<start menu>`, `<desktop>`) render verbatim in a dry run and are substituted from
 //! `Subst` on a real one — except in the PATH edit, where `%LocalAppData%` stays literal on
-//! purpose (`REG_EXPAND_SZ` expands it per user, the way the `.iss` wrote it). Goldens enter through [`render`].
+//! purpose: `REG_EXPAND_SZ` expands it per user. Goldens enter through [`render`].
 
 use std::path::{Path, PathBuf};
 

@@ -120,7 +120,7 @@ punktfunk-host-setup-<ver>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
 Keep `/SUPPRESSMSGBOXES`: without it an unattended run can stop on a message box nobody can see.
 
 A silent **first** install takes the same defaults as the wizard, so add or drop individual options
-with Inno's `/MERGETASKS` — a bare name adds a task, a `!` prefix removes one.
+with `/MERGETASKS` — a bare name adds a task, a `!` prefix removes one.
 `/MERGETASKS="gamestream"` turns on Moonlight compatibility; `/MERGETASKS="!trayicon"` skips the
 status icon. The task names are `installdriver`, `installgamepad`, `installhdrlayer`, `gamestream`,
 `allowpublicfw`, `startservice` and `trayicon`.

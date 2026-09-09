@@ -1,6 +1,6 @@
 # Windows CLIENT — build, lint, test and package, on a self-hosted windows-amd64 runner (host mode;
 # the generic runner + MSVC/WinUI toolchain come from unom/infra's windows-runner/, punktfunk's own
-# extras — WDK, Inno Setup, the ARM64 rustup target — self-provision via the "Ensure Windows
+# extras — the WDK and the ARM64 rustup target — self-provision via the "Ensure Windows
 # toolchain" step, a fast no-op once present, so any runner with that label works).
 #
 # Covers BOTH client binaries: the WinUI 3 shell (windows-reactor + WASAPI + SDL3) and the
@@ -57,7 +57,7 @@
 #
 # Publishes THREE artifacts per arch (x64 + ARM64) to Gitea's generic package registry, all packed
 # from one assembled layout:
-#   punktfunk-client-setup_<arch>.exe   — Inno Setup per-user installer, the DEFAULT download
+#   punktfunk-client-setup_<arch>.exe   — per-user installer exe, the DEFAULT download
 #                                         (stable path Steam can launch: overlay + Big Picture work)
 #   punktfunk-client-windows_<arch>-portable.zip — the same file set, no installer
 #   punktfunk-client-windows_<arch>.msix — kept for Microsoft Store compatibility
@@ -188,7 +188,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Ensure Windows toolchain (WDK, Inno Setup, ARM64 target)
+      - name: Ensure Windows toolchain (WDK, ARM64 target)
         shell: pwsh
         run: ./scripts/ci/ensure-windows-toolchain.ps1
 
@@ -305,7 +305,7 @@ jobs:
             -Version $env:MSIX_VERSION -Arch ${{ matrix.arch }} `
             -TargetDir ${{ matrix.td }}\${{ matrix.target }}\release -OutDir ${{ matrix.td }}\msix
 
-      # The DEFAULT download: a per-user Inno Setup exe + a portable zip, packed from the layout
+      # The DEFAULT download: a per-user installer exe + a portable zip, packed from the layout
       # the MSIX step just assembled. The MSIX shape (WindowsApps ACLs, alias-only activation)
       # breaks Steam's non-Steam-game picker, the Steam overlay injection and Big Picture launch;
       # the installer's stable %LOCALAPPDATA%\Programs\Punktfunk path is the fix. The MSIX stays
@@ -323,11 +323,11 @@ jobs:
           MSIX_CERT_PFX_B64: ${{ secrets.MSIX_CERT_PFX_B64 }}
           MSIX_CERT_PASSWORD: ${{ secrets.MSIX_CERT_PASSWORD }}
         run: |
-          # M5: the default download is the engine exe (punktfunk-setup-client + payload); same
-          # name, signing and silent flags, same per-user ARP key.
+          # The engine exe (punktfunk-setup-client + payload): same name, signing and silent
+          # flags as the Inno installer it replaced, and the same per-user ARP key.
           & clients/windows/packaging/pack-client-installer.ps1 `
             -Version $env:MSIX_VERSION -Arch ${{ matrix.arch }} `
-            -LayoutDir ${{ matrix.td }}\msix\layout -OutDir ${{ matrix.td }}\installer -Engine
+            -LayoutDir ${{ matrix.td }}\msix\layout -OutDir ${{ matrix.td }}\installer
 
       # The smoke, on the artifact that ships: a signature present, and (x64, where the runner can
       # run it) the packed client exe's silent dry-run — unelevated, the client twin carries no
@@ -352,28 +352,6 @@ jobs:
             Get-Content $log
           }
           Write-Output "client installer: $([math]::Round((Get-Item $setup).Length / 1MB, 1)) MB"
-
-      # M5's revert gate: the .iss stays buildable for one release — a stable tag packs it into
-      # its own OutDir, GITHUB_ENV withheld, nothing published.
-      - name: Pack with Inno Setup (revert gate, stable tags only)
-        if: startsWith(gitea.ref, 'refs/tags/v')
-        shell: pwsh
-        env:
-          AZURE_CODESIGNING_ENDPOINT: https://neu.codesigning.azure.net/
-          AZURE_CODESIGNING_ACCOUNT: unomsigning
-          AZURE_CODESIGNING_PROFILE: unom-io
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          MSIX_CERT_PFX_B64: ${{ secrets.MSIX_CERT_PFX_B64 }}
-          MSIX_CERT_PASSWORD: ${{ secrets.MSIX_CERT_PASSWORD }}
-        run: |
-          Remove-Item Env:GITHUB_ENV -ErrorAction SilentlyContinue
-          & clients/windows/packaging/pack-client-installer.ps1 `
-            -Version $env:MSIX_VERSION -Arch ${{ matrix.arch }} `
-            -LayoutDir ${{ matrix.td }}\msix\layout -OutDir ${{ matrix.td }}\installer-inno
-          $inno = "${{ matrix.td }}\installer-inno\punktfunk-client-setup-$($env:MSIX_VERSION)_${{ matrix.arch }}.exe"
-          Write-Output "Inno Setup build (not published): $([math]::Round((Get-Item $inno).Length / 1MB, 1)) MB"
 
       - name: Publish to Gitea generic registry
         if: github.event_name != 'pull_request'

@@ -144,7 +144,8 @@ pub fn run(args: crate::Args) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // AUMID must match `punktfunk-host.iss` [Registry] (DisplayName + IconUri). Call before
+    // AUMID must match the key the installer registers (punktfunk-setup's `registry_steps`).
+    // Call before
     // the notify icon exists. Unregistered (dev) degrades to default attribution, not an error.
     // SAFETY: static nul-terminated literal.
     unsafe {

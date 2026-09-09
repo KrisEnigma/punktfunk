@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 #
 # Installer manifest for the Windows host: punktfunk-setup-win, the self-contained engine exe
-# (crates/punktfunk-setup-win, packed by packaging/windows/pack-host-installer.ps1 -Engine).
+# (crates/punktfunk-setup-win, packed by packaging/windows/pack-host-installer.ps1).
 # It speaks the Inno Setup silent dialect verbatim (design/installer-v2-windows.md D5) and keeps
 # Inno's ARP key + unins000.exe (D6), which is why everything below except InstallerType reads
 # as it did for the Inno Setup years.

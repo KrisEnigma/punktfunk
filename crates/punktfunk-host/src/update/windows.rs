@@ -16,7 +16,7 @@ use super::manifest::WindowsHostAsset;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-/// 3× download size: installer + Inno unpack scratch + headroom.
+/// 3× download size: installer + the extract dir it unpacks into + headroom.
 const DISK_MARGIN: u64 = 3;
 
 /// Target plus one previous installer, for manual rollback.

@@ -3,17 +3,18 @@
 A one-file, signed `setup.exe` for the punktfunk streaming **host** on Windows, published to Gitea's
 generic package registry (`punktfunk-host-windows`) by `.gitea/workflows/windows-host.yml`.
 
-> The published artifact is the `crates/punktfunk-setup-win` engine exe, packed by
-> `pack-host-installer.ps1 -Engine`. `punktfunk-host.iss` stays buildable as the revert path; the
-> silent flags, the ARP key and `unins000.exe` are the same either way.
+> The installer is the `crates/punktfunk-setup-win` engine exe, packed by
+> `pack-host-installer.ps1`. Inno Setup is gone; the silent flags, the ARP key and
+> `unins000.exe` it froze are kept, so a fielded Inno install upgrades onto it unchanged.
 
 > Toolchain, drivers-from-source and the dev loop in full: punktfunk-planning
 > `windows-build-and-packaging.md`. This README is the `packaging/windows/` file index.
 
 ## Windows 11 22H2+ only (no Windows 10)
 
-The installer refuses anything below **Windows 11 22H2 (build 22621)** — `MinVersion=10.0.22621` in
-`punktfunk-host.iss`, with a `[Messages]` override naming the requirement. The floor comes from the
+The installer refuses anything below **Windows 11 22H2 (build 22621)** — `MIN_HOST_BUILD` in
+`crates/punktfunk-setup/src/platform/windows/plan.rs`, checked before the plan touches the box.
+The floor comes from the
 **pf-vdisplay** driver: it is built against the **IddCx 1.10** class extension (the HDR `*2` DDIs +
 the FP16 adapter cap, linked via the 1.10 `IddCxStub`, no runtime `IddCxGetVersion` downgrade), and
 IddCx 1.10 first shipped in Windows 11 22H2. On older Windows — **all of Windows 10 including LTSC,
@@ -89,9 +90,8 @@ works.
 
 | File | Role |
 |------|------|
-| `punktfunk-host.iss` | Inno Setup script (the installer definition). |
-| `branding/` | Wizard branding: `gen-branding.ps1` renders the brand mark into the committed `wizard-image-*.bmp` / `wizard-small-*.bmp` (100–200% DPI) + `punktfunk.ico`. Re-run only on a brand change. |
-| `pack-host-installer.ps1` | Orchestrator: cert + sign exe, **build + sign the drivers from source**, stage them + the **web console** (`.output` + bun) + the HDR layer + branding, run ISCC, sign setup.exe. |
+| `branding/` | `gen-branding.ps1` renders the brand mark into the committed `punktfunk.ico`. Re-run only on a brand change. |
+| `pack-host-installer.ps1` | Orchestrator: cert + sign exe, **build + sign the drivers from source**, stage them + the **web console** (`.output` + bun) + the HDR layer, build + pack the wizard, sign setup.exe. |
 | `build-pf-vdisplay.ps1` | Build pf-vdisplay from source (the `drivers/` workspace) + clear FORCE_INTEGRITY + sign `.dll`/`.cat` + export `.cer`. |
 | `build-gamepad-drivers.ps1` | Sign + catalog the gamepad drivers (`pf-gamepad` + `pf-xusb`) from the same workspace build (`-SkipBuild`), one shared cert. |
 | `make-driver-cert.ps1` | Generate the stable `CN=punktfunk-driver` code-signing cert (the `DRIVER_CERT_PFX_B64` / `DRIVER_CERT_PASSWORD` secrets). No key container, so it works over SSH; self-tests with signtool where it can. See *Driver signing* above. |
@@ -260,7 +260,7 @@ The driver should reclaim monitor slots on REMOVE so churn can't wedge it; until
 the recovery. From a Linux box drive either over SSH, e.g.
 `ssh user@box 'powershell -ExecutionPolicy Bypass -File C:\...\reset-pf-vdisplay.ps1'`.
 
-## Build locally (Windows, MSVC + Windows SDK + Inno Setup)
+## Build locally (Windows, MSVC + Windows SDK)
 
 ```powershell
 # 1. build the host (NVENC needs no import lib — its entry points are runtime-loaded; `qsv`

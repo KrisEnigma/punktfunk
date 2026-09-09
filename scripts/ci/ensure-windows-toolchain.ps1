@@ -1,5 +1,5 @@
-# Idempotent pre-flight for punktfunk's Windows CI dependencies: WDK + cargo-wdk (driver builds),
-# Inno Setup, and the aarch64-pc-windows-msvc rustup target. Run at the
+# Idempotent pre-flight for punktfunk's Windows CI dependencies: WDK + cargo-wdk (driver builds)
+# and the aarch64-pc-windows-msvc rustup target. Run at the
 # start of every Windows CI job so ANY runner - freshly built from unom/infra's windows-runner/
 # template, rebuilt, or a new one added later - self-provisions on first real use, instead of
 # needing a human to remember to dispatch a separate provisioning workflow first (and instead of

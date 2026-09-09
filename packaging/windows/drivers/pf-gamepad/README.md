@@ -19,7 +19,7 @@ memory channel from `crates/punktfunk-host/src/inject/windows/dualsense_windows.
 serves the **DualShock 4** identity per a `device_type` byte the host stamps.
 
 This README captures the driver-authoring lore — the bugs and the signing recipe that make a
-self-signed UMDF HID driver actually load. The authoritative build/sign/package flow (CI + Inno Setup)
+self-signed UMDF HID driver actually load. The authoritative build/sign/package flow (CI + the installer)
 lives in the [Windows host packaging README](../../README.md).
 
 ## Build workspace

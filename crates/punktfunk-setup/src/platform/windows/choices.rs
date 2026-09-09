@@ -1,7 +1,7 @@
 //! The Windows option set: Inno task checkboxes as engine choices.
 //!
 //! Defaults derive from `WinFacts` (`design/installer-v2-windows.md`). Fresh installs get
-//! the `.iss` defaults; upgrades pre-fill from the box, not Inno's remembered-checkbox
+//! the fresh-install defaults; upgrades pre-fill from the box, not a remembered-checkbox
 //! registry. GameStream and the public-firewall opt-in are `Option<bool>`: `None` means the
 //! plan passes nothing and the box keeps its state. A default must never rewrite an upgrade.
 //! An explicit task flag or the D12 network answer sets `Some` even on upgrades, which is

@@ -5,8 +5,8 @@
 //! harness (`design/installer-v2-windows.md`).
 //!
 //! Every path in a step is a literal string, never a `PathBuf::join` — goldens
-//! must render byte-identically on every OS. Phase order matches the `.iss` and
-//! is load-bearing: stop → files → registry → network → coexistence → drivers →
+//! must render byte-identically on every OS. Phase order is load-bearing:
+//! stop → files → registry → network → coexistence → drivers →
 //! service → web → plugin runner → restore → tray. `<staging>` and `<temp>` are
 //! placeholders the executor substitutes; dry-run renders them verbatim.
 
@@ -588,8 +588,8 @@ fn host_uninstall(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
             WinAction::ArpRemove {
                 key: super::HOST_ARP_KEY.into(),
             },
-            // The `.iss`'s uninsdelete* set: the tray autostart, its toast AUMID, the HDR
-            // layer's registration. Lenient — a Custom install may never have laid one down.
+            // The tray autostart, its toast AUMID, the HDR layer's registration. Lenient —
+            // a Custom install may never have laid one down.
             run_lenient(&[
                 "reg",
                 "delete",

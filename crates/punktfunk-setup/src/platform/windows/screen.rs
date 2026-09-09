@@ -102,7 +102,7 @@ impl WinScreen {
     }
 
     /// The Configure rows, in the `[Tasks]` order. The password row is fresh-only and only
-    /// when no web install already left one (`.iss`: password page skipped on upgrade).
+    /// when no web install already left one — an upgrade keeps the password the box has.
     pub fn rows(&self) -> Vec<Field> {
         match self.artifact {
             Artifact::Client => vec![Field::DesktopIcon],
