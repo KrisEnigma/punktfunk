@@ -10,9 +10,8 @@
 //! presenter composites each acquired `AHardwareBuffer` onto this layer via an `ASurfaceTransaction`
 //! that carries a desired present time (the single actuator both present modes drive) and an
 //! acquire fence. Every applied transaction registers a one-shot completion callback that reports
-//! the frame's real latch time and the *previous* buffer's release fence back through the decode
-//! loop's event channel — the truthful present clock the cadence loop and the glass budget were
-//! missing.
+//! the frame's latch time, its present fence and the *previous* buffer's release fence back
+//! through the decode loop's event channel — the real vsync the slot scheduler is phased on.
 //!
 //! Every `ASurface*` entry point is **API 29** — above the crate's minSdk-28 floor — so all are
 //! `dlsym`-resolved from `libandroid.so`, exactly as [`crate::adpf`] and [`super::vsync`] resolve
@@ -23,9 +22,9 @@
 use ndk::hardware_buffer::HardwareBuffer;
 use ndk::native_window::NativeWindow;
 use std::ffi::c_void;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 
 use super::async_loop::DecodeEvent;
 
@@ -94,6 +93,7 @@ type TxnSetOnCompleteFn = unsafe extern "C" fn(*mut ASurfaceTransaction, *mut c_
 type StatsGetLatchTimeFn = unsafe extern "C" fn(*mut ASurfaceTransactionStats) -> i64;
 type StatsGetPrevReleaseFenceFn =
     unsafe extern "C" fn(*mut ASurfaceTransactionStats, *mut ASurfaceControl) -> RawFd;
+type StatsGetPresentFenceFn = unsafe extern "C" fn(*mut ASurfaceTransactionStats) -> RawFd;
 
 struct Api {
     create_from_window: CreateFromWindowFn,
@@ -114,6 +114,7 @@ struct Api {
     txn_set_on_complete: TxnSetOnCompleteFn,
     stats_latch_time: StatsGetLatchTimeFn,
     stats_prev_release_fence: StatsGetPrevReleaseFenceFn,
+    stats_present_fence: StatsGetPresentFenceFn,
 }
 
 impl Api {
@@ -179,6 +180,9 @@ impl Api {
                 >(req(
                     c"ASurfaceTransactionStats_getPreviousReleaseFenceFd",
                 )?),
+                stats_present_fence: std::mem::transmute::<*mut c_void, StatsGetPresentFenceFn>(
+                    req(c"ASurfaceTransactionStats_getPresentFenceFd")?,
+                ),
             })
         }
     }
@@ -223,6 +227,9 @@ pub(super) struct PresentComplete {
     /// layer), or `None` when the platform reports none. The loop deletes that buffer's image with
     /// this fence so it is returned to the reader's pool only once SurfaceFlinger is done with it.
     pub prev_release_fence: Option<OwnedFd>,
+    /// The present fence: signals at the hardware vsync that scanned this frame out. Usually still
+    /// pending when the completion arrives; [`fence_signal_ns`] reads it later, never waits.
+    pub present_fence: Option<OwnedFd>,
 }
 
 /// The completion callback's per-transaction context, leaked as a raw pointer into
@@ -236,6 +243,7 @@ struct CompleteCtx {
     /// the layer was already dropped.
     sc: Arc<ScHandle>,
     prev_fence_fn: StatsGetPrevReleaseFenceFn,
+    present_fence_fn: StatsGetPresentFenceFn,
     latch_fn: StatsGetLatchTimeFn,
 }
 
@@ -265,10 +273,20 @@ unsafe extern "C" fn on_complete(context: *mut c_void, stats: *mut ASurfaceTrans
         // descriptor whose ownership the API transfers to us; wrapping it in `OwnedFd` closes it.
         (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
     };
+    let present_fence = if stats.is_null() {
+        None
+    } else {
+        // SAFETY: valid stats for the callback's duration; `-1` means no fence.
+        let fd = unsafe { (ctx.present_fence_fn)(stats) };
+        // SAFETY: a non-negative fd from `getPresentFenceFd` is a fresh descriptor whose
+        // ownership the API transfers to us; wrapping it in `OwnedFd` closes it.
+        (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
+    };
     let _ = ctx.tx.send(DecodeEvent::PresentComplete(PresentComplete {
         seq: ctx.seq,
         latch_ns,
         prev_release_fence,
+        present_fence,
     }));
 }
 
@@ -414,6 +432,7 @@ impl Layer {
                 seq,
                 sc: self.sc.clone(),
                 prev_fence_fn: self.api.stats_prev_release_fence,
+                present_fence_fn: self.api.stats_present_fence,
                 latch_fn: self.api.stats_latch_time,
             }));
             (self.api.txn_set_on_complete)(txn, ctx as *mut c_void, on_complete);
@@ -421,5 +440,87 @@ impl Layer {
             (self.api.txn_delete)(txn);
         }
         true
+    }
+}
+
+// ---- Present-fence timestamps (libsync, API 26) -----------------------------------------------
+
+/// `struct sync_file_info` (`linux/sync_file.h`).
+#[repr(C)]
+struct SyncFileInfo {
+    name: [u8; 32],
+    status: i32,
+    flags: u32,
+    num_fences: u32,
+    pad: u32,
+    sync_fence_info: u64,
+}
+
+/// `struct sync_fence_info` (`linux/sync_file.h`).
+#[repr(C)]
+struct SyncFenceInfo {
+    obj_name: [u8; 32],
+    driver_name: [u8; 32],
+    status: i32,
+    flags: u32,
+    timestamp_ns: u64,
+}
+
+type SyncFileInfoFn = unsafe extern "C" fn(i32) -> *mut SyncFileInfo;
+type SyncFileInfoFreeFn = unsafe extern "C" fn(*mut SyncFileInfo);
+
+struct SyncApi {
+    info: SyncFileInfoFn,
+    free: SyncFileInfoFreeFn,
+}
+
+fn sync_api() -> Option<&'static SyncApi> {
+    static API: OnceLock<Option<SyncApi>> = OnceLock::new();
+    API.get_or_init(|| {
+        // SAFETY: `dlopen` of the public `libsync.so` (process-lifetime handle); each `dlsym`
+        // is null-checked before the transmute to its documented signature.
+        unsafe {
+            let lib = libc::dlopen(c"libsync.so".as_ptr(), libc::RTLD_NOW);
+            if lib.is_null() {
+                return None;
+            }
+            let info = libc::dlsym(lib, c"sync_file_info".as_ptr());
+            let free = libc::dlsym(lib, c"sync_file_info_free".as_ptr());
+            if info.is_null() || free.is_null() {
+                return None;
+            }
+            Some(SyncApi {
+                info: std::mem::transmute::<*mut c_void, SyncFileInfoFn>(info),
+                free: std::mem::transmute::<*mut c_void, SyncFileInfoFreeFn>(free),
+            })
+        }
+    })
+    .as_ref()
+}
+
+/// The instant `fence` signalled (`CLOCK_MONOTONIC` ns), or `None` while it is still pending, on
+/// an invalid fence, or where libsync is missing. Never blocks.
+pub(super) fn fence_signal_ns(fence: BorrowedFd<'_>) -> Option<i64> {
+    let api = sync_api()?;
+    // SAFETY: `sync_file_info` returns a malloc'd record (or null) that `sync_file_info_free`
+    // releases; `sync_fence_info` points at `num_fences` records inside that allocation.
+    unsafe {
+        let info = (api.info)(fence.as_raw_fd());
+        if info.is_null() {
+            return None;
+        }
+        let signalled = (*info).status == 1;
+        let mut latest = 0u64;
+        if signalled {
+            let fences = (*info).sync_fence_info as usize as *const SyncFenceInfo;
+            for i in 0..(*info).num_fences as usize {
+                let f = &*fences.add(i);
+                if f.status == 1 {
+                    latest = latest.max(f.timestamp_ns);
+                }
+            }
+        }
+        (api.free)(info);
+        (signalled && latest > 0).then_some(latest as i64)
     }
 }

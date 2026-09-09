@@ -196,6 +196,7 @@ internal fun StatsOverlay(
         // rung at all) that "the setting says one thing" is not evidence of anything.
         audioFormatLine(s)?.let { statLine(it, Color(0xFFB0FFD0)) }
         counterLine(s, lost)?.let { statLine(it, Color(0xFFFFB0B0)) }
+        cadenceLine(s)?.let { statLine(it, Color(0xFFFFD9A0)) }
     }
 }
 
@@ -336,6 +337,23 @@ private fun compactLine(s: DoubleArray, latValid: Boolean): String {
  * (the received count rides at index 21). A pre-window layout (< 22 doubles) falls back to the
  * session-cumulative `lostTotal` so an older native lib still reports loss.
  */
+/**
+ * The presenter's cadence readout at 38/39: `judder 25‰ · coalesced 3` — off-mode present
+ * intervals per thousand and frames SurfaceFlinger folded onto one vsync in the last second. Both
+ * zero is the common case and draws nothing; either one is what a stutter looks like in numbers,
+ * which no latency figure on this HUD can show. `null` on an older native layout.
+ */
+private fun cadenceLine(s: DoubleArray): String? {
+    if (s.size < 40) return null
+    val judder = s[38].toInt()
+    val coalesced = s[39].toLong()
+    if (judder == 0 && coalesced == 0L) return null
+    return buildList {
+        if (judder > 0) add("judder ${judder}‰")
+        if (coalesced > 0) add("coalesced $coalesced")
+    }.joinToString(" · ")
+}
+
 private fun counterLine(s: DoubleArray, lostTotal: Long): String? {
     if (s.size < 22) return if (lostTotal > 0) "lost $lostTotal" else null
     val lost = s[18].toLong()
