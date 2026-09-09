@@ -302,7 +302,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoStats<
             .drain(h.client.frames_dropped(), h.client.fec_recovered_shards());
         let mode = h.client.mode();
         let color = h.client.color;
-        let buf: [f64; 38] = [
+        let buf: [f64; 40] = [
             snap.fps,
             snap.mbps,
             snap.e2e_p50_ms,
@@ -375,6 +375,11 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoStats<
             h.client.audio_codec as f64,
             h.client.audio_sample_rate_hz as f64,
             h.client.audio_bits as f64,
+            // The presenter's cadence readout: off-mode present intervals (‰) and frames the
+            // compositor coalesced onto one vsync in the last 1 s window — the two numbers a
+            // stutter report needs and every latency figure above cannot show.
+            h.stats.judder_permille() as f64,
+            h.stats.coalesced() as f64,
         ];
         let arr = env.new_double_array(buf.len())?;
         arr.set_region(env, 0, &buf)?;
