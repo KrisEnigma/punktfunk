@@ -38,8 +38,9 @@ on:
       - 'crates/libvpl-sys/**'
       - 'crates/pyrowave-sys/**'
       - 'packaging/windows/drivers/**'
-      # Every build job below runs this, and it sits beside the driver tree rather than in it.
+      # Every build job below runs these, and they sit beside the driver tree rather than in it.
       - 'packaging/windows/drivers-cargo.ps1'
+      - 'scripts/ci/ensure-windows-toolchain.ps1'
   pull_request:
     paths:
       - '.gitea/workflows/windows-drivers.yml'
@@ -55,8 +56,9 @@ on:
       - 'crates/libvpl-sys/**'
       - 'crates/pyrowave-sys/**'
       - 'packaging/windows/drivers/**'
-      # Every build job below runs this, and it sits beside the driver tree rather than in it.
+      # Every build job below runs these, and they sit beside the driver tree rather than in it.
       - 'packaging/windows/drivers-cargo.ps1'
+      - 'scripts/ci/ensure-windows-toolchain.ps1'
 
 # Driver builds need the WDK on the runner - the driver-build job below self-provisions it via
 # scripts/ci/ensure-windows-toolchain.ps1, a fast no-op once already present.
