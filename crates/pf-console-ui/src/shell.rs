@@ -234,7 +234,8 @@ pub struct ConsoleOptions {
     /// Which settings rows exist and which platform-native screens may open.
     pub platform: Platform,
     /// Skia GPU resource-cache budget, bytes. Desktop default is
-    /// [`DEFAULT_GPU_CACHE_BYTES`]; a 1 GB TV box wants a quarter of that.
+    /// [`DEFAULT_GPU_CACHE_BYTES`]; a memory-tight box may go down to
+    /// [`MIN_GPU_CACHE_BYTES`] but never below it.
     pub gpu_cache_bytes: usize,
 }
 
@@ -261,6 +262,16 @@ impl ConsoleOptions {
 /// re-decoded JPEG on the render thread. A TV box passes its own through
 /// [`ConsoleOptions::gpu_cache_bytes`].
 pub const DEFAULT_GPU_CACHE_BYTES: usize = 160 << 20;
+
+/// The floor under [`ConsoleOptions::gpu_cache_bytes`], bytes.
+///
+/// A screenful of covers plus the render targets is ~74 MB at `k` 1.35, the
+/// scale a 1080p surface gives. Under that the cache evicts covers it is about
+/// to draw again and the next frame re-decodes them on the render thread, which
+/// on a television costs more than the frame. 96 MB leaves that ~30% of room.
+/// It is a ceiling, not an allocation, and the shell hands its covers back
+/// before a stream takes the GPU.
+pub const MIN_GPU_CACHE_BYTES: usize = 96 << 20;
 
 pub(crate) struct Shell {
     stack: Vec<Screen>,
