@@ -196,6 +196,8 @@ impl DataPump {
         // detectors tolerate (< QUEUE_HIGH, < FLUSH_LATENCY). Otherwise it
         // reads as permanent extra network latency.
         let mut standing_lat = StandingLatency::new();
+        // A hole's two causes told apart: silence at the socket vs. this thread away from it.
+        let mut rx_gap = super::rx_gap::RxGap::new(Instant::now());
         while !pump_shutdown.load(Ordering::SeqCst) {
             // Reloaded every iteration so a mid-stream re-sync hits the
             // next frame's latency math.
@@ -230,6 +232,16 @@ impl DataPump {
             // Mirror drop/FEC counters every iteration, not only on a
             // produced frame — a total-loss drought completes no AU.
             let st = session.stats();
+            if let Some(g) = rx_gap.observe(Instant::now(), st.packets_received) {
+                tracing::warn!(
+                    silence_ms = g.silence_ms,
+                    unpolled_ms = g.unpolled_ms,
+                    burst = g.burst,
+                    "receive gap — silence_ms: no datagram reached this socket; unpolled_ms: \
+                     this thread's longest absence from the socket meanwhile. Near-equal = \
+                     this client stalled; unpolled small = nothing arrived, the path or the host"
+                );
+            }
             frames_dropped.store(st.frames_dropped, Ordering::Relaxed);
             fec_recovered.store(st.fec_recovered_shards, Ordering::Relaxed);
             let probe_active = {
