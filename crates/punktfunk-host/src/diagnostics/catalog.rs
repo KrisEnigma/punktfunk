@@ -13,7 +13,7 @@
 
 use super::{ids, CheckStatus, Diagnostics, HostCheck, Remedy, Severity};
 use crate::inject::{UinputVerdict, VhciVerdict};
-use crate::vdisplay::{TakeoverInapplicable, TakeoverVerdict};
+use crate::vdisplay::{DriverHealth, TakeoverInapplicable, TakeoverVerdict};
 use std::process::Command;
 
 /// Privilege-helper allowlist and vhci attach-node owner — one group, two gates.
@@ -29,6 +29,83 @@ pub(crate) fn register_all(reg: &Diagnostics) {
     reg.register(server_conflict);
     reg.register(hyprland_permissions);
     reg.register(omarchy_updates);
+    reg.register(vdisplay_driver);
+}
+
+/// The Windows virtual-display driver answers, or the host has no video at all. A driver whose
+/// host process hangs still handshakes and streams audio, so nothing else reports it.
+fn vdisplay_driver() -> HostCheck {
+    let id = ids::VDISPLAY_DRIVER;
+    let reinstall = || Remedy {
+        text: "Reinstall the host — the installer bundles the matching driver.".to_string(),
+        command: None,
+        relogin_required: false,
+    };
+    match crate::vdisplay::driver_health() {
+        DriverHealth::Inapplicable => {
+            HostCheck::inapplicable(id, "The virtual display driver is a Windows component.")
+        }
+        DriverHealth::Ok { protocol } => HostCheck::ok(
+            id,
+            format!("The virtual display driver answers (protocol {protocol})."),
+        )
+        .with_param("protocol", protocol.to_string()),
+        DriverHealth::Wedged => HostCheck::problem(
+            id,
+            CheckStatus::Fail,
+            Severity::Critical,
+            "The virtual display driver is not answering",
+            "Every stream connects with audio and a black screen: the host can't create its \
+             virtual monitor, so no video is ever captured, and the stuck sessions keep the host \
+             reporting busy.",
+        )
+        .with_remedy(Remedy {
+            text: "Restart the punktfunk host. If it happens again, disable and re-enable the \
+                   punktfunk Virtual Display adapter in Device Manager, or reboot. RivaTuner \
+                   Statistics Server (MSI Afterburner) is a known cause — close it before the \
+                   next connect."
+                .to_string(),
+            command: None,
+            relogin_required: false,
+        }),
+        DriverHealth::Absent => HostCheck::problem(
+            id,
+            CheckStatus::Fail,
+            Severity::Critical,
+            "The virtual display driver is not installed",
+            "No virtual monitor can be created, so every stream is a black screen.",
+        )
+        .with_remedy(reinstall()),
+        DriverHealth::Outdated { driver, host } => HostCheck::problem(
+            id,
+            CheckStatus::Fail,
+            Severity::Critical,
+            format!("The virtual display driver speaks protocol {driver}; this host needs {host}"),
+            "The host refuses a mismatched driver, so no virtual monitor can be created."
+                .to_string(),
+        )
+        .with_remedy(reinstall())
+        .with_param("driver_protocol", driver.to_string())
+        .with_param("host_protocol", host.to_string()),
+        DriverHealth::NotReady { detail } => HostCheck::problem(
+            id,
+            CheckStatus::Warn,
+            Severity::Warning,
+            "The virtual display driver did not open",
+            format!(
+                "The host retries on every connect, so this may be a driver still starting up. \
+                 If it stays, streams have no video. ({detail})"
+            ),
+        )
+        .with_remedy(Remedy {
+            text: "Wait a moment and refresh. If it stays, check the punktfunk Virtual Display \
+                   adapter in Device Manager, or reboot."
+                .to_string(),
+            command: None,
+            relogin_required: false,
+        })
+        .with_param("error", detail),
+    }
 }
 
 /// Hyprland 0.49+ `ecosystem.enforce_permissions`. Off by default; when on and ungranted,

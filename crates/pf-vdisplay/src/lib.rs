@@ -447,6 +447,41 @@ pub fn probe(compositor: Compositor) -> Result<()> {
     }
 }
 
+/// The Windows virtual-display driver, as data for a diagnostics row. Off Windows it is
+/// always `Inapplicable`. Bounded: a driver that never answers reports `Wedged`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DriverHealth {
+    Inapplicable,
+    /// The control device opened and completed the version handshake.
+    Ok {
+        protocol: u32,
+    },
+    /// No device interface at all: not installed, or its host process crashed.
+    Absent,
+    /// The interface opens but the driver's host process never answers.
+    Wedged,
+    /// Installed, but speaks a protocol this host does not.
+    Outdated {
+        driver: u32,
+        host: u32,
+    },
+    /// Present and not openable — mid-arrival, a problem code, or an IOCTL error.
+    NotReady {
+        detail: String,
+    },
+}
+
+/// Read-only probe for a diagnostics UI; never reloads the adapter.
+#[cfg(target_os = "windows")]
+pub fn driver_health() -> DriverHealth {
+    driver::health()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn driver_health() -> DriverHealth {
+    DriverHealth::Inapplicable
+}
+
 // Management policy (keep-alive / topology / conflict / identity / layout).
 // Platform-neutral — mgmt API and both host paths read it — so no cfg gate.
 // `design/display-management.md`.

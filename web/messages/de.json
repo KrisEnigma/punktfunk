@@ -462,6 +462,7 @@
 	"diag_virtual_deck_vhci_title": "Virtueller Steam-Deck-Controller",
 	"diag_uinput_access_title": "Unterstützung für virtuelle Controller",
 	"diag_server_conflict_title": "Konkurrierender Streaming-Server",
+	"diag_vdisplay_driver_title": "Treiber für virtuelle Anzeige",
 	"logs_title": "Logs",
 	"logs_sources_label": "Quellen",
 	"logs_sources_none": "Keine Quelle ausgewählt — wähle oben mindestens eine aus.",
