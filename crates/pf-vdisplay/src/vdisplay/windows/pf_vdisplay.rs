@@ -549,6 +549,11 @@ static WEDGED_PROBES: AtomicUsize = AtomicUsize::new(0);
 /// `DeviceIoControl` on a hung WUDFHost never return and take no timeout; the calling thread
 /// must not be the one that waits.
 fn probe_device() -> Probe {
+    bounded_probe(PROBE_BUDGET, probe_sync)
+}
+
+/// [`probe_device`] with the probe and its budget as parameters, so a test can wedge one.
+fn bounded_probe(budget: Duration, probe: fn() -> Probe) -> Probe {
     if WEDGED_PROBES.load(Ordering::SeqCst) > 0 {
         return Probe::wedged();
     }
@@ -558,19 +563,19 @@ fn probe_device() -> Probe {
     let spawned = std::thread::Builder::new()
         .name("vdisplay-probe".into())
         .spawn(move || {
-            if tx.send(probe_sync()).is_err() {
+            if tx.send(probe()).is_err() {
                 WEDGED_PROBES.fetch_sub(1, Ordering::SeqCst);
             }
         });
     if spawned.is_err() {
-        return probe_sync(); // no thread to be had — unbounded is still better than no probe
+        return probe(); // no thread to be had — unbounded is still better than no probe
     }
-    match rx.recv_timeout(PROBE_BUDGET) {
+    match rx.recv_timeout(budget) {
         Ok(p) => p,
         Err(_) => {
             WEDGED_PROBES.fetch_add(1, Ordering::SeqCst);
             tracing::error!(
-                budget_s = PROBE_BUDGET.as_secs(),
+                budget_s = budget.as_secs(),
                 "pf-vdisplay control device did not answer — WUDFHost is WEDGED; sessions get \
                  audio and no video until the adapter reloads"
             );
@@ -1327,6 +1332,54 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    /// A probe past its budget is reported wedged and later probes fail fast without a second
+    /// worker; the count clears when the abandoned worker returns, and probing resumes. A count
+    /// stuck at one would fail every session forever after one hang.
+    #[test]
+    fn an_abandoned_probe_fails_fast_until_it_returns() {
+        use std::sync::atomic::AtomicBool;
+        static RELEASE: AtomicBool = AtomicBool::new(false);
+        fn stuck() -> Probe {
+            while !RELEASE.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Probe {
+                opened: None,
+                active: 1,
+                inactive: 0,
+                last_err: None,
+                wedged: false,
+            }
+        }
+        let budget = Duration::from_millis(50);
+        let started = Instant::now();
+        assert!(bounded_probe(budget, stuck).wedged);
+        assert!(started.elapsed() >= budget);
+        let started = Instant::now();
+        assert!(
+            bounded_probe(budget, stuck).wedged,
+            "must fail fast while one is abandoned"
+        );
+        assert!(
+            started.elapsed() < budget,
+            "a fail-fast probe must not wait out a budget"
+        );
+        assert_eq!(WEDGED_PROBES.load(Ordering::SeqCst), 1);
+
+        RELEASE.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while WEDGED_PROBES.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            WEDGED_PROBES.load(Ordering::SeqCst),
+            0,
+            "the returned worker must clear it"
+        );
+        let probe = bounded_probe(budget, stuck);
+        assert!(!probe.wedged && probe.active == 1);
+    }
+
     /// Every ADD needs its own key: the preempt path adds after a removal that
     /// may not have landed, and a reused key would depart the incumbent.
     #[test]
@@ -1434,12 +1487,17 @@ mod tests {
     #[test]
     fn only_a_total_absence_counts_as_absent() {
         let probe = |active, inactive| Probe {
-            handle: None,
+            opened: None,
             active,
             inactive,
             last_err: None,
+            wedged: false,
         };
         assert!(probe(0, 0).is_absent(), "no instances at all = absent");
+        assert!(
+            !Probe::wedged().is_absent(),
+            "a wedged host saw nothing, yet it is not a missing device"
+        );
         assert!(
             !probe(0, 1).is_absent(),
             "a registered-but-inactive instance is a device coming up, not a missing one"
