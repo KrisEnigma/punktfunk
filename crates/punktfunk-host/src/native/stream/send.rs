@@ -180,6 +180,8 @@ pub(super) struct SendStats {
     pub(super) client: String,
     pub(super) bitrate_kbps: Arc<AtomicU32>,
     pub(super) bringup: Arc<crate::bringup::Trace>,
+    /// Data-socket clone for the kernel-queue probe behind the `wire egress` line.
+    pub(super) wire_sock: Option<std::net::UdpSocket>,
 }
 
 /// Whether this session may accept a mid-stream `Reconfigure`.
@@ -227,6 +229,10 @@ pub(super) fn send_loop(
         .unwrap_or(3.0);
     let mut last_perf = std::time::Instant::now();
     let mut last_bytes = 0u64;
+    // The layer under this thread. Always on: a stall there leaves every other line clean.
+    let mut wire = crate::net_health::WireProbe::new(stats.wire_sock);
+    let mut last_wire = std::time::Instant::now();
+    let (mut wire_sent, mut wire_dropped) = (0u64, 0u64);
     let mut last_send_dropped = 0u64;
     let mut encode_us: Vec<u32> = Vec::new();
     let mut pace_us: Vec<u32> = Vec::new();
@@ -366,6 +372,7 @@ pub(super) fn send_loop(
                             } else {
                                 new_frames += 1;
                             }
+                            wire.sample();
                             if stat.paced {
                                 paced_frames += 1;
                             } else {
@@ -381,6 +388,24 @@ pub(super) fn send_loop(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if last_wire.elapsed() >= std::time::Duration::from_secs(30) {
+            let s = session.stats();
+            let w = wire.window();
+            tracing::info!(
+                sent = s.packets_sent - wire_sent,
+                send_dropped = s.packets_send_dropped - wire_dropped,
+                outq_max_kb = w.outq_max_kb,
+                tx_dropped = w.tx_dropped,
+                tx_errors = w.tx_errors,
+                carrier_changes = w.carrier_changes,
+                udp_sndbuf_errors = w.udp_sndbuf_errors,
+                iface = wire.iface.as_deref().unwrap_or("?"),
+                "wire egress"
+            );
+            wire_sent = s.packets_sent;
+            wire_dropped = s.packets_send_dropped;
+            last_wire = std::time::Instant::now();
         }
         if last_perf.elapsed() >= std::time::Duration::from_secs(2) {
             let s = session.stats();

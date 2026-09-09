@@ -381,6 +381,8 @@ pub(super) struct SessionContext {
     pub(super) client_hdr: Option<pf_frame::HdrMeta>,
     pub(super) bringup: Arc<crate::bringup::Trace>,
     pub(super) resize_ms: Arc<AtomicU32>,
+    /// A clone of the data socket for the sender's kernel-queue probe; `None` on the web plane.
+    pub(super) wire_sock: Option<std::net::UdpSocket>,
     #[cfg(target_os = "linux")]
     pub(super) input_tx: std::sync::mpsc::SyncSender<super::input::ClientInput>,
     /// Isolated gamescope spawn identity. `None` = shared planes. See `design/gamescope-multiuser.md`.
