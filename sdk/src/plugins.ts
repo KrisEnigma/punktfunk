@@ -186,6 +186,35 @@ const runBun = (action: "add" | "remove", pkgs: string[], opts: PkgOpts): void =
 	if (!res.success) {
 		throw new Error(`bun ${action} exited ${res.exitCode ?? "?"} — see output above`);
 	}
+	if (action === "add") stripGroupWrite(dir);
+};
+
+/**
+ * Clear group/world write on everything under `<dir>/node_modules`. The runner refuses a
+ * group-writable entry file (`fileIsSafe`), and a umask of 002 — Ubuntu's default for
+ * user-private groups — makes every file bun extracts exactly that. bun hardlinks into
+ * its cache, so an entry extracted once under 002 stays 664 on every later install;
+ * fixing the mode after the fact is the only cure that covers the cache too.
+ */
+export const stripGroupWrite = (dir: string): void => {
+	if (process.platform === "win32") return;
+	const root = path.join(dir, "node_modules");
+	let names: string[];
+	try {
+		names = fs.readdirSync(root, { recursive: true }) as string[];
+	} catch {
+		return;
+	}
+	for (const rel of ["", ...names]) {
+		const p = path.join(root, rel);
+		try {
+			const st = fs.lstatSync(p);
+			if (st.isSymbolicLink()) continue;
+			if (st.mode & 0o022) fs.chmodSync(p, st.mode & ~0o022 & 0o7777);
+		} catch {
+			// A vanished or foreign entry is not ours to fix; the runner judges the entry file.
+		}
+	}
 };
 
 /** The SDK version installed in a plugins tree, or undefined if it isn't installed at all. */
@@ -264,6 +293,7 @@ export const reconcileSharedSdk = (
 		if (!res.success) {
 			throw new Error(`bun install exited ${res.exitCode ?? "?"}`);
 		}
+		stripGroupWrite(dir);
 		const now = installedSdkVersion(dir);
 		if (now !== SDK_VERSION) {
 			// The install "succeeded" and still did not deliver the version — better to sit on the

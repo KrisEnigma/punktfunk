@@ -32,10 +32,20 @@ pub fn main(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("add") | Some("remove") | Some("rm") | Some("uninstall") | Some("list")
         | Some("ls") => {
-            if !matches!(args.first().map(String::as_str), Some("list") | Some("ls")) {
+            let listing = matches!(args.first().map(String::as_str), Some("list") | Some("ls"));
+            if !listing {
                 plat::require_elevation("installing or removing plugins")?;
             }
-            forward_to_runner(args)
+            forward_to_runner(args)?;
+            if !listing {
+                // The runner discovers units at startup; without this the change is dormant.
+                match restart_runtime() {
+                    Ok(true) => println!("Plugin runner restarted."),
+                    Ok(false) => println!("The plugin runner is off — `plugins enable` starts it."),
+                    Err(e) => println!("Couldn't restart the plugin runner: {e:#}"),
+                }
+            }
+            Ok(())
         }
         Some("enable") => {
             plat::require_elevation("enabling the plugin runner")?;
@@ -175,14 +185,15 @@ pub(crate) fn set_runtime_enabled(enabled: bool) -> Result<()> {
     }
 }
 
-/// Restart so the runner rediscovers units. `false` when it is not running — not an
-/// error; the store reports "installed, but off".
+/// Restart so the runner rediscovers units. `false` when it is off — not an error;
+/// the store reports "installed, but off".
 ///
 /// Discovery runs once at runner startup ([`sdk/src/runner.ts`]); this restart is
-/// how a newly installed plugin becomes active.
+/// how a newly installed plugin becomes active. An enabled runner that is not running
+/// (installed after login, crashed out) is started, not skipped.
 pub(crate) fn restart_runtime() -> Result<bool> {
     let st = runtime_status();
-    if !st.installed || !st.running {
+    if !st.installed || !st.enabled {
         return Ok(false);
     }
     plat::restart_runtime()?;

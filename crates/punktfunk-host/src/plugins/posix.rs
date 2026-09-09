@@ -108,16 +108,25 @@ pub(super) fn grant(_dir: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Lifts a mask left by [`disable`] first; a no-op when there is none.
 #[cfg(target_os = "linux")]
 pub(super) fn enable() -> Result<()> {
+    run_systemctl(&["unmask", UNIT])?;
     run_systemctl(&["enable", "--now", UNIT])?;
     println!("Plugin runner enabled and started ({UNIT}).");
     Ok(())
 }
 
+/// The packages enable the unit in GLOBAL scope (`/etc/systemd/user`), which a user-scope
+/// disable cannot undo: `is-enabled` keeps answering `enabled`. Mask is the per-user opt-out
+/// there. The SteamOS install writes the unit into `~/.config/systemd/user`, where mask is
+/// refused, so mask only when disable left it enabled.
 #[cfg(target_os = "linux")]
 pub(super) fn disable() -> Result<()> {
     run_systemctl(&["disable", "--now", UNIT])?;
+    if systemctl_output(&["is-enabled", UNIT]).as_deref() == Some("enabled") {
+        run_systemctl(&["mask", UNIT])?;
+    }
     println!("Plugin runner stopped and disabled ({UNIT}).");
     Ok(())
 }

@@ -10,6 +10,7 @@ import {
 	listInstalled,
 	REGISTRY,
 	resolvePackage,
+	stripGroupWrite,
 } from "../src/plugins.js";
 
 const ROOT = path.join(import.meta.dir, "..", `.plugins-fixtures-${process.pid}`);
@@ -228,4 +229,33 @@ describe("ensurePluginsDir", () => {
 			"punktfunk-plugin-legacy",
 		]);
 	});
+});
+
+describe("stripGroupWrite", () => {
+	test.skipIf(process.platform === "win32")(
+		"clears group/world write on the tree a umask-002 install left behind",
+		() => {
+			const dir = tmp("strip-go-w");
+			writePkg(dir, "@punktfunk/plugin-x", "1.0.0");
+			const pkgDir = path.join(dir, "node_modules", "@punktfunk", "plugin-x");
+			const entry = path.join(pkgDir, "index.js");
+			fs.writeFileSync(entry, "export default {};\n");
+			fs.chmodSync(entry, 0o664);
+			fs.chmodSync(pkgDir, 0o775);
+			// A symlink is skipped, and its target outside the tree is left alone.
+			const outside = path.join(dir, "outside.js");
+			fs.writeFileSync(outside, "");
+			fs.chmodSync(outside, 0o666);
+			fs.symlinkSync(outside, path.join(pkgDir, "link.js"));
+
+			stripGroupWrite(dir);
+
+			expect(fs.statSync(entry).mode & 0o022).toBe(0);
+			expect(fs.statSync(pkgDir).mode & 0o022).toBe(0);
+			expect(fs.statSync(entry).mode & 0o644).toBe(0o644);
+			expect(fs.statSync(outside).mode & 0o022).toBe(0o022);
+			// No node_modules at all is not an error.
+			stripGroupWrite(tmp("strip-empty"));
+		},
+	);
 });
