@@ -16,7 +16,11 @@ import Section from "@unom/ui/section";
 import { Activity as ActivityIcon, ArrowRight } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { FC } from "react";
-import { type ActivityEntry, useActivity } from "@/api/events";
+import {
+	type ActivityEntry,
+	useActivity,
+	useActivityReady,
+} from "@/api/events";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,23 +39,34 @@ const ROW_GAP = 0.035;
 const STAGGER_STEPS = 10;
 
 /**
+ * How long the rows wait after their card starts arriving. They fade in under the card's own fade,
+ * so rows starting with it spent the first half of their cascade on a card nobody could see yet.
+ */
+const CARD_LEAD = 0.18;
+
+/** When row `i` of the batch a list mounts with starts, counted from its card's start. */
+const rowDelay = (i: number) =>
+	CARD_LEAD + Math.min(i, STAGGER_STEPS) * ROW_GAP;
+
+/**
  * A row's arrival. Sliding from above is the direction the list grows: a new event is prepended,
  * so it comes in over the row it displaced.
  *
- * The delay lives on the ENTER transition, keyed by `custom`, and never on the row's own
- * `transition` — that one also drives the row's `layout` animation. Every arrival re-indexes the
- * survivors, so each slid down on its own 0–1 s delay: pure Y movement with no fade, and with
- * events a second apart the list never finished settling. Measured: rows mid-move in every frame.
+ * No delay here, and none on the row's own `transition` — that one also drives its `layout` slide,
+ * and every arrival re-indexes the survivors. The list's `delayChildren` times the batch it mounts
+ * with; anything later lands at once.
  */
 const ROW_VARIANTS = {
 	from: { opacity: 0, y: -10 },
-	enter: (i: number) => ({
-		opacity: 1,
-		y: 0,
-		transition: { delay: Math.min(i, STAGGER_STEPS) * ROW_GAP },
-	}),
-	exit: { opacity: 0, y: 6 },
+	enter: { opacity: 1, y: 0 },
 };
+
+/**
+ * A row leaving. An object, never a variant label: a label on `initial`, `animate` or `exit` makes
+ * the row drive its own variants, so it stops inheriting `from → enter` — the rows then mounted at
+ * full opacity with no entrance at all.
+ */
+const ROW_EXIT = { opacity: 0, y: 6 };
 
 /**
  * The feed itself.
@@ -60,29 +75,25 @@ const ROW_VARIANTS = {
  * the cap by a newer event simply vanished mid-glance, and `layout` carries the survivors down
  * rather than snapping them.
  *
- * Each row drives its own `from → enter` rather than inheriting it from a `<Stagger>` container.
- * Inherited, the rows never received a driving `animate` and landed on a single frame — and
- * removing `AnimatePresence` did not change that; giving each row its own `initial`/`animate` did.
- * A screenshot cannot tell a flattened list from a staggered one, which is why that took measuring.
- *
- * That indexing also does the right thing while live: a new event mounts at index 0, so it lands
- * immediately, while a freshly loaded page fills in on the cadence.
- *
- * NOT `initial={false}`: that is the "these were already here" switch, and it would skip the
- * entrance for exactly the batch worth animating.
+ * The rows inherit `from → enter` through the list from the card, so the cascade is timed from the
+ * moment the card starts — whatever delayed it: its slot in the page's stagger on a navigation, the
+ * replay on a reload. That holds because the card mounts in the same render as its rows
+ * (`useActivityReady`). A row mounting into a list already on screen animates by itself, at once,
+ * which is what a live arrival should do.
  */
 export const ActivityList: FC<{ entries: ActivityEntry[] }> = ({ entries }) => (
-	<ul className="flex flex-col divide-y">
+	<motion.ul
+		variants={{ from: {}, enter: {} }}
+		transition={{ delayChildren: rowDelay }}
+		className="flex flex-col divide-y"
+	>
 		<AnimatePresence>
-			{entries.map((e, i) => (
+			{entries.map((e) => (
 				<motion.li
 					key={e.seq}
 					layout
-					initial="from"
-					animate="enter"
-					exit="exit"
+					exit={ROW_EXIT}
 					variants={ROW_VARIANTS}
-					custom={i}
 					className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 first:pt-0 last:pb-0"
 				>
 					<Badge variant={toneFor(e.kind)}>{eventKindLabel(e.kind)}</Badge>
@@ -96,13 +107,18 @@ export const ActivityList: FC<{ entries: ActivityEntry[] }> = ({ entries }) => (
 				</motion.li>
 			))}
 		</AnimatePresence>
-	</ul>
+	</motion.ul>
 );
 
 /** The dashboard's card: the newest few, with the way to the rest. */
-export const ActivityCard: FC = () => (
-	<ActivityCardView entries={useActivity()} />
-);
+export const ActivityCard: FC = () => {
+	const entries = useActivity();
+	const ready = useActivityReady();
+	// Not until the feed is settled: a card that mounts empty and fills a moment later animates on
+	// a different path each time. Mounted with its rows, it animates the same way every time.
+	if (!ready) return null;
+	return <ActivityCardView entries={entries} />;
+};
 
 /** Split from the hook so a story can hand it a busy host — the cap and the cadence are the
  *  parts worth looking at, and neither shows up without one. */
@@ -140,25 +156,31 @@ export const ActivityCardView: FC<{ entries: ActivityEntry[] }> = ({
 
 /** `/activity`: the whole ring, which is everything since this page was loaded. */
 export const SectionActivity: FC = () => (
-	<ActivityPage entries={useActivity()} />
+	<ActivityPage entries={useActivity()} ready={useActivityReady()} />
 );
 
-export const ActivityPage: FC<{ entries: ActivityEntry[] }> = ({ entries }) => {
+export const ActivityPage: FC<{
+	entries: ActivityEntry[];
+	ready?: boolean;
+}> = ({ entries, ready = true }) => {
 	return (
 		<Section maxWidth={false}>
 			<div className="flex flex-col gap-card">
 				<h1 className="text-2xl font-semibold">{m.activity_title()}</h1>
-				<Card>
-					<CardContent>
-						{entries.length === 0 ? (
-							<p className="text-sm text-muted-foreground">
-								{m.activity_empty()}
-							</p>
-						) : (
-							<ActivityList entries={entries} />
-						)}
-					</CardContent>
-				</Card>
+				{/* The card waits for a settled feed, for the same reason the dashboard's does. */}
+				{ready && (
+					<Card>
+						<CardContent>
+							{entries.length === 0 ? (
+								<p className="text-sm text-muted-foreground">
+									{m.activity_empty()}
+								</p>
+							) : (
+								<ActivityList entries={entries} />
+							)}
+						</CardContent>
+					</Card>
+				)}
 				{/* The ring is per page load, and a reader who scrolled to the bottom of it has
 				    earned that fact rather than wondering where last week went. */}
 				<p className="text-xs text-muted-foreground">

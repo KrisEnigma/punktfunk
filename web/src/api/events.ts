@@ -136,6 +136,14 @@ function resyncAll(qc: QueryClient): void {
 let activity: ActivityEntry[] = [];
 const activityListeners = new Set<() => void>();
 
+/**
+ * True once this page load's replay has been applied, or its deadline passed. Before that the
+ * feed is not empty, it is unknown — so a card rendered from it waits instead of mounting empty
+ * and filling a moment later. Mounted together with its rows, the card animates the same way on
+ * every path (reload, navigation, a slow status query); mounted early, it depended on timing.
+ */
+let activityReady = false;
+
 /** Fold frames into the ring and notify once — or not at all when none of them was new. */
 function commitActivity(batch: ActivityEntry[]): void {
 	const next = mergeActivity(activity, batch);
@@ -158,6 +166,18 @@ export function useActivity(): ActivityEntry[] {
 }
 
 const EMPTY_ACTIVITY: ActivityEntry[] = [];
+
+/** Whether the feed holds what it is going to hold yet — see `activityReady`. */
+export function useActivityReady(): boolean {
+	return useSyncExternalStore(
+		(cb) => {
+			activityListeners.add(cb);
+			return () => activityListeners.delete(cb);
+		},
+		() => activityReady,
+		() => false,
+	);
+}
 
 /** Every kind we act on. A kind the host adds later simply has no listener — never a mis-handle. */
 const KINDS = [
@@ -249,6 +269,10 @@ function finishReplay(): void {
 	live = true;
 	commitActivity(replayed);
 	replayed = [];
+	if (!activityReady) {
+		activityReady = true;
+		for (const l of activityListeners) l();
+	}
 	if (client) {
 		// A restart in the replay makes every snapshot stale; the individual keys are a subset.
 		if (replayedResync) resyncAll(client);
@@ -263,6 +287,8 @@ function finishReplay(): void {
 function attach(): void {
 	if (source) return;
 	source = new EventSource("/api/v1/events");
+	// A stream that never opens still settles the feed, so the card is not held back forever.
+	if (!replayTimer) replayTimer = setTimeout(finishReplay, REPLAY_DEADLINE_MS);
 	// Every (re)connect replays first; `open` fires before any frame, on auto-reconnect too.
 	source.addEventListener("open", startReplay);
 	source.addEventListener("live", finishReplay);
