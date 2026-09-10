@@ -83,6 +83,15 @@ export default defineEventHandler(async (event) => {
 		return { error: `plugin ${id} is not reachable` };
 	}
 
+	// A 404 here is the plugin declining to have a `__config` at all (`config` is optional on the
+	// kit's `serveUi`), which the console renders as "settings live on this plugin's own page".
+	// Marked in the body rather than left as a bare status: under `bun run dev` these routes do not
+	// run and `/api` proxies to the management API, whose 404 for an unknown path would otherwise
+	// read as that same claim about every source.
+	if (res.status === 404) {
+		setResponseStatus(event, 404);
+		return { error: "plugin serves no config surface", noConfig: true };
+	}
 	setResponseStatus(event, res.status);
 	// Pass the plugin's own body through untouched: a 400 from `__config` carries the decode issue
 	// the drawer shows the operator, and rewriting it would throw away the only useful part.

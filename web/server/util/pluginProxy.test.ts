@@ -47,10 +47,10 @@ describe("isDialablePort", () => {
 });
 
 describe("PLUGIN_ID_RE", () => {
-	// The console's Game sources drawer reads a 404 from `/api/plugin-config/<id>` as "this plugin
-	// serves no `__config`, so its settings live on its own page". That holds only while this
-	// regex's own refusals are answered 400 instead — it is narrower than the host's provider rule
-	// (`[a-z0-9._-]`, leading alphanumeric), so a source the host lists can still be refused here.
+	// This regex is narrower than the host's provider rule (`[a-z0-9._-]`, leading alphanumeric),
+	// so a source the host happily lists can be refused here. That refusal is a bad request, not a
+	// missing settings surface: `/api/plugin-config/<id>` answers 400, leaving 404 to the plugin
+	// declining a `__config` — the one case the console offers the plugin's own page for.
 	test("is narrower than a provider id the host will list", () => {
 		for (const id of ["my-provider.v2", "rom_manager", "9lives"]) {
 			expect(PLUGIN_ID_RE.test(id)).toBe(false);

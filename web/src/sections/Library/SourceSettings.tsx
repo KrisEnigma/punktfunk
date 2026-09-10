@@ -23,19 +23,23 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { m } from "@/paraglide/messages";
 
-/**
- * Why the drawer was refused, from either shape `/api/plugin-config/<id>` answers with: the
- * plugin's own `__config` body carries `issue`, the route's own failures (unreachable plugin,
- * bad id, non-JSON reply) carry `error`. Read both — on `issue` alone every transport failure
- * reads as "the host said no".
- */
-const refusal = async (res: Response): Promise<string> => {
-	const body = (await res.json().catch(() => null)) as {
-		issue?: string;
-		error?: string;
-	} | null;
-	return body?.issue ?? body?.error ?? m.library_source_settings_refused();
-};
+interface RefusalBody {
+	/** The plugin's own `__config` decode issue. */
+	issue?: string;
+	/** The route's own refusal: unreachable plugin, bad id, a reply that was not JSON. */
+	error?: string;
+	/** The route saw the plugin decline a `__config` surface. Only it sets this. */
+	noConfig?: boolean;
+}
+
+/** Read a refusal body once; a `Response` body cannot be consumed twice. */
+const refusalBody = async (res: Response): Promise<RefusalBody | null> =>
+	(await res.json().catch(() => null)) as RefusalBody | null;
+
+/** Both shapes carry the reason under a different key — on `issue` alone every transport
+ *  failure reads as "the host said no". */
+const refusalText = (body: RefusalBody | null): string =>
+	body?.issue ?? body?.error ?? m.library_source_settings_refused();
 
 /**
  * A library source's settings, rendered as a **generic form** from the plugin's own JSON Schema.
@@ -80,15 +84,17 @@ export const SourceSettingsDialog: FC<{
 				const res = await fetch(`/api/plugin-config/${pluginId}`, {
 					credentials: "same-origin",
 				});
-				// `config` is optional on the kit's `serveUi`, and a plugin that omits it answers
-				// `__config` 404 — it keeps its settings on the page it already serves. Not a
-				// failure, so it must not read as one. The route reserves 404 for exactly this:
-				// its own refusals are 400 (bad id) and 502 (plugin unreachable).
-				if (res.status === 404) {
-					if (!cancelled) setState({ tag: "ownPage" });
-					return;
+				if (!res.ok) {
+					const body = await refusalBody(res);
+					// `config` is optional on the kit's `serveUi`, and a plugin that omits it keeps
+					// its settings on the page it already serves. Not a failure, so it must not read
+					// as one — but only the route's own marker may mean it, never a bare 404.
+					if (res.status === 404 && body?.noConfig === true) {
+						if (!cancelled) setState({ tag: "ownPage" });
+						return;
+					}
+					throw new Error(refusalText(body));
 				}
-				if (!res.ok) throw new Error(await refusal(res));
 				const body = (await res.json()) as {
 					schema: JsonSchemaDoc | null;
 					value: JsonObject | null;
@@ -120,7 +126,7 @@ export const SourceSettingsDialog: FC<{
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify(value),
 			});
-			if (!res.ok) throw new Error(await refusal(res));
+			if (!res.ok) throw new Error(refusalText(await refusalBody(res)));
 			toast.success(m.library_source_settings_saved());
 			onClose();
 		} catch (e) {
