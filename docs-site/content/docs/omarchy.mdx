@@ -65,7 +65,7 @@ That one command, each step idempotent and each one reversible:
 | --- | --- |
 | **Groups** | offers to add you to `input` (virtual gamepads) and `punktfunk` (the virtual Steam Deck pad). Both apply at your **next login**. |
 | **Autostart** | enables `punktfunk-host` as a user service so it comes up at login. It also installs the `graphical-session.target` binding — see [Autostart and your session](#autostart-and-your-session) for when that does more than nothing. |
-| **Firewall** | adds ufw rules scoped to your local networks (and `tailscale0` if you have it), each tagged `punktfunk-omarchy` so `remove` finds them again. A path unit recouples those rules when `tailscale0` appears after setup. |
+| **Firewall** | adds ufw rules scoped to your local networks and a dormant `tailscale0` rule, each tagged `punktfunk-omarchy` so `remove` finds them again. |
 | **Browser trust** *(optional)* | trusts the console's certificate in Chromium (`~/.pki/nssdb`), so it opens with no security warning at all. |
 | **App menu** | installs "Punktfunk Web Console" as an Omarchy webapp — it appears in Apps (`Super`+`Space`) and opens already logged in, in its own window. |
 | **Bar widget** | the Punktfunk Quickshell widget in the bar — a hero plus SESSION, PAIRING, DEVICES and DISPLAY, without opening the console. It replaces the tray icon, which is hidden while the widget is enabled. |
@@ -111,10 +111,11 @@ punktfunk-omarchy mode mirror
 punktfunk-omarchy mode --status
 ```
 
-`--status` reads the settings file only, so the menu's checked rows do not start the host.
-This screen is the [Streamed screen](/docs/virtual-displays#stream-a-real-monitor-instead)
-pin; Dedicated clears it. Changing the mode restarts a running host, ends its active stream,
-and applies to the next connection.
+`--status` reads local config only: it checks `PUNKTFUNK_CAPTURE_MONITOR` in `host.env` before
+`display-settings.json`, and that override wins. The menu's checked rows do not start the host.
+This screen is the [Streamed screen](/docs/virtual-displays#stream-a-real-monitor-instead) pin;
+Dedicated clears it. Changing the mode restarts a running host, ends its active stream, and applies
+to the next connection.
 
 ## Keep-alive and window re-home
 
@@ -228,10 +229,9 @@ systemctl --user restart punktfunk-host
 
 The cost is one concurrent session on that port; extra sessions fall back to ephemeral ports again.
 
-**Tailscale later triggers a rule update.** Setup opens `tailscale0` only while the iface exists.
-A user path unit watches `/sys/class/net/tailscale0` and tries the same tagged rules when the
-iface appears after setup. The unit cannot answer a `sudo` password prompt; if the rule is
-missing, run `punktfunk-omarchy ufw` in a terminal. `punktfunk-omarchy remove` disables the watch.
+**Tailscale is ready before its interface appears.** Setup immediately installs the tagged
+`allow in on tailscale0` rule. Ufw accepts the named interface before it exists and keeps the rule
+dormant until `tailscale0` appears. `punktfunk-omarchy remove` deletes it.
 
 ## Updating
 
@@ -341,7 +341,7 @@ punktfunk-omarchy remove                      # the Omarchy wiring
 sudo pacman -R punktfunk-host punktfunk-web   # the packages
 ```
 
-`remove` reverses every step of `setup` — units, drop-in, ufw rules, the tailscale0 watch, the
-certificate trust, the webapp, the bar widget, the hooks, the theme template — and restores both
-the screen-share picker and the tray icon. Your config and pairings survive both; see
-[Uninstall](/docs/uninstall) to clear those too.
+`remove` reverses every step of `setup` — units, drop-in, ufw rules, certificate trust, the webapp,
+the bar widget, the hooks and the theme template — and restores both the screen-share picker and
+the tray icon. Your config and pairings survive both; see [Uninstall](/docs/uninstall) to clear
+those too.
