@@ -145,6 +145,9 @@ export function snap(
 	return best;
 }
 
+/** Tallest the map is drawn. A map is glanceable, not a diagram to study. */
+const MAX_MAP_HEIGHT = 360;
+
 export const DesktopMap: FC<{
 	monitors: readonly ApiMonitorInfo[];
 	displays: readonly ApiDisplayInfo[];
@@ -231,8 +234,14 @@ export const DesktopMap: FC<{
 	return (
 		<div
 			// A fixed aspect box: the desktop's own proportions, scaled to whatever width there is.
-			className="relative w-full overflow-hidden rounded-lg border bg-muted/30"
-			style={{ aspectRatio: `${box.w} / ${box.h}` }}
+			className="relative mx-auto w-full overflow-hidden rounded-lg border bg-muted/30"
+			// Aspect ratio alone would give a single 16:9 monitor a map 580 px tall at desk
+			// width — mostly empty. Capping the WIDTH instead of the height is what keeps the
+			// ratio: a height cap with `w-full` would just stretch the desktop out of shape.
+			style={{
+				aspectRatio: `${box.w} / ${box.h}`,
+				maxWidth: `${Math.round(MAX_MAP_HEIGHT * (box.w / box.h))}px`,
+			}}
 			role="img"
 			aria-label={m.display_map_label()}
 		>
