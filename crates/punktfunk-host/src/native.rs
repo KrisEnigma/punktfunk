@@ -1091,6 +1091,9 @@ pub(crate) fn setup_failed_sentence(e: &anyhow::Error) -> Option<String> {
         .map(|m| m.user_message())
 }
 
+// One session's whole context, threaded down rather than bundled: every argument is owned by a
+// different part of the host and none of them share a lifetime.
+#[allow(clippy::too_many_arguments)]
 async fn serve_session(
     conn: link::SessionLink,
     opts: &Arc<Punktfunk1Options>,
