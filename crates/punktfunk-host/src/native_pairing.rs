@@ -412,20 +412,16 @@ mod tests {
     use super::approval::{MAX_PENDING_PER_IP, PENDING_CAP};
     use super::*;
 
-    fn temp() -> PathBuf {
-        // Unique-enough path without pulling rand into tests: pid + address of a stack byte.
-        let x = 0u8;
-        std::env::temp_dir().join(format!(
-            "pf-native-pair-{}-{}.json",
-            std::process::id(),
-            &x as *const _ as usize
-        ))
+    /// The dir is returned with the path: dropping it deletes the store.
+    fn temp() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paired.json");
+        (dir, path)
     }
 
     #[test]
     fn arm_expire_and_pair() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         assert!(np.current_pin().is_none());
         assert!(!np.status().armed);
@@ -449,13 +445,11 @@ mod tests {
         assert!(np.remove("ab12").unwrap());
         assert!(!np.remove("ab12").unwrap());
         assert!(np.list().is_empty());
-        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn pending_knock_approve_and_deny() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         assert!(np.pending().is_empty());
 
@@ -495,13 +489,11 @@ mod tests {
         let pend = np.pending();
         assert_eq!(pend.len(), PENDING_CAP);
         assert_eq!(pend[0].fingerprint, "f003", "oldest entries evicted first");
-        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn pairing_clears_a_pending_knock() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         np.note_pending("Knocker", "cc44", None);
         assert_eq!(np.pending().len(), 1);
@@ -511,25 +503,21 @@ mod tests {
             "a now-paired device must leave the approval list"
         );
         assert!(np.is_paired("cc44"));
-        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn add_replaces_case_insensitively() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         np.add("First", "AB12").unwrap();
         np.add("Second", "ab12").unwrap();
         assert_eq!(np.list().len(), 1, "re-add must replace, not duplicate");
         assert_eq!(np.list()[0].name, "Second");
-        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn cli_flag_arms_with_no_expiry() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), Some("1234".into()), true).unwrap();
         assert_eq!(np.current_pin().as_deref(), Some("1234"));
         let s = np.status();
@@ -537,14 +525,12 @@ mod tests {
         assert_eq!(s.expires_in_secs, None, "CLI arming has no expiry");
         np.disarm();
         assert!(np.current_pin().is_none());
-        let _ = std::fs::remove_file(&p);
     }
 
     #[tokio::test]
     async fn wait_for_decision_approve_deny_timeout() {
         use std::sync::Arc;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = Arc::new(NativePairing::load_with(Some(p.clone()), None, false).unwrap());
 
         let seq = np.note_pending("Knocker", "ab01", None);
@@ -595,7 +581,6 @@ mod tests {
             .wait_for_decision("ab01", 0, Duration::from_secs(5))
             .await;
         assert_eq!(d, PairingDecision::Approved);
-        let _ = std::fs::remove_file(&p);
     }
 
     /// An expired record is still listed. A paired-check on listing would admit the knock
@@ -605,8 +590,7 @@ mod tests {
     async fn expired_record_parks_until_regrant() {
         use punktfunk_core::quic::GRANT_GAMEPAD;
         use std::sync::Arc;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = Arc::new(NativePairing::load_with(Some(p.clone()), None, false).unwrap());
         np.add_with_access(
             "Old Guest",
@@ -650,7 +634,6 @@ mod tests {
         .unwrap();
         assert_eq!(waiter.await.unwrap(), PairingDecision::Approved);
         assert_eq!(np.effective("aa77", wall_now()), Some(GRANT_GAMEPAD));
-        let _ = std::fs::remove_file(&p);
     }
 
     /// One Approve admits exactly one session. A re-knock supersedes the previous parked
@@ -659,8 +642,7 @@ mod tests {
     #[tokio::test]
     async fn newest_knock_supersedes_parked_waiter() {
         use std::sync::Arc;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = Arc::new(NativePairing::load_with(Some(p.clone()), None, false).unwrap());
 
         let seq1 = np.note_pending("iPad Pro", "ee01", None);
@@ -697,15 +679,13 @@ mod tests {
             .wait_for_decision("ee01", seq1, Duration::from_millis(80))
             .await;
         assert_eq!(d, PairingDecision::Superseded);
-        let _ = std::fs::remove_file(&p);
     }
 
     /// A window bound to one fingerprint: another peer can neither pair nor burn it
     /// (rejected without a PIN).
     #[test]
     fn armed_pin_is_fingerprint_bindable() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         let pin = np.arm(Duration::from_secs(60));
         assert!(matches!(np.pin_for_attempt("aa11"), PinAttempt::Pin(x) if x == pin));
@@ -718,15 +698,13 @@ mod tests {
         ));
         np.disarm();
         assert!(matches!(np.pin_for_attempt("aa11"), PinAttempt::Disarmed));
-        let _ = std::fs::remove_file(&p);
     }
 
     /// One source IP cannot exceed the per-IP cap. A parked genuine knock is never
     /// evicted by a flood, even one that fills the global cap from many IPs.
     #[test]
     fn pending_per_ip_cap_and_parked_protection() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         let attacker = IpAddr::from([192, 168, 1, 66]);
         for i in 0..20 {
@@ -749,7 +727,6 @@ mod tests {
             "a parked, held-open knock is never evicted by a flood"
         );
         assert!(np.pending().len() <= PENDING_CAP, "global cap still holds");
-        let _ = std::fs::remove_file(&p);
     }
 
     fn wall_now() -> i64 {
@@ -763,8 +740,7 @@ mod tests {
     /// control, forever.
     #[test]
     fn pre_grants_store_decodes_as_full_permanent() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         std::fs::write(
             &p,
             br#"{ "clients": [ { "name": "Old Laptop", "fingerprint": "ab12" } ] }"#,
@@ -783,7 +759,6 @@ mod tests {
             Some(GRANT_ALL),
             "absent grants = full control"
         );
-        let _ = std::fs::remove_file(&p);
     }
 
     /// Re-running the pairing ceremony must never widen access. `add()` is name-only for
@@ -791,8 +766,7 @@ mod tests {
     #[test]
     fn repair_via_add_never_escalates() {
         use punktfunk_core::quic::GRANT_GAMEPAD;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         let now = wall_now();
         let guest = Access {
@@ -829,14 +803,12 @@ mod tests {
         drop(np);
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         assert_eq!(np.effective("aa11", now), Some(GRANT_GAMEPAD));
-        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn approve_with_access_pins_the_choice() {
         use punktfunk_core::quic::GRANT_GAMEPAD;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         let now = wall_now();
         np.note_pending("device bb22", "BB22", None);
@@ -857,7 +829,6 @@ mod tests {
         assert_eq!(client.expires_unix, Some(now + 4 * 3600));
         assert!(client.granted_unix.is_some());
         assert_eq!(np.effective("bb22", now), Some(GRANT_GAMEPAD));
-        let _ = std::fs::remove_file(&p);
     }
 
     /// Expiry ends authorization, not listing: `effective()` becomes `None` at the
@@ -865,8 +836,7 @@ mod tests {
     #[test]
     fn expiry_flips_effective_but_keeps_the_row() {
         use punktfunk_core::quic::GRANT_GAMEPAD;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         let now = wall_now();
         np.add_with_access(
@@ -892,15 +862,13 @@ mod tests {
         assert_eq!(np.effective("cc33", now + 3600), None);
         assert!(np.is_paired("cc33"), "expired but still LISTED");
         assert_eq!(np.list().len(), 1, "the row survives for the console");
-        let _ = std::fs::remove_file(&p);
     }
 
     /// A store that smuggles reserved bits cannot feed them into enforcement:
     /// `effective()` and the watch mask with GRANT_ALL on read.
     #[test]
     fn reserved_bits_are_masked_on_read() {
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         np.add("Future Device", "dd44").unwrap();
         let from_the_future = Access {
@@ -916,7 +884,6 @@ mod tests {
         assert_eq!(np.subscribe("dd44").borrow().grants, GRANT_ALL);
         assert!(!np.set_access("nope99", from_the_future).unwrap());
         assert!(!np.is_paired("nope99"));
-        let _ = std::fs::remove_file(&p);
     }
 
     /// An edit reaches a live subscriber in one event; unpair publishes `revoked`.
@@ -924,8 +891,7 @@ mod tests {
     #[tokio::test]
     async fn watch_publishes_on_set_access_and_unpair() {
         use punktfunk_core::quic::GRANT_GAMEPAD;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         np.add("Living Room", "ee55").unwrap();
         // Registry keys case-insensitively, like the store.
@@ -977,7 +943,6 @@ mod tests {
         assert_eq!(rx.borrow().grants, GRANT_ALL);
 
         assert!(np.subscribe("zz99").borrow().revoked);
-        let _ = std::fs::remove_file(&p);
     }
 
     /// Absent Moonlight record = ungoverned full control (the GameStream cert list is
@@ -987,8 +952,7 @@ mod tests {
     #[test]
     fn moonlight_effective_absent_is_ungoverned_but_a_record_governs() {
         use punktfunk_core::quic::GRANT_GAMEPAD;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         let now = wall_now();
 
@@ -1023,14 +987,12 @@ mod tests {
         // Unpair here returns ungoverned; GameStream pairing is a separate store.
         assert!(np.remove("ab12").unwrap());
         assert_eq!(np.moonlight_effective("ab12", now), Some(GRANT_ALL));
-        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn armed_window_carries_access_until_consumed() {
         use punktfunk_core::quic::GRANT_GAMEPAD;
-        let p = temp();
-        let _ = std::fs::remove_file(&p);
+        let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         assert_eq!(np.armed_access(), None, "disarmed = no choice");
         let choice = Access {
@@ -1041,6 +1003,5 @@ mod tests {
         assert_eq!(np.armed_access(), Some(choice));
         np.disarm();
         assert_eq!(np.armed_access(), None, "consumed with the window");
-        let _ = std::fs::remove_file(&p);
     }
 }
