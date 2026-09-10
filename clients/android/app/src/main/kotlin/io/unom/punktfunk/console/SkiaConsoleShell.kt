@@ -254,7 +254,11 @@ fun SkiaConsoleShell(
                     NativeBridge.nativeConsoleMenu(handle, 0) // ▲ opens the tile's options on Home
                     return@probe true
                 }
-                return@probe false
+                // Only a key a pad can produce stops here. The source class is the platform's
+                // per-device guess and a composite keyboard (dongle receiver, Fire OS) stamps
+                // GAMEPAD on every key it sends — dropping those left its Enter and its typing
+                // dead in the menus. See [MainActivity.fromPad], which asks the same question.
+                if (padShaped(code)) return@probe false
             }
             // A remote / keyboard. D-pad keys and DPAD_CENTER as discrete events with the
             // framework's own repeat; the rest as console keys; printable text while editing.
@@ -285,6 +289,13 @@ fun SkiaConsoleShell(
                 else -> {
                     val ch = ev.unicodeChar
                     if (ch != 0 && !ev.isCtrlPressed && !ev.isAltPressed && ch >= 0x20) {
+                        // Y/X are the keyboard's stand-ins for the pad's ▲/■, sent BESIDE the
+                        // character the way SDL's separate key and text events reach the shell:
+                        // editing types the letter and drops the key, otherwise the key acts.
+                        when (ev.keyCode) {
+                            KeyEvent.KEYCODE_Y -> NativeBridge.nativeConsoleKey(handle, 11, ev.isShiftPressed, repeat)
+                            KeyEvent.KEYCODE_X -> NativeBridge.nativeConsoleKey(handle, 12, ev.isShiftPressed, repeat)
+                        }
                         NativeBridge.nativeConsoleText(handle, String(Character.toChars(ch)))
                     } else {
                         return@probe false
@@ -407,6 +418,15 @@ fun SkiaConsoleShell(
  * intents, `nativePadAudioSelfTest`), so the support answer cannot drift between interfaces.
  * Runs on the main thread (the command drain lives there); results ride [SkiaConsole.notice].
  */
+/**
+ * Is [code] a key only a controller sends? The pad route claims those and nothing else, so a
+ * keyboard whose device also advertises `SOURCE_GAMEPAD` keeps its typing. BACK counts: a pad
+ * with no Select scancode delivers Select as `KEYCODE_BACK`, and the console's Back is the
+ * same event either way.
+ */
+internal fun padShaped(code: Int): Boolean =
+    KeyEvent.isGamepadButton(code) || code == KeyEvent.KEYCODE_BACK
+
 private fun padAction(activity: MainActivity?, action: String, padKey: String) {
     if (activity == null) return
     val settings = SettingsStore(activity).load()
