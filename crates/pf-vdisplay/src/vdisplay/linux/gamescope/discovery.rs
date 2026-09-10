@@ -601,19 +601,11 @@ fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
 #[cfg(test)]
 mod live_probe {
     /// Reads the atoms off a real `--steam` gamescope. Ignored: needs one running.
-    /// `cargo test -p pf-vdisplay --bins -- --ignored steam_atoms --nocapture`
     #[test]
     #[ignore]
     fn steam_atoms_are_readable() {
         let targets = super::xwayland_cursor_targets(None);
         assert!(!targets.is_empty(), "no gamescope Xwayland found");
-        for (dpy, _) in &targets {
-            println!(
-                "{dpy}: focused={:?} baselayer={:?}",
-                super::focused_app(dpy),
-                super::root_cardinals(dpy, b"GAMESCOPECTRL_BASELAYER_APPID"),
-            );
-        }
         assert!(
             targets.iter().any(|(d, _)| super::focused_app(d).is_some()),
             "no display answered GAMESCOPE_FOCUSED_APP — the empty-token connect failed"
@@ -621,19 +613,16 @@ mod live_probe {
     }
 
     /// With two gamescopes up, the seat key must select exactly one. Ignored: needs both.
-    /// `PF_SEAT_A=gamescope-0 PF_SEAT_B=gamescope-1 cargo test -p pf-vdisplay -- --ignored seat_key --nocapture`
     #[test]
     #[ignore]
     fn seat_key_selects_one_gamescope() {
         let all = super::xwayland_cursor_targets(None);
-        println!("unscoped: {all:?}");
         assert!(all.len() >= 2, "need two live gamescopes for this probe");
         for var in ["PF_SEAT_A", "PF_SEAT_B"] {
             let Ok(seat) = std::env::var(var) else {
                 continue;
             };
             let scoped = super::xwayland_cursor_targets(Some(&seat));
-            println!("{var}={seat}: {scoped:?}");
             assert_eq!(scoped.len(), 1, "{seat} did not select exactly one display");
         }
     }

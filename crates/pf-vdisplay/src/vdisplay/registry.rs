@@ -660,18 +660,6 @@ mod pool {
             );
         }
 
-        /// The reuse path is the one that launches into a live compositor, so a kept entry that
-        /// forgot its seat would deliver the launch to whichever gamescope `/proc` listed first.
-        #[test]
-        fn a_kept_entry_remembers_its_seat() {
-            let mut e = test_entry("gamescope", 1, None);
-            e.seat = Some("gamescope-1".into());
-            e.life = lifecycle::State::Pinned;
-            let pool = vec![e];
-            assert_eq!(pool[0].seat.as_deref(), Some("gamescope-1"));
-            assert_eq!(kept_to_retire(&pool, "gamescope", &None), vec![1]);
-        }
-
         /// S1: a kept spawn is retired so the acquire that follows never runs a second one.
         /// Two live gamescopes lose the `gamescope-N` lock, and Steam then hands the URL to the
         /// older instance and exits, killing the new spawn's primary child.

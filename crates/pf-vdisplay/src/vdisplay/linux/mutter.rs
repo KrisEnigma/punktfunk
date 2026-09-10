@@ -1565,14 +1565,8 @@ mod tests {
         assert!(pick_virtual(&[], M).is_none());
     }
 
-    /// Live GNOME round trip: create, hold, drop. Needs a running
-    /// `gnome-shell` on the session bus:
-    /// ```text
-    /// PUNKTFUNK_MUTTER_VIRTUAL_PRIMARY=0 \
-    ///   cargo test -p pf-vdisplay -- --ignored --nocapture live_mutter_create_drop
-    /// ```
-    /// Set that variable unless you mean to exercise Exclusive: the
-    /// default disables physical heads for the duration.
+    /// Live GNOME create/drop. Needs gnome-shell on the session bus.
+    /// `PUNKTFUNK_MUTTER_VIRTUAL_PRIMARY=0` unless Exclusive is the point.
     #[test]
     #[ignore = "needs a live gnome-shell on the session bus; run with --ignored"]
     fn live_mutter_create_drop() {
@@ -1584,27 +1578,12 @@ mod tests {
             refresh_hz: 60,
         };
         let mut vd = MutterDisplay::new().expect("construct the Mutter backend");
-        let started = std::time::Instant::now();
         let out = vd.create(mode).expect("create the Mutter virtual monitor");
-        println!(
-            "created: node_id={} preferred={:?} in {:?}",
-            out.node_id,
-            out.preferred_mode,
-            started.elapsed()
-        );
         assert!(out.node_id > 0, "a real PipeWire node id");
         assert_eq!(
             out.preferred_mode,
             Some((mode.width, mode.height, mode.refresh_hz))
         );
-
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        // Drop waits for Stop + settle (`StopGuard`); no grace sleep.
-        let dropped_at = std::time::Instant::now();
         drop(out);
-        println!(
-            "dropped in {:?} — gnome-shell should have removed the monitor and reverted the topology",
-            dropped_at.elapsed()
-        );
     }
 }
