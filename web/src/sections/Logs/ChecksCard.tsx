@@ -7,6 +7,7 @@ import {
 	Copy,
 	RefreshCw,
 } from "lucide-react";
+import { motion } from "motion/react";
 import { type FC, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import {
@@ -15,6 +16,7 @@ import {
 	useRefreshDiagnostics,
 } from "@/api/gen/diagnostics/diagnostics";
 import type { HostCheck } from "@/api/gen/model/hostCheck";
+import { ROW, ROW_GAP, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -122,11 +124,14 @@ export const ChecksCard: FC<{
 								{m.diag_all_ok()}
 							</p>
 						)}
-						<ul className="flex flex-col gap-2">
+						<motion.ul
+							{...staggerProps(ROW_GAP)}
+							className="flex flex-col gap-2"
+						>
 							{applicable.map((check) => (
 								<CheckRow key={check.id} check={check} />
 							))}
-						</ul>
+						</motion.ul>
 						{inapplicable.length > 0 && (
 							<div className="flex flex-col gap-2">
 								<button
@@ -147,11 +152,14 @@ export const ChecksCard: FC<{
 											})}
 								</button>
 								{showInapplicable && (
-									<ul className="flex flex-col gap-2">
+									<motion.ul
+										{...staggerProps(ROW_GAP)}
+										className="flex flex-col gap-2"
+									>
 										{inapplicable.map((check) => (
 											<CheckRow key={check.id} check={check} />
 										))}
-									</ul>
+									</motion.ul>
 								)}
 							</div>
 						)}
@@ -181,7 +189,10 @@ const CheckRow: FC<{ check: HostCheck }> = ({ check }) => {
 	);
 
 	return (
-		<li className="rounded-md border bg-card/40 px-3 py-2">
+		<motion.li
+			variants={ROW}
+			className="rounded-md border bg-card/40 px-3 py-2"
+		>
 			{expandable ? (
 				<button
 					type="button"
@@ -230,7 +241,7 @@ const CheckRow: FC<{ check: HostCheck }> = ({ check }) => {
 					)}
 				</div>
 			)}
-		</li>
+		</motion.li>
 	);
 };
 

@@ -1,9 +1,11 @@
 import Section from "@unom/ui/section";
+import { motion } from "motion/react";
 import type { FC, ReactNode } from "react";
 import type { AvailableCompositor } from "@/api/gen/model/availableCompositor";
 import type { HostInfo } from "@/api/gen/model/hostInfo";
 import { OsIcon } from "@/components/os-icon";
 import { QueryState } from "@/components/query-state";
+import { ROW, ROW_GAP, Stagger, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { Loadable } from "@/lib/query";
@@ -30,72 +32,75 @@ export const HostView: FC<{
 				<h1 className="text-2xl font-semibold">{m.nav_host()}</h1>
 
 				{conflicts}
-				{h && <ConnectCard host={h} />}
 
 				<QueryState
 					isLoading={host.isLoading}
 					error={host.error}
 					refetch={host.refetch}
 				>
+					{/* One group, mounted with its cards once /host answers — a late group takes its cadence from its own container. */}
 					{h && (
-						<div className="grid gap-card lg:grid-cols-2">
-							<Card>
-								<CardHeader>
-									<CardTitle>{m.host_identity()}</CardTitle>
-								</CardHeader>
-								<CardContent>
-									<dl className="grid grid-cols-1 gap-3">
-										<Row label={m.host_hostname()} value={h.hostname} />
-										{/* The OS mark resolves from the identity chain (h.os), which also
-										    serves as the tooltip for the curious; the text is the pretty name. */}
-										<Row
-											label={m.host_os()}
-											value={h.os_name}
-											title={h.os}
-											icon={<OsIcon os={h.os} className="size-4 shrink-0" />}
-										/>
-										<Row label={m.host_local_ip()} value={h.local_ip} mono />
-										<Row
-											label={m.host_version()}
-											value={`${h.app_version} (${h.version})`}
-										/>
-										<Row label={m.host_abi()} value={String(h.abi_version)} />
-										<Row label={m.host_uniqueid()} value={h.uniqueid} mono />
-									</dl>
-								</CardContent>
-							</Card>
-							<div className="space-y-card">
+						<Stagger className="flex flex-col gap-card">
+							<ConnectCard host={h} />
+							<div className="grid gap-card lg:grid-cols-2">
 								<Card>
 									<CardHeader>
-										<CardTitle>{m.host_codecs()}</CardTitle>
-									</CardHeader>
-									<CardContent className="flex flex-wrap gap-2">
-										{h.codecs.map((c) => (
-											<Badge key={c} variant="secondary">
-												{c.toUpperCase()}
-											</Badge>
-										))}
-									</CardContent>
-								</Card>
-								<Card>
-									<CardHeader>
-										<CardTitle>{m.host_ports()}</CardTitle>
+										<CardTitle>{m.host_identity()}</CardTitle>
 									</CardHeader>
 									<CardContent>
-										<dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm tabular-nums">
-											{Object.entries(h.ports).map(([k, v]) => (
-												<div key={k} className="flex justify-between">
-													<dt className="text-muted-foreground uppercase">
-														{k}
-													</dt>
-													<dd className="font-medium">{v as number}</dd>
-												</div>
-											))}
+										<dl className="grid grid-cols-1 gap-3">
+											<Row label={m.host_hostname()} value={h.hostname} />
+											{/* The OS mark resolves from the identity chain (h.os), which also
+										    serves as the tooltip for the curious; the text is the pretty name. */}
+											<Row
+												label={m.host_os()}
+												value={h.os_name}
+												title={h.os}
+												icon={<OsIcon os={h.os} className="size-4 shrink-0" />}
+											/>
+											<Row label={m.host_local_ip()} value={h.local_ip} mono />
+											<Row
+												label={m.host_version()}
+												value={`${h.app_version} (${h.version})`}
+											/>
+											<Row label={m.host_abi()} value={String(h.abi_version)} />
+											<Row label={m.host_uniqueid()} value={h.uniqueid} mono />
 										</dl>
 									</CardContent>
 								</Card>
+								<div className="space-y-card">
+									<Card>
+										<CardHeader>
+											<CardTitle>{m.host_codecs()}</CardTitle>
+										</CardHeader>
+										<CardContent className="flex flex-wrap gap-2">
+											{h.codecs.map((c) => (
+												<Badge key={c} variant="secondary">
+													{c.toUpperCase()}
+												</Badge>
+											))}
+										</CardContent>
+									</Card>
+									<Card>
+										<CardHeader>
+											<CardTitle>{m.host_ports()}</CardTitle>
+										</CardHeader>
+										<CardContent>
+											<dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm tabular-nums">
+												{Object.entries(h.ports).map(([k, v]) => (
+													<div key={k} className="flex justify-between">
+														<dt className="text-muted-foreground uppercase">
+															{k}
+														</dt>
+														<dd className="font-medium">{v as number}</dd>
+													</div>
+												))}
+											</dl>
+										</CardContent>
+									</Card>
+								</div>
 							</div>
-						</div>
+						</Stagger>
 					)}
 				</QueryState>
 
@@ -122,9 +127,13 @@ export const HostView: FC<{
 								error={compositors.error}
 								refetch={compositors.refetch}
 							>
-								<ul className="divide-y rounded-md border">
+								<motion.ul
+									{...staggerProps(ROW_GAP)}
+									className="divide-y rounded-md border"
+								>
 									{compositors.data?.map((c) => (
-										<li
+										<motion.li
+											variants={ROW}
 											key={c.id}
 											className="flex items-center justify-between gap-4 px-4 py-3"
 										>
@@ -146,9 +155,9 @@ export const HostView: FC<{
 													? m.compositor_available()
 													: m.compositor_unavailable()}
 											</Badge>
-										</li>
+										</motion.li>
 									))}
-								</ul>
+								</motion.ul>
 							</QueryState>
 						</CardContent>
 					</Card>

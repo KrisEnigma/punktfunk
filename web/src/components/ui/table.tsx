@@ -1,3 +1,4 @@
+import { motion } from "motion/react";
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
@@ -80,4 +81,17 @@ const TableCell = React.forwardRef<
 ));
 TableCell.displayName = "TableCell";
 
-export { Table, TableBody, TableCell, TableHead, TableHeader, TableRow };
+/** For a body whose rows stagger in: `staggerProps` on the body, `ROW` on each row. */
+const MotionTableBody = motion.create(TableBody);
+const MotionTableRow = motion.create(TableRow);
+
+export {
+	MotionTableBody,
+	MotionTableRow,
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+};

@@ -6,6 +6,7 @@ import type { AudioWiring } from "@/api/gen/model/audioWiring";
 import type { GameEntry } from "@/api/gen/model/gameEntry";
 import type { RuntimeStatus } from "@/api/gen/model/runtimeStatus";
 import { QueryState } from "@/components/query-state";
+import { Stagger } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -50,8 +51,9 @@ export const DashboardView: FC<{
 					error={status.error}
 					refetch={status.refetch}
 				>
+					{/* A Stagger, not a div: these cards mount once /status answers, after the page animated. */}
 					{s && (
-						<div className="flex flex-col gap-card">
+						<Stagger className="flex flex-col gap-card">
 							<div className="grid gap-card sm:grid-cols-2 lg:grid-cols-4">
 								<StatCard
 									icon={<Video className="size-4" />}
@@ -230,7 +232,7 @@ export const DashboardView: FC<{
 
 							{/* Below the session card: the past, under the present. */}
 							<ActivityCard />
-						</div>
+						</Stagger>
 					)}
 				</QueryState>
 			</div>

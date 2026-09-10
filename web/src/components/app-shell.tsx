@@ -5,7 +5,7 @@ import { type ReactNode, useState } from "react";
 import { useHostEvents } from "@/api/events";
 import { pluginIcon, uiPlugins, usePlugins } from "@/api/plugins";
 import { BrandMark } from "@/components/brand-mark";
-import { Stagger, staggerProps } from "@/components/stagger";
+import { ROW, Stagger, staggerProps } from "@/components/stagger";
 import { Wordmark } from "@/components/wordmark";
 import { changeLocale, type Locale, locales, useLocale } from "@/lib/i18n";
 import {
@@ -251,7 +251,11 @@ function MobileNav() {
 				{/* The "More" sheet sits directly above the bar (bottom-full of the fixed nav).
 				    Capped at 70vh so a host with several plugins still shows the bar under it. */}
 				{moreOpen && (
-					<div className="absolute inset-x-0 bottom-full max-h-[70vh] overflow-y-auto border-t bg-card/95 backdrop-blur">
+					<Stagger
+						root
+						gap={0.03}
+						className="absolute inset-x-0 bottom-full max-h-[70vh] overflow-y-auto border-t bg-card/95 backdrop-blur"
+					>
 						{spill.length > 0 && (
 							<MoreGroup>
 								{spill.map((n) => (
@@ -278,7 +282,7 @@ function MobileNav() {
 								))}
 							</MoreGroup>
 						)}
-					</div>
+					</Stagger>
 				)}
 				<div className="flex border-t bg-card/95 backdrop-blur">
 					{bar.map(({ to, icon: Icon, label, exact }) => (
@@ -332,7 +336,7 @@ function MoreGroup({
 }
 
 /** A 44 px-tall row: icon, label, and the one line that says what the page is for. */
-const ROW =
+const MORE_ROW =
 	"flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground transition-colors";
 
 function MoreRow({
@@ -344,12 +348,12 @@ function MoreRow({
 }) {
 	const { to, icon: Icon, label, hint, exact } = entry;
 	return (
-		<li>
+		<motion.li variants={ROW}>
 			<Link
 				to={to}
 				onClick={onNavigate}
 				activeOptions={{ exact: exact === true }}
-				className={ROW}
+				className={MORE_ROW}
 				activeProps={{ className: "text-[var(--brand-light)]" }}
 			>
 				<Icon className="size-5 shrink-0" />
@@ -358,7 +362,7 @@ function MoreRow({
 					<span className="block truncate text-xs">{hint()}</span>
 				</span>
 			</Link>
-		</li>
+		</motion.li>
 	);
 }
 
@@ -371,12 +375,12 @@ function MorePluginRow({
 }) {
 	const Icon = pluginIcon(plugin.ui?.icon);
 	return (
-		<li>
+		<motion.li variants={ROW}>
 			<Link
 				to="/plugins/$pluginId/$"
 				params={{ pluginId: plugin.id, _splat: "" }}
 				onClick={onNavigate}
-				className={ROW}
+				className={MORE_ROW}
 				activeProps={{ className: "text-[var(--brand-light)]" }}
 			>
 				<Icon className="size-5 shrink-0" />
@@ -384,7 +388,7 @@ function MorePluginRow({
 					{plugin.title}
 				</span>
 			</Link>
-		</li>
+		</motion.li>
 	);
 }
 

@@ -289,8 +289,8 @@ export const CustomiseDialog: FC<{
  * the stored policy — the generalised `applyAxis` that three controls already used, now the
  * only write path on the page.
  *
- * `root`, because a dialog renders through a portal: there is no animating ancestor out there to
- * inherit `from → enter` from, so the group has to run its own clock.
+ * The questions inherit their cascade from the dialog, which staggers its sections, so they follow
+ * the header instead of running a clock of their own.
  */
 const Customise: FC<{
 	effective: EffectivePolicy;
@@ -313,7 +313,7 @@ const Customise: FC<{
 				: { preset: "custom", ...effective, ...patch },
 		);
 	return (
-		<Stagger root className="space-y-5">
+		<Stagger className="space-y-5">
 			<Question label={m.display_q_keep()}>
 				<Segmented
 					busy={busy}

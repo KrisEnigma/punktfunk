@@ -8,9 +8,11 @@
 //
 // One persistence model: everything saves on change. The host applies at the next connect
 // either way, so there was never anything for a Save button to protect.
+
 import { useQueryClient } from "@tanstack/react-query";
 import Section from "@unom/ui/section";
 import { toast } from "@unom/ui/toast";
+import { motion } from "motion/react";
 import { type FC, useState } from "react";
 import {
 	getGetDisplayMonitorsQueryKey,
@@ -36,6 +38,7 @@ import { usePlatform } from "@/api/platform";
 import { useDialogs } from "@/components/dialogs";
 import { DocsLink } from "@/components/docs-link";
 import { QueryState } from "@/components/query-state";
+import { ROW, ROW_GAP, Stagger, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -216,161 +219,177 @@ export const SectionDisplays: FC = () => {
 					)}
 				</div>
 
-				<Card>
-					<CardContent className="space-y-4">
-						<QueryState
-							isLoading={settings.isLoading || monitors.isLoading}
-							error={effective ? undefined : (settings.error ?? monitors.error)}
-							refetch={settings.refetch}
-						>
-							{heads.length + displays.length === 0 ? (
-								<p className="text-sm text-muted-foreground">
-									{m.display_map_empty()}
-								</p>
-							) : (
-								<DesktopMap
-									monitors={heads}
-									displays={displays}
-									dimMonitors={shown?.topology === "exclusive"}
-									overlaid={overlaid}
-									captureMonitor={monitors.data?.pinned ?? null}
-									onRelease={doRelease}
-									onMove={moveDisplay}
-									busy={release.isPending || saveLayout.isPending}
-								/>
-							)}
-							{displays.length > 1 && (
-								<p className="text-xs text-muted-foreground">
-									{m.display_arrange_hint()}
-								</p>
-							)}
-							{error && <p className="text-sm text-destructive">{error}</p>}
-						</QueryState>
-					</CardContent>
-				</Card>
+				{/* One group, mounted once both queries settle. Cards that arrived one by one after the
+				    page animated each landed on a single frame. Errors stay with each card. */}
+				<QueryState
+					isLoading={settings.isLoading || monitors.isLoading}
+					error={undefined}
+				>
+					<Stagger className="flex flex-col gap-card">
+						<Card>
+							<CardContent className="space-y-4">
+								<QueryState
+									isLoading={settings.isLoading || monitors.isLoading}
+									error={
+										effective ? undefined : (settings.error ?? monitors.error)
+									}
+									refetch={settings.refetch}
+								>
+									{heads.length + displays.length === 0 ? (
+										<p className="text-sm text-muted-foreground">
+											{m.display_map_empty()}
+										</p>
+									) : (
+										<DesktopMap
+											monitors={heads}
+											displays={displays}
+											dimMonitors={shown?.topology === "exclusive"}
+											overlaid={overlaid}
+											captureMonitor={monitors.data?.pinned ?? null}
+											onRelease={doRelease}
+											onMove={moveDisplay}
+											busy={release.isPending || saveLayout.isPending}
+										/>
+									)}
+									{displays.length > 1 && (
+										<p className="text-xs text-muted-foreground">
+											{m.display_arrange_hint()}
+										</p>
+									)}
+									{error && <p className="text-sm text-destructive">{error}</p>}
+								</QueryState>
+							</CardContent>
+						</Card>
 
-				{/* The page's central question, answered in the open. Under the map on purpose:
+						{/* The page's central question, answered in the open. Under the map on purpose:
 				    hovering a preset redraws the map, and a picker in a modal covered the very
 				    thing it was previewing. */}
-				{policy && effective && settings.data && (
-					<Card>
-						<CardContent className="space-y-4">
-							<h2 className="text-sm font-medium">
-								{m.display_behaviour_title()}
-							</h2>
-							{effective && (
-								<p className="text-sm">
-									{/* The policy in effect: never a local draft, and never the hovered preview. This sits
-									    right above the preset grid, so text that followed the hover would move the grid under
-									    the cursor. The map and each card's caption show the preview instead. */}
-									{describePolicy(effective, { live })}
-									{effective.layout.mode === "manual" && (
-										<> {m.display_arranged_by_you()}</>
+						{policy && effective && settings.data && (
+							<Card>
+								<CardContent className="space-y-4">
+									<h2 className="text-sm font-medium">
+										{m.display_behaviour_title()}
+									</h2>
+									{effective && (
+										<p className="text-sm">
+											{/* The policy in effect: never a local draft, and never the hovered preview. This sits
+											    right above the preset grid, so text that followed the hover would move the grid under
+											    the cursor. The map and each card's caption show the preview instead. */}
+											{describePolicy(effective, { live })}
+											{effective.layout.mode === "manual" && (
+												<> {m.display_arranged_by_you()}</>
+											)}
+										</p>
 									)}
-								</p>
-							)}
-							<BehaviourPicker
-								policy={policy}
-								presets={settings.data.presets}
-								customPresets={settings.data.custom_presets}
-								onApply={(p) => write(p)}
-								onCustomise={() => setCustomiseOpen(true)}
-								onSavePreset={savePreset}
-								onRenamePreset={renamePreset}
-								onUpdatePreset={(p) =>
-									updatePreset.mutate(
-										{
-											id: p.id,
-											data: {
-												name: p.name,
-												fields: effective,
-												game_session: policy.game_session ?? "auto",
-											},
-										},
-										{ onSuccess: invalidate },
-									)
-								}
-								onDeletePreset={removePreset}
-								busy={busy}
-								onPreview={setPreview}
-							/>
-						</CardContent>
-					</Card>
-				)}
-
-				{/* The rows are the map in words: the keyboard and screen-reader path, and what a
-				    phone falls back to when a box would be under 44 px. */}
-				<Card>
-					<CardContent className="space-y-4">
-						<h2 className="text-sm font-medium">{m.display_devices()}</h2>
-						{displays.length === 0 ? (
-							<p className="text-sm text-muted-foreground">
-								{m.display_no_devices()}
-							</p>
-						) : (
-							<ul className="divide-y rounded-md border">
-								{displays.map((d) => (
-									<li
-										key={d.slot}
-										className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm"
-									>
-										<span className="min-w-0 flex-1 truncate font-medium">
-											{d.client ?? m.display_map_unnamed()}
-										</span>
-										<span className="text-muted-foreground">{d.mode}</span>
-										<Badge
-											variant={d.state === "active" ? "default" : "outline"}
-										>
-											{d.state === "active"
-												? m.display_state_streaming()
-												: d.state === "pinned"
-													? m.display_state_kept_until()
-													: m.display_state_kept()}
-										</Badge>
-										{d.state !== "active" && (
-											<Button
-												size="sm"
-												variant="ghost"
-												disabled={release.isPending}
-												onClick={() => doRelease(d.slot)}
-											>
-												{m.display_release()}
-											</Button>
-										)}
-									</li>
-								))}
-							</ul>
+									<BehaviourPicker
+										policy={policy}
+										presets={settings.data.presets}
+										customPresets={settings.data.custom_presets}
+										onApply={(p) => write(p)}
+										onCustomise={() => setCustomiseOpen(true)}
+										onSavePreset={savePreset}
+										onRenamePreset={renamePreset}
+										onUpdatePreset={(p) =>
+											updatePreset.mutate(
+												{
+													id: p.id,
+													data: {
+														name: p.name,
+														fields: effective,
+														game_session: policy.game_session ?? "auto",
+													},
+												},
+												{ onSuccess: invalidate },
+											)
+										}
+										onDeletePreset={removePreset}
+										busy={busy}
+										onPreview={setPreview}
+									/>
+								</CardContent>
+							</Card>
 						)}
-					</CardContent>
-				</Card>
 
-				<MonitorRows
-					monitors={heads}
-					pinned={monitors.data?.pinned ?? null}
-					pinSupported={acts("display", "capture_monitor")}
-					policy={policy}
-					effective={effective}
-					busy={busy}
-					onPick={(connector) => write({ capture_monitor: connector })}
-					// KWin is the only backend that honours a keep-list; the host says so.
-					onKeepLit={
-						acts("display", "keep_monitors")
-							? (connector, keep) => {
-									const current = policy?.keep_monitors ?? [];
-									write({
-										keep_monitors: keep
-											? [...current, connector]
-											: current.filter(
-													(c) => c.toLowerCase() !== connector.toLowerCase(),
-												),
-									});
-								}
-							: undefined
-					}
-				/>
+						{/* The rows are the map in words: the keyboard and screen-reader path, and what a
+				    phone falls back to when a box would be under 44 px. */}
+						<Card>
+							<CardContent className="space-y-4">
+								<h2 className="text-sm font-medium">{m.display_devices()}</h2>
+								{displays.length === 0 ? (
+									<p className="text-sm text-muted-foreground">
+										{m.display_no_devices()}
+									</p>
+								) : (
+									<motion.ul
+										{...staggerProps(ROW_GAP)}
+										className="divide-y rounded-md border"
+									>
+										{displays.map((d) => (
+											<motion.li
+												variants={ROW}
+												key={d.slot}
+												className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm"
+											>
+												<span className="min-w-0 flex-1 truncate font-medium">
+													{d.client ?? m.display_map_unnamed()}
+												</span>
+												<span className="text-muted-foreground">{d.mode}</span>
+												<Badge
+													variant={d.state === "active" ? "default" : "outline"}
+												>
+													{d.state === "active"
+														? m.display_state_streaming()
+														: d.state === "pinned"
+															? m.display_state_kept_until()
+															: m.display_state_kept()}
+												</Badge>
+												{d.state !== "active" && (
+													<Button
+														size="sm"
+														variant="ghost"
+														disabled={release.isPending}
+														onClick={() => doRelease(d.slot)}
+													>
+														{m.display_release()}
+													</Button>
+												)}
+											</motion.li>
+										))}
+									</motion.ul>
+								)}
+							</CardContent>
+						</Card>
 
-				<GameSessionDisclosure policy={policy} busy={busy} onSet={write} />
-				<AdvancedDisclosure policy={policy} busy={busy} onSet={write} />
+						<MonitorRows
+							monitors={heads}
+							pinned={monitors.data?.pinned ?? null}
+							pinSupported={acts("display", "capture_monitor")}
+							policy={policy}
+							effective={effective}
+							busy={busy}
+							onPick={(connector) => write({ capture_monitor: connector })}
+							// KWin is the only backend that honours a keep-list; the host says so.
+							onKeepLit={
+								acts("display", "keep_monitors")
+									? (connector, keep) => {
+											const current = policy?.keep_monitors ?? [];
+											write({
+												keep_monitors: keep
+													? [...current, connector]
+													: current.filter(
+															(c) =>
+																c.toLowerCase() !== connector.toLowerCase(),
+														),
+											});
+										}
+									: undefined
+							}
+						/>
+
+						<GameSessionDisclosure policy={policy} busy={busy} onSet={write} />
+						<AdvancedDisclosure policy={policy} busy={busy} onSet={write} />
+					</Stagger>
+				</QueryState>
 			</div>
 
 			{policy && effective && (

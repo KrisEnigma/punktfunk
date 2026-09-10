@@ -3,12 +3,15 @@
 // This absorbs the old Streamed screen card: the choice of streaming a real monitor instead of
 // a virtual one is a property OF a monitor, so the radio sits on the monitor's row rather than
 // in a separate card with its own 214-character introduction.
+
+import { motion } from "motion/react";
 import type { FC, ReactNode } from "react";
 import type {
 	ApiMonitorInfo,
 	DisplayPolicy,
 	EffectivePolicy,
 } from "@/api/gen/model";
+import { ROW, ROW_GAP, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -66,7 +69,10 @@ export const MonitorRows: FC<{
 				)}
 				{/* `overflow-hidden` because the selected row paints its own square-cornered
 				    background: without it that background runs past the rounded corner. */}
-				<ul className="divide-y overflow-hidden rounded-md border">
+				<motion.ul
+					{...staggerProps(ROW_GAP)}
+					className="divide-y overflow-hidden rounded-md border"
+				>
 					{pinSupported && (
 						<Row
 							selected={!pinned}
@@ -112,7 +118,7 @@ export const MonitorRows: FC<{
 							}
 						/>
 					))}
-				</ul>
+				</motion.ul>
 			</CardContent>
 		</Card>
 	);
@@ -175,10 +181,14 @@ const Row: FC<{
 		</>
 	);
 	if (!onPick) {
-		return <li className="flex items-center gap-3 px-3 py-2">{body}</li>;
+		return (
+			<motion.li variants={ROW} className="flex items-center gap-3 px-3 py-2">
+				{body}
+			</motion.li>
+		);
 	}
 	return (
-		<li>
+		<motion.li variants={ROW}>
 			<button
 				type="button"
 				disabled={disabled}
@@ -192,6 +202,6 @@ const Row: FC<{
 			>
 				{body}
 			</button>
-		</li>
+		</motion.li>
 	);
 };

@@ -7,6 +7,7 @@ import {
 	ShieldOff,
 	Trash2,
 } from "lucide-react";
+import { motion } from "motion/react";
 import { type FC, type FormEvent, useEffect, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import {
@@ -19,6 +20,7 @@ import {
 } from "@/api/store";
 import { useDialogs } from "@/components/dialogs";
 import { QueryState } from "@/components/query-state";
+import { ROW, ROW_GAP, Stagger } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -174,9 +176,10 @@ export const SourceList: FC<{
 					error={sources.error}
 					refetch={sources.refetch}
 				>
-					<div className="flex flex-col gap-3">
+					<Stagger gap={ROW_GAP} className="flex flex-col gap-3">
 						{rows.map((s) => (
-							<div
+							<motion.div
+								variants={ROW}
 								key={s.name}
 								className="flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:items-start"
 							>
@@ -236,9 +239,9 @@ export const SourceList: FC<{
 										<Trash2 className="size-4 text-destructive" />
 									</Button>
 								)}
-							</div>
+							</motion.div>
 						))}
-					</div>
+					</Stagger>
 				</QueryState>
 			</CardContent>
 		</Card>
