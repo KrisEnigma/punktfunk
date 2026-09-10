@@ -56,7 +56,7 @@ export const AppearanceCard: FC = () => {
 						onPick={() => apply({ ...appearance, mode: "system" })}
 					>
 						{m.appearance_follow_host()}
-						<span className="text-muted-foreground">
+						<span className="opacity-70">
 							{" · "}
 							{followsMode ? modeLabel(followsMode) : sourceLabel}
 						</span>
@@ -84,7 +84,7 @@ export const AppearanceCard: FC = () => {
 						{followsAccent ? (
 							<Swatch color={followsAccent} />
 						) : (
-							<span className="text-muted-foreground">
+							<span className="opacity-70">
 								{" · "}
 								{sourceLabel}
 							</span>
