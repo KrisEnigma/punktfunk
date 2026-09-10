@@ -995,9 +995,10 @@ pub(crate) fn actual_dims(our_prefix: &str) -> Option<(u32, u32, u32, f64)> {
     Some((w, h, mhz, ours.scale.filter(|s| *s > 0.0).unwrap_or(1.0)))
 }
 
-/// Install and select a `want_w`×`want_h`@`want_hz` custom mode on the just-created
-/// virtual output (name `our_prefix`, currently at sacrificial birth size
-/// `birth_w`×`birth_h`). In-process replacement for `kscreen-doctor` `addCustomMode`.
+/// Install and select a `want_w`×`want_h`@`want_hz` custom mode on the virtual output
+/// named `our_prefix`, which sits at `at_w`×`at_h` right now — its sacrificial birth size,
+/// or wherever KWin's stored setup put it. Addressing it by a size it has already left
+/// resolves nothing. In-process replacement for `kscreen-doctor` `addCustomMode`.
 ///
 /// `set_custom_modes` hands KWin a one-entry list; KWin generates CVT timing
 /// (width may align down — [`CVT_H_GRANULARITY`]) and we then select it, which
@@ -1006,8 +1007,8 @@ pub(crate) fn actual_dims(our_prefix: &str) -> Option<(u32, u32, u32, f64)> {
 /// `set_custom_modes` replaces the custom list (`since 18`).
 pub(crate) fn set_custom_mode(
     our_prefix: &str,
-    birth_w: u32,
-    birth_h: u32,
+    at_w: u32,
+    at_h: u32,
     want_w: u32,
     want_h: u32,
     want_hz: u32,
@@ -1022,7 +1023,7 @@ pub(crate) fn set_custom_mode(
     }
 
     let our_proxy = sess
-        .resolve_ours(our_prefix, birth_w, birth_h)
+        .resolve_ours(our_prefix, at_w, at_h)
         .and_then(|d| d.proxy.clone())?;
     let our_key = our_proxy.id();
 
