@@ -242,7 +242,7 @@
 	"pairing_pending_deny": "Deny",
 	"pairing_pending_from_internet": "From the internet",
 	"pairing_pending_arm": "Arm PIN",
-	"pairing_pending_wan_hint": "This device knocked from the internet, where the name it sent proves nothing. Arm a PIN bound to it, then read the PIN out to whoever is holding it.",
+	"pairing_pending_wan_hint": "Knocked from the internet, where its name proves nothing. Arm a PIN bound to it, then pass the PIN on.",
 	"pairing_pending_name_prompt": "Name this device",
 	"pairing_pending_name_title": "Approve this device",
 	"pairing_pending_name_desc": "{name} — fingerprint {fp}. It is stored under the name you leave here.",
