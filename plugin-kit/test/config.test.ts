@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effect, Fiber, Schema, Stream } from "effect";
+import { Effect, Queue, Schema, Stream } from "effect";
 import {
 	type ConfigService,
 	makeConfigService,
@@ -124,14 +124,16 @@ describe("ConfigService", () => {
 
 	test("changes stream emits the decoded config after saveRaw", async () => {
 		const decoded = await withService((svc) =>
-			Effect.gen(function* () {
-				const fiber = yield* Effect.forkChild(
-					svc.changes.pipe(Stream.take(1), Stream.runCollect),
-				);
-				yield* Effect.sleep("20 millis"); // let the subscription attach
-				yield* svc.saveRaw({ roots: ["/x"], sync: { pollMinutes: 5 } });
-				return yield* Fiber.join(fiber);
-			}),
+			Effect.scoped(
+				Effect.gen(function* () {
+					const queue = yield* svc.changes.pipe(
+						Stream.toQueue({ capacity: "unbounded" }),
+					);
+					yield* Effect.yieldNow;
+					yield* svc.saveRaw({ roots: ["/x"], sync: { pollMinutes: 5 } });
+					return [yield* Queue.take(queue)];
+				}),
+			),
 		);
 		expect(decoded).toEqual([
 			{ roots: ["/x"], sync: { pollMinutes: 5, watch: true } },
