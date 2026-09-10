@@ -95,4 +95,40 @@ final class AUPumpStateTests: XCTestCase {
         XCTAssertFalse(delta.resumed)
         XCTAssertTrue(state.awaitingIDR, "only parameter sets can clear this want")
     }
+
+    func testALossWithholdsDeltasUntilTheAnchor() throws {
+        var state = AUPumpState()
+        _ = state.note(frameIndex: 1, idrFormat: try format(1920, 1080))
+        _ = state.note(frameIndex: 2, idrFormat: nil)
+        // Frame 3 was lost: 4 and 5 reference it and must never reach VideoToolbox.
+        let first = state.note(frameIndex: 4, idrFormat: nil, lossAhead: true)
+        XCTAssertTrue(first.withhold)
+        XCTAssertFalse(first.askKeyframe, "the RFI is in flight — no keyframe ask")
+        XCTAssertTrue(state.note(frameIndex: 5, idrFormat: nil).withhold)
+        let anchor = state.note(
+            frameIndex: 6, idrFormat: nil, flags: PunktfunkConnection.userFlagRecoveryAnchor)
+        XCTAssertFalse(anchor.withhold, "the anchor references a pre-loss picture: decode it")
+        XCTAssertFalse(state.note(frameIndex: 7, idrFormat: nil).withhold)
+    }
+
+    func testAnIDREndsWithholdingToo() throws {
+        var state = AUPumpState()
+        _ = state.note(frameIndex: 1, idrFormat: try format(1920, 1080))
+        XCTAssertTrue(state.note(frameIndex: 3, idrFormat: nil, lossAhead: true).withhold)
+        XCTAssertFalse(state.note(frameIndex: 4, idrFormat: try format(1920, 1080)).withhold)
+        XCTAssertFalse(state.note(frameIndex: 5, idrFormat: nil).withhold)
+    }
+
+    func testARecoveryMarkWhileWithholdingAsksForAKeyframe() throws {
+        var state = AUPumpState()
+        _ = state.note(frameIndex: 1, idrFormat: try format(1920, 1080))
+        _ = state.note(frameIndex: 3, idrFormat: nil, lossAhead: true)
+        // The host declined the RFI and started an intra-refresh wave. The wave builds on a
+        // chain VideoToolbox no longer has, so only an IDR ends this: ask, and keep asking.
+        let mark = state.note(
+            frameIndex: 4, idrFormat: nil, flags: PunktfunkConnection.userFlagRecoveryPoint)
+        XCTAssertTrue(mark.withhold)
+        XCTAssertTrue(mark.askKeyframe)
+        XCTAssertTrue(state.note(frameIndex: 5, idrFormat: nil).askKeyframe)
+    }
 }
