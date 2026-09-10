@@ -747,26 +747,21 @@ mod tests {
         assert_eq!(cover_a_hole(&mut lost, frame) as u64 * FRAME_MS as u64, 500);
     }
 
-    /// The caller drops its stamp across a state transition so a Paused span is not one huge gap.
+    /// Dropping the stamp across a pause is not a gap. `observe_pause` still
+    /// counts it for the log line.
     #[test]
-    fn a_paused_span_is_not_scored() {
+    fn a_paused_span_is_not_a_gap_and_is_still_counted() {
         let mut s = CaptureStats::default();
         s.observe_callback(Some(Duration::from_millis(5)), Q);
-        s.observe_callback(None, Q); // resumed: the pause spanned an unknowable amount of time
+        s.observe_callback(None, Q); // stamp dropped; the pause spanned an unknowable time
         s.observe_callback(Some(Duration::from_millis(5)), Q);
         assert_eq!(s.gaps, 0);
         assert_eq!(s.max_gap_ms(), 0);
-    }
+        assert_eq!(s.pauses, 0);
 
-    /// A pause stays out of `gaps` but not out of the log line.
-    #[test]
-    fn a_paused_span_is_reported_even_though_it_is_not_a_gap() {
-        let mut s = CaptureStats::default();
-        s.observe_callback(Some(Duration::from_millis(5)), Q);
         s.observe_pause(Duration::from_millis(16_214));
         s.observe_callback(None, Q);
         s.observe_callback(Some(Duration::from_millis(5)), Q);
-
         assert_eq!(s.gaps, 0, "a pause is still not a delivery gap");
         assert_eq!(s.max_gap_ms(), 0);
         assert_eq!(s.pauses, 1, "…but it is now countable");
@@ -824,15 +819,6 @@ mod tests {
         assert_eq!(s.max_spacing_ms(), FRAME_MS as u64);
     }
 
-    /// Lateness under one frame is jitter, not a slip, but must still be visible on `max_late`.
-    #[test]
-    fn sub_frame_lateness_is_measured_without_being_counted() {
-        let mut s = SendStats::new(OPUS_FRAME_US);
-        s.observe_departure(Duration::from_micros(3_400), None, false);
-        assert_eq!(s.late, 0, "3.4 ms has not slipped a whole 5 ms slot");
-        assert_eq!(s.max_late_ms(), 3, "…and it is still on the record");
-    }
-
     #[test]
     fn a_slipped_slot_is_one_frame_of_whatever_this_session_paces() {
         for frame_us in punktfunk_core::audio::pcm::FRAME_US_LADDER {
@@ -854,6 +840,9 @@ mod tests {
     #[test]
     fn a_slipped_slot_is_counted_and_its_worst_case_kept() {
         let mut s = SendStats::new(OPUS_FRAME_US);
+        s.observe_departure(Duration::from_micros(3_400), None, false);
+        assert_eq!(s.late, 0, "3.4 ms has not slipped a whole 5 ms slot");
+        assert_eq!(s.max_late_ms(), 3, "…and it is still on the record");
         s.observe_departure(Duration::from_millis(6), None, false);
         s.observe_departure(
             Duration::from_millis(41),

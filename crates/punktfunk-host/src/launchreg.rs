@@ -581,11 +581,15 @@ mod tests {
         assert!(recs.is_empty());
     }
 
+    /// A reconnect inside the window adopts the running launch: no second
+    /// spawn, original stamp, same proc slot. A recorded stamp must never
+    /// become `None` (that disables the start-time filter).
     #[test]
-    fn a_reconnect_does_not_launch_the_title_a_second_time() {
-        let (fp, app) = (Some("fp-double"), Some("gog:double"));
+    fn a_reconnect_adopts_the_original_launch() {
+        let (fp, app) = (Some("fp-reconnect"), Some("steam:reconnect"));
         let first = claim(fp, app, Some(100.0));
         assert!(first.must_spawn(), "the first session starts the title");
+        assert_eq!(first.stamp(), Some(100.0));
         first.launched();
         drop(first); // opens the reconnect window
 
@@ -594,46 +598,14 @@ mod tests {
             !second.must_spawn(),
             "a reconnect inside the window must adopt the running launch, not start a second copy"
         );
-        second.abandon(); // process-global registry; leave it as we found it
-    }
-
-    /// Reconnect must inherit the original stamp; a fresh one is above
-    /// the running game and [`crate::procscan`] will not adopt it.
-    #[test]
-    fn a_reconnect_inherits_the_original_launchs_reference_instant() {
-        let (fp, app) = (Some("fp-stamp"), Some("steam:stamp"));
-        let first = claim(fp, app, Some(100.0));
-        assert_eq!(first.stamp(), Some(100.0));
-        first.launched();
-        drop(first);
-
-        let second = claim(fp, app, Some(900.0));
         assert_eq!(
             second.stamp(),
             Some(100.0),
             "the reconnect must adopt against the original launch, not against its own start"
         );
-        assert_ne!(second.stamp(), Some(900.0));
-        // Same proc slot so tracking survives the handover.
         assert!(second.procs().is_some());
-        second.abandon();
-    }
+        second.abandon(); // process-global registry; leave it as we found it
 
-    /// A recorded stamp must never become `None` (that disables the
-    /// start-time filter and would adopt anything).
-    #[test]
-    fn a_decision_never_downgrades_a_reference_instant_to_no_filter() {
-        let (fp, app) = (Some("fp-filter"), Some("steam:filter"));
-        let first = claim(fp, app, Some(42.0));
-        assert!(first.stamp().is_some());
-        first.launched();
-        drop(first);
-        let second = claim(fp, app, Some(99.0));
-        assert!(
-            second.stamp().is_some(),
-            "a reconnect must never end up with the start-time filter disabled"
-        );
-        second.abandon();
         // Unrecordable still carries this session's own stamp.
         let anon = claim(None, app, Some(7.0));
         assert!(anon.must_spawn());
