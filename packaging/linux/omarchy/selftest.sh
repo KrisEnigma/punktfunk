@@ -272,6 +272,23 @@ else
   printf '  FAIL mode --status null pin: %s\n' "${got:-<empty>}"; fails=$((fails + 1))
 fi
 
+printf 'PUNKTFUNK_MGMT_BIND=127.0.0.1:47990\nPUNKTFUNK_CAPTURE_MONITOR=DP-9\n' \
+  > "$mod/punktfunk/host.env"
+if got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "mirror" ]]; then
+  printf '  ok   mode --status honors the stronger host.env screen pin\n'
+else
+  printf '  FAIL mode --status ignored host.env: %s\n' "${got:-<empty>}"; fails=$((fails + 1))
+fi
+
+XDG_CONFIG_HOME="$mod" write_capture_monitor "$mod/punktfunk/display-settings.json" "" >/dev/null
+if got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "dedicated" ]] &&
+   grep -qx 'PUNKTFUNK_MGMT_BIND=127.0.0.1:47990' "$mod/punktfunk/host.env" &&
+   ! grep -q '^PUNKTFUNK_CAPTURE_MONITOR=' "$mod/punktfunk/host.env"; then
+  printf '  ok   dedicated clears the stronger host.env screen pin\n'
+else
+  printf '  FAIL dedicated left the host.env screen pin active\n'; fails=$((fails + 1))
+fi
+
 printf '{ "preset": "default", "capture_monitor": "DP-2", "max_displays": 4 }\n' \
   > "$mod/punktfunk/display-settings.json"
 if got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "mirror" ]]; then
@@ -313,12 +330,14 @@ chmod +x "$WORK/bin/systemctl" "$WORK/bin/punktfunk-host"
 
 SYSTEMCTL_LOG="$WORK/systemctl.log"
 : > "$SYSTEMCTL_LOG"
+printf 'PUNKTFUNK_CAPTURE_MONITOR=DP-9\n' > "$mod/punktfunk/host.env"
 if PATH="$WORK/bin:$PATH" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" XDG_CONFIG_HOME="$mod" \
      "$SCRIPT" mode mirror >/dev/null &&
    got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "mirror" ]] &&
    python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["capture_monitor"]=="eDP-1"' \
-     "$mod/punktfunk/display-settings.json"; then
-  printf '  ok   mode mirror pins the primary connector from list-monitors\n'
+     "$mod/punktfunk/display-settings.json" &&
+   ! grep -q '^PUNKTFUNK_CAPTURE_MONITOR=' "$mod/punktfunk/host.env"; then
+  printf '  ok   mode mirror pins the primary connector and clears host.env\n'
 else
   printf '  FAIL mode mirror did not pin the primary\n'; fails=$((fails + 1))
   cat "$mod/punktfunk/display-settings.json" 2>/dev/null || true
