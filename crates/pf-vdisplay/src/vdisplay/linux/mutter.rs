@@ -263,7 +263,7 @@ impl Drop for StopGuard {
 // Held across setup/teardown awaits: this OS thread owns a single-future
 // runtime, so the guard blocks sibling session threads, not a shared
 // executor (see TOPOLOGY_LOCK).
-#[allow(clippy::await_holding_lock)]
+#[allow(clippy::await_holding_lock, clippy::too_many_arguments)]
 fn session_thread(
     setup_tx: Sender<Result<u32, String>>,
     stop: Arc<AtomicBool>,
