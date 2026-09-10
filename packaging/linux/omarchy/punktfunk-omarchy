@@ -84,14 +84,13 @@ edits YOUR config. It will ask for sudo where it genuinely needs it (ufw, group 
 
 # ── ufw (D4) ───────────────────────────────────────────────────────────────────────────────────
 #
-# The Omarchy idiom is not "open a port to the world" but "open it to the networks you are actually
-# on", tagged so it can be found again — exactly what their Sunshine installer does. We reuse the
-# app profiles the package already ships (/etc/ufw/applications.d/punktfunk), so the port list lives
-# in ONE place and this script never repeats it.
+# LAN-scoped rules tagged so `remove` can find them, using the package's app profiles so the port
+# list lives in one place. Ufw accepts a named interface before it exists; that rule stays dormant
+# until tailscale0 appears and remains scoped to that interface.
 
-lan_sources() {  # the CIDRs (and tailscale) a rule should accept from
-  printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12
-  ip link show tailscale0 >/dev/null 2>&1 && printf '%s\n' tailscale0
+# RFC1918 plus tailscale0. The interface rule is safe to install before the link exists.
+lan_sources() {
+  printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12 tailscale0
 }
 
 ufw_rule() {  # ufw_rule <profile> <source> — idempotent (ufw dedupes identical rules)

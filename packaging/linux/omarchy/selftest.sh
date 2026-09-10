@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# Self-check for the two pieces of `punktfunk-omarchy` that parse or generate a file the USER owns:
-# the xdph picker restore (awk over ~/.config/hypr/xdph.conf) and the hooks.json generator. Both
-# are reachable only on an Omarchy box, which is exactly why they need a check that runs anywhere.
+# Self-check for the pieces of `punktfunk-omarchy` that parse or generate a file the USER owns,
+# plus the firewall source list — all without root or an Omarchy box.
 #
 #     bash packaging/linux/omarchy/selftest.sh
 #
@@ -222,6 +221,14 @@ if (parse_setup_opts --nonsense=1 >/dev/null 2>&1); then
 else
   printf '  ok   an unknown option is refused\n'
 fi
+
+echo "lan_sources / ufw"
+
+{
+  printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12 tailscale0
+} > "$WORK/expected-lan"
+lan_sources > "$WORK/actual-lan"
+check "lan_sources preinstalls the tailscale0 rule" "$WORK/expected-lan" "$WORK/actual-lan"
 
 echo
 if [[ $fails -eq 0 ]]; then echo "all checks passed"; else echo "$fails check(s) failed"; exit 1; fi
