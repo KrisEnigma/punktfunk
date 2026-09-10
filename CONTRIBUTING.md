@@ -60,9 +60,11 @@ so a push can never fail CI on those alone:
 git config core.hooksPath scripts/git-hooks
 ```
 
-They only report; nothing is rewritten under you, and each failure prints the command that fixes
-it. The Biome gate is skipped where `web/` or `plugin-kit/` has no `node_modules` — `bun install`
-in either directory to get it locally.
+On commit the hook formats your staged Rust and JavaScript and re-stages the result; a file that
+carries both staged and unstaged edits is refused rather than rewritten, so an unstaged edit is
+never swallowed. On push nothing is rewritten — the commits already exist, so it only reports,
+and each failure prints the command that fixes it. The Biome gate is skipped where `web/` or
+`plugin-kit/` has no `node_modules` — `bun install` in either directory to get it locally.
 
 Then the usual full pass. Use `--locked` as CI does — otherwise a silent `Cargo.lock` update can pass
 locally and fail CI:
@@ -96,6 +98,49 @@ cargo run -p punktfunk-host -- openapi > api/openapi.json
 cp api/openapi.json docs-site/public/openapi.json
 (cd sdk && bun run gen)
 ```
+
+## Getting the expensive CI lanes to run
+
+Open the pull request as a **draft** while you iterate — in Gitea that is the `WIP:` title
+prefix. A draft runs only the cheap gates: writing style, docs drift, secret scan, and the
+plugin-kit and Decky typechecks. Seconds of fleet time instead of an hour.
+
+**Mark it ready for review** to turn on `rust`, `rust-arm64`, `web` and `docs-site`. To get them
+on a pull request you want to keep as a draft, add the **`ci:all`** label instead.
+
+Neither of those starts a run by itself on Gitea 1.27 — measured, not assumed — so after marking
+ready or labelling, either push again or hit **Re-run** on the latest run in the Actions tab. The
+gate reads the pull request's state at that moment, so the re-run picks up the change.
+
+### Platform builds
+
+Android, Apple, the Windows client and drivers, the Windows setup test and the Nix flake are
+label-only. Being ready for review is not enough — they cost too much to run on every pull
+request:
+
+| Label | Runs |
+|---|---|
+| `ci:android` | the Android build, and publishes its APK (below) |
+| `ci:apple` | the Apple client build and tests |
+| `ci:windows-client` | the Windows client |
+| `ci:windows-host` | the Windows drivers and the setup test |
+| `ci:nix-rust` | the Nix flake |
+| `ci:all` | all of the above, plus the lanes above |
+
+Only someone with write access can add a label, which is what keeps these off the persistent
+signing runners for untrusted code. Each job also keeps its own fail-closed fork check.
+
+### Installing the Android build from a pull request
+
+A pull request labelled `ci:android` attaches its debug APK to the run, as a zip you can download
+in one click from the run page. That is the existing `Attach APK(s) to the workflow run` step; the
+label is now what makes the build happen at all, so it is also what produces the APK.
+
+It is debug-signed, so it installs alongside a store build rather than replacing it.
+
+Push to `main` always runs everything, so nothing escapes verification — it moves to merge time.
+The platform workflows (Android, Apple, Windows, Nix, packaging) are unaffected here: they are
+already narrowed by path, so they fire only when their own files change.
 
 ## Where facts live (docs vs READMEs vs website)
 

@@ -31,13 +31,45 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # The Windows setup test is opt-in on a pull request: add the `ci:windows-host` label, or `ci:all`. Only someone with
+  # write access can label, so this is also the trust boundary. Pushes and tags are unaffected.
+  #
+  # Shell rather than a label expression on the job's `if`, because the event payload is a
+  # snapshot: a label added after the last push is not in it, and a re-run replays the old one.
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      heavy: ${{ steps.gate.outputs.heavy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Decide whether this pull request runs Windows setup test
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          sh scripts/ci/pr-gate.sh --self-test
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "heavy=true" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          API="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/pulls/$PR"
+          curl -fsS "$API" -H "Authorization: token $GITEA_TOKEN" > /tmp/pr.json || true
+          [ -s /tmp/pr.json ] || curl -fsS "$API" > /tmp/pr.json || true
+          sh scripts/ci/pr-gate.sh --label ci:windows-host < /tmp/pr.json | tee -a "$GITHUB_OUTPUT"
+
   # Same fork backstop as windows-client.yml: this persistent host-mode runner also handles
   # release signing, so fork-PR code stays off it. Fails closed — head repo must be this repo.
   test:
     runs-on: windows-amd64
+    needs: gate
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      (github.event.pull_request.head.repo.full_name == github.repository
+      && needs.gate.outputs.heavy == 'true')
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

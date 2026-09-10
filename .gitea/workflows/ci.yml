@@ -19,6 +19,11 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Setting `types` at all replaces the default set, so the three defaults are listed again.
+    # `ready_for_review` and `labeled` are listed for the day they work: measured on 1.27.1,
+    # neither starts a run. A Gitea draft is a `WIP:` title prefix, so undrafting is an edit,
+    # not its own event. Until then the gate is re-read on the next push or a manual re-run.
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
 
 # Shared compile cache: sccache -> RustFS S3 (storage.unom.io, LAN-pinned via ci-core's
 # unbound). Keys include compiler hash + target + flags, so cross-OS/arch entries can
@@ -60,6 +65,7 @@ jobs:
       docs_site: ${{ steps.paths.outputs.docs_site }}
       sdk_plugin_kit: ${{ steps.paths.outputs.sdk_plugin_kit }}
       decky_typecheck: ${{ steps.paths.outputs.decky_typecheck }}
+      heavy: ${{ steps.gate.outputs.heavy }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -81,9 +87,34 @@ jobs:
           fi
           tee -a "$GITHUB_OUTPUT" < /tmp/changed-outputs
 
+      # The expensive lanes are opt-in on a pull request. A draft runs the cheap gates only;
+      # marking it ready for review — or labelling it `ci:all` — turns the rest on. Push to
+      # main always runs everything, so nothing escapes verification, it only moves to merge
+      # time. Reads the PR's CURRENT state rather than the event payload: a label added after
+      # the last push is not in the payload, and a re-run replays the old one.
+      - name: Decide whether the expensive lanes run
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          sh scripts/ci/pr-gate.sh --self-test
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "heavy=true" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          API="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/pulls/$PR"
+          # `|| true`: an unreachable API must not fail the gate. pr-gate.sh fails open on an
+          # empty body, so the lanes run and the cost is visible.
+          curl -fsS "$API" -H "Authorization: token $GITEA_TOKEN" > /tmp/pr.json || true
+          [ -s /tmp/pr.json ] || curl -fsS "$API" > /tmp/pr.json || true
+          sh scripts/ci/pr-gate.sh < /tmp/pr.json | tee -a "$GITHUB_OUTPUT"
+
   rust:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ needs.changes.outputs.rust == 'true' && needs.changes.outputs.heavy == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: 192.168.1.58:5010/punktfunk-rust-ci:latest
@@ -336,7 +367,7 @@ jobs:
   # ci/rust-ci-arm64cross.Dockerfile) on the ordinary runner — no arm64 runner involved.
   rust-arm64:
     needs: changes
-    if: ${{ needs.changes.outputs.rust_arm64 == 'true' }}
+    if: ${{ needs.changes.outputs.rust_arm64 == 'true' && needs.changes.outputs.heavy == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: 192.168.1.58:5010/punktfunk-rust-ci-arm64cross:latest
@@ -409,7 +440,7 @@ jobs:
 
   web:
     needs: changes
-    if: ${{ needs.changes.outputs.web == 'true' }}
+    if: ${{ needs.changes.outputs.web == 'true' && needs.changes.outputs.heavy == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: oven/bun:1
@@ -460,7 +491,7 @@ jobs:
 
   docs-site:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_site == 'true' }}
+    if: ${{ needs.changes.outputs.docs_site == 'true' && needs.changes.outputs.heavy == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: oven/bun:1
