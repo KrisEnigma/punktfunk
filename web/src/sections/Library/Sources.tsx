@@ -424,7 +424,7 @@ export const useSourceNames = (): ((id: string) => string | undefined) => {
 		const names = new Map<string, string>();
 		for (const s of scanners.data ?? [])
 			if (s.label !== s.id) names.set(s.id, s.label);
-		for (const p of libraryPlugins(plugins.data))
+		for (const p of plugins.data ?? [])
 			if (p.title !== p.id) names.set(p.id, p.title);
 		return (id: string) => names.get(id);
 	}, [scanners.data, plugins.data]);
