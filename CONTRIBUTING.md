@@ -60,9 +60,11 @@ so a push can never fail CI on those alone:
 git config core.hooksPath scripts/git-hooks
 ```
 
-They only report; nothing is rewritten under you, and each failure prints the command that fixes
-it. The Biome gate is skipped where `web/` or `plugin-kit/` has no `node_modules` — `bun install`
-in either directory to get it locally.
+On commit the hook formats your staged Rust and JavaScript and re-stages the result; a file that
+carries both staged and unstaged edits is refused rather than rewritten, so an unstaged edit is
+never swallowed. On push nothing is rewritten — the commits already exist, so it only reports,
+and each failure prints the command that fixes it. The Biome gate is skipped where `web/` or
+`plugin-kit/` has no `node_modules` — `bun install` in either directory to get it locally.
 
 Then the usual full pass. Use `--locked` as CI does — otherwise a silent `Cargo.lock` update can pass
 locally and fail CI:
@@ -96,6 +98,24 @@ cargo run -p punktfunk-host -- openapi > api/openapi.json
 cp api/openapi.json docs-site/public/openapi.json
 (cd sdk && bun run gen)
 ```
+
+## Getting the expensive CI lanes to run
+
+Open the pull request as a **draft** while you iterate. A draft runs only the cheap gates —
+writing style, docs drift, secret scan, the plugin-kit and Decky typechecks — which is seconds
+of fleet time instead of an hour.
+
+**Mark it ready for review** to turn on the expensive lanes: `rust`, `rust-arm64`, `web` and
+`docs-site`. To get them on a pull request you want to keep as a draft, add the **`ci:full`**
+label instead.
+
+Either signal is read on the next run, so after marking ready (or labelling) push again, or
+re-run the latest run from the Actions tab. Gitea does not start a run for those events on its
+own.
+
+Push to `main` always runs everything, so nothing escapes verification — it moves to merge time.
+The platform workflows (Android, Apple, Windows, Nix, packaging) are unaffected here: they are
+already narrowed by path, so they fire only when their own files change.
 
 ## Where facts live (docs vs READMEs vs website)
 
