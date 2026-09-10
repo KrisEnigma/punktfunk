@@ -53,6 +53,8 @@ struct CaptureOpts {
     /// `SPA_META_Cursor` every buffer. `false` (Mutter): buffers recycle
     /// the region. See [`pw_cursor::CursorState::id0_hides`].
     cursor_id0_hides: bool,
+    /// Gamescope omits cursor metadata and exports LINEAR-only dmabufs.
+    producer_is_gamescope: bool,
     /// Least dmabuf pool depth to ask for: [`crate::POOL_MIN`], or
     /// [`crate::KWIN_POOL_MIN`] so KWin's default of 3 cannot win.
     pool_min: i32,
@@ -247,6 +249,7 @@ impl PortalCapturer {
                 // portal capture would rewrite per buffer; nothing routes
                 // one here yet (`from_virtual_output` carries the real flag).
                 cursor_id0_hides: false,
+                producer_is_gamescope: false,
                 pool_min: crate::POOL_MIN,
                 unpaced: false,
                 // A monitor mirror paints on the panel's own vblank; nothing to drive.
@@ -257,11 +260,9 @@ impl PortalCapturer {
         .into_capturer(node_id, None, Some(portal), super::HdrSource::PortalMonitor))
     }
 
-    /// Capturer for an already-created virtual output's PipeWire node. The
-    /// host facade splits `vdisplay::VirtualOutput` so this crate never
-    /// depends on that type. `keepalive` owns the output (dropping the
-    /// capturer releases it). `want_hdr` — see
-    /// [`crate::open_virtual_output`] for who may pass it.
+    /// Capturer for an already-created virtual output's PipeWire node.
+    /// The host supplies producer contracts because node ids do not identify
+    /// a compositor. `keepalive` releases the output with the capturer.
     #[allow(clippy::too_many_arguments)]
     pub fn from_virtual_output(
         remote_fd: Option<OwnedFd>,
@@ -274,6 +275,7 @@ impl PortalCapturer {
         policy: ZeroCopyPolicy,
         expect_exact_dims: bool,
         cursor_id0_hides: bool,
+        producer_is_gamescope: bool,
         pool_min: i32,
         unpaced: bool,
     ) -> Result<PortalCapturer> {
@@ -284,6 +286,7 @@ impl PortalCapturer {
             want_hdr,
             expect_exact_dims,
             cursor_id0_hides,
+            producer_is_gamescope,
             pool_min,
             unpaced,
             "connecting PipeWire to virtual output"
@@ -301,6 +304,7 @@ impl PortalCapturer {
                 want_hdr,
                 expect_exact_dims,
                 cursor_id0_hides,
+                producer_is_gamescope,
                 pool_min,
                 unpaced,
                 lazy: crate::lazy_capture(),

@@ -526,6 +526,7 @@ pub fn mirror_test(args: &[String]) -> Result<()> {
         fmt,
         crate::session_plan::CaptureBackend::resolve(),
         compositor == crate::vdisplay::Compositor::Kwin,
+        compositor == crate::vdisplay::Compositor::Gamescope,
     )
     .context("attach a capturer to the mirrored monitor")?;
     cap.set_active(true);

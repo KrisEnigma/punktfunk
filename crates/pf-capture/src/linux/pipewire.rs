@@ -1288,15 +1288,15 @@ pub fn pipewire_thread(
         want_hdr,
         expect_exact_dims,
         cursor_id0_hides,
+        producer_is_gamescope,
         pool_min,
         unpaced,
         lazy,
         ..
     } = opts;
-    // gamescope (no portal fd, not KWin): skip Cursor meta and offer LINEAR
-    // as the modifier default — see connect params / `dmabuf_modifiers_for_producer`.
-    let offer_cursor_meta = cursor_id0_hides || fd.is_some();
-    let gamescope = !offer_cursor_meta;
+    // Node ids and remote fds do not identify a compositor: Mutter and gamescope
+    // can both use the default daemon. Keep the producer contract explicit.
+    let offer_cursor_meta = !producer_is_gamescope;
     crate::pwinit::ensure_init();
 
     let mainloop = pw::main_loop::MainLoopRc::new(None).context("pw MainLoop")?;
@@ -1374,7 +1374,8 @@ pub fn pipewire_thread(
     // PyroWave imports through Vulkan, not libva. Extra modifiers come from the facade
     // (`ZeroCopyPolicy::pyrowave_modifiers`) so capture never calls `encode`. Empty unless
     // the `pyrowave` feature is on and this session (or the global pref) is PyroWave.
-    let extend_pyrowave = vaapi_passthrough && !policy.pyrowave_modifiers.is_empty() && !gamescope;
+    let extend_pyrowave =
+        vaapi_passthrough && !policy.pyrowave_modifiers.is_empty() && !producer_is_gamescope;
     for list in [&mut modifiers, &mut modifiers_bgra] {
         if extend_pyrowave {
             for &m in &policy.pyrowave_modifiers {
@@ -1383,8 +1384,11 @@ pub fn pipewire_thread(
                 }
             }
         }
-        *list =
-            dmabuf_modifiers_for_producer(list, importer.is_some() || vaapi_passthrough, gamescope);
+        *list = dmabuf_modifiers_for_producer(
+            list,
+            importer.is_some() || vaapi_passthrough,
+            producer_is_gamescope,
+        );
     }
     if extend_pyrowave {
         tracing::info!(
