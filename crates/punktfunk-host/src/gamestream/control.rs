@@ -1292,6 +1292,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 60),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -1306,6 +1307,7 @@ mod tests {
             Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now - 1),
+                until_disconnect: false,
             },
         )
         .unwrap();
@@ -1318,6 +1320,7 @@ mod tests {
             Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: None,
+                until_disconnect: false,
             },
         )
         .unwrap();

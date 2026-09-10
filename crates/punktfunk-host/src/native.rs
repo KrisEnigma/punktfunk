@@ -1407,6 +1407,12 @@ pub(crate) async fn run_admitted(
         },
         None => (GRANT_ALL, None, None),
     };
+    // Count this session while it runs. Held to the end of the function, so an error return or
+    // a cancelled task releases it too — a record granted "this session" is dropped once the
+    // guard falls and nothing reconnects inside the grace.
+    let _session = session_fp_hex
+        .as_deref()
+        .map(|fp_hex| host.np.session_started(fp_hex));
     // One relaxed load per event; the lifecycle task is the only writer after admission.
     let session_grants = Arc::new(AtomicU32::new(initial_grants));
     // Launch without LAUNCH: refuse before handshake (typed reason), not a silent bare desktop.
@@ -3597,6 +3603,7 @@ mod tests {
             Some(crate::native_pairing::Access {
                 grants: GRANT_ALL,
                 expires_unix: Some(wall_unix_now() + 2),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -3665,6 +3672,7 @@ mod tests {
                 crate::native_pairing::Access {
                     grants: punktfunk_core::quic::GRANT_PRESET_CONTROLLER_ONLY,
                     expires_unix: Some(now + 62),
+                    until_disconnect: false,
                 },
             )
             .unwrap()
@@ -3704,6 +3712,7 @@ mod tests {
                 crate::native_pairing::Access {
                     grants: punktfunk_core::quic::GRANT_PRESET_CONTROLLER_ONLY,
                     expires_unix: Some(wall_unix_now() - 1),
+                    until_disconnect: false,
                 },
             )
             .unwrap();
@@ -3735,6 +3744,7 @@ mod tests {
             Some(crate::native_pairing::Access {
                 grants: punktfunk_core::quic::GRANT_PRESET_CONTROLLER_ONLY,
                 expires_unix: None,
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -3825,6 +3835,7 @@ mod tests {
             Some(crate::native_pairing::Access {
                 grants: GRANT_ALL,
                 expires_unix: Some(wall_unix_now() - 3600),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -3860,6 +3871,7 @@ mod tests {
                     Some(crate::native_pairing::Access {
                         grants: punktfunk_core::quic::GRANT_PRESET_CONTROLLER_ONLY,
                         expires_unix: Some(wall_unix_now() + 4 * 3600),
+                        until_disconnect: false,
                     }),
                 )
                 .unwrap()

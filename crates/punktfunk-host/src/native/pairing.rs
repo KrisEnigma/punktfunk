@@ -148,6 +148,7 @@ mod tests {
         Access {
             grants: punktfunk_core::quic::GRANT_PRESET_CONTROLLER_ONLY,
             expires_unix: Some(4 * 3600),
+            until_disconnect: false,
         }
     }
 

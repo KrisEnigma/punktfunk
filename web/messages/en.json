@@ -332,6 +332,8 @@
 	"access_expires_1h": "In 1 hour",
 	"access_expires_4h": "In 4 hours",
 	"access_expires_8h": "In 8 hours",
+	"access_expires_session": "Until they disconnect",
+	"access_until_disconnect": "until they disconnect",
 	"access_expires_custom": "Custom…",
 	"access_expires_custom_hours": "Hours",
 	"access_left_days": "{d} d left",

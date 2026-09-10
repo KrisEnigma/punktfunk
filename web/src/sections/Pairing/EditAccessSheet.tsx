@@ -15,6 +15,7 @@ import {
 	AccessControls,
 	type AccessDraft,
 	draftExpirySecs,
+	draftUntilDisconnect,
 	GRANT_ALL,
 } from "./access";
 
@@ -24,6 +25,8 @@ export interface EditAccessTarget {
 	name: string;
 	grants: number | null | undefined;
 	expiresUnix: number | null | undefined;
+	/** The record ends with the device's last session rather than at a clock time. */
+	untilDisconnect?: boolean | null;
 }
 
 /**
@@ -65,8 +68,14 @@ export const EditAccessSheet: FC<{
 		if (!target) return;
 		setDraft({
 			grants: (target.grants ?? GRANT_ALL) & GRANT_ALL,
+			// A session grant opens as one: it has no deadline, so "Forever" would both misread
+			// the row and, on save, quietly convert it to permanent.
 			// A permanent device has no expiry to keep — "Forever" is its no-change state.
-			expiry: target.expiresUnix != null ? "keep" : "forever",
+			expiry: target.untilDisconnect
+				? "session"
+				: target.expiresUnix != null
+					? "keep"
+					: "forever",
 			customHours: 4,
 		});
 	}, [target]);
@@ -86,6 +95,10 @@ export const EditAccessSheet: FC<{
 			const secs = draftExpirySecs(draft);
 			if (secs != null) body.expires_in_secs = secs;
 		}
+		// Only when it moves: an omitted field keeps whatever the record already says.
+		const session = draftUntilDisconnect(draft);
+		if (session !== (target.untilDisconnect ?? false))
+			body.until_disconnect = session;
 		if (Object.keys(body).length === 0) {
 			onCancel(); // nothing changed — no request to make
 			return;

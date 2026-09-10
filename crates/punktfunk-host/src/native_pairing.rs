@@ -33,6 +33,33 @@ pub use approval::{classify_source, KnockSource, PairingDecision, PendingRequest
 pub use arming::PinAttempt;
 pub use store::{Access, PairedClient};
 
+/// Counts one live session for as long as it is held. Dropping the last one for a device
+/// whose record says "this session" schedules the record's removal, after
+/// [`RECONNECT_GRACE`] and only if nothing reconnected.
+///
+/// A guard, not a pair of calls: a session can end through a return, an error or a task
+/// cancellation, and a count that leaks one of those never falls back to zero.
+pub struct SessionGuard {
+    np: std::sync::Arc<NativePairing>,
+    fp_hex: String,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if self.np.session_ended(&self.fp_hex) > 0 {
+            return;
+        }
+        // Last one out. The grace has to be waited on somewhere, and Drop cannot await — so
+        // hand it to the runtime this session ran on. Without one (shutdown) the record simply
+        // waits for the next session to end, which is the same state a crash would leave.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (np, fp_hex) = (self.np.clone(), self.fp_hex.clone());
+        handle.spawn(async move { np.drop_session_only_after_grace(&fp_hex).await });
+    }
+}
+
 /// Result of a delegated approve. Not a `Result`: a refusal here is an answer about the
 /// knock, not a failure of the call.
 pub enum ApproveOutcome {
@@ -84,6 +111,17 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// How long a "this session" record outlives its last session. A router blip, a client
+/// restart or a sleeping laptop must not cost the guest a re-pair; anything longer starts to
+/// look like the deadline this grant exists to replace. Deliberately not `gamelease`'s
+/// disconnect grace: that one keeps a *game* running, this one keeps *trust*.
+#[cfg(not(test))]
+pub const RECONNECT_GRACE: Duration = Duration::from_secs(60);
+/// The tests exercise the ordering — last session out, reconnect inside the window, nothing
+/// coming back — not the length of the wait.
+#[cfg(test)]
+pub const RECONNECT_GRACE: Duration = Duration::from_millis(60);
+
 pub struct NativePairing {
     arm: arming::ArmState,
     store: store::TrustStore,
@@ -91,6 +129,9 @@ pub struct NativePairing {
     /// Fingerprint (lowercased) → live-session channel. Senders stay after unpair so a
     /// late subscriber cannot race a close; a re-pair publishes on the same channel.
     access_watch: Mutex<HashMap<String, watch::Sender<AccessState>>>,
+    /// Fingerprint (lowercased) → live sessions right now. Only "this session" records read
+    /// it, but every admitted session counts: the guard is what makes the count honest.
+    live: Mutex<HashMap<String, u32>>,
 }
 
 pub struct NativePairingStatus {
@@ -115,6 +156,7 @@ impl NativePairing {
             store: store::TrustStore::open(store_path)?,
             approval: approval::ApprovalQueue::new(),
             access_watch: Mutex::new(HashMap::new()),
+            live: Mutex::new(HashMap::new()),
         })
     }
 
@@ -315,6 +357,76 @@ impl NativePairing {
 
     /// Remove by fingerprint. Persist failure rolls the in-memory store back. A removal
     /// publishes `revoked` so live sessions can end themselves.
+    /// Count a live session for `fp_hex` until the returned guard drops.
+    pub fn session_started(self: &std::sync::Arc<Self>, fp_hex: &str) -> SessionGuard {
+        *self
+            .live
+            .lock()
+            .unwrap()
+            .entry(fp_hex.to_ascii_lowercase())
+            .or_insert(0) += 1;
+        SessionGuard {
+            np: self.clone(),
+            fp_hex: fp_hex.to_ascii_lowercase(),
+        }
+    }
+
+    /// Sessions live for `fp_hex` right now.
+    pub fn live_sessions(&self, fp_hex: &str) -> u32 {
+        self.live
+            .lock()
+            .unwrap()
+            .get(&fp_hex.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Drop one live session, returning how many remain.
+    fn session_ended(&self, fp_hex: &str) -> u32 {
+        let mut live = self.live.lock().unwrap();
+        let key = fp_hex.to_ascii_lowercase();
+        let Some(n) = live.get_mut(&key) else {
+            return 0;
+        };
+        *n = n.saturating_sub(1);
+        let remaining = *n;
+        if remaining == 0 {
+            live.remove(&key);
+        }
+        remaining
+    }
+
+    /// Wait out [`RECONNECT_GRACE`], then remove a "this session" record if the device did
+    /// not come back. Re-reads the live count after the sleep: a reconnect inside the grace
+    /// must not be closed by its predecessor's cleanup.
+    async fn drop_session_only_after_grace(&self, fp_hex: &str) {
+        tokio::time::sleep(RECONNECT_GRACE).await;
+        if self.live_sessions(fp_hex) > 0 {
+            return;
+        }
+        let Some(record) = self.store.get(fp_hex) else {
+            return;
+        };
+        if !record.until_disconnect {
+            return;
+        }
+        match self.remove(fp_hex) {
+            Ok(true) => tracing::info!(
+                name = %record.name,
+                fingerprint = %fp_hex,
+                "this-session access ended with the device's last session"
+            ),
+            Ok(false) => {}
+            // The record stays and the operator can still unpair by hand; losing the row is
+            // the safe direction to fail in, not the one to panic over.
+            Err(e) => tracing::warn!(
+                error = %e,
+                fingerprint = %fp_hex,
+                "couldn't drop a this-session record"
+            ),
+        }
+    }
+
     pub fn remove(&self, fp_hex: &str) -> Result<bool> {
         let removed = self.store.remove(fp_hex)?;
         if removed {
@@ -642,6 +754,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_ALL,
                 expires_unix: Some(wall_now() - 10),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -673,6 +786,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(wall_now() + 3600),
+                until_disconnect: false,
             }),
         )
         .unwrap()
@@ -730,6 +844,107 @@ mod tests {
             .wait_for_decision("ee01", seq1, Duration::from_millis(80))
             .await;
         assert_eq!(d, PairingDecision::Superseded);
+    }
+
+    /// A "this session" record goes when the device's last session ends — but not while another
+    /// is live, and not if the device comes back inside the grace. Paused clock: the grace is a
+    /// minute of wall time and none of it is interesting.
+    #[test]
+    fn this_session_access_ends_with_the_last_session() {
+        use punktfunk_core::quic::GRANT_GAMEPAD;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (_temp, path) = temp();
+            let np =
+                std::sync::Arc::new(NativePairing::load_with(Some(path), None, false).unwrap());
+            np.add_with_access(
+                "Friend's Deck",
+                "dd11",
+                Some(Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: None,
+                    until_disconnect: true,
+                }),
+            )
+            .unwrap();
+
+            // Two overlapping sessions: the first ending is not the last one out.
+            let first = np.session_started("dd11");
+            let second = np.session_started("dd11");
+            assert_eq!(np.live_sessions("dd11"), 2);
+            drop(first);
+            assert_eq!(np.live_sessions("dd11"), 1);
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(
+                np.is_paired("dd11"),
+                "another live session holds the record"
+            );
+
+            // Last one out, then a reconnect inside the grace.
+            drop(second);
+            tokio::time::sleep(RECONNECT_GRACE / 2).await;
+            let reconnect = np.session_started("dd11");
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(
+                np.is_paired("dd11"),
+                "a device back inside the grace keeps its access"
+            );
+
+            // Nothing comes back this time.
+            drop(reconnect);
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(
+                !np.is_paired("dd11"),
+                "the record goes with the last session"
+            );
+            assert_eq!(np.effective("dd11", wall_now()), None);
+        });
+    }
+
+    /// The flag is what does it: an ordinary grant outlives its sessions, and a PATCH that only
+    /// moves the expiry must not turn a this-session grant permanent.
+    #[test]
+    fn a_dated_grant_outlives_its_sessions() {
+        use punktfunk_core::quic::GRANT_GAMEPAD;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (_temp, path) = temp();
+            let np =
+                std::sync::Arc::new(NativePairing::load_with(Some(path), None, false).unwrap());
+            np.add_with_access(
+                "Living Room",
+                "ee22",
+                Some(Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: Some(wall_now() + 3600),
+                    until_disconnect: false,
+                }),
+            )
+            .unwrap();
+            drop(np.session_started("ee22"));
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(np.is_paired("ee22"), "a dated grant is not a session grant");
+
+            // Re-granting as "this session" now behaves like one.
+            np.set_access(
+                "ee22",
+                Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: None,
+                    until_disconnect: true,
+                },
+            )
+            .unwrap();
+            drop(np.session_started("ee22"));
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(!np.is_paired("ee22"));
+        });
     }
 
     /// The address table the admission rules read. Anything not on a network the operator
@@ -951,6 +1166,7 @@ mod tests {
         let guest = Access {
             grants: GRANT_GAMEPAD,
             expires_unix: Some(now + 3600),
+            until_disconnect: false,
         };
         np.add_with_access("Guest Deck", "aa11", Some(guest))
             .unwrap();
@@ -999,6 +1215,7 @@ mod tests {
                 Some(Access {
                     grants: GRANT_GAMEPAD,
                     expires_unix: Some(now + 4 * 3600),
+                    until_disconnect: false,
                 }),
             )
             .unwrap()
@@ -1025,6 +1242,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 10),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -1054,6 +1272,7 @@ mod tests {
         let from_the_future = Access {
             grants: GRANT_ALL | (1 << 30),
             expires_unix: None,
+            until_disconnect: false,
         };
         assert!(np.set_access("dd44", from_the_future).unwrap());
         assert_eq!(
@@ -1092,6 +1311,7 @@ mod tests {
             Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 60),
+                until_disconnect: false,
             },
         )
         .unwrap();
@@ -1149,6 +1369,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 60),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -1178,6 +1399,7 @@ mod tests {
         let choice = Access {
             grants: GRANT_GAMEPAD,
             expires_unix: Some(wall_now() + 3600),
+            until_disconnect: false,
         };
         np.arm_for(Duration::from_secs(60), None, Some(choice));
         assert_eq!(np.armed_access(), Some(choice));

@@ -64,6 +64,8 @@ export interface PairedRow {
 	grants?: number | null;
 	/** Absolute expiry (unix secs); `null` = permanent. "Expired" is our arithmetic. */
 	expiresUnix?: number | null;
+	/** The record goes when this device's last session does. Independent of `expiresUnix`. */
+	untilDisconnect?: boolean | null;
 }
 
 /** Whether the host reported access fields for this row (⇒ the chip and editor exist). */
@@ -103,6 +105,7 @@ export const PairedDevicesSection: FC = () => {
 				accessLevel: c.access_level,
 				grants: c.grants,
 				expiresUnix: c.expires_unix,
+				untilDisconnect: c.until_disconnect,
 			}),
 		),
 		...(moonlight.data ?? []).map(
@@ -255,6 +258,7 @@ export const PairedDevicesSection: FC = () => {
 						name: r.name,
 						grants: r.grants,
 						expiresUnix: r.expiresUnix,
+						untilDisconnect: r.untilDisconnect,
 					})
 				}
 				onRename={onRename}
@@ -375,6 +379,7 @@ export const PairedDevices: FC<{
 											<AccessChip
 												grants={r.grants}
 												expiresUnix={r.expiresUnix}
+												untilDisconnect={r.untilDisconnect}
 												nowUnix={nowUnix}
 											/>
 										) : (

@@ -803,6 +803,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: None,
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -813,6 +814,7 @@ mod tests {
             Access {
                 grants: GRANT_ALL,
                 expires_unix: Some(super::super::wall_unix_now() - 5),
+                until_disconnect: false,
             },
         )
         .unwrap();
@@ -872,6 +874,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 3600),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -888,6 +891,7 @@ mod tests {
             Access {
                 grants: GRANT_ALL,
                 expires_unix: Some(now - 5),
+                until_disconnect: false,
             },
         )
         .unwrap();
@@ -916,6 +920,7 @@ mod tests {
             Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 3600),
+                until_disconnect: false,
             },
         )
         .unwrap();

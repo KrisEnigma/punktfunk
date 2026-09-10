@@ -22,6 +22,7 @@ import {
 	AccessControls,
 	type AccessDraft,
 	draftExpirySecs,
+	draftUntilDisconnect,
 	GRANT_ALL,
 	PRESET_CONTROLLER,
 } from "./access";
@@ -164,13 +165,14 @@ export const NativePairingCard: FC<{
 		customHours: 4,
 	});
 	// A window named for a device is being armed for someone else's — a knock from the internet
-	// is the only way to get here today — so it starts at Controller · 4 h. Keyed on the
-	// fingerprint, not the object, so a re-render never wipes the operator's edits mid-form.
+	// is the only way to get here today — so it starts at Controller · this session, which ends
+	// when they do. Keyed on the fingerprint, not the object, so a re-render never wipes the
+	// operator's edits mid-form.
 	const boundFp = boundTo?.fingerprint;
 	useEffect(() => {
 		setDraft(
 			boundFp
-				? { grants: PRESET_CONTROLLER, expiry: "4h", customHours: 4 }
+				? { grants: PRESET_CONTROLLER, expiry: "session", customHours: 4 }
 				: { grants: GRANT_ALL, expiry: "forever", customHours: 4 },
 		);
 	}, [boundFp]);
@@ -181,9 +183,11 @@ export const NativePairingCard: FC<{
 		// The untouched Full · Forever default is omitted entirely: a re-pairing device then keeps
 		// the access it already has (the API's omitted-fields contract), and an older host that
 		// predates the fields sees exactly yesterday's request.
-		if (draft.grants !== GRANT_ALL || secs != null) {
+		const session = draftUntilDisconnect(draft);
+		if (draft.grants !== GRANT_ALL || secs != null || session) {
 			access.grants = draft.grants;
 			if (secs != null) access.expires_in_secs = secs;
+			access.until_disconnect = session;
 		}
 		onArm(access, password);
 	};

@@ -19,6 +19,7 @@ import {
 	type AccessDraft,
 	draftExpirySecs,
 	draftFromStored,
+	draftUntilDisconnect,
 	GRANT_ALL,
 	GUEST_EXPIRES_SECS,
 	PRESET_CONTROLLER,
@@ -68,7 +69,12 @@ export const ApproveDialog: FC<{
 		setName(device.name);
 		setPassword("");
 		setDraft(
-			draftFromStored(device.grants, device.expires_unix, device.granted_unix),
+			draftFromStored(
+				device.grants,
+				device.expires_unix,
+				device.granted_unix,
+				device.until_disconnect,
+			),
 		);
 	}, [device]);
 
@@ -82,9 +88,13 @@ export const ApproveDialog: FC<{
 		// is granted — omitting both fields would silently keep the stored access instead). For an
 		// unknown device the untouched Full · Forever default is omitted: identical semantics, and
 		// an older host that predates the fields sees exactly yesterday's request.
-		if (known || draft.grants !== GRANT_ALL || secs != null) {
+		const session = draftUntilDisconnect(draft);
+		if (known || draft.grants !== GRANT_ALL || secs != null || session) {
 			body.grants = draft.grants;
 			if (secs != null) body.expires_in_secs = secs;
+			// Sent whenever the access half is sent at all, so clearing the choice on a
+			// re-approve reaches the host as `false` rather than as silence.
+			body.until_disconnect = session;
 		}
 		onApprove(device.id, body, password);
 	};

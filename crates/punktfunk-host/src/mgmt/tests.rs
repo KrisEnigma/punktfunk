@@ -197,6 +197,7 @@ async fn host_actions_follow_the_power_grant() {
         Some(crate::native_pairing::Access {
             grants: GRANT_GAMEPAD,
             expires_unix: None,
+            until_disconnect: false,
         }),
     )
     .unwrap();
@@ -207,6 +208,7 @@ async fn host_actions_follow_the_power_grant() {
         Some(crate::native_pairing::Access {
             grants: GRANT_ALL_PRE_POWER,
             expires_unix: None,
+            until_disconnect: false,
         }),
     )
     .unwrap();

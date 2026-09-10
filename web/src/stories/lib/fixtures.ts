@@ -283,6 +283,7 @@ export const pendingDevices: PendingDevice[] = [
 			"9f8e7d6c5b4a39281706f5e4d3c2b1a0998877665544332211ffeeddccbbaa00",
 		age_secs: 8,
 		source: "lan",
+		until_disconnect: false,
 	},
 	{
 		id: 2,
@@ -291,6 +292,7 @@ export const pendingDevices: PendingDevice[] = [
 			"ff00eeddccbbaa998877665544332211009f8e7d6c5b4a39281706f5e4d3c2b1",
 		age_secs: 30,
 		source: "lan",
+		until_disconnect: false,
 	},
 	// A knock from the internet: badged, and offered an "Arm PIN" instead of Approve.
 	{
@@ -300,6 +302,7 @@ export const pendingDevices: PendingDevice[] = [
 			"5c5b5a595857565554535251504f4e4d4c4b4a494847464544434241403f3e3d",
 		age_secs: 3,
 		source: "wan",
+		until_disconnect: false,
 	},
 ];
 
@@ -311,6 +314,7 @@ export const pendingGuestReknock: PendingDevice = {
 		"0011223344556677889900aabbccddeeff102030405060708090a0b0c0d0e0f0",
 	age_secs: 12,
 	source: "lan",
+	until_disconnect: false,
 	access_level: "controller",
 	grants: 0x01,
 	granted_unix: accessNowUnix - 6 * 3600,
@@ -326,6 +330,7 @@ export const nativeClients: NativeClient[] = [
 		grants: 0x3f,
 		granted_unix: accessNowUnix - 30 * 86400,
 		expires_unix: null,
+		until_disconnect: false,
 	},
 	{
 		name: "living-room-tv",
@@ -336,6 +341,18 @@ export const nativeClients: NativeClient[] = [
 		granted_unix: accessNowUnix - 2 * 3600,
 		// 1 h 58 min out — renders as the design's "Controller · 2 h left".
 		expires_unix: accessNowUnix + 7080,
+		until_disconnect: false,
+	},
+	// A guest admitted for the evening: no deadline, the record goes when they do.
+	{
+		name: "Friend's Deck",
+		fingerprint:
+			"5c5b5a595857565554535251504f4e4d4c4b4a494847464544434241403f3e3d",
+		access_level: "controller",
+		grants: 0x01,
+		granted_unix: accessNowUnix - 900,
+		expires_unix: null,
+		until_disconnect: true,
 	},
 ];
 
