@@ -8,8 +8,8 @@
 //!
 //! A monitor rule sets the client's exact mode ([`set_monitor_rule`]). xdph is
 //! steered at that output through a custom picker ([`crate::portal_picker`]).
-//! Teardown is ordered: [`StopGuard`] waits for ScreenCast close, then
-//! [`OutputGuard`] removes the compositor output — the reverse wedges xdph.
+//! [`StopGuard`] is session-scoped; [`OutputGuard`] lingers the named head and
+//! evacuates its workspace onto a remaining physical before `output remove`.
 //!
 //! Requires a reachable Hyprland instance (`HYPRLAND_INSTANCE_SIGNATURE` or
 //! `$XDG_RUNTIME_DIR/hypr/`) and ScreenCast routed to xdph
@@ -17,15 +17,16 @@
 //! answers `unknown request` at exit 0; [`hyprctl_dispatch`] turns that into
 //! an error.
 
-use super::{DisplayOwnership, Mode, VirtualDisplay, VirtualOutput};
+use super::{DisplayOwnership, Mode, SessionCastParts, VirtualDisplay, VirtualOutput};
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -121,24 +122,32 @@ pub struct HyprlandDisplay {
     last_cursor_mode: Option<crate::portal_cursor::Mode>,
     /// Topology restore from the first `create` (re-enable heads `exclusive`
     /// disabled). First-wins: this instance serves the pipeline retry loop and
-    /// only attempt 1 finds heads to disable. Unlike KWin's field of the same
-    /// name, the registry never takes this — a Hyprland display carries a portal
-    /// fd, so `registry::acquire` returns it as pass-through. [`Drop`] is the
-    /// only runner. Two concurrent `exclusive` sessions on this desk: the first
-    /// to end re-enables heads under the second.
+    /// only attempt 1 finds heads to disable. The registry lifts this after a
+    /// pooled `create`, so Drop is only the retry-loop backstop. Exclusive
+    /// physicals stay dark for the linger window and re-light on real teardown.
     pending_restore: Option<Box<dyn FnOnce() + Send>>,
     /// Output the last successful `create` minted. A mid-stream resize replaces
     /// the head (create-before-drop); the next `create` carries its workspace
     /// over ([`adopt_active_workspace`]). Unset on failure so a half-created
     /// head is not the adoption source.
     prev_output: Option<String>,
+    /// ScreenCast from the `create` that just ran. Registry [`session_cast_for`]
+    /// takes it so the portal fd never sits on the pooled output.
+    pending_cast: Option<PendingCast>,
+    /// The registry requests a split output/cast lifetime around `create`.
+    /// Direct callers keep the portal fd and cast on their returned output.
+    handoff_cast: bool,
 }
 
 impl Drop for HyprlandDisplay {
     fn drop(&mut self) {
-        // The only path that runs it: the registry never takes a pass-through
-        // display's restore. A failed pipeline drops this instance still holding
-        // attempt 1's restore, which re-lights the desk.
+        // A registry create that never completed its handoff still owns this
+        // cast. Close it before the backend disappears.
+        if let Some(pending) = self.pending_cast.take() {
+            stop_cast(&pending.name);
+        }
+        // Retry-loop backstop: the registry takes a pooled restore, so this is
+        // only a create that never reached acquire.
         if let Some(restore) = self.pending_restore.take() {
             restore();
         }
@@ -152,13 +161,42 @@ impl HyprlandDisplay {
             last_cursor_mode: None,
             pending_restore: None,
             prev_output: None,
+            pending_cast: None,
+            handoff_cast: false,
         })
     }
 
-    /// Apply [`crate::policy::Topology`] for `ours` and stash the restore this
-    /// instance runs on drop. Called at the END of `create` so nothing can fail
-    /// after it and unwind past the hand-off. Physical heads stay lit through
-    /// the portal handshake — that is also `extend`.
+    /// Attach a cast to `name`. A successful recast makes that reused output
+    /// the workspace source for the next `create`.
+    fn session_cast_for_with(
+        &mut self,
+        name: &str,
+        start: impl FnOnce(&str, bool) -> Result<(OwnedFd, u32, crate::portal_cursor::Mode)>,
+    ) -> Result<Option<SessionCastParts>> {
+        if let Some(pending) = self.pending_cast.take() {
+            if pending.name == name {
+                return Ok(Some((
+                    pending.node_id,
+                    Some(pending.fd),
+                    Box::new(SessionCast(pending.name)),
+                )));
+            }
+            stop_cast(&pending.name);
+        }
+        let (fd, node_id, cursor_mode) = start(name, self.hw_cursor)?;
+        self.last_cursor_mode = Some(cursor_mode);
+        self.prev_output = Some(name.to_string());
+        Ok(Some((
+            node_id,
+            Some(fd),
+            Box::new(SessionCast(name.to_string())),
+        )))
+    }
+
+    /// Apply [`crate::policy::Topology`] for `ours` and stash the restore the
+    /// registry runs on real teardown. Called at the END of `create` so nothing
+    /// can fail after it and unwind past the hand-off. Physical heads stay lit
+    /// through the portal handshake — that is also `extend`.
     fn apply_topology(&mut self, ours: &str) {
         use crate::policy::Topology;
         match crate::effective_topology() {
@@ -175,6 +213,11 @@ impl HyprlandDisplay {
                 crate::backend::stash_topology_restore(&mut self.pending_restore, prepared);
             }
         }
+    }
+
+    /// Record `name` and return the output whose workspace it replaces.
+    fn replace_output(&mut self, name: &str) -> Option<String> {
+        self.prev_output.replace(name.to_string())
     }
 }
 
@@ -241,9 +284,20 @@ impl VirtualDisplay for HyprlandDisplay {
         self.pending_restore.take()
     }
 
+    fn set_session_cast_handoff(&mut self, enabled: bool) {
+        self.handoff_cast = enabled;
+    }
+
+    fn session_cast_for(&mut self, name: &str) -> Result<Option<SessionCastParts>> {
+        self.session_cast_for_with(name, start_cast)
+    }
+
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput> {
         preflight_once();
         reclaim_leftovers_once();
+        if let Some(pending) = self.pending_cast.take() {
+            stop_cast(&pending.name);
+        }
 
         let name = next_output_name();
         hyprctl_dispatch(&["output", "create", "headless", &name]).with_context(|| {
@@ -257,18 +311,22 @@ impl VirtualDisplay for HyprlandDisplay {
         // Client mode is also the frame clock: a headless output is timer-paced from it.
         set_monitor_rule(&name, mode).with_context(|| format!("set monitor rule for {name}"))?;
 
-        focus_output(&name);
-
-        // Steer xdph at this output, then handshake on its own thread. Serialized:
-        // the selection is one per-user file; a concurrent write between ours and
-        // xdph's read would capture the wrong output (`SELECTION_LOCK`).
-        let (fd, node_id, cursor_mode, stop) = {
-            let _sel = SELECTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            select_and_cast(&name, self.hw_cursor)?
-        };
+        // Portal fd stays off this output so the registry can linger the named
+        // head. [`session_cast_for`] hands the fd to the session, not the pool.
+        let (fd, node_id, cursor_mode) = start_cast(&name, self.hw_cursor)?;
         // On today's xdph this is `embedded` regardless of `hw_cursor`; the
         // session's cursor behaviour follows this, not the request.
         self.last_cursor_mode = Some(cursor_mode);
+        let (remote_fd, direct_cast) = if self.handoff_cast {
+            self.pending_cast = Some(PendingCast {
+                node_id,
+                fd,
+                name: name.clone(),
+            });
+            (None, None)
+        } else {
+            (Some(fd), Some(SessionCast(name.clone())))
+        };
         tracing::info!(
             node_id,
             output = %name,
@@ -280,25 +338,27 @@ impl VirtualDisplay for HyprlandDisplay {
         );
         // Last, so no failure path unwinds past the restore hand-off.
         self.apply_topology(&name);
-        // A resize replaces the head (create-before-drop). Hyprland hands every
-        // new monitor an empty workspace, so carry the superseded head's active
-        // one over. After `apply_topology`: nothing fails past here, so no unwind
-        // strands a moved workspace on a head error cleanup is about to remove.
-        if let Some(prev) = self.prev_output.take() {
+        // Hyprland gives each replacement an empty workspace. Carry the active
+        // workspace only after every fallible setup step has completed.
+        if let Some(prev) = self.replace_output(&name) {
             adopt_active_workspace(&prev, &name);
         }
-        self.prev_output = Some(name.clone());
+        let output_keepalive = OutputKeepalive {
+            _reload: watch_config_reloads(name.clone(), mode),
+            _output: output,
+        };
+        let keepalive: Box<dyn Send> = match direct_cast {
+            Some(cast) => Box::new(DirectKeepalive {
+                _cast: cast,
+                _output: output_keepalive,
+            }),
+            None => Box::new(output_keepalive),
+        };
         Ok(VirtualOutput {
             node_id,
-            remote_fd: Some(fd),
+            remote_fd,
             preferred_mode: Some((mode.width, mode.height, mode.refresh_hz)),
-            keepalive: Box::new(Keepalive {
-                _reload: watch_config_reloads(name.clone(), mode),
-                _stop: stop,
-                _output: output,
-            }),
-            // Owned, but not registry-poolable: the portal fd can't be re-opened
-            // per attach, so the registry passes it through on `remote_fd.is_some()`.
+            keepalive,
             ownership: DisplayOwnership::Owned,
             reused_gen: None,
             pool_gen: None,
@@ -312,15 +372,68 @@ impl VirtualDisplay for HyprlandDisplay {
     }
 }
 
-/// Drop order is the fix: [`StopGuard`] blocks until the ScreenCast session is
-/// closed, then [`OutputGuard`] removes the compositor output (fields drop in
-/// declaration order). The reverse removes an output xdph is still capturing.
-struct Keepalive {
-    /// First so the watcher is gone before the cast stops and the output is
-    /// removed — it must never re-apply a rule onto a head this teardown deletes.
+/// Named head the registry lingers. ScreenCast is [`SessionCast`], not here:
+/// pooling this must not keep the portal session alive across reconnects.
+struct OutputKeepalive {
+    /// First so the watcher is gone before the output is removed — it must
+    /// never re-apply a rule onto a head this teardown deletes.
     _reload: Option<ReloadWatcher>,
-    _stop: StopGuard,
     _output: OutputGuard,
+}
+
+/// Standalone `create`: close ScreenCast before removing its named output.
+struct DirectKeepalive {
+    _cast: SessionCast,
+    _output: OutputKeepalive,
+}
+
+/// ScreenCast parked off the pooled output until [`HyprlandDisplay::session_cast_for`]
+/// takes it. The fd is session-scoped; the named head is not.
+struct PendingCast {
+    node_id: u32,
+    fd: OwnedFd,
+    name: String,
+}
+
+/// Closes the ScreenCast for `name` on drop. Token only — the real closer is
+/// [`StopGuard`] in [`casts`].
+struct SessionCast(String);
+
+impl Drop for SessionCast {
+    fn drop(&mut self) {
+        stop_cast(&self.0);
+    }
+}
+
+/// Live ScreenCast per output name. [`SessionCast`] and [`OutputGuard`] both
+/// remove from here; the first drop closes, the second is a no-op.
+fn casts() -> &'static Mutex<HashMap<String, StopGuard>> {
+    static CASTS: OnceLock<Mutex<HashMap<String, StopGuard>>> = OnceLock::new();
+    CASTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn stop_cast(name: &str) {
+    let guard = casts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(name);
+    drop(guard);
+}
+
+/// Point xdph at `name` and park the [`StopGuard`] in [`casts`]. Closes a
+/// leftover cast on the same name first so reconnect does not stack sessions.
+fn start_cast(name: &str, hw_cursor: bool) -> Result<(OwnedFd, u32, crate::portal_cursor::Mode)> {
+    stop_cast(name);
+    focus_output(name);
+    let (fd, node_id, cursor_mode, stop) = {
+        let _sel = SELECTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        select_and_cast(name, hw_cursor)?
+    };
+    casts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(name.to_string(), stop);
+    Ok((fd, node_id, cursor_mode))
 }
 
 /// Puts the streamed head's monitor rule back after a `hyprctl reload`.
@@ -677,46 +790,20 @@ fn active_workspace_id(name: &str) -> Option<i64> {
 }
 
 /// Move the superseded head's active workspace onto the new head, then switch
-/// the new head to it.
+/// the new head to it. Inverse of [`evacuate_workspace`].
 ///
-/// Hyprland assigns every new monitor an empty workspace and re-homes a
-/// removed monitor's workspaces elsewhere. Two dispatches: `workspace.move`
-/// does not activate the moved workspace on its target. When the predecessor
-/// is no longer listed this is a reconnect, not a live resize — nothing to
-/// carry. Best-effort: a failure costs workspace continuity, never the stream.
+/// Hyprland assigns every new monitor an empty workspace. Two dispatches:
+/// `workspace.move` does not activate the moved workspace on its target. When
+/// the predecessor is no longer listed this is a reconnect — nothing to carry.
 fn adopt_active_workspace(prev: &str, ours: &str) {
     let Some(id) = active_workspace_id(prev) else {
         return;
     };
-    let ws = id.to_string();
-    // Classic first, Lua on rejection — same two-era probe as [`focus_output`]
-    // / [`dpms_one`]. There is no stable way to ask which config manager is loaded.
-    let both = |classic: &[&str], lua: &str| -> Result<()> {
-        match hyprctl_dispatch(classic) {
-            Ok(()) => Ok(()),
-            Err(classic_err) => hyprctl_dispatch(&["dispatch", lua])
-                .map_err(|lua_err| anyhow::anyhow!("hyprlang: {classic_err:#}; lua: {lua_err:#}")),
-        }
-    };
-    if let Err(e) = both(
-        &["dispatch", "moveworkspacetomonitor", &ws, ours],
-        &lua_workspace_move_expr(&ws, ours),
-    ) {
+    if let Err(e) = workspace_to_monitor(id, ours) {
         tracing::warn!(
             workspace = id, from = %prev, to = %ours, error = %format!("{e:#}"),
             "hyprland: could not move the streamed workspace to the replacement head — the \
              client will land on an empty workspace after this resize"
-        );
-        return;
-    }
-    if let Err(e) = both(
-        &["dispatch", "workspace", &ws],
-        &lua_workspace_focus_expr(&ws),
-    ) {
-        tracing::warn!(
-            workspace = id, to = %ours, error = %format!("{e:#}"),
-            "hyprland: moved the streamed workspace but could not switch the replacement head \
-             to it — the client must switch workspaces by hand once"
         );
         return;
     }
@@ -734,6 +821,117 @@ fn adopt_active_workspace(prev: &str, ours: &str) {
             "hyprland: both workspace dispatches were accepted but the replacement head shows a \
              different active workspace — the client may land on an empty workspace"
         ),
+    }
+}
+
+/// Move workspace `id` onto `dest` and switch to it there. Classic first, Lua
+/// on rejection — same two-era probe as [`focus_output`].
+fn workspace_to_monitor(id: i64, dest: &str) -> Result<()> {
+    let ws = id.to_string();
+    hyprctl_dispatch_both(
+        &evacuate_move_argv(&ws, dest),
+        &lua_workspace_move_expr(&ws, dest),
+    )?;
+    hyprctl_dispatch_both(&evacuate_focus_argv(&ws), &lua_workspace_focus_expr(&ws))?;
+    Ok(())
+}
+
+fn hyprctl_dispatch_both(classic: &[&str], lua: &str) -> Result<()> {
+    match hyprctl_dispatch(classic) {
+        Ok(()) => Ok(()),
+        Err(classic_err) => hyprctl_dispatch(&["dispatch", lua])
+            .map_err(|lua_err| anyhow::anyhow!("hyprlang: {classic_err:#}; lua: {lua_err:#}")),
+    }
+}
+
+/// Classic `hyprctl` argv that moves workspace `ws` onto `dest`.
+fn evacuate_move_argv<'a>(ws: &'a str, dest: &'a str) -> [&'a str; 4] {
+    ["dispatch", "moveworkspacetomonitor", ws, dest]
+}
+
+/// Classic `hyprctl` argv that switches to workspace `ws` on the focused monitor.
+fn evacuate_focus_argv(ws: &str) -> [&str; 3] {
+    ["dispatch", "workspace", ws]
+}
+
+/// Where the streamed workspace goes before the named head is removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Evacuate {
+    /// `moveworkspacetomonitor` then `workspace`. Never destroy the windows.
+    ToPhysical { workspace: i64, dest: String },
+    /// No remaining physical. Skip the move; workspaces stay in limbo.
+    Limbo,
+}
+
+/// Inverse of [`adopt_active_workspace`]: a dest means re-home, else limbo.
+fn evacuate_plan(workspace: Option<i64>, dest: Option<&str>) -> Evacuate {
+    match (workspace, dest) {
+        (Some(workspace), Some(dest)) => Evacuate::ToPhysical {
+            workspace,
+            dest: dest.to_string(),
+        },
+        _ => Evacuate::Limbo,
+    }
+}
+
+/// First enabled physical that is not `ours` and not a managed sibling.
+fn first_physical_dest(heads: &[crate::monitors::PhysicalMonitor], ours: &str) -> Option<String> {
+    heads
+        .iter()
+        .find(|h| h.enabled && !h.managed && h.connector != ours)
+        .map(|h| h.connector.clone())
+}
+
+/// Re-home the streamed workspace onto a remaining physical, then remove is safe.
+/// Headless: skip the move. Windows are never destroyed.
+fn evacuate_workspace(ours: &str) {
+    let dest = list_monitors()
+        .ok()
+        .and_then(|heads| first_physical_dest(&heads, ours));
+    match evacuate_plan(active_workspace_id(ours), dest.as_deref()) {
+        Evacuate::Limbo => {}
+        Evacuate::ToPhysical { workspace, dest } => {
+            if let Err(e) = workspace_to_monitor(workspace, &dest) {
+                tracing::warn!(
+                    workspace, from = %ours, to = %dest, error = %format!("{e:#}"),
+                    "hyprland: streamed workspace not re-homed onto a remaining physical — \
+                     windows stay on this head until it is removed"
+                );
+            }
+        }
+    }
+}
+
+/// Keep-alive reconnect: recast the named head, or create if nothing matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LingerReuse {
+    Recast { output_name: String },
+    Create,
+}
+
+/// Matching backend + mode + identity on a named Hyprland head skips `output create`.
+/// A missing name is Create: lingering a black head is worse than tearing down.
+pub(crate) fn linger_reuse_decision(
+    backend: &str,
+    mode: Mode,
+    identity: Option<u32>,
+    kept_backend: &str,
+    kept_mode: Mode,
+    kept_identity: Option<u32>,
+    kept_output_name: Option<&str>,
+) -> LingerReuse {
+    if backend != "hyprland" {
+        return LingerReuse::Create;
+    }
+    match kept_output_name {
+        Some(output_name)
+            if kept_backend == backend && kept_mode == mode && kept_identity == identity =>
+        {
+            LingerReuse::Recast {
+                output_name: output_name.to_string(),
+            }
+        }
+        _ => LingerReuse::Create,
     }
 }
 
@@ -925,6 +1123,9 @@ struct OutputGuard(String);
 
 impl Drop for OutputGuard {
     fn drop(&mut self) {
+        // Close first: removing a head xdph is still capturing wedges its loop.
+        stop_cast(&self.0);
+        evacuate_workspace(&self.0);
         match hyprctl_dispatch(&["output", "remove", &self.0]) {
             Ok(_) => tracing::info!(output = %self.0, "hyprland headless output removed"),
             Err(e) => {
@@ -1798,6 +1999,151 @@ mod tests {
             disable_lua_expr("DP-1"),
             r#"hl.monitor{ output = "DP-1", disabled = true }"#
         );
+    }
+
+    /// Classic argv for the re-home that runs before `output remove`. Both
+    /// dispatchers answer `ok` on the wrong era, so a drifted string is silent.
+    #[test]
+    fn evacuate_argv_moves_the_workspace_then_focuses_it() {
+        assert_eq!(
+            evacuate_move_argv("2", "DP-1"),
+            ["dispatch", "moveworkspacetomonitor", "2", "DP-1"]
+        );
+        assert_eq!(evacuate_focus_argv("2"), ["dispatch", "workspace", "2"]);
+        assert_eq!(
+            lua_workspace_move_expr("2", "DP-1"),
+            r#"hl.dsp.workspace.move({ workspace = "2", monitor = "DP-1" })"#
+        );
+        assert_eq!(
+            lua_workspace_focus_expr("2"),
+            r#"hl.dsp.focus({ workspace = "2" })"#
+        );
+    }
+
+    /// A remaining physical gets the streamed workspace. Headless (or an
+    /// already-gone workspace) skips the move — windows stay in limbo.
+    #[test]
+    fn evacuate_rehomes_onto_a_physical_and_skips_when_headless() {
+        assert_eq!(
+            evacuate_plan(Some(3), Some("HDMI-A-1")),
+            Evacuate::ToPhysical {
+                workspace: 3,
+                dest: "HDMI-A-1".into(),
+            }
+        );
+        assert_eq!(evacuate_plan(Some(3), None), Evacuate::Limbo);
+        assert_eq!(evacuate_plan(None, Some("DP-1")), Evacuate::Limbo);
+        assert_eq!(evacuate_plan(None, None), Evacuate::Limbo);
+    }
+
+    /// Re-home aims at the operator's first enabled physical, never a managed
+    /// sibling and never a head exclusive already darkened.
+    #[test]
+    fn evacuate_picks_the_first_remaining_physical() {
+        let ours = "PF-4242-1";
+        let heads = [
+            head("DP-1", false),
+            head("PF-99-1", true),
+            head(ours, true),
+            head("HDMI-A-1", true),
+            head("DP-2", true),
+        ];
+        assert_eq!(
+            first_physical_dest(&heads, ours).as_deref(),
+            Some("HDMI-A-1")
+        );
+        assert!(first_physical_dest(&[head(ours, true)], ours).is_none());
+    }
+
+    fn mode(w: u32, h: u32, hz: u32) -> Mode {
+        Mode {
+            width: w,
+            height: h,
+            refresh_hz: hz,
+        }
+    }
+
+    /// Reconnect with matching backend + mode + identity skips `output create`
+    /// and recasts at the existing name. Anything else creates — including a
+    /// kept head with no name, which would otherwise linger black.
+    #[test]
+    fn linger_reuse_recasts_a_matching_named_hyprland_head() {
+        let m = mode(1920, 1080, 60);
+        assert_eq!(
+            linger_reuse_decision(
+                "hyprland",
+                m,
+                Some(1),
+                "hyprland",
+                m,
+                Some(1),
+                Some("PF-1-1"),
+            ),
+            LingerReuse::Recast {
+                output_name: "PF-1-1".into(),
+            }
+        );
+        assert_eq!(
+            linger_reuse_decision("hyprland", m, None, "hyprland", m, None, Some("PF-1-1")),
+            LingerReuse::Recast {
+                output_name: "PF-1-1".into(),
+            }
+        );
+        assert_eq!(
+            linger_reuse_decision(
+                "hyprland",
+                m,
+                Some(1),
+                "hyprland",
+                mode(1280, 720, 60),
+                Some(1),
+                Some("PF-1-1"),
+            ),
+            LingerReuse::Create
+        );
+        assert_eq!(
+            linger_reuse_decision(
+                "hyprland",
+                m,
+                Some(1),
+                "hyprland",
+                m,
+                Some(2),
+                Some("PF-1-1"),
+            ),
+            LingerReuse::Create
+        );
+        assert_eq!(
+            linger_reuse_decision("hyprland", m, None, "hyprland", m, None, None),
+            LingerReuse::Create
+        );
+        assert_eq!(
+            linger_reuse_decision("wlroots", m, None, "wlroots", m, None, Some("HEADLESS-1")),
+            LingerReuse::Create
+        );
+        assert_eq!(
+            linger_reuse_decision("hyprland", m, None, "kwin", m, None, Some("PF-1-1")),
+            LingerReuse::Create
+        );
+    }
+
+    /// A reconnect backend must adopt from the pooled head when a later mode
+    /// rebuild creates its replacement.
+    #[test]
+    fn reconnect_then_rebuild_adopts_the_reused_outputs_workspace() {
+        let mut display = HyprlandDisplay::new().unwrap();
+        let cast = display
+            .session_cast_for_with("PF-1-1", |_, _| {
+                let (fd, peer) = UnixStream::pair()?;
+                drop(peer);
+                Ok((fd.into(), 42, crate::portal_cursor::Mode::Embedded))
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(display.replace_output("PF-1-2").as_deref(), Some("PF-1-1"));
+        assert_eq!(display.prev_output.as_deref(), Some("PF-1-2"));
+        drop(cast);
     }
 
     /// `hyprctl keyword` under Lua answers "keyword can't work with non-legacy
