@@ -47,26 +47,31 @@ pub(crate) struct HostTheme {
     )
 )]
 pub(crate) async fn get_host_theme() -> Json<HostTheme> {
-    Json(read())
+    // `read()` blocks — a D-Bus round trip on Linux, a registry read on Windows — and the
+    // console polls `ui-config` every two seconds per open tab. Holding a runtime worker for
+    // that is how one unresponsive portal starves every other management request.
+    Json(tokio::task::spawn_blocking(read).await.unwrap_or_default())
 }
 
 #[cfg(target_os = "linux")]
 fn read() -> HostTheme {
-    // The portal is D-Bus, and a desktop that is not running one must not stall a management
-    // request. Anything slower than this is "no answer" as far as the console is concerned.
+    // A desktop running no portal must not stall the request. Anything slower than this is
+    // "no answer" as far as the console is concerned.
     const BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
-    std::thread::spawn(|| {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::debug!("host theme: no runtime for the portal read ({e})");
-                return HostTheme::default();
-            }
-        };
-        rt.block_on(async {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::debug!("host theme: no runtime for the portal read ({e})");
+            return HostTheme::default();
+        }
+    };
+    rt.block_on(async {
+        // The budget covers the whole exchange, not each call: a portal that accepts the
+        // connection and then never answers is the case worth bounding.
+        match tokio::time::timeout(BUDGET, async {
             let Ok(settings) = ashpd::desktop::settings::Settings::new().await else {
                 return HostTheme::default();
             };
@@ -90,8 +95,15 @@ fn read() -> HostTheme {
                 accent,
             }
         })
+        .await
+        {
+            Ok(theme) => theme,
+            Err(_) => {
+                tracing::debug!("host theme: the desktop portal did not answer in time");
+                HostTheme::default()
+            }
+        }
     })
-    .join_timeout(BUDGET)
 }
 
 /// The portal reports each channel as 0.0..=1.0.
@@ -218,30 +230,6 @@ fn read_dword(subkey: &str, name: &str) -> Option<u32> {
 fn read() -> HostTheme {
     // No host runs here; the console falls back to its own palette.
     HostTheme::default()
-}
-
-/// Join a probe thread, or give up on it. A portal that never answers must not hold a
-/// management request open.
-#[cfg(target_os = "linux")]
-trait JoinTimeout {
-    fn join_timeout(self, budget: std::time::Duration) -> HostTheme;
-}
-
-#[cfg(target_os = "linux")]
-impl JoinTimeout for std::thread::JoinHandle<HostTheme> {
-    fn join_timeout(self, budget: std::time::Duration) -> HostTheme {
-        let deadline = std::time::Instant::now() + budget;
-        while !self.is_finished() {
-            if std::time::Instant::now() >= deadline {
-                tracing::debug!("host theme: the desktop portal did not answer in time");
-                // The thread is left to finish on its own; it holds nothing but its own
-                // runtime and drops when the portal call returns or fails.
-                return HostTheme::default();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        self.join().unwrap_or_default()
-    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
