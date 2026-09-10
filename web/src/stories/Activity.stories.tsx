@@ -180,6 +180,46 @@ export const Burst: Story = {
 	},
 };
 
+/** How many ring events the Reload story replays — a busy host's ring holds up to 1024. */
+const REPLAY = 300;
+
+/**
+ * A page LOAD. The stream replays the host's whole ring the moment it connects, each frame
+ * dispatched as its own task — so each one is its own render, and every event past the twelfth
+ * evicts a row into an exit animation. None of the stories above exercise that path, and it is
+ * the one that stretched the real card below the fold and froze the page on reload.
+ */
+export const Reload: Story = {
+	render: function ReloadFeed() {
+		const [feed, setFeed] = useState<ActivityEntry[]>([]);
+		useEffect(() => {
+			let i = 0;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			// One frame per TASK, the way EventSource dispatches them. The same pushes in one
+			// loop would be batched into a single render and hide the whole problem.
+			const next = () => {
+				const pick = KINDS[i % KINDS.length];
+				if (!pick) return;
+				const [kind, data] = pick;
+				const seq = i + 1;
+				const ts_ms = at(REPLAY - i);
+				setFeed((f) => [{ seq, ts_ms, kind, data }, ...f].slice(0, 200));
+				i += 1;
+				if (i < REPLAY) timer = setTimeout(next, 0);
+			};
+			timer = setTimeout(next, 0);
+			return () => clearTimeout(timer);
+		}, []);
+		return (
+			<Routed>
+				<div className="max-w-3xl">
+					<ActivityCardView entries={feed} />
+				</div>
+			</Routed>
+		);
+	},
+};
+
 /** Nothing has happened yet — a fresh page load on a quiet host. */
 export const Empty: Story = {
 	render: () => (
