@@ -194,25 +194,26 @@ export const NativePairingCard: FC<{
 		onArm(access, password);
 	};
 	return (
-		<QueryState
-			isLoading={status.isLoading}
-			error={status.error}
-			refetch={status.refetch}
-		>
-			<Card>
-				<CardHeader>
-					<CardTitle className="flex items-center gap-2">
-						<Smartphone className="size-4" />
-						{m.pairing_native_title()}
-					</CardTitle>
-				</CardHeader>
-				<CardContent className="space-y-4">
+		<Card>
+			<CardHeader>
+				<CardTitle className="flex items-center gap-2">
+					<Smartphone className="size-4" />
+					{m.pairing_native_title()}
+				</CardTitle>
+			</CardHeader>
+			<CardContent className="@container space-y-4">
+				{/* The card is in the page's cascade from the first frame; only its body waits. */}
+				<QueryState
+					isLoading={status.isLoading}
+					error={status.error}
+					refetch={status.refetch}
+				>
 					{!d?.enabled ? (
 						<p className="text-sm text-muted-foreground">
 							{m.pairing_native_disabled()}
 						</p>
 					) : d.armed && pin ? (
-						<div className="space-y-3">
+						<div className="mx-auto w-full max-w-md space-y-3">
 							<p className="text-sm">
 								{boundTo
 									? m.pairing_native_bound_for({ name: boundTo.name })
@@ -238,7 +239,7 @@ export const NativePairingCard: FC<{
 						</div>
 					) : (
 						<>
-							<p className="text-sm text-muted-foreground">
+							<p className="max-w-prose text-sm text-muted-foreground">
 								{m.pairing_native_desc()}
 							</p>
 							{boundTo && (
@@ -273,23 +274,27 @@ export const NativePairingCard: FC<{
 							{/* Whoever completes this window's ceremony gets keyboard and mouse on this
 							    machine, so arming re-confirms the console password — the BFF verifies and
 							    strips it (util/confirm.ts). */}
-							<div className="space-y-2">
-								<Label htmlFor="arm-password">{m.store_spec_password()}</Label>
-								<Input
-									id="arm-password"
-									type="password"
-									autoComplete="current-password"
-									value={password}
-									onChange={(e) => setPassword(e.target.value)}
-								/>
-								<p className="text-xs text-muted-foreground">
-									{m.pairing_password_help()}
-								</p>
-								{wrongPassword && (
-									<p role="alert" className="text-xs text-destructive">
-										{m.update_apply_wrong_password()}
+							<div className="grid gap-4 @xl:grid-cols-2">
+								<div className="space-y-2">
+									<Label htmlFor="arm-password">
+										{m.store_spec_password()}
+									</Label>
+									<Input
+										id="arm-password"
+										type="password"
+										autoComplete="current-password"
+										value={password}
+										onChange={(e) => setPassword(e.target.value)}
+									/>
+									<p className="text-xs text-muted-foreground">
+										{m.pairing_password_help()}
 									</p>
-								)}
+									{wrongPassword && (
+										<p role="alert" className="text-xs text-destructive">
+											{m.update_apply_wrong_password()}
+										</p>
+									)}
+								</div>
 							</div>
 							<Button
 								disabled={isArming || password.length === 0}
@@ -300,8 +305,8 @@ export const NativePairingCard: FC<{
 							</Button>
 						</>
 					)}
-				</CardContent>
-			</Card>
-		</QueryState>
+				</QueryState>
+			</CardContent>
+		</Card>
 	);
 };

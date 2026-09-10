@@ -21,12 +21,14 @@ import {
 } from "@/api/gen/native/native";
 import { useDialogs } from "@/components/dialogs";
 import { QueryState } from "@/components/query-state";
+import { ROW, ROW_GAP, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import {
+	MotionTableBody,
+	MotionTableRow,
 	Table,
-	TableBody,
 	TableCell,
 	TableHead,
 	TableHeader,
@@ -357,12 +359,12 @@ export const PairedDevices: FC<{
 			    button there would open a confirmation reading "Unpair all 0 devices?". */}
 			{rows.length > 0 && (
 				<Button
-					variant="destructive"
+					variant="outline"
 					size="sm"
 					disabled={isUnpairingAll}
 					onClick={onUnpairAll}
 				>
-					<Trash2 className="size-4" />
+					<Trash2 className="size-4 text-destructive" />
 					{m.action_unpair_all()}
 				</Button>
 			)}
@@ -386,9 +388,12 @@ export const PairedDevices: FC<{
 								<TableHead className="w-20" />
 							</TableRow>
 						</TableHeader>
-						<TableBody>
+						<MotionTableBody {...staggerProps(ROW_GAP)}>
 							{rows.map((r) => (
-								<TableRow key={`${r.protocol}:${r.fingerprint}`}>
+								<MotionTableRow
+									key={`${r.protocol}:${r.fingerprint}`}
+									variants={ROW}
+								>
 									<TableCell className="font-medium">{r.name || "—"}</TableCell>
 									<TableCell>
 										<Badge
@@ -500,9 +505,9 @@ export const PairedDevices: FC<{
 											</Button>
 										</div>
 									</TableCell>
-								</TableRow>
+								</MotionTableRow>
 							))}
-						</TableBody>
+						</MotionTableBody>
 					</Table>
 				)}
 			</QueryState>
