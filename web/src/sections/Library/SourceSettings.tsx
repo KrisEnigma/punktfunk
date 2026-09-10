@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { toast } from "@unom/ui/toast";
 import { type FC, useEffect, useState } from "react";
 import type { ScannerInfo } from "@/api/gen/model/scannerInfo";
@@ -22,6 +23,24 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { m } from "@/paraglide/messages";
 
+interface RefusalBody {
+	/** The plugin's own `__config` decode issue. */
+	issue?: string;
+	/** The route's own refusal: unreachable plugin, bad id, a reply that was not JSON. */
+	error?: string;
+	/** The route saw the plugin decline a `__config` surface. Only it sets this. */
+	noConfig?: boolean;
+}
+
+/** Read a refusal body once; a `Response` body cannot be consumed twice. */
+const refusalBody = async (res: Response): Promise<RefusalBody | null> =>
+	(await res.json().catch(() => null)) as RefusalBody | null;
+
+/** Both shapes carry the reason under a different key — on `issue` alone every transport
+ *  failure reads as "the host said no". */
+const refusalText = (body: RefusalBody | null): string =>
+	body?.issue ?? body?.error ?? m.library_source_settings_refused();
+
 /**
  * A library source's settings, rendered as a **generic form** from the plugin's own JSON Schema.
  *
@@ -39,6 +58,9 @@ import { m } from "@/paraglide/messages";
  * Fields the derivation can't express fall back to a raw JSON editor. That fallback is what bounds
  * the risk of the whole approach: worst case the drawer is a validated textarea, and the PUT still
  * validates by decode host-side either way.
+ *
+ * `config` is optional on the kit's `serveUi`, so a source that ships its own page may serve no
+ * `__config` at all. That 404 points at the plugin's page instead of reporting a failure.
  */
 export const SourceSettingsDialog: FC<{
 	source: ScannerInfo;
@@ -48,6 +70,8 @@ export const SourceSettingsDialog: FC<{
 	const [state, setState] = useState<
 		| { tag: "loading" }
 		| { tag: "error"; message: string }
+		// The plugin serves no `__config`: its settings are its own page, not this form.
+		| { tag: "ownPage" }
 		| { tag: "ready"; schema: JsonSchemaDoc | null; value: JsonObject }
 	>({ tag: "loading" });
 	const [raw, setRaw] = useState("");
@@ -60,7 +84,17 @@ export const SourceSettingsDialog: FC<{
 				const res = await fetch(`/api/plugin-config/${pluginId}`, {
 					credentials: "same-origin",
 				});
-				if (!res.ok) throw new Error(m.library_source_settings_refused());
+				if (!res.ok) {
+					const body = await refusalBody(res);
+					// `config` is optional on the kit's `serveUi`, and a plugin that omits it keeps
+					// its settings on the page it already serves. Not a failure, so it must not read
+					// as one — but only the route's own marker may mean it, never a bare 404.
+					if (res.status === 404 && body?.noConfig === true) {
+						if (!cancelled) setState({ tag: "ownPage" });
+						return;
+					}
+					throw new Error(refusalText(body));
+				}
 				const body = (await res.json()) as {
 					schema: JsonSchemaDoc | null;
 					value: JsonObject | null;
@@ -92,12 +126,7 @@ export const SourceSettingsDialog: FC<{
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify(value),
 			});
-			if (!res.ok) {
-				const body = (await res.json().catch(() => null)) as {
-					issue?: string;
-				} | null;
-				throw new Error(body?.issue ?? m.library_source_settings_refused());
-			}
+			if (!res.ok) throw new Error(refusalText(await refusalBody(res)));
 			toast.success(m.library_source_settings_saved());
 			onClose();
 		} catch (e) {
@@ -124,6 +153,18 @@ export const SourceSettingsDialog: FC<{
 					<p className="text-sm text-destructive">
 						{m.library_source_settings_unreachable({ issue: state.message })}
 					</p>
+				)}
+				{state.tag === "ownPage" && (
+					<div className="space-y-3">
+						<p className="text-sm text-muted-foreground">
+							{m.library_source_settings_own_page({ source: source.label })}
+						</p>
+						<Button asChild onClick={onClose}>
+							<Link to="/plugins/$pluginId/$" params={{ pluginId, _splat: "" }}>
+								{m.library_source_settings_open_page({ source: source.label })}
+							</Link>
+						</Button>
+					</div>
 				)}
 				{state.tag === "ready" && (
 					<ConfigForm

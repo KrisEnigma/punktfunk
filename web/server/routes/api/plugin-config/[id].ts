@@ -33,8 +33,12 @@ const ALLOWED = new Set(["GET", "PUT"]);
 
 export default defineEventHandler(async (event) => {
 	const id = getRouterParam(event, "id");
+	// 400, not 404: the console reads a 404 from here as "this plugin serves no `__config`, its
+	// settings are its own page". `PLUGIN_ID_RE` is deliberately narrower than the host's provider
+	// rule (which allows `.` and `_`), so a listed source can land here with an id we won't dial —
+	// and saying "no settings surface" about it would be a lie.
 	if (!id || !PLUGIN_ID_RE.test(id)) {
-		setResponseStatus(event, 404);
+		setResponseStatus(event, 400);
 		return { error: "not a valid plugin id" };
 	}
 	const method = event.method;
@@ -79,6 +83,15 @@ export default defineEventHandler(async (event) => {
 		return { error: `plugin ${id} is not reachable` };
 	}
 
+	// A 404 here is the plugin declining to have a `__config` at all (`config` is optional on the
+	// kit's `serveUi`), which the console renders as "settings live on this plugin's own page".
+	// Marked in the body rather than left as a bare status: under `bun run dev` these routes do not
+	// run and `/api` proxies to the management API, whose 404 for an unknown path would otherwise
+	// read as that same claim about every source.
+	if (res.status === 404) {
+		setResponseStatus(event, 404);
+		return { error: "plugin serves no config surface", noConfig: true };
+	}
 	setResponseStatus(event, res.status);
 	// Pass the plugin's own body through untouched: a 400 from `__config` carries the decode issue
 	// the drawer shows the operator, and rewriting it would throw away the only useful part.

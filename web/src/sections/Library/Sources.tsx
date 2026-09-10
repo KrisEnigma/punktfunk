@@ -10,7 +10,7 @@ import {
 	useSetLibraryScanner,
 } from "@/api/gen/library/library";
 import type { ScannerInfo } from "@/api/gen/model/scannerInfo";
-import { libraryPlugins, usePlugins } from "@/api/plugins";
+import { usePlugins } from "@/api/plugins";
 import {
 	type StoreEntry,
 	useInstallPlugin,
@@ -116,7 +116,10 @@ export const SourcesSection: FC<{
 	const available = (catalog.data?.plugins ?? []).filter(
 		(p) => p.categories?.includes("library") && !installedPkgs.has(p.pkg),
 	);
-	const running = new Set(libraryPlugins(plugins.data).map((p) => p.id));
+	// Every live registration, NOT just the `library`-category ones. A plugin's nav categorisation
+	// cannot decide whether its liveness badge is honest: a library plugin that registers without
+	// `category` is live, and filtering on it here badges a running plugin "Stopped".
+	const running = new Set((plugins.data ?? []).map((p) => p.id));
 
 	// The bridge-release nudge (design D9): a built-in scanner still doing the work, with its
 	// replacement plugin sitting uninstalled in the catalog. One click per scanner, and NEVER a
@@ -210,7 +213,7 @@ export const SourcesCard: FC<{
 	sources: ScannerInfo[];
 	/** Catalog rows offering a library source that isn't installed yet. */
 	available: StoreEntry[];
-	/** Ids of library plugins whose lease is currently live. */
+	/** Ids of every plugin whose lease is currently live, whatever its category. */
 	running: Set<string>;
 	/** Source id whose toggle is in flight, or null — only that row disables. */
 	busyId: string | null;
@@ -244,7 +247,7 @@ export const SourcesCard: FC<{
 					<SourceRow
 						key={source.id}
 						source={source}
-						running={running.has(source.id)}
+						running={running.has(source.provider ?? source.id)}
 						busy={busyId === source.id}
 						filtered={
 							activeFilter !== null &&

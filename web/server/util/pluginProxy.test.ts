@@ -6,7 +6,7 @@
 // dial itself, which on the plugin origin recurses until the process dies; and it is silent, since
 // a self-dial answers 200 like anything else.
 import { afterEach, describe, expect, test } from "bun:test";
-import { isDialablePort } from "./pluginProxy";
+import { isDialablePort, PLUGIN_ID_RE } from "./pluginProxy";
 
 const CONSOLE_PORT = "47992";
 const PLUGIN_PORT = "47993";
@@ -43,5 +43,32 @@ describe("isDialablePort", () => {
 		process.env.PUNKTFUNK_UI_CONSOLE_PORT_ACTIVE = CONSOLE_PORT;
 		expect(isDialablePort(51234)).toBe(true);
 		expect(isDialablePort(47992)).toBe(false);
+	});
+});
+
+describe("PLUGIN_ID_RE", () => {
+	// This regex is narrower than the host's provider rule (`[a-z0-9._-]`, leading alphanumeric),
+	// so a source the host happily lists can be refused here. That refusal is a bad request, not a
+	// missing settings surface: `/api/plugin-config/<id>` answers 400, leaving 404 to the plugin
+	// declining a `__config` — the one case the console offers the plugin's own page for.
+	test("is narrower than a provider id the host will list", () => {
+		for (const id of ["my-provider.v2", "rom_manager", "9lives"]) {
+			expect(PLUGIN_ID_RE.test(id)).toBe(false);
+		}
+	});
+
+	test("accepts the ids first-party plugins register", () => {
+		for (const id of ["playnite", "rom-manager", "steam", "heroic"]) {
+			expect(PLUGIN_ID_RE.test(id)).toBe(true);
+		}
+	});
+
+	test("refuses a segment that could climb out of the proxy prefix", () => {
+		const hostile = ["", "..", "-lead", "A", "a b"];
+		hostile.push(["a", "b"].join("/"));
+		hostile.push("a%2Fb");
+		for (const id of hostile) {
+			expect(PLUGIN_ID_RE.test(id)).toBe(false);
+		}
 	});
 });
