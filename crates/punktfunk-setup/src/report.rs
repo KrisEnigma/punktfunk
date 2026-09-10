@@ -151,11 +151,12 @@ fn next_steps(
 ) {
     let ip = facts.ip.clone().unwrap_or_else(|| "<host-ip>".to_string());
     ui.blank();
-    ui.line("  Done. Next:");
+    // The download page's third step, in its words, so the terminal ends where the page does.
+    ui.line("  Done. Next: let a device in.");
     // This box serves nothing. Console URL and pairing belong on the host, not localhost.
     if !choices.components.host {
         ui.line(
-            "  Open punktfunk and pick a host — then approve this device in that host's console.",
+            "  Open punktfunk here and pick the PC you stream from — then approve this device in that host's console.",
         );
         ui.line(&format!("  {DOCS}/install-client · {DOCS}/pairing"));
         ui.blank();
@@ -164,13 +165,13 @@ fn next_steps(
     // Probe again, not Facts: the install that just ran is usually what put the
     // console on the box. `--dry-run` shows the same text (it installs nothing).
     if run.which("punktfunk-web-server") || opts.dry {
-        ui.line("  Connect with a client — a notification appears here to approve it.");
+        ui.line("  On the device you play on, open punktfunk and pick this host. Approve it in the notification here, or in the console.");
         ui.line(&format!(
             "  Console: https://{ip}:47992  (its certificate is this host's own)"
         ));
         let password = match choices.web_password {
-            Some(_) => format!("  Password: the one you typed — print it with: {PASSWORD_READ}"),
-            None => format!("  Password: {PASSWORD_READ}"),
+            Some(_) => format!("  Password: the one you typed — this prints it: {PASSWORD_READ}"),
+            None => format!("  Password — this prints it: {PASSWORD_READ}"),
         };
         ui.line(&password);
     } else {

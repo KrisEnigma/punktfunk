@@ -936,10 +936,10 @@ fn welcome_page(ctx: &Ctx) -> Element {
         (
             match ctx.preset.artifact {
                 Artifact::Host => {
-                    "This installs the punktfunk host — it streams this PC's screen, audio and games to your devices."
+                    "This PC becomes the one you stream from: the punktfunk host sends its screen, audio and games to the devices you play on."
                 }
                 Artifact::Client => {
-                    "This installs the punktfunk client — it plays streams from a punktfunk host."
+                    "This PC becomes a device you play on: the punktfunk client shows the stream from the PC you stream from."
                 }
             },
             vec![continue_button(
@@ -1468,7 +1468,7 @@ fn done_page(ctx: &Ctx) -> Element {
                 ),
                 next_step(
                     "Install a client",
-                    "On the device you stream to — Windows, macOS, iOS, Android, Linux, Steam Deck — then connect and click Approve in the console.",
+                    "On the device you play on — Windows, macOS, iOS, Android, Linux, Steam Deck — then connect and press Approve in the console.",
                     "Client downloads",
                     &format!("{DOCS}/install-client"),
                 ),
@@ -1482,7 +1482,7 @@ fn done_page(ctx: &Ctx) -> Element {
                 ),
                 next_step(
                     "No host yet?",
-                    "Install the punktfunk host on the PC you want to stream from.",
+                    "Install the punktfunk host on the PC you stream from.",
                     "Host install guide",
                     &format!("{DOCS}/windows-host"),
                 ),

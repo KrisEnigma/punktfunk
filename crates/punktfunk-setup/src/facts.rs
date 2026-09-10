@@ -389,12 +389,14 @@ fn detect_family(os: &OsRelease, run: &dyn CommandRunner) -> Result<Detected, Pu
 pub fn floors(os: &OsRelease, family: Family) -> (Option<String>, Option<Floor>) {
     let floor = match os.id.as_str() {
         "debian" if os.major() < 13 => Some(Floor::Die(format!(
-            "Debian {} is below the glibc floor — Debian 13+ or build from source: {DOCS}/build-from-source",
-            os.version_id
+            "Debian {} is below the glibc floor — {}, or build from source: {DOCS}/build-from-source",
+            os.version_id,
+            crate::platform::floor("debian")
         ))),
         "ubuntu" if (20..=25).contains(&os.major()) => Some(Floor::Confirm(format!(
-            "Ubuntu {} installs the package but can't host — its desktop is too old to create a virtual display ({DOCS}/requirements#the-floor-for-a-working-host). Use 26.04+.",
-            os.version_id
+            "Ubuntu {} installs the package but can't host — its desktop is too old to create a virtual display ({DOCS}/requirements#the-floor-for-a-working-host). Runs on {}.",
+            os.version_id,
+            crate::platform::floor("debian")
         ))),
         "linuxmint" if (20..=22).contains(&os.major()) => Some(Floor::Confirm(format!(
             "Linux Mint {} (Ubuntu 24.04 base) installs the package but can't host — {DOCS}/requirements#cinnamon-linux-mint-and-lmde. LMDE 7 and Mint 23 can.",

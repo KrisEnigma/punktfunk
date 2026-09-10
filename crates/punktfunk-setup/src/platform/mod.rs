@@ -43,6 +43,19 @@ pub fn install_lines(id: &str) -> Vec<String> {
         .collect()
 }
 
+/// The platform's one-line floor, worded as the download page shows it. Empty for an
+/// unknown id.
+pub fn floor(id: &str) -> String {
+    platforms()["platforms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["id"] == id)
+        .and_then(|p| p["floor"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Lines before `marker` are the repo block; the rest is the install.
 fn split_at(id: &str, marker: &str) -> (Vec<String>, Vec<String>) {
     let lines = install_lines(id);
@@ -564,6 +577,13 @@ mod tests {
         for id in ["debian", "arch", "omarchy", "fedora", "bazzite", "steamos"] {
             assert!(!install_lines(id).is_empty(), "{id} has no install lines");
         }
+    }
+
+    // The Windows refusal quotes platforms.json's floor line; the check itself uses the
+    // build number. Both must name the same build.
+    #[test]
+    fn the_windows_floor_names_the_build_the_check_uses() {
+        assert!(floor("windows").contains(&windows::plan::MIN_HOST_BUILD.to_string()));
     }
 
     // The split is the one assumption. A reordered line here fails instead of on a box.
