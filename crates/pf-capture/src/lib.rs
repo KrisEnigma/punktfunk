@@ -685,13 +685,11 @@ pub fn open_portal_monitor(
     .map(|c| Box::new(c) as Box<dyn Capturer>)
 }
 
-/// Linux portal capturer bound to an already-created virtual output's PipeWire
-/// node. The capturer takes `keepalive`; dropping it releases the output. Pass
-/// `want_hdr` only when the output was brought up HDR — a PQ session cannot
-/// fall back to SDR. `cursor_id0_hides`: KWin rewrites `SPA_META_Cursor` on
-/// every buffer and treats `id == 0` as "pointer hidden". `pool_min`:
-/// [`POOL_MIN`], or [`KWIN_POOL_MIN`] for a KWin output. `unpaced`:
-/// [`unpaced_capture`] for a KWin output, else `false`.
+/// Linux capturer for an existing virtual output's PipeWire node.
+/// `keepalive` owns the output. `want_hdr` requires an HDR output.
+/// `cursor_id0_hides` selects KWin's rewritten cursor-meta contract.
+/// `producer_is_gamescope` selects its no-meta, LINEAR-only contract.
+/// KWin also needs [`KWIN_POOL_MIN`] and [`unpaced_capture`].
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub fn open_virtual_output(
@@ -705,6 +703,7 @@ pub fn open_virtual_output(
     policy: ZeroCopyPolicy,
     expect_exact_dims: bool,
     cursor_id0_hides: bool,
+    producer_is_gamescope: bool,
     pool_min: i32,
     unpaced: bool,
 ) -> Result<Box<dyn Capturer>> {
@@ -719,6 +718,7 @@ pub fn open_virtual_output(
         policy,
         expect_exact_dims,
         cursor_id0_hides,
+        producer_is_gamescope,
         pool_min,
         unpaced,
     )

@@ -122,6 +122,7 @@ pub fn run(opts: Options) -> Result<()> {
                 want,
                 crate::session_plan::CaptureBackend::resolve(),
                 compositor == crate::vdisplay::Compositor::Kwin,
+                compositor == crate::vdisplay::Compositor::Gamescope,
             )
             .context("capture virtual output")?
         }

@@ -95,6 +95,7 @@ mod linux {
             policy,
             vout.expect_exact_dims,
             kwin,
+            compositor == pf_vdisplay::Compositor::Gamescope,
             if kwin {
                 pf_capture::KWIN_POOL_MIN
             } else {

@@ -97,8 +97,8 @@ pub fn open_portal_monitor(
 }
 
 /// Capturer from an already-created [`crate::vdisplay::VirtualOutput`].
-/// Explodes the output so pf-capture never depends on the vdisplay type; the
-/// capturer takes the keepalive, so dropping it releases the output.
+/// The compositor flags carry PipeWire producer contracts that node ids and
+/// remote fds cannot reveal. The capturer owns the output keepalive.
 #[cfg(target_os = "linux")]
 pub fn capture_virtual_output(
     vout: crate::vdisplay::VirtualOutput,
@@ -110,6 +110,8 @@ pub fn capture_virtual_output(
     // a 3-buffer pool unless asked for `KWIN_POOL_MIN`, and paces delivery on a
     // millisecond-rounded timer unless offered no `maxFramerate` ceiling.
     kwin: bool,
+    // Gamescope omits cursor metadata and exports LINEAR-only dmabufs.
+    gamescope: bool,
 ) -> Result<Box<dyn Capturer>> {
     // Portal negotiates its own pixel format, so `want.gpu` gates GPU zero-copy
     // (this path is always the portal; `CaptureBackend` is Windows-only dispatch)
@@ -164,6 +166,7 @@ pub fn capture_virtual_output(
         zero_copy_policy(want.pyrowave, want.nv12_native),
         vout.expect_exact_dims,
         kwin,
+        gamescope,
         if kwin {
             pf_capture::KWIN_POOL_MIN
         } else {
@@ -258,6 +261,7 @@ pub fn capture_virtual_output(
     // Linux-only (`SPA_META_Cursor`, pool depth). IDD-push has no such meta; hide is
     // CURSOR_SUPPRESSED.
     _kwin: bool,
+    _gamescope: bool,
 ) -> Result<Box<dyn Capturer>> {
     let target = vout.win_capture.clone().ok_or_else(|| {
         anyhow::anyhow!(
@@ -456,6 +460,7 @@ pub fn capture_virtual_output(
     _want: OutputFormat,
     _capture: crate::session_plan::CaptureBackend,
     _kwin: bool,
+    _gamescope: bool,
 ) -> Result<Box<dyn Capturer>> {
     anyhow::bail!("virtual-output capture requires Linux or Windows")
 }
@@ -497,6 +502,7 @@ mod live_tests {
             vout,
             want,
             crate::session_plan::CaptureBackend::IddPush,
+            false,
             false,
         )
         .expect("open the IDD-push capturer");
@@ -652,6 +658,7 @@ mod live_tests {
             vout,
             want,
             crate::session_plan::CaptureBackend::IddPush,
+            false,
             false,
         )
         .expect("open the IDD-push capturer");

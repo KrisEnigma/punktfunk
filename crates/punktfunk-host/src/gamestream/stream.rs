@@ -549,6 +549,7 @@ fn open_gs_mirror_source(
         gs_session_plan(&cfg, metadata_cursor).output_format(),
         crate::session_plan::CaptureBackend::resolve(),
         compositor == crate::vdisplay::Compositor::Kwin,
+        compositor == crate::vdisplay::Compositor::Gamescope,
     )
     .context("attach a capturer to the mirrored monitor")
 }
@@ -708,6 +709,7 @@ fn open_gs_virtual_source(
         .output_format(),
         crate::session_plan::CaptureBackend::resolve(),
         compositor == crate::vdisplay::Compositor::Kwin,
+        compositor == crate::vdisplay::Compositor::Gamescope,
     )
     .context("capture virtual output")?;
     capturer.set_active(true);

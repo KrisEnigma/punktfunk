@@ -524,9 +524,10 @@ in
         wantedBy =
           optional cfg.host.autoStart "default.target"
           ++ optional cfg.host.desktopSession "graphical-session.target";
-        # The host may exec external helpers (pw-dump, sh, and — for the gamescope/kwin backends —
-        # the compositor). Extend this in your config for a headless gamescope/KWin appliance.
+        # Nested gamescope does `exec steam -gamepadui …`. bash/coreutils/pipewire alone cannot
+        # see programs.steam on /run/current-system/sw, so the child exits and PipeWire dies.
         path = [
+          config.system.path
           pkgs.bash
           pkgs.coreutils
           pkgs.pipewire
