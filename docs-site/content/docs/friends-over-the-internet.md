@@ -76,12 +76,13 @@ everything — that is the step people skip.
 
 The friend's first connect shows up on your console as a pending device. Admit it with a
 [PIN](/docs/pairing#pair-with-a-pin), not a bare Approve — read the PIN out over voice chat — and
-pick **Controller only** with an expiry
+pick **Controller only**
 ([choosing access](/docs/pairing#choosing-access-when-you-admit-a-device)).
 
-When the expiry passes the device is refused until you re-grant it. **Expire now** or **Unpair**
-on the Paired devices table ends a running session at once. There is no "unpair when they
-disconnect" yet, so set an expiry that fits the evening.
+For the expiry, **Until they disconnect** fits an evening: the device's access ends with its last
+session and the record is gone, so nothing is left to clean up and nothing can reconnect
+unattended. A clock-time expiry works too, and refuses the device once it passes. **Expire now**
+or **Unpair** on the Paired devices table ends a running session at once.
 
 ## Port forwarding
 
@@ -92,30 +93,21 @@ this path only when neither fits, and take the rules below seriously.
 Forward UDP `9777` and `9779` to the host. **Never forward `47990` or `9778`.**
 
 Send a [link](/docs/profiles-and-links), not a bare address, so your friend's first connect is
-verified rather than blind. **Copy link** on a client already paired to this host writes one
-carrying `fp=`; swap the address in `host=` for your public one:
+verified rather than blind. The **Connect** card on the Host page writes one; swap its address for
+your public one:
 
 ```
-punktfunk://connect/<id>?host=203.0.113.5:9777&fp=<64 hex>
+punktfunk://connect/<id>?host=203.0.113.5&fp=<64 hex>
 ```
 
-Strangers knock once the port is open. Nothing streams to them — an unpaired device is refused, and
-pairing answers only while a window is armed — but the host can't yet tell a knock from the internet
-apart from one on your couch, so two things fall to you.
+Strangers knock once the port is open. Nothing streams to them: an unpaired device is refused, the
+host tags the knock **From the internet**, and such a knock is admitted only through a PIN window
+named for its own fingerprint — the row's **Arm PIN** does that, and its access starts at
+Controller · until they disconnect. A window you opened for your own next device never answers
+one, and neither refusal spends the PIN.
 
-**Bind the window to their device.** The console's **Pair a device** window runs for two minutes and
-any device that knocks can consume it. Binding it to one device is CLI-only today:
-
-```sh
-punktfunk-host ctl pending --json    # their knock, with the full fingerprint
-punktfunk-host ctl pair arm --fingerprint <fp> --preset controller --expires-in 14400
-```
-
-Read the PIN out over voice chat. Don't use the one-click **Approve** here — the name on a pending
-device is one that device chose for itself.
-
-**Give it an expiry.** Arming from the console defaults to Full control, forever; pick Controller
-only and a deadline that fits the evening ([Admit them as a guest](#admit-them-as-a-guest)).
+Read the PIN out over voice chat. There is no Approve button on that row on purpose: the name a
+pending device shows is one it chose for itself, and from the internet that is all it is.
 
 A pairing that keeps being refused usually means a stranger is knocking into the same rate limit.
 Wait a moment and retry.
