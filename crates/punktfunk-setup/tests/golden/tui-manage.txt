@@ -4,7 +4,7 @@
 │
 │  ▸ Apply these changes
 │  ──────────────────────────────────────────────────────────
-│    Components               Host ✓ · Client ✗
+│    This machine is          the PC I stream from (host)
 │    Channel                  canary
 │    Full controller support  yes — joins the punktfunk group (grants usbip attach)
 │    Third-party clients      no  — punktfunk's own apps don't need it

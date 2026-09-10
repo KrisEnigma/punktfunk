@@ -9,7 +9,7 @@
   + sudo apt install -y punktfunk-client
 ==> Checking
 
-  Done. Next:
-  Open punktfunk and pick a host — then approve this device in that host's console.
+  Done. Next: let a device in.
+  Open punktfunk here and pick the PC you stream from — then approve this device in that host's console.
   https://docs.punktfunk.unom.io/docs/install-client · https://docs.punktfunk.unom.io/docs/pairing
 
