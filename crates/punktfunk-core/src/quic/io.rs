@@ -95,24 +95,27 @@ mod tests {
         let second = b"the-frame-after-it".to_vec();
         let (f1, f2) = (first.clone(), second.clone());
 
+        let (head_tx, head_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
         let writer = tokio::spawn(async move {
             let (mut send, _recv) = host_conn.open_bi().await.expect("open bi");
             let framed = crate::quic::frame(&f1);
-            // Prefix + partial payload, then a pause so the timeout can cancel mid-frame.
+            // Prefix + partial payload. The reader cancels, then this task writes the tail.
             let split = 2 + f1.len() / 3;
             send.write_all(&framed[..split]).await.expect("write head");
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let _ = head_tx.send(());
+            let _ = resume_rx.await;
             send.write_all(&framed[split..]).await.expect("write tail");
             send.write_all(&crate::quic::frame(&f2))
                 .await
                 .expect("write second");
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             host_conn
         });
 
         let (_send, recv) = client_conn.accept_bi().await.expect("accept bi");
         let mut reader = io::MsgReader::new(recv);
 
+        head_rx.await.expect("head written");
         // Cancel before the tail arrives — same drop as a sibling `select!` arm.
         let cancelled =
             tokio::time::timeout(std::time::Duration::from_millis(30), reader.read_msg()).await;
@@ -120,6 +123,7 @@ mod tests {
             cancelled.is_err(),
             "the head-only frame must not complete yet (test setup)"
         );
+        let _ = resume_tx.send(());
 
         let got = tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_msg())
             .await
@@ -144,7 +148,6 @@ mod tests {
             let (mut send, _recv) = host_conn.open_bi().await.expect("open bi");
             send.write_all(&crate::quic::frame(&[])).await.unwrap();
             send.write_all(&crate::quic::frame(b"after")).await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             host_conn
         });
         let (_send, recv) = client_conn.accept_bi().await.expect("accept bi");
