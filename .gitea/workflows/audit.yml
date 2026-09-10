@@ -9,13 +9,9 @@
 #                   login gate, session sealing, mgmt bearer token), sdk (@punktfunk/host),
 #                   plugin-kit (@punktfunk/plugin-kit).
 #   * pnpm audit  → clients/decky (the Steam Deck plugin).
-#   * docs-site   → scanned NON-blocking (continue-on-error). 2026-08-14: docs-site's own deps
-#                   are current (fumadocs/tanstack/react bumped; build + tsc + serve verified),
-#                   but every remaining advisory is pinned INSIDE @unom/ui 0.9.2's dependency
-#                   tree (@payloadcms/* → fast-uri/image-size/sharp, next 16.x, sass→immutable) —
-#                   nothing bumpable from this lockfile, and overrides would fork what the CMS
-#                   actually ships. The fix belongs in the @unom/ui package repo; flip this to
-#                   blocking after a ui release with a clean payload chain lands here.
+#   * docs-site   → scanned NON-blocking. Its `overrides` lift the chains fumadocs and @unom/ui
+#                   pull in (next, sharp, fast-uri, immutable), as web's do; it carries web's
+#                   three ignores for the same reasons.
 #   * cargo-about → license-allowlist gate over the host + driver workspaces (about.toml `accepted`);
 #                   fails if any crate carries a license outside the allowlist. Android dependencies
 #                   are locked and checksum-verified by Gradle in android.yml.
@@ -167,7 +163,10 @@ jobs:
         run: apt-get update && apt-get install -y --no-install-recommends ca-certificates git
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: bun audit (non-blocking)
-        run: bun audit || echo "::warning::docs-site has known advisories (CMS/UI + nitropack chains) — tracked in punktfunk-planning design/cra-readiness.md"
+        run: |
+          bun audit --ignore=GHSA-w3rx-r6r6-pgpr --ignore=GHSA-5p2g-fcmc-qvqq \
+            --ignore=GHSA-jg8r-5jh2-v2xj \
+            || echo "::warning::docs-site has a new advisory — lift it with an override, as web does"
 
   pnpm-audit:
     runs-on: ubuntu-24.04
