@@ -388,6 +388,8 @@
 	"library_source_settings_failed": "Couldn't save the settings — {issue}",
 	"library_source_settings_unreachable": "Couldn't reach this source's settings — {issue}",
 	"library_source_settings_refused": "the host said no",
+	"library_source_settings_own_page": "{source} keeps its settings on its own page.",
+	"library_source_settings_open_page": "Open {source}",
 	"library_source_settings_json_hint": "This source's settings don't fit a simple form, so edit them as JSON. They're checked before saving.",
 	"library_migrate_title": "Game sources are moving to plugins",
 	"library_migrate_help": "Each launcher is becoming its own add-on, so you only install the ones you use — and each gets its own settings. Install one and it takes over from the built-in scanner; your games keep the same tiles. Nothing changes if you do nothing yet.",

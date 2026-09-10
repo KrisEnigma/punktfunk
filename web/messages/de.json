@@ -388,6 +388,8 @@
 	"library_source_settings_failed": "Einstellungen konnten nicht gespeichert werden — {issue}",
 	"library_source_settings_unreachable": "Die Einstellungen dieser Quelle sind nicht erreichbar — {issue}",
 	"library_source_settings_refused": "der Host hat abgelehnt",
+	"library_source_settings_own_page": "{source} verwaltet seine Einstellungen auf einer eigenen Seite.",
+	"library_source_settings_open_page": "{source} öffnen",
 	"library_source_settings_json_hint": "Die Einstellungen dieser Quelle passen in kein einfaches Formular — bearbeite sie als JSON. Sie werden vor dem Speichern geprüft.",
 	"library_migrate_title": "Spielquellen werden zu Plugins",
 	"library_migrate_help": "Jeder Launcher wird ein eigenes Add-on — du installierst nur die, die du nutzt, und jedes bekommt eigene Einstellungen. Installierst du eines, übernimmt es vom eingebauten Scanner; deine Spiele behalten ihre Kacheln. Wenn du nichts tust, ändert sich nichts.",

@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { toast } from "@unom/ui/toast";
 import { type FC, useEffect, useState } from "react";
 import type { ScannerInfo } from "@/api/gen/model/scannerInfo";
@@ -53,6 +54,9 @@ const refusal = async (res: Response): Promise<string> => {
  * Fields the derivation can't express fall back to a raw JSON editor. That fallback is what bounds
  * the risk of the whole approach: worst case the drawer is a validated textarea, and the PUT still
  * validates by decode host-side either way.
+ *
+ * `config` is optional on the kit's `serveUi`, so a source that ships its own page may serve no
+ * `__config` at all. That 404 points at the plugin's page instead of reporting a failure.
  */
 export const SourceSettingsDialog: FC<{
 	source: ScannerInfo;
@@ -62,6 +66,8 @@ export const SourceSettingsDialog: FC<{
 	const [state, setState] = useState<
 		| { tag: "loading" }
 		| { tag: "error"; message: string }
+		// The plugin serves no `__config`: its settings are its own page, not this form.
+		| { tag: "ownPage" }
 		| { tag: "ready"; schema: JsonSchemaDoc | null; value: JsonObject }
 	>({ tag: "loading" });
 	const [raw, setRaw] = useState("");
@@ -74,6 +80,14 @@ export const SourceSettingsDialog: FC<{
 				const res = await fetch(`/api/plugin-config/${pluginId}`, {
 					credentials: "same-origin",
 				});
+				// `config` is optional on the kit's `serveUi`, and a plugin that omits it answers
+				// `__config` 404 — it keeps its settings on the page it already serves. Not a
+				// failure, so it must not read as one. The route's own 404 (a malformed id) cannot
+				// reach here: `pluginId` is a source the host itself listed.
+				if (res.status === 404) {
+					if (!cancelled) setState({ tag: "ownPage" });
+					return;
+				}
 				if (!res.ok) throw new Error(await refusal(res));
 				const body = (await res.json()) as {
 					schema: JsonSchemaDoc | null;
@@ -133,6 +147,18 @@ export const SourceSettingsDialog: FC<{
 					<p className="text-sm text-destructive">
 						{m.library_source_settings_unreachable({ issue: state.message })}
 					</p>
+				)}
+				{state.tag === "ownPage" && (
+					<div className="space-y-3">
+						<p className="text-sm text-muted-foreground">
+							{m.library_source_settings_own_page({ source: source.label })}
+						</p>
+						<Button asChild onClick={onClose}>
+							<Link to="/plugins/$pluginId/$" params={{ pluginId, _splat: "" }}>
+								{m.library_source_settings_open_page({ source: source.label })}
+							</Link>
+						</Button>
+					</div>
 				)}
 				{state.tag === "ready" && (
 					<ConfigForm
