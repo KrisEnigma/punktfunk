@@ -4115,7 +4115,7 @@ fn spawn(
         .context("spawn gamescope (is it installed? `apt install gamescope`)")
 }
 
-/// `"$1"` is the host executable — an argv, so the path never needs shell-escaping.
+/// Builds the nested command wrapper with quoted environment and relay values.
 fn nested_wrapper_script(
     relay: &std::path::Path,
     with_splash: bool,
@@ -4123,9 +4123,10 @@ fn nested_wrapper_script(
 ) -> String {
     let env_kv = nested_env
         .iter()
-        .map(|(k, v)| format!("{k}={v}"))
+        .map(|(k, v)| shell_word(&format!("{k}={v}")))
         .collect::<Vec<_>>()
         .join(" ");
+    let relay = shell_word(&relay.to_string_lossy());
     let run = if env_kv.is_empty() {
         "exec \"$@\"".to_string()
     } else {
@@ -4137,13 +4138,15 @@ fn nested_wrapper_script(
         } else {
             format!("env {env_kv} \"$1\" gamescope-splash &")
         };
-        format!(
-            "printf %s \"$LIBEI_SOCKET\" > '{}'; {splash} shift; {run}",
-            relay.display()
-        )
+        format!("printf %s \"$LIBEI_SOCKET\" > {relay}; {splash} shift; {run}")
     } else {
-        format!("printf %s \"$LIBEI_SOCKET\" > '{}'; {run}", relay.display())
+        format!("printf %s \"$LIBEI_SOCKET\" > {relay}; {run}")
     }
+}
+
+/// Quotes one POSIX shell word, including embedded apostrophes.
+fn shell_word(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 struct GamescopeProc {
@@ -4176,10 +4179,10 @@ mod tests {
         managed_darken_release_edge, mask_unit, missing_flags, mode_mismatch,
         nested_wrapper_script, our_wsi_layer_dir, parse_listed_units, plan_bind, refresh_rate_list,
         release_autologin_mask, remove_idle_dropin, script_hardcodes_gamescope, sentinel_advanced,
-        shape_dedicated_command, switch_ends_mask_window, takeover_state_is_live, unmask_unit,
-        xwayland_refusal_marker, BindOff, BindPlan, BoxOutputSize, DmHelperError, SessionBind,
-        TakeoverState, WsiPlan, AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH, PENDING_RESTORE,
-        RESTORE_FLIGHT, STOPPED_AUTOLOGIN, WSI_OFF_ENV, X11_SOCKET_DIR,
+        shape_dedicated_command, shell_word, switch_ends_mask_window, takeover_state_is_live,
+        unmask_unit, xwayland_refusal_marker, BindOff, BindPlan, BoxOutputSize, DmHelperError,
+        SessionBind, TakeoverState, WsiPlan, AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH,
+        PENDING_RESTORE, RESTORE_FLIGHT, STOPPED_AUTOLOGIN, WSI_OFF_ENV, X11_SOCKET_DIR,
     };
     use std::time::{Duration, Instant};
 
@@ -4434,7 +4437,8 @@ mod tests {
             false,
             &[("PUNKTFUNK_GAMESCOPE_WSI", "1".to_string())],
         );
-        assert!(wsi.contains("exec env PUNKTFUNK_GAMESCOPE_WSI=1 \"$@\""));
+        assert!(wsi.contains("exec env 'PUNKTFUNK_GAMESCOPE_WSI=1' \"$@\""));
+        assert_eq!(shell_word("a b'c;$HOME"), "'a b'\"'\"'c;$HOME'");
     }
 
     #[test]
