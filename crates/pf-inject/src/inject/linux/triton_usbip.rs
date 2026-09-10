@@ -694,6 +694,7 @@ fn puck_connect_report() -> InputReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_sysfs::{hid_entry, wait_hid_gone};
 
     #[test]
     fn sparse_input_report_survives_following_state() {
@@ -1009,15 +1010,16 @@ mod tests {
         st.raw[..raw.len()].copy_from_slice(raw);
         st.raw_len = raw.len() as u8;
         let start = std::time::Instant::now();
+        let mut found = None;
         while start.elapsed() < std::time::Duration::from_millis(1500) {
             pad.write_state(&st);
             let _ = pad.service();
+            if let Some(e) = hid_entry(":28DE:1302") {
+                found = Some(e);
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(8));
         }
-        let found = std::fs::read_dir("/sys/bus/hid/devices")
-            .expect("/sys/bus/hid/devices")
-            .flatten()
-            .find(|e| e.file_name().to_string_lossy().contains(":28DE:1302"));
         let entry = found.expect("virtual 28DE:1302 did not enumerate via vhci_hcd");
         let target = std::fs::read_link(entry.path()).expect("hid device link");
         assert!(
@@ -1026,11 +1028,9 @@ mod tests {
             target.display()
         );
         drop(pad);
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        let still = std::fs::read_dir("/sys/bus/hid/devices")
-            .expect("/sys/bus/hid/devices")
-            .flatten()
-            .any(|e| e.file_name().to_string_lossy().contains(":28DE:1302"));
-        assert!(!still, "device not torn down on drop");
+        assert!(
+            wait_hid_gone(":28DE:1302", std::time::Duration::from_millis(400)),
+            "device not torn down on drop"
+        );
     }
 }
