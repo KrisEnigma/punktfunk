@@ -3,9 +3,14 @@
 // This absorbs the old Streamed screen card: the choice of streaming a real monitor instead of
 // a virtual one is a property OF a monitor, so the radio sits on the monitor's row rather than
 // in a separate card with its own 214-character introduction.
-import type { FC } from "react";
-import type { ApiMonitorInfo, DisplayPolicy } from "@/api/gen/model";
+import type { FC, ReactNode } from "react";
+import type {
+	ApiMonitorInfo,
+	DisplayPolicy,
+	EffectivePolicy,
+} from "@/api/gen/model";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { m } from "@/paraglide/messages";
@@ -17,9 +22,22 @@ export const MonitorRows: FC<{
 	/** The host can honour a pin at all (`enforced` carries `capture_monitor`). */
 	pinSupported: boolean;
 	policy?: DisplayPolicy;
+	/** In-force policy, so "while streaming" can default from the topology axis. */
+	effective?: EffectivePolicy;
 	busy?: boolean;
 	onPick: (connector: string | null) => void;
-}> = ({ monitors, pinned, pinSupported, policy, busy, onPick }) => {
+	/** Keep this connector lit through an exclusive stream, or stop keeping it (§5.5). */
+	onKeepLit?: (connector: string, keep: boolean) => void;
+}> = ({
+	monitors,
+	pinned,
+	pinSupported,
+	policy,
+	effective,
+	busy,
+	onPick,
+	onKeepLit,
+}) => {
 	// Our own virtual displays show up in the head list on KWin; they are on the map already and
 	// are not something to stream FROM.
 	const heads = monitors.filter((mon) => !mon.managed);
@@ -29,6 +47,13 @@ export const MonitorRows: FC<{
 	// saying nothing.
 	const envLocked = !!pinned && !!policy && policy.capture_monitor !== pinned;
 	const locked = busy || envLocked;
+	// Only `exclusive` turns a monitor off, so only there is "stays on" a real choice —
+	// under every other topology every monitor already stays on, and offering the control
+	// would be offering one that does nothing.
+	const exclusive = effective?.topology === "exclusive";
+	const keptLit = new Set(
+		(policy?.keep_monitors ?? []).map((c) => c.toLowerCase()),
+	);
 
 	return (
 		<Card>
@@ -74,6 +99,15 @@ export const MonitorRows: FC<{
 							// No radio at all where the host cannot honour a pin: the row is then
 							// just the inventory it always was.
 							onPick={pinSupported ? () => onPick(mon.connector) : undefined}
+							trailing={
+								exclusive && onKeepLit && mon.enabled ? (
+									<StaysOn
+										on={keptLit.has(mon.connector.toLowerCase())}
+										busy={busy}
+										onSet={(keep) => onKeepLit(mon.connector, keep)}
+									/>
+								) : undefined
+							}
 						/>
 					))}
 				</ul>
@@ -82,14 +116,43 @@ export const MonitorRows: FC<{
 	);
 };
 
+/** `Stays on` / `Turns off` for one monitor while a stream owns the screen. */
+const StaysOn: FC<{
+	on: boolean;
+	busy?: boolean;
+	onSet: (keep: boolean) => void;
+}> = ({ on, busy, onSet }) => (
+	<span className="flex shrink-0 gap-1">
+		{([true, false] as const).map((keep) => (
+			<Button
+				key={String(keep)}
+				size="sm"
+				variant={on === keep ? "default" : "outline"}
+				aria-pressed={on === keep}
+				disabled={busy}
+				onClick={(e) => {
+					// The row itself is the streamed-screen picker; this is a different question.
+					e.stopPropagation();
+					onSet(keep);
+				}}
+			>
+				{keep
+					? m.display_q_monitors_extend()
+					: m.display_q_monitors_exclusive()}
+			</Button>
+		))}
+	</span>
+);
+
 const Row: FC<{
 	selected: boolean;
 	disabled: boolean;
 	title: string;
 	detail?: string;
-	badges?: React.ReactNode;
+	badges?: ReactNode;
+	trailing?: ReactNode;
 	onPick?: () => void;
-}> = ({ selected, disabled, title, detail, badges, onPick }) => {
+}> = ({ selected, disabled, title, detail, badges, trailing, onPick }) => {
 	const body = (
 		<>
 			<span className="min-w-0 flex-1">
@@ -106,6 +169,7 @@ const Row: FC<{
 					{selected ? m.display_map_streamed() : m.display_stream_this()}
 				</span>
 			)}
+			{trailing}
 		</>
 	);
 	if (!onPick) {
