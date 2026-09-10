@@ -1,6 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
-import { motion } from "motion/react";
+import { AnimatePresence, motion, stagger, type Variants } from "motion/react";
 import { type ReactNode, useState } from "react";
 import { useHostEvents } from "@/api/events";
 import { pluginIcon, uiPlugins, usePlugins } from "@/api/plugins";
@@ -26,6 +26,41 @@ const ITEM =
 	"group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground";
 const ACTIVE = { className: "bg-primary/15 text-foreground font-medium" };
 const RISE = { from: { opacity: 0, x: -20 }, enter: { opacity: 1, x: 0 } };
+
+/** The phone bar slides up on load and its tabs rise in turn behind it, as the sidebar's items do. */
+const BAR: Variants = {
+	from: { y: "100%" },
+	enter: {
+		y: 0,
+		transition: {
+			type: "spring",
+			bounce: 0,
+			duration: 0.45,
+			delayChildren: stagger(0.05, { startDelay: 0.1 }),
+		},
+	},
+};
+const TAB = { from: { opacity: 0, y: 12 }, enter: { opacity: 1, y: 0 } };
+
+/** The More sheet rises over the bar with its rows following; `exit` plays it back out. */
+const SHEET: Variants = {
+	from: { opacity: 0, y: 24 },
+	enter: {
+		opacity: 1,
+		y: 0,
+		transition: {
+			type: "spring",
+			bounce: 0,
+			duration: 0.35,
+			delayChildren: stagger(0.03, { startDelay: 0.05 }),
+		},
+	},
+	exit: { opacity: 0, y: 16, transition: { duration: 0.15 } },
+};
+
+/** A press answers at once. Objects, never labels: a label would stop the item inheriting its entrance. */
+const PRESS = { scale: 0.9 };
+const ROW_PRESS = { scale: 0.98 };
 
 export function AppShell({ children }: { children: ReactNode }) {
 	// Read the locale so the whole shell re-renders on a language switch.
@@ -209,6 +244,9 @@ function PluginLink({
  * "More" opens a LIST — icon, label, one line of what the page is for — grouped Manage /
  * Pinned / Plugins. It was a 4-column icon grid with 10 px labels, which is unreadable and
  * says nothing about what a page does.
+ *
+ * The bar slides up on load with its tabs rising in turn. The sheet rises over it with its rows
+ * following, and every tab and row answers a press. A pill behind the icon marks the page.
  */
 function MobileNav() {
 	const [moreOpen, setMoreOpen] = useState(false);
@@ -232,87 +270,134 @@ function MobileNav() {
 	const tab =
 		"flex flex-1 flex-col items-center justify-center gap-1 px-0.5 py-2 text-muted-foreground transition-colors";
 	const lbl = "w-full truncate text-center text-xs leading-tight";
+	const tabOn = "font-medium text-foreground";
 	const close = () => setMoreOpen(false);
+	// Which tab marks the page: a bar tab by its route, else More for anything in the sheet.
+	const on = (to: string, exact?: boolean) =>
+		pathname === to || (!exact && pathname.startsWith(`${to}/`));
+	const activeTo =
+		bar.find((n) => on(n.to, n.exact))?.to ?? (overflowActive ? "more" : null);
 	return (
 		<>
 			{/* Tap-outside backdrop, under the bar (z-50) but over the page. */}
-			{moreOpen && (
-				<button
-					type="button"
-					aria-label={m.nav_close_menu()}
-					className="fixed inset-0 z-40 bg-black/40 sm:hidden"
-					onClick={close}
-				/>
-			)}
-			<nav
+			<AnimatePresence>
+				{moreOpen && (
+					<motion.button
+						type="button"
+						aria-label={m.nav_close_menu()}
+						className="fixed inset-0 z-40 bg-black/40 sm:hidden"
+						onClick={close}
+						initial={{ opacity: 0 }}
+						animate={{ opacity: 1 }}
+						exit={{ opacity: 0 }}
+					/>
+				)}
+			</AnimatePresence>
+			<motion.nav
+				initial="from"
+				animate="enter"
+				variants={BAR}
 				className="fixed inset-x-0 bottom-0 z-50 sm:hidden"
 				style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
 			>
 				{/* The "More" sheet sits directly above the bar (bottom-full of the fixed nav).
 				    Capped at 70vh so a host with several plugins still shows the bar under it. */}
-				{moreOpen && (
-					<Stagger
-						root
-						gap={0.03}
-						className="absolute inset-x-0 bottom-full max-h-[70vh] overflow-y-auto border-t bg-card/95 backdrop-blur"
-					>
-						{spill.length > 0 && (
-							<MoreGroup>
-								{spill.map((n) => (
+				<AnimatePresence>
+					{moreOpen && (
+						<motion.div
+							initial="from"
+							animate="enter"
+							exit="exit"
+							variants={SHEET}
+							className="absolute inset-x-0 bottom-full max-h-[70vh] overflow-y-auto border-t bg-card/95 backdrop-blur"
+						>
+							{spill.length > 0 && (
+								<MoreGroup>
+									{spill.map((n) => (
+										<MoreRow key={n.to} entry={n} onNavigate={close} />
+									))}
+								</MoreGroup>
+							)}
+							<MoreGroup label={m.nav_group_manage()}>
+								{MANAGE.map((n) => (
 									<MoreRow key={n.to} entry={n} onNavigate={close} />
 								))}
 							</MoreGroup>
-						)}
-						<MoreGroup label={m.nav_group_manage()}>
-							{MANAGE.map((n) => (
-								<MoreRow key={n.to} entry={n} onNavigate={close} />
-							))}
-						</MoreGroup>
-						{pinnedPlugins.length > 0 && (
-							<MoreGroup label={m.nav_group_pinned()}>
-								{pinnedPlugins.map((p) => (
-									<MorePluginRow key={p.id} plugin={p} onNavigate={close} />
-								))}
-							</MoreGroup>
-						)}
-						{rest.length > 0 && (
-							<MoreGroup label={m.nav_plugins()}>
-								{rest.map((p) => (
-									<MorePluginRow key={p.id} plugin={p} onNavigate={close} />
-								))}
-							</MoreGroup>
-						)}
-					</Stagger>
-				)}
+							{pinnedPlugins.length > 0 && (
+								<MoreGroup label={m.nav_group_pinned()}>
+									{pinnedPlugins.map((p) => (
+										<MorePluginRow key={p.id} plugin={p} onNavigate={close} />
+									))}
+								</MoreGroup>
+							)}
+							{rest.length > 0 && (
+								<MoreGroup label={m.nav_plugins()}>
+									{rest.map((p) => (
+										<MorePluginRow key={p.id} plugin={p} onNavigate={close} />
+									))}
+								</MoreGroup>
+							)}
+						</motion.div>
+					)}
+				</AnimatePresence>
 				<div className="flex border-t bg-card/95 backdrop-blur">
 					{bar.map(({ to, icon: Icon, label, exact }) => (
-						<Link
+						<MLink
 							key={to}
 							to={to}
 							onClick={close}
+							variants={TAB}
+							whileTap={PRESS}
 							activeOptions={{ exact: exact === true }}
-							className={tab}
-							activeProps={{ className: "text-[var(--brand-light)]" }}
+							className={cn(tab, activeTo === to && tabOn)}
 						>
-							<Icon className="size-5 shrink-0" />
+							<TabIcon active={activeTo === to}>
+								<Icon className="size-5 shrink-0" />
+							</TabIcon>
 							<span className={lbl}>{label()}</span>
-						</Link>
+						</MLink>
 					))}
-					<button
+					<motion.button
 						type="button"
+						variants={TAB}
+						whileTap={PRESS}
 						onClick={() => setMoreOpen((o) => !o)}
 						aria-expanded={moreOpen}
-						className={cn(
-							tab,
-							(moreOpen || overflowActive) && "text-[var(--brand-light)]",
-						)}
+						className={cn(tab, (moreOpen || overflowActive) && tabOn)}
 					>
-						<MoreHorizontal className="size-5 shrink-0" />
+						<TabIcon active={activeTo === "more"}>
+							<MoreHorizontal className="size-5 shrink-0" />
+						</TabIcon>
 						<span className={lbl}>{m.nav_more()}</span>
-					</button>
+					</motion.button>
 				</div>
-			</nav>
+			</motion.nav>
 		</>
+	);
+}
+
+/**
+ * A tab's icon, over the pill that marks the page you are on. The pill is one shared `layoutId`,
+ * so switching tabs slides it across instead of blinking it out and back in.
+ */
+function TabIcon({
+	active,
+	children,
+}: {
+	active: boolean;
+	children: ReactNode;
+}) {
+	return (
+		<span className="relative flex h-7 w-12 items-center justify-center">
+			{active && (
+				<motion.span
+					layoutId="tab-pill"
+					className="absolute inset-0 rounded-full bg-primary/15"
+					transition={{ type: "spring", bounce: 0.2, duration: 0.4 }}
+				/>
+			)}
+			<span className="relative">{children}</span>
+		</span>
 	);
 }
 
@@ -335,9 +420,12 @@ function MoreGroup({
 	);
 }
 
-/** A 44 px-tall row: icon, label, and the one line that says what the page is for. */
+/**
+ * A 44 px-tall row: icon, label, and the one line that says what the page is for. The router's
+ * `data-status` marks the page you are on; an appended active class lost to the muted colour.
+ */
 const MORE_ROW =
-	"flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground transition-colors";
+	"flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground transition-colors data-[status=active]:bg-primary/15 data-[status=active]:text-foreground";
 
 function MoreRow({
 	entry,
@@ -348,13 +436,12 @@ function MoreRow({
 }) {
 	const { to, icon: Icon, label, hint, exact } = entry;
 	return (
-		<motion.li variants={ROW}>
+		<motion.li variants={ROW} whileTap={ROW_PRESS}>
 			<Link
 				to={to}
 				onClick={onNavigate}
 				activeOptions={{ exact: exact === true }}
 				className={MORE_ROW}
-				activeProps={{ className: "text-[var(--brand-light)]" }}
 			>
 				<Icon className="size-5 shrink-0" />
 				<span className="min-w-0">
@@ -375,13 +462,12 @@ function MorePluginRow({
 }) {
 	const Icon = pluginIcon(plugin.ui?.icon);
 	return (
-		<motion.li variants={ROW}>
+		<motion.li variants={ROW} whileTap={ROW_PRESS}>
 			<Link
 				to="/plugins/$pluginId/$"
 				params={{ pluginId: plugin.id, _splat: "" }}
 				onClick={onNavigate}
 				className={MORE_ROW}
-				activeProps={{ className: "text-[var(--brand-light)]" }}
 			>
 				<Icon className="size-5 shrink-0" />
 				<span className="block min-w-0 truncate font-medium text-foreground">
