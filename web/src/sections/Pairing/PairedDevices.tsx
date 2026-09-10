@@ -274,6 +274,7 @@ export const PairedDevicesSection: FC = () => {
 				onUnpairAll={onUnpairAll}
 				onDisplaySettings={setDisplayTarget}
 				settings={displaySettings.data}
+				perDevice={(displaySettings.data?.client_enforced ?? []).length > 0}
 				pendingFingerprint={pendingFingerprint}
 				isUnpairingAll={isUnpairingAll}
 			/>
@@ -316,6 +317,10 @@ export const PairedDevices: FC<{
 	/** Display policy + stored overlays, so the Display column can be rendered without a
 	 * second fetch per row. */
 	settings?: DisplaySettingsState;
+	/** Whether this host acts on ANY per-device field. False hides the column and its
+	 * control — an older host has no `/display/clients` at all, and a sheet with no
+	 * questions in it is the dead control D1 exists to prevent. */
+	perDevice: boolean;
 	/**
 	 * Name a Moonlight row. Offered only on those: a native device already carries the name it gave
 	 * at pairing, while a Moonlight certificate carries nothing that identifies the device at all.
@@ -340,6 +345,7 @@ export const PairedDevices: FC<{
 	onUnpairAll,
 	onDisplaySettings,
 	settings,
+	perDevice,
 	pendingFingerprint,
 	isUnpairingAll,
 }) => (
@@ -373,7 +379,9 @@ export const PairedDevices: FC<{
 								<TableHead>{m.clients_name()}</TableHead>
 								<TableHead>{m.pairing_protocol()}</TableHead>
 								<TableHead>{m.pairing_access()}</TableHead>
-								<TableHead>{m.display_device_column()}</TableHead>
+								{perDevice && (
+									<TableHead>{m.display_device_column()}</TableHead>
+								)}
 								<TableHead>{m.clients_fingerprint()}</TableHead>
 								<TableHead className="w-20" />
 							</TableRow>
@@ -417,18 +425,20 @@ export const PairedDevices: FC<{
 											<span className="text-muted-foreground">—</span>
 										)}
 									</TableCell>
-									<TableCell className="max-w-[22rem] text-sm text-muted-foreground">
-										{/* Only a native device has an overlay: the map is keyed by the
-										    pairing fingerprint the native plane presents, and a
-										    GameStream client's cert is not that. */}
-										{r.protocol === "native" ? (
-											<span>
-												{overlaySummary(settings?.clients?.[r.fingerprint])}
-											</span>
-										) : (
-											<span>—</span>
-										)}
-									</TableCell>
+									{perDevice && (
+										<TableCell className="max-w-[22rem] text-sm text-muted-foreground">
+											{/* Only a native device has an overlay: the map is keyed by
+											    the pairing fingerprint the native plane presents, and a
+											    GameStream client's cert is not that. */}
+											{r.protocol === "native" ? (
+												<span>
+													{overlaySummary(settings?.clients?.[r.fingerprint])}
+												</span>
+											) : (
+												<span>—</span>
+											)}
+										</TableCell>
+									)}
 									<TableCell className="font-mono text-xs text-muted-foreground">
 										{r.fingerprint.slice(0, 16)}…
 									</TableCell>
@@ -448,7 +458,7 @@ export const PairedDevices: FC<{
 													<Pencil className="size-4" />
 												</Button>
 											)}
-											{r.protocol === "native" && (
+											{perDevice && r.protocol === "native" && (
 												<Button
 													variant="ghost"
 													size="icon"

@@ -194,7 +194,7 @@
 	"clients_rename_body": "Moonlight-Clients melden sich alle gleich, deshalb vergibst du diesen Namen selbst. Leer lassen, um ihn zu entfernen.",
 	"clients_rename_label": "Anzeigename",
 	"clients_rename_failed": "Gerät konnte nicht umbenannt werden",
-	"pairing_title": "Kopplung",
+	"pairing_title": "Geräte",
 	"pairing_idle": "Keine Kopplung aktiv. Starte die Kopplung in einem Moonlight-Client und gib hier die PIN ein.",
 	"pairing_waiting": "Ein Gerät wartet auf Kopplung. Gib die angezeigte PIN ein:",
 	"pairing_ceremony_device": "Gerät {uniqueid} unter {ip} — Zertifikat …{fp}",

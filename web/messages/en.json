@@ -194,7 +194,7 @@
 	"clients_rename_body": "Moonlight clients all identify themselves the same way, so this name is yours to set. Leave it empty to remove it.",
 	"clients_rename_label": "Display name",
 	"clients_rename_failed": "Couldn't rename the device",
-	"pairing_title": "Pairing",
+	"pairing_title": "Devices",
 	"pairing_idle": "No pairing in progress. Start pairing from a Moonlight client, then enter its PIN here.",
 	"pairing_waiting": "A client is waiting to pair. Enter the PIN it shows:",
 	"pairing_ceremony_device": "Device {uniqueid} at {ip} — certificate …{fp}",
