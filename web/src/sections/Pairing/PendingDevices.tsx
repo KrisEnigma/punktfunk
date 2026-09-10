@@ -119,7 +119,7 @@ export const PendingDevices: FC<{
 			<CardContent flush>
 				<CardHeader>
 					<CardTitle>
-						<h2 className="flex items-center gap-2 text-lg font-medium">
+						<h2 className="flex items-center gap-2">
 							<UserPlus className="size-4" />
 							{m.pairing_pending_title()}
 						</h2>

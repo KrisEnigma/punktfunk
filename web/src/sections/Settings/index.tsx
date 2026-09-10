@@ -1,6 +1,6 @@
 import Section from "@unom/ui/section";
 import { toast } from "@unom/ui/toast";
-import { LogOut } from "lucide-react";
+import { Languages, LogOut, PanelLeft, UserRound } from "lucide-react";
 import type { FC } from "react";
 import { pluginIcon, uiPlugins, usePlugins } from "@/api/plugins";
 import { Button } from "@/components/ui/button";
@@ -38,7 +38,10 @@ export const SectionSettings: FC = () => {
 
 				<Card className="max-w-lg">
 					<CardHeader>
-						<CardTitle>{m.settings_language()}</CardTitle>
+						<CardTitle className="flex items-center gap-2">
+							<Languages className="size-4" />
+							{m.settings_language()}
+						</CardTitle>
 					</CardHeader>
 					<CardContent className="flex gap-2">
 						{locales.map((l: Locale) => (
@@ -61,7 +64,10 @@ export const SectionSettings: FC = () => {
 
 				<Card className="max-w-lg">
 					<CardHeader>
-						<CardTitle>{m.settings_account()}</CardTitle>
+						<CardTitle className="flex items-center gap-2">
+							<UserRound className="size-4" />
+							{m.settings_account()}
+						</CardTitle>
 					</CardHeader>
 					<CardContent>
 						<Button variant="outline" onClick={onLogout}>
@@ -102,7 +108,10 @@ const NavigationCard: FC = () => {
 	return (
 		<Card className="max-w-lg">
 			<CardHeader>
-				<CardTitle>{m.settings_navigation()}</CardTitle>
+				<CardTitle className="flex items-center gap-2">
+					<PanelLeft className="size-4" />
+					{m.settings_navigation()}
+				</CardTitle>
 			</CardHeader>
 			<CardContent className="space-y-2">
 				<p className="text-sm text-muted-foreground">

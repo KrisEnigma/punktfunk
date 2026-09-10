@@ -12,6 +12,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import Section from "@unom/ui/section";
 import { toast } from "@unom/ui/toast";
+import { MonitorSmartphone, SlidersHorizontal } from "lucide-react";
 import { motion } from "motion/react";
 import { type FC, useState } from "react";
 import {
@@ -41,7 +42,7 @@ import { QueryState } from "@/components/query-state";
 import { ROW, ROW_GAP, Stagger, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { apiErrorMessage } from "@/lib/errors";
 import { useLocale } from "@/lib/i18n";
 import { m } from "@/paraglide/messages";
@@ -267,9 +268,12 @@ export const SectionDisplays: FC = () => {
 						{policy && effective && settings.data && (
 							<Card>
 								<CardContent className="space-y-4">
-									<h2 className="text-sm font-medium">
-										{m.display_behaviour_title()}
-									</h2>
+									<CardTitle>
+										<h2 className="flex items-center gap-2">
+											<SlidersHorizontal className="size-4" />
+											{m.display_behaviour_title()}
+										</h2>
+									</CardTitle>
 									{effective && (
 										<p className="text-sm">
 											{/* The policy in effect: never a local draft, and never the hovered preview. This sits
@@ -314,7 +318,12 @@ export const SectionDisplays: FC = () => {
 				    phone falls back to when a box would be under 44 px. */}
 						<Card>
 							<CardContent className="space-y-4">
-								<h2 className="text-sm font-medium">{m.display_devices()}</h2>
+								<CardTitle>
+									<h2 className="flex items-center gap-2">
+										<MonitorSmartphone className="size-4" />
+										{m.display_devices()}
+									</h2>
+								</CardTitle>
 								{displays.length === 0 ? (
 									<p className="text-sm text-muted-foreground">
 										{m.display_no_devices()}

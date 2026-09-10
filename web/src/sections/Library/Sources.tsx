@@ -1,6 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
-import { Check, Download, Settings2, Trash2 } from "lucide-react";
+import {
+	Boxes,
+	Check,
+	Download,
+	PackagePlus,
+	Settings2,
+	Trash2,
+} from "lucide-react";
 import { motion } from "motion/react";
 import { type FC, useMemo, useState } from "react";
 import {
@@ -201,7 +208,10 @@ export const MigrationBanner: FC<{
 }> = ({ rows, busy, onInstall }) => (
 	<Card>
 		<CardHeader className="pb-3">
-			<CardTitle className="text-base">{m.library_migrate_title()}</CardTitle>
+			<CardTitle className="flex items-center gap-2">
+				<PackagePlus className="size-4" />
+				{m.library_migrate_title()}
+			</CardTitle>
 		</CardHeader>
 		<CardContent className="space-y-3">
 			<p className="max-w-prose text-sm text-muted-foreground">
@@ -256,7 +266,10 @@ export const SourcesCard: FC<{
 }) => (
 	<Card>
 		<CardHeader className="pb-3">
-			<CardTitle className="text-base">{m.library_sources_title()}</CardTitle>
+			<CardTitle className="flex items-center gap-2">
+				<Boxes className="size-4" />
+				{m.library_sources_title()}
+			</CardTitle>
 		</CardHeader>
 		<CardContent className="space-y-4">
 			<Stagger gap={ROW_GAP} className="flex flex-col gap-2">

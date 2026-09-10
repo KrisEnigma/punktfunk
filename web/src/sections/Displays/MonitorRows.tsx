@@ -4,6 +4,7 @@
 // a virtual one is a property OF a monitor, so the radio sits on the monitor's row rather than
 // in a separate card with its own 214-character introduction.
 
+import { Monitor } from "lucide-react";
 import { motion } from "motion/react";
 import type { FC, ReactNode } from "react";
 import type {
@@ -14,7 +15,7 @@ import type {
 import { ROW, ROW_GAP, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { m } from "@/paraglide/messages";
 
@@ -61,7 +62,12 @@ export const MonitorRows: FC<{
 	return (
 		<Card>
 			<CardContent className="space-y-3">
-				<h2 className="text-sm font-medium">{m.display_your_monitors()}</h2>
+				<CardTitle>
+					<h2 className="flex items-center gap-2">
+						<Monitor className="size-4" />
+						{m.display_your_monitors()}
+					</h2>
+				</CardTitle>
 				{envLocked && (
 					<p className="text-sm text-amber-600 dark:text-amber-500">
 						{m.display_monitor_env_locked()}

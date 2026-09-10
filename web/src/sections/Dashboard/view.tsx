@@ -1,5 +1,13 @@
 import Section from "@unom/ui/section";
-import { MonitorPlay, RefreshCw, Video, Volume2, ZapOff } from "lucide-react";
+import {
+	KeyRound,
+	MonitorPlay,
+	RefreshCw,
+	Smartphone,
+	Video,
+	Volume2,
+	ZapOff,
+} from "lucide-react";
 import type { FC, ReactNode } from "react";
 import type { ActiveGame } from "@/api/gen/model/activeGame";
 import type { AudioWiring } from "@/api/gen/model/audioWiring";
@@ -71,7 +79,8 @@ export const DashboardView: FC<{
 								    one of whose clients was in fact paired. */}
 								<Card>
 									<CardContent className="flex flex-1 items-center justify-between">
-										<span className="text-sm text-muted-foreground">
+										<span className="flex items-center gap-2 text-sm text-muted-foreground">
+											<Smartphone className="size-4" />
 											{m.status_paired_count()}
 										</span>
 										<span className="text-2xl font-semibold tabular-nums">
@@ -81,7 +90,8 @@ export const DashboardView: FC<{
 								</Card>
 								<Card>
 									<CardContent className="flex flex-1 items-center justify-between">
-										<span className="text-sm text-muted-foreground">
+										<span className="flex items-center gap-2 text-sm text-muted-foreground">
+											<KeyRound className="size-4" />
 											{m.status_pin_pending()}
 										</span>
 										{/* The whole value used to be "●" or "—": no text, no state, colour

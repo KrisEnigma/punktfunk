@@ -1,3 +1,4 @@
+import { Power } from "lucide-react";
 import { type FC, useState } from "react";
 import { useListActions } from "@/api/gen/actions/actions";
 import type { ActionInfo } from "@/api/gen/model";
@@ -46,7 +47,10 @@ export const PowerSection: FC = () => {
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle>{m.host_power_title()}</CardTitle>
+				<CardTitle className="flex items-center gap-2">
+					<Power className="size-4" />
+					{m.host_power_title()}
+				</CardTitle>
 			</CardHeader>
 			<CardContent className="space-y-3">
 				<QueryState

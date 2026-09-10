@@ -1,7 +1,9 @@
 import { toast } from "@unom/ui/toast";
 import {
 	AlertTriangle,
+	Globe,
 	Lock,
+	Plus,
 	RefreshCw,
 	ShieldCheck,
 	ShieldOff,
@@ -153,7 +155,10 @@ export const SourceList: FC<{
 	return (
 		<Card>
 			<CardHeader className="flex-row items-center justify-between space-y-0">
-				<CardTitle>{m.store_sources_title()}</CardTitle>
+				<CardTitle className="flex items-center gap-2">
+					<Globe className="size-4" />
+					{m.store_sources_title()}
+				</CardTitle>
 				<Button
 					variant="outline"
 					size="sm"
@@ -271,7 +276,10 @@ export const AddSourceForm: FC<{
 	return (
 		<Card className="max-w-xl">
 			<CardHeader>
-				<CardTitle>{m.store_add_source_title()}</CardTitle>
+				<CardTitle className="flex items-center gap-2">
+					<Plus className="size-4" />
+					{m.store_add_source_title()}
+				</CardTitle>
 			</CardHeader>
 			<CardContent>
 				<form onSubmit={handleSubmit} className="space-y-4">

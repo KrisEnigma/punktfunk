@@ -1,4 +1,4 @@
-import { ArrowUpCircle, Ban, Circle, Trash2 } from "lucide-react";
+import { ArrowUpCircle, Ban, Circle, Package, Trash2 } from "lucide-react";
 import type { FC } from "react";
 import { type InstalledPlugin, useInstalledPlugins } from "@/api/store";
 import { QueryState } from "@/components/query-state";
@@ -84,7 +84,10 @@ export const InstalledList: FC<{
 			<CardContent flush>
 				{/* The bulk action sits with the list it acts on, the way Sources' "Refresh all" does. */}
 				<CardHeader className="flex-row items-center justify-between gap-3 space-y-0">
-					<CardTitle>{m.store_installed_title()}</CardTitle>
+					<CardTitle className="flex items-center gap-2">
+						<Package className="size-4" />
+						{m.store_installed_title()}
+					</CardTitle>
 					{updateCount > 0 && (
 						<Button size="sm" disabled={batchRunning} onClick={onUpdateAll}>
 							<ArrowUpCircle className="size-4" />

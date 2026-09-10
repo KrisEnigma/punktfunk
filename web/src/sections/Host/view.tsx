@@ -1,4 +1,5 @@
 import Section from "@unom/ui/section";
+import { Film, IdCard, Layers, Network } from "lucide-react";
 import { motion } from "motion/react";
 import type { FC, ReactNode } from "react";
 import type { AvailableCompositor } from "@/api/gen/model/availableCompositor";
@@ -45,7 +46,10 @@ export const HostView: FC<{
 							<div className="grid gap-card lg:grid-cols-2">
 								<Card>
 									<CardHeader>
-										<CardTitle>{m.host_identity()}</CardTitle>
+										<CardTitle className="flex items-center gap-2">
+											<IdCard className="size-4" />
+											{m.host_identity()}
+										</CardTitle>
 									</CardHeader>
 									<CardContent>
 										<dl className="grid grid-cols-1 gap-3">
@@ -71,7 +75,10 @@ export const HostView: FC<{
 								<div className="space-y-card">
 									<Card>
 										<CardHeader>
-											<CardTitle>{m.host_codecs()}</CardTitle>
+											<CardTitle className="flex items-center gap-2">
+												<Film className="size-4" />
+												{m.host_codecs()}
+											</CardTitle>
 										</CardHeader>
 										<CardContent className="flex flex-wrap gap-2">
 											{h.codecs.map((c) => (
@@ -83,7 +90,10 @@ export const HostView: FC<{
 									</Card>
 									<Card>
 										<CardHeader>
-											<CardTitle>{m.host_ports()}</CardTitle>
+											<CardTitle className="flex items-center gap-2">
+												<Network className="size-4" />
+												{m.host_ports()}
+											</CardTitle>
 										</CardHeader>
 										<CardContent>
 											<dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm tabular-nums">
@@ -116,7 +126,10 @@ export const HostView: FC<{
 				{compositors.data?.length !== 0 && (
 					<Card>
 						<CardHeader>
-							<CardTitle>{m.host_compositors()}</CardTitle>
+							<CardTitle className="flex items-center gap-2">
+								<Layers className="size-4" />
+								{m.host_compositors()}
+							</CardTitle>
 						</CardHeader>
 						<CardContent className="space-y-4">
 							<p className="text-sm text-muted-foreground">

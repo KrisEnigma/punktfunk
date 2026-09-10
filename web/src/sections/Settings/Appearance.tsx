@@ -8,6 +8,7 @@
 // server render sets from the cookie — so re-rendering from the server is both the simplest way
 // to apply it and the one that proves the cookie round-trips.
 
+import { Palette } from "lucide-react";
 import type { FC } from "react";
 import { useState } from "react";
 import { useUiConfig } from "@/api/uiConfig";
@@ -47,7 +48,10 @@ export const AppearanceCard: FC = () => {
 	return (
 		<Card className="max-w-lg">
 			<CardHeader>
-				<CardTitle>{m.settings_appearance()}</CardTitle>
+				<CardTitle className="flex items-center gap-2">
+					<Palette className="size-4" />
+					{m.settings_appearance()}
+				</CardTitle>
 			</CardHeader>
 			<CardContent className="space-y-5">
 				<Row label={m.appearance_theme()}>

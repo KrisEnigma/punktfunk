@@ -1,6 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
-import { MonitorPlay, Pencil, SlidersHorizontal, Trash2 } from "lucide-react";
+import {
+	MonitorPlay,
+	MonitorSmartphone,
+	Pencil,
+	SlidersHorizontal,
+	Trash2,
+} from "lucide-react";
 import { type FC, useState } from "react";
 import {
 	getListPairedClientsQueryKey,
@@ -24,7 +30,7 @@ import { QueryState } from "@/components/query-state";
 import { ROW, ROW_GAP, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
 	MotionTableBody,
 	MotionTableRow,
@@ -354,7 +360,12 @@ export const PairedDevices: FC<{
 	<Card>
 		{/* flex-row: CardHeader stacks by default, and this one carries a trailing action. */}
 		<CardHeader className="flex-row items-center justify-between gap-4 space-y-0">
-			<h2 className="text-lg font-medium">{m.pairing_native_devices()}</h2>
+			<CardTitle>
+				<h2 className="flex items-center gap-2">
+					<MonitorSmartphone className="size-4" />
+					{m.pairing_native_devices()}
+				</h2>
+			</CardTitle>
 			{/* Nothing to unpair in bulk when the list is empty (or still loading) — an enabled
 			    button there would open a confirmation reading "Unpair all 0 devices?". */}
 			{rows.length > 0 && (

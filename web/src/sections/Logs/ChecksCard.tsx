@@ -5,6 +5,7 @@ import {
 	ChevronDown,
 	ChevronRight,
 	Copy,
+	ListChecks,
 	RefreshCw,
 } from "lucide-react";
 import { motion } from "motion/react";
@@ -19,7 +20,7 @@ import type { HostCheck } from "@/api/gen/model/hostCheck";
 import { ROW, ROW_GAP, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import {
 	checkTitle,
 	needsAttention,
@@ -94,7 +95,12 @@ export const ChecksCard: FC<{
 		<Card>
 			<CardContent className="flex flex-col gap-3">
 				<div className="flex flex-wrap items-center justify-between gap-2">
-					<h2 className="text-lg font-medium">{m.diag_checks_title()}</h2>
+					<CardTitle>
+						<h2 className="flex items-center gap-2">
+							<ListChecks className="size-4" />
+							{m.diag_checks_title()}
+						</h2>
+					</CardTitle>
 					<Button
 						variant="outline"
 						size="sm"
