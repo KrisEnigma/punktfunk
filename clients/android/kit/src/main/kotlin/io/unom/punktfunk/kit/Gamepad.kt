@@ -254,6 +254,75 @@ object Gamepad {
         hasFaceButtons: Boolean,
     ): Boolean = padSource && !virtual && (hasStick || hasFaceButtons)
 
+    /** A Steam Controller 2 by identity: wired, BLE, or on one of the Puck dongles. */
+    fun isSc2VidPid(vid: Int, pid: Int): Boolean =
+        vid == VID_VALVE && (pid in PID_STEAMCONTROLLER2 || pid in PID_STEAMCONTROLLER2_PUCK)
+
+    /**
+     * Did this key event come from a controller — the question every pad branch actually means
+     * when it asks `isFromSource(SOURCE_GAMEPAD)`.
+     *
+     * The event's source class is the platform's per-EVENT guess, and some boxes get it wrong:
+     * Fire OS is reported to deliver a Bluetooth DualSense's Triangle, touchpad and Mode/PS with
+     * standard `KEYCODE_BUTTON_*` keycodes but a SOURCE_KEYBOARD tag, and the plain gate then
+     * drops them before anything can map them. The DEVICE's source classes are the fact, so
+     * widen to the device — but only for keycodes that cannot be anything BUT a gamepad button.
+     *
+     * That restriction is the whole safety of this. [KeyEvent.isGamepadButton] is exactly the
+     * `KEYCODE_BUTTON_*` block — no `KEYCODE_DPAD_*`, no `KEYCODE_BACK` — and both exclusions
+     * are load-bearing: a keyboard's arrow keys share the D-pad keycodes and belong to the VK
+     * path ([buttonBit]), and a remote's or keyboard's BACK shares `KEYCODE_BACK` and has to
+     * keep leaving the stream ([padButtonBit]). [isPad] is a source claim, which a composite
+     * receiver carrying a keyboard collection beside its pad satisfies, so widening on the
+     * device alone — or on its vendor id — routes that keyboard's arrows and BACK into the pad
+     * branch and breaks both.
+     *
+     * [deviceIsSc2] is the one exception, and only where [includeSc2Fallback] allows it: an SC2
+     * in lizard mode is a keyboard and a mouse by design, so no capability probe can find it and
+     * the identity is all there is. Menus take that route; a stream passes false, leaving an
+     * uncaptured SC2 typing.
+     *
+     * The RAW keycode is what is asked: routing happens before [padKeyCode]'s correction, and
+     * both the raw and the corrected keycode are in this block for every button concerned.
+     */
+    fun eventFromPad(event: KeyEvent, includeSc2Fallback: Boolean = true): Boolean = eventFromPad(
+        eventFromGamepad = event.isFromSource(InputDevice.SOURCE_GAMEPAD),
+        deviceIsPad = isPad(event.device),
+        deviceIsSc2 = event.device?.let { isSc2VidPid(it.vendorId, it.productId) } == true,
+        padButton = KeyEvent.isGamepadButton(event.keyCode),
+        keyCode = event.keyCode,
+        fallback = event.flags and KeyEvent.FLAG_FALLBACK != 0,
+        includeSc2Fallback = includeSc2Fallback,
+    )
+
+    /** [eventFromPad]'s decision, over plain facts — the seam its truth table is tested at. */
+    fun eventFromPad(
+        eventFromGamepad: Boolean,
+        deviceIsPad: Boolean,
+        deviceIsSc2: Boolean,
+        padButton: Boolean,
+        keyCode: Int,
+        fallback: Boolean,
+        includeSc2Fallback: Boolean = true,
+    ): Boolean {
+        if (eventFromGamepad) return true
+        if (deviceIsSc2 && includeSc2Fallback) {
+            // A FLAG_FALLBACK BACK is the framework's own duplicate of an unconsumed button.
+            if (fallback && keyCode == KeyEvent.KEYCODE_BACK) return false
+            return padButton || sc2NavKey(keyCode)
+        }
+        return deviceIsPad && padButton
+    }
+
+    /** The D-pad and Select-as-BACK, which a lizard-mode SC2 sends outside the button block. */
+    private fun sc2NavKey(keyCode: Int): Boolean = when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+        KeyEvent.KEYCODE_BACK,
+        -> true
+        else -> false
+    }
+
     /**
      * All connected controllers, in system enumeration order — the devices that answer "is a pad
      * attached", so the filter is [looksLikeController] rather than the looser [isPad].
@@ -284,8 +353,7 @@ object Gamepad {
      */
     fun sc2InputDevicePresent(): Boolean =
         InputDevice.getDeviceIds().asSequence().mapNotNull { InputDevice.getDevice(it) }.any {
-            it.vendorId == VID_VALVE &&
-                (it.productId in PID_STEAMCONTROLLER2 || it.productId in PID_STEAMCONTROLLER2_PUCK)
+            isSc2VidPid(it.vendorId, it.productId)
         }
 
     /**
