@@ -23,6 +23,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { m } from "@/paraglide/messages";
 
 /**
+ * Why the drawer was refused, from either shape `/api/plugin-config/<id>` answers with: the
+ * plugin's own `__config` body carries `issue`, the route's own failures (unreachable plugin,
+ * bad id, non-JSON reply) carry `error`. Read both — on `issue` alone every transport failure
+ * reads as "the host said no".
+ */
+const refusal = async (res: Response): Promise<string> => {
+	const body = (await res.json().catch(() => null)) as {
+		issue?: string;
+		error?: string;
+	} | null;
+	return body?.issue ?? body?.error ?? m.library_source_settings_refused();
+};
+
+/**
  * A library source's settings, rendered as a **generic form** from the plugin's own JSON Schema.
  *
  * The point (design D7, closing G8): a scanner plugin ships no SPA at all. It serves
@@ -60,7 +74,7 @@ export const SourceSettingsDialog: FC<{
 				const res = await fetch(`/api/plugin-config/${pluginId}`, {
 					credentials: "same-origin",
 				});
-				if (!res.ok) throw new Error(m.library_source_settings_refused());
+				if (!res.ok) throw new Error(await refusal(res));
 				const body = (await res.json()) as {
 					schema: JsonSchemaDoc | null;
 					value: JsonObject | null;
@@ -92,12 +106,7 @@ export const SourceSettingsDialog: FC<{
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify(value),
 			});
-			if (!res.ok) {
-				const body = (await res.json().catch(() => null)) as {
-					issue?: string;
-				} | null;
-				throw new Error(body?.issue ?? m.library_source_settings_refused());
-			}
+			if (!res.ok) throw new Error(await refusal(res));
 			toast.success(m.library_source_settings_saved());
 			onClose();
 		} catch (e) {
