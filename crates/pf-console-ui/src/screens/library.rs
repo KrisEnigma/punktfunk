@@ -2289,27 +2289,51 @@ mod tests {
         }
     }
 
+    /// 8-col clamp × ~3 visible rows; 6 is generous. `k` is height/800, so row count is stable.
+    const SCREENFUL: usize = 8 * 6;
+
+    /// What one screen of covers plus the render targets holds at `k`, bytes.
+    fn screenful_bytes(src: (i32, i32), k: f64) -> usize {
+        // RGBA + 1/3 for the mip chain `decode_poster` bakes.
+        let bytes = |(w, h): (i32, i32)| (w as usize) * (h as usize) * 4 * 4 / 3;
+        bytes(art_cache_size(src, k)) * SCREENFUL
+            + 2 * (1280.0 * k) as usize * (800.0 * k) as usize * 4
+    }
+
     /// Over budget, Skia purges and the next frame re-decodes JPEG on the render thread.
     #[test]
     fn a_screenful_of_covers_fits_the_gpu_budget() {
-        // 8-col clamp × ~3 visible rows; 6 is generous. `k` is height/800, so row count is stable.
-        const SCREENFUL: usize = 8 * 6;
-        // RGBA + 1/3 for the mip chain `decode_poster` bakes.
-        let bytes = |(w, h): (i32, i32)| (w as usize) * (h as usize) * 4 * 4 / 3;
         // Through 1440p. 4K + 1000×1500 art is outside `DEFAULT_GPU_CACHE_BYTES`.
         for k in [0.75, 1.0, 1.35, 1.8] {
             for src in [(600, 900), (1000, 1500)] {
-                let covers = bytes(art_cache_size(src, k)) * SCREENFUL;
-                let targets = 2 * (1280.0 * k) as usize * (800.0 * k) as usize * 4;
+                let need = screenful_bytes(src, k);
                 let budget = crate::shell::DEFAULT_GPU_CACHE_BYTES;
                 assert!(
-                    covers + targets < budget,
-                    "{src:?} art at k={k}: {} MB of covers + {} MB of targets over a {} MB budget",
-                    covers >> 20,
-                    targets >> 20,
+                    need < budget,
+                    "{src:?} art at k={k}: {} MB needed over a {} MB budget",
+                    need >> 20,
                     budget >> 20
                 );
             }
+        }
+    }
+
+    /// The floor a memory-tight host may pass, pinned to what 1080p actually needs.
+    ///
+    /// A television is `k` 1.35, and this is the number a TV client copies instead of
+    /// guessing a fraction of the desktop default — a guess that put webOS on 64 MB,
+    /// under the working set, re-decoding covers on the render thread every frame.
+    #[test]
+    fn the_gpu_budget_floor_covers_a_1080p_screenful() {
+        for src in [(600, 900), (1000, 1500)] {
+            let need = screenful_bytes(src, 1.35);
+            let floor = crate::shell::MIN_GPU_CACHE_BYTES;
+            assert!(
+                need < floor,
+                "{src:?} art at 1080p: {} MB needed under a {} MB floor",
+                need >> 20,
+                floor >> 20
+            );
         }
     }
 
