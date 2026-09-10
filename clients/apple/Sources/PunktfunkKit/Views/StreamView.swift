@@ -195,6 +195,9 @@ public final class StreamLayerView: NSView {
     /// bounds change and a resize-END has none, so without this the layer keeps its pre-resize aspect
     /// and the shader stretches the new frame into it (black bars + squish). Main-thread only.
     private var lastDecodedContentSize: CGSize?
+    /// This screen's below-the-notch mode, as of the last layout — the one input to `videoBounds`
+    /// too expensive to read per mouse event (see `layoutPresenter`). Main-thread only.
+    private var safeModePixels: (width: Int, height: Int)?
     private let cursorCapture = CursorCapture()
     private var inputCapture: InputCapture?
     private var appObservers: [NSObjectProtocol] = []
@@ -719,12 +722,28 @@ public final class StreamLayerView: NSView {
         return (mode.width, mode.height)
     }
 
+    /// The rect the picture is fit into — `bounds`, except for a full-screen session whose mode is
+    /// exactly this screen's below-the-notch mode, which is trimmed to sit under the camera
+    /// housing (see `SafeDisplay.videoBox`). EVERY measurement against the picture reads this:
+    /// the presenter's fit, the pointer mapping both ways, and the cursor scale.
+    private var videoBounds: CGRect {
+        guard let window, window.styleMask.contains(.fullScreen), let screen = window.screen
+        else { return bounds }
+        let content = hostContentSize()
+        guard content.width > 0, content.height > 0 else { return bounds }
+        return SafeDisplay.videoBox(
+            bounds: bounds, topInsetPoints: Double(screen.safeAreaInsets.top),
+            content: (Int(content.width), Int(content.height)),
+            safeMode: safeModePixels)
+    }
+
     private func cursorFitScale() -> CGFloat {
         guard connection != nil else { return 1 }
         let mode = hostContentSize()
-        guard mode.width > 0, mode.height > 0, bounds.width > 0, bounds.height > 0 else { return 1 }
+        let box = videoBounds
+        guard mode.width > 0, mode.height > 0, box.width > 0, box.height > 0 else { return 1 }
         let fit = AVMakeRect(
-            aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)), insideRect: bounds)
+            aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)), insideRect: box)
         guard fit.width > 0 else { return 1 }
         return fit.width / CGFloat(mode.width)
     }
@@ -751,7 +770,7 @@ public final class StreamLayerView: NSView {
         guard mode.width > 0, mode.height > 0 else { return nil }
         let fit = AVMakeRect(
             aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)),
-            insideRect: bounds)
+            insideRect: videoBounds)
         guard fit.width > 0, fit.height > 0 else { return nil }
         let u = (CGFloat(hx) / CGFloat(mode.width)).clamped(to: 0...1)
         let v = (CGFloat(hy) / CGFloat(mode.height)).clamped(to: 0...1)
@@ -849,11 +868,12 @@ public final class StreamLayerView: NSView {
         // Window → view coords (non-flipped: origin bottom-left), then flip y into view-top-left.
         let inView = convert(event.locationInWindow, from: nil)
         let p = CGPoint(x: inView.x, y: bounds.height - inView.y)
-        // The video occupies the aspect-fit rect inside the (non-flipped) bounds; AVMakeRect's
-        // origin is bottom-left, so flip its minY too to match p's top-left space.
+        // The video occupies the aspect-fit rect inside the (non-flipped) video box; AVMakeRect's
+        // origin is bottom-left, so flip its minY too to match p's top-left space. The flip itself
+        // stays on the VIEW's height — `p` is in view coordinates, box or no box.
         let fit = AVMakeRect(
             aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)),
-            insideRect: bounds)
+            insideRect: videoBounds)
         guard fit.width > 0, fit.height > 0 else { return nil }
         let videoMinYTop = bounds.height - fit.maxY
         let u = (p.x - fit.minX) / fit.width
@@ -1035,11 +1055,16 @@ public final class StreamLayerView: NSView {
         requestAutoCapture() // entering a session is the deliberate "capture me" moment
     }
 
-    /// Aspect-fit the stage-2 metal sublayer to the view; refresh contentsScale on a
-    /// retina↔non-retina move (see SessionPresenter.layout). Also feeds the Match-window follower
-    /// the view's physical-pixel size (bounds → backing), so a window resize / retina move follows.
+    /// Aspect-fit the stage-2 metal sublayer to the video box (`videoBounds`, which is the view
+    /// except under a camera housing); refresh contentsScale on a retina↔non-retina move (see
+    /// SessionPresenter.layout). Also feeds the Match-window follower the WINDOW's physical-pixel
+    /// size (bounds → backing) — it follows the window, not the box — so a resize / retina move
+    /// follows.
     private func layoutPresenter() {
-        presenter.layout(in: bounds, contentsScale: window?.backingScaleFactor ?? 1)
+        // Refresh BEFORE the fit below reads it. Enumerating display modes costs ~150 µs, and
+        // `videoBounds` is read on every mouse event — that belongs on layout, not on input.
+        safeModePixels = window?.screen?.notchSafePixelSize
+        presenter.layout(in: videoBounds, contentsScale: window?.backingScaleFactor ?? 1)
         // Present routing tracks the window's composited state (fullscreen transitions always
         // re-layout, so this stays current): a windowed session presents through a Core Animation
         // transaction — the DCP swapID kernel-panic mitigation (see SessionPresenter.setComposited).
