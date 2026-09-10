@@ -14,7 +14,11 @@
 //! `pf-inject`'s absolute-coordinate region selection.
 
 use crate::Compositor;
-use anyhow::{bail, Result};
+use anyhow::Result;
+// Only the non-Linux fallback arm of `list` bails; on Linux every backend has its own arm, so an
+// unconditional import is an unused one under `-D warnings`.
+#[cfg(not(target_os = "linux"))]
+use anyhow::bail;
 
 /// One head as the compositor currently reports it.
 ///
