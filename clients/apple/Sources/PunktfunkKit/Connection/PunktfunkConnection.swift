@@ -60,6 +60,13 @@ public struct AccessUnit: Sendable {
         self.receivedNs = receivedNs
         self.pulledNs = pulledNs ?? receivedNs
     }
+
+    /// The same access unit with its bytes replaced — a concealed rewrite of the same length.
+    public func replacing(data: Data) -> AccessUnit {
+        AccessUnit(
+            data: data, ptsNs: ptsNs, frameIndex: frameIndex, flags: flags,
+            receivedNs: receivedNs, pulledNs: pulledNs)
+    }
 }
 
 /// One Opus audio packet (48 kHz stereo, 5 ms frames) — decode with AVAudioConverter

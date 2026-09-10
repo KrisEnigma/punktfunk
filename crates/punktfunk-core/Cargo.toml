@@ -41,6 +41,7 @@ reed-solomon-simd = "3.1"      # GF(2^16) Leopard-RS, SIMD, O(n log n) — the w
 # parity is decodable by a stock Moonlight client. (reed-solomon-erasure is Vandermonde and is
 # NOT interoperable.) See vendor/fec-rs/LICENSE (BSD-2-Clause).
 fec-rs = { path = "vendor/fec-rs" }
+pf-bitstream = { path = "../pf-bitstream" }
 aes-gcm = "0.11"               # AES-128-GCM session crypto, matches GameStream
 # ChaCha20-Poly1305 session crypto, negotiated by clients without hardware AES (the soft-AES
 # armv7 targets — webOS TVs — where GCM caps decrypt at ~100 Mbps; ARX runs 4-7x faster there).

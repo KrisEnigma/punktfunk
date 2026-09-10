@@ -54,39 +54,67 @@ struct AUPumpState {
         }
     }
 
+    /// What the codec's concealer made of an AU. `.none` for a codec without one: loss then
+    /// falls back to withholding until the re-anchor.
+    enum Concealment: Equatable {
+        case none
+        /// Every current reference names a picture the decoder holds (as received or rewritten).
+        case decodable
+        /// Nothing can stand in: off the decoder, and ask for an IDR.
+        case unrecoverable
+    }
+
+    /// Whether `note` skips this index as a straggler. Work the decoder never sees must not
+    /// happen on one — the concealer mirrors the decoder's DPB.
+    func isStraggler(frameIndex: UInt32) -> Bool {
+        // Wraparound-safe: the index is a 32-bit counter, so compare the difference as signed.
+        newestIndex.map { Int32(bitPattern: frameIndex &- $0) <= 0 } ?? false
+    }
+
     /// Fold one access unit in. `idrFormat` is what the codec made of its parameter sets, or nil
     /// for a delta frame; `lossAhead` says a frame-index gap precedes this AU; `flags` are its
-    /// wire flags (`AccessUnit.flags`).
+    /// wire flags (`AccessUnit.flags`); `concealed` is the concealer's verdict on it.
     mutating func note(
         frameIndex: UInt32, idrFormat: CMVideoFormatDescription?, lossAhead: Bool = false,
-        flags: UInt32 = 0
+        flags: UInt32 = 0, concealed: Concealment = .none
     ) -> Step {
         var step = Step()
-        // Wraparound-safe: the index is a 32-bit counter, so compare the difference as signed.
-        if let newest = newestIndex, Int32(bitPattern: frameIndex &- newest) <= 0 {
+        if isStraggler(frameIndex: frameIndex) {
             step.straggler = true
             return step
         }
         newestIndex = frameIndex
 
-        if lossAhead {
-            withholding = true
-            markWhileWithholding = false
-        }
-        if withholding {
-            let reanchors =
-                idrFormat != nil
-                || flags & (PunktfunkConnection.flagSOF | PunktfunkConnection.userFlagRecoveryAnchor)
-                    != 0
-            if reanchors {
-                withholding = false
-            } else {
-                step.withhold = true
-                if flags & PunktfunkConnection.userFlagRecoveryPoint != 0 {
-                    markWhileWithholding = true
-                }
-                step.askKeyframe = markWhileWithholding
+        switch concealed {
+        case .none:
+            if lossAhead {
+                withholding = true
+                markWhileWithholding = false
             }
+            if withholding {
+                let reanchors =
+                    idrFormat != nil
+                    || flags
+                        & (PunktfunkConnection.flagSOF | PunktfunkConnection.userFlagRecoveryAnchor)
+                        != 0
+                if reanchors {
+                    withholding = false
+                } else {
+                    step.withhold = true
+                    if flags & PunktfunkConnection.userFlagRecoveryPoint != 0 {
+                        markWhileWithholding = true
+                    }
+                    step.askKeyframe = markWhileWithholding
+                }
+            }
+        case .decodable:
+            // The concealer keeps the decoder's DPB consistent, so a wave or an anchor heals
+            // without an IDR: nothing is withheld.
+            withholding = false
+            markWhileWithholding = false
+        case .unrecoverable:
+            step.withhold = true
+            step.askKeyframe = true
         }
 
         if let f = idrFormat {
