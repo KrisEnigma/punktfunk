@@ -1,5 +1,5 @@
 #!/bin/sh
-# Repo pre-commit hook: the same rustfmt gates as pre-push, but at commit time for faster
+# Repo pre-commit hook: the same gates as pre-push, but at commit time for faster
 # feedback. Enable once per clone:
 #
 #     git config core.hooksPath scripts/git-hooks
