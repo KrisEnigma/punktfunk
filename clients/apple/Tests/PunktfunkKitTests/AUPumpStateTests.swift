@@ -119,6 +119,39 @@ final class AUPumpStateTests: XCTestCase {
         XCTAssertFalse(state.note(frameIndex: 5, idrFormat: nil).withhold)
     }
 
+    func testAConcealedStreamWithholdsNothingAfterALoss() throws {
+        var state = AUPumpState()
+        _ = state.note(frameIndex: 1, idrFormat: try format(1920, 1080))
+        // The concealer moved the lost reference: the decoder can take every AU, the wave heals.
+        let first = state.note(frameIndex: 3, idrFormat: nil, lossAhead: true, concealed: .decodable)
+        XCTAssertFalse(first.withhold)
+        XCTAssertFalse(first.askKeyframe)
+        let mark = state.note(
+            frameIndex: 4, idrFormat: nil, flags: PunktfunkConnection.userFlagRecoveryPoint,
+            concealed: .decodable)
+        XCTAssertFalse(mark.withhold)
+        XCTAssertFalse(mark.askKeyframe)
+    }
+
+    func testAnUnrecoverableConcealmentWithholdsAndAsks() throws {
+        var state = AUPumpState()
+        _ = state.note(frameIndex: 1, idrFormat: try format(1920, 1080))
+        let step = state.note(frameIndex: 3, idrFormat: nil, lossAhead: true, concealed: .unrecoverable)
+        XCTAssertTrue(step.withhold)
+        XCTAssertTrue(step.askKeyframe)
+        // The concealer resumes at the IDR and says so per AU; the pump follows it.
+        XCTAssertFalse(state.note(frameIndex: 4, idrFormat: try format(1920, 1080), concealed: .decodable).withhold)
+    }
+
+    func testIsStragglerMirrorsNote() throws {
+        var state = AUPumpState()
+        XCTAssertFalse(state.isStraggler(frameIndex: 5), "nothing submitted yet")
+        _ = state.note(frameIndex: 5, idrFormat: try format(1920, 1080))
+        XCTAssertTrue(state.isStraggler(frameIndex: 4))
+        XCTAssertTrue(state.isStraggler(frameIndex: 5))
+        XCTAssertFalse(state.isStraggler(frameIndex: 6))
+    }
+
     func testARecoveryMarkWhileWithholdingAsksForAKeyframe() throws {
         var state = AUPumpState()
         _ = state.note(frameIndex: 1, idrFormat: try format(1920, 1080))

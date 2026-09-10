@@ -25,7 +25,7 @@
 // Not [`WIRE_VERSION`]. The C surface can grow without a wire byte changing.
 // Pin the integer in `abi.rs` (`abi_version_is_pinned`). Per-bump notes live
 // in `CHANGELOG.md`.
-#define PUNKTFUNK_ABI_VERSION 28
+#define PUNKTFUNK_ABI_VERSION 29
 
 // punktfunk/1 wire version. `Hello`/`Welcome` carry it; hosts equality-check it.
 //
@@ -1239,6 +1239,17 @@ typedef uint8_t PunktfunkInputKind;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
+// Outcome of [`punktfunk_h265_concealer_conceal`].
+typedef enum {
+    // Decode the access unit as it came.
+    PUNKTFUNK_CONCEALMENT_INTACT = 0,
+    // Decode the returned bytes instead: a missing current reference was moved to a picture
+    // the decoder holds.
+    PUNKTFUNK_CONCEALMENT_REWRITTEN = 1,
+    // Keep this and every following delta off the decoder and ask for an IDR.
+    PUNKTFUNK_CONCEALMENT_UNRECOVERABLE = 2,
+} PunktfunkConcealment;
+
 #if defined(PUNKTFUNK_FEATURE_QUIC)
 // Why a session ended — [`NativeClient::end_reason`], `punktfunk_connection_end_reason` on C.
 //
@@ -1307,6 +1318,10 @@ typedef struct LocalRecovery LocalRecovery;
 // One puller thread per plane; never two threads on the same plane.
 typedef struct PunktfunkConnection PunktfunkConnection;
 #endif
+
+// Opaque handle: one elementary stream's [`H265Concealer`]. The type lives in another crate,
+// so the header needs a core-owned name for it.
+typedef struct PunktfunkH265Concealer PunktfunkH265Concealer;
 
 // Opaque session handle. C sees only the pointer.
 typedef struct PunktfunkSession PunktfunkSession;
@@ -3007,6 +3022,34 @@ void punktfunk_connection_disconnect_quit(PunktfunkConnection *c);
 // `c` was returned by [`punktfunk_connect`] and is not used after this call.
 void punktfunk_connection_close(PunktfunkConnection *c);
 #endif
+
+// Create an HEVC reference concealer for one elementary stream (IDR first). Free with
+// [`punktfunk_h265_concealer_free`]. Never returns NULL.
+PunktfunkH265Concealer *punktfunk_h265_concealer_new(void);
+
+// Free a concealer created by [`punktfunk_h265_concealer_new`]. NULL is a no-op.
+//
+// # Safety
+// `c` was returned by [`punktfunk_h265_concealer_new`] and is not used after this call.
+void punktfunk_h265_concealer_free(PunktfunkH265Concealer *c);
+
+// Fold one Annex-B access unit. `out_kind` says what to decode; for `Rewritten`,
+// `out_buf`/`out_len` hold the bytes until [`punktfunk_h265_concealer_release`].
+//
+// # Safety
+// `c` is a valid handle; `au` points to `len` readable bytes; the out pointers are writable.
+PunktfunkStatus punktfunk_h265_concealer_conceal(PunktfunkH265Concealer *c,
+                                                 const uint8_t *au,
+                                                 uintptr_t len,
+                                                 PunktfunkConcealment *out_kind,
+                                                 uint8_t **out_buf,
+                                                 uintptr_t *out_len);
+
+// Release a buffer [`punktfunk_h265_concealer_conceal`] returned. NULL is a no-op.
+//
+// # Safety
+// `buf`/`len` are exactly what one `conceal` call returned, released once.
+void punktfunk_h265_concealer_release(uint8_t *buf, uintptr_t len);
 
 // Create a re-anchor gate seeded with the session's current `frames_dropped` (so
 // the first [`punktfunk_reanchor_gate_poll`] doesn't read the baseline as a loss).

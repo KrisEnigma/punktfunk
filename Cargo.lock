@@ -3779,6 +3779,7 @@ dependencies = [
  "libc",
  "log",
  "opus",
+ "pf-bitstream",
  "proptest",
  "quinn",
  "rand 0.9.5",

@@ -26,6 +26,7 @@ use crate::reanchor::{GateVerdict, ReanchorGate};
 use crate::session::Session;
 use crate::stats::Stats;
 use crate::transport::{loopback_pair, Transport, UdpTransport};
+use pf_bitstream::h265::conceal::{Concealment, H265Concealer};
 use std::ffi::{c_void, CStr};
 use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
@@ -5128,6 +5129,115 @@ pub unsafe extern "C" fn punktfunk_connection_close(c: *mut PunktfunkConnection)
     });
 }
 
+// C wrapper for [`H265Concealer`]: a platform decoder that reads the RPS itself (VideoToolbox)
+// gets every access unit through `conceal` first, in decode order, and decodes what it says.
+
+/// Outcome of [`punktfunk_h265_concealer_conceal`].
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PunktfunkConcealment {
+    /// Decode the access unit as it came.
+    Intact = 0,
+    /// Decode the returned bytes instead: a missing current reference was moved to a picture
+    /// the decoder holds.
+    Rewritten = 1,
+    /// Keep this and every following delta off the decoder and ask for an IDR.
+    Unrecoverable = 2,
+}
+
+/// Opaque handle: one elementary stream's [`H265Concealer`]. The type lives in another crate,
+/// so the header needs a core-owned name for it.
+pub struct PunktfunkH265Concealer {
+    inner: H265Concealer,
+}
+
+/// Create an HEVC reference concealer for one elementary stream (IDR first). Free with
+/// [`punktfunk_h265_concealer_free`]. Never returns NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn punktfunk_h265_concealer_new() -> *mut PunktfunkH265Concealer {
+    Box::into_raw(Box::new(PunktfunkH265Concealer {
+        inner: H265Concealer::new(),
+    }))
+}
+
+/// Free a concealer created by [`punktfunk_h265_concealer_new`]. NULL is a no-op.
+///
+/// # Safety
+/// `c` was returned by [`punktfunk_h265_concealer_new`] and is not used after this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_h265_concealer_free(c: *mut PunktfunkH265Concealer) {
+    guard_void(|| {
+        if !c.is_null() {
+            // SAFETY: pointers are caller-supplied and null-checked on this path.
+            drop(unsafe { Box::from_raw(c) });
+        }
+    });
+}
+
+/// Fold one Annex-B access unit. `out_kind` says what to decode; for `Rewritten`,
+/// `out_buf`/`out_len` hold the bytes until [`punktfunk_h265_concealer_release`].
+///
+/// # Safety
+/// `c` is a valid handle; `au` points to `len` readable bytes; the out pointers are writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_h265_concealer_conceal(
+    c: *mut PunktfunkH265Concealer,
+    au: *const u8,
+    len: usize,
+    out_kind: *mut PunktfunkConcealment,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_mut`/`as_ref` never dereference null.
+        let (Some(c), Some(out_kind), Some(out_buf), Some(out_len)) = (
+            unsafe { c.as_mut() },
+            unsafe { out_kind.as_mut() },
+            unsafe { out_buf.as_mut() },
+            unsafe { out_len.as_mut() },
+        ) else {
+            return PunktfunkStatus::NullPointer;
+        };
+        if au.is_null() && len != 0 {
+            return PunktfunkStatus::NullPointer;
+        }
+        // SAFETY: `au` points to `len` readable bytes per the contract; an empty AU is a
+        // valid empty slice from a dangling pointer.
+        let bytes: &[u8] = if len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(au, len) }
+        };
+        *out_buf = std::ptr::null_mut();
+        *out_len = 0;
+        *out_kind = match c.inner.conceal(bytes) {
+            Concealment::Intact => PunktfunkConcealment::Intact,
+            Concealment::Rewritten(v) => {
+                let boxed = v.into_boxed_slice();
+                *out_len = boxed.len();
+                *out_buf = Box::into_raw(boxed).cast::<u8>();
+                PunktfunkConcealment::Rewritten
+            }
+            Concealment::Unrecoverable => PunktfunkConcealment::Unrecoverable,
+        };
+        PunktfunkStatus::Ok
+    })
+}
+
+/// Release a buffer [`punktfunk_h265_concealer_conceal`] returned. NULL is a no-op.
+///
+/// # Safety
+/// `buf`/`len` are exactly what one `conceal` call returned, released once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_h265_concealer_release(buf: *mut u8, len: usize) {
+    guard_void(|| {
+        if !buf.is_null() {
+            // SAFETY: the pair came from `Box::<[u8]>::into_raw` above, released once.
+            drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(buf, len)) });
+        }
+    });
+}
+
 // C wrapper for [`ReanchorGate`]. Time stays inside (`Instant::now`).
 // `arm` on loss, `on_decoded` per frame, `on_no_output` per empty AU, `poll` each tick.
 
@@ -5297,8 +5407,8 @@ mod abi_version_tests {
     #[test]
     fn abi_version_is_pinned() {
         // Current ABI. A bump must update this pin.
-        assert_eq!(crate::ABI_VERSION, 28);
-        assert_eq!(super::punktfunk_abi_version(), 28);
+        assert_eq!(crate::ABI_VERSION, 29);
+        assert_eq!(super::punktfunk_abi_version(), 29);
     }
 
     #[test]

@@ -57,6 +57,8 @@ pub use crate::h264::PicId;
 use crate::sei;
 pub use crate::sei::RecoveryPointHevc;
 
+pub mod conceal;
+
 /// Everything a backend needs to submit one access unit.
 #[derive(Debug, Clone)]
 pub struct AuPlan {
@@ -1445,7 +1447,7 @@ mod tests {
     /// AU starts at a non-VCL NALU after slices, or at a slice with
     /// `first_slice_segment_in_pic_flag == 1` (first payload bit after the 2-byte
     /// NAL header) once the current AU already has slices.
-    fn split_into_aus(stream: &[u8]) -> Vec<&[u8]> {
+    pub(super) fn split_into_aus(stream: &[u8]) -> Vec<&[u8]> {
         let mut aus = Vec::new();
         let mut cursor = Cursor::new(stream);
         let mut au_start = 0usize;
@@ -1721,7 +1723,7 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct SpsOpts {
+    pub(super) struct SpsOpts {
         profile_idc: u8,
         chroma_format_idc: u32,
         width: u32,
@@ -2009,7 +2011,7 @@ mod tests {
         })
     }
 
-    fn trail_p(poc_lsb: u32, neg: &[(u32, bool)], num_ref_idx_l0: u32) -> Vec<u8> {
+    pub(super) fn trail_p(poc_lsb: u32, neg: &[(u32, bool)], num_ref_idx_l0: u32) -> Vec<u8> {
         synth_slice(&SliceOpts {
             poc_lsb,
             neg: neg.to_vec(),
@@ -2024,7 +2026,7 @@ mod tests {
         au
     }
 
-    fn opening_idr_au(sps: &SpsOpts) -> Vec<u8> {
+    pub(super) fn opening_idr_au(sps: &SpsOpts) -> Vec<u8> {
         let mut au = param_sets(sps);
         au.extend(idr_slice());
         au
