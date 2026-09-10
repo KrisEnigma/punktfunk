@@ -22,8 +22,9 @@ import { useNewPluginToast } from "./plugin-toast";
 
 const MLink = motion(Link);
 
+// Centred in the collapsed rail, where the label is hidden; left-aligned beside it from lg.
 const ITEM =
-	"group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground";
+	"group relative flex items-center justify-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground lg:justify-start";
 const ACTIVE = { className: "bg-primary/15 text-foreground font-medium" };
 const RISE = { from: { opacity: 0, x: -20 }, enter: { opacity: 1, x: 0 } };
 
@@ -86,7 +87,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 				<Link
 					to="/"
 					aria-label="Punktfunk"
-					className="mb-7 flex items-center gap-2 px-2 pt-1"
+					className="mb-7 flex items-center justify-center gap-2 px-2 pt-1 lg:justify-start"
 				>
 					<BrandMark className="size-7 shrink-0 drop-shadow-[0_2px_12px_rgba(108,91,243,0.45)]" />
 					<Wordmark className="hidden h-4 lg:block" />
