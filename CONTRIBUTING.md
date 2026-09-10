@@ -112,6 +112,36 @@ Neither of those starts a run by itself on Gitea 1.27 — measured, not assumed 
 ready or labelling, either push again or hit **Re-run** on the latest run in the Actions tab. The
 gate reads the pull request's state at that moment, so the re-run picks up the change.
 
+### Platform builds
+
+Android, Apple, the Windows client and drivers, the Windows setup test and the Nix flake are
+label-only. Being ready for review is not enough — they cost too much to run on every pull
+request:
+
+| Label | Runs |
+|---|---|
+| `ci:android` | the Android build, and publishes its APK (below) |
+| `ci:apple` | the Apple client build and tests |
+| `ci:windows-client` | the Windows client |
+| `ci:windows-host` | the Windows drivers and the setup test |
+| `ci:nix-rust` | the Nix flake |
+| `ci:all` | all of the above, plus the lanes above |
+
+Only someone with write access can add a label, which is what keeps these off the persistent
+signing runners for untrusted code. Each job also keeps its own fail-closed fork check.
+
+### Installing the Android build from a pull request
+
+A pull request labelled `ci:android` publishes its debug APK to the generic package registry, and
+the job summary links it:
+
+```
+https://git.unom.io/api/packages/unom/generic/punktfunk-android-pr/pr-<number>/punktfunk-pr<number>-<sha>.apk
+```
+
+It is debug-signed, so it installs alongside a store build rather than replacing it. Workflow
+artifacts are not used for this — artifact downloads 400 on this instance.
+
 Push to `main` always runs everything, so nothing escapes verification — it moves to merge time.
 The platform workflows (Android, Apple, Windows, Nix, packaging) are unaffected here: they are
 already narrowed by path, so they fire only when their own files change.
