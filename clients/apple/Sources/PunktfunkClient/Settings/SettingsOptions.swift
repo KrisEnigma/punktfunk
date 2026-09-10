@@ -215,7 +215,8 @@ enum SettingsOptions {
     /// narrowed so the picture clears the sensor housing and the rounded corners — see
     /// [`SafeDisplay`] for why a narrower mode is the whole fix. It is emitted unconditionally and
     /// left to the dedup below: on a device with no housing the two modes are identical, the
-    /// duplicate is dropped, and no pointless row appears.
+    /// duplicate is dropped, and no pointless row appears. A notched Mac gets the same pair from
+    /// [`macDisplayModes`], shortened instead of narrowed.
     @MainActor
     static func resolutionModes() -> [(name: String, w: Int, h: Int)] {
         var native: [(name: String, w: Int, h: Int)] = []
@@ -231,16 +232,61 @@ enum SettingsOptions {
         native.append(("This device (safe area)", safe.width, safe.height))
         #endif
         #else
-        if let screen = NSScreen.main {
-            let scale = screen.backingScaleFactor
-            native = [("This display",
-                       Int(screen.frame.width * scale),
-                       Int(screen.frame.height * scale))]
-        }
+        native = macDisplayModes()
         #endif
         var seen = Set<String>()
         return (native + resolutionPresets).filter { seen.insert("\($0.w)x\($0.h)").inserted }
     }
+
+    #if os(macOS)
+    /// This display's real modes: the PANEL first, then — on a notched Mac — the variant that
+    /// clears the camera housing, which is the mode a full-screen stream can show whole.
+    ///
+    /// The two are deduped here, so a second entry means "this display has a housing" and a caller
+    /// can offer the choice on exactly the Macs that have one.
+    @MainActor
+    static func macDisplayModes() -> [(name: String, w: Int, h: Int)] {
+        guard let screen = NSScreen.main else { return [] }
+        let native = nativePixelSize(screen)
+        let safe = SafeDisplay.mode(
+            nativeWidth: native.w, nativeHeight: native.h,
+            topInsetPoints: Double(screen.safeAreaInsets.top),
+            // Points → panel pixels. NOT backingScaleFactor — see `SafeDisplay.mode(topInset:)`.
+            scale: Double(native.h) / max(Double(screen.frame.height), 1))
+        let modes: [(name: String, w: Int, h: Int)] = [
+            (name: "This display", w: native.w, h: native.h),
+            (name: "This display (below the notch)", w: safe.width, h: safe.height),
+        ]
+        var seen = Set<String>()
+        return modes.filter { seen.insert("\($0.w)x\($0.h)").inserted }
+    }
+
+    /// IOKit's flag for the mode that drives the panel 1:1 (`kDisplayModeNativeFlag`).
+    private static let displayModeNativeFlag: UInt32 = 0x0200_0000
+
+    /// The PANEL's pixels, which are not the framebuffer's. A scaled mode ("More Space") renders
+    /// into a buffer LARGER than the panel and the window server shrinks it, so
+    /// `frame × backingScaleFactor` reads 3420×2224 on a 2560×1664 MacBook Air — a mode the host
+    /// would really drive, at a third more pixels than the screen can show. The mode list carries
+    /// the panel size on the modes IOKit marks native.
+    ///
+    /// Falls back to the framebuffer for a display that publishes no native mode at all (Sidecar,
+    /// screen sharing, some virtual outputs), which is the best guess available there.
+    @MainActor
+    private static func nativePixelSize(_ screen: NSScreen) -> (w: Int, h: Int) {
+        let fallback = (Int(screen.frame.width * screen.backingScaleFactor),
+                        Int(screen.frame.height * screen.backingScaleFactor))
+        guard let number = screen.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+            let modes = CGDisplayCopyAllDisplayModes(
+                CGDirectDisplayID(number.uint32Value), nil) as? [CGDisplayMode],
+            let panel = modes
+                .filter({ $0.ioFlags & displayModeNativeFlag != 0 })
+                .max(by: { $0.pixelWidth * $0.pixelHeight < $1.pixelWidth * $1.pixelHeight })
+        else { return fallback }
+        return (panel.pixelWidth, panel.pixelHeight)
+    }
+    #endif
 
     #if os(iOS)
     /// The key window's per-side safe-area inset in points, resolved for the LANDSCAPE stream even

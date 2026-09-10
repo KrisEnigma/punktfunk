@@ -71,4 +71,32 @@ final class SafeDisplayTests: XCTestCase {
             nativeWidth: 1280, nativeHeight: 720, sideInsetPoints: -40, scale: 3)
         XCTAssertEqual(neg.width, 1280)
     }
+
+    func testMacModeInsetsHeightOnly() {
+        // A 13" MacBook Air at native scaling: 2560×1664 panel, a 32 pt housing over 832 pt of
+        // height ⇒ 64 px off the top, the 2560×1600 a full-screen stream shows whole.
+        let m = SafeDisplay.mode(
+            nativeWidth: 2560, nativeHeight: 1664, topInsetPoints: 32, scale: 2)
+        XCTAssertEqual(m.width, 2560, "the housing binds the vertical axis only")
+        XCTAssertEqual(m.height, 1600, "1664 − 64")
+    }
+
+    func testMacScaledModeStillLandsOnWholePixels() {
+        // The same panel driven "More Space": 1710×1112 pt, so the point→pixel factor is a ratio
+        // (1664/1112) and the housing lands a hair off 64 px. Rounding first is what keeps the
+        // answer 1600 — the raw 64.05 would even-floor to 1598, two pixels of panel dropped.
+        let m = SafeDisplay.mode(
+            nativeWidth: 2560, nativeHeight: 1664,
+            topInsetPoints: 42.8, scale: 1664.0 / 1112.0)
+        XCTAssertEqual(m.height, 1600)
+    }
+
+    func testMacWithoutAHousingYieldsTheNativeModeSoTheRowDedups() {
+        // Every Mac without a notch, and any external display: zero inset ⇒ the panel itself, which
+        // `macDisplayModes` dedups away instead of offering the same size twice.
+        let m = SafeDisplay.mode(
+            nativeWidth: 5120, nativeHeight: 1440, topInsetPoints: 0, scale: 1)
+        XCTAssertEqual(m.width, 5120)
+        XCTAssertEqual(m.height, 1440)
+    }
 }
