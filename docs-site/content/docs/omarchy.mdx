@@ -222,8 +222,8 @@ hosting here — this works, and it is why `punched=false` in the logs is normal
 If you want strict control instead, pin the port and open exactly it:
 
 ```sh
-echo 'PUNKTFUNK_DATA_PORT=9778' >> ~/.config/punktfunk/host.env
-sudo ufw allow from 192.168.0.0/16 to any port 9778 proto udp comment "punktfunk-omarchy"
+echo 'PUNKTFUNK_DATA_PORT=9779' >> ~/.config/punktfunk/host.env
+sudo ufw allow from 192.168.0.0/16 to any port 9779 proto udp comment "punktfunk-omarchy"
 systemctl --user restart punktfunk-host
 ```
 
