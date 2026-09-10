@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -36,6 +37,7 @@ import io.unom.punktfunk.kit.Keymap
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.RingNav
 import io.unom.punktfunk.kit.Sc2BleLink
+import io.unom.punktfunk.kit.Sc2Device
 import io.unom.punktfunk.kit.SessionAccess
 import io.unom.punktfunk.kit.ringNavForKey
 import io.unom.punktfunk.kit.link.DeepLinkResult
@@ -228,6 +230,10 @@ class MainActivity : ComponentActivity() {
     private var sc2Menu: io.unom.punktfunk.kit.Sc2Capture? = null
     var sc2MenuActive by mutableStateOf(false)
         private set
+
+    /** A wired SC2 or Puck is plugged in — the console lists it before the capture grant lands. */
+    var sc2UsbAttached by mutableStateOf(false)
+        private set
     private var sc2Receiver: BroadcastReceiver? = null
     private var sc2PermissionAsked = false
 
@@ -291,7 +297,9 @@ class MainActivity : ComponentActivity() {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, intent: Intent?) {
                 when (intent?.action) {
-                    UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    UsbManager.ACTION_USB_DEVICE_ATTACHED,
+                    UsbManager.ACTION_USB_DEVICE_DETACHED,
+                    -> {
                         sc2PermissionAsked = false // a fresh attach may ask once again
                         startSc2MenuNav()
                         dsPermissionAsked = false
@@ -308,6 +316,7 @@ class MainActivity : ComponentActivity() {
         sc2Receiver = receiver
         val filter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
             addAction(SC2_MENU_PERMISSION)
         }
         if (Build.VERSION.SDK_INT >= 33) {
@@ -374,9 +383,16 @@ class MainActivity : ComponentActivity() {
      * dialog, for the Controllers screen's explicit grant button) — else an already-paired BLE
      * controller, asking for Bluetooth access once if one appears to be attached
      * ([maybeAskSc2BtPermission]). Safe to call repeatedly.
+     *
+     * [sc2UsbAttached] is refreshed first, before any of the gates below: the console lists the
+     * pad whether or not this client may capture it.
      */
     fun startSc2MenuNav(forceAsk: Boolean = false) {
         if (forceAsk) sc2PermissionAsked = false
+        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        sc2UsbAttached = usbManager.deviceList.values.any {
+            it.vendorId == Sc2Device.VID_VALVE && it.productId in Sc2Device.USB_PIDS
+        }
         if (streamHandle != 0L) return // StreamScreen owns the pad while streaming
         if (sc2Menu?.isActive == true) return
         if (!SettingsStore(this).load().sc2Capture) return
@@ -385,7 +401,6 @@ class MainActivity : ComponentActivity() {
             c.onActiveChanged = { on -> runOnUiThread { sc2MenuActive = on } }
             sc2Menu = c
         }
-        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         val dev = cap.findUsbDevice()
         when {
             dev != null && usbManager.hasPermission(dev) -> cap.startUsb(dev)
@@ -492,13 +507,10 @@ class MainActivity : ComponentActivity() {
         lastPadIsGamepad = true
         lastPadStyle = Gamepad.PadStyle.XBOX // Valve pads carry A/B/X/Y in Xbox positions
         val action = if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
-        // The console UI navigates through padKeyProbe (GamepadNavEffect's held-state + repeat
-        // machinery — A/X/Y/D-pad/Select), NOT the focus system: synthesized events must be
-        // offered there first, exactly like real ones in dispatchKeyEvent (tester-diagnosed:
-        // routing everything via super.dispatchKeyEvent bypassed the probe, so only B — which
-        // never rides key events — did anything). The probes gate on keycode only, so a
-        // synthetic KeyEvent satisfies them.
-        padKeyProbe?.let { if (it(KeyEvent(action, keyCode))) return }
+        // The console UI navigates through padKeyProbe, not the focus system, so a synthesized
+        // key has to reach it exactly like a real one. The Skia probe asks the event's source,
+        // and a 2-arg KeyEvent is the virtual keyboard — a captured pad read as a TV remote.
+        padKeyProbe?.let { if (it(padKeyEvent(action, keyCode))) return }
         when (keyCode) {
             // B → back, on release (same edge the real-pad path uses).
             KeyEvent.KEYCODE_BUTTON_B -> if (!down) onBackPressedDispatcher.onBackPressed()
@@ -515,6 +527,15 @@ class MainActivity : ComponentActivity() {
             KeyEvent.KEYCODE_DPAD_RIGHT -> if (down) moveSc2Focus(androidx.compose.ui.focus.FocusDirection.Right)
             else -> super.dispatchKeyEvent(KeyEvent(action, keyCode))
         }
+    }
+
+    /** A capture-synthesized pad key, stamped SOURCE_GAMEPAD the way a real pad's event is. */
+    private fun padKeyEvent(action: Int, keyCode: Int): KeyEvent {
+        val now = SystemClock.uptimeMillis()
+        return KeyEvent(
+            now, now, action, keyCode, 0, 0,
+            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_GAMEPAD,
+        )
     }
 
     private fun moveSc2Focus(dir: androidx.compose.ui.focus.FocusDirection) {
@@ -770,29 +791,14 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Did this key event come from a controller — the question every pad branch here actually
-     * means when it asks `isFromSource(SOURCE_GAMEPAD)`.
+     * means when it asks `isFromSource(SOURCE_GAMEPAD)`. The rule, and why it is drawn where it
+     * is, lives on [Gamepad.eventFromPad].
      *
-     * The event's source class is the platform's per-EVENT guess, and some boxes get it wrong:
-     * Fire OS is reported to deliver a Bluetooth DualSense's Triangle, touchpad and Mode/PS with
-     * standard `KEYCODE_BUTTON_*` keycodes but a SOURCE_KEYBOARD tag, and the plain gate then
-     * drops them before anything can map them. The DEVICE's source classes are the fact, so widen
-     * to the device — but only for keycodes that cannot be anything BUT a gamepad button.
-     *
-     * That restriction is the whole safety of this. [KeyEvent.isGamepadButton] is exactly the
-     * `KEYCODE_BUTTON_*` block — no `KEYCODE_DPAD_*`, no `KEYCODE_BACK` — and both exclusions are
-     * load-bearing: a keyboard's arrow keys share the D-pad keycodes and belong to the VK path
-     * ([Gamepad.buttonBit]), and a remote's or keyboard's BACK shares `KEYCODE_BACK` and has to
-     * keep leaving the stream, which for a device with no pad on it is the documented way out
-     * ([Gamepad.padButtonBit]). Widening on the device alone — or on its vendor id, which for
-     * `0x045E`/`0x054C` covers those vendors' keyboards and mice too — routes both into the pad
-     * branch and breaks them.
-     *
-     * The RAW keycode is what is asked: routing happens before [Gamepad.padKeyCode]'s correction,
-     * and both the raw and the corrected keycode are in this block for every button concerned.
+     * Only the menus take the Steam Controller 2's identity fallback. While streaming, an
+     * uncaptured SC2 is a keyboard and a mouse, and its keys have to keep typing at the host.
      */
     private fun fromPad(event: KeyEvent): Boolean =
-        event.isFromSource(InputDevice.SOURCE_GAMEPAD) ||
-            (KeyEvent.isGamepadButton(event.keyCode) && Gamepad.isPad(event.device))
+        Gamepad.eventFromPad(event, includeSc2Fallback = streamHandle == 0L)
 
     /**
      * `true` (back) / `false` (forward) when this key event is a MOUSE side button, null when it is

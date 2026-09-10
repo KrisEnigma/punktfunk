@@ -52,13 +52,17 @@ and is not a substitute for the list above.)
 
 ## Before you push
 
-Enable the repo git hooks once per clone — they run the exact rustfmt gates CI runs (main
-workspace + the UMDF driver workspace) on every commit and push, so a push can never fail CI
-on formatting alone:
+Enable the repo git hooks once per clone — they run the cheap gates CI runs (rustfmt for the
+main and UMDF driver workspaces, Biome, writing style, unsafe hygiene) on every commit and push,
+so a push can never fail CI on those alone:
 
 ```sh
 git config core.hooksPath scripts/git-hooks
 ```
+
+They only report; nothing is rewritten under you, and each failure prints the command that fixes
+it. The Biome gate is skipped where `web/` or `plugin-kit/` has no `node_modules` — `bun install`
+in either directory to get it locally.
 
 Then the usual full pass. Use `--locked` as CI does — otherwise a silent `Cargo.lock` update can pass
 locally and fail CI:

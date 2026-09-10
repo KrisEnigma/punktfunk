@@ -674,6 +674,23 @@ fn vhci_detach(port: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_sysfs::{input_devices, wait_input_gone};
+
+    /// hid-steam hidraw on iface 2; `bInterfaceNumber` is the HID parent's attribute.
+    fn hid_steam_iface2() -> Option<String> {
+        std::fs::read_dir("/sys/class/hidraw")
+            .ok()?
+            .flatten()
+            .find_map(|e| {
+                let ue =
+                    std::fs::read_to_string(e.path().join("device/uevent")).unwrap_or_default();
+                let iface = std::fs::read_to_string(e.path().join("device/../bInterfaceNumber"))
+                    .ok()
+                    .and_then(|s| u8::from_str_radix(s.trim(), 16).ok());
+                (ue.lines().any(|l| l == "DRIVER=hid-steam") && iface == Some(2))
+                    .then(|| format!("/dev/{}", e.file_name().to_string_lossy()))
+            })
+    }
 
     /// Modern and legacy `status` layouts; a miss here attaches to a busy port.
     #[test]
@@ -779,18 +796,18 @@ mod tests {
         while start.elapsed() < Duration::from_millis(800) {
             pad.write_state(&st);
             let _ = pad.service();
+            if input_devices().contains("Steam Deck") {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(8));
         }
-        let devs = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
         assert!(
-            devs.contains("Steam Deck"),
+            input_devices().contains("Steam Deck"),
             "hid-steam did not bind the usbip Deck"
         );
         drop(pad);
-        std::thread::sleep(Duration::from_millis(300));
-        let devs = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
         assert!(
-            !devs.contains("Steam Deck Motion Sensors"),
+            wait_input_gone("Steam Deck Motion Sensors", Duration::from_millis(400)),
             "device not torn down on drop"
         );
     }
@@ -805,25 +822,17 @@ mod tests {
         let mut pad = SteamDeckUsbip::open(0).expect("open SteamDeckUsbip (root + vhci_hcd?)");
         let st = SteamState::from_gamepad(0, 0, 0, 0, 0, 0, 0);
         let start = Instant::now();
+        let mut node = None;
         while start.elapsed() < Duration::from_millis(1500) {
             pad.write_state(&st);
             let _ = pad.service();
+            if let Some(n) = hid_steam_iface2() {
+                node = Some(n);
+                break;
+            }
             std::thread::sleep(Duration::from_millis(8));
         }
-        // hid-steam hidraw on iface 2; `bInterfaceNumber` is the HID parent's attribute.
-        let node = std::fs::read_dir("/sys/class/hidraw")
-            .expect("/sys/class/hidraw")
-            .flatten()
-            .find_map(|e| {
-                let ue =
-                    std::fs::read_to_string(e.path().join("device/uevent")).unwrap_or_default();
-                let iface = std::fs::read_to_string(e.path().join("device/../bInterfaceNumber"))
-                    .ok()
-                    .and_then(|s| u8::from_str_radix(s.trim(), 16).ok());
-                (ue.lines().any(|l| l == "DRIVER=hid-steam") && iface == Some(2))
-                    .then(|| format!("/dev/{}", e.file_name().to_string_lossy()))
-            })
-            .expect("no hid-steam hidraw on interface 2");
+        let node = node.expect("no hid-steam hidraw on interface 2");
         let f = std::fs::OpenOptions::new()
             .read(true)
             .write(true)

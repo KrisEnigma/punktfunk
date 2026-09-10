@@ -46,7 +46,44 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # Which suites this diff can break (scripts/ci/changed.sh), as job outputs. Every gated job
+  # below waits on this one, so it stays a bare runner with no builder image: seconds of a fleet
+  # slot, not minutes. A merge-base diff is the PR's own change — Gitea path filters also see
+  # rebase noise (gitea#34710). No base sha (push, dispatch) runs every bucket.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.paths.outputs.rust }}
+      rust_arm64: ${{ steps.paths.outputs.rust_arm64 }}
+      web: ${{ steps.paths.outputs.web }}
+      docs_site: ${{ steps.paths.outputs.docs_site }}
+      sdk_plugin_kit: ${{ steps.paths.outputs.sdk_plugin_kit }}
+      decky_typecheck: ${{ steps.paths.outputs.decky_typecheck }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          sh scripts/ci/changed.sh --self-test
+          if [ -n "${BASE_SHA:-}" ]; then
+            git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch origin "$BASE_SHA"
+            git diff --no-renames --name-only "$BASE_SHA...HEAD" > /tmp/changed-paths
+            cat /tmp/changed-paths
+            sh scripts/ci/changed.sh /tmp/changed-paths > /tmp/changed-outputs
+          else
+            CHANGED_ALL=1 sh scripts/ci/changed.sh /dev/null > /tmp/changed-outputs
+          fi
+          tee -a "$GITHUB_OUTPUT" < /tmp/changed-outputs
+
   rust:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: 192.168.1.58:5010/punktfunk-rust-ci:latest
@@ -298,6 +335,8 @@ jobs:
   # `--workspace` would drag it in. Runs in the cross image (amd64 toolchain + arm64 sysroot,
   # ci/rust-ci-arm64cross.Dockerfile) on the ordinary runner — no arm64 runner involved.
   rust-arm64:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust_arm64 == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: 192.168.1.58:5010/punktfunk-rust-ci-arm64cross:latest
@@ -369,6 +408,8 @@ jobs:
         run: sccache --show-stats
 
   web:
+    needs: changes
+    if: ${{ needs.changes.outputs.web == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: oven/bun:1
@@ -418,6 +459,8 @@ jobs:
         run: bun run test
 
   docs-site:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_site == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: oven/bun:1
@@ -442,6 +485,8 @@ jobs:
         run: bun run lint
 
   sdk-plugin-kit:
+    needs: changes
+    if: ${{ needs.changes.outputs.sdk_plugin_kit == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: oven/bun:1
@@ -479,10 +524,13 @@ jobs:
             rm -rf node_modules/@punktfunk/host
             cp -R ../sdk node_modules/@punktfunk/host
           fi
+          bun run check
           bun run typecheck
           bun run test
 
   decky-typecheck:
+    needs: changes
+    if: ${{ needs.changes.outputs.decky_typecheck == 'true' }}
     runs-on: ubuntu-24.04
     container:
       image: node:22-bookworm

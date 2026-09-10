@@ -520,10 +520,13 @@ object SkiaConsole {
         }
     }
 
-    /** The connected controllers, for the chip + settings rows. */
-    fun padsChanged(driving: InputDevice?) {
+    /** The connected controllers, for the chip + settings rows, plus pads with no `InputDevice`. */
+    internal fun padsChanged(driving: InputDevice?, extras: List<ConsoleJson.ExtraPad> = emptyList()) {
         if (handle == 0L) return
-        NativeBridge.nativeConsoleSetPads(handle, ConsoleJson.pads(Gamepad.pads(), driving ?: Gamepad.firstPad()))
+        NativeBridge.nativeConsoleSetPads(
+            handle,
+            ConsoleJson.pads(Gamepad.pads(), driving ?: Gamepad.firstPad(), extras),
+        )
     }
 
     // ---- model pushers -----------------------------------------------------------------------

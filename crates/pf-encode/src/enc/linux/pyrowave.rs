@@ -2302,12 +2302,11 @@ mod tests {
         }
     }
 
-    /// Driver-reported VRAM per slot at the modes that decide affordability. Prints rather
-    /// than asserting a GPU-wide cap; asserts the slot is neither free nor absurd so a
-    /// refactor that made bitstream/import-cache per-slot fails visibly.
+    /// Each slot owns only conversion images and cursor staging. The 512 MiB ceiling
+    /// catches a bitstream or import cache becoming per-slot at 4K.
     #[test]
     #[ignore = "needs a real Vulkan 1.3 compute device (run on a GPU host, not the build box)"]
-    fn slot_vram_cost_is_reported() {
+    fn slot_vram_cost_stays_bounded() {
         for (w, h, chroma, name) in [
             (1920u32, 1080u32, crate::ChromaFormat::Yuv420, "1080p 4:2:0"),
             (3840, 2160, crate::ChromaFormat::Yuv420, "4K 4:2:0"),
@@ -2329,16 +2328,10 @@ mod tests {
                         .get_buffer_memory_requirements(enc.slots[0].cursor_stage)
                         .size
             };
-            eprintln!(
-                "{name}: {} KiB per slot, {SLOTS} slots = {} KiB total",
-                per_slot / 1024,
-                per_slot * SLOTS as u64 / 1024
-            );
             assert!(per_slot > 0, "{name}: a slot must own real memory");
             assert!(
                 per_slot < 512 * 1024 * 1024,
-                "{name}: {per_slot} bytes per slot — something large became per-slot that should \
-                 not have (bitstream? import cache?)"
+                "{name}: {per_slot} bytes per slot exceeds the 512 MiB ceiling"
             );
         }
     }

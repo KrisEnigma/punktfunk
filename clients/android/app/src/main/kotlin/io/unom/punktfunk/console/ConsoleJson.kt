@@ -286,15 +286,32 @@ internal object ConsoleJson {
     // ---- pads -------------------------------------------------------------------------------
 
     /**
+     * A pad the console must list that owns no [InputDevice]: a captured Steam Controller 2,
+     * whose claim detaches the kernel node, or a USB one still waiting on its grant.
+     */
+    data class ExtraPad(
+        val name: String,
+        val key: String,
+        val pref: Int,
+        val detail: String,
+        val forwarded: Boolean,
+    )
+
+    /**
      * `{"label", "pref", "pads": [...]}` — the controller chip's text (the driving pad's name),
      * the glyph style's pref byte, and one entry per connected pad for the settings rows and the
-     * console's Connected-controllers screen.
+     * console's Connected-controllers screen. [extras] are appended, and the first one names the
+     * chip when no `InputDevice` drives it.
      *
      * `detail`/`forwarded`/`rumble` come straight from [padInfoOf], the same reader the touch
      * Controllers screen renders from: the support answer a user gets must not depend on which
      * interface asked, and two readers of `InputDevice` would be two answers waiting to drift.
      */
-    fun pads(pads: List<InputDevice>, driving: InputDevice?): String {
+    fun pads(
+        pads: List<InputDevice>,
+        driving: InputDevice?,
+        extras: List<ExtraPad> = emptyList(),
+    ): String {
         val arr = JSONArray()
         for (d in pads) {
             val info = padInfoOf(d)
@@ -321,9 +338,23 @@ internal object ConsoleJson {
             entry.put("battery", battery ?: JSONObject.NULL)
             arr.put(entry)
         }
+        for (e in extras) {
+            arr.put(
+                JSONObject()
+                    .put("name", e.name)
+                    .put("key", e.key)
+                    .put("pref", e.pref)
+                    .put("steam_virtual", false)
+                    .put("detail", e.detail)
+                    .put("forwarded", e.forwarded)
+                    .put("rumble", false)
+                    .put("battery", JSONObject.NULL),
+            )
+        }
+        val extra = extras.firstOrNull()
         return JSONObject()
-            .put("label", driving?.name ?: JSONObject.NULL)
-            .put("pref", driving?.let { Gamepad.prefFor(it) } ?: JSONObject.NULL)
+            .put("label", driving?.name ?: extra?.name ?: JSONObject.NULL)
+            .put("pref", driving?.let { Gamepad.prefFor(it) } ?: extra?.pref ?: JSONObject.NULL)
             .put("pads", arr)
             .toString()
     }

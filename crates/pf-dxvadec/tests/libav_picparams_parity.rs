@@ -12,9 +12,8 @@
 //! grep -oE 'PF(PP|QM|BD|CFG) .*' h264.log > libav-h264.capture
 //! PF_LIBAV_CAPTURE_H264=libav-h264.capture cargo test -p pf-dxvadec --test libav_picparams_parity -- --ignored
 //! ```
-//! Repeat for HEVC (`test-25fps.h265`) and AV1 (`test-25fps.ivf.av1`). `PF_DXVA_DUMP`
-//! writes this harness's records. H.264 POC offset and HEVC tiles-disabled bit 10 are
-//! the only allowances; reject `Reserved16Bits == 0`.
+//! Repeat for HEVC (`test-25fps.h265`) and AV1 (`test-25fps.ivf.av1`). H.264 POC offset
+//! and HEVC tiles-disabled bit 10 are the only allowances; reject `Reserved16Bits == 0`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -2885,18 +2884,6 @@ fn our_av1_picture_parameters_match_libavcodecs() {
     // ClearVideo workarounds are H.264-only; AV1 has no `Reserved16Bits`.
     preflight(&capture, ours.len(), "av1", None);
     compare_av1_picparams(&ours, &capture).verdict("AV1 picture parameters", ours.len());
-}
-
-#[test]
-#[ignore = "writes a dump: PF_DXVA_DUMP=<path>"]
-fn dump_our_submission_in_the_captures_own_format() {
-    let path = std::env::var("PF_DXVA_DUMP").expect("PF_DXVA_DUMP=<path> names the output file");
-    let mut text = dump("h264", &our_h264_submissions());
-    text.push_str(&dump("hevc", &our_hevc_submissions()));
-    // AV1 dump is the only view of the submission until a capture exists.
-    text.push_str(&dump("av1", &our_av1_submissions()));
-    std::fs::write(&path, text).expect("write the dump");
-    println!("wrote {path}");
 }
 
 #[test]
