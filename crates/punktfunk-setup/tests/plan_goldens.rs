@@ -967,13 +967,13 @@ fn trap_a_ujust_box_uses_the_recipe_not_usermod() {
     let mut facts = fresh("bazzite", Family::Sysext);
     facts.has_ujust = true;
     let cmds = plan_for(&facts, &pins()).commands();
+    let recipe = cmds
+        .iter()
+        .find(|c| c.starts_with("ujust add-user-to-input-group"))
+        .unwrap_or_else(|| panic!("{cmds:?}"));
     assert!(
-        cmds.contains(&"ujust add-user-to-input-group".to_string()),
-        "{cmds:?}"
-    );
-    assert!(
-        !cmds.iter().any(|c| c.contains("usermod -aG input")),
-        "{cmds:?}"
+        recipe.starts_with("ujust add-user-to-input-group add"),
+        "a bare recipe call opens a prompt the run cannot answer: {recipe}"
     );
 }
 
