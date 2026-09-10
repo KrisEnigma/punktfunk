@@ -66,7 +66,11 @@ format_staged_biome() {
             fail "$path also has unstaged edits" "stage or stash that file, then commit again"
     done < "$staged"
 
-    if ! (cd "$root/$workspace" && bun run biome check --write --staged .); then
+    # Biome reads `--staged` through its own git client, which honours GIT_DIR. Git exports that
+    # to every hook, and in a worktree it names `.git/worktrees/<name>`; biome then sees no staged
+    # files and exits 1 on a clean tree. Its own discovery from the workspace is correct.
+    if ! (cd "$root/$workspace" && unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE &&
+            bun run biome check --write --staged .); then
         fail "$workspace staged files are not Biome-clean" \
             "(cd $workspace && bun install && bun run biome check --write --staged .)"
     fi
