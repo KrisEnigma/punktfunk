@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import {
+	Deferred,
 	Duration,
 	Effect,
 	Exit,
@@ -96,6 +97,13 @@ const ALWAYS_APPLY: ReadonlySet<SyncReason> = new Set<SyncReason>([
 export const DEFAULT_FS_CHANGE_MIN_INTERVAL: Duration.Duration =
 	Duration.seconds(30);
 
+/**
+ * How long `startLoops` waits for the forked watch fiber to reach `openWatchers`. That acquire
+ * is a synchronous `fs.watch`, so 5 s can only mean the fiber went away first — a concurrent
+ * `reconfigure` closing the scope, or shutdown — and an unbounded wait there hangs startup.
+ */
+const WATCHER_REGISTER_TIMEOUT: Duration.Duration = Duration.seconds(5);
+
 export interface SyncEngineOptions<
 	Report,
 	Entries extends ReadonlyArray<unknown>,
@@ -129,7 +137,7 @@ export interface SyncEngine<Report> {
 	readonly status: Effect.Effect<SyncStatus<Report>>;
 	/** Emits on every sync start/finish — the UI's SSE feed. */
 	readonly changes: Stream.Stream<SyncStatus<Report>>;
-	/** Initial sync + start poll/watch loops (scoped to the construction Scope). */
+	/** Initial sync, then start loops. Returns after filesystem watchers are registered. */
 	readonly start: Effect.Effect<void>;
 	/** Restart loops with fresh settings, then sync("config-change"). */
 	readonly reconfigure: Effect.Effect<void>;
@@ -282,13 +290,17 @@ export const makeSyncEngine = <
 			yield* Effect.forkIn(pollLoop, scope);
 
 			if (settings.watch && settings.watchDirs.length > 0) {
+				// The acquire below runs inside the forked feed, so `start` would otherwise return
+				// before any `fs.watch` exists and lose every write until the next poll — 15 minutes
+				// on a library plugin's default. Hold `start` until the watchers are live.
+				const watching = yield* Deferred.make<void>();
 				const watchStream = Stream.callback<void>((queue) =>
 					Effect.acquireRelease(
 						Effect.sync(() =>
 							openWatchers(settings.watchDirs, () => {
 								Queue.offerUnsafe(queue, undefined);
 							}),
-						),
+						).pipe(Effect.tap(() => Deferred.succeed(watching, undefined))),
 						(watchers) =>
 							Effect.sync(() => {
 								for (const w of watchers) {
@@ -314,6 +326,13 @@ export const makeSyncEngine = <
 					Stream.runForEach(() => Queue.offer(kick, undefined)),
 				);
 				yield* Effect.forkIn(feed, scope);
+				yield* Deferred.await(watching).pipe(
+					Effect.timeoutOrElse({
+						duration: WATCHER_REGISTER_TIMEOUT,
+						orElse: () =>
+							Effect.die(new Error("register the filesystem watchers")),
+					}),
+				);
 				const drain = Effect.forever(
 					Queue.take(kick).pipe(
 						Effect.andThen(safeSync("fs-change")),
