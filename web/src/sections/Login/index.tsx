@@ -4,7 +4,7 @@ import { LoginView } from "./view";
 
 export const SectionLogin: FC<{ next?: string }> = ({ next }) => {
 	useLocale();
-	// A form action reads the fields from the DOM, so a password Firefox filled or restored
+	// A form action reads the fields from the DOM, so a saved password the browser filled in
 	// before hydration counts. A submit before the bundle runs is captured by React's inline
 	// runtime and replayed once the form hydrates; nothing ever leaves as a native GET.
 	const [error, action, busy] = useActionState(
