@@ -3,6 +3,7 @@ import { type FC, useMemo, useState } from "react";
 import { pluginIcon } from "@/api/plugins";
 import { type StoreEntry, useStoreCatalog } from "@/api/store";
 import { QueryState } from "@/components/query-state";
+import { Stagger } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -149,7 +150,14 @@ export const BrowseTab: FC<{
 					</Card>
 				) : (
 					<div className="@container">
-						<div className="grid grid-cols-1 gap-card @xl:grid-cols-2 @4xl:grid-cols-3">
+						{/* The catalogue had no stagger container at all, so the cards landed
+						    together however the page was doing. `root` because this is a tab
+						    panel behind a query — two layers between it and the page's
+						    `<Section>` that decide for themselves when to mount. */}
+						<Stagger
+							root
+							className="grid grid-cols-1 gap-card @xl:grid-cols-2 @4xl:grid-cols-3"
+						>
 							{shown.map((entry) => (
 								<StoreCard
 									key={`${entry.source}/${entry.id}`}
@@ -157,7 +165,7 @@ export const BrowseTab: FC<{
 									onInstall={() => onInstall(entry)}
 								/>
 							))}
-						</div>
+						</Stagger>
 					</div>
 				)}
 			</QueryState>

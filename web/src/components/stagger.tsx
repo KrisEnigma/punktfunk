@@ -31,9 +31,15 @@ export const staggerProps = (gap: number = STAGGER_GAP) => ({
  * Nothing in the types catches that; it only shows up in a browser, beside a page that does it
  * right. Wrapping the grid re-establishes the cadence.
  *
- * `root` is for a container with no animating motion ancestor to inherit from (the sidebar nav): it
- * drives `from → enter` itself. Inside a `<Section>` or a card, leave it off — supplying
- * `initial`/`animate` there would run the group on its own clock instead of the page's.
+ * `root` is for a group with no animating motion ancestor to inherit from, or one whose ancestor
+ * cannot be relied on to still be driving when it mounts: it runs `from → enter` itself. A dialog
+ * (rendered through a portal, outside the page's `<Section>`) and a tab panel are the clear cases.
+ * Inside a `<Section>` or a card, leave it off — supplying `initial`/`animate` there runs the group
+ * on its own clock instead of the page's.
+ *
+ * Inheriting survives more than it looks like it should: measured, a group still staggers through
+ * plain wrapper elements and when it mounts half a second after the page. "It arrives late" is
+ * therefore NOT on its own a reason to reach for `root`.
  */
 export const Stagger: FC<
 	HTMLMotionProps<"div"> & {

@@ -5,7 +5,7 @@ import { type ReactNode, useState } from "react";
 import { useHostEvents } from "@/api/events";
 import { pluginIcon, uiPlugins, usePlugins } from "@/api/plugins";
 import { BrandMark } from "@/components/brand-mark";
-import { staggerProps } from "@/components/stagger";
+import { Stagger, staggerProps } from "@/components/stagger";
 import { Wordmark } from "@/components/wordmark";
 import { changeLocale, type Locale, locales, useLocale } from "@/lib/i18n";
 import {
@@ -104,8 +104,11 @@ function Sidebar() {
 			{MANAGE.map((n) => (
 				<SidebarLink key={n.to} entry={n} />
 			))}
+			{/* Its own group, driving itself: the pins come from the plugins query and land after
+			    the nav above them has finished arriving, so they get their own cadence on arrival
+			    rather than a slot in a cascade that is over. */}
 			{pinned.length > 0 && (
-				<>
+				<Stagger root className="flex flex-col gap-1">
 					<GroupLabel>{m.nav_group_pinned()}</GroupLabel>
 					{pinned.map((p) =>
 						p.kind === "nav" ? (
@@ -119,7 +122,7 @@ function Sidebar() {
 							/>
 						),
 					)}
-				</>
+				</Stagger>
 			)}
 		</motion.nav>
 	);

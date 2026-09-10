@@ -289,8 +289,8 @@ export const CustomiseDialog: FC<{
  * the stored policy — the generalised `applyAxis` that three controls already used, now the
  * only write path on the page.
  *
- * `root`, because a dialog is not inside the page's `<Section>`: there is no ancestor driving
- * `from → enter` here, so the group has to run its own.
+ * `root`, because a dialog renders through a portal: there is no animating ancestor out there to
+ * inherit `from → enter` from, so the group has to run its own clock.
  */
 const Customise: FC<{
 	effective: EffectivePolicy;
