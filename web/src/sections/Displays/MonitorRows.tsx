@@ -45,7 +45,17 @@ export const MonitorRows: FC<{
 	// Our own virtual displays show up in the head list on KWin; they are on the map already and
 	// are not something to stream FROM.
 	const heads = monitors.filter((mon) => !mon.managed);
-	if (heads.length === 0) return null;
+	// A pin naming a screen the host does not have fails every session until it changes. The rows
+	// list only screens the host HAS, so it gets its own row and a warning, or the card would show
+	// nothing selected and no hint that anything is wrong.
+	const danglingPin =
+		pinned &&
+		!monitors.some(
+			(mon) => mon.connector.toLowerCase() === pinned.toLowerCase(),
+		)
+			? pinned
+			: null;
+	if (heads.length === 0 && !danglingPin) return null;
 	// `PUNKTFUNK_CAPTURE_MONITOR` outranks the stored policy, so a host pinned in its unit's
 	// environment is read-only: offering controls that silently lose to the env is worse than
 	// saying nothing.
@@ -73,6 +83,11 @@ export const MonitorRows: FC<{
 						{m.display_monitor_env_locked()}
 					</p>
 				)}
+				{danglingPin && (
+					<p className="text-sm text-destructive">
+						{m.display_monitor_missing_warning()}
+					</p>
+				)}
 				{/* `overflow-hidden` because the selected row paints its own square-cornered
 				    background: without it that background runs past the rounded corner. */}
 				<motion.ul
@@ -85,6 +100,19 @@ export const MonitorRows: FC<{
 							disabled={locked}
 							title={m.display_stream_virtual()}
 							onPick={() => onPick(null)}
+						/>
+					)}
+					{danglingPin && (
+						<Row
+							selected
+							disabled
+							title={danglingPin}
+							detail={m.display_monitor_missing_hint()}
+							badges={
+								<Badge variant="destructive">
+									{m.display_monitor_missing()}
+								</Badge>
+							}
 						/>
 					)}
 					{heads.map((mon) => (
