@@ -473,7 +473,6 @@ mod live {
             .write_all(bytes)
             .expect("write to wl-copy");
         let _ = child.wait(); // foreground exits; the fork keeps serving
-        std::thread::sleep(Duration::from_millis(150));
     }
 
     fn open_or_skip() -> Option<(
