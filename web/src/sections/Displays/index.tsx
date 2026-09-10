@@ -31,6 +31,7 @@ import type {
 	DisplayPolicy,
 	EffectivePolicy,
 } from "@/api/gen/model";
+import { useListNativeClients } from "@/api/gen/native/native";
 import { usePlatform } from "@/api/platform";
 import { useDialogs } from "@/components/dialogs";
 import { DocsLink } from "@/components/docs-link";
@@ -84,6 +85,13 @@ export const SectionDisplays: FC = () => {
 	const kept = displays.filter((d) => d.state !== "active");
 	const shown = preview ?? effective;
 	const busy = save.isPending;
+	// A box on the map is labelled with the device's name; an overlay is keyed by its
+	// fingerprint. The paired list is the only place both appear, so it is what turns one
+	// into the other (§6.2).
+	const paired = useListNativeClients();
+	const overlaid = (paired.data ?? [])
+		.filter((c) => settings.data?.clients?.[c.fingerprint])
+		.map((c) => c.name);
 
 	const invalidate = () => {
 		qc.invalidateQueries({ queryKey: getGetDisplaySettingsQueryKey() });
@@ -224,6 +232,7 @@ export const SectionDisplays: FC = () => {
 									monitors={heads}
 									displays={displays}
 									dimMonitors={shown?.topology === "exclusive"}
+									overlaid={overlaid}
 									captureMonitor={monitors.data?.pinned ?? null}
 									onRelease={doRelease}
 									onMove={moveDisplay}

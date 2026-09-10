@@ -316,6 +316,12 @@ fn api_router_parts() -> (Router<Arc<MgmtState>>, utoipa::openapi::OpenApi) {
             display::update_custom_preset,
             display::delete_custom_preset
         ))
+        // Three methods, one path — one `routes!` (same-path merge).
+        .routes(routes!(
+            display::get_display_client,
+            display::set_display_client,
+            display::delete_display_client
+        ))
         .routes(routes!(host::get_status))
         .routes(routes!(host::get_local_summary))
         // Two paths → two `routes!`. The macro merges METHODS of one path;

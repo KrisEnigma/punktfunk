@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
-import { Pencil, SlidersHorizontal, Trash2 } from "lucide-react";
+import { MonitorPlay, Pencil, SlidersHorizontal, Trash2 } from "lucide-react";
 import { type FC, useState } from "react";
 import {
 	getListPairedClientsQueryKey,
@@ -9,6 +9,8 @@ import {
 	useUnpairAllClients,
 	useUnpairClient,
 } from "@/api/gen/clients/clients";
+import { useGetDisplaySettings } from "@/api/gen/display/display";
+import type { DisplaySettingsState } from "@/api/gen/model";
 import type { UpdateNativeAccess } from "@/api/gen/model/updateNativeAccess";
 import {
 	getListNativeClientsQueryKey,
@@ -31,6 +33,10 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { m } from "@/paraglide/messages";
+import {
+	ClientPolicySheet,
+	overlaySummary,
+} from "@/sections/Displays/ClientPolicySheet";
 import { AccessChip, useNowUnix } from "./access";
 import { EditAccessSheet, type EditAccessTarget } from "./EditAccessSheet";
 
@@ -89,6 +95,8 @@ export const PairedDevicesSection: FC = () => {
 	const unpairAllMoonlight = useUnpairAllClients();
 	const renameMoonlight = useRenameClient();
 	const patchAccess = useUpdateNativeClientAccess();
+	const displaySettings = useGetDisplaySettings();
+	const [displayTarget, setDisplayTarget] = useState<PairedRow | null>(null);
 	// One clock for every countdown in the card AND the sheet — recomputed client-side from
 	// `expires_unix`, so the tick never refetches anything.
 	const nowUnix = useNowUnix();
@@ -264,9 +272,21 @@ export const PairedDevicesSection: FC = () => {
 				onRename={onRename}
 				onUnpair={onUnpair}
 				onUnpairAll={onUnpairAll}
+				onDisplaySettings={setDisplayTarget}
+				settings={displaySettings.data}
 				pendingFingerprint={pendingFingerprint}
 				isUnpairingAll={isUnpairingAll}
 			/>
+			{displayTarget && (
+				<ClientPolicySheet
+					open
+					onOpenChange={(open) => !open && setDisplayTarget(null)}
+					fingerprint={displayTarget.fingerprint}
+					deviceName={
+						displayTarget.name || displayTarget.fingerprint.slice(0, 12)
+					}
+				/>
+			)}
 			<EditAccessSheet
 				target={editing}
 				nowUnix={nowUnix}
@@ -290,6 +310,12 @@ export const PairedDevices: FC<{
 	nowUnix: number;
 	/** Open the access editor for a native row (only offered where `hasAccess`). */
 	onEditAccess: (row: PairedRow) => void;
+	/** Open this device's display settings. Native only — the overlay is keyed by the
+	 * pairing fingerprint the native plane presents, which a GameStream cert is not. */
+	onDisplaySettings: (row: PairedRow) => void;
+	/** Display policy + stored overlays, so the Display column can be rendered without a
+	 * second fetch per row. */
+	settings?: DisplaySettingsState;
 	/**
 	 * Name a Moonlight row. Offered only on those: a native device already carries the name it gave
 	 * at pairing, while a Moonlight certificate carries nothing that identifies the device at all.
@@ -312,6 +338,8 @@ export const PairedDevices: FC<{
 	onRename,
 	onUnpair,
 	onUnpairAll,
+	onDisplaySettings,
+	settings,
 	pendingFingerprint,
 	isUnpairingAll,
 }) => (
@@ -345,6 +373,7 @@ export const PairedDevices: FC<{
 								<TableHead>{m.clients_name()}</TableHead>
 								<TableHead>{m.pairing_protocol()}</TableHead>
 								<TableHead>{m.pairing_access()}</TableHead>
+								<TableHead>{m.display_device_column()}</TableHead>
 								<TableHead>{m.clients_fingerprint()}</TableHead>
 								<TableHead className="w-20" />
 							</TableRow>
@@ -388,6 +417,18 @@ export const PairedDevices: FC<{
 											<span className="text-muted-foreground">—</span>
 										)}
 									</TableCell>
+									<TableCell className="max-w-[22rem] text-sm text-muted-foreground">
+										{/* Only a native device has an overlay: the map is keyed by the
+										    pairing fingerprint the native plane presents, and a
+										    GameStream client's cert is not that. */}
+										{r.protocol === "native" ? (
+											<span>
+												{overlaySummary(settings?.clients?.[r.fingerprint])}
+											</span>
+										) : (
+											<span>—</span>
+										)}
+									</TableCell>
 									<TableCell className="font-mono text-xs text-muted-foreground">
 										{r.fingerprint.slice(0, 16)}…
 									</TableCell>
@@ -405,6 +446,21 @@ export const PairedDevices: FC<{
 													onClick={() => onRename(r)}
 												>
 													<Pencil className="size-4" />
+												</Button>
+											)}
+											{r.protocol === "native" && (
+												<Button
+													variant="ghost"
+													size="icon"
+													aria-label={m.display_device_settings()}
+													title={m.display_device_settings()}
+													disabled={
+														isUnpairingAll ||
+														pendingFingerprint === r.fingerprint
+													}
+													onClick={() => onDisplaySettings(r)}
+												>
+													<MonitorPlay className="size-4" />
 												</Button>
 											)}
 											{hasAccess(r) && (

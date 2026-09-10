@@ -775,5 +775,11 @@
 	"common_off": "Aus",
 	"display_state_kept_for": "Gehalten, {seconds} s",
 	"display_save": "Speichern",
-	"display_revert": "Änderungen verwerfen"
+	"display_revert": "Änderungen verwerfen",
+	"display_follows_host": "Folgt dem Host",
+	"display_follow_host": "Host folgen",
+	"display_follow_host_all": "In allem dem Host folgen",
+	"display_device_settings": "Anzeige-Einstellungen …",
+	"display_device_column": "Anzeige",
+	"display_mirrors": "Spiegelt {connector}"
 }

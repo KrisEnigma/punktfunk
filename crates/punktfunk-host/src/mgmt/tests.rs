@@ -1484,6 +1484,18 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         ("POST", "/api/v1/display/presets", true, false),
         ("PUT", "/api/v1/display/presets/{id}", true, false),
         ("DELETE", "/api/v1/display/presets/{id}", true, false),
+        // Per-device display settings. Same lane as the host-wide policy above and
+        // deliberately no stricter: this route changes ONE device's behaviour, while
+        // `PUT /display/settings` changes every device's. It carries no device identity
+        // either — the fingerprint is the key, and the body is display behaviour.
+        ("GET", "/api/v1/display/clients/{fingerprint}", true, false),
+        ("PUT", "/api/v1/display/clients/{fingerprint}", true, false),
+        (
+            "DELETE",
+            "/api/v1/display/clients/{fingerprint}",
+            true,
+            false,
+        ),
         // Session control.
         ("DELETE", "/api/v1/session", true, false),
         ("POST", "/api/v1/session/idr", true, false),
@@ -1884,6 +1896,78 @@ async fn display_settings_surface() {
         !enforced.contains(&"game_session") || cfg!(target_os = "linux"),
         "a dedicated game session is a headless gamescope spawn"
     );
+}
+
+/// The per-device overlay routes (`design/web-console-overhaul.md` §6.1).
+///
+/// **Read-only on purpose.** `policy::prefs()` is a process-global `OnceLock`
+/// bound to whatever `PUNKTFUNK_CONFIG_DIR` said at its FIRST use anywhere in
+/// this binary, so `ConfigDirOverride` cannot move it afterwards — a test that
+/// PUT a policy here wrote to the developer's real `display-settings.json`.
+/// Resolution, sanitisation and the insert/remove round-trip are covered
+/// against in-memory policies in `pf-vdisplay`'s `policy::tests::client_overlay`;
+/// what is worth asserting HERE is the wiring the console depends on.
+#[tokio::test]
+async fn display_client_overlay_is_served_beside_the_policy_never_inside_it() {
+    let app = test_app(test_state(), None);
+
+    // An unknown device is "follows host", not 404: absent fields ARE the answer.
+    let (status, body) = send(&app, get_req("/api/v1/display/clients/aa11")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!({}));
+
+    let (status, body) = send(&app, get_req("/api/v1/display/settings")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("clients").is_some(),
+        "overlays ride their own field so one fetch paints the device rows"
+    );
+    assert!(
+        body["settings"].get("clients").is_none(),
+        "and never inside `settings`, which the console PUTs back whole"
+    );
+
+    // Only fields this build actually acts on per device, and never one the host
+    // does not act on at all — the console renders this list verbatim (D1).
+    let per_device: Vec<&str> = body["client_enforced"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(per_device.contains(&"mode_conflict"));
+    let host_wide: Vec<&str> = body["enforced"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for field in &per_device {
+        assert!(
+            host_wide.contains(field),
+            "{field} is offered per-device but this build does not act on it at all"
+        );
+    }
+}
+
+/// A stale console must not be able to revert per-device work it never saw by
+/// PUTting back the whole policy object it fetched earlier. Refused before any
+/// write, so this asserts the guard without touching the store.
+#[tokio::test]
+async fn the_host_wide_policy_put_refuses_to_carry_overlays() {
+    let app = test_app(test_state(), None);
+    let (status, _) = send(
+        &app,
+        put_json(
+            "/api/v1/display/settings",
+            serde_json::json!({
+                "preset": "default",
+                "clients": {"aa11": {"mode_conflict": "join"}}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 /// No backend has created a display here (non-Windows reports none): empty `/state`, no-op `/release`.

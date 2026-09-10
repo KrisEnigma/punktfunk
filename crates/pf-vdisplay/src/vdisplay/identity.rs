@@ -308,9 +308,14 @@ pub(crate) fn resolve_slot_bounded(
     max_id: u32,
 ) -> Option<u32> {
     use crate::policy::Identity;
+    // Per device: "remember display settings" is a property of the device whose
+    // settings are being remembered (§6.1).
     let id_policy = crate::policy::prefs()
-        .configured_effective()
-        .map(|e| e.identity)
+        .configured()
+        .map(|p| {
+            p.effective_for(crate::policy::fp_hex(fp).as_deref())
+                .identity
+        })
         .unwrap_or(default);
     let per_client_mode = match id_policy {
         Identity::Shared => return None,

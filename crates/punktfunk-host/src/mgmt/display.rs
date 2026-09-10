@@ -32,6 +32,15 @@ pub(crate) struct DisplaySettingsState {
     custom_presets: Vec<crate::vdisplay::policy::CustomPreset>,
     /// Names this build acts on (live vs coming-soon). Per-backend nuance is on `/display/state`.
     enforced: Vec<String>,
+    /// Overlay fields this build acts on PER DEVICE. A strict subset of
+    /// `enforced`: an axis can be host-wide and not yet per-device, and the
+    /// console must not offer a device control the host would store and ignore
+    /// (`design/web-console-overhaul.md` D1).
+    client_enforced: Vec<String>,
+    /// Stored per-device overlays, so one fetch paints the device rows.
+    /// READ-ONLY here — writes go to `/display/clients/{fingerprint}`, and the
+    /// PUT below refuses a body carrying this key.
+    clients: std::collections::BTreeMap<String, crate::vdisplay::policy::ClientOverlay>,
 }
 
 pub(crate) fn preset_summary(id: &str) -> &'static str {
@@ -121,8 +130,21 @@ pub(crate) fn display_settings_state() -> DisplaySettingsState {
     if cfg!(target_os = "linux") {
         enforced.push("capture_monitor".into());
     }
+    // Wired through a call site that has the client's fingerprint. The rest are
+    // stored and served but not yet consulted: they are read where no
+    // fingerprint is in scope (the registry entry, the open path), which is its
+    // own change. Advertising them would put dead controls on the device sheet.
+    let client_enforced: Vec<String> = vec!["mode_conflict".into(), "identity".into()];
+    // Overlays ride their own field, never `settings`. The console PUTs `settings`
+    // back whole, and the PUT refuses a body carrying `clients` — so leaving them
+    // in here would make every host-wide save fail the moment one device had an
+    // overlay. The file keeps them; the wire does not.
+    let mut settings = settings;
+    let clients = std::mem::take(&mut settings.clients);
     DisplaySettingsState {
         effective: settings.effective(),
+        clients,
+        client_enforced,
         settings,
         configured,
         presets,
@@ -169,6 +191,17 @@ pub(crate) async fn get_display_settings() -> Json<DisplaySettingsState> {
 pub(crate) async fn set_display_settings(
     ApiJson(policy): ApiJson<crate::vdisplay::policy::DisplayPolicy>,
 ) -> Response {
+    // The overlay map never rides the policy object. A console that fetched
+    // `/display/settings`, sat on it, and PUT it back would otherwise revert every
+    // per-device change made in between — the class of bug `serverCaptureMonitor()`
+    // used to paper over one field at a time.
+    if !policy.clients.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "Per-device display settings are saved on their own — this request carried them \
+             with the host policy.",
+        );
+    }
     #[cfg_attr(target_os = "linux", allow(unused_mut))]
     let mut policy = policy;
     // Off Linux there is no mirror backend. Drop `capture_monitor` rather than 400: this PUT is
@@ -192,6 +225,127 @@ pub(crate) async fn set_display_settings(
     #[cfg(target_os = "linux")]
     crate::refresh_capture_monitor_anchor("display policy updated");
     Json(display_settings_state()).into_response()
+}
+
+/// Read one device's overlay
+///
+/// Absent fields follow the host policy; an unknown device answers with an empty
+/// overlay rather than 404 — "follows host" is a real answer, not a missing one.
+#[utoipa::path(
+    get,
+    path = "/display/clients/{fingerprint}",
+    tag = "display",
+    operation_id = "getDisplayClient",
+    params(("fingerprint" = String, Path, description = "Pairing fingerprint (hex)")),
+    responses(
+        (status = OK, description = "The device's overlay", body = crate::vdisplay::policy::ClientOverlay),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn get_display_client(
+    Path(fingerprint): Path<String>,
+) -> Json<crate::vdisplay::policy::ClientOverlay> {
+    let key = fingerprint.trim().to_ascii_lowercase();
+    Json(
+        crate::vdisplay::policy::prefs()
+            .get()
+            .clients
+            .get(&key)
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
+/// Save one device's overlay
+///
+/// The WHOLE overlay: a field absent from the body stops being pinned and the
+/// device follows the host again. An overlay that pins nothing is dropped, which
+/// is the same as `DELETE`.
+#[utoipa::path(
+    put,
+    path = "/display/clients/{fingerprint}",
+    tag = "display",
+    operation_id = "setDisplayClient",
+    params(("fingerprint" = String, Path, description = "Pairing fingerprint (hex)")),
+    request_body = crate::vdisplay::policy::ClientOverlay,
+    responses(
+        (status = OK, description = "Overlay stored; the new settings state", body = DisplaySettingsState),
+        (status = BAD_REQUEST, description = "Empty fingerprint", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Overlay could not be persisted", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn set_display_client(
+    Path(fingerprint): Path<String>,
+    ApiJson(overlay): ApiJson<crate::vdisplay::policy::ClientOverlay>,
+) -> Response {
+    let key = fingerprint.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "no device named");
+    }
+    let store = crate::vdisplay::policy::prefs();
+    let mut policy = store.get();
+    // `sanitized` drops an overlay that pins nothing, so this covers the reset
+    // case too without a second path.
+    policy.clients.insert(key.clone(), overlay);
+    if let Err(e) = store.set(policy) {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Couldn't save the display settings for this device — {e:#}"),
+        );
+    }
+    tracing::info!(fingerprint = %key, "management API: per-device display overlay updated");
+    Json(display_settings_state()).into_response()
+}
+
+/// Make one device follow the host again
+#[utoipa::path(
+    delete,
+    path = "/display/clients/{fingerprint}",
+    tag = "display",
+    operation_id = "deleteDisplayClient",
+    params(("fingerprint" = String, Path, description = "Pairing fingerprint (hex)")),
+    responses(
+        (status = OK, description = "Overlay cleared; the new settings state", body = DisplaySettingsState),
+        (status = INTERNAL_SERVER_ERROR, description = "Overlay could not be cleared", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn delete_display_client(Path(fingerprint): Path<String>) -> Response {
+    let key = fingerprint.trim().to_ascii_lowercase();
+    let store = crate::vdisplay::policy::prefs();
+    let mut policy = store.get();
+    // Already following the host: nothing to write, and a no-op write would
+    // rewrite the file on every unpair.
+    if policy.clients.remove(&key).is_none() {
+        return Json(display_settings_state()).into_response();
+    }
+    if let Err(e) = store.set(policy) {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Couldn't clear the display settings for this device — {e:#}"),
+        );
+    }
+    tracing::info!(fingerprint = %key, "management API: per-device display overlay cleared");
+    Json(display_settings_state()).into_response()
+}
+
+/// Drop a device's overlay when it unpairs, so a later device that is granted the
+/// same fingerprint cannot inherit settings the operator made for another one.
+pub(crate) fn forget_display_overlay(fingerprint: &str) {
+    let key = fingerprint.trim().to_ascii_lowercase();
+    let store = crate::vdisplay::policy::prefs();
+    let mut policy = store.get();
+    if policy.clients.remove(&key).is_none() {
+        return;
+    }
+    match store.set(policy) {
+        Ok(()) => tracing::info!(fingerprint = %key,
+            "unpaired: dropped this device's display settings"),
+        Err(e) => tracing::warn!(fingerprint = %key,
+            "unpaired: could not drop this device's display settings ({e:#}) — a device \
+             re-paired to the same fingerprint would inherit them"),
+    }
 }
 
 /// One live or kept virtual display.
@@ -449,14 +603,7 @@ pub(crate) struct DisplayLayoutRequest {
 )]
 pub(crate) async fn set_display_layout(ApiJson(req): ApiJson<DisplayLayoutRequest>) -> Response {
     let store = crate::vdisplay::policy::prefs();
-    let policy = store.get().effective().with_manual_layout(
-        req.positions,
-        store.game_session(),
-        store.ddc_power_off(),
-        store.pnp_disable_monitors(),
-        store.edid_lock(),
-        store.get().capture_monitor,
-    );
+    let policy = store.get().with_manual_layout(req.positions);
     if let Err(e) = store.set(policy) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,

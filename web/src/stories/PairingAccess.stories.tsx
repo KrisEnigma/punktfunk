@@ -112,6 +112,7 @@ export const AccessColumn: Story = {
 			refetch={noop}
 			nowUnix={accessNowUnix}
 			onEditAccess={noop}
+			onDisplaySettings={noop}
 			onRename={noop}
 			onUnpair={noop}
 			onUnpairAll={noop}

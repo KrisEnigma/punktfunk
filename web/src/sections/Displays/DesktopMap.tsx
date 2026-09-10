@@ -9,7 +9,7 @@
 // Positions come from the host in DESKTOP pixels and are rendered as percentages of the
 // bounding box, so the map is responsive with no measurement. Only dragging needs the
 // container's real rect, and it reads it at drag time.
-import { Monitor, X } from "lucide-react";
+import { Monitor, Settings2, X } from "lucide-react";
 import {
 	type FC,
 	type PointerEvent as ReactPointerEvent,
@@ -46,6 +46,8 @@ export interface MapBox {
 	expiresInMs?: number | null;
 	slot?: number;
 	connector?: string;
+	/** This device pins something of its own, so its box is not the host's policy. */
+	overlaid?: boolean;
 	/** Dimmed: this monitor turns off while streaming under the previewed topology. */
 	dimmed?: boolean;
 	draggable?: boolean;
@@ -55,7 +57,11 @@ export interface MapBox {
 export function toBoxes(
 	monitors: readonly ApiMonitorInfo[],
 	displays: readonly ApiDisplayInfo[],
-	opts: { dimMonitors?: boolean } = {},
+	opts: {
+		dimMonitors?: boolean;
+		/** Fingerprints with a stored overlay (§6.2) — their boxes carry a marker. */
+		overlaid?: readonly string[];
+	} = {},
 ): MapBox[] {
 	const boxes: MapBox[] = [];
 	for (const mon of monitors) {
@@ -93,6 +99,10 @@ export function toBoxes(
 			state: d.state,
 			expiresInMs: d.expires_in_ms,
 			slot: d.slot,
+			// By NAME: `/display/state` identifies a device the way the box labels it,
+			// while overlays are keyed by fingerprint. The page resolves one to the
+			// other through the paired-device list, which is the only place both live.
+			overlaid: d.client != null && opts.overlaid?.includes(d.client),
 			// Only a display with a stable identity slot has a manual-layout key; an anonymous
 			// one has nowhere to store a position, so it cannot be arranged.
 			draggable: d.identity_slot != null,
@@ -140,6 +150,8 @@ export const DesktopMap: FC<{
 	displays: readonly ApiDisplayInfo[];
 	/** Preview: the selected policy turns the physical monitors off while streaming. */
 	dimMonitors?: boolean;
+	/** Devices that pin settings of their own, by the name their box carries. */
+	overlaid?: readonly string[];
 	/** Pinned monitor (`capture_monitor`), so its box can show it is the streamed one. */
 	captureMonitor?: string | null;
 	onRelease?: (slot: number) => void;
@@ -150,6 +162,7 @@ export const DesktopMap: FC<{
 	monitors,
 	displays,
 	dimMonitors,
+	overlaid,
 	captureMonitor,
 	onRelease,
 	onMove,
@@ -163,7 +176,7 @@ export const DesktopMap: FC<{
 		y: number;
 	} | null>(null);
 
-	const boxes = toBoxes(monitors, displays, { dimMonitors });
+	const boxes = toBoxes(monitors, displays, { dimMonitors, overlaid });
 	if (boxes.length === 0) return null;
 	const placed = boxes.map((b) =>
 		drag && b.slot === drag.slot ? { ...b, x: drag.x, y: drag.y } : b,
@@ -263,6 +276,12 @@ export const DesktopMap: FC<{
 								<Monitor
 									className="size-3 shrink-0"
 									aria-label={m.display_map_streamed()}
+								/>
+							)}
+							{b.overlaid && (
+								<Settings2
+									className="size-3 shrink-0"
+									aria-label={m.display_device_settings()}
 								/>
 							)}
 						</div>

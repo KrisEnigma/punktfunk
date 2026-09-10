@@ -783,5 +783,11 @@
 	"common_off": "Off",
 	"display_state_kept_for": "Kept {seconds} s",
 	"display_save": "Save",
-	"display_revert": "Discard changes"
+	"display_revert": "Discard changes",
+	"display_follows_host": "Follows host",
+	"display_follow_host": "Follow host",
+	"display_follow_host_all": "Follow the host in everything",
+	"display_device_settings": "Display settings…",
+	"display_device_column": "Display",
+	"display_mirrors": "Mirrors {connector}"
 }

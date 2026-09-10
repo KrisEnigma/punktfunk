@@ -237,6 +237,64 @@ pub struct DisplayPolicy {
     /// can pin without a console write undoing it.
     #[serde(default)]
     pub capture_monitor: Option<String>,
+    /// Per-device deviations, keyed by pairing fingerprint — what identity
+    /// slots, admission and the device list already key on (never an address:
+    /// a dual-boot box keeps its fingerprint and changes its IP).
+    ///
+    /// Written only through `/display/clients/{fp}`; the host-wide PUT refuses
+    /// a `clients` key outright, so a stale console cannot round-trip the
+    /// whole map back over a change it never saw.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub clients: BTreeMap<String, ClientOverlay>,
+}
+
+/// One paired device's deviations from the host policy
+/// (`design/web-console-overhaul.md` §6.1).
+///
+/// Every field is optional and absent means **follow the host**. That is the
+/// whole point: a copied policy would silently stop following host changes,
+/// while an overlay only pins what the operator actually chose for this
+/// device. The TV wants take-over and keep-forever; the tablet wants its own
+/// screen and no linger — one host policy cannot serve both.
+///
+/// `max_displays` and `layout` are deliberately absent: they are properties of
+/// the host's desktop, not of a device connecting to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ClientOverlay {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<KeepAlive>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<Topology>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_conflict: Option<ModeConflict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_session: Option<GameSession>,
+    /// Mirror this connector for this device only. Absent follows the host,
+    /// which is also the only way back to a virtual screen — a device cannot
+    /// opt OUT of a host-wide pin. Nobody has asked to; the reverse direction
+    /// is what the field exists for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_monitor: Option<String>,
+}
+
+impl ClientOverlay {
+    /// Nothing pinned — the operator reset every field, so the record can go.
+    pub fn is_empty(&self) -> bool {
+        *self == ClientOverlay::default()
+    }
+
+    /// Same clamps a host-wide write gets: an overlay must not be able to
+    /// smuggle a linger window a direct PUT would refuse.
+    pub fn sanitized(mut self) -> Self {
+        self.keep_alive = self.keep_alive.map(clamp_keep_alive);
+        self.capture_monitor = self
+            .capture_monitor
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        self
+    }
 }
 
 /// Schema this host writes. Other versions still load (fields default) but
@@ -277,6 +335,7 @@ impl Default for DisplayPolicy {
             pnp_disable_monitors: false,
             edid_lock: false,
             capture_monitor: None,
+            clients: BTreeMap::new(),
         }
     }
 }
@@ -300,7 +359,57 @@ pub struct EffectivePolicy {
     pub max_displays: u32,
 }
 
+/// Hex form of a peer fingerprint — the key `clients` is stored under, and what
+/// the pairing store and the device list already use.
+pub fn fp_hex(fp: Option<[u8; 32]>) -> Option<String> {
+    fp.map(|fp| fp.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 impl DisplayPolicy {
+    /// This device's overlay, if it has one.
+    pub fn overlay_for(&self, fp: Option<&str>) -> Option<&ClientOverlay> {
+        self.clients.get(fp?)
+    }
+
+    /// `host.effective() ⊕ clients[fp]`, field-wise.
+    ///
+    /// `layout` and `max_displays` stay host-wide — they describe the desktop
+    /// every device shares, so letting one device move them would move them
+    /// for all of them.
+    pub fn effective_for(&self, fp: Option<&str>) -> EffectivePolicy {
+        let mut e = self.effective();
+        let Some(o) = self.overlay_for(fp) else {
+            return e;
+        };
+        if let Some(v) = o.keep_alive {
+            e.keep_alive = v;
+        }
+        if let Some(v) = o.topology {
+            e.topology = v;
+        }
+        if let Some(v) = o.mode_conflict {
+            e.mode_conflict = v;
+        }
+        if let Some(v) = o.identity {
+            e.identity = v;
+        }
+        e
+    }
+
+    /// Game-launch routing for this device, else the host's.
+    pub fn game_session_for(&self, fp: Option<&str>) -> GameSession {
+        self.overlay_for(fp)
+            .and_then(|o| o.game_session)
+            .unwrap_or(self.game_session)
+    }
+
+    /// The connector this device mirrors, else the host's pin.
+    pub fn capture_monitor_for(&self, fp: Option<&str>) -> Option<String> {
+        self.overlay_for(fp)
+            .and_then(|o| o.capture_monitor.clone())
+            .or_else(|| self.capture_monitor.clone())
+    }
+
     pub fn effective(&self) -> EffectivePolicy {
         if let Some(mut e) = preset_fields(self.preset) {
             // A preset fixes the six axes; workstation still honors an
@@ -333,6 +442,14 @@ impl DisplayPolicy {
             .capture_monitor
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        self.clients = std::mem::take(&mut self.clients)
+            .into_iter()
+            .map(|(fp, o)| (fp.trim().to_ascii_lowercase(), o.sanitized()))
+            // An overlay that pins nothing is "follows host", which is what an
+            // absent key already means. Keeping it would show a device as
+            // configured in the console while changing nothing.
+            .filter(|(fp, o)| !fp.is_empty() && !o.is_empty())
+            .collect();
         self
     }
 }
@@ -385,39 +502,33 @@ fn canonical_positions(positions: BTreeMap<String, Position>) -> BTreeMap<String
     out
 }
 
-impl EffectivePolicy {
-    /// Persistable `Custom` policy with this behavior and a **manual**
-    /// layout. `/display/layout` uses this so arranging stays orthogonal
-    /// to the other axes. `Custom` so the new layout is not ignored.
-    pub fn with_manual_layout(
-        &self,
-        positions: BTreeMap<String, Position>,
-        game_session: GameSession,
-        ddc_power_off: bool,
-        pnp_disable_monitors: bool,
-        edid_lock: bool,
-        capture_monitor: Option<String>,
-    ) -> DisplayPolicy {
-        DisplayPolicy {
-            version: CURRENT_VERSION,
-            preset: Preset::Custom,
-            keep_alive: self.keep_alive,
-            topology: self.topology,
-            mode_conflict: self.mode_conflict,
-            identity: self.identity,
-            layout: Layout {
-                mode: LayoutMode::Manual,
-                positions,
-            },
-            max_displays: self.max_displays,
-            // EffectivePolicy does not carry these. Dropping any would mean
-            // "saving a layout cleared my capture pin / game-session / …".
-            game_session,
-            ddc_power_off,
-            pnp_disable_monitors,
-            edid_lock,
-            capture_monitor,
-        }
+impl DisplayPolicy {
+    /// This policy with a **manual** layout at `positions`. `/display/layout`
+    /// uses it so arranging stays orthogonal to every other axis.
+    ///
+    /// Consumes and returns the WHOLE policy rather than rebuilding one from
+    /// [`EffectivePolicy`]. The old shape took the five orthogonal fields as
+    /// arguments and named every field it kept, so each field added since had
+    /// to be remembered at this one site or arranging silently cleared it —
+    /// which is how saving a layout used to drop a capture pin. Now anything
+    /// not named here survives, which is the safe direction.
+    pub fn with_manual_layout(mut self, positions: BTreeMap<String, Position>) -> DisplayPolicy {
+        // Expand BEFORE switching to `Custom`: on a named preset the struct's
+        // own axes are whatever was last written, and `Custom` is what makes
+        // the new layout take effect at all.
+        let e = self.effective();
+        self.version = CURRENT_VERSION;
+        self.preset = Preset::Custom;
+        self.keep_alive = e.keep_alive;
+        self.topology = e.topology;
+        self.mode_conflict = e.mode_conflict;
+        self.identity = e.identity;
+        self.max_displays = e.max_displays;
+        self.layout = Layout {
+            mode: LayoutMode::Manual,
+            positions,
+        };
+        self
     }
 }
 
@@ -1191,22 +1302,20 @@ mod tests {
 
     #[test]
     fn with_manual_layout_preserves_behavior_and_sets_positions() {
-        let eff = DisplayPolicy {
+        let stored = DisplayPolicy {
             preset: Preset::Workstation,
+            game_session: GameSession::Dedicated,
+            ddc_power_off: true,
+            pnp_disable_monitors: true,
+            edid_lock: true,
+            capture_monitor: Some("DP-2".into()),
             ..DisplayPolicy::default()
-        }
-        .effective();
+        };
+        let eff = stored.effective();
         let mut positions = BTreeMap::new();
         positions.insert("1".to_string(), Position { x: 0, y: 0 });
         positions.insert("7".to_string(), Position { x: 2560, y: 0 });
-        let p = eff.with_manual_layout(
-            positions,
-            GameSession::Dedicated,
-            true,
-            true,
-            true,
-            Some("DP-2".into()),
-        );
+        let p = stored.with_manual_layout(positions);
         // Arranging must not clear orthogonal pins (game-session, capture, …).
         assert_eq!(p.game_session, GameSession::Dedicated);
         assert!(p.ddc_power_off);
@@ -1609,5 +1718,163 @@ mod tests {
         assert!(kept.exists());
         let _ = std::fs::remove_file(&kept);
         let _ = std::fs::remove_dir(&dir);
+    }
+    /// Overlay resolution, as a table (`design/web-console-overhaul.md` §6.1).
+    ///
+    /// The shape this pins: an ABSENT field follows the host, so a host-side
+    /// change still reaches a device that pinned something else. A copied
+    /// policy would silently stop following, which is why the overlay is
+    /// field-wise and not a whole `DisplayPolicy`.
+    mod client_overlay {
+        use super::*;
+
+        const TV: &str = "aa11";
+        const PAD: &str = "bb22";
+
+        /// A host on `default`, with the TV pinned to take-over + keep-forever.
+        fn host() -> DisplayPolicy {
+            let mut p = DisplayPolicy {
+                preset: Preset::Default,
+                ..DisplayPolicy::default()
+            };
+            p.clients.insert(
+                TV.into(),
+                ClientOverlay {
+                    keep_alive: Some(KeepAlive::Forever),
+                    mode_conflict: Some(ModeConflict::Steal),
+                    ..ClientOverlay::default()
+                },
+            );
+            p
+        }
+
+        #[test]
+        fn an_overlaid_field_wins_and_the_rest_still_follow_the_host() {
+            let p = host();
+            let tv = p.effective_for(Some(TV));
+            let base = p.effective();
+            assert_eq!(tv.keep_alive, KeepAlive::Forever);
+            assert_eq!(tv.mode_conflict, ModeConflict::Steal);
+            // Untouched axes are the host's, not the type's defaults.
+            assert_eq!(tv.topology, base.topology);
+            assert_eq!(tv.identity, base.identity);
+        }
+
+        #[test]
+        fn a_device_with_no_overlay_is_exactly_the_host_policy() {
+            let p = host();
+            assert_eq!(p.effective_for(Some(PAD)), p.effective());
+            assert_eq!(p.effective_for(None), p.effective());
+            assert_eq!(p.effective_for(Some("unknown")), p.effective());
+        }
+
+        /// The reason for a field-wise overlay rather than a copied policy:
+        /// changing the host must still move every axis the device did not pin.
+        #[test]
+        fn a_host_change_still_reaches_an_overlaid_device() {
+            let mut p = host();
+            p.preset = Preset::Workstation;
+            let tv = p.effective_for(Some(TV));
+            assert_eq!(tv.topology, p.effective().topology, "followed the host");
+            assert_eq!(tv.keep_alive, KeepAlive::Forever, "kept its own pin");
+        }
+
+        /// These describe the host's desktop, not a device on it. Asserted on a
+        /// `Custom` host because a named preset fixes both axes itself.
+        #[test]
+        fn layout_and_max_displays_stay_host_wide() {
+            let mut p = host();
+            p.preset = Preset::Custom;
+            p.max_displays = 7;
+            p.layout.mode = LayoutMode::Manual;
+            let tv = p.effective_for(Some(TV));
+            assert_eq!(tv.max_displays, 7);
+            assert_eq!(tv.layout.mode, LayoutMode::Manual);
+        }
+
+        #[test]
+        fn the_orthogonal_axes_overlay_too() {
+            let mut p = host();
+            p.game_session = GameSession::Auto;
+            p.capture_monitor = Some("DP-1".into());
+            p.clients.insert(
+                PAD.into(),
+                ClientOverlay {
+                    game_session: Some(GameSession::Dedicated),
+                    capture_monitor: Some("HDMI-1".into()),
+                    ..ClientOverlay::default()
+                },
+            );
+            assert_eq!(p.game_session_for(Some(PAD)), GameSession::Dedicated);
+            assert_eq!(p.capture_monitor_for(Some(PAD)).as_deref(), Some("HDMI-1"));
+            // The TV pinned neither, so it still mirrors the host's monitor.
+            assert_eq!(p.game_session_for(Some(TV)), GameSession::Auto);
+            assert_eq!(p.capture_monitor_for(Some(TV)).as_deref(), Some("DP-1"));
+        }
+
+        /// An overlay must not smuggle a window a host-wide PUT would clamp.
+        #[test]
+        fn sanitize_clamps_an_overlay_the_way_it_clamps_the_host() {
+            let mut p = DisplayPolicy::default();
+            p.clients.insert(
+                TV.into(),
+                ClientOverlay {
+                    keep_alive: Some(KeepAlive::Duration { seconds: 999_999 }),
+                    capture_monitor: Some("  ".into()),
+                    ..ClientOverlay::default()
+                },
+            );
+            let p = p.sanitized();
+            let o = &p.clients[TV];
+            assert_eq!(
+                o.keep_alive,
+                Some(KeepAlive::Duration {
+                    seconds: MAX_KEEP_ALIVE_SECS
+                })
+            );
+            assert_eq!(o.capture_monitor, None, "a blank pin is no pin");
+        }
+
+        /// "Pins nothing" is what an absent key already means; keeping the
+        /// record would show the device as configured in the console.
+        #[test]
+        fn sanitize_drops_an_overlay_that_pins_nothing() {
+            let mut p = DisplayPolicy::default();
+            p.clients.insert(TV.into(), ClientOverlay::default());
+            p.clients.insert(
+                "  ".into(),
+                ClientOverlay {
+                    keep_alive: Some(KeepAlive::Forever),
+                    ..ClientOverlay::default()
+                },
+            );
+            assert!(p.sanitized().clients.is_empty());
+        }
+
+        /// Fingerprints are hex and reach us from two spellings of the same
+        /// device (a console echo, a hand-edited file).
+        #[test]
+        fn sanitize_lowercases_the_key_so_one_device_is_one_record() {
+            let mut p = DisplayPolicy::default();
+            p.clients.insert(
+                "AA11".into(),
+                ClientOverlay {
+                    keep_alive: Some(KeepAlive::Forever),
+                    ..ClientOverlay::default()
+                },
+            );
+            let p = p.sanitized();
+            assert!(p.clients.contains_key(TV));
+            assert_eq!(p.effective_for(Some(TV)).keep_alive, KeepAlive::Forever);
+        }
+
+        /// Arranging must not clear what it does not mention — the trap the
+        /// old six-argument rebuild kept falling into.
+        #[test]
+        fn arranging_a_layout_keeps_every_overlay() {
+            let p = host().with_manual_layout(BTreeMap::new());
+            assert_eq!(p.layout.mode, LayoutMode::Manual);
+            assert_eq!(p.effective_for(Some(TV)).mode_conflict, ModeConflict::Steal);
+        }
     }
 }
