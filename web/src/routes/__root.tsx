@@ -83,7 +83,15 @@ function RootComponent() {
 	const mode =
 		appearance.mode !== "system" ? appearance.mode : (theme?.mode ?? "dark");
 	// Surfaces need the full pair; a theme carrying only an accent must not switch them on.
-	const surfaces = theme?.background && theme.foreground ? theme : null;
+	//
+	// And they are dropped outright when the operator overrides the MODE: Omarchy publishes one
+	// palette, for its own light or dark theme, so painting a dark theme's surfaces under a
+	// forced light mode left the page dark while the semantic colours went light. Following the
+	// desktop is all-or-nothing; the accent still carries over.
+	const modeOverridden =
+		appearance.mode !== "system" && appearance.mode !== theme?.mode;
+	const surfaces =
+		!modeOverridden && theme?.background && theme.foreground ? theme : null;
 	const vars: Record<string, string> = {};
 	if (accent) vars["--pf-accent"] = accent;
 	if (surfaces) {
