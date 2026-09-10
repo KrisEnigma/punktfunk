@@ -264,6 +264,9 @@ pub enum SessionEvent {
         access: crate::access::SessionAccess,
         notice: Option<String>,
     },
+    /// A toast line the stream needs the user to read: what did not happen, then the
+    /// next move. Once per condition per session; the stream keeps running.
+    Notice(String),
 }
 
 /// Times this process has had a session codec exhaust the decode ladder.
@@ -974,6 +977,8 @@ fn pump(
     // Newest frame index handed to the decoder — the staleness bar for late partials.
     let mut newest_decoded_idx: Option<u32> = None;
     let mut window_start = Instant::now();
+    // The pin-unsustainable notice goes out once per session.
+    let mut pin_noticed = false;
     let mut frames_n = 0u32;
     let mut bytes_n = 0u64;
     // Stage windows (µs): `host+network` = capture→received, `decode` =
@@ -1475,6 +1480,15 @@ fn pump(
         flush_pending_rfi(&mut pending_rfi, &mut last_kf_req, now, &connector);
 
         if window_start.elapsed() >= Duration::from_secs(1) {
+            let pin_kbps = connector.unsustainable_pin_kbps();
+            if pin_kbps != 0 && !pin_noticed {
+                pin_noticed = true;
+                let _ = ev_tx.try_send(SessionEvent::Notice(format!(
+                    "This device can't keep up with the pinned {} Mbps. Set the bitrate to \
+                     Automatic or lower it.",
+                    pin_kbps / 1000
+                )));
+            }
             // ~1 Hz phase-lock report, riding the stats window. Quiet until the
             // presenter has a grid (period 0) or the window is thin (< 8 arrivals).
             // 1 ms uncertainty.

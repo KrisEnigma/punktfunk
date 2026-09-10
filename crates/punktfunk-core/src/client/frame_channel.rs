@@ -76,6 +76,11 @@ pub(crate) const NOOP_FLUSH_DATAGRAMS: u64 = 64;
 /// re-syncs.
 pub(crate) const NOOP_CLOCK_FLUSHES_TO_DISARM: u32 = 2;
 
+/// Real backlog sheds under a pinned rate before the client says it cannot
+/// keep up. [`FLUSH_COOLDOWN`] spaces them, so three is ≥ 4 s of falling
+/// behind — a condition, not a loading burst.
+pub(crate) const PIN_SHEDS_TO_WARN: u32 = 3;
+
 /// Periodic mid-stream clock re-sync ([`ClockResync`]): 60 s bounds slow drift
 /// and picks up an NTP step within a minute (8 tiny control messages per batch).
 /// The pump also fires one immediately after the first no-op clock flush.

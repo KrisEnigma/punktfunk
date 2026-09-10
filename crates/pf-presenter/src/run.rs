@@ -1545,6 +1545,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 // capture: a removed POINTER/KEYBOARD bit releases the lock it backed;
                 // with neither class left the capture drops (auto-release, so a later
                 // re-grant re-engages on click).
+                SessionEvent::Notice(n) => {
+                    st.session_notice = Some((n, Instant::now()));
+                }
                 SessionEvent::Access { access, notice } => {
                     st.access = access;
                     if let Some(n) = notice {

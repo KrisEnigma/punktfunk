@@ -80,6 +80,7 @@ pub(crate) struct WorkerArgs {
     pub(crate) probe: Arc<Mutex<ProbeState>>,
     pub(crate) frames_dropped: Arc<AtomicU64>,
     pub(crate) fec_recovered: Arc<AtomicU64>,
+    pub(crate) unsustainable_pin_kbps: Arc<AtomicU32>,
     /// Pump mic task counts wire sends and stale-shed drops; the producer counts
     /// queue-full drops.
     pub(crate) mic_stats: Arc<MicUplinkCounters>,
