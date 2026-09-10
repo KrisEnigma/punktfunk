@@ -377,13 +377,28 @@ fun SkiaConsoleShell(
                         if (ev.actionMasked == MotionEvent.ACTION_UP) v.performClick()
                         true
                     }
+                    // The uncaptured pointer: a mouse (or a lizard-mode SC2 trackpad) hovers
+                    // rather than touches, so its cursor never reaches the touch listener above.
+                    // Kind 0 is Move — it focuses a tile without acting on it; 4 is the wheel.
                     setOnGenericMotionListener { _, ev ->
-                        if (handle != 0L && ev.actionMasked == MotionEvent.ACTION_SCROLL &&
-                            ev.isFromSource(InputDevice.SOURCE_CLASS_POINTER)
-                        ) {
-                            NativeBridge.nativeConsolePointer(handle, 4, ev.x * currentRender, ev.y * currentRender, ev.getAxisValue(MotionEvent.AXIS_VSCROLL))
-                            true
-                        } else false
+                        if (handle == 0L) return@setOnGenericMotionListener false
+                        if (!ev.isFromSource(InputDevice.SOURCE_CLASS_POINTER)) {
+                            return@setOnGenericMotionListener false
+                        }
+                        val x = ev.x * currentRender
+                        val y = ev.y * currentRender
+                        when (ev.actionMasked) {
+                            MotionEvent.ACTION_SCROLL -> {
+                                val dy = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
+                                NativeBridge.nativeConsolePointer(handle, 4, x, y, dy)
+                                true
+                            }
+                            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                                NativeBridge.nativeConsolePointer(handle, 0, x, y, 0f)
+                                true
+                            }
+                            else -> false
+                        }
                     }
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     consoleView = this
