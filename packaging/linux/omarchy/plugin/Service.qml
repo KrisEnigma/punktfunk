@@ -1,22 +1,12 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "Model.js" as Model
 
-// The plugin's data half: one long-lived `punktfunk-host ctl watch`, the REST snapshots it
-// triggers, and the one function that spawns anything.
-//
-// **This is the security boundary.** A shell plugin runs unsandboxed inside omarchy-shell, and the
-// management API's admin surface — the pending queue, the PIN, unpair, session control — is exactly
-// what is worth protecting. So the QML holds no credential and speaks no HTTPS: every call spawns
-// `punktfunk-host ctl`, which reads the operator token and the host's certificate from the 0700
-// config directory in its own process and pins the certificate *before* sending anything. Reading
-// `run()` below answers "can this plugin leak a secret?".
-//
-// Exactly ONE process runs continuously (`watcher`). The host caps concurrent event streams and the
-// web console holds one of them, so a stream per surface would be the thing that exhausts the cap.
-// `ctl watch` owns its own reconnect and Last-Event-ID resume; this file only reacts to the
-// synthetic `ctl.resync` line by re-snapshotting, which is the only correct answer to "your
-// incremental state may be stale".
+// The plugin's data half: one `ctl watch`, the snapshots it triggers, and the
+// only spawn site. The QML holds no credential and speaks no HTTPS — every
+// host call is `punktfunk-host ctl`, which pins the certificate before sending
+// the operator token. Reading `run()` answers whether this plugin can leak.
 Item {
   id: root
 
@@ -27,20 +17,19 @@ Item {
   property bool pinPending: false
   property bool armed: false
   property string pairingPin: ""
+  property var pinDevices: []
   property var pendingDevices: []
   property var nativeClients: []
   property var gamestreamClients: []
   property var games: []
 
-  // ── displays ─────────────────────────────────────────────────────────────────────────────────
-  // The stored policy's preset id, the resolved policy it expands to, and the two preset
-  // catalogues (built-in and saved presets share one id space). Deliberately NOT the live display
-  // list `ctl display` also carries: on wlroots the registry passes displays through rather than
-  // owning them, so that list is always empty here — see the Panel's DISPLAYS section.
+  // Stored preset, its expansion, and the authoritative Dedicated vs This
+  // screen result. Live and lingered heads stay off this daily-use surface.
   property string displayPreset: ""
   property var displayEffective: ({})
   property var displayPresets: []
   property var customPresets: []
+  property string captureMode: "dedicated"
 
   // ── summary ──────────────────────────────────────────────────────────────────────────────────
   // `/status` exposes no device names by design, so it cannot say WHO is streaming. This is the one
@@ -59,14 +48,16 @@ Item {
   property var statsSample: null
   property var statsMeta: null
 
-  // A rolling window of what the Stats poll saw, so the panel can draw the SHAPE of a number and
-  // not just its current value — a bitrate sitting at 300 and a bitrate that just collapsed from
-  // 300 read identically as one figure. Client-side because the host publishes no periodic event
-  // and the alternative, shipping the capture's whole time-series through a process spawn every
-  // two seconds, would cost far more than it shows. Filled only while the Stats tab is open, which
-  // is the only time anything reads it.
+  // Rolling window of the Stats poll. Filled only while the panel is open.
+  // ≈ 3 minutes at the 2 s poll.
   property var history: []
-  readonly property int historyMax: 90        // ≈ 3 minutes at the 2 s poll
+  readonly property int historyMax: 90
+
+  // Optimistic host switch: systemctl is async, so bind the knob to this
+  // until the next snapshot lands.
+  property bool haveDesired: false
+  property bool desiredRunning: false
+  readonly property bool hostEnabled: haveDesired ? desiredRunning : (state !== "stopped")
 
   function pushHistory() {
     var p = {
@@ -94,22 +85,30 @@ Item {
 
   readonly property int exitPin: 4
 
-  // ── the one place anything is spawned ────────────────────────────────────────────────────────
-  //
-  // ⚠ Quickshell's `Process` does NOT search `PATH` — it reported "the binary could not be found"
-  // for `punktfunk-host` on a box where /usr/bin/punktfunk-host was present, executable, and
-  // /usr/bin was in the shell process's own PATH. Hardcoding /usr/bin would be wrong (a sysext or
-  // a /usr/local build lives elsewhere), so the command goes through `sh -c 'exec "$@"' sh …`:
-  // the shell does the PATH lookup and `exec "$@"` passes our argv through **unquoted and
-  // unsplit**, so a device name with a space in it cannot turn into two arguments.
+  // Quickshell's Process does not search PATH. The ctl and local-helper paths
+  // share this wrapper so lookup never rejoins or re-quotes an argv.
+  function spawnArgv(bin, args) {
+    return ["sh", "-c", "exec \"$@\"", "sh", bin].concat(args)
+  }
+
   function argvFor(args) {
-    return ["sh", "-c", "exec \"$@\"", "sh", "punktfunk-host", "ctl"].concat(args)
+    return spawnArgv("punktfunk-host", ["ctl"].concat(args))
   }
 
   // run(["approve", "3"], function (data, err) { … })
   function run(args, callback) {
     var proc = callComponent.createObject(root, {
       argv: argvFor(args.concat(["--json"])),
+      jsonEnvelope: true,
+      cb: callback || function () {}
+    })
+    proc.start()
+  }
+
+  function runArgv(bin, args, callback) {
+    var proc = callComponent.createObject(root, {
+      argv: spawnArgv(bin, args),
+      jsonEnvelope: false,
       cb: callback || function () {}
     })
     proc.start()
@@ -117,6 +116,24 @@ Item {
 
   function detached(argv) {
     Quickshell.execDetached(argv)
+  }
+
+  function detachedBin(bin, args) {
+    detached(spawnArgv(bin, args))
+  }
+
+  function setHostEnabled(on) {
+    root.haveDesired = true
+    root.desiredRunning = !!on
+    detachedBin("systemctl", ["--user", on ? "start" : "stop", "punktfunk-host.service"])
+  }
+
+  function setCaptureMode(mode) {
+    var selected = Model.captureModeStatus(mode)
+    if (!selected) return
+    runArgv("punktfunk-omarchy", ["mode", selected], function (output, err) {
+      if (!err) root.refreshCaptureMode()
+    })
   }
 
   // The console opens at a one-shot login page under $XDG_RUNTIME_DIR, so it lands already logged
@@ -134,18 +151,32 @@ Item {
     Process {
       id: proc
       property var argv: []
+      property bool jsonEnvelope: true
       property var cb: function () {}
       property string buffer: ""
+      property string errorBuffer: ""
 
       function start() { command = argv; running = true }
 
-      // `proc.buffer`, not `parent.buffer`: inside a `StdioCollector` the `parent` scope is not
-      // the Process, and QML resolves the assignment against something that has no such property —
-      // "Cannot assign to non-existent property" at load, and every call silently returning
-      // nothing. The first-party plugins all assign through an explicit id for this reason.
+      // A collector's parent scope is not the Process. Explicit ids keep both
+      // streams attached to this invocation instead of silently losing output.
       stdout: StdioCollector { onStreamFinished: proc.buffer = text }
+      stderr: StdioCollector { onStreamFinished: proc.errorBuffer = text }
 
       onExited: function (code) {
+        if (!proc.jsonEnvelope) {
+          if (code === 0) {
+            root.lastError = ""
+            proc.cb(proc.buffer, null)
+          } else {
+            var commandError = proc.errorBuffer.trim()
+            if (!commandError) commandError = "command exited with code " + code
+            root.lastError = commandError
+            proc.cb(null, { code: code, message: commandError })
+          }
+          proc.destroy()
+          return
+        }
         var payload = null
         try { payload = JSON.parse(proc.buffer) } catch (e) { payload = null }
         if (payload && payload.error) {
@@ -170,15 +201,33 @@ Item {
   }
 
   // ── snapshots ────────────────────────────────────────────────────────────────────────────────
+  function applyPairingWindow(data) {
+    var next = Model.pairingWindow(data)
+    root.armed = next.armed
+    root.pairingPin = next.pairingPin
+    root.pinDevices = next.pinDevices
+    root.pinPending = next.pinPending
+  }
+
+  function clearPairingState() {
+    applyPairingWindow(null)
+    root.pendingDevices = []
+    root.pending = 0
+  }
+
   function refresh() {
     run(["status"], function (data, err) {
-      if (err) { root.state = "stopped"; root.sessions = 0; root.stream = null; return }
+      if (err) {
+        root.state = "stopped"
+        root.sessions = 0
+        root.stream = null
+        if (!(root.haveDesired && root.desiredRunning)) root.haveDesired = false
+        return
+      }
+      root.haveDesired = false
       root.sessions = data.active_sessions || 0
-      root.pinPending = !!data.pin_pending
       root.games = data.games || []
       root.state = root.sessions > 0 ? "streaming" : "idle"
-      // The Now tab shows the negotiated mode and codec, so `stream` is read here too and not only
-      // by the Stats poll — otherwise the tab is blank until someone visits Stats.
       root.stream = data.stream || null
       root.audioStreaming = !!data.audio_streaming
     })
@@ -188,9 +237,11 @@ Item {
       root.pending = root.pendingDevices.length
     })
     run(["pair", "status"], function (data, err) {
-      if (err || !data) return
-      root.armed = !!data.armed
-      root.pairingPin = data.pin || ""
+      if (err || !data) {
+        root.applyPairingWindow(null)
+        return
+      }
+      root.applyPairingWindow(data)
     })
   }
 
@@ -203,6 +254,7 @@ Item {
   }
 
   function refreshDisplays() {
+    refreshCaptureMode()
     run(["display"], function (data, err) {
       if (err || !data) return
       root.displayPreset = (data.settings && data.settings.preset) || ""
@@ -212,19 +264,31 @@ Item {
     })
   }
 
+  // The helper includes host.env overrides, so neither the display snapshot
+  // nor the requested action is authoritative.
+  function refreshCaptureMode() {
+    runArgv("punktfunk-omarchy", ["mode", "--status"], function (output, err) {
+      if (err) return
+      var mode = Model.captureModeStatus(output)
+      if (!mode) {
+        root.lastError = "punktfunk-omarchy mode --status returned an invalid result"
+        return
+      }
+      root.captureMode = mode
+    })
+  }
+
   // Re-reads afterwards rather than assuming: the host validates and clamps the policy it stores,
   // so what came back is the only trustworthy answer to "what is in force now".
   function setDisplayPreset(id) {
     run(["display", "preset", id], function () { root.refreshDisplays() })
   }
 
-  // Polled, not evented: the host publishes no periodic stats event, and a bitrate that only moved
-  // on a lifecycle event would be a still photograph labelled "live". `ctl status --json` measured
-  // 116 ms on the Omarchy testbox — under the 150 ms threshold `ctl.rs` sets for itself — and the
-  // Panel only runs this timer while the Stats tab is the one being looked at.
+  // Polled, not evented: the host publishes no periodic stats event. The
+  // panel runs this only while it is open.
   function refreshStats() {
     run(["stats"], function (data, err) {
-      if (err || !data) { root.stream = null; return }
+      if (err || !data) return
       root.stream = data.stream || null
       root.sessionMode = data.session || null
       root.captureArmed = !!(data.capture && data.capture.armed)
@@ -242,8 +306,8 @@ Item {
     })
   }
 
-  // The capture is ONE host-wide slot the web console also drives, and stopping it writes a
-  // recording to disk — so it is never armed as a side effect of opening a tab.
+  // Stopping a capture writes a recording to disk, so it is never armed as
+  // a side effect of opening the panel.
   function setCapture(on) {
     run(["stats", "record", on ? "start" : "stop"], function () { root.refreshStats() })
   }
@@ -263,6 +327,7 @@ Item {
       if (code === root.exitPin) root.pinMismatch = true
       root.state = "stopped"
       root.sessions = 0
+      if (!(root.haveDesired && root.desiredRunning)) root.haveDesired = false
     }
 
     // ⚠ Arm the retry from `running`, NOT from `onExited`. A process that fails to **start** — the
@@ -286,17 +351,25 @@ Item {
     var ev
     try { ev = JSON.parse(line) } catch (e) { return }
 
-    // The display policy is not evented — it only changes when a person edits it, here or in the
-    // console — so a resync re-reads it and the Displays tab re-reads it on arrival. Nothing polls.
+    // Display policy is not evented, so a resync re-reads it. Nothing polls it.
     if (ev.kind === "ctl.resync") { refresh(); refreshClients(); refreshDisplays(); return }
-    if (ev.kind === "ctl.disconnected") { root.state = "stopped"; return }
+    if (ev.kind === "ctl.disconnected") {
+      root.state = "stopped"
+      root.clearPairingState()
+      return
+    }
 
     // A knock only refreshes the badge. The toast — with Approve/Deny — is the `pairing-pending`
     // hook's job; a second one here made every request ring twice.
     if (ev.kind === "pairing.completed" || ev.kind === "pairing.denied" || ev.kind === "host.started") {
       refresh(); refreshClients(); return
     }
-    if (ev.kind === "host.stopping") { root.state = "stopped"; root.sessions = 0; return }
+    if (ev.kind === "host.stopping") {
+      root.state = "stopped"
+      root.sessions = 0
+      root.clearPairingState()
+      return
+    }
     // A graph that spans the gap between two sessions draws a line between numbers that were never
     // related. The window belongs to one stream.
     if (ev.kind === "stream.stopped" || ev.kind === "session.ended") clearHistory()
