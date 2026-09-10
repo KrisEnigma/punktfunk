@@ -1002,6 +1002,28 @@ fn adapt_fec(loss_ppm: u32) -> u8 {
     target.clamp(FEC_MIN as u32, FEC_MAX as u32) as u8
 }
 
+/// Points over the measured level while frames die that parity might have caught.
+const FEC_STEP: u8 = 3;
+/// Report windows (~750 ms each) the step gets to prove itself.
+const FEC_STEP_WINDOWS: u32 = 4;
+
+/// One window's FEC target. `unrecovered_run` counts consecutive windows an RFI ask landed
+/// in — a frame parity could not repair. The first [`FEC_STEP_WINDOWS`] of those add
+/// [`FEC_STEP`] over the measured level; a run past that is loss no per-frame parity bridges,
+/// so the step comes off and only the measured loss holds. Decays one point per window so a
+/// burst every few seconds does not fall to the floor between hits.
+fn fec_target(loss_ppm: u32, prev: u8, unrecovered_run: u32) -> u8 {
+    let step = if (1..=FEC_STEP_WINDOWS).contains(&unrecovered_run) {
+        FEC_STEP
+    } else {
+        0
+    };
+    adapt_fec(loss_ppm)
+        .saturating_add(step)
+        .min(FEC_MAX)
+        .max(prev.saturating_sub(1))
+}
+
 /// Per-frame send path: apply the adaptive-FEC target if it changed (relaxed load + compare).
 fn apply_fec_target(session: &mut Session, fec_target: &AtomicU8) {
     let t = fec_target.load(Ordering::Relaxed);
@@ -2462,6 +2484,32 @@ mod tests {
         assert_eq!(adapt_fec(100_000), 15); // 10% → ceil(14)+1 = 15
         assert_eq!(adapt_fec(1_000_000), FEC_MAX); // 100% → clamped
         assert!(adapt_fec(u32::MAX) <= FEC_MAX);
+    }
+
+    /// The 2026-09-10 storm read 0.3 % measured loss with a frame dying every window. The
+    /// step is a bounded probe over the measured level, not a 5 % reading: on for a few
+    /// windows, off once it has not stopped the asks, and a clean window ends the run.
+    #[test]
+    fn fec_step_is_bounded_and_gives_up_when_frames_keep_dying() {
+        // Clean: measured level, decaying one point per window.
+        assert_eq!(fec_target(0, FEC_MIN, 0), FEC_MIN);
+        assert_eq!(fec_target(0, 12, 0), 11);
+        // A dropped frame at 0.3 % loss: +3 over the floor, held while the run is young.
+        let mut fec = FEC_MIN;
+        let mut seen = Vec::new();
+        for run in 1..=FEC_STEP_WINDOWS + 2 {
+            fec = fec_target(3_000, fec, run);
+            seen.push(fec);
+        }
+        assert_eq!(
+            seen,
+            [8, 8, 8, 8, 7, 6],
+            "step, then the decay back to measured"
+        );
+        // Measured loss still carries its own level once the step is off.
+        assert_eq!(fec_target(100_000, FEC_MIN, FEC_STEP_WINDOWS + 1), 15);
+        // Never past the band.
+        assert_eq!(fec_target(1_000_000, FEC_MAX, 1), FEC_MAX);
     }
 
     #[test]

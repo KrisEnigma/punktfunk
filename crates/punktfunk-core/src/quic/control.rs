@@ -451,27 +451,21 @@ impl PipelineGap {
     }
 }
 
-/// [`LossReport`] `loss_ppm` from one window's session-stat deltas.
+/// [`LossReport`] `loss_ppm` from one window's session-stat deltas: the
+/// shard loss parity repaired, and nothing else.
 ///
 /// Loss ≈ (recovered − late) / (received + recovered − late): late shards
 /// reconstructed early then arrived, so they are reorder not loss (netted
 /// from both ends; saturating so a straddling window cannot go negative).
-/// An unrecoverable frame means loss exceeded the FEC budget, so add a
-/// fixed bump to push FEC past the cap. Returns ppm, capped at 1e6.
-///
-/// Exception: `lost == 0 && late > 0` — every presumed-lost shard arrived.
-/// Frames died of lateness (a delivery hole). FEC and bitrate backoff
-/// cannot shorten delay, so do not bump.
-pub fn window_loss_ppm(recovered: u64, late: u64, received: u64, frames_dropped: u64) -> u32 {
+/// Frames parity could not repair are not in here — the host reads those
+/// off the RFI asks they raise. Capped at 1e6.
+pub fn window_loss_ppm(recovered: u64, late: u64, received: u64) -> u32 {
     let lost = recovered.saturating_sub(late);
     let denom = received.saturating_add(lost);
-    let mut ppm = lost
+    let ppm = lost
         .saturating_mul(1_000_000)
         .checked_div(denom)
         .unwrap_or(0) as u32;
-    if frames_dropped > 0 && (lost > 0 || late == 0) {
-        ppm = ppm.saturating_add(50_000); // +5%: unrecoverable loss → raise FEC past the current cap
-    }
     ppm.min(1_000_000)
 }
 
@@ -1196,25 +1190,16 @@ mod tests {
 
     #[test]
     fn window_loss_ppm_estimates_and_caps() {
-        assert_eq!(window_loss_ppm(0, 0, 0, 0), 0);
-        assert_eq!(window_loss_ppm(0, 0, 1000, 0), 0);
+        assert_eq!(window_loss_ppm(0, 0, 0), 0);
+        assert_eq!(window_loss_ppm(0, 0, 1000), 0);
         // 50 of 1000 = 5%.
-        assert_eq!(window_loss_ppm(50, 0, 950, 0), 50_000);
-        // Unrecoverable frame adds the +5% bump.
-        assert_eq!(window_loss_ppm(50, 0, 950, 1), 100_000);
-        assert_eq!(window_loss_ppm(0, 0, 0, 3), 50_000);
-        assert!(window_loss_ppm(u64::MAX, 0, 1, 9) <= 1_000_000);
+        assert_eq!(window_loss_ppm(50, 0, 950), 50_000);
+        assert!(window_loss_ppm(u64::MAX, 0, 1) <= 1_000_000);
         // Late shards are reorder, not loss. 20 of 1000 = 2%.
-        assert_eq!(window_loss_ppm(50, 50, 1000, 0), 0);
-        assert_eq!(window_loss_ppm(50, 30, 980, 0), 20_000);
+        assert_eq!(window_loss_ppm(50, 50, 1000), 0);
+        assert_eq!(window_loss_ppm(50, 30, 980), 20_000);
         // `late` can outrun `recovered` across a window boundary — saturate, never underflow.
-        assert_eq!(window_loss_ppm(10, 25, 1000, 0), 0);
-        // All-late (`lost == 0`, `late > 0`): delivery hole, not loss. No bump.
-        assert_eq!(window_loss_ppm(50, 50, 1000, 2), 0);
-        assert_eq!(window_loss_ppm(10, 25, 1000, 4), 0);
-        assert_eq!(window_loss_ppm(50, 30, 980, 1), 70_000);
-        // Silent total loss: shards in neither recovered nor late still bump.
-        assert_eq!(window_loss_ppm(0, 0, 500, 2), 50_000);
+        assert_eq!(window_loss_ppm(10, 25, 1000), 0);
     }
 
     #[test]

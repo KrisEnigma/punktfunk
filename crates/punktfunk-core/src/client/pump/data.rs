@@ -400,7 +400,6 @@ impl DataPump {
                     st.fec_recovered_shards.wrapping_sub(last_recovered),
                     st.fec_late_shards.wrapping_sub(last_late),
                     st.packets_received.wrapping_sub(last_received),
-                    window_dropped,
                 );
                 if discard {
                     // LossReport goes with the window: probe tail would
