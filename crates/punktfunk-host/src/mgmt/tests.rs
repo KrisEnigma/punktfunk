@@ -698,6 +698,34 @@ async fn host_info_reports_identity_and_ports() {
     assert_eq!(body["gamestream"], false);
 }
 
+/// A device sent a connect link has to be able to check what it reached, so the host publishes
+/// its own leaf fingerprint. Public by construction — every client reads it off the handshake.
+#[tokio::test]
+async fn host_info_publishes_the_hosts_own_fingerprint() {
+    let stats = test_stats();
+    let state = test_state();
+    let app = crate::mgmt::app(
+        state,
+        Some("test-secret".to_string()),
+        Some("plugin-secret".to_string()),
+        DEFAULT_PORT,
+        None,
+        stats,
+        test_client_logs_dir(),
+        false,
+        Some([0xab; 32]),
+        false,
+    );
+    let (status, body) = send(&app, get_req("/api/v1/host")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["fingerprint"], "ab".repeat(32));
+
+    // An identity that could not be parsed says so rather than publishing a wrong pin.
+    let app = test_app(test_state(), None);
+    let (_, body) = send(&app, get_req("/api/v1/host")).await;
+    assert!(body["fingerprint"].is_null());
+}
+
 #[tokio::test]
 async fn compositors_lists_all_backends_with_flags() {
     let app = test_app(test_state(), None);

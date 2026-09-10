@@ -7330,6 +7330,14 @@
             },
             "description": "Codecs this host can encode (`host_wire_caps`, not the compile-time list)."
           },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hex SHA-256 of this host's leaf certificate — what a client pins. Public by\nconstruction: every client reads it off the handshake. Carried here so a connect link\ncan name it, and a first connect over an untrusted path is verified rather than blind.\n`null` only if the identity could not be parsed.",
+            "example": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
           "gamestream": {
             "type": "boolean",
             "description": "GameStream/Moonlight-compat planes are running (`--gamestream`). `false` is the default (native only)."

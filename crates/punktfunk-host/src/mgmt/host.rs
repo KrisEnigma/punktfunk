@@ -50,6 +50,12 @@ pub(crate) struct HostInfo {
     codecs: Vec<ApiCodec>,
     /// GameStream/Moonlight-compat planes are running (`--gamestream`). `false` is the default (native only).
     gamestream: bool,
+    /// Hex SHA-256 of this host's leaf certificate — what a client pins. Public by
+    /// construction: every client reads it off the handshake. Carried here so a connect link
+    /// can name it, and a first connect over an untrusted path is verified rather than blind.
+    /// `null` only if the identity could not be parsed.
+    #[schema(example = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")]
+    fingerprint: Option<String>,
     ports: PortMap,
 }
 
@@ -461,6 +467,7 @@ pub(crate) async fn get_host_info(State(st): State<Arc<MgmtState>>) -> Json<Host
             .collect()
         },
         gamestream: st.gamestream_enabled,
+        fingerprint: st.identity_fingerprint.map(hex::encode),
         ports: PortMap {
             mgmt: st.port,
             http: h.http_port,
