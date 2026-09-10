@@ -79,6 +79,8 @@ pub(super) struct StreamState {
     /// Never re-anchors the IDR cooldown: sustained loss + RFI would swallow IDR pleas forever.
     pub(super) last_rfi: Option<std::time::Instant>,
     pub(super) rfi_echo_swallowed: u32,
+    /// Forced IDRs in a row the client re-asked after; each doubles the IDR cooldown.
+    pub(super) idr_unhealed: u32,
     pub(super) last_kf_request: Option<std::time::Instant>,
     pub(super) recovery_cadence: pf_frame::metronome::Metronome,
     pub(super) ir_wave_pos: u32,
@@ -859,6 +861,7 @@ impl StreamState {
             last_forced_idr: Some(now),
             last_rfi: None,
             rfi_echo_swallowed: 0,
+            idr_unhealed: 0,
             last_kf_request: None,
             recovery_cadence: pf_frame::metronome::Metronome::new(),
             ir_wave_pos: 0,

@@ -210,18 +210,22 @@ impl StreamState {
 
     /// One forced IDR per cooldown. A stream whose recovery marks the client can lift on heals
     /// over ~0.5 s (2 s window); every other stream's only repair is the IDR, so the window is
-    /// short — swallow the round-trip echo, re-issue a lost IDR promptly.
+    /// short — swallow the round-trip echo, re-issue a lost IDR promptly. An IDR the client
+    /// re-asks after is one it lost or could not use; each such IDR doubles the cooldown
+    /// ([`idr_cooldown`]) so the repair stops feeding the overload that defeats it.
     fn force_keyframe(&mut self, rfi_declined: bool) {
         const IDR_COOLDOWN_INTRA: std::time::Duration = std::time::Duration::from_secs(2);
         const IDR_COOLDOWN_FULL: std::time::Duration = std::time::Duration::from_millis(750);
-        const RFI_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
         const RFI_ECHO_MAX_SWALLOWED: u32 = 2;
         const KF_EPISODE_RESET: std::time::Duration = std::time::Duration::from_secs(1);
-        let window = if self.enc.caps().intra_refresh_recovery {
+        /// Consecutive unhealed IDRs that name the state in the log, once.
+        const IDR_STORM: u32 = 3;
+        let base = if self.enc.caps().intra_refresh_recovery {
             IDR_COOLDOWN_INTRA
         } else {
             IDR_COOLDOWN_FULL
         };
+        let window = idr_cooldown(base, self.idr_unhealed);
         let now = std::time::Instant::now();
         if self
             .last_kf_request
@@ -229,15 +233,17 @@ impl StreamState {
         {
             self.rfi_echo_swallowed = 0;
         }
-        self.last_kf_request = Some(now);
+        let prev_request = self.last_kf_request.replace(now);
         let idr_recent = self.last_forced_idr.is_some_and(|t| t.elapsed() < window);
         let rfi_echo = !rfi_declined
-            && self.last_rfi.is_some_and(|t| t.elapsed() < RFI_ECHO_WINDOW)
+            && self.last_rfi.is_some_and(|t| t.elapsed() < RECOVERY_FLIGHT)
             && self.rfi_echo_swallowed < RFI_ECHO_MAX_SWALLOWED;
         if idr_recent {
             // In-flight IDR has not repaired the client yet — do not RFI-anchor over that damage.
             self.enc.distrust_references();
             tracing::debug!(
+                cooldown_ms = window.as_millis() as u64,
+                unhealed = self.idr_unhealed,
                 "keyframe request coalesced — within the IDR cooldown; RFI anchor trust \
                  withdrawn until the IDR repairs the client"
             );
@@ -250,15 +256,38 @@ impl StreamState {
             );
         } else {
             let rfi_unhealed = self.rfi_echo_swallowed > 0;
-            tracing::debug!(rfi_unhealed, "forcing keyframe (client decode recovery)");
+            self.idr_unhealed =
+                idr_unhealed_next(self.idr_unhealed, self.last_forced_idr, prev_request);
+            let cooldown = idr_cooldown(base, self.idr_unhealed);
+            tracing::debug!(
+                rfi_unhealed,
+                unhealed = self.idr_unhealed,
+                cooldown_ms = cooldown.as_millis() as u64,
+                "forcing keyframe (client decode recovery)"
+            );
             if rfi_unhealed {
                 self.enc.distrust_references();
             }
             self.enc.request_keyframe();
             self.last_forced_idr = Some(now);
             self.rfi_echo_swallowed = 0;
-            if let Some(period) = self.recovery_cadence.note(now) {
-                self.diagnose_recovery_cadence(period);
+            if self.idr_unhealed == IDR_STORM {
+                tracing::warn!(
+                    unhealed = self.idr_unhealed,
+                    cooldown_ms = cooldown.as_millis() as u64,
+                    "forced IDRs are not healing the client — each landed and a fresh \
+                     keyframe request followed. The client is losing the repair itself: a \
+                     client that cannot drain the stream (decoder, receive buffer) or a link \
+                     below the bitrate does this, and it is NOT a host display disturbance. \
+                     IDR cooldown backed off. Lower the bitrate or set it to Automatic; the \
+                     client log's 'receive backlog stopped draining' (queue_depth) decides"
+                );
+            }
+            // A re-issue is the host's own cooldown, not a disturbance with a period.
+            if self.idr_unhealed == 0 {
+                if let Some(period) = self.recovery_cadence.note(now) {
+                    self.diagnose_recovery_cadence(period);
+                }
             }
         }
     }
@@ -414,6 +443,38 @@ pub(super) fn run_loop_stage(
     }
 }
 
+/// A recovery frame's flight: encode, wire, decode. A request inside it echoes the loss the
+/// frame repairs; one past it says the frame landed and did not.
+const RECOVERY_FLIGHT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Longest wait between forced IDRs, whatever the backoff. 3 s of a broken picture is the
+/// ceiling a user tolerates over a storm of repairs that never take.
+const IDR_COOLDOWN_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Consecutive forced IDRs the client re-asked after. `prev_request` past the last IDR's
+/// [`RECOVERY_FLIGHT`] means that IDR landed and did not heal; a cooldown no request landed
+/// in past the flight resets the run.
+fn idr_unhealed_next(
+    unhealed: u32,
+    last_idr: Option<std::time::Instant>,
+    prev_request: Option<std::time::Instant>,
+) -> u32 {
+    let missed = last_idr
+        .zip(prev_request)
+        .is_some_and(|(idr, req)| req.saturating_duration_since(idr) >= RECOVERY_FLIGHT);
+    if missed {
+        unhealed.saturating_add(1)
+    } else {
+        0
+    }
+}
+
+/// `base` doubled per unhealed IDR, capped at [`IDR_COOLDOWN_MAX`].
+fn idr_cooldown(base: std::time::Duration, unhealed: u32) -> std::time::Duration {
+    base.saturating_mul(1u32 << unhealed.min(2))
+        .min(IDR_COOLDOWN_MAX)
+}
+
 /// ±10 % of [`FLUSH_COOLDOWN`]: a software cooldown is the most periodic thing in the system.
 fn matches_client_flush_cadence(period: std::time::Duration) -> bool {
     let flush = punktfunk_core::client::FLUSH_COOLDOWN;
@@ -433,6 +494,45 @@ fn matches_client_recovery_cooldown(period: std::time::Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The 2026-09-10 field storm: 49 IDRs in 42 s, every one followed by a fresh request
+    /// once it had landed. The backoff must reach the cap and hold there, and a cooldown the
+    /// client stayed quiet through must reset it.
+    #[test]
+    fn an_idr_the_client_reasks_after_backs_the_cooldown_off_to_the_cap() {
+        let base = Duration::from_millis(750);
+        let t0 = Instant::now();
+        // The request that forced the IDR is not a miss (same instant).
+        assert_eq!(idr_unhealed_next(0, Some(t0), Some(t0)), 0);
+        // An echo inside the flight is the same loss.
+        assert_eq!(
+            idr_unhealed_next(0, Some(t0), Some(t0 + Duration::from_millis(200))),
+            0
+        );
+        // Past the flight: the IDR landed and did not heal.
+        let mut n = 0;
+        let mut cooldowns = Vec::new();
+        for _ in 0..4 {
+            n = idr_unhealed_next(n, Some(t0), Some(t0 + Duration::from_millis(500)));
+            cooldowns.push(idr_cooldown(base, n));
+        }
+        assert_eq!(n, 4);
+        assert_eq!(
+            cooldowns,
+            [1500, 3000, 3000, 3000].map(Duration::from_millis),
+            "double, then hold at the cap"
+        );
+        // A quiet cooldown resets.
+        assert_eq!(idr_unhealed_next(n, Some(t0), None), 0);
+        assert_eq!(
+            idr_unhealed_next(n, Some(t0 + Duration::from_secs(1)), Some(t0)),
+            0
+        );
+        assert_eq!(idr_cooldown(base, 0), base);
+        // The intra-refresh window is capped too, never 8 s.
+        assert_eq!(idr_cooldown(Duration::from_secs(2), 3), IDR_COOLDOWN_MAX);
+    }
 
     /// The 2026-08-13 field log's exact reading — `period_s=2.0` — must be attributed to the
     /// client's backlog shedding, not to a host display disturbance. The whole point of routing
