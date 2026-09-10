@@ -134,12 +134,15 @@ pub struct HyprlandDisplay {
     /// ScreenCast from the `create` that just ran. Registry [`session_cast_for`]
     /// takes it so the portal fd never sits on the pooled output.
     pending_cast: Option<PendingCast>,
+    /// The registry requests a split output/cast lifetime around `create`.
+    /// Direct callers keep the portal fd and cast on their returned output.
+    handoff_cast: bool,
 }
 
 impl Drop for HyprlandDisplay {
     fn drop(&mut self) {
-        // Direct `create` (no registry take) still owns the session cast; close
-        // it so a leftover ScreenCast does not outlive this instance.
+        // A registry create that never completed its handoff still owns this
+        // cast. Close it before the backend disappears.
         if let Some(pending) = self.pending_cast.take() {
             stop_cast(&pending.name);
         }
@@ -159,6 +162,7 @@ impl HyprlandDisplay {
             pending_restore: None,
             prev_output: None,
             pending_cast: None,
+            handoff_cast: false,
         })
     }
 
@@ -248,13 +252,20 @@ impl VirtualDisplay for HyprlandDisplay {
         self.pending_restore.take()
     }
 
+    fn set_session_cast_handoff(&mut self, enabled: bool) {
+        self.handoff_cast = enabled;
+    }
+
     fn session_cast_for(&mut self, name: &str) -> Result<Option<SessionCastParts>> {
         if let Some(pending) = self.pending_cast.take() {
-            return Ok(Some((
-                pending.node_id,
-                Some(pending.fd),
-                Box::new(SessionCast(pending.name)),
-            )));
+            if pending.name == name {
+                return Ok(Some((
+                    pending.node_id,
+                    Some(pending.fd),
+                    Box::new(SessionCast(pending.name)),
+                )));
+            }
+            stop_cast(&pending.name);
         }
         let (fd, node_id, cursor_mode) = start_cast(name, self.hw_cursor)?;
         self.last_cursor_mode = Some(cursor_mode);
@@ -268,6 +279,9 @@ impl VirtualDisplay for HyprlandDisplay {
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput> {
         preflight_once();
         reclaim_leftovers_once();
+        if let Some(pending) = self.pending_cast.take() {
+            stop_cast(&pending.name);
+        }
 
         let name = next_output_name();
         hyprctl_dispatch(&["output", "create", "headless", &name]).with_context(|| {
@@ -287,11 +301,16 @@ impl VirtualDisplay for HyprlandDisplay {
         // On today's xdph this is `embedded` regardless of `hw_cursor`; the
         // session's cursor behaviour follows this, not the request.
         self.last_cursor_mode = Some(cursor_mode);
-        self.pending_cast = Some(PendingCast {
-            node_id,
-            fd,
-            name: name.clone(),
-        });
+        let (remote_fd, direct_cast) = if self.handoff_cast {
+            self.pending_cast = Some(PendingCast {
+                node_id,
+                fd,
+                name: name.clone(),
+            });
+            (None, None)
+        } else {
+            (Some(fd), Some(SessionCast(name.clone())))
+        };
         tracing::info!(
             node_id,
             output = %name,
@@ -311,14 +330,22 @@ impl VirtualDisplay for HyprlandDisplay {
             adopt_active_workspace(&prev, &name);
         }
         self.prev_output = Some(name.clone());
+        let output_keepalive = OutputKeepalive {
+            _reload: watch_config_reloads(name.clone(), mode),
+            _output: output,
+        };
+        let keepalive: Box<dyn Send> = match direct_cast {
+            Some(cast) => Box::new(DirectKeepalive {
+                _cast: cast,
+                _output: output_keepalive,
+            }),
+            None => Box::new(output_keepalive),
+        };
         Ok(VirtualOutput {
             node_id,
-            remote_fd: None,
+            remote_fd,
             preferred_mode: Some((mode.width, mode.height, mode.refresh_hz)),
-            keepalive: Box::new(OutputKeepalive {
-                _reload: watch_config_reloads(name.clone(), mode),
-                _output: output,
-            }),
+            keepalive,
             ownership: DisplayOwnership::Owned,
             reused_gen: None,
             pool_gen: None,
@@ -339,6 +366,12 @@ struct OutputKeepalive {
     /// never re-apply a rule onto a head this teardown deletes.
     _reload: Option<ReloadWatcher>,
     _output: OutputGuard,
+}
+
+/// Standalone `create`: close ScreenCast before removing its named output.
+struct DirectKeepalive {
+    _cast: SessionCast,
+    _output: OutputKeepalive,
 }
 
 /// ScreenCast parked off the pooled output until [`HyprlandDisplay::session_cast_for`]

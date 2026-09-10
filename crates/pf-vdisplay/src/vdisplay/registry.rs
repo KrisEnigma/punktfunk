@@ -61,11 +61,12 @@ fn topology_str() -> String {
     .to_string()
 }
 
-/// Lease a virtual display: reuse a kept (lingering/pinned) one of the same
-/// backend + mode, else create. The returned [`VirtualOutput`](super::VirtualOutput)
-/// `keepalive` is a registry lease, so the display outlives the capturer.
+/// Lease a virtual display: reuse a matching kept output or create one. The
+/// returned [`VirtualOutput`](super::VirtualOutput) holds the session capture
+/// and a registry lease; the registry retains the compositor output.
 ///
-/// Windows: `vd.create` via [`manager`](super::manager). Linux: the pool below.
+/// Windows calls `vd.create` through [`manager`](super::manager). Linux uses
+/// the pool below and splits Hyprland's ScreenCast from its named output.
 ///
 /// `quit` set means a deliberate stop — teardown now, skip linger. A network
 /// drop leaves it false.
@@ -1214,8 +1215,13 @@ mod linux {
         };
         vd.set_first_in_group(first_in_group);
 
-        // Not under the lock: `vd.create` blocks and spawns threads.
-        let real = vd.create(mode)?;
+        // Not under the lock: `vd.create` blocks and spawns threads. Hyprland
+        // parks the fresh ScreenCast for the session attachment below; direct
+        // `create` callers still receive a complete output.
+        vd.set_session_cast_handoff(true);
+        let real = vd.create(mode);
+        vd.set_session_cast_handoff(false);
+        let real = real?;
         let identity_slot = vd.last_identity_slot();
 
         // Pool only `Owned` with no portal fd on the output. Pass through

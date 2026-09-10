@@ -152,6 +152,11 @@ pub trait VirtualDisplay: Send {
     /// Create a virtual output of the given mode. Teardown is RAII: drop the returned
     /// [`VirtualOutput`]'s `keepalive`.
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput>;
+    /// Let the registry take a successful create's session-scoped ScreenCast.
+    /// Hyprland then returns the named head without its portal fd; direct
+    /// callers retain both the fd and cast in their [`VirtualOutput`].
+    #[cfg(target_os = "linux")]
+    fn set_session_cast_handoff(&mut self, _enabled: bool) {}
     /// Session-scoped ScreenCast for a named output the registry is lingering.
     /// Hyprland recasts by name; default `None` (the pooled node is already live).
     #[cfg(target_os = "linux")]
