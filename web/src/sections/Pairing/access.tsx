@@ -80,7 +80,14 @@ export const levelLabel = (level: AccessLevel): string => {
  * The expiry the operator is choosing. "keep" only exists in the edit sheet (a device already
  * has an expiry and the PATCH is partial — omitting the field keeps it).
  */
-export type ExpiryChoice = "keep" | "forever" | "1h" | "4h" | "8h" | "custom";
+export type ExpiryChoice =
+	| "keep"
+	| "forever"
+	| "session"
+	| "1h"
+	| "4h"
+	| "8h"
+	| "custom";
 
 export interface AccessDraft {
 	/** Grant bitmask (`GRANT_*`). */
@@ -90,7 +97,16 @@ export interface AccessDraft {
 	customHours: number;
 }
 
-/** Relative seconds for the drafted expiry, or null for forever/keep (callers omit the field). */
+/**
+ * `until_disconnect` for the drafted expiry: the record goes when the device's last session
+ * does, instead of at a clock time. It is one choice among the expiry options here, so a draft
+ * that says "session" carries no deadline — the API would take both and end the grant on
+ * whichever landed first, but nothing in this console sends both.
+ */
+export const draftUntilDisconnect = (draft: AccessDraft): boolean =>
+	draft.expiry === "session";
+
+/** Relative seconds for the drafted expiry, or null for forever/keep/session (field omitted). */
 export const draftExpirySecs = (draft: AccessDraft): number | null => {
 	switch (draft.expiry) {
 		case "1h":
@@ -115,10 +131,15 @@ export const draftFromStored = (
 	grants: number | null | undefined,
 	expiresUnix: number | null | undefined,
 	grantedUnix: number | null | undefined,
+	untilDisconnect?: boolean | null,
 ): AccessDraft => {
 	// null grants = a pre-grants record = full control (the API contract); an explicit
 	// pre-power full mask normalizes so the toggles agree with the "Full" chip.
 	const mask = normalizeLegacyFull(grants ?? GRANT_ALL);
+	// "This session" outranks a deadline in the display: it is the one that will actually end
+	// the grant, and the two are not exclusive on the wire.
+	if (untilDisconnect)
+		return { grants: mask, expiry: "session", customHours: 4 };
 	if (expiresUnix == null || grantedUnix == null || expiresUnix <= grantedUnix)
 		return { grants: mask, expiry: "forever", customHours: 4 };
 	const secs = expiresUnix - grantedUnix;
@@ -167,16 +188,23 @@ export const AccessChip: FC<{
 	grants: number | null | undefined;
 	expiresUnix: number | null | undefined;
 	nowUnix: number;
-}> = ({ grants, expiresUnix, nowUnix }) => {
+	/** The record goes when this device's last session does — no deadline to count down. */
+	untilDisconnect?: boolean | null;
+}> = ({ grants, expiresUnix, nowUnix, untilDisconnect }) => {
 	// "Expired" is the reader's arithmetic against the wall clock — the host keeps the row.
 	if (expiresUnix != null && expiresUnix <= nowUnix)
 		return <Badge variant="warning">{m.access_expired()}</Badge>;
 	const label = levelLabel(levelOfMask((grants ?? GRANT_ALL) & GRANT_ALL));
+	// A session grant has no deadline, so without this it would read as permanent — the one
+	// reading it is deciding whether anything still needs cleaning up after the evening.
+	const when = untilDisconnect
+		? m.access_until_disconnect()
+		: expiresUnix == null
+			? null
+			: fmtRemaining(expiresUnix - nowUnix);
 	return (
 		<Badge variant="secondary" className="whitespace-nowrap">
-			{expiresUnix == null
-				? label
-				: `${label} · ${fmtRemaining(expiresUnix - nowUnix)}`}
+			{when == null ? label : `${label} · ${when}`}
 		</Badge>
 	);
 };
@@ -318,6 +346,9 @@ export const AccessControls: FC<{
 						)}
 						<SelectItem value="forever">
 							{m.access_expires_forever()}
+						</SelectItem>
+						<SelectItem value="session">
+							{m.access_expires_session()}
 						</SelectItem>
 						<SelectItem value="1h">{m.access_expires_1h()}</SelectItem>
 						<SelectItem value="4h">{m.access_expires_4h()}</SelectItem>

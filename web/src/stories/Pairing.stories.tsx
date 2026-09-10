@@ -56,6 +56,7 @@ export const Armed: Story = {
 			<PendingDevices
 				pending={{ data: pendingDevices, ...idle }}
 				onApprove={noop}
+				onArmFor={noop}
 				onDeny={noop}
 				pendingId={null}
 			/>

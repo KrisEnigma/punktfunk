@@ -17,9 +17,9 @@ encrypted per session. All you need to solve is how the friend reaches the host.
 |---|---|
 | A PC, Mac or Steam Deck with Steam | [Porthole](#porthole) — easiest, nothing to configure on your router |
 | A phone, tablet, Apple TV, or no Steam | [Tailscale machine sharing](#tailscale) |
-| Anything, and you manage your own router | [Port forwarding](#port-forwarding) |
+| Anything, and you manage your own router | [Port forwarding](#port-forwarding) — not recommended, and the only path that exposes the host to the internet |
 
-Both tunnels need the video port pinned first.
+Every path needs the video port pinned first.
 
 ## Pin the video port
 
@@ -76,19 +76,42 @@ everything — that is the step people skip.
 
 The friend's first connect shows up on your console as a pending device. Admit it with a
 [PIN](/docs/pairing#pair-with-a-pin), not a bare Approve — read the PIN out over voice chat — and
-pick **Controller only** with an expiry
+pick **Controller only**
 ([choosing access](/docs/pairing#choosing-access-when-you-admit-a-device)).
 
-When the expiry passes the device is refused until you re-grant it. **Expire now** or **Unpair**
-on the Paired devices table ends a running session at once. There is no "unpair when they
-disconnect" yet, so set an expiry that fits the evening.
+For the expiry, **Until they disconnect** fits an evening: a minute after their last session ends
+the record is gone, so nothing is left to clean up and coming back means knocking again. The
+minute is deliberate — a router blip should not cost them a re-pair — and they can reconnect
+freely inside it. A clock-time expiry works too, and refuses the device once it passes. **Expire
+now** or **Unpair** on the Paired devices table ends a running session at once.
 
 ## Port forwarding
 
-Forward UDP `9777` and `9779` to the host and give the friend your public address. A stranger who
-finds the ports gets a refusal, and a pairing attempt is only possible during the short window you
-arm. Two rules: admit only with a PIN, because the host cannot tell a stranger's knock from your
-friend's, and never forward `47990` or `9778`.
+**Not recommended. Prefer [Porthole](#porthole) or [Tailscale](#tailscale) whenever either one
+reaches your friend** — both leave the host unreachable from the internet, and this does not. Take
+this path only when neither fits, and take the rules below seriously.
+
+Forward UDP `9777` and `9779` to the host. **Never forward `47990` or `9778`.**
+
+Send a [link](/docs/profiles-and-links), not a bare address, so your friend's first connect is
+verified rather than blind. The **Connect** card on the Host page writes one; swap its address for
+your public one:
+
+```
+punktfunk://connect/<id>?host=203.0.113.5&fp=<64 hex>
+```
+
+Strangers knock once the port is open. Nothing streams to them: an unpaired device is refused, the
+host tags the knock **From the internet**, and such a knock is admitted only through a PIN window
+named for its own fingerprint — the row's **Arm PIN** does that, and its access starts at
+Controller · until they disconnect. A window you opened for your own next device never answers
+one, and neither refusal spends the PIN.
+
+Read the PIN out over voice chat. There is no Approve button on that row on purpose: the name a
+pending device shows is one it chose for itself, and from the internet that is all it is.
+
+A pairing that keeps being refused usually means a stranger is knocking into the same rate limit.
+Wait a moment and retry.
 
 ## What not to use
 

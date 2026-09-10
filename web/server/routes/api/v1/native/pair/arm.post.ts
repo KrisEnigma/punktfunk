@@ -15,6 +15,7 @@ interface ArmBody {
 	fingerprint?: string;
 	grants?: number;
 	expires_in_secs?: number;
+	until_disconnect?: boolean;
 	password?: string;
 }
 
@@ -24,11 +25,14 @@ export default defineEventHandler(async (event) => {
 	// Rebuild from the contract's own fields so the password cannot leak upstream, and so an
 	// unexpected extra field can't ride along to the host. Absent stays absent: the console omits
 	// `grants`/`expires_in_secs` to mean "keep what a re-pairing device already has".
-	const { ttl_secs, fingerprint, grants, expires_in_secs } = body ?? {};
+	const { ttl_secs, fingerprint, grants, expires_in_secs, until_disconnect } =
+		body ?? {};
 	const upstream: Omit<ArmBody, "password"> = {};
 	if (ttl_secs !== undefined) upstream.ttl_secs = ttl_secs;
 	if (fingerprint) upstream.fingerprint = fingerprint;
 	if (grants !== undefined) upstream.grants = grants;
 	if (expires_in_secs !== undefined) upstream.expires_in_secs = expires_in_secs;
+	if (until_disconnect !== undefined)
+		upstream.until_disconnect = until_disconnect;
 	return forwardJson(event, "/api/v1/native/pair/arm", "POST", upstream);
 });

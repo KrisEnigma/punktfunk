@@ -31,8 +31,9 @@ open **Pairing** and click **Pair a device**. The host shows a **4-digit PIN** a
   console's **Moonlight (GameStream) pairing** card. Arming doesn't apply. (Moonlight needs
   [GameStream compat on](/docs/moonlight) first.)
 
-If the window lapses, arm it again. A `punktfunk://` link can't pair for you — it only starts a
-stream on a host this device already trusts.
+If the window lapses, arm it again. A `punktfunk://` link can't pair for you: one carrying an
+address opens the client's trust prompt, pre-filled and with any fingerprint the link named, but
+admitting the device is still this ceremony.
 
 ## Choosing access when you admit a device
 
@@ -41,10 +42,22 @@ Approving and deciding what the device may do are one dialog:
 ![Approve this device: name, access level, expiry, and the one-click Approve as guest](/img/console-approve-device.png)
 
 The levels are **Full control**, **Controller only** and **View only** (**Advanced** opens the
-individual toggles — [Access levels](/docs/access-levels)); expiry is **Never** or 1 h / 4 h / 8 h /
-custom. The defaults are right for your own new laptop; **Approve as guest** is for a friend's
-device — Controller only, for 4 hours, then it expires on its own. The same two controls sit on the
-**Pair a device** card, and apply to whichever device completes the PIN.
+individual toggles — [Access levels](/docs/access-levels)); expiry is **Never**, **Until they
+disconnect**, or 1 h / 4 h / 8 h / custom. The defaults are right for your own new laptop;
+**Approve as guest** is for a friend's device — Controller only, for 4 hours, then it expires on
+its own. The same two controls sit on the **Pair a device** card, and apply to whichever device
+completes the PIN.
+
+**Until they disconnect** removes the device's record once its last session ends — after a minute's
+grace, so a router blip or a client restart is not a re-pair. Nothing is left in the list
+afterwards, which is the point: a grant that outlives the evening is a device that can come back
+while nobody is watching. Coming back later is a fresh knock and a fresh PIN.
+
+A device that knocked **from the internet** is listed as such and cannot be admitted with
+Approve at all — the name it sent proves nothing there. Its row offers **Arm PIN** instead, which
+names the **Pair a device** card below for that one device; fill in the card and the PIN it mints
+works for nobody else. Read it out to whoever is holding the device. See
+[Friends over the internet](/docs/friends-over-the-internet).
 
 ## Managing paired devices
 

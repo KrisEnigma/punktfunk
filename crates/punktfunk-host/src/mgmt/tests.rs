@@ -32,6 +32,10 @@ fn published_endpoint_line_parses_the_way_both_consumers_read_it() {
 }
 
 use super::*;
+
+/// Knocks in these tests come from the LAN unless the test is about a WAN knock. An unknown
+/// source classifies as WAN, which the approve endpoint refuses.
+const LAN_KNOCK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 44));
 use crate::encode::Codec;
 #[cfg(feature = "gamestream")]
 use crate::gamestream::cert::ServerIdentity;
@@ -193,6 +197,7 @@ async fn host_actions_follow_the_power_grant() {
         Some(crate::native_pairing::Access {
             grants: GRANT_GAMEPAD,
             expires_unix: None,
+            until_disconnect: false,
         }),
     )
     .unwrap();
@@ -203,6 +208,7 @@ async fn host_actions_follow_the_power_grant() {
         Some(crate::native_pairing::Access {
             grants: GRANT_ALL_PRE_POWER,
             expires_unix: None,
+            until_disconnect: false,
         }),
     )
     .unwrap();
@@ -690,6 +696,34 @@ async fn host_info_reports_identity_and_ports() {
     assert_eq!(body["codecs"], serde_json::json!(expected));
     assert!(caps & CODEC_H264 != 0, "H.264 is always encodable");
     assert_eq!(body["gamestream"], false);
+}
+
+/// A device sent a connect link has to be able to check what it reached, so the host publishes
+/// its own leaf fingerprint. Public by construction — every client reads it off the handshake.
+#[tokio::test]
+async fn host_info_publishes_the_hosts_own_fingerprint() {
+    let stats = test_stats();
+    let state = test_state();
+    let app = crate::mgmt::app(
+        state,
+        Some("test-secret".to_string()),
+        Some("plugin-secret".to_string()),
+        DEFAULT_PORT,
+        None,
+        stats,
+        test_client_logs_dir(),
+        false,
+        Some([0xab; 32]),
+        false,
+    );
+    let (status, body) = send(&app, get_req("/api/v1/host")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["fingerprint"], "ab".repeat(32));
+
+    // An identity that could not be parsed says so rather than publishing a wrong pin.
+    let app = test_app(test_state(), None);
+    let (_, body) = send(&app, get_req("/api/v1/host")).await;
+    assert!(body["fingerprint"].is_null());
 }
 
 #[tokio::test]
@@ -1995,8 +2029,8 @@ async fn pending_devices_approve_and_deny() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(b.as_array().unwrap().len(), 0);
 
-    np.note_pending("Enrico's MacBook", "aa11", None);
-    np.note_pending("device bb22cc33", "bb22", None);
+    np.note_pending("Enrico's MacBook", "aa11", Some(LAN_KNOCK));
+    np.note_pending("device bb22cc33", "bb22", Some(LAN_KNOCK));
     let (_, b) = send(&app, get_req("/api/v1/native/pending")).await;
     assert_eq!(b.as_array().unwrap().len(), 2);
     assert_eq!(b[0]["name"], "Enrico's MacBook");
@@ -2227,6 +2261,123 @@ async fn patch_native_access_validates_and_404s() {
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// `until_disconnect` replaces nothing on its own. Honouring it alone would hand a re-pairing
+/// device full permanent control, because `Access` replaces the whole record.
+#[tokio::test]
+async fn until_disconnect_alone_is_refused_rather_than_widening_access() {
+    let np = Arc::new(
+        crate::native_pairing::NativePairing::load_with(
+            Some(
+                std::env::temp_dir().join(format!("pf-mgmt-lone-udc-{}.json", std::process::id())),
+            ),
+            None,
+            false,
+        )
+        .unwrap(),
+    );
+    let app = test_app_native(test_state(), np.clone());
+    np.note_pending("Guest Phone", "cc33", Some(LAN_KNOCK));
+    let id = np.pending()[0].id;
+
+    let (s, _) = send(
+        &app,
+        post_json(
+            &format!("/api/v1/native/pending/{id}/approve"),
+            serde_json::json!({"until_disconnect": true}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(!np.is_paired("cc33"), "a 400 must not consume the knock");
+    assert_eq!(np.pending().len(), 1);
+
+    // Arming refuses it on the same terms, and leaves no window open.
+    let (s, _) = send(
+        &app,
+        post_json(
+            "/api/v1/native/pair/arm",
+            serde_json::json!({"until_disconnect": true}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(!np.status().armed, "a refused arm leaves no window");
+
+    // With an access level beside it, it lands.
+    let (s, b) = send(
+        &app,
+        post_json(
+            &format!("/api/v1/native/pending/{id}/approve"),
+            serde_json::json!({"grants": 1, "until_disconnect": true}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["until_disconnect"], true);
+    assert_eq!(b["grants"], 1, "grants stay what the operator chose");
+}
+
+/// The pending list says where a knock came from, and the endpoint refuses to admit one from
+/// the internet — the console can hide its Approve button, but the rule is enforced here.
+#[tokio::test]
+async fn a_wan_knock_is_listed_as_wan_and_refused_by_approve() {
+    let np = Arc::new(
+        crate::native_pairing::NativePairing::load_with(
+            Some(
+                std::env::temp_dir().join(format!("pf-mgmt-wan-knock-{}.json", std::process::id())),
+            ),
+            None,
+            false,
+        )
+        .unwrap(),
+    );
+    let app = test_app_native(test_state(), np.clone());
+    let wan = std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5));
+    np.note_pending("Friend's Deck", "dd88", Some(wan));
+    np.note_pending("Living Room", "ee99", Some(LAN_KNOCK));
+
+    let (_, b) = send(&app, get_req("/api/v1/native/pending")).await;
+    let rows = b.as_array().unwrap();
+    let wan_row = rows.iter().find(|r| r["fingerprint"] == "dd88").unwrap();
+    let lan_row = rows.iter().find(|r| r["fingerprint"] == "ee99").unwrap();
+    assert_eq!(wan_row["source"], "wan");
+    assert_eq!(lan_row["source"], "lan");
+
+    let (s, _) = send(
+        &app,
+        post_json(
+            &format!(
+                "/api/v1/native/pending/{}/approve",
+                wan_row["id"].as_u64().unwrap()
+            ),
+            serde_json::json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "a WAN knock needs a bound PIN");
+    assert!(!np.is_paired("dd88"));
+    assert_eq!(
+        np.pending().len(),
+        2,
+        "the refusal leaves the knock waiting"
+    );
+
+    // The LAN one goes through, so the refusal is about the source and nothing else.
+    let (s, _) = send(
+        &app,
+        post_json(
+            &format!(
+                "/api/v1/native/pending/{}/approve",
+                lan_row["id"].as_u64().unwrap()
+            ),
+            serde_json::json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(np.is_paired("ee99"));
+}
+
 /// Approve pins the chosen mask. Reserved bits 400 without consuming the pending entry.
 /// A later re-knock surfaces the stored access.
 #[tokio::test]
@@ -2245,7 +2396,7 @@ async fn approve_with_access_pins_the_chosen_mask() {
     );
     let app = test_app_native(test_state(), np.clone());
 
-    np.note_pending("Guest Phone", "cc33", None);
+    np.note_pending("Guest Phone", "cc33", Some(LAN_KNOCK));
     let (_, pend) = send(&app, get_req("/api/v1/native/pending")).await;
     assert!(pend[0]["grants"].is_null());
     assert!(pend[0]["access_level"].is_null());
@@ -2286,7 +2437,7 @@ async fn approve_with_access_pins_the_chosen_mask() {
     assert_eq!(np.effective("cc33", now), Some(GRANT_GAMEPAD));
 
     // Re-knock surfaces the stored access for the approve dialog.
-    np.note_pending("Guest Phone", "cc33", None);
+    np.note_pending("Guest Phone", "cc33", Some(LAN_KNOCK));
     let (_, pend) = send(&app, get_req("/api/v1/native/pending")).await;
     assert_eq!(pend[0]["grants"], GRANT_GAMEPAD);
     assert_eq!(pend[0]["access_level"], "controller");
@@ -2371,7 +2522,7 @@ async fn approve_and_arm_without_access_fields_keep_todays_behavior() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(np.armed_access(), None, "no fields = no choice");
 
-    np.note_pending("Old Laptop", "ee55", None);
+    np.note_pending("Old Laptop", "ee55", Some(LAN_KNOCK));
     let (_, pend) = send(&app, get_req("/api/v1/native/pending")).await;
     let id = pend[0]["id"].as_u64().unwrap();
     let (s, b) = send(

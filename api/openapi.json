@@ -2831,6 +2831,16 @@
               }
             }
           },
+          "409": {
+            "description": "Knock came from the internet; arm a fingerprint-bound PIN instead",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Couldn't save the paired-device list",
             "content": {
@@ -4939,6 +4949,13 @@
             ],
             "description": "Label; defaults to the name the device knocked with.",
             "example": "Living Room TV"
+          },
+          "until_disconnect": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Drop the device's record once its last session ends, rather than at a clock time.\nCombines with `expires_in_secs`: whichever comes first ends the grant. Send it with an\naccess level, never alone (400) — like the other access fields it is part of a whole\nreplacement, so sending `grants` without it clears it."
           }
         }
       },
@@ -4982,6 +4999,13 @@
             "description": "Window length, seconds. Default 120; clamped to 15–600.",
             "example": 120,
             "minimum": 0
+          },
+          "until_disconnect": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Drop the device's record once its last session ends, rather than at a clock time.\nCombines with `expires_in_secs`: whichever comes first ends the grant. Send it with an\naccess level, never alone (400) — like the other access fields it is part of a whole\nreplacement, so sending `grants` without it clears it."
           }
         }
       },
@@ -7306,6 +7330,14 @@
             },
             "description": "Codecs this host can encode (`host_wire_caps`, not the compile-time list)."
           },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hex SHA-256 of this host's leaf certificate — what a client pins. Public by\nconstruction: every client reads it off the handshake. Carried here so a connect link\ncan name it, and a first connect over an untrusted path is verified rather than blind.\n`null` only if the identity could not be parsed.",
+            "example": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
           "gamestream": {
             "type": "boolean",
             "description": "GameStream/Moonlight-compat planes are running (`--gamestream`). `false` is the default (native only)."
@@ -7825,7 +7857,8 @@
         "type": "object",
         "required": [
           "name",
-          "fingerprint"
+          "fingerprint",
+          "until_disconnect"
         ],
         "properties": {
           "access_level": {
@@ -7869,6 +7902,10 @@
           "name": {
             "type": "string",
             "example": "Living Room iPad"
+          },
+          "until_disconnect": {
+            "type": "boolean",
+            "description": "The record is dropped when the device's last session ends, rather than at a clock\ntime. `expires_unix` may also be set; whichever comes first ends the grant."
           }
         }
       },
@@ -8023,7 +8060,9 @@
           "id",
           "name",
           "fingerprint",
-          "age_secs"
+          "age_secs",
+          "source",
+          "until_disconnect"
         ],
         "properties": {
           "access_level": {
@@ -8078,6 +8117,15 @@
             "type": "string",
             "description": "Client's own name, else fingerprint-derived.",
             "example": "Enrico's MacBook"
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the knock came from: `\"lan\"` or `\"wan\"`. A `\"wan\"` device cannot be admitted by\napprove — arm a PIN bound to its fingerprint instead.",
+            "example": "lan"
+          },
+          "until_disconnect": {
+            "type": "boolean",
+            "description": "Stored \"this session\" setting if this fingerprint was paired before. `false` if unknown."
           }
         }
       },
@@ -9486,6 +9534,13 @@
             "description": "New `GRANT_*` mask; reserved bits are 400. Omit to keep current grants.",
             "example": 1,
             "minimum": 0
+          },
+          "until_disconnect": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Drop the record once the device's last session ends. Omit to keep the current setting."
           }
         }
       },

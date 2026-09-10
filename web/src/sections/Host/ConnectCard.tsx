@@ -16,9 +16,16 @@ import { m } from "@/paraglide/messages";
  *
  * No QR code: rendering one needs an encoder we do not bundle, and a wrong QR is worse than none.
  * The link is short enough to send over any chat app, which is what people actually do.
+ *
+ * The link carries the address and this host's certificate fingerprint, so a device opening it
+ * verifies what it reached instead of trusting the first answer. A bare record id only opens on
+ * a device that already knows this host, which the device being sent the link does not.
  */
 export const ConnectCard: FC<{ host: HostInfo }> = ({ host }) => {
-	const deepLink = `punktfunk://connect/${host.uniqueid}`;
+	// No port: the clients default to 9777, the same as typing the address by hand.
+	const params = new URLSearchParams({ host: host.local_ip });
+	if (host.fingerprint) params.set("fp", host.fingerprint);
+	const deepLink = `punktfunk://connect/${host.uniqueid}?${params}`;
 	return (
 		<Card>
 			<CardHeader>

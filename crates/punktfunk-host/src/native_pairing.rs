@@ -29,9 +29,61 @@ mod arming;
 mod sanitize;
 mod store;
 
-pub use approval::{PairingDecision, PendingRequest};
+pub use approval::{classify_source, KnockSource, PairingDecision, PendingRequest};
 pub use arming::PinAttempt;
 pub use store::{Access, PairedClient};
+
+/// Counts one live session for as long as it is held. Dropping the last one for a device
+/// whose record says "this session" schedules the record's removal, after
+/// [`RECONNECT_GRACE`] and only if nothing reconnected.
+///
+/// A guard, not a pair of calls: a session can end through a return, an error or a task
+/// cancellation, and a count that leaks one of those never falls back to zero.
+///
+/// Named apart from `gamelease::SessionGuard` and `session_status::LiveSessionGuard`, which
+/// count different things in the same binary.
+pub struct SessionCountGuard {
+    np: std::sync::Arc<NativePairing>,
+    fp_hex: String,
+}
+
+impl Drop for SessionCountGuard {
+    fn drop(&mut self) {
+        if self.np.session_ended(&self.fp_hex) > 0 {
+            return;
+        }
+        // Last one out. The grace has to be waited on somewhere, and Drop cannot await — so
+        // hand it to the runtime this session ran on. Without one (shutdown) the record simply
+        // waits for the next session to end, which is the same state a crash would leave.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (np, fp_hex) = (self.np.clone(), self.fp_hex.clone());
+        handle.spawn(async move { np.drop_session_only_after_grace(&fp_hex).await });
+    }
+}
+
+/// Result of a delegated approve. Not a `Result`: a refusal here is an answer about the
+/// knock, not a failure of the call.
+pub enum ApproveOutcome {
+    /// Paired. Carries the stored record as it now stands, which a re-pair may have kept.
+    Paired(PairedClient),
+    /// No pending request with that id — expired, denied, or already admitted.
+    NotFound,
+    /// The knock came from the internet, where the operator cannot tell whose it is.
+    /// Admit it by arming a PIN bound to its fingerprint instead.
+    WanNeedsBoundPin,
+}
+
+impl ApproveOutcome {
+    /// The stored record, or `None` for either refusal.
+    pub fn paired(self) -> Option<PairedClient> {
+        match self {
+            ApproveOutcome::Paired(c) => Some(c),
+            ApproveOutcome::NotFound | ApproveOutcome::WanNeedsBoundPin => None,
+        }
+    }
+}
 
 /// What a live session observes about its device's access. Carries the record's raw deadline
 /// rather than a pre-evaluated verdict — expiry is checked against the wall clock each time,
@@ -62,6 +114,17 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// How long a "this session" record outlives its last session. A router blip, a client
+/// restart or a sleeping laptop must not cost the guest a re-pair; anything longer starts to
+/// look like the deadline this grant exists to replace. Deliberately not `gamelease`'s
+/// disconnect grace: that one keeps a *game* running, this one keeps *trust*.
+#[cfg(not(test))]
+pub const RECONNECT_GRACE: Duration = Duration::from_secs(60);
+/// The tests exercise the ordering — last session out, reconnect inside the window, nothing
+/// coming back — not the length of the wait.
+#[cfg(test)]
+pub const RECONNECT_GRACE: Duration = Duration::from_millis(60);
+
 pub struct NativePairing {
     arm: arming::ArmState,
     store: store::TrustStore,
@@ -69,6 +132,9 @@ pub struct NativePairing {
     /// Fingerprint (lowercased) → live-session channel. Senders stay after unpair so a
     /// late subscriber cannot race a close; a re-pair publishes on the same channel.
     access_watch: Mutex<HashMap<String, watch::Sender<AccessState>>>,
+    /// Fingerprint (lowercased) → live sessions right now. Only "this session" records read
+    /// it, but every admitted session counts: the guard is what makes the count honest.
+    live: Mutex<HashMap<String, u32>>,
 }
 
 pub struct NativePairingStatus {
@@ -88,12 +154,40 @@ impl NativePairing {
         fixed_pin: Option<String>,
         arm_at_start: bool,
     ) -> Result<NativePairing> {
-        Ok(NativePairing {
+        let np = NativePairing {
             arm: arming::ArmState::new(arm_at_start, fixed_pin),
             store: store::TrustStore::open(store_path)?,
             approval: approval::ApprovalQueue::new(),
             access_watch: Mutex::new(HashMap::new()),
-        })
+            live: Mutex::new(HashMap::new()),
+        };
+        np.drop_session_only_records();
+        Ok(np)
+    }
+
+    /// A host that is starting has no live sessions, so every "this session" grant has already
+    /// ended — by a restart, an update or a crash, which is how a session usually ends. The
+    /// counter is in memory only, so without this sweep those records would outlive the guest
+    /// forever and the list would keep exactly the leftover the grant exists to prevent.
+    fn drop_session_only_records(&self) {
+        for client in self.store.list() {
+            if !client.until_disconnect {
+                continue;
+            }
+            match self.store.remove(&client.fingerprint) {
+                Ok(true) => tracing::info!(
+                    name = %client.name,
+                    fingerprint = %client.fingerprint,
+                    "dropped a this-session grant left by the previous run"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    fingerprint = %client.fingerprint,
+                    "couldn't drop a this-session grant at startup"
+                ),
+            }
+        }
     }
 
     /// Arm with a fresh PIN for `ttl`, unbound (any well-formed attempt consumes it) and with
@@ -121,10 +215,11 @@ impl NativePairing {
         self.arm.armed_access()
     }
 
-    /// PIN for an attempt from `client_fp_hex`. `BoundToOther` means reject without consuming
-    /// the window; `Disarmed` means none is armed.
-    pub fn pin_for_attempt(&self, client_fp_hex: &str) -> PinAttempt {
-        self.arm.pin_for_attempt(client_fp_hex)
+    /// PIN for an attempt from `client_fp_hex` knocking from `source`. `BoundToOther` and
+    /// `UnboundForWan` both mean reject without consuming the window; `Disarmed` means none
+    /// is armed.
+    pub fn pin_for_attempt(&self, client_fp_hex: &str, source: KnockSource) -> PinAttempt {
+        self.arm.pin_for_attempt(client_fp_hex, source)
     }
 
     pub fn disarm(&self) {
@@ -290,6 +385,88 @@ impl NativePairing {
         self.store.list()
     }
 
+    /// Count a live session for `fp_hex` until the returned guard drops. Every admitted session
+    /// counts; only a "this session" record reads the total.
+    pub fn session_started(self: &std::sync::Arc<Self>, fp_hex: &str) -> SessionCountGuard {
+        *self
+            .live
+            .lock()
+            .unwrap()
+            .entry(fp_hex.to_ascii_lowercase())
+            .or_insert(0) += 1;
+        SessionCountGuard {
+            np: self.clone(),
+            fp_hex: fp_hex.to_ascii_lowercase(),
+        }
+    }
+
+    /// Sessions live for `fp_hex` right now.
+    pub fn live_sessions(&self, fp_hex: &str) -> u32 {
+        self.live
+            .lock()
+            .unwrap()
+            .get(&fp_hex.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Drop one live session, returning how many remain.
+    fn session_ended(&self, fp_hex: &str) -> u32 {
+        let mut live = self.live.lock().unwrap();
+        let key = fp_hex.to_ascii_lowercase();
+        let Some(n) = live.get_mut(&key) else {
+            return 0;
+        };
+        *n = n.saturating_sub(1);
+        let remaining = *n;
+        if remaining == 0 {
+            live.remove(&key);
+        }
+        remaining
+    }
+
+    /// Wait out [`RECONNECT_GRACE`], then remove a "this session" record if the device did not
+    /// come back. Counting and removing share the `live` lock, which [`Self::session_started`]
+    /// is the only other taker of: a device that reconnects inside the grace therefore cannot
+    /// land between the two and be revoked by its own predecessor's cleanup. Lock order is
+    /// live → store → watch and never the reverse.
+    async fn drop_session_only_after_grace(&self, fp_hex: &str) {
+        tokio::time::sleep(RECONNECT_GRACE).await;
+        let removed = {
+            let live = self.live.lock().unwrap();
+            if live.contains_key(&fp_hex.to_ascii_lowercase()) {
+                return;
+            }
+            match self.store.get(fp_hex) {
+                Some(record) if record.until_disconnect => {
+                    Some((record.name, self.store.remove(fp_hex)))
+                }
+                _ => return,
+            }
+        };
+        let Some((name, removed)) = removed else {
+            return;
+        };
+        match removed {
+            Ok(true) => {
+                self.publish_current(fp_hex);
+                tracing::info!(
+                    %name,
+                    fingerprint = %fp_hex,
+                    "this-session access ended with the device's last session"
+                );
+            }
+            Ok(false) => {}
+            // The record stays and the operator can still unpair by hand; keeping a row too
+            // long is the safe direction to fail in, not one to panic over.
+            Err(e) => tracing::warn!(
+                error = %e,
+                fingerprint = %fp_hex,
+                "couldn't drop a this-session record"
+            ),
+        }
+    }
+
     /// Remove by fingerprint. Persist failure rolls the in-memory store back. A removal
     /// publishes `revoked` so live sessions can end themselves.
     pub fn remove(&self, fp_hex: &str) -> Result<bool> {
@@ -340,23 +517,35 @@ impl NativePairing {
 
     /// Approve a pending knock: pair under `name_override` (else the knock's name) and drop
     /// the queue entry. `access` is the dialog choice; `None` keeps existing access or the
-    /// full/permanent default. `Ok(None)` = unknown or expired id. Reads the entry (does not
+    /// full/permanent default. `NotFound` = unknown or expired id. Reads the entry (does not
     /// pre-remove), then [`Self::add_with_access`] pins and clears — waiters rely on that order.
     pub fn approve_pending(
         &self,
         id: u32,
         name_override: Option<&str>,
         access: Option<Access>,
-    ) -> Result<Option<PairedClient>> {
+    ) -> Result<ApproveOutcome> {
+        // The pending card shows a name the device chose for itself, so from the internet a
+        // one-click approve is a guess about who knocked. Only a PIN window bound to this
+        // fingerprint can admit one. Read before the entry, not after: an entry that expires
+        // between the two lookups must read as gone, never as a knock with no source.
+        match self.approval.source_of(id) {
+            None => return Ok(ApproveOutcome::NotFound),
+            Some(KnockSource::Wan) => return Ok(ApproveOutcome::WanNeedsBoundPin),
+            Some(KnockSource::Lan) => {}
+        }
         let (knock_name, fp_hex) = match self.approval.read_entry(id) {
             Some(x) => x,
-            None => return Ok(None),
+            None => return Ok(ApproveOutcome::NotFound),
         };
         let name = name_override.unwrap_or(&knock_name).to_string();
         self.add_with_access(&name, &fp_hex, access)?;
 
         // Read the stored record: `access == None` on a re-pair kept prior grants/expiry.
-        Ok(self.store.get(&fp_hex))
+        Ok(match self.store.get(&fp_hex) {
+            Some(c) => ApproveOutcome::Paired(c),
+            None => ApproveOutcome::NotFound,
+        })
     }
 
     /// Deny is "not now": the next knock creates a new entry.
@@ -409,6 +598,11 @@ impl NativePairing {
 
 #[cfg(test)]
 mod tests {
+    /// Knocks in these tests come from the couch unless a test says otherwise. `None` now
+    /// classifies as WAN, which refuses a bare approve — that is the point of the rule.
+    const LAN_KNOCK: std::net::IpAddr =
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 44));
+
     use super::approval::{MAX_PENDING_PER_IP, PENDING_CAP};
     use super::*;
 
@@ -453,8 +647,8 @@ mod tests {
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         assert!(np.pending().is_empty());
 
-        np.note_pending("device aa11", "AA11", None);
-        np.note_pending("Bedroom TV", "aa11", None);
+        np.note_pending("device aa11", "AA11", Some(LAN_KNOCK));
+        np.note_pending("Bedroom TV", "aa11", Some(LAN_KNOCK));
         let pend = np.pending();
         assert_eq!(pend.len(), 1, "re-knock dedups by fingerprint");
         assert_eq!(pend[0].name, "Bedroom TV");
@@ -465,15 +659,19 @@ mod tests {
         assert!(np.pending().is_empty());
         assert!(!np.is_paired("aa11"));
 
-        np.note_pending("device bb22", "BB22", None);
+        np.note_pending("device bb22", "BB22", Some(LAN_KNOCK));
         let id = np.pending()[0].id;
         assert!(
-            np.approve_pending(9999, None, None).unwrap().is_none(),
+            np.approve_pending(9999, None, None)
+                .unwrap()
+                .paired()
+                .is_none(),
             "unknown id"
         );
         let client = np
             .approve_pending(id, Some("Living Room"), None)
             .unwrap()
+            .paired()
             .unwrap();
         assert_eq!(client.name, "Living Room");
         assert!(np.is_paired("bb22"), "approval pins the fingerprint");
@@ -495,7 +693,7 @@ mod tests {
     fn pairing_clears_a_pending_knock() {
         let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
-        np.note_pending("Knocker", "cc44", None);
+        np.note_pending("Knocker", "cc44", Some(LAN_KNOCK));
         assert_eq!(np.pending().len(), 1);
         np.add("Knocker", "CC44").unwrap();
         assert!(
@@ -533,7 +731,7 @@ mod tests {
         let (_temp, p) = temp();
         let np = Arc::new(NativePairing::load_with(Some(p.clone()), None, false).unwrap());
 
-        let seq = np.note_pending("Knocker", "ab01", None);
+        let seq = np.note_pending("Knocker", "ab01", Some(LAN_KNOCK));
         let d = np
             .wait_for_decision("ab01", seq, Duration::from_millis(80))
             .await;
@@ -555,11 +753,12 @@ mod tests {
             .id;
         np.approve_pending(id, Some("Approved"), None)
             .unwrap()
+            .paired()
             .unwrap();
         assert_eq!(waiter.await.unwrap(), PairingDecision::Approved);
         assert!(np.is_paired("ab01"));
 
-        let seq = np.note_pending("Knock2", "cd02", None);
+        let seq = np.note_pending("Knock2", "cd02", Some(LAN_KNOCK));
         let ready = np.approval.waiter_ready_generation();
         let np3 = np.clone();
         let waiter = tokio::spawn(async move {
@@ -600,18 +799,19 @@ mod tests {
             Some(Access {
                 grants: GRANT_ALL,
                 expires_unix: Some(wall_now() - 10),
+                until_disconnect: false,
             }),
         )
         .unwrap();
         assert!(np.is_paired("aa77"), "expired but still listed");
 
-        let seq = np.note_pending("Old Guest", "aa77", None);
+        let seq = np.note_pending("Old Guest", "aa77", Some(LAN_KNOCK));
         let d = np
             .wait_for_decision("aa77", seq, Duration::from_millis(120))
             .await;
         assert_eq!(d, PairingDecision::TimedOut);
 
-        let seq = np.note_pending("Old Guest", "aa77", None);
+        let seq = np.note_pending("Old Guest", "aa77", Some(LAN_KNOCK));
         let ready = np.approval.waiter_ready_generation();
         let np2 = np.clone();
         let waiter = tokio::spawn(async move {
@@ -631,9 +831,11 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(wall_now() + 3600),
+                until_disconnect: false,
             }),
         )
         .unwrap()
+        .paired()
         .unwrap();
         assert_eq!(waiter.await.unwrap(), PairingDecision::Approved);
         assert_eq!(np.effective("aa77", wall_now()), Some(GRANT_GAMEPAD));
@@ -648,7 +850,7 @@ mod tests {
         let (_temp, p) = temp();
         let np = Arc::new(NativePairing::load_with(Some(p.clone()), None, false).unwrap());
 
-        let seq1 = np.note_pending("iPad Pro", "ee01", None);
+        let seq1 = np.note_pending("iPad Pro", "ee01", Some(LAN_KNOCK));
         let ready = np.approval.waiter_ready_generation();
         let np1 = np.clone();
         let waiter1 = tokio::spawn(async move {
@@ -657,7 +859,7 @@ mod tests {
         });
         np.approval.wait_for_waiter_ready(ready).await;
 
-        let seq2 = np.note_pending("iPad Pro", "ee01", None);
+        let seq2 = np.note_pending("iPad Pro", "ee01", Some(LAN_KNOCK));
         assert_ne!(seq1, seq2);
         assert_eq!(waiter1.await.unwrap(), PairingDecision::Superseded);
         assert_eq!(np.pending().len(), 1);
@@ -675,7 +877,10 @@ mod tests {
             .find(|x| x.fingerprint == "ee01")
             .unwrap()
             .id;
-        np.approve_pending(id, None, None).unwrap().unwrap();
+        np.approve_pending(id, None, None)
+            .unwrap()
+            .paired()
+            .unwrap();
         assert_eq!(waiter2.await.unwrap(), PairingDecision::Approved);
 
         // After approval the entry is gone and the fingerprint is paired; the admitted
@@ -686,6 +891,298 @@ mod tests {
         assert_eq!(d, PairingDecision::Superseded);
     }
 
+    /// A "this session" record goes when the device's last session ends — but not while another
+    /// is live, and not if the device comes back inside the grace. Real clock against the short
+    /// test grace: `tokio`'s `test-util` is not enabled here, so there is none to pause. The
+    /// reconnect leg takes its guard at once rather than sleeping into the window, which would
+    /// race the timer on a loaded runner.
+    #[test]
+    fn this_session_access_ends_with_the_last_session() {
+        use punktfunk_core::quic::GRANT_GAMEPAD;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (_temp, path) = temp();
+            let np =
+                std::sync::Arc::new(NativePairing::load_with(Some(path), None, false).unwrap());
+            np.add_with_access(
+                "Friend's Deck",
+                "dd11",
+                Some(Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: None,
+                    until_disconnect: true,
+                }),
+            )
+            .unwrap();
+
+            // Two overlapping sessions: the first ending is not the last one out.
+            let first = np.session_started("dd11");
+            let second = np.session_started("dd11");
+            assert_eq!(np.live_sessions("dd11"), 2);
+            drop(first);
+            assert_eq!(np.live_sessions("dd11"), 1);
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(
+                np.is_paired("dd11"),
+                "another live session holds the record"
+            );
+
+            // Last one out, then a reconnect inside the grace — taken at once, so no amount of
+            // scheduler stall can put it on the wrong side of the timer.
+            drop(second);
+            let reconnect = np.session_started("dd11");
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(
+                np.is_paired("dd11"),
+                "a device back inside the grace keeps its access"
+            );
+
+            // Nothing comes back this time.
+            drop(reconnect);
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(
+                !np.is_paired("dd11"),
+                "the record goes with the last session"
+            );
+            assert_eq!(np.effective("dd11", wall_now()), None);
+        });
+    }
+
+    /// The flag is what does it: an ordinary grant outlives its sessions, and a PATCH that only
+    /// moves the expiry must not turn a this-session grant permanent.
+    #[test]
+    fn a_dated_grant_outlives_its_sessions() {
+        use punktfunk_core::quic::GRANT_GAMEPAD;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (_temp, path) = temp();
+            let np =
+                std::sync::Arc::new(NativePairing::load_with(Some(path), None, false).unwrap());
+            np.add_with_access(
+                "Living Room",
+                "ee22",
+                Some(Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: Some(wall_now() + 3600),
+                    until_disconnect: false,
+                }),
+            )
+            .unwrap();
+            drop(np.session_started("ee22"));
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(np.is_paired("ee22"), "a dated grant is not a session grant");
+
+            // Re-granting as "this session" now behaves like one.
+            np.set_access(
+                "ee22",
+                Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: None,
+                    until_disconnect: true,
+                },
+            )
+            .unwrap();
+            drop(np.session_started("ee22"));
+            tokio::time::sleep(RECONNECT_GRACE * 2).await;
+            assert!(!np.is_paired("ee22"));
+        });
+    }
+
+    /// A device that knocked from the couch and came back from the internet must be reclassified.
+    /// The entry refreshes in place for up to the pending TTL, so a stale source would let a bare
+    /// approve admit exactly the knock the rule exists to refuse.
+    #[test]
+    fn a_re_knock_is_classified_by_where_it_knocked_from() {
+        let (_temp, p) = temp();
+        let np = NativePairing::load_with(Some(p), None, false).unwrap();
+        let wan = std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5));
+
+        np.note_pending("Roaming Laptop", "ab99", Some(LAN_KNOCK));
+        assert_eq!(np.pending()[0].source, KnockSource::Lan);
+        np.note_pending("Roaming Laptop", "ab99", Some(wan));
+        assert_eq!(
+            np.pending()[0].source,
+            KnockSource::Wan,
+            "the entry refreshed in place, so its source must refresh too"
+        );
+        let id = np.pending()[0].id;
+        assert!(matches!(
+            np.approve_pending(id, None, None).unwrap(),
+            ApproveOutcome::WanNeedsBoundPin
+        ));
+
+        // And back again, so the honest direction is not a one-way door.
+        np.note_pending("Roaming Laptop", "ab99", Some(LAN_KNOCK));
+        assert_eq!(np.pending()[0].source, KnockSource::Lan);
+    }
+
+    /// A host that is starting has no sessions, so every "this session" grant already ended —
+    /// most often by the restart itself. Without the sweep the record would outlive the guest,
+    /// because the live count lives only in memory.
+    #[test]
+    fn a_restart_drops_this_session_grants() {
+        use punktfunk_core::quic::GRANT_GAMEPAD;
+        let (_temp, path) = temp();
+        {
+            let np = NativePairing::load_with(Some(path.clone()), None, false).unwrap();
+            np.add_with_access(
+                "Friend's Deck",
+                "dd11",
+                Some(Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: None,
+                    until_disconnect: true,
+                }),
+            )
+            .unwrap();
+            np.add_with_access(
+                "Living Room",
+                "ee22",
+                Some(Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: None,
+                    until_disconnect: false,
+                }),
+            )
+            .unwrap();
+            assert!(np.is_paired("dd11") && np.is_paired("ee22"));
+        }
+
+        let restarted = NativePairing::load_with(Some(path), None, false).unwrap();
+        assert!(
+            !restarted.is_paired("dd11"),
+            "the guest's session ended when the host did"
+        );
+        assert!(
+            restarted.is_paired("ee22"),
+            "an ordinary grant survives a restart"
+        );
+    }
+
+    /// The address table the admission rules read. Anything not on a network the operator
+    /// already let the peer onto is WAN, and an address we could not read is WAN too.
+    #[test]
+    fn knock_sources_classify_by_address() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let lan: [IpAddr; 7] = [
+            Ipv4Addr::LOCALHOST.into(),
+            Ipv4Addr::new(10, 1, 2, 3).into(),
+            Ipv4Addr::new(172, 16, 0, 1).into(),
+            Ipv4Addr::new(192, 168, 1, 44).into(),
+            Ipv4Addr::new(169, 254, 3, 4).into(),
+            // Tailscale hands its peers 100.64/10.
+            Ipv4Addr::new(100, 96, 0, 7).into(),
+            Ipv6Addr::LOCALHOST.into(),
+        ];
+        for ip in lan {
+            assert_eq!(classify_source(Some(ip)), KnockSource::Lan, "{ip}");
+        }
+        let wan: [IpAddr; 6] = [
+            Ipv4Addr::new(203, 0, 113, 5).into(),
+            Ipv4Addr::new(8, 8, 8, 8).into(),
+            // 172.32/12 is outside RFC 1918; 100.128/9 is outside the CGNAT block.
+            Ipv4Addr::new(172, 32, 0, 1).into(),
+            Ipv4Addr::new(100, 128, 0, 1).into(),
+            Ipv4Addr::UNSPECIFIED.into(),
+            "2606:4700::1111".parse::<IpAddr>().unwrap(),
+        ];
+        for ip in wan {
+            assert_eq!(classify_source(Some(ip)), KnockSource::Wan, "{ip}");
+        }
+        assert_eq!(
+            classify_source(None),
+            KnockSource::Wan,
+            "an unknown source fails closed"
+        );
+        // A v4 address wearing a v6 hat is classified as what it really is.
+        assert_eq!(
+            classify_source(Some("::ffff:192.168.1.44".parse().unwrap())),
+            KnockSource::Lan
+        );
+        assert_eq!(
+            classify_source(Some("::ffff:203.0.113.5".parse().unwrap())),
+            KnockSource::Wan
+        );
+        // fc00::/7 unique-local and fe80::/10 link-local are both on-link.
+        assert_eq!(
+            classify_source(Some("fd00::1".parse().unwrap())),
+            KnockSource::Lan
+        );
+        assert_eq!(
+            classify_source(Some("fe80::1".parse().unwrap())),
+            KnockSource::Lan
+        );
+    }
+
+    /// A knock from the internet carries a name it chose for itself, so the one-click approve
+    /// cannot admit it. The entry survives the refusal: the operator still has to answer it.
+    #[test]
+    fn a_wan_knock_is_not_admitted_by_a_bare_approve() {
+        let (_temp, p) = temp();
+        let np = NativePairing::load_with(Some(p), None, false).unwrap();
+        let wan = std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5));
+        np.note_pending("Friend's Deck", "dd88", Some(wan));
+        let id = np.pending()[0].id;
+        assert_eq!(np.pending()[0].source, KnockSource::Wan);
+        assert!(matches!(
+            np.approve_pending(id, None, None).unwrap(),
+            ApproveOutcome::WanNeedsBoundPin
+        ));
+        assert!(!np.is_paired("dd88"), "a refused approve pairs nothing");
+        assert_eq!(np.pending().len(), 1, "the knock is still waiting");
+
+        // The same knock from the couch is admitted.
+        np.note_pending("Living Room", "ee99", Some(LAN_KNOCK));
+        let lan_id = np
+            .pending()
+            .iter()
+            .find(|x| x.fingerprint == "ee99")
+            .unwrap()
+            .id;
+        assert!(np
+            .approve_pending(lan_id, None, None)
+            .unwrap()
+            .paired()
+            .is_some());
+        assert!(np.is_paired("ee99"));
+    }
+
+    /// An open window is for the device in the operator's hands. It answers the couch, refuses
+    /// the internet, and a window named for the WAN device's fingerprint answers it.
+    #[test]
+    fn an_open_window_does_not_answer_the_internet() {
+        let (_temp, p) = temp();
+        let np = NativePairing::load_with(Some(p), None, false).unwrap();
+        let pin = np.arm(Duration::from_secs(60));
+        assert!(
+            matches!(np.pin_for_attempt("aa11", KnockSource::Lan), PinAttempt::Pin(x) if x == pin)
+        );
+        assert!(matches!(
+            np.pin_for_attempt("aa11", KnockSource::Wan),
+            PinAttempt::UnboundForWan
+        ));
+        // Refusing must not have consumed the window — the LAN device it was opened for still pairs.
+        assert!(
+            matches!(np.pin_for_attempt("aa11", KnockSource::Lan), PinAttempt::Pin(x) if x == pin)
+        );
+
+        let bound = np.arm_for(Duration::from_secs(60), Some("AA11".into()), None);
+        assert!(
+            matches!(np.pin_for_attempt("aa11", KnockSource::Wan), PinAttempt::Pin(x) if x == bound),
+            "a window named for this fingerprint answers it wherever it knocked from"
+        );
+        assert!(matches!(
+            np.pin_for_attempt("bb22", KnockSource::Wan),
+            PinAttempt::BoundToOther
+        ));
+    }
+
     /// A window bound to one fingerprint: another peer can neither pair nor burn it
     /// (rejected without a PIN).
     #[test]
@@ -693,16 +1190,26 @@ mod tests {
         let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         let pin = np.arm(Duration::from_secs(60));
-        assert!(matches!(np.pin_for_attempt("aa11"), PinAttempt::Pin(x) if x == pin));
-        assert!(matches!(np.pin_for_attempt("bb22"), PinAttempt::Pin(_)));
-        let pin = np.arm_for(Duration::from_secs(60), Some("AA11".into()), None);
-        assert!(matches!(np.pin_for_attempt("aa11"), PinAttempt::Pin(x) if x == pin));
+        assert!(
+            matches!(np.pin_for_attempt("aa11", KnockSource::Lan), PinAttempt::Pin(x) if x == pin)
+        );
         assert!(matches!(
-            np.pin_for_attempt("bb22"),
+            np.pin_for_attempt("bb22", KnockSource::Lan),
+            PinAttempt::Pin(_)
+        ));
+        let pin = np.arm_for(Duration::from_secs(60), Some("AA11".into()), None);
+        assert!(
+            matches!(np.pin_for_attempt("aa11", KnockSource::Lan), PinAttempt::Pin(x) if x == pin)
+        );
+        assert!(matches!(
+            np.pin_for_attempt("bb22", KnockSource::Lan),
             PinAttempt::BoundToOther
         ));
         np.disarm();
-        assert!(matches!(np.pin_for_attempt("aa11"), PinAttempt::Disarmed));
+        assert!(matches!(
+            np.pin_for_attempt("aa11", KnockSource::Lan),
+            PinAttempt::Disarmed
+        ));
     }
 
     /// One source IP cannot exceed the per-IP cap. A parked genuine knock is never
@@ -777,6 +1284,7 @@ mod tests {
         let guest = Access {
             grants: GRANT_GAMEPAD,
             expires_unix: Some(now + 3600),
+            until_disconnect: false,
         };
         np.add_with_access("Guest Deck", "aa11", Some(guest))
             .unwrap();
@@ -816,7 +1324,7 @@ mod tests {
         let (_temp, p) = temp();
         let np = NativePairing::load_with(Some(p.clone()), None, false).unwrap();
         let now = wall_now();
-        np.note_pending("device bb22", "BB22", None);
+        np.note_pending("device bb22", "BB22", Some(LAN_KNOCK));
         let id = np.pending()[0].id;
         let client = np
             .approve_pending(
@@ -825,9 +1333,11 @@ mod tests {
                 Some(Access {
                     grants: GRANT_GAMEPAD,
                     expires_unix: Some(now + 4 * 3600),
+                    until_disconnect: false,
                 }),
             )
             .unwrap()
+            .paired()
             .unwrap();
         assert_eq!(client.name, "Guest Phone");
         assert_eq!(client.grants, Some(GRANT_GAMEPAD));
@@ -850,6 +1360,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 10),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -879,6 +1390,7 @@ mod tests {
         let from_the_future = Access {
             grants: GRANT_ALL | (1 << 30),
             expires_unix: None,
+            until_disconnect: false,
         };
         assert!(np.set_access("dd44", from_the_future).unwrap());
         assert_eq!(
@@ -917,6 +1429,7 @@ mod tests {
             Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 60),
+                until_disconnect: false,
             },
         )
         .unwrap();
@@ -974,6 +1487,7 @@ mod tests {
             Some(Access {
                 grants: GRANT_GAMEPAD,
                 expires_unix: Some(now + 60),
+                until_disconnect: false,
             }),
         )
         .unwrap();
@@ -1003,6 +1517,7 @@ mod tests {
         let choice = Access {
             grants: GRANT_GAMEPAD,
             expires_unix: Some(wall_now() + 3600),
+            until_disconnect: false,
         };
         np.arm_for(Duration::from_secs(60), None, Some(choice));
         assert_eq!(np.armed_access(), Some(choice));

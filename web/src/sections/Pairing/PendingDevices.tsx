@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { UserPlus, X } from "lucide-react";
+import { Globe, KeyRound, UserPlus, X } from "lucide-react";
 import { type FC, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import type { ApprovePending } from "@/api/gen/model/approvePending";
@@ -12,6 +12,7 @@ import {
 } from "@/api/gen/native/native";
 import { useApprovePendingDevice } from "@/api/pairing";
 import { QueryState } from "@/components/query-state";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
@@ -25,7 +26,10 @@ import { ApproveDialog } from "./ApproveDialog";
  * looking; approving pairs the device, so it also refreshes the paired-clients
  * list (owned by the PairedDevices subsection — invalidated here by query key).
  */
-export const PendingDevicesSection: FC = () => {
+export const PendingDevicesSection: FC<{
+	/** Hand a WAN knock to the arm card, which is the only way to admit one. */
+	onArmFor?: (device: PendingDevice) => void;
+}> = ({ onArmFor }) => {
 	const qc = useQueryClient();
 	// A knock arrives as a `pairing.pending` event (api/events.ts), so the timer is the fallback —
 	// but it stays reasonably brisk: this list is the one the operator is actively waiting on, and
@@ -73,6 +77,7 @@ export const PendingDevicesSection: FC = () => {
 			<PendingDevices
 				pending={pending}
 				onApprove={openApprove}
+				onArmFor={onArmFor}
 				onDeny={onDeny}
 				pendingId={pendingId}
 			/>
@@ -95,12 +100,14 @@ export const PendingDevicesSection: FC = () => {
  */
 export const PendingDevices: FC<{
 	pending: Loadable<PendingDevice[]>;
-	/** Opens the approve dialog for this row. */
+	/** Opens the approve dialog for this row. Never offered for a knock from the internet. */
 	onApprove: (device: PendingDevice) => void;
+	/** Binds the arm card's next PIN to this row. The only route in for a WAN knock. */
+	onArmFor?: (device: PendingDevice) => void;
 	onDeny: (id: number) => void;
 	/** Id of the row whose approve/deny is in flight, or null — only that row disables. */
 	pendingId: number | null;
-}> = ({ pending, onApprove, onDeny, pendingId }) => {
+}> = ({ pending, onApprove, onArmFor, onDeny, pendingId }) => {
 	const rows = pending.data ?? [];
 	// Stay out of the way when there's nothing pending and the fetch is healthy — but DON'T swallow
 	// a real error (a 500 etc.); fall through to QueryState below so it surfaces like every other
@@ -138,7 +145,17 @@ export const PendingDevices: FC<{
 									    screen (the table wrapper scrolls, the page doesn't — an
 									    off-canvas Approve button is unreachable on mobile). */}
 									<TableCell className="w-full max-w-0 font-medium">
-										<div className="truncate">{p.name}</div>
+										<div className="flex items-center gap-2">
+											<div className="truncate">{p.name}</div>
+											{/* The name is whatever the device sent. Where it knocked
+											    from is not, which is why the badge sits beside it. */}
+											{p.source === "wan" && (
+												<Badge variant="outline" className="shrink-0 gap-1">
+													<Globe className="size-3" />
+													{m.pairing_pending_from_internet()}
+												</Badge>
+											)}
+										</div>
 										<div className="truncate font-mono text-xs font-normal text-muted-foreground md:hidden">
 											{p.fingerprint.slice(0, 16)}…
 											<span className="ml-2 font-sans sm:hidden">
@@ -154,13 +171,28 @@ export const PendingDevices: FC<{
 									</TableCell>
 									<TableCell className="whitespace-nowrap text-right">
 										<div className="flex justify-end gap-2">
-											<Button
-												size="sm"
-												disabled={pendingId === p.id}
-												onClick={() => onApprove(p)}
-											>
-												{m.pairing_pending_approve()}
-											</Button>
+											{/* A knock from the internet has no Approve: the host refuses
+											    one (409), because the operator cannot tell whose knock it
+											    is. Arming a PIN bound to this fingerprint is the way in. */}
+											{p.source === "wan" ? (
+												<Button
+													size="sm"
+													title={m.pairing_pending_wan_hint()}
+													disabled={pendingId === p.id || !onArmFor}
+													onClick={() => onArmFor?.(p)}
+												>
+													<KeyRound className="size-4" />
+													{m.pairing_pending_arm()}
+												</Button>
+											) : (
+												<Button
+													size="sm"
+													disabled={pendingId === p.id}
+													onClick={() => onApprove(p)}
+												>
+													{m.pairing_pending_approve()}
+												</Button>
+											)}
 											<Button
 												size="sm"
 												variant="ghost"

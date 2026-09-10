@@ -34,6 +34,11 @@ pub struct PairedClient {
     /// Grant time, unix seconds. Display/audit only; never enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_unix: Option<i64>,
+    /// Drop this record once the device's last session ends and stays ended. Not an
+    /// authorization input — while the record is here, `grants` and `expires_unix` govern
+    /// exactly as they always do. Older stores read as `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub until_disconnect: bool,
 }
 
 /// Operator access choice. `Option<Access>::None` means no choice: new records get
@@ -45,6 +50,9 @@ pub struct Access {
     pub grants: u32,
     /// Host wall-clock unix seconds. `None` is permanent.
     pub expires_unix: Option<i64>,
+    /// Remove the record when the device disconnects for good, rather than at a clock time.
+    /// Independent of `expires_unix`: a grant may have both, and whichever lands first wins.
+    pub until_disconnect: bool,
 }
 
 impl PairedClients {
@@ -176,6 +184,7 @@ impl TrustStore {
                 if let Some(a) = access {
                     existing.grants = Some(a.grants);
                     existing.expires_unix = a.expires_unix;
+                    existing.until_disconnect = a.until_disconnect;
                     existing.granted_unix = Some(now_unix());
                 }
             }
@@ -185,6 +194,7 @@ impl TrustStore {
                 grants: access.map(|a| a.grants),
                 expires_unix: access.and_then(|a| a.expires_unix),
                 granted_unix: access.map(|_| now_unix()),
+                until_disconnect: access.is_some_and(|a| a.until_disconnect),
             }),
         }
         if let Err(e) = save(&p) {
@@ -209,6 +219,7 @@ impl TrustStore {
         };
         existing.grants = Some(access.grants);
         existing.expires_unix = access.expires_unix;
+        existing.until_disconnect = access.until_disconnect;
         existing.granted_unix = Some(now_unix());
         if let Err(e) = save(&p) {
             p.clients.clients = snapshot;
