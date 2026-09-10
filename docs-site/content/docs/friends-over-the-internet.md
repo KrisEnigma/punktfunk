@@ -79,10 +79,11 @@ The friend's first connect shows up on your console as a pending device. Admit i
 pick **Controller only**
 ([choosing access](/docs/pairing#choosing-access-when-you-admit-a-device)).
 
-For the expiry, **Until they disconnect** fits an evening: the device's access ends with its last
-session and the record is gone, so nothing is left to clean up and nothing can reconnect
-unattended. A clock-time expiry works too, and refuses the device once it passes. **Expire now**
-or **Unpair** on the Paired devices table ends a running session at once.
+For the expiry, **Until they disconnect** fits an evening: a minute after their last session ends
+the record is gone, so nothing is left to clean up and coming back means knocking again. The
+minute is deliberate — a router blip should not cost them a re-pair — and they can reconnect
+freely inside it. A clock-time expiry works too, and refuses the device once it passes. **Expire
+now** or **Unpair** on the Paired devices table ends a running session at once.
 
 ## Port forwarding
 

@@ -39,12 +39,15 @@ pub use store::{Access, PairedClient};
 ///
 /// A guard, not a pair of calls: a session can end through a return, an error or a task
 /// cancellation, and a count that leaks one of those never falls back to zero.
-pub struct SessionGuard {
+///
+/// Named apart from `gamelease::SessionGuard` and `session_status::LiveSessionGuard`, which
+/// count different things in the same binary.
+pub struct SessionCountGuard {
     np: std::sync::Arc<NativePairing>,
     fp_hex: String,
 }
 
-impl Drop for SessionGuard {
+impl Drop for SessionCountGuard {
     fn drop(&mut self) {
         if self.np.session_ended(&self.fp_hex) > 0 {
             return;
@@ -151,13 +154,40 @@ impl NativePairing {
         fixed_pin: Option<String>,
         arm_at_start: bool,
     ) -> Result<NativePairing> {
-        Ok(NativePairing {
+        let np = NativePairing {
             arm: arming::ArmState::new(arm_at_start, fixed_pin),
             store: store::TrustStore::open(store_path)?,
             approval: approval::ApprovalQueue::new(),
             access_watch: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
-        })
+        };
+        np.drop_session_only_records();
+        Ok(np)
+    }
+
+    /// A host that is starting has no live sessions, so every "this session" grant has already
+    /// ended — by a restart, an update or a crash, which is how a session usually ends. The
+    /// counter is in memory only, so without this sweep those records would outlive the guest
+    /// forever and the list would keep exactly the leftover the grant exists to prevent.
+    fn drop_session_only_records(&self) {
+        for client in self.store.list() {
+            if !client.until_disconnect {
+                continue;
+            }
+            match self.store.remove(&client.fingerprint) {
+                Ok(true) => tracing::info!(
+                    name = %client.name,
+                    fingerprint = %client.fingerprint,
+                    "dropped a this-session grant left by the previous run"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    fingerprint = %client.fingerprint,
+                    "couldn't drop a this-session grant at startup"
+                ),
+            }
+        }
     }
 
     /// Arm with a fresh PIN for `ttl`, unbound (any well-formed attempt consumes it) and with
@@ -355,17 +385,16 @@ impl NativePairing {
         self.store.list()
     }
 
-    /// Remove by fingerprint. Persist failure rolls the in-memory store back. A removal
-    /// publishes `revoked` so live sessions can end themselves.
-    /// Count a live session for `fp_hex` until the returned guard drops.
-    pub fn session_started(self: &std::sync::Arc<Self>, fp_hex: &str) -> SessionGuard {
+    /// Count a live session for `fp_hex` until the returned guard drops. Every admitted session
+    /// counts; only a "this session" record reads the total.
+    pub fn session_started(self: &std::sync::Arc<Self>, fp_hex: &str) -> SessionCountGuard {
         *self
             .live
             .lock()
             .unwrap()
             .entry(fp_hex.to_ascii_lowercase())
             .or_insert(0) += 1;
-        SessionGuard {
+        SessionCountGuard {
             np: self.clone(),
             fp_hex: fp_hex.to_ascii_lowercase(),
         }
@@ -396,29 +425,40 @@ impl NativePairing {
         remaining
     }
 
-    /// Wait out [`RECONNECT_GRACE`], then remove a "this session" record if the device did
-    /// not come back. Re-reads the live count after the sleep: a reconnect inside the grace
-    /// must not be closed by its predecessor's cleanup.
+    /// Wait out [`RECONNECT_GRACE`], then remove a "this session" record if the device did not
+    /// come back. Counting and removing share the `live` lock, which [`Self::session_started`]
+    /// is the only other taker of: a device that reconnects inside the grace therefore cannot
+    /// land between the two and be revoked by its own predecessor's cleanup. Lock order is
+    /// live → store → watch and never the reverse.
     async fn drop_session_only_after_grace(&self, fp_hex: &str) {
         tokio::time::sleep(RECONNECT_GRACE).await;
-        if self.live_sessions(fp_hex) > 0 {
-            return;
-        }
-        let Some(record) = self.store.get(fp_hex) else {
+        let removed = {
+            let live = self.live.lock().unwrap();
+            if live.contains_key(&fp_hex.to_ascii_lowercase()) {
+                return;
+            }
+            match self.store.get(fp_hex) {
+                Some(record) if record.until_disconnect => {
+                    Some((record.name, self.store.remove(fp_hex)))
+                }
+                _ => return,
+            }
+        };
+        let Some((name, removed)) = removed else {
             return;
         };
-        if !record.until_disconnect {
-            return;
-        }
-        match self.remove(fp_hex) {
-            Ok(true) => tracing::info!(
-                name = %record.name,
-                fingerprint = %fp_hex,
-                "this-session access ended with the device's last session"
-            ),
+        match removed {
+            Ok(true) => {
+                self.publish_current(fp_hex);
+                tracing::info!(
+                    %name,
+                    fingerprint = %fp_hex,
+                    "this-session access ended with the device's last session"
+                );
+            }
             Ok(false) => {}
-            // The record stays and the operator can still unpair by hand; losing the row is
-            // the safe direction to fail in, not the one to panic over.
+            // The record stays and the operator can still unpair by hand; keeping a row too
+            // long is the safe direction to fail in, not one to panic over.
             Err(e) => tracing::warn!(
                 error = %e,
                 fingerprint = %fp_hex,
@@ -427,6 +467,8 @@ impl NativePairing {
         }
     }
 
+    /// Remove by fingerprint. Persist failure rolls the in-memory store back. A removal
+    /// publishes `revoked` so live sessions can end themselves.
     pub fn remove(&self, fp_hex: &str) -> Result<bool> {
         let removed = self.store.remove(fp_hex)?;
         if removed {
@@ -475,7 +517,7 @@ impl NativePairing {
 
     /// Approve a pending knock: pair under `name_override` (else the knock's name) and drop
     /// the queue entry. `access` is the dialog choice; `None` keeps existing access or the
-    /// full/permanent default. `Ok(None)` = unknown or expired id. Reads the entry (does not
+    /// full/permanent default. `NotFound` = unknown or expired id. Reads the entry (does not
     /// pre-remove), then [`Self::add_with_access`] pins and clears — waiters rely on that order.
     pub fn approve_pending(
         &self,
@@ -850,8 +892,10 @@ mod tests {
     }
 
     /// A "this session" record goes when the device's last session ends — but not while another
-    /// is live, and not if the device comes back inside the grace. Paused clock: the grace is a
-    /// minute of wall time and none of it is interesting.
+    /// is live, and not if the device comes back inside the grace. Real clock against the short
+    /// test grace: `tokio`'s `test-util` is not enabled here, so there is none to pause. The
+    /// reconnect leg takes its guard at once rather than sleeping into the window, which would
+    /// race the timer on a loaded runner.
     #[test]
     fn this_session_access_ends_with_the_last_session() {
         use punktfunk_core::quic::GRANT_GAMEPAD;
@@ -886,9 +930,9 @@ mod tests {
                 "another live session holds the record"
             );
 
-            // Last one out, then a reconnect inside the grace.
+            // Last one out, then a reconnect inside the grace — taken at once, so no amount of
+            // scheduler stall can put it on the wrong side of the timer.
             drop(second);
-            tokio::time::sleep(RECONNECT_GRACE / 2).await;
             let reconnect = np.session_started("dd11");
             tokio::time::sleep(RECONNECT_GRACE * 2).await;
             assert!(
@@ -948,6 +992,77 @@ mod tests {
             tokio::time::sleep(RECONNECT_GRACE * 2).await;
             assert!(!np.is_paired("ee22"));
         });
+    }
+
+    /// A device that knocked from the couch and came back from the internet must be reclassified.
+    /// The entry refreshes in place for up to the pending TTL, so a stale source would let a bare
+    /// approve admit exactly the knock the rule exists to refuse.
+    #[test]
+    fn a_re_knock_is_classified_by_where_it_knocked_from() {
+        let (_temp, p) = temp();
+        let np = NativePairing::load_with(Some(p), None, false).unwrap();
+        let wan = std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5));
+
+        np.note_pending("Roaming Laptop", "ab99", Some(LAN_KNOCK));
+        assert_eq!(np.pending()[0].source, KnockSource::Lan);
+        np.note_pending("Roaming Laptop", "ab99", Some(wan));
+        assert_eq!(
+            np.pending()[0].source,
+            KnockSource::Wan,
+            "the entry refreshed in place, so its source must refresh too"
+        );
+        let id = np.pending()[0].id;
+        assert!(matches!(
+            np.approve_pending(id, None, None).unwrap(),
+            ApproveOutcome::WanNeedsBoundPin
+        ));
+
+        // And back again, so the honest direction is not a one-way door.
+        np.note_pending("Roaming Laptop", "ab99", Some(LAN_KNOCK));
+        assert_eq!(np.pending()[0].source, KnockSource::Lan);
+    }
+
+    /// A host that is starting has no sessions, so every "this session" grant already ended —
+    /// most often by the restart itself. Without the sweep the record would outlive the guest,
+    /// because the live count lives only in memory.
+    #[test]
+    fn a_restart_drops_this_session_grants() {
+        use punktfunk_core::quic::GRANT_GAMEPAD;
+        let (_temp, path) = temp();
+        {
+            let np = NativePairing::load_with(Some(path.clone()), None, false).unwrap();
+            np.add_with_access(
+                "Friend's Deck",
+                "dd11",
+                Some(Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: None,
+                    until_disconnect: true,
+                }),
+            )
+            .unwrap();
+            np.add_with_access(
+                "Living Room",
+                "ee22",
+                Some(Access {
+                    grants: GRANT_GAMEPAD,
+                    expires_unix: None,
+                    until_disconnect: false,
+                }),
+            )
+            .unwrap();
+            assert!(np.is_paired("dd11") && np.is_paired("ee22"));
+        }
+
+        let restarted = NativePairing::load_with(Some(path), None, false).unwrap();
+        assert!(
+            !restarted.is_paired("dd11"),
+            "the guest's session ended when the host did"
+        );
+        assert!(
+            restarted.is_paired("ee22"),
+            "an ordinary grant survives a restart"
+        );
     }
 
     /// The address table the admission rules read. Anything not on a network the operator

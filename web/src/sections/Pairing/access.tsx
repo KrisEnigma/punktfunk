@@ -99,8 +99,9 @@ export interface AccessDraft {
 
 /**
  * `until_disconnect` for the drafted expiry: the record goes when the device's last session
- * does, instead of at a clock time. Sent alongside `expires_in_secs`, never instead of it —
- * the API takes both and whichever lands first ends the grant.
+ * does, instead of at a clock time. It is one choice among the expiry options here, so a draft
+ * that says "session" carries no deadline — the API would take both and end the grant on
+ * whichever landed first, but nothing in this console sends both.
  */
 export const draftUntilDisconnect = (draft: AccessDraft): boolean =>
 	draft.expiry === "session";

@@ -83,9 +83,10 @@ pub fn classify_source(ip: Option<IpAddr>) -> KnockSource {
             if v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
-                // 100.64/10: carrier-grade NAT, and the range Tailscale assigns. A knock can
-                // only reach us from it over such an overlay, which authenticated the peer
-                // before we ever saw the packet.
+                // 100.64/10: the range Tailscale assigns, which authenticates a peer before we
+                // see the packet. It is also carrier-grade NAT space, so a host whose own uplink
+                // is CGNAT could in principle be reached from it by another subscriber — that
+                // host cannot forward a port to begin with, which is why this stays LAN.
                 || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])) =>
         {
             KnockSource::Lan
@@ -221,9 +222,10 @@ impl ApprovalQueue {
         {
             p.requested_at = Instant::now();
             p.name = name;
-            if p.src_ip.is_none() {
-                p.src_ip = src_ip;
-            }
+            // This knock's address, not the first one's. A device that knocked from the couch and
+            // came back from the internet inside the TTL would otherwise still read as LAN, and a
+            // bare approve would admit it.
+            p.src_ip = src_ip;
             p.knock_seq = p.knock_seq.wrapping_add(1);
             let seq = p.knock_seq;
             drop(pending);

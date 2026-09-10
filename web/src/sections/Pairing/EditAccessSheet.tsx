@@ -99,6 +99,10 @@ export const EditAccessSheet: FC<{
 		const session = draftUntilDisconnect(draft);
 		if (session !== (target.untilDisconnect ?? false))
 			body.until_disconnect = session;
+		// Moving to "this session" has to clear any deadline the row still carries. The host
+		// honours whichever lands first, but the chip shows only the session half — so a
+		// surviving deadline would cut the guest off with nothing on screen explaining it.
+		if (session && target.expiresUnix != null) body.clear_expiry = true;
 		if (Object.keys(body).length === 0) {
 			onCancel(); // nothing changed — no request to make
 			return;

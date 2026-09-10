@@ -31,8 +31,9 @@ open **Pairing** and click **Pair a device**. The host shows a **4-digit PIN** a
   console's **Moonlight (GameStream) pairing** card. Arming doesn't apply. (Moonlight needs
   [GameStream compat on](/docs/moonlight) first.)
 
-If the window lapses, arm it again. A `punktfunk://` link can't pair for you — it only starts a
-stream on a host this device already trusts.
+If the window lapses, arm it again. A `punktfunk://` link can't pair for you: one carrying an
+address opens the client's trust prompt, pre-filled and with any fingerprint the link named, but
+admitting the device is still this ceremony.
 
 ## Choosing access when you admit a device
 
@@ -54,7 +55,8 @@ while nobody is watching. Coming back later is a fresh knock and a fresh PIN.
 
 A device that knocked **from the internet** is listed as such and cannot be admitted with
 Approve at all — the name it sent proves nothing there. Its row offers **Arm PIN** instead, which
-opens a window only that device can use; read the PIN out to whoever is holding it. See
+names the **Pair a device** card below for that one device; fill in the card and the PIN it mints
+works for nobody else. Read it out to whoever is holding the device. See
 [Friends over the internet](/docs/friends-over-the-internet).
 
 ## Managing paired devices

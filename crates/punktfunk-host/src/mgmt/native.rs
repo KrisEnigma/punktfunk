@@ -25,6 +25,25 @@ fn absolute_expiry(expires_in_secs: u64) -> i64 {
 
 /// 400 when reserved bits are set. Never silently cleared: a newer console
 /// must learn its bit did not take, not vanish.
+/// `until_disconnect` rides alongside an access choice. On its own it would mean "replace this
+/// device's access with full and permanent, then end it at disconnect" — an escalation nobody
+/// asked for — so say so instead of guessing. Editing one field of a stored record is what
+/// `PATCH /native/clients/{fingerprint}` is for.
+fn reject_lone_until_disconnect(
+    grants: Option<u32>,
+    expires_in_secs: Option<u64>,
+    until_disconnect: Option<bool>,
+) -> Option<Response> {
+    if until_disconnect.is_some() && grants.is_none() && expires_in_secs.is_none() {
+        return Some(api_error(
+            StatusCode::BAD_REQUEST,
+            "until_disconnect needs an access level beside it. Send grants as well, or edit the \
+             device's access instead.",
+        ));
+    }
+    None
+}
+
 fn reject_reserved(grants: u32) -> Option<Response> {
     if grants & GRANT_RESERVED != 0 {
         return Some(api_error(
@@ -43,7 +62,10 @@ fn chosen_access(
     expires_in_secs: Option<u64>,
     until_disconnect: Option<bool>,
 ) -> Option<Access> {
-    if grants.is_none() && expires_in_secs.is_none() && until_disconnect.is_none() {
+    // `until_disconnect` alone is NOT a choice: `Access` replaces the whole record, so honouring
+    // it by itself would hand a re-pairing device full permanent control it never had. Callers
+    // that send it alone are turned away by `reject_lone_until_disconnect`.
+    if grants.is_none() && expires_in_secs.is_none() {
         return None;
     }
     Some(Access {
@@ -96,7 +118,9 @@ pub(crate) struct ArmNativePairing {
     #[schema(example = 14400)]
     expires_in_secs: Option<u64>,
     /// Drop the device's record once its last session ends, rather than at a clock time.
-    /// Combines with `expires_in_secs`: whichever comes first ends the grant.
+    /// Combines with `expires_in_secs`: whichever comes first ends the grant. Send it with an
+    /// access level, never alone (400) — like the other access fields it is part of a whole
+    /// replacement, so sending `grants` without it clears it.
     until_disconnect: Option<bool>,
 }
 
@@ -185,7 +209,9 @@ pub(crate) struct ApprovePending {
     #[schema(example = 14400)]
     expires_in_secs: Option<u64>,
     /// Drop the device's record once its last session ends, rather than at a clock time.
-    /// Combines with `expires_in_secs`: whichever comes first ends the grant.
+    /// Combines with `expires_in_secs`: whichever comes first ends the grant. Send it with an
+    /// access level, never alone (400) — like the other access fields it is part of a whole
+    /// replacement, so sending `grants` without it clears it.
     until_disconnect: Option<bool>,
 }
 
@@ -275,6 +301,11 @@ pub(crate) async fn arm_native_pairing(
     };
     // 400 must not leave a window open — validate grants before `arm_for`.
     if let Some(resp) = req.grants.and_then(reject_reserved) {
+        return resp;
+    }
+    if let Some(resp) =
+        reject_lone_until_disconnect(req.grants, req.expires_in_secs, req.until_disconnect)
+    {
         return resp;
     }
     let access = chosen_access(req.grants, req.expires_in_secs, req.until_disconnect);
@@ -627,6 +658,11 @@ pub(crate) async fn approve_pending_device(
     };
     // Reserved bits 400 before `approve_pending` so a bad mask does not consume the knock.
     if let Some(resp) = req.grants.and_then(reject_reserved) {
+        return resp;
+    }
+    if let Some(resp) =
+        reject_lone_until_disconnect(req.grants, req.expires_in_secs, req.until_disconnect)
+    {
         return resp;
     }
     let access = chosen_access(req.grants, req.expires_in_secs, req.until_disconnect);

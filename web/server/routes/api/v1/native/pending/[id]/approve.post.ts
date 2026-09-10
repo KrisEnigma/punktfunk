@@ -13,6 +13,7 @@ interface ApproveBody {
 	name?: string | null;
 	grants?: number;
 	expires_in_secs?: number;
+	until_disconnect?: boolean;
 	password?: string;
 }
 
@@ -27,11 +28,13 @@ export default defineEventHandler(async (event) => {
 	confirmPassword(event, body?.password);
 	// Rebuild from known fields so the password cannot leak upstream. Absent stays absent: the
 	// dialog omits `grants`/`expires_in_secs` to keep a re-knocking device's stored access.
-	const { name, grants, expires_in_secs } = body ?? {};
+	const { name, grants, expires_in_secs, until_disconnect } = body ?? {};
 	const upstream: Omit<ApproveBody, "password"> = {};
 	if (typeof name === "string") upstream.name = name;
 	if (grants !== undefined) upstream.grants = grants;
 	if (expires_in_secs !== undefined) upstream.expires_in_secs = expires_in_secs;
+	if (until_disconnect !== undefined)
+		upstream.until_disconnect = until_disconnect;
 	return forwardJson(
 		event,
 		`/api/v1/native/pending/${id}/approve`,

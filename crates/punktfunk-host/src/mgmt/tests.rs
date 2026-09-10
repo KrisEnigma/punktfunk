@@ -2261,6 +2261,62 @@ async fn patch_native_access_validates_and_404s() {
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// `until_disconnect` replaces nothing on its own. Honouring it alone would hand a re-pairing
+/// device full permanent control, because `Access` replaces the whole record.
+#[tokio::test]
+async fn until_disconnect_alone_is_refused_rather_than_widening_access() {
+    let np = Arc::new(
+        crate::native_pairing::NativePairing::load_with(
+            Some(
+                std::env::temp_dir().join(format!("pf-mgmt-lone-udc-{}.json", std::process::id())),
+            ),
+            None,
+            false,
+        )
+        .unwrap(),
+    );
+    let app = test_app_native(test_state(), np.clone());
+    np.note_pending("Guest Phone", "cc33", Some(LAN_KNOCK));
+    let id = np.pending()[0].id;
+
+    let (s, _) = send(
+        &app,
+        post_json(
+            &format!("/api/v1/native/pending/{id}/approve"),
+            serde_json::json!({"until_disconnect": true}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(!np.is_paired("cc33"), "a 400 must not consume the knock");
+    assert_eq!(np.pending().len(), 1);
+
+    // Arming refuses it on the same terms, and leaves no window open.
+    let (s, _) = send(
+        &app,
+        post_json(
+            "/api/v1/native/pair/arm",
+            serde_json::json!({"until_disconnect": true}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(!np.status().armed, "a refused arm leaves no window");
+
+    // With an access level beside it, it lands.
+    let (s, b) = send(
+        &app,
+        post_json(
+            &format!("/api/v1/native/pending/{id}/approve"),
+            serde_json::json!({"grants": 1, "until_disconnect": true}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["until_disconnect"], true);
+    assert_eq!(b["grants"], 1, "grants stay what the operator chose");
+}
+
 /// The pending list says where a knock came from, and the endpoint refuses to admit one from
 /// the internet — the console can hide its Approve button, but the rule is enforced here.
 #[tokio::test]

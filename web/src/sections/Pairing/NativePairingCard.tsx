@@ -71,13 +71,9 @@ export const NativePairingSection: FC<{
 			pairedCount !== prevPairedCount.current
 		) {
 			qc.invalidateQueries({ queryKey: getListNativeClientsQueryKey() });
-			// The window was named for a device and that device has now taken it. Releasing the
-			// binding matters: the card would otherwise keep their name, and the next PIN armed
-			// from here would silently be for them and nobody else.
-			onClearBound?.();
 		}
 		prevPairedCount.current = pairedCount;
-	}, [pairedCount, qc, onClearBound]);
+	}, [pairedCount, qc]);
 
 	const refresh = () =>
 		qc.invalidateQueries({ queryKey: getGetNativePairingQueryKey() });
@@ -138,7 +134,9 @@ export const NativePairingCard: FC<{
 	status: Loadable<NativePairStatus>;
 	/** The PIN of the window THIS console armed, or null — never from the polled status. */
 	pin: string | null;
-	/** The device this window is named for, or null for any device (trusted LAN only). */
+	/** The device this window is named for, or null for any device (trusted LAN only). The card
+	 * never drops a binding on its own: the count it can see says a device paired, not WHICH,
+	 * and unbinding on someone else's pairing would silently reset this form to Full · forever. */
 	boundTo?: BoundDevice | null;
 	onClearBound?: () => void;
 	/** Arm, carrying the chosen device access (empty = today's full/permanent behavior) and the

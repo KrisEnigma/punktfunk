@@ -4955,7 +4955,7 @@
               "boolean",
               "null"
             ],
-            "description": "Drop the device's record once its last session ends, rather than at a clock time.\nCombines with `expires_in_secs`: whichever comes first ends the grant."
+            "description": "Drop the device's record once its last session ends, rather than at a clock time.\nCombines with `expires_in_secs`: whichever comes first ends the grant. Send it with an\naccess level, never alone (400) — like the other access fields it is part of a whole\nreplacement, so sending `grants` without it clears it."
           }
         }
       },
@@ -5005,7 +5005,7 @@
               "boolean",
               "null"
             ],
-            "description": "Drop the device's record once its last session ends, rather than at a clock time.\nCombines with `expires_in_secs`: whichever comes first ends the grant."
+            "description": "Drop the device's record once its last session ends, rather than at a clock time.\nCombines with `expires_in_secs`: whichever comes first ends the grant. Send it with an\naccess level, never alone (400) — like the other access fields it is part of a whole\nreplacement, so sending `grants` without it clears it."
           }
         }
       },
