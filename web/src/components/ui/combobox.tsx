@@ -148,6 +148,16 @@ export function Combobox({
 					// The list is a suggestion, never a focus trap: the caret stays in the field
 					// while it is open, so typing keeps filtering.
 					onOpenAutoFocus={(e) => e.preventDefault()}
+					// ...which makes the field itself "outside" as far as the dismissable layer is
+					// concerned. Focusing it opened the list and dismissed it in the same gesture —
+					// a flash on click, then nothing until a keystroke, because typing is not an
+					// outside interaction. The anchor is exempt; everything else still closes it.
+					onInteractOutside={(e) => {
+						const target = e.target as Node | null;
+						if (target && inputRef.current?.contains(target)) {
+							e.preventDefault();
+						}
+					}}
 					className={cn(
 						"z-[100] max-h-72 w-[var(--radix-popover-trigger-width)] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md",
 						"data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
