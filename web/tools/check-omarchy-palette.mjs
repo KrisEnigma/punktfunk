@@ -35,6 +35,42 @@ const THEMES = {
 	"Everforest Light": ["#fdf6e3", "#5c6a72", "#8da101"],
 };
 
+/** Accents that reach the console WITHOUT a background/foreground pair
+ *  (design/web-console-overhaul.md §7.3): a desktop over the XDG portal or DWM, and the
+ *  operator's own pick. Only the accent-derived tokens apply, so each is checked against the
+ *  console's OWN two surfaces rather than a theme's.
+ *
+ *  Every desktop default here is a real one — a tune that leaves any of them unreadable on
+ *  either console background should fail the build, not the operator's eyes. */
+const ACCENTS = {
+	"Windows default": "#0078d4",
+	"libadwaita blue": "#3584e4",
+	"libadwaita teal": "#2190a4",
+	"libadwaita green": "#3a944a",
+	"libadwaita yellow": "#c88800",
+	"libadwaita orange": "#ed5b00",
+	"libadwaita red": "#e62d42",
+	"libadwaita pink": "#d56199",
+	"libadwaita purple": "#9141ac",
+	"libadwaita slate": "#6f8396",
+	"Breeze blue": "#3daee9",
+	// The console's own swatch row (src/lib/appearance.ts).
+	"punktfunk violet": "#6c5bf3",
+	"swatch blue": "#3584e4",
+	"swatch green": "#2ec27e",
+	"swatch amber": "#c88800",
+	"swatch orange": "#e66100",
+	"swatch red": "#c01c28",
+	"swatch purple": "#c061cb",
+	"swatch slate": "#6f8396",
+};
+
+/** The console's own surfaces, from the `:root` / `.dark` blocks in styles.css. */
+const CONSOLE_SURFACES = {
+	light: { bg: "#ffffff", fg: "#0a0a0a" },
+	dark: { bg: "#0a0a0a", fg: "#fafafa" },
+};
+
 // ── colour maths: sRGB ⇄ Oklab (Ottosson), and WCAG 2.1 relative luminance ──────────────────
 const hex = (h) => {
 	const s = h.replace("#", "");
@@ -167,6 +203,39 @@ for (const [name, [bgH, fgH, acH]] of Object.entries(THEMES)) {
 	}
 }
 
+// ── accent-only sources: the [data-accent] half of the split ────────────────────────────────
+for (const [name, acH] of Object.entries(ACCENTS)) {
+	const ac = hex(acH);
+	// Mirrors :root[data-accent] in styles.css.
+	const brand = mix(ac, 88, BLACK);
+	const brandLight = mix(ac, 55, WHITE);
+	const highlight = mix(ac, 15, WHITE);
+	for (const [mode, { bg: bgH, fg: fgH }] of Object.entries(CONSOLE_SURFACES)) {
+		const [bg, fg] = [hex(bgH), hex(fgH)];
+		const dark = mode === "dark";
+		// Dark takes --primary from the light tint with the page background as its text;
+		// light takes the 75%-toward-black mix with white text. Same rule as the themed half.
+		const primary = dark ? brandLight : mix(ac, 75, BLACK);
+		const primaryFg = dark ? bg : WHITE;
+		const checks = [
+			["text on a primary button", primaryFg, primary, 4.5],
+			["mark: light circle vs deep circle", brandLight, brand, 1.4],
+			["mark: highlight vs light circle", highlight, brandLight, 1.25],
+			["primary distinguishable from the page", primary, bg, 1.5],
+			// Nothing here repaints surfaces, so the page's own text stays the console's.
+			["foreground on background", fg, bg, 4.5],
+		];
+		for (const [what, a, b, floor] of checks) {
+			const r = contrast(a, b);
+			if (r < floor) {
+				failures.push(
+					`${name} (${mode}): ${what} is ${r.toFixed(2)}:1, floor ${floor}:1`,
+				);
+			}
+		}
+	}
+}
+
 if (failures.length > 0) {
 	console.error(
 		`✖ Omarchy palette: ${failures.length} contrast floor(s) breached by the ratios in ` +
@@ -176,5 +245,6 @@ if (failures.length > 0) {
 	process.exit(1);
 }
 console.log(
-	`✔ Omarchy palette: ${Object.keys(THEMES).length} themes clear every contrast floor`,
+	`✔ Omarchy palette: ${Object.keys(THEMES).length} themes and ` +
+		`${Object.keys(ACCENTS).length} accents clear every contrast floor`,
 );

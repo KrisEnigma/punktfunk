@@ -320,8 +320,19 @@ export const SectionDisplays: FC = () => {
 					pinned={monitors.data?.pinned ?? null}
 					pinSupported={acts("display", "capture_monitor")}
 					policy={policy}
+					effective={effective}
 					busy={busy}
 					onPick={(connector) => write({ capture_monitor: connector })}
+					onKeepLit={(connector, keep) => {
+						const current = policy?.keep_monitors ?? [];
+						write({
+							keep_monitors: keep
+								? [...current, connector]
+								: current.filter(
+										(c) => c.toLowerCase() !== connector.toLowerCase(),
+									),
+						});
+					}}
 				/>
 
 				<GameSessionDisclosure policy={policy} busy={busy} onSet={write} />

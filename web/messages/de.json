@@ -781,5 +781,20 @@
 	"display_follow_host_all": "In allem dem Host folgen",
 	"display_device_settings": "Anzeige-Einstellungen …",
 	"display_device_column": "Anzeige",
-	"display_mirrors": "Spiegelt {connector}"
+	"display_mirrors": "Spiegelt {connector}",
+	"settings_appearance": "Erscheinungsbild",
+	"appearance_theme": "Design",
+	"appearance_accent": "Akzent",
+	"appearance_follow_host": "Host folgen",
+	"appearance_following": "{source}",
+	"appearance_none_detected": "nichts erkannt",
+	"appearance_light": "Hell",
+	"appearance_dark": "Dunkel",
+	"appearance_custom": "Eigene Farbe",
+	"appearance_use_custom": "Diese Farbe nutzen",
+	"display_q_max_mode": "Größter Bildschirm für dieses Gerät",
+	"display_q_max_mode_none": "Keine Grenze",
+	"display_q_scale": "Bildschirm skalieren mit",
+	"display_q_scale_desktop": "Was der Desktop gewählt hat",
+	"display_capped": "Bis {mode}"
 }

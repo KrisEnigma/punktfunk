@@ -234,6 +234,7 @@ pub(crate) fn plugin_may_access(method: &Method, path: &str) -> bool {
         (&Method::GET, "/api/v1/native/clients"),
         (&Method::GET, "/api/v1/gpus"),
         (&Method::PUT, "/api/v1/gpus/preference"),
+        (&Method::GET, "/api/v1/host/theme"),
         (&Method::GET, "/api/v1/display/settings"),
         (&Method::PUT, "/api/v1/display/settings"),
         (&Method::GET, "/api/v1/display/state"),

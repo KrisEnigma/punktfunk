@@ -5,12 +5,20 @@
 // origin, and the port has to come from the server — only it knows whether the listener bound.
 import { useQuery } from "@tanstack/react-query";
 
-/** The desktop's own theme, when the console is running on an Omarchy box that opted in. */
+/**
+ * The desktop's own theme, from whichever reader answered (design/web-console-overhaul.md §7).
+ *
+ * Only `mode` is always there. Omarchy renders our template and so publishes all four values;
+ * the host's own read of the desktop — XDG portal on Linux, DWM on Windows — publishes an
+ * accent at most, and the console then keeps its own surfaces rather than half a palette.
+ */
 export interface OmarchyTheme {
 	mode: "light" | "dark";
-	accent: string;
-	background: string;
-	foreground: string;
+	accent?: string;
+	background?: string;
+	foreground?: string;
+	/** Which reader answered: `omarchy` | `portal` | `windows`. Named on the Appearance panel. */
+	source?: string;
 }
 
 export interface UiConfig {

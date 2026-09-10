@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { changeLocale, type Locale, locales, useLocale } from "@/lib/i18n";
 import { MANAGE, pluginPin, togglePin, usePins } from "@/lib/nav";
 import { m } from "@/paraglide/messages";
+import { AppearanceCard } from "./Appearance";
 
 // Settings owns the console's own preferences — the locale, the sidebar pins, and the way
 // out. Everything here is per browser (design/web-console-overhaul.md D8); nothing reaches
@@ -53,6 +54,8 @@ export const SectionSettings: FC = () => {
 						))}
 					</CardContent>
 				</Card>
+
+				<AppearanceCard />
 
 				<NavigationCard />
 

@@ -133,11 +133,22 @@ pub(crate) fn display_settings_state() -> DisplaySettingsState {
     // What acts per device. The rest are stored and served but read inside a backend
     // `create`, which takes no client — advertising one would put a control on the
     // device sheet that this host would store and ignore.
-    let client_enforced: Vec<String> = vec![
+    let mut client_enforced: Vec<String> = vec![
         "keep_alive".into(),
         "mode_conflict".into(),
         "identity".into(),
     ];
+    // The cap is applied in the native handshake, before Welcome, so the client is told the
+    // mode it actually gets rather than the one it asked for.
+    client_enforced.push("max_mode".into());
+    // Linux only. Topology: the backend reads it at `create`, where `set_client_identity`
+    // has already named the device — the Windows CCD isolate is one topology for the whole
+    // managed group, so there is no per-device answer to give. Scale: Mutter mints a fresh
+    // EDID serial per session, so it is the backend that cannot remember one on its own.
+    if cfg!(target_os = "linux") {
+        client_enforced.push("topology".into());
+        client_enforced.push("scale".into());
+    }
     // Overlays ride their own field, never `settings`. The console PUTs `settings`
     // back whole, and the PUT refuses a body carrying `clients` — so leaving them
     // in here would make every host-wide save fail the moment one device had an

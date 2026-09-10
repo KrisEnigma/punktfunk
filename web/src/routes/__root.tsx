@@ -15,6 +15,7 @@ import { type CSSProperties, useEffect } from "react";
 import { useUiConfig } from "@/api/uiConfig";
 import { AppShell } from "@/components/app-shell";
 import { DialogsProvider } from "@/components/dialogs";
+import { currentAppearance } from "@/lib/appearanceRequest";
 import { adoptStoredLocale, useLocale } from "@/lib/i18n";
 import appCss from "@/styles.css?url";
 
@@ -60,33 +61,42 @@ function RootComponent() {
 	const isLogin = useRouterState({
 		select: (s) => s.location.pathname === "/login",
 	});
-	// On an Omarchy box that opted in, follow the desktop's theme. Three raw values go in and
-	// `data-omarchy` turns on the block in styles.css that expands them: `mode` picks the palette
-	// the whole stylesheet already keys off, the accent re-tints the brand (and with it `--primary`,
-	// `--accent`, `--ring` and the lens mark), and the background/foreground pair is what every
-	// surface — cards, hovers, borders — is mixed out of. Everywhere else `theme` is null, the
-	// attribute is absent and the console keeps its own violet, which is also what SSR renders and
-	// what shows for the moment before this resolves.
+	// Follow the desktop's own theme, and let the operator override it (§7).
 	//
-	// The expansion lives in CSS rather than here on purpose: `color-mix()` does it natively, in one
-	// place, for both modes at once — and it is the only way `.dark`'s own values get overridden
-	// without this component knowing which of them each mode uses.
+	// Two attributes, because two kinds of source exist: `data-accent` re-tints the brand from
+	// one colour, `data-omarchy` additionally repaints every surface out of the theme's own
+	// background/foreground pair. A desktop that publishes only an accent — GNOME over the XDG
+	// portal, Windows' DWM — switches on the first and leaves the console's surfaces alone.
+	//
+	// The expansion lives in CSS rather than here on purpose: `color-mix()` does it natively, in
+	// one place, for both modes at once — and it is the only way `.dark`'s own values get
+	// overridden without this component knowing which of them each mode uses.
 	const { data: uiConfig } = useUiConfig();
 	const theme = uiConfig?.theme ?? null;
+	// The operator's own pick outranks the desktop. Read isomorphically, so the server render
+	// already carries it and there is no flash to correct after hydration.
+	const appearance = currentAppearance();
+	const accent =
+		appearance.accent !== "system"
+			? appearance.accent
+			: (theme?.accent ?? null);
+	const mode =
+		appearance.mode !== "system" ? appearance.mode : (theme?.mode ?? "dark");
+	// Surfaces need the full pair; a theme carrying only an accent must not switch them on.
+	const surfaces = theme?.background && theme.foreground ? theme : null;
+	const vars: Record<string, string> = {};
+	if (accent) vars["--pf-accent"] = accent;
+	if (surfaces) {
+		vars["--pf-bg"] = surfaces.background as string;
+		vars["--pf-fg"] = surfaces.foreground as string;
+	}
 	return (
 		<html
 			lang={locale}
-			className={theme?.mode === "light" ? undefined : "dark"}
-			data-omarchy={theme ? "" : undefined}
-			style={
-				theme
-					? ({
-							"--pf-accent": theme.accent,
-							"--pf-bg": theme.background,
-							"--pf-fg": theme.foreground,
-						} as CSSProperties)
-					: undefined
-			}
+			className={mode === "light" ? undefined : "dark"}
+			data-accent={accent ? "" : undefined}
+			data-omarchy={surfaces ? "" : undefined}
+			style={Object.keys(vars).length > 0 ? (vars as CSSProperties) : undefined}
 		>
 			<head>
 				<HeadContent />

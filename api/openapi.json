@@ -1727,6 +1727,38 @@
         }
       }
     },
+    "/api/v1/host/theme": {
+      "get": {
+        "tags": [
+          "host"
+        ],
+        "summary": "Host desktop theme",
+        "description": "The mode and accent colour of the desktop this host runs on, for a console that follows it.\nEvery field is nullable: \"no answer\" is a real state, and the console renders it as\n\"none detected\" rather than guessing.",
+        "operationId": "getHostTheme",
+        "responses": {
+          "200": {
+            "description": "The desktop's mode and accent, as far as this host can see",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostTheme"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/library": {
       "get": {
         "tags": [
@@ -5829,6 +5861,13 @@
               }
             ]
           },
+          "max_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Largest mode this device is granted, `WIDTHxHEIGHT@HZ`. A phone asking for 4K120\non a weak host degrades every other session; the operator caps it once and the\nclient is told the smaller mode rather than silently given one."
+          },
           "mode_conflict": {
             "oneOf": [
               {
@@ -5838,6 +5877,14 @@
                 "$ref": "#/components/schemas/ModeConflict"
               }
             ]
+          },
+          "scale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Scale this device's screen is created at, when the desktop has not already\nremembered one for it (`display-management.md` §5.4). Mutter mints a fresh EDID\nserial per session, so its own `monitors.xml` never rematches — without this the\noperator re-sets the scale on every connect."
           },
           "topology": {
             "oneOf": [
@@ -6249,6 +6296,13 @@
           },
           "keep_alive": {
             "$ref": "#/components/schemas/KeepAlive"
+          },
+          "keep_monitors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Connectors that stay lit while streaming, even under `exclusive`\n(`design/web-console-overhaul.md` §5.5).\n\nThe shared-desktop case the all-or-nothing topology axis cannot express: the\ncouch TV streams on the sole screen while the desk monitor stays usable. Only\nmeaningful under `exclusive` — nothing else turns a monitor off."
           },
           "layout": {
             "$ref": "#/components/schemas/Layout"
@@ -7629,6 +7683,34 @@
           "version": {
             "type": "string",
             "description": "`punktfunk-host` crate version."
+          }
+        }
+      },
+      "HostTheme": {
+        "type": "object",
+        "description": "The desktop's appearance, as far as this host can see it.",
+        "properties": {
+          "accent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`#rrggbb`, or `null` when the desktop has no accent to report."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`light` | `dark`, or `null` when the desktop expresses no preference."
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the answer came from, for the console's \"Follow host — Windows\" line.\n`null` when nothing answered.",
+            "example": "gnome"
           }
         }
       },

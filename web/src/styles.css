@@ -110,10 +110,18 @@
 	--destructive-foreground: oklch(0.985 0 0);
 }
 
-/* ── Omarchy: the desktop's own palette, expanded into the console's tokens. ──
-   `data-omarchy` and the three --pf-* values below it are set by routes/__root.tsx
-   from the theme file Omarchy renders for us (server/util/omarchyTheme.ts); on
-   every other box the attribute is absent and none of this applies.
+/* ── The desktop's own palette, expanded into the console's tokens. ──
+   Two attributes, because two kinds of source exist (design/web-console-overhaul.md §7):
+
+     [data-accent]  an accent and nothing else — a GNOME/Plasma/COSMIC desktop over the
+                    XDG portal, Windows' DWM, or the operator's own pick in Settings.
+                    Re-tints the brand and leaves the console's own surfaces alone.
+     [data-omarchy] the full four values. Omarchy renders our template, so it publishes a
+                    background and foreground too, and the surfaces are mixed out of them.
+
+   Omarchy sets both. Splitting them is what stops a desktop that reports one value from
+   being painted in half a palette — the surfaces would go unset and the page would read
+   as broken rather than untinted.
 
    `:root[data-omarchy]` outranks both `:root` and `.dark`, so ONE block covers both
    modes: the surface mixes take their direction from the theme's own background /
@@ -127,6 +135,30 @@
    Surfaces and the brand follow the theme. --success / --warning / --destructive do
    NOT: they encode meaning, and a theme whose accent is red must not leave "delete"
    and "save" the same colour. */
+
+/* Accent only. Everything here derives from --pf-accent alone, so it applies whether the
+   colour came from a desktop, from Omarchy, or from the operator. */
+:root[data-accent] {
+	/* The lens mark, rebuilt from the accent: deep circle, lighter circle, and the
+	   highlight where they overlap. Mixed toward black and white rather than toward the
+	   theme's own foreground — measured, because on a theme whose accent and foreground
+	   are close (Tokyo Night) mixing them collapses the three tints into one flat blob.
+	   These also carry --primary and --ring, which is why they are worth this care. */
+	--pf-brand: color-mix(in oklab, var(--pf-accent) 88%, black);
+	--pf-brand-light: color-mix(in oklab, var(--pf-accent) 55%, white);
+	--pf-highlight: color-mix(in oklab, var(--pf-accent) 15%, white);
+	--pf-glow: color-mix(in oklab, var(--pf-accent) 45%, transparent);
+}
+
+/* Light mode takes --primary from --pf-brand and keeps :root's white text, so the
+   button has to be deep enough to hold it: a soft accent (a dusty rose, a sage) is
+   only 3.9:1 at --pf-brand, and 5.7:1 here. */
+:root[data-accent]:not(.dark) {
+	--primary: color-mix(in oklab, var(--pf-accent) 75%, black);
+}
+
+/* Surfaces. Needs the background/foreground pair, so only a source that publishes all
+   four values switches this on. */
 :root[data-omarchy] {
 	--background: var(--pf-bg);
 	--foreground: var(--pf-fg);
@@ -153,29 +185,12 @@
 	   is what keeps the theme's own foreground readable on top of it. */
 	--accent: color-mix(in oklab, var(--pf-bg) 86%, var(--pf-accent));
 	--accent-foreground: var(--pf-fg);
-
-	/* The lens mark, rebuilt from the accent: deep circle, lighter circle, and the
-	   highlight where they overlap. Mixed toward black and white rather than toward the
-	   theme's own foreground — measured, because on a theme whose accent and foreground
-	   are close (Tokyo Night) mixing them collapses the three tints into one flat blob.
-	   These also carry --primary and --ring, which is why they are worth this care. */
-	--pf-brand: color-mix(in oklab, var(--pf-accent) 88%, black);
-	--pf-brand-light: color-mix(in oklab, var(--pf-accent) 55%, white);
-	--pf-highlight: color-mix(in oklab, var(--pf-accent) 15%, white);
-	--pf-glow: color-mix(in oklab, var(--pf-accent) 45%, transparent);
 }
 
 /* `.dark` takes --primary from the LIGHT tint, so the text on it has to be the dark
-   end of the theme — its own background. */
+   end of the theme — its own background. Needs --pf-bg, so it stays with the surfaces. */
 :root[data-omarchy].dark {
 	--primary-foreground: var(--pf-bg);
-}
-
-/* Light mode takes --primary from --pf-brand and keeps :root's white text, so the
-   button has to be deep enough to hold it: a soft accent (a dusty rose, a sage) is
-   only 3.9:1 at --pf-brand, and 5.7:1 here. */
-:root[data-omarchy]:not(.dark) {
-	--primary: color-mix(in oklab, var(--pf-accent) 75%, black);
 }
 
 /* Map the palette to Tailwind colour/util tokens — both the shadcn vocabulary

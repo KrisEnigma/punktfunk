@@ -789,5 +789,20 @@
 	"display_follow_host_all": "Follow the host in everything",
 	"display_device_settings": "Display settings…",
 	"display_device_column": "Display",
-	"display_mirrors": "Mirrors {connector}"
+	"display_mirrors": "Mirrors {connector}",
+	"settings_appearance": "Appearance",
+	"appearance_theme": "Theme",
+	"appearance_accent": "Accent",
+	"appearance_follow_host": "Follow host",
+	"appearance_following": "{source}",
+	"appearance_none_detected": "none detected",
+	"appearance_light": "Light",
+	"appearance_dark": "Dark",
+	"appearance_custom": "Custom colour",
+	"appearance_use_custom": "Use this colour",
+	"display_q_max_mode": "Largest screen this device gets",
+	"display_q_max_mode_none": "No cap",
+	"display_q_scale": "Scale its screen at",
+	"display_q_scale_desktop": "Whatever the desktop chose",
+	"display_capped": "Up to {mode}"
 }

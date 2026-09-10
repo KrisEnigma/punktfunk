@@ -1428,6 +1428,10 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         ("GET", "/api/v1/status", true, true),
         ("GET", "/api/v1/local/summary", true, false), // loopback-only, handled before the gates
         ("GET", "/api/v1/compositors", true, true),
+        // Mode + accent of the desktop, for a console that follows it. Operator
+        // decoration, so it sits with the other host configuration rather than on
+        // the cert lane — no streaming client asks what colour the desktop is.
+        ("GET", "/api/v1/host/theme", true, false),
         ("GET", "/api/v1/events", true, false),
         // Unredacted host tracing (webhook URLs, hook command lines). Plugin access would void `/hooks`.
         ("GET", "/api/v1/logs", false, false),
@@ -1942,7 +1946,11 @@ async fn display_client_overlay_is_served_beside_the_policy_never_inside_it() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    for field in &per_device {
+    // A field that IS a host axis must be enforced host-wide too — offering it per device
+    // while the host ignores it everywhere would be the dead control D1 is about. Fields
+    // that exist only per device (a mode cap, a scale) have no host-wide twin to check.
+    const HOST_AXES: [&str; 4] = ["keep_alive", "topology", "mode_conflict", "identity"];
+    for field in per_device.iter().filter(|f| HOST_AXES.contains(f)) {
         assert!(
             host_wide.contains(field),
             "{field} is offered per-device but this build does not act on it at all"
