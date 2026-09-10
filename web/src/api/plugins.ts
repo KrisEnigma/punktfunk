@@ -116,9 +116,3 @@ export function usePlugins() {
  */
 export const uiPlugins = (list: PluginSummary[] | undefined): PluginSummary[] =>
 	(list ?? []).filter((p) => p.ui && p.category !== LIBRARY_CATEGORY);
-
-/** The installed library-category plugins — the Game sources surface's own list. */
-export const libraryPlugins = (
-	list: PluginSummary[] | undefined,
-): PluginSummary[] =>
-	(list ?? []).filter((p) => p.category === LIBRARY_CATEGORY);
