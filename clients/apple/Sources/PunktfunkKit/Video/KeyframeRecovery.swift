@@ -17,7 +17,10 @@ final class KeyframeRecovery: @unchecked Sendable {
         lock.lock(); connection = c; lastNs = 0; lock.unlock()
     }
 
-    func request() {
+    /// Ask the host for a keyframe. True when the ask went out, false when the 100 ms throttle
+    /// swallowed it — log on the sent ask, not per wedge signal.
+    @discardableResult
+    func request() -> Bool {
         lock.lock()
         let now = DispatchTime.now().uptimeNanoseconds
         let due = lastNs == 0 || now &- lastNs > 100_000_000 // ≥ 100 ms since the last request
@@ -25,5 +28,6 @@ final class KeyframeRecovery: @unchecked Sendable {
         let conn = due ? connection : nil
         lock.unlock()
         conn?.requestKeyframe()
+        return conn != nil
     }
 }

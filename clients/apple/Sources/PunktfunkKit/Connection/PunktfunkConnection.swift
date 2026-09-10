@@ -1537,6 +1537,12 @@ public final class PunktfunkConnection: @unchecked Sendable {
     /// `USER_FLAG_CHUNK_ALIGNED`, PyroWave datagram-aligned mode §4.4) — walk it
     /// window-by-window at `shardPayload`. (The C `#define` doesn't import into Swift.)
     public static let userFlagChunkAligned: UInt32 = 64
+    /// `AccessUnit.flags` bit: the AU is an IDR (the wire's `FLAG_SOF`).
+    public static let flagSOF: UInt32 = 4
+    /// `AccessUnit.flags` bit: an intra-refresh wave boundary (the wire's `USER_FLAG_RECOVERY_POINT`).
+    public static let userFlagRecoveryPoint: UInt32 = 16
+    /// `AccessUnit.flags` bit: a clean RFI recovery anchor P (the wire's `USER_FLAG_RECOVERY_ANCHOR`).
+    public static let userFlagRecoveryAnchor: UInt32 = 32
 
     /// Static HDR mastering metadata (SMPTE ST.2086 + content light level) the host sent for an HDR
     /// session. Mirrors the wire/ABI `PunktfunkHdrMeta`; primaries are in ST.2086 **G, B, R** order,

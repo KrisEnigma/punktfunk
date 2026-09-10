@@ -704,11 +704,17 @@ public final class Stage2Pipeline {
                 // FRAME ARRIVAL is the render trigger (never the display link — see the header).
                 renderSignal.signal()
             },
-            // Async decode failure (a bad P-frame referencing a lost/corrupt IDR): fold it into the
-            // gate's no-output streak (which arms the freeze after a short run, matching the desktop),
-            // and when that trips ask the host for a fresh IDR now (infinite GOP — it wouldn't
-            // otherwise come soon). Throttled in KeyframeRecovery.
-            onDecodeError: { _ in if gate.onNoOutput() { recovery.request() } })
+            // Async decode failure: fold it into the gate's no-output streak (which arms the freeze
+            // after a short run, matching the desktop), and when that trips ask the host for a
+            // fresh IDR now (infinite GOP — it wouldn't otherwise come soon). One WARN per sent
+            // ask carries the OSStatus, the only trace a field log has of what VideoToolbox refused.
+            onDecodeError: { status in
+                if gate.onNoOutput(), recovery.request() {
+                    pumpLog.warning(
+                        "video: VideoToolbox refused an AU status=\(status, privacy: .public) — asked the host for a keyframe"
+                    )
+                }
+            })
     }
 
     /// Start the AU pump, decoder, and selected presentation loop on the main thread.
@@ -818,7 +824,8 @@ public final class Stage2Pipeline {
                     onFrame?(au)
                     let step = pump.note(
                         frameIndex: au.frameIndex,
-                        idrFormat: connection.videoCodec.formatDescription(fromKeyframe: au.data))
+                        idrFormat: connection.videoCodec.formatDescription(fromKeyframe: au.data),
+                        lossAhead: gapWidth > 0, flags: au.flags)
                     if step.straggler { return true }
                     if let size = step.newSize { onDecodedSize?(size.width, size.height) }
                     if step.startedFormatWait {
@@ -826,6 +833,11 @@ public final class Stage2Pipeline {
                             "video: received AUs but no decodable format (missing/unparsed parameter sets) — requesting an IDR until one seeds it"
                         )
                     }
+                    if step.askKeyframe { recovery.request() }
+                    // A delta between a loss and its re-anchor references the lost picture. Fed to
+                    // VideoToolbox it poisons the session — every later non-IDR AU, the anchor too,
+                    // comes back kVTVideoDecoderBadDataErr. Withheld, the anchor decodes and lifts.
+                    if step.withhold { return true }
                     guard let f = pump.format, !token.isStopped else { return true }
                     if decoder.decode(au: au, format: f) {
                         decodeFailRun = 0

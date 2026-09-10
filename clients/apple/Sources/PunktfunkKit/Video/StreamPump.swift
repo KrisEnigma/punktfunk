@@ -89,8 +89,11 @@ final class StreamPump {
                     if gapWidth > 0 { gate.arm(expectingDrops: UInt64(gapWidth)) }
                     onFrame?(au)
                     let idrFormat = connection.videoCodec.formatDescription(fromKeyframe: au.data)
-                    let step = pump.note(frameIndex: au.frameIndex, idrFormat: idrFormat)
+                    let step = pump.note(
+                        frameIndex: au.frameIndex, idrFormat: idrFormat, lossAhead: gapWidth > 0,
+                        flags: au.flags)
                     if step.straggler { return true }
+                    if step.askKeyframe { recovery.request() }
                     if let size = step.newSize { onDecodedSize?(size.width, size.height) }
                     if step.resumed {
                         let ms = Int(Date().timeIntervalSince(awaitingSince) * 1000)
@@ -114,6 +117,9 @@ final class StreamPump {
                         if idrFormat == nil { pump.requireIDR() }
                     }
                     wasFailed = failed
+                    // A delta between a loss and its re-anchor references the lost picture; one
+                    // such AU wedges the layer's decoder until an IDR. Withheld, the anchor lands.
+                    if step.withhold { return true }
                     guard let f = pump.format,
                           let sample = connection.videoCodec.sampleBuffer(au: au, format: f),
                           !token.isStopped // don't enqueue a stale frame after a restart
