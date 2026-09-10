@@ -840,12 +840,16 @@ fn nvidia_present() -> bool {
 /// The `auto` Linux backend decision, shared by [`open_video`] and
 /// [`linux_zero_copy_is_vaapi`]. Manual GPU preference picks that vendor's
 /// backend (NVIDIA still needs the proprietary device nodes); else the
-/// presence probe.
+/// presence probe. A build without `nvenc` carries no NVIDIA arm at all, so it
+/// always answers VAAPI — whose Vulkan Video leg the NVIDIA driver serves too.
 ///
 /// Resolves **`auto` only** — ignores `encoder_pref`. Capability probes must
 /// use [`linux_zero_copy_is_vaapi`], which layers the pref on top.
 #[cfg(target_os = "linux")]
 fn linux_auto_is_vaapi() -> bool {
+    if !cfg!(feature = "nvenc") {
+        return true;
+    }
     if let Some(g) = pf_gpu::manual_selection() {
         if g.vendor_id == pf_gpu::VENDOR_NVIDIA {
             return !nvidia_present();
