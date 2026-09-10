@@ -13,7 +13,7 @@ use std::path::Path;
 use punktfunk_setup::choices::{Action, Choices, Pins};
 use punktfunk_setup::exec::{Executor, Opts};
 use punktfunk_setup::facts::{Channel, Facts, Family, Firewall, Nvidia, OsRelease};
-use punktfunk_setup::plan::{self, Plan, StepAction};
+use punktfunk_setup::plan::{self, Phase, Plan, PlanPhase, Step, StepAction};
 use punktfunk_setup::report;
 use punktfunk_setup::seam::{BasePaths, FakeRunner};
 use punktfunk_setup::ui::Plain;
@@ -64,6 +64,7 @@ fn fresh(id: &str, family: Family) -> Facts {
         user_manager: true,
         // Nothing installed, so no unit: the start phase has to reason from the install.
         web_unit_present: false,
+        web_password_present: false,
         scripting_unit_disabled: false,
         ip: Some("192.168.1.10".into()),
         user: "pf".into(),
@@ -83,6 +84,7 @@ fn installed(id: &str, family: Family, channel: Channel) -> Facts {
         host_version: Some("punktfunk-host 0.34.0".into()),
         has_web_server: true,
         web_unit_present: true,
+        web_password_present: true,
         in_input_group: true,
         ..fresh(id, family)
     }
@@ -1000,4 +1002,85 @@ fn every_platforms_json_install_line_is_carried_verbatim() {
             );
         }
     }
+}
+
+/// A typed password reaches the file and nothing else. The plan step carries no value, so
+/// the echo, the dry run and every golden stay free of it — and the phase lands before the
+/// Omarchy hand-off, which ends the run before the later phases exist.
+#[test]
+fn a_typed_console_password_is_written_but_never_echoed() {
+    let facts = fresh("omarchy", Family::Pacman);
+    let mut choices = Choices::derive(&facts, &pins());
+    choices.web_password = Some("correct-horse-battery".into());
+    let text = render(&facts, &choices);
+    assert!(
+        !text.contains("correct-horse"),
+        "the password reached the transcript:\n{text}"
+    );
+    assert!(
+        text.contains("would write your password to /box/config/punktfunk/web-password"),
+        "the dry run does not say where the password goes:\n{text}"
+    );
+    let kinds: Vec<Phase> = plan_for(&facts, &pins())
+        .phases
+        .iter()
+        .map(|p| p.kind)
+        .collect();
+    assert!(!kinds.contains(&Phase::Password), "nobody asked for one");
+    let phases = plan::build(&facts, &choices);
+    let kinds: Vec<Phase> = phases.phases.iter().map(|p| p.kind).collect();
+    let at = |k: Phase| kinds.iter().position(|p| *p == k);
+    assert!(
+        at(Phase::Password) < at(Phase::Omarchy),
+        "the hand-off would end the run first: {kinds:?}"
+    );
+}
+
+/// The file the console's unit reads as an `EnvironmentFile`, owner-only — a umask of 0022
+/// would otherwise leave the login password readable by everyone on the box.
+#[test]
+fn the_password_file_is_written_owner_only() {
+    let root = std::env::temp_dir().join(format!("pf-setup-pw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let paths = BasePaths::rooted(&root);
+    let facts = fresh("arch", Family::Pacman);
+    let mut choices = Choices::derive(&facts, &pins());
+    choices.web_password = Some("correct-horse-battery".into());
+    let (ui, _buf) = Plain::capture();
+    let run = FakeRunner::new();
+    let exec = Executor {
+        paths: &paths,
+        run: &run,
+        ui: &ui,
+        opts: Opts {
+            dry: false,
+            quiet: false,
+            tty: false,
+        },
+    };
+    let plan = Plan {
+        phases: vec![PlanPhase {
+            kind: Phase::Password,
+            title: "Web console password".into(),
+            steps: vec![Step {
+                action: StepAction::WebPassword,
+                ends_run: false,
+            }],
+        }],
+    };
+    exec.execute(&plan, &facts, &choices).expect("one write");
+
+    let file = root.join("config/punktfunk/web-password");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the password file"),
+        "PUNKTFUNK_UI_PASSWORD=correct-horse-battery\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600, "the password is readable by others");
+        assert_eq!(mode(file.parent().expect("dir")), 0o700);
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }

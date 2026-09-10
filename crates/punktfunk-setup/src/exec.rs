@@ -143,6 +143,15 @@ impl Executor<'_> {
             StepAction::PacmanSwitch { pkgs } => self.pacman_switch(pkgs, facts).map(|()| true),
             StepAction::Linger => self.linger(facts),
             StepAction::StartUnits { units } => self.start_units(units, outcome, facts),
+            // No password, no file: an empty `PUNKTFUNK_UI_PASSWORD=` line is a console
+            // that admits nobody, which is worse than the generated one this skips to.
+            StepAction::WebPassword => match choices.web_password.as_deref() {
+                Some(password) => {
+                    self.web_password(password);
+                    Ok(true)
+                }
+                None => Ok(false),
+            },
             StepAction::TrustCert => self.trust_cert(facts, outcome),
         }
     }
@@ -262,6 +271,33 @@ impl Executor<'_> {
             self.ui.warn("certutil refused the certificate — the browser warning stays; click through once instead");
         }
         Ok(true)
+    }
+
+    /// The console's login password, in the file its unit reads as an `EnvironmentFile`.
+    /// 0600 and never echoed — `web-init.sh` writes a generated one only when this is absent,
+    /// so landing it before the units start is what makes the user's own password the one.
+    fn web_password(&self, password: &str) {
+        let path = self.paths.config.join("punktfunk/web-password");
+        let shown = path.display().to_string().replace('\\', "/");
+        if self.opts.dry {
+            self.ui.ok(&format!("would write your password to {shown}"));
+            return;
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+            set_mode(dir, 0o700);
+        }
+        match std::fs::write(&path, format!("PUNKTFUNK_UI_PASSWORD={password}\n")) {
+            Ok(()) => {
+                set_mode(&path, 0o600);
+                self.ui.ok(&format!("your password → {shown}"));
+            }
+            // Not fatal: the console generates one on its first start, and the outro says
+            // where to read it.
+            Err(e) => self.ui.warn(&format!(
+                "couldn't write {shown} — {e}; the console will generate one instead"
+            )),
+        }
     }
 
     /// Replace or append one `KEY=VALUE` line in host.env, creating it on first use.
@@ -394,6 +430,17 @@ impl Executor<'_> {
         .map(|()| true)
     }
 }
+
+/// Owner-only bits for the password file and the config dir. A umask cannot be trusted to
+/// have done it: 0022 leaves a secret world-readable.
+#[cfg(unix)]
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &std::path::Path, _mode: u32) {}
 
 #[cfg(test)]
 mod tests {

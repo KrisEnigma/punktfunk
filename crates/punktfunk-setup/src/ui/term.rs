@@ -25,6 +25,8 @@ pub enum Key {
     Right,
     Enter,
     Space,
+    /// Text entry only; every other prompt reads it as `Other`.
+    Backspace,
     /// Esc, Ctrl-C, `q`, or a terminal that has stopped answering.
     Cancel,
     Char(char),
@@ -82,6 +84,7 @@ impl Terminal for ConsoleTerm {
             Ok(console::Key::ArrowRight) => Key::Right,
             Ok(console::Key::Enter) => Key::Enter,
             Ok(console::Key::Char(' ')) => Key::Space,
+            Ok(console::Key::Backspace | console::Key::Del) => Key::Backspace,
             Ok(console::Key::Escape | console::Key::CtrlC) => Key::Cancel,
             Ok(console::Key::Char(c)) => Key::Char(c),
             Ok(_) => Key::Other,

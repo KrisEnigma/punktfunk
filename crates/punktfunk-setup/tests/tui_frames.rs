@@ -9,6 +9,7 @@
 
 use punktfunk_setup::choices::{Choices, Pins};
 use punktfunk_setup::demo;
+use punktfunk_setup::report;
 use punktfunk_setup::ui::logo::MARK_TEXT_ROWS;
 use punktfunk_setup::ui::summary::{Screen, Step};
 use punktfunk_setup::ui::term::{Key, ScriptedTerm, Terminal};
@@ -351,4 +352,59 @@ fn verbose_keeps_the_command_transcript() {
     let all = term.frames.join("");
     assert!(all.contains("sudo pacman -Syu punktfunk-host"), "{all}");
     assert!(all.contains("installed"), "{all}");
+}
+
+/// The step a fresh host install ends on. Enter takes the generated password, and the frame
+/// it was taken from names the command that prints it.
+fn ask_password(keys: &[Key]) -> (Option<String>, Vec<String>) {
+    let mut term = ScriptedTerm::new(keys);
+    let answer = {
+        let tui = Tui::new(&mut term as &mut dyn Terminal, caps(), 0);
+        tui.web_password("https://192.168.1.10:47992", report::PASSWORD_READ)
+    };
+    (answer, term.frames.clone())
+}
+
+#[test]
+fn the_password_step_offers_the_generated_one_and_says_how_to_print_it() {
+    let (answer, frames) = ask_password(&[Key::Enter]);
+    assert_eq!(
+        answer, None,
+        "Enter on arrival keeps the generated password"
+    );
+    golden("tui-web-password", &frames[0]);
+    assert!(frames[0].contains(report::PASSWORD_READ));
+}
+
+#[test]
+fn typing_a_password_returns_it() {
+    let mut keys = vec![Key::Down, Key::Enter];
+    keys.extend("s3cret-pw".chars().map(Key::Char));
+    keys.push(Key::Enter);
+    let (answer, _) = ask_password(&keys);
+    assert_eq!(answer.as_deref(), Some("s3cret-pw"));
+}
+
+/// Two things the file cannot carry: too little to be a password, and a character systemd
+/// unquotes back out of the value. Neither may reach it.
+#[test]
+fn a_short_or_unquotable_password_is_refused_at_the_prompt() {
+    let mut keys = vec![Key::Down, Key::Enter];
+    keys.extend("ab\"cd".chars().map(Key::Char));
+    keys.push(Key::Enter);
+    keys.extend("efgh".chars().map(Key::Char));
+    keys.push(Key::Enter);
+    let (answer, _) = ask_password(&keys);
+    assert_eq!(
+        answer.as_deref(),
+        Some("abcdefgh"),
+        "the quote landed in the value, or Enter accepted four characters"
+    );
+}
+
+/// Backing out of either prompt is "generate one", never a cancelled install.
+#[test]
+fn escaping_the_prompt_falls_back_to_the_generated_password() {
+    assert_eq!(ask_password(&[Key::Cancel]).0, None);
+    assert_eq!(ask_password(&[Key::Down, Key::Enter, Key::Cancel]).0, None);
 }
