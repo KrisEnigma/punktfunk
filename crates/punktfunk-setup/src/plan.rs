@@ -380,8 +380,12 @@ fn group_steps(facts: &Facts, choices: &Choices) -> Vec<Step> {
     if facts.in_input_group {
         steps.push(Step::note(Level::Ok, "already in the input group"));
     } else if facts.has_ujust {
-        // Bazzite's input group is recipe-managed; usermod is the wrong tool.
-        steps.push(Step::run("ujust add-user-to-input-group"));
+        // Bazzite's input group is recipe-managed; usermod is the wrong tool. With no action
+        // the recipe opens a gum menu, which the captured progress line hides while the step
+        // waits on stdin. A recipe older than that action takes none, and usermod is its body.
+        steps.push(Step::run(
+            r#"ujust add-user-to-input-group add || sudo usermod -aG input "$USER""#,
+        ));
     } else if !facts.has_input_group {
         steps.push(Step::note(
             Level::Warn,
