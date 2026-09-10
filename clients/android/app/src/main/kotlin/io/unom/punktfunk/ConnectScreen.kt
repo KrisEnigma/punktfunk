@@ -513,8 +513,11 @@ fun ConnectScreen(
                     isOnline = {
                         val live = liveAdvert()
                         withContext(Dispatchers.IO) {
-                            NativeBridge.nativeProbe(
-                                live?.host ?: targetHost, live?.port ?: targetPort, 3_000,
+                            Presence.isSelf(
+                                pinHex ?: "",
+                                NativeBridge.nativeProbe(
+                                    live?.host ?: targetHost, live?.port ?: targetPort, 3_000,
+                                ),
                             )
                         }
                     },
@@ -872,7 +875,12 @@ fun ConnectScreen(
             isOnline = {
                 val live = discovered.firstOrNull { kh.matches(it) }
                 withContext(Dispatchers.IO) {
-                    NativeBridge.nativeProbe(live?.host ?: kh.address, live?.port ?: kh.port, 3_000)
+                    Presence.isSelf(
+                        kh,
+                        NativeBridge.nativeProbe(
+                            live?.host ?: kh.address, live?.port ?: kh.port, 3_000,
+                        ),
+                    )
                 }
             },
             onOnline = {},

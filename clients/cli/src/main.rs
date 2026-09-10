@@ -614,7 +614,7 @@ from the config directory for a true factory reset."
                         known
                             .hosts
                             .iter()
-                            .map(|h| (h.addr.clone(), h.port))
+                            .map(|h| (h.addr.clone(), h.port, h.fp_hex.clone()))
                             .collect(),
                         PROBE_TIMEOUT,
                     )
@@ -858,7 +858,7 @@ from the config directory for a true factory reset."
         let mut wait = WakeWait::new();
         loop {
             let online = trust::probe_reachable_many(
-                vec![(host.addr.clone(), host.port)],
+                vec![(host.addr.clone(), host.port, host.fp_hex.clone())],
                 Duration::from_millis(900),
             )
             .first()
@@ -1058,7 +1058,11 @@ from the config directory for a true factory reset."
         // old exec-style CLI never did: it fired a packet at best and dialled into the void.
         if plan.wake
             && !trust::probe_reachable_many(
-                vec![(plan.host.addr.clone(), plan.host.port)],
+                vec![(
+                    plan.host.addr.clone(),
+                    plan.host.port,
+                    plan.host.fp_hex.clone().unwrap_or_default(),
+                )],
                 Duration::from_millis(900),
             )
             .first()
@@ -1069,7 +1073,11 @@ from the config directory for a true factory reset."
             let mut wait = WakeWait::new();
             loop {
                 let online = trust::probe_reachable_many(
-                    vec![(plan.host.addr.clone(), plan.host.port)],
+                    vec![(
+                        plan.host.addr.clone(),
+                        plan.host.port,
+                        plan.host.fp_hex.clone().unwrap_or_default(),
+                    )],
                     Duration::from_millis(900),
                 )
                 .first()

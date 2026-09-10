@@ -849,20 +849,41 @@ pub fn pair_error_message(err: &punktfunk_core::PunktfunkError) -> String {
 }
 
 /// Probe several hosts in parallel — wall-clock is ~one `timeout`, not the sum. Result
-/// index matches `targets`. Wraps [`NativeClient::probe`].
+/// index matches `targets`, each `(addr, port, expected_fp_hex)`.
+///
+/// A target carrying a fingerprint is online only when THAT host answers. An address is
+/// not an identity: a stranger who inherits a sleeping host's lease answers at it, and
+/// counting that as the host lights the pip and shuts the wake gate (`!online`) against
+/// the machine that needs waking. An empty fingerprint is a record saved by address alone,
+/// which has nothing to compare — any answer is the host it names.
 #[cfg(not(target_family = "wasm"))]
 pub fn probe_reachable_many(
-    targets: Vec<(String, u16)>,
+    targets: Vec<(String, u16, String)>,
     timeout: std::time::Duration,
 ) -> Vec<bool> {
     let handles: Vec<_> = targets
         .into_iter()
-        .map(|(addr, port)| std::thread::spawn(move || NativeClient::probe(&addr, port, timeout)))
+        .map(|(addr, port, want)| {
+            std::thread::spawn(move || {
+                answered_as_self(&want, NativeClient::probe_identity(&addr, port, timeout))
+            })
+        })
         .collect();
     handles
         .into_iter()
         .map(|h| h.join().unwrap_or(false))
         .collect()
+}
+
+/// Whether a probe's answer is the host that was asked for. `answered` is the fingerprint
+/// that replied, or `None` when nothing did; `want` is the record's pin, empty for one saved
+/// by address alone — that has nothing to compare, so any answer is the host it names.
+#[cfg(not(target_family = "wasm"))]
+fn answered_as_self(want: &str, answered: Option<[u8; 32]>) -> bool {
+    match answered {
+        None => false,
+        Some(fp) => want.is_empty() || hex(&fp).eq_ignore_ascii_case(want),
+    }
 }
 
 /// On-stream stats overlay tier (design/stats-unification.md). Each tier is a strict
@@ -1872,6 +1893,26 @@ mod tests {
             Some(47991),
             "the pin must not lose the port"
         );
+    }
+
+    /// An address is not an identity: a stranger on a sleeping host's lease completes the
+    /// same handshake. Counting that as the host lights the pip and, since wake reads
+    /// `!online`, silences Wake-on-LAN for the machine that needs it.
+    #[test]
+    fn a_probe_answered_by_someone_else_is_not_this_host() {
+        let ours = fp('a');
+        let theirs = [0xbbu8; 32];
+        assert!(!answered_as_self(&ours, None), "nothing answered");
+        assert!(
+            !answered_as_self(&ours, Some(theirs)),
+            "a stranger on the lease"
+        );
+        assert!(answered_as_self(&ours, Some([0xaau8; 32])));
+        // The store spells a pin lowercase; a hand-typed one need not.
+        assert!(answered_as_self(&ours.to_uppercase(), Some([0xaau8; 32])));
+        // Saved by address, never paired: there is no pin to compare against.
+        assert!(answered_as_self("", Some(theirs)));
+        assert!(!answered_as_self("", None));
     }
 
     /// Two identities at one address are two records. A dual-boot box answers on one

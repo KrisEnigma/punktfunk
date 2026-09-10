@@ -34,18 +34,38 @@ object Presence {
     }
 
     /**
-     * Probe every host in [saved] and return the address each one answered at, keyed by record
-     * id. Hosts run in parallel, so a sweep costs one probe budget, not one per sleeping host.
-     * Blocking — call off the main thread.
+     * Is [answered] — the fingerprint that replied to a probe, or `null` when nothing did —
+     * [saved] itself?
+     *
+     * An address is not an identity. Whoever inherits a sleeping host's DHCP lease answers at
+     * it, and counting that as the host lights the pip and, since wake is gated on `!online`,
+     * silences Wake-on-LAN for exactly the machine that needs it; both OS installs of a
+     * dual-boot box share one lease the same way. A record saved by address alone carries no
+     * pin and has nothing to compare, so any answer is the host it names.
+     */
+    fun isSelf(pinHex: String, answered: String?): Boolean =
+        answered != null && (pinHex.isEmpty() || pinHex.equals(answered, ignoreCase = true))
+
+    /** [isSelf] for a saved record, which carries its own pin. */
+    fun isSelf(saved: KnownHost, answered: String?): Boolean = isSelf(saved.fpHex, answered)
+
+    /**
+     * Probe every host in [saved] and return the address each one answered AT AND AS ITSELF,
+     * keyed by record id. Hosts run in parallel, so a sweep costs one probe budget, not one per
+     * sleeping host. Blocking — call off the main thread.
      */
     fun sweep(
         saved: List<KnownHost>,
         liveFor: (KnownHost) -> DiscoveredHost?,
-        probe: (String, Int) -> Boolean,
+        probe: (String, Int) -> String?,
     ): Map<String, HostAddr> {
         if (saved.isEmpty()) return emptyMap()
         val tasks = saved.map { kh ->
-            Callable { candidates(kh, liveFor(kh)).firstOrNull { probe(it.address, it.port) }?.let { kh.id to it } }
+            Callable {
+                candidates(kh, liveFor(kh))
+                    .firstOrNull { isSelf(kh, probe(it.address, it.port)) }
+                    ?.let { kh.id to it }
+            }
         }
         return pool.invokeAll(tasks).mapNotNull { runCatching { it.get() }.getOrNull() }.toMap()
     }

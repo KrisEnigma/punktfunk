@@ -2551,31 +2551,45 @@ pub unsafe extern "C" fn punktfunk_generate_identity(
     })
 }
 
-/// QUIC reachability probe, trust-agnostic and mDNS-independent. `Ok` if the
-/// host answered, `Timeout` otherwise. Blocks up to `timeout_ms`; off the UI thread.
+/// QUIC reachability probe, mDNS-independent. `Ok` if something answered, `Timeout`
+/// otherwise. Blocks up to `timeout_ms`; off the UI thread.
+///
+/// The handshake is unpinned, so `Ok` says an address is occupied, not that it is YOUR
+/// host: pass `observed_sha256_out` and compare it against the record's pin. A stranger
+/// who inherits a sleeping host's lease answers too, and counting that as the host lights
+/// the pip and shuts the wake gate against the machine that needs waking.
 ///
 /// # Safety
-/// `host` is a NUL-terminated UTF-8 string.
+/// `host` is a NUL-terminated UTF-8 string; `observed_sha256_out` is null, or writable
+/// for 32 bytes.
 #[cfg(feature = "quic")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn punktfunk_probe(
     host: *const std::os::raw::c_char,
     port: u16,
     timeout_ms: u32,
+    observed_sha256_out: *mut u8,
 ) -> PunktfunkStatus {
     guard(|| {
         // SAFETY: pointers are caller-supplied and null-checked on this path.
         let Ok(Some(host)) = (unsafe { opt_cstr(host) }) else {
             return PunktfunkStatus::NullPointer;
         };
-        if crate::client::NativeClient::probe(
+        match crate::client::NativeClient::probe_identity(
             host,
             port,
             std::time::Duration::from_millis(timeout_ms as u64),
         ) {
-            PunktfunkStatus::Ok
-        } else {
-            PunktfunkStatus::Timeout
+            Some(fp) => {
+                if !observed_sha256_out.is_null() {
+                    // SAFETY: the caller guarantees 32 writable bytes when non-null.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(fp.as_ptr(), observed_sha256_out, 32);
+                    }
+                }
+                PunktfunkStatus::Ok
+            }
+            None => PunktfunkStatus::Timeout,
         }
     })
 }

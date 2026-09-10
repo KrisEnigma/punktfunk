@@ -983,7 +983,7 @@ object SkiaConsole {
                     NativeBridge.nativeWakeOnLan(kh.mac.joinToString(","), kh.address)
                     lastPacket = System.currentTimeMillis()
                 }
-                val online = NativeBridge.nativeProbe(kh.address, kh.port, 900) ||
+                val online = Presence.isSelf(kh, NativeBridge.nativeProbe(kh.address, kh.port, 900)) ||
                     discovered.any { kh.matches(it) }
                 if (wakeGen.get() != gen) return@execute
                 NativeBridge.nativeConsoleSetWake(

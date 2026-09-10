@@ -122,16 +122,23 @@ final class HostStore: ObservableObject {
     /// PTR TTL, and a host that suspends sends no goodbye, so a sleeping machine keeps advertising
     /// to every client for up to an hour — which is exactly how a Wake-on-LAN gate written as "not
     /// advertising" came to never fire for the host it was meant to wake. So the advert only says
-    /// WHERE to look (and re-keys the saved address when the host moved DHCP lease); a bounded,
-    /// trust-agnostic QUIC handshake says whether anything is there.
+    /// WHERE to look (and re-keys the saved address when the host moved DHCP lease); a bounded
+    /// QUIC handshake says whether THIS host is there.
+    ///
+    /// The pin decides, not the answer alone: whoever inherits a sleeping host's lease completes
+    /// a handshake at its address too. A host saved by address carries no pin to compare, so any
+    /// answer is the one it names.
     func isReachable(_ host: StoredHost, discovery: HostDiscovery) async -> Bool {
         if let live = discovery.hosts.first(where: { host.matches($0) }) {
             updateAddress(host.id, address: live.host, port: live.port)
         }
         let target = hosts.first { $0.id == host.id } ?? host
-        let (address, port) = (target.address, target.port)
+        let (address, port, pin) = (target.address, target.port, target.pinnedSHA256)
         return await Task.detached(priority: .utility) {
-            PunktfunkConnection.probe(host: address, port: port)
+            guard let answered = PunktfunkConnection.probeIdentity(host: address, port: port) else {
+                return false
+            }
+            return pin.map { $0 == answered } ?? true
         }.value
     }
 
