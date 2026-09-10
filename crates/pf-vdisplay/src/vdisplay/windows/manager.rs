@@ -2534,7 +2534,7 @@ mod tests {
     }
 
     /// Non-last-member teardown keys off `ccd_exclusive`, not `has_saved`.
-    /// `Primary` also snapshots; the old gate ran exclusive isolate on it.
+    /// Exclusive re-isolates even without a snapshot; Primary never isolates.
     #[test]
     fn a_primary_group_shrink_repromotes_instead_of_isolating() {
         // Snapshot without exclusivity: Primary, not isolate.
@@ -2544,14 +2544,8 @@ mod tests {
             "a Primary group must never run the exclusive isolate on a shrink"
         );
         assert_eq!(shrink_action(true, true), ShrinkAction::Reisolate);
-        assert_eq!(shrink_action(false, false), ShrinkAction::Nothing);
-    }
-
-    /// Exclusive still re-isolates when the snapshot is missing: physicals
-    /// are deactivated either way.
-    #[test]
-    fn exclusivity_decides_without_a_snapshot() {
         assert_eq!(shrink_action(true, false), ShrinkAction::Reisolate);
+        assert_eq!(shrink_action(false, false), ShrinkAction::Nothing);
     }
 
     /// Session re-asks the negotiated rate on every rebuild; that must join

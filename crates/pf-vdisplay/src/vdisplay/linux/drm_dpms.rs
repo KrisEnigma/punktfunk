@@ -231,9 +231,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(DrmModeCrtc, mode), 36);
     }
 
-    /// Live: darken this box's panels and read sysfs. Needs a connected head and no compositor
-    /// holding `/dev/dri/card*` (the takeover state). Skips, rather than fails, when nothing
-    /// is ours — a live desktop already masters the card.
+    /// Live: darken this box's panels and read sysfs. Skips when a compositor already
+    /// masters the card. Sysfs is the latch; a miss of Off or restore fails.
     #[test]
     #[ignore = "on glass: needs a connected head and no compositor holding /dev/dri/card*"]
     fn live_the_panels_go_dark_and_come_back() {
@@ -261,26 +260,32 @@ mod tests {
             v
         }
 
+        fn wait_until(
+            pred: impl Fn(&[(String, String, String)]) -> bool,
+        ) -> Vec<(String, String, String)> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let now = connectors();
+                if pred(&now) || std::time::Instant::now() >= deadline {
+                    return now;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
         let before = connectors();
-        println!("before: {before:?}");
         assert!(
             !before.is_empty(),
             "no connected head — this test needs one to mean anything"
         );
 
         let Some(hold) = super::darken() else {
-            println!("nothing was ours to darken (card already mastered?) — skipping");
             return;
         };
-        println!("darkened cards: {:?}", hold.darkened);
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        let during = connectors();
-        println!("during: {during:?}");
+        let during = wait_until(|now| now.iter().all(|(_, _, dpms)| dpms == "Off"));
 
         drop(hold);
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        let after = connectors();
-        println!("after:  {after:?}");
+        let after = wait_until(|now| now == before);
 
         for (name, en, dpms) in &during {
             assert_eq!(dpms, "Off", "{name} should be DPMS-off while held ({en})");
