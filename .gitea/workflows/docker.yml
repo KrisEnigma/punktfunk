@@ -6,9 +6,9 @@
 #     live on the LAN registry (home-ci-core — unom/infra runners/ci-core/) and are
 #     CONTENT-KEYED: the tag is a hash of what they are built from (the ci/ tree, +
 #     rust-toolchain.toml for the cross image), and a build only happens when that key
-#     has no manifest yet. A push that doesn't touch ci/ costs one curl per image
-#     (~seconds), pushes nothing over the WAN, and mints no per-SHA tag debris on the
-#     runners — the failure mode that filled the fleet's disks. `:latest` is re-pushed
+#     has no manifest yet. An app-only push costs one curl per builder image, pushes
+#     no builder bytes, and mints no per-SHA tag debris on the runners — the failure
+#     mode that filled the fleet's disks. `:latest` is re-pushed
 #     alongside every new key and is what the consuming workflows pin.
 #
 #     READS come from :5010 and need no credential. WRITES go to :5011 and need
@@ -71,6 +71,16 @@ concurrency:
 on:
   push:
     branches: [main]
+    paths:
+      - 'ci/**'
+      - 'web/**'
+      - 'docs-site/**'
+      - 'api/openapi.json'
+      - 'rust-toolchain.toml'
+      - '.dockerignore'
+      - '.gitea/scripts/reconcile-latest.sh'
+      - '.gitea/workflows/docker.yml'
+      - 'compose.production.yml'
     tags: ['v*']
   workflow_dispatch:
 

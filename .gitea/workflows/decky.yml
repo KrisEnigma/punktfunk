@@ -37,7 +37,8 @@ on:
     # tag runs are matched by `tags:` (proven by flatpak/windows-msix releases).
     paths:
       - 'clients/decky/**'
-      - 'scripts/ci/**'
+      - 'scripts/ci/gitea-release.sh'
+      - 'scripts/ci/pf-version.sh'
       - '.gitea/workflows/decky.yml'
     tags: ['v*']
   workflow_dispatch:
