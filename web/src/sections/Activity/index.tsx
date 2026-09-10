@@ -17,7 +17,6 @@ import { Activity as ActivityIcon, ArrowRight } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { FC } from "react";
 import { type ActivityEntry, useActivity } from "@/api/events";
-import { STAGGER_GAP } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,19 +27,31 @@ import { m } from "@/paraglide/messages";
 /** How many rows the dashboard card keeps. The rest are a click away, not gone. */
 const CARD_MAX = 12;
 
+/** Tighter than the house 0.1 s: a dozen short rows at 0.1 s took over a second to arrive. */
+const ROW_GAP = 0.035;
+
+/** How many rows still step. Past this they share the last one's delay, or a 200-entry ring on
+ *  the full page would take seconds to finish arriving. */
+const STAGGER_STEPS = 10;
+
 /**
- * A row's arrival. Sliding from above is the direction the list actually grows: a new event is
- * prepended, so it comes in over the row it displaced.
+ * A row's arrival. Sliding from above is the direction the list grows: a new event is prepended,
+ * so it comes in over the row it displaced.
+ *
+ * The delay lives on the ENTER transition, keyed by `custom`, and never on the row's own
+ * `transition` — that one also drives the row's `layout` animation. Every arrival re-indexes the
+ * survivors, so each slid down on its own 0–1 s delay: pure Y movement with no fade, and with
+ * events a second apart the list never finished settling. Measured: rows mid-move in every frame.
  */
 const ROW_VARIANTS = {
 	from: { opacity: 0, y: -10 },
-	enter: { opacity: 1, y: 0 },
+	enter: (i: number) => ({
+		opacity: 1,
+		y: 0,
+		transition: { delay: Math.min(i, STAGGER_STEPS) * ROW_GAP },
+	}),
 	exit: { opacity: 0, y: 6 },
 };
-
-/** How many rows still step. Past this they share the last one's delay: at the house 0.1 s a
- *  200-entry ring would otherwise take twenty seconds to finish arriving. */
-const STAGGER_STEPS = 10;
 
 /**
  * The feed itself.
@@ -49,12 +60,10 @@ const STAGGER_STEPS = 10;
  * the cap by a newer event simply vanished mid-glance, and `layout` carries the survivors down
  * rather than snapping them.
  *
- * The cadence is a per-row `delay` and NOT the house `<Stagger>` container, which is the one
- * surprise here. A stagger container works by propagating the variant NAME down and orchestrating
- * the children itself; `AnimatePresence` sits between the two and the children never inherit, so
- * the rows arrived on a single frame with every prop looking correct. Measured, not guessed — a
- * screenshot cannot tell the two apart. Each row therefore drives its own `from → enter` and
- * spaces itself by index.
+ * Each row drives its own `from → enter` rather than inheriting it from a `<Stagger>` container.
+ * Inherited, the rows never received a driving `animate` and landed on a single frame — and
+ * removing `AnimatePresence` did not change that; giving each row its own `initial`/`animate` did.
+ * A screenshot cannot tell a flattened list from a staggered one, which is why that took measuring.
  *
  * That indexing also does the right thing while live: a new event mounts at index 0, so it lands
  * immediately, while a freshly loaded page fills in on the cadence.
@@ -73,9 +82,7 @@ export const ActivityList: FC<{ entries: ActivityEntry[] }> = ({ entries }) => (
 					animate="enter"
 					exit="exit"
 					variants={ROW_VARIANTS}
-					transition={{
-						delay: Math.min(i, STAGGER_STEPS) * STAGGER_GAP,
-					}}
+					custom={i}
 					className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 first:pt-0 last:pb-0"
 				>
 					<Badge variant={toneFor(e.kind)}>{eventKindLabel(e.kind)}</Badge>

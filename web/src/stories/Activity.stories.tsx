@@ -6,7 +6,7 @@ import {
 	createRouter,
 	RouterProvider,
 } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ActivityEntry } from "@/api/events";
 import {
 	ActivityCardView,
@@ -115,6 +115,69 @@ export const Rows: Story = {
 			<ActivityList entries={entries} />
 		</div>
 	),
+};
+
+/**
+ * A host that is busy RIGHT NOW: the card starts at its cap and an event lands every 900 ms, so
+ * every arrival also evicts the oldest row. This is the only state where the card's height and
+ * the rows' movement can go wrong — both only happen while something is arriving, which is why
+ * the static stories above never showed it.
+ */
+export const Live: Story = {
+	render: function LiveFeed() {
+		const [feed, setFeed] = useState(entries);
+		useEffect(() => {
+			let seq = entries.length;
+			const t = setInterval(() => {
+				seq += 1;
+				const next = KINDS[seq % KINDS.length];
+				if (!next) return;
+				const [kind, data] = next;
+				setFeed((f) => [{ seq, ts_ms: Date.now(), kind, data }, ...f]);
+			}, 900);
+			return () => clearInterval(t);
+		}, []);
+		return (
+			<Routed>
+				<div className="max-w-3xl">
+					<ActivityCardView entries={feed} />
+				</div>
+			</Routed>
+		);
+	},
+};
+
+/**
+ * What a client CONNECTING looks like: five events inside the same instant — connected, session,
+ * stream, display, game — every two seconds. Each one evicts a row, so a burst evicts five at
+ * once, and five rows mid-exit is the one situation that can make the card taller than its cap.
+ * The one-per-900-ms story above never produces it.
+ */
+export const Burst: Story = {
+	render: function BurstFeed() {
+		const [feed, setFeed] = useState(entries);
+		useEffect(() => {
+			let seq = entries.length;
+			const t = setInterval(() => {
+				const now = Date.now();
+				const batch: ActivityEntry[] = KINDS.slice(0, 5).map(
+					([kind, data], i) => {
+						seq += 1;
+						return { seq, ts_ms: now + i, kind, data };
+					},
+				);
+				setFeed((f) => [...batch.reverse(), ...f]);
+			}, 2000);
+			return () => clearInterval(t);
+		}, []);
+		return (
+			<Routed>
+				<div className="max-w-3xl">
+					<ActivityCardView entries={feed} />
+				</div>
+			</Routed>
+		);
+	},
 };
 
 /** Nothing has happened yet — a fresh page load on a quiet host. */
