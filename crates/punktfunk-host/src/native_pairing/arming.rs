@@ -88,8 +88,8 @@ impl ArmState {
         arm.access
     }
 
-    /// PIN for this fingerprint, or a refusal that does not consume the window. `source` is
-    /// read under the same lock as the binding, so a window cannot be widened between the two.
+    /// PIN for this fingerprint knocking from `source`, or a refusal that does not consume the
+    /// window. Binding and PIN are read under one lock, so a re-arm cannot land between them.
     pub(super) fn pin_for_attempt(
         &self,
         client_fp_hex: &str,
