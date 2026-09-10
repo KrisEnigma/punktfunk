@@ -228,7 +228,9 @@ pub(crate) async fn set_display_settings(
              monitor is Linux-only (no Windows mirror backend); the pin was NOT stored"
         );
     }
-    if let Err(e) = crate::vdisplay::policy::prefs().set(policy) {
+    let store = crate::vdisplay::policy::prefs();
+    let policy = with_stored_overlays(policy, &store.get());
+    if let Err(e) = store.set(policy) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Couldn't save the display policy — {e:#}"),
@@ -239,6 +241,20 @@ pub(crate) async fn set_display_settings(
     #[cfg(target_os = "linux")]
     crate::refresh_capture_monitor_anchor("display policy updated");
     Json(display_settings_state()).into_response()
+}
+
+/// Carry the stored per-device overlays across a host-wide write.
+///
+/// `clients` never rides the wire — the state this route answers with strips it and the PUT
+/// refuses a body that carries it — so a host-wide save always arrives with an empty map. The
+/// store replaces the whole policy, so without this every preset click and every axis change
+/// would silently revert every device to the host policy.
+pub(super) fn with_stored_overlays(
+    mut incoming: crate::vdisplay::policy::DisplayPolicy,
+    stored: &crate::vdisplay::policy::DisplayPolicy,
+) -> crate::vdisplay::policy::DisplayPolicy {
+    incoming.clients = stored.clients.clone();
+    incoming
 }
 
 /// Read one device's overlay
