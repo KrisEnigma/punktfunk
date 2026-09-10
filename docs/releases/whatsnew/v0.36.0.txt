@@ -1,0 +1,6 @@
+• Keep streaming in the background behind a notification. Off until you turn it on.
+• L3 and R3 on the on-screen controller.
+• Steam Controller 2: the USB permission sticks, and it drives the menus without capture.
+• A TV remote drives the quick-action ring.
+• Frames pace evenly on handhelds.
+• A host stays reachable when the TV switches between Wi-Fi and Ethernet.
