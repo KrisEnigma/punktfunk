@@ -331,7 +331,7 @@ impl StreamState {
                  above, and pin PUNKTFUNK_WIRE_MTU to skip the lossy discovery window \
                  on this path"
             );
-        } else {
+        } else if cfg!(windows) {
             tracing::warn!(
                 period_s = format!("{:.1}", period.as_secs_f64()),
                 "client keyframe recoveries are METRONOMIC — a periodic host/display \
@@ -339,6 +339,16 @@ impl StreamState {
                  virtual-display timing) is the likely cause, not random network \
                  loss; correlate with 'slow display-descriptor poll' / 'display \
                  descriptor changed' / 'IDD-push capture stall' lines"
+            );
+        } else {
+            tracing::warn!(
+                period_s = format!("{:.1}", period.as_secs_f64()),
+                "client keyframe recoveries are METRONOMIC — a timer, not random loss. \
+                 'audio egress' with late=0 in the same window clears this process; then \
+                 read the 'wire egress' line for that window (outq_max_kb, tx_dropped, \
+                 carrier_changes = this box's kernel or NIC) and any 'network changed' \
+                 line at the same instant (DHCP renewal, route or link flap). Both clean \
+                 = the path or the client: the client's per-second stats decide"
             );
         }
     }

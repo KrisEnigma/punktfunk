@@ -72,10 +72,9 @@ host platform.
 
 **Linux packages (apt / RPM / Bazzite).** On first start `punktfunk-web-init` generates a random
 password and saves it to `~/.config/punktfunk/web-password` (as `PUNKTFUNK_UI_PASSWORD=…`). Read it
-from the init service's journal or the file:
+from the file — the journal names the file but never the password, so the secret stays 0600:
 
 ```sh
-journalctl --user -u punktfunk-web-init | sed -n 's/.*password generated: //p'
 sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' ~/.config/punktfunk/web-password
 ```
 
@@ -91,10 +90,22 @@ sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' ~/.config/punktfunk/web.env
 
 Edit that file and `systemctl --user restart punktfunk-web` to change it.
 
-**Windows host.** You choose the password during install — a secure random default is pre-filled and
-shown again on the installer's final page. It's stored in `%ProgramData%\punktfunk\web-password` (as
-`PUNKTFUNK_UI_PASSWORD=…`), readable only by Administrators and SYSTEM. To change it, edit the file
-and restart the Punktfunk Host service from an **elevated** PowerShell:
+**Windows host.** How you got the password depends on how you installed:
+
+- **The wizard** pre-fills a secure random default, lets you change it, and shows it again on its
+  final page.
+- **A silent install** — winget, or `/VERYSILENT` — has no wizard. It generates the password and
+  displays nothing, so you read it back afterwards.
+
+Either way it's stored in `%ProgramData%\punktfunk\web-password` (as `PUNKTFUNK_UI_PASSWORD=…`),
+readable only by Administrators and SYSTEM. Print it from an **elevated** PowerShell:
+
+```powershell
+punktfunk-host web password
+```
+
+To change it, edit the file and restart the Punktfunk Host service from that same elevated
+PowerShell:
 
 ```powershell
 notepad "$env:ProgramData\punktfunk\web-password"   # set PUNKTFUNK_UI_PASSWORD=<your-password>

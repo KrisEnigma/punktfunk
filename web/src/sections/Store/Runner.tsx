@@ -27,15 +27,15 @@ function useRunnerToggle() {
 }
 
 /**
- * Browse-tab banner: the runner is installed but off, so nothing an operator installs here would
- * start. Renders nothing in every other state (including "not installed" — the Installed tab's card
- * explains that case properly).
+ * Browse-tab banner: the runner is installed but not running, so nothing an operator installs
+ * here would start. Renders nothing in every other state (including "not installed" — the
+ * Installed tab's card explains that case properly).
  */
 export const RunnerBanner: FC = () => {
 	const runtime = useStoreRuntime();
 	const { toggle, isPending } = useRunnerToggle();
 	const s = runtime.data;
-	if (!s?.installed || s.enabled) return null;
+	if (!s?.installed || s.running) return null;
 
 	return (
 		<div className="flex flex-col gap-3 rounded-lg border border-amber-600/40 bg-amber-500/10 p-4 text-sm text-amber-600 sm:flex-row sm:items-center dark:border-amber-500/40 dark:text-amber-500">
@@ -63,7 +63,11 @@ export const RunnerCardSection: FC = () => {
 	);
 };
 
-/** The runner card: what the service is, whether it's up, and the one switch that changes it. */
+/**
+ * The runner card: what the service is, whether it's up, and the one switch that changes it.
+ * The switch follows `running`, not `enabled`: an enabled-but-stopped runner must offer a
+ * way back up, and enable is what starts it.
+ */
 export const RunnerCard: FC<{
 	status: RuntimeStatus;
 	busy: boolean;
@@ -108,16 +112,16 @@ export const RunnerCard: FC<{
 			{status.installed && (
 				<Button
 					size="sm"
-					variant={status.enabled ? "outline" : "default"}
+					variant={status.running ? "outline" : "default"}
 					disabled={busy}
-					onClick={() => onToggle(!status.enabled)}
+					onClick={() => onToggle(!status.running)}
 				>
-					{status.enabled ? (
+					{status.running ? (
 						<PowerOff className="size-4" />
 					) : (
 						<Power className="size-4" />
 					)}
-					{status.enabled ? m.store_runner_disable() : m.store_runner_enable()}
+					{status.running ? m.store_runner_disable() : m.store_runner_enable()}
 				</Button>
 			)}
 		</CardContent>

@@ -333,6 +333,7 @@ impl StreamState {
             client_hdr,
             bringup,
             resize_ms,
+            wire_sock,
             #[cfg(target_os = "linux")]
             input_tx,
             #[cfg(target_os = "linux")]
@@ -705,6 +706,7 @@ impl StreamState {
             client: client_label.clone(),
             bitrate_kbps: live_bitrate.clone(),
             bringup: bringup.clone(),
+            wire_sock,
         };
         let send_thread = std::thread::Builder::new()
             .name("punktfunk-send".into())

@@ -1999,13 +1999,13 @@ pub(crate) async fn run_admitted(
     let control_local_ip = conn.local_ip();
     let result: Result<()> = async {
         let stream_thread = tokio::task::spawn_blocking(move || -> Result<()> {
-            let transport: Box<dyn punktfunk_core::transport::Transport> = match (data_plane, data_sock) {
+            let (transport, wire_sock): (Box<dyn punktfunk_core::transport::Transport>, _) = match (data_plane, data_sock) {
                 // A browser's video goes out on the connection it arrived on. Nothing to bind,
                 // nothing to punch, and the source-address check below has no second socket to
                 // compare — the datagrams leave from wherever the QUIC path already is.
                 (DataPlane::Web(plane), _) => {
                     bringup_dp.mark("punch_done");
-                    Box::new(plane)
+                    (Box::new(plane), None)
                 }
                 (DataPlane::Udp, None) => anyhow::bail!("the native plane negotiated no data socket"),
                 (DataPlane::Udp, Some(data_sock)) => {
@@ -2072,7 +2072,8 @@ pub(crate) async fn run_admitted(
                      executable (any port), or pin --data-port and open that one"
                 );
             }
-            Box::new(transport)
+            let wire_sock = transport.try_clone_socket().ok();
+            (Box::new(transport), wire_sock)
                 }
             };
             let mut session = Session::new(cfg, transport)
@@ -2151,6 +2152,7 @@ pub(crate) async fn run_admitted(
                         client_hdr,
                         bringup: bringup_dp,
                         resize_ms: resize_ms_dp,
+                        wire_sock,
                         #[cfg(target_os = "linux")]
                         input_tx: input_tx_stream,
                         #[cfg(target_os = "linux")]

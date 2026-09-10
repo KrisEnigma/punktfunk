@@ -76,7 +76,9 @@ pub fn outro(ui: &dyn Reporter, facts: &WinFacts, choices: &WinChoices, artifact
         Artifact::Host => {
             ui.line("  1. Open the web console:  https://<this-PC>:47992  (the certificate is the host's own — continue past the warning)");
             if !facts.web_password_present {
-                ui.line("     password: stored ACL'd in %ProgramData%\\punktfunk\\web-password (the wizard also shows it on its finish page)");
+                ui.line(
+                    "     password: punktfunk-host web password  (from an elevated PowerShell)",
+                );
             }
             ui.line(&format!(
                 "  2. Install a client on the device you stream to ({DOCS}/install-client), connect, and click Approve in the console."

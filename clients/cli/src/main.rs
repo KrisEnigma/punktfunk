@@ -676,42 +676,32 @@ from the config directory for a true factory reset."
                 let fp = value(args, "--fp").unwrap_or_default();
                 let name = value(args, "--name");
                 let mut known = KnownHosts::load();
-                if let Some(i) = known
-                    .hosts
-                    .iter()
-                    .position(|h| h.addr == addr && h.port == port)
-                {
-                    return match merge_saved_host(&mut known, i, &fp, name.as_deref()) {
+                if let Some(i) = add_target(&known, &addr, port, &fp) {
+                    match merge_saved_host(&mut known, i, &fp, name.as_deref()) {
                         AddOutcome::Unchanged => {
                             eprintln!("{addr}:{port} is already saved");
-                            OK
+                            return OK;
                         }
-                        AddOutcome::Conflict => {
-                            eprintln!(
-                                "{addr}:{port} is already saved with a different fingerprint — \
-                                 forget it first if you really mean to replace it \
-                                 (punktfunk hosts forget {addr}:{port})"
-                            );
-                            TRUST_REJECTED
+                        AddOutcome::Pinned => {
+                            return match known.save() {
+                                Ok(()) => {
+                                    println!("updated {addr}:{port}");
+                                    OK
+                                }
+                                Err(e) => {
+                                    eprintln!("saving: {e:#}");
+                                    CONNECT_FAILED
+                                }
+                            }
                         }
-                        AddOutcome::Pinned => match known.save() {
-                            Ok(()) => {
-                                println!("updated {addr}:{port}");
-                                OK
-                            }
-                            Err(e) => {
-                                eprintln!("saving: {e:#}");
-                                CONNECT_FAILED
-                            }
-                        },
-                    };
+                        // The guard held: nothing was overwritten, so file this identity below.
+                        AddOutcome::Conflict => {}
+                    }
                 }
-                // No record at this address — but a record carrying this exact FINGERPRINT is
-                // this same host at a new one. Re-point it rather than filing a second record:
-                // the fingerprint is the identity, and a host that changed DHCP lease is the
-                // whole reason `hosts add --fp` is idempotent in the first place. Without this a
-                // moved host accumulates one record per address it has ever held, and the one a
-                // stable id resolves to keeps the address it can no longer be reached at.
+                // Nothing to merge into here — but a record with this exact FINGERPRINT is this
+                // same host at a new address. Re-point it: a moved host would otherwise file one
+                // record per address it has ever held, and the one its stable id resolves to
+                // keeps an address it has left.
                 if let Some(i) = known
                     .hosts
                     .iter()
@@ -786,8 +776,23 @@ from the config directory for a true factory reset."
         Unchanged,
         /// The record had no fingerprint and now has this one.
         Pinned,
-        /// The record carries a DIFFERENT fingerprint. Refused, never overwritten.
+        /// The record carries a DIFFERENT fingerprint. Never overwritten — a second identity
+        /// is filed beside it.
         Conflict,
+    }
+
+    /// The saved record `hosts add` is ABOUT: the one at this address already carrying this
+    /// fingerprint, or the unpinned placeholder waiting for one.
+    ///
+    /// A record there carrying a DIFFERENT fingerprint is a different host, and is not this
+    /// add's target — a dual-boot box answers on one lease with one MAC and a certificate per
+    /// OS, so the second one is filed beside the first rather than refused for its address.
+    fn add_target(known: &KnownHosts, addr: &str, port: u16, fp: &str) -> Option<usize> {
+        known.hosts.iter().position(|h| {
+            h.addr == addr
+                && h.port == port
+                && (fp.is_empty() || h.fp_hex.is_empty() || h.fp_hex.eq_ignore_ascii_case(fp))
+        })
     }
 
     /// `hosts add --fp` against an address that is already saved. The difference between these
@@ -798,10 +803,10 @@ from the config directory for a true factory reset."
     /// the floor and the launch that follows refuses for want of a pin — which is what this did
     /// before, silently and with exit 0.
     ///
-    /// A *different* fingerprint is refused because a changed identity is a decision for a
-    /// person, at a surface that can show them both. That is what `upsert_trusted` exists to
-    /// enforce; quietly overwriting it here would be a back door through the pinning the rest
-    /// of the client is built on.
+    /// A *different* fingerprint never lands on this record: a changed identity is a decision
+    /// for a person, and quietly overwriting a pin here would be a back door through the
+    /// pinning the rest of the client is built on. `hosts add` files it as its own record —
+    /// see [`add_target`], which is why this outcome should not reach the caller.
     fn merge_saved_host(
         known: &mut KnownHosts,
         i: usize,
@@ -1486,6 +1491,27 @@ from the config directory for a true factory reset."
                 AddOutcome::Unchanged
             );
             assert_eq!(known.hosts[0].fp_hex, "ABC123");
+        }
+
+        /// Both OS installs of a dual-boot box answer at one address with a certificate each.
+        /// The second `hosts add --fp` is not about the first's record, so it is filed beside
+        /// it — the pin the user already has must survive, and so must the new one.
+        #[test]
+        fn a_second_identity_at_one_address_is_not_this_adds_target() {
+            let known = KnownHosts {
+                hosts: vec![saved("desk", "192.168.1.9", "abc123")],
+            };
+            assert_eq!(add_target(&known, "192.168.1.9", 9777, "deadbeef"), None);
+            // The same host again, and a placeholder waiting for a pin, both ARE the target.
+            assert_eq!(add_target(&known, "192.168.1.9", 9777, "ABC123"), Some(0));
+            assert_eq!(add_target(&known, "192.168.1.9", 9777, ""), Some(0));
+            let placeholder = KnownHosts {
+                hosts: vec![saved("192.168.1.9", "192.168.1.9", "")],
+            };
+            assert_eq!(
+                add_target(&placeholder, "192.168.1.9", 9777, "abc"),
+                Some(0)
+            );
         }
 
         /// A changed identity is a decision for a person. Never a silent overwrite — this is the

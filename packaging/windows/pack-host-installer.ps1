@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Build + sign the punktfunk Windows host installer (Inno Setup setup.exe).
+  Build + sign the punktfunk Windows host installer (the punktfunk-setup-win engine exe).
 
 .DESCRIPTION
   From a release `cargo build -p punktfunk-host --features nvenc` output (the exe), this:
@@ -12,7 +12,7 @@
        a silent downgrade to a throwaway cert - see -RequireSignedCert,
     2. signs the inner punktfunk-host.exe,
     3. stages the pf-vdisplay virtual-display driver bundle (unless -NoDriver),
-    4. runs ISCC to build punktfunk-host-setup-<ver>.exe,
+    4. builds the wizard and packs it over the {app} tree as punktfunk-host-setup-<ver>.exe,
     5. signs the setup.exe (timestamped - MANDATORY under Azure signing, see Sign-File),
     6. emits HOST_SETUP_PATH / HOST_CER_PATH to GITHUB_ENV for the publish step. Azure signing
        emits no .cer: the chain is publicly trusted, so there is nothing for a user to import.
@@ -23,7 +23,7 @@
   installer's signature and the driver catalogs' signatures are independent by design - Windows
   verifies the first via SmartScreen/UAC and the second via PnP, and never requires a common signer.
 
-  Idempotent; safe to re-run. Run on the Windows runner / dev box (MSVC + Windows SDK + Inno Setup).
+  Idempotent; safe to re-run. Run on the Windows runner / dev box (MSVC + Windows SDK).
 
 .EXAMPLE
   pwsh -File pack-host-installer.ps1 -Version 0.2.137 -TargetDir C:\t\release -OutDir C:\t\out
@@ -52,10 +52,6 @@ param(
     [string]$BunExe = $env:BUN_EXE,                                # portable bun.exe runtime for the console + runner
     [switch]$NoDriver,                                              # build without the bundled pf-vdisplay driver
     [switch]$NoSign,                                                # skip signing (local debug)
-    # WP3.1 (design/installer-v2-windows.md D3/D6): pack with punktfunk-setup-win instead of ISCC.
-    # Same staging inputs, same output name, same signing. Since M5 the workflow passes it for
-    # the published artifact; ISCC (the default here) is the one-release revert path.
-    [switch]$Engine,
     # 'auto' (default) = required iff this is a v* tag build; 'true'/'false' to force. See below.
     [ValidateSet('auto', 'true', 'false')][string]$RequireSignedCert = 'auto',
     # The installer's architecture (#298). -TargetDir must already hold that arch's host build;
@@ -69,27 +65,15 @@ $ProgressPreference = 'SilentlyContinue'
 $PSNativeCommandUseErrorActionPreference = $false
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$iss = Join-Path $here 'punktfunk-host.iss'
 $triple = if ($Arch -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
 $archSuffix = if ($Arch -eq 'arm64') { '_arm64' } else { '' }
-if ($Arch -ne 'x64' -and -not $Engine) { throw "-Arch $Arch needs -Engine: the Inno path stays x64-only" }
 $exe = Join-Path $TargetDir 'punktfunk-host.exe'
 if (-not (Test-Path $exe)) { throw "missing build artifact 'punktfunk-host.exe' in $TargetDir (did 'cargo build --release -p punktfunk-host --features nvenc' run?)" }
 $trayExe = Join-Path $TargetDir 'punktfunk-tray.exe'
 if (-not (Test-Path $trayExe)) { throw "missing build artifact 'punktfunk-tray.exe' in $TargetDir (did 'cargo build --release -p punktfunk-tray' run?)" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-# --- locate ISCC (Inno Setup) + signtool (Windows SDK) ---------------------------------------
-function Find-Iscc {
-    foreach ($p in @(
-            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
-            'C:\Program Files\Inno Setup 6\ISCC.exe')) {
-        if (Test-Path $p) { return $p }
-    }
-    $c = Get-Command iscc -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    throw "ISCC.exe (Inno Setup 6, any 6.x) not found - install it (choco install innosetup -y)."
-}
+# --- locate signtool (Windows SDK) -----------------------------------------------------------
 function Find-SdkTool([string]$name) {
     $root = 'C:\Program Files (x86)\Windows Kits\10\bin'
     $hit = Get-ChildItem -Path $root -Recurse -Filter $name -ErrorAction SilentlyContinue |
@@ -122,8 +106,6 @@ function Find-AzureDlib([string]$Explicit) {
     }
     $hit.FullName
 }
-$iscc = if ($Engine) { $null } else { Find-Iscc }
-if ($iscc) { Write-Host "ISCC: $iscc" }
 
 # --- signing cert (supplied stable pfx OR ephemeral self-signed) -----------------------------
 # FAIL CLOSED on a real release. The ephemeral fallback below exists so canary/CI/dev builds keep
@@ -234,28 +216,10 @@ Sign-File $trayExe
 $repoRoot = (Resolve-Path (Join-Path $here '..\..')).Path
 $hostEnvSrc = Join-Path $repoRoot 'scripts\windows\host.env.example'
 $readmeSrc = Join-Path $here 'README.md'
-foreach ($p in @($exe, $trayExe, $hostEnvSrc, $readmeSrc, $iss)) {
+$brandIco = Join-Path $here 'branding\punktfunk.ico'
+foreach ($p in @($exe, $trayExe, $hostEnvSrc, $readmeSrc, $brandIco)) {
     if (-not (Test-Path -LiteralPath $p)) { throw "installer source file missing: $p" }
 }
-
-# ISCC is a 32-bit program. On the self-hosted runner (which runs as SYSTEM) the checkout lives
-# under C:\Windows\System32\config\systemprofile\..., and WOW64 file-system redirection rewrites a
-# 32-bit process's System32 reads to SysWOW64 (where the files don't exist) -> ISCC dies at
-# script-open with "path not found". So stage every file ISCC reads (the .iss + the two payload
-# files) into the non-redirected build dir under C:\t. (BinDir/StageDir/OutputDir already live there.)
-$hostEnv = Join-Path $OutDir 'host.env.example'
-$readme = Join-Path $OutDir 'README.md'
-$issLocal = Join-Path $OutDir 'punktfunk-host.iss'
-Copy-Item -LiteralPath $hostEnvSrc -Destination $hostEnv -Force
-Copy-Item -LiteralPath $readmeSrc -Destination $readme -Force
-Copy-Item -LiteralPath $iss -Destination $issLocal -Force
-# Branding (wizard BMPs + punktfunk.ico, committed outputs of branding/gen-branding.ps1): the .iss
-# references them as "branding\" relative to itself, so stage the dir next to the staged .iss.
-$brandStage = Join-Path $OutDir 'branding'
-if (Test-Path $brandStage) { Remove-Item $brandStage -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $brandStage | Out-Null
-Copy-Item (Join-Path $here 'branding\*.bmp') $brandStage -Force
-Copy-Item (Join-Path $here 'branding\punktfunk.ico') $brandStage -Force
 
 # License/attribution payload bundled into {app}\licenses: the project's own MIT/Apache texts and the
 # generated third-party crate notices. The FFmpeg LGPL notice + license text are added to this same
@@ -270,15 +234,6 @@ foreach ($n in @('LICENSE-MIT', 'LICENSE-APACHE', 'THIRD-PARTY-NOTICES.txt')) {
     else { Write-Warning "license payload missing (skipped): $p" }
 }
 
-$defines = @(
-    "/DMyAppVersion=$Version",
-    "/DBinDir=$TargetDir",
-    "/DOutputDir=$OutDir",
-    "/DHostEnv=$hostEnv",
-    "/DReadme=$readme",
-    "/DLicensesDir=$licStage"
-)
-
 # --- build (from source) + stage the pf-vdisplay virtual-display driver -----------------------
 # pf-vdisplay is our all-Rust IddCx driver (packaging/windows/drivers/). It is now BUILT FROM SOURCE
 # every release (build-pf-vdisplay.ps1) instead of shipping a checked-in prebuilt binary: the vendored
@@ -291,8 +246,6 @@ if (-not $NoDriver) {
     & (Join-Path $here 'build-pf-vdisplay.ps1') -Out $built -Arch $Arch
     $stage = Join-Path $OutDir 'stage'
     & (Join-Path $here 'stage-pf-vdisplay.ps1') -OutDir $stage -VendorDir $built -Arch $Arch
-    # The installer runs `punktfunk-host.exe driver install --dir {tmp}\pfvdisplay` (not a staged .ps1).
-    $defines += "/DStageDir=$stage"
 }
 else { Write-Host "-NoDriver: building installer WITHOUT the bundled pf-vdisplay driver" }
 
@@ -311,7 +264,6 @@ if (-not $NoDriver) {
     if (Test-Path $gpStage) { Remove-Item -Recurse -Force $gpStage }
     New-Item -ItemType Directory -Force -Path $gpStage | Out-Null
     Copy-Item (Join-Path $gpBuilt '*') $gpStage -Force
-    $defines += "/DGamepadStageDir=$gpStage"
     Write-Host "==> built + staged gamepad UMDF drivers -> $gpStage"
 }
 
@@ -322,17 +274,15 @@ if (-not $NoDriver) {
 # VB-CABLE keeps working as a fallback mic target.
 
 # --- stage the bun runtime + the two bun payloads (web console, plugin/script runner) --------------
-# Both the web console and the runner run on bun. Stage everything ISCC reads into $OutDir (the
-# non-WOW64-redirected C:\t area, same reason as the .iss/host.env staging above). bun is staged ONCE
-# and shared: the two payloads pass their own defines and the .iss keys WithWeb / WithScripting on
-# (their dir + BunExe). Each payload is omitted when its inputs are unset (e.g. a local debug pack).
+# Both the web console and the runner run on bun. bun is staged ONCE into $OutDir and shared by the
+# two payloads; each payload is omitted when its inputs are unset (e.g. a local debug pack), and the
+# {app} tree below simply has no bun\ or web\ then.
 $haveBun = $BunExe -and (Test-Path $BunExe)
 $wantWeb = $WebDir -and (Test-Path $WebDir) -and $haveBun
 $wantScripting = $ScriptingBundle -and (Test-Path $ScriptingBundle) -and $haveBun
 if ($wantWeb -or $wantScripting) {
     $bunStage = Join-Path $OutDir 'bun.exe'
     Copy-Item -LiteralPath $BunExe -Destination $bunStage -Force
-    $defines += "/DBunExe=$bunStage"
 }
 # The web console: the self-contained .output tree (Nitro noExternals - deps bundled + tree-shaken,
 # no node_modules), run as a supervised child of the PunktfunkHost service (no launcher script),
@@ -342,8 +292,6 @@ if ($wantWeb) {
     if (Test-Path $webStage) { Remove-Item $webStage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $webStage | Out-Null
     Copy-Item (Join-Path $WebDir '*') -Destination $webStage -Recurse -Force
-    # The console is provisioned by `punktfunk-host.exe web setup` (not a staged web-setup.ps1).
-    $defines += "/DWebDir=$webStage"
     Write-Host "bundling the web console from $WebDir (+ bun $BunExe)"
 }
 else { Write-Host "no -WebDir/-BunExe -> installer built WITHOUT the web console" }
@@ -358,8 +306,6 @@ if ($wantScripting) {
     Copy-Item -LiteralPath $ScriptingBundle -Destination $scrBundle -Force
     $scrRun = Join-Path $scrStage 'scripting-run.cmd'
     Copy-Item (Join-Path $repoRoot 'scripts\windows\scripting-run.cmd') -Destination $scrRun -Force
-    $defines += "/DScriptingBundle=$scrBundle"
-    $defines += "/DScriptingRunCmd=$scrRun"
     Write-Host "bundling the plugin/script runner from $ScriptingBundle (+ bun $BunExe)"
 }
 else { Write-Host "no -ScriptingBundle/-BunExe -> installer built WITHOUT the plugin/script runner" }
@@ -389,85 +335,77 @@ if (Test-Path (Join-Path $layerSrc 'Cargo.toml')) {
         Copy-Item $layerDll (Join-Path $layerStage 'pf_vkhdr_layer.dll') -Force
         Copy-Item (Join-Path $layerSrc 'pf_vkhdr_layer.json') (Join-Path $layerStage 'pf_vkhdr_layer.json') -Force
         Sign-File (Join-Path $layerStage 'pf_vkhdr_layer.dll')
-        $defines += "/DVkLayerDir=$layerStage"
         Write-Host "==> staged pf-vkhdr-layer -> $layerStage"
     }
     else { Write-Warning "pf-vkhdr-layer build failed ($layerExit) - installer built WITHOUT the HDR Vulkan layer" }
 }
 else { Write-Host "no pf-vkhdr-layer crate -> installer built WITHOUT the HDR Vulkan layer" }
 
-# --- build the installer (from the non-redirected copy under C:\t) -----------------------------
+# --- build the wizard + pack the installer -----------------------------------------------------
 $setup = Join-Path $OutDir "punktfunk-host-setup-$Version$archSuffix.exe"
-if ($Engine) {
-    # The wizard crate builds into a target dir of its own: windows-reactor-setup stages the
-    # self-contained WinAppSDK runtime next to the exe, and the packer takes everything in that
-    # dir that is not cargo's as the runtime set.
-    $wizTarget = Join-Path $OutDir 'wizard-target'
-    Write-Host "==> building punktfunk-setup-win (self-contained wizard + packer) -> $wizTarget"
-    $prevTarget = $env:CARGO_TARGET_DIR
-    $env:CARGO_TARGET_DIR = $wizTarget
-    Push-Location $repoRoot
-    # windows-reactor-setup extracts the WinAppSDK runtime into ONE cache under LOCALAPPDATA,
-    # keyed by package version only: whichever arch fills it first is what every later wizard
-    # build stages. A cross-built wizard therefore gets a cache of its own.
-    $prevLocal = $env:LOCALAPPDATA
-    if ($Arch -ne 'x64') { $env:LOCALAPPDATA = Join-Path $OutDir "reactor-cache-$Arch" }
-    & cargo build --release -p punktfunk-setup-win --target $triple
+# The wizard crate builds into a target dir of its own: windows-reactor-setup stages the
+# self-contained WinAppSDK runtime next to the exe, and the packer takes everything in that
+# dir that is not cargo's as the runtime set.
+$wizTarget = Join-Path $OutDir 'wizard-target'
+Write-Host "==> building punktfunk-setup-win (self-contained wizard + packer) -> $wizTarget"
+$prevTarget = $env:CARGO_TARGET_DIR
+$env:CARGO_TARGET_DIR = $wizTarget
+Push-Location $repoRoot
+# windows-reactor-setup extracts the WinAppSDK runtime into ONE cache under LOCALAPPDATA,
+# keyed by package version only: whichever arch fills it first is what every later wizard
+# build stages. A cross-built wizard therefore gets a cache of its own.
+$prevLocal = $env:LOCALAPPDATA
+if ($Arch -ne 'x64') { $env:LOCALAPPDATA = Join-Path $OutDir "reactor-cache-$Arch" }
+& cargo build --release -p punktfunk-setup-win --target $triple
+$wizExit = $LASTEXITCODE
+$env:LOCALAPPDATA = $prevLocal
+# The pack tool rewrites bytes on the runner, so a cross build needs a host-arch copy of it.
+if ($wizExit -eq 0 -and $Arch -ne 'x64') {
+    & cargo build --release -p punktfunk-setup-win --bin punktfunk-setup-pack
     $wizExit = $LASTEXITCODE
-    $env:LOCALAPPDATA = $prevLocal
-    # The pack tool rewrites bytes on the runner, so a cross build needs a host-arch copy of it.
-    if ($wizExit -eq 0 -and $Arch -ne 'x64') {
-        & cargo build --release -p punktfunk-setup-win --bin punktfunk-setup-pack
-        $wizExit = $LASTEXITCODE
-    }
-    Pop-Location
-    if ($prevTarget) { $env:CARGO_TARGET_DIR = $prevTarget } else { Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
-    if ($wizExit -ne 0) { throw "punktfunk-setup-win build failed ($wizExit)" }
-    $wizRel = Join-Path $wizTarget "$triple\release"
-    $wizExe = Join-Path $wizRel 'punktfunk-setup-win.exe'
-    $packer = if ($Arch -eq 'x64') { Join-Path $wizRel 'punktfunk-setup-pack.exe' } else { Join-Path $wizTarget 'release\punktfunk-setup-pack.exe' }
-
-    # The {app} tree - the .iss [Files] table as directories (a missing input is simply absent,
-    # exactly as its #ifdef was). The plan's DeployFiles lays this down verbatim.
-    $appStage = Join-Path $OutDir 'app'
-    if (Test-Path $appStage) { Remove-Item $appStage -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path $appStage | Out-Null
-    Copy-Item $exe, $trayExe, $hostEnv -Destination $appStage -Force
-    Copy-Item $readme -Destination (Join-Path $appStage 'README.txt') -Force
-    Copy-Item (Join-Path $brandStage 'punktfunk.ico') -Destination $appStage -Force
-    Copy-Item $licStage -Destination (Join-Path $appStage 'licenses') -Recurse -Force
-    if ($wantWeb -or $wantScripting) {
-        New-Item -ItemType Directory -Force -Path (Join-Path $appStage 'bun') | Out-Null
-        Copy-Item $bunStage -Destination (Join-Path $appStage 'bun\bun.exe') -Force
-    }
-    if ($wantWeb) { Copy-Item $webStage -Destination (Join-Path $appStage 'web\.output') -Recurse -Force }
-    if ($wantScripting) { Copy-Item $scrStage -Destination (Join-Path $appStage 'scripting') -Recurse -Force }
-    if ($layerStage -and (Test-Path $layerStage)) { Copy-Item $layerStage -Destination (Join-Path $appStage 'vklayer') -Recurse -Force }
-    # Driver payloads: extracted beside the wizard, handed to `driver install --dir <staging>\...`.
-    $stagingRoot = Join-Path $OutDir 'staging'
-    if (Test-Path $stagingRoot) { Remove-Item $stagingRoot -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
-    if (-not $NoDriver) {
-        Copy-Item $stage -Destination (Join-Path $stagingRoot 'pfvdisplay') -Recurse -Force
-        Copy-Item $gpStage -Destination (Join-Path $stagingRoot 'gamepad') -Recurse -Force
-    }
-
-    # D6: the payload-less uninstaller lands in {app} as unins000.exe, signed before it is packed.
-    $unins = Join-Path $appStage 'unins000.exe'
-    & $packer pack-uninstaller --exe $wizExe --runtime $wizRel --version $Version --artifact host --out $unins
-    if ($LASTEXITCODE -ne 0) { throw "pack-uninstaller failed ($LASTEXITCODE)" }
-    Sign-File $unins
-
-    & $packer pack --exe $wizExe --runtime $wizRel --app $appStage --staging $stagingRoot --version $Version --artifact host --out $setup
-    if ($LASTEXITCODE -ne 0) { throw "pack failed ($LASTEXITCODE)" }
-    & $packer inspect $setup
-    if ($LASTEXITCODE -ne 0) { throw "inspect failed ($LASTEXITCODE)" }
 }
-else {
-    Write-Host "==> ISCC $($defines -join ' ') $issLocal"
-    & $iscc @defines $issLocal
-    if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+Pop-Location
+if ($prevTarget) { $env:CARGO_TARGET_DIR = $prevTarget } else { Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
+if ($wizExit -ne 0) { throw "punktfunk-setup-win build failed ($wizExit)" }
+$wizRel = Join-Path $wizTarget "$triple\release"
+$wizExe = Join-Path $wizRel 'punktfunk-setup-win.exe'
+$packer = if ($Arch -eq 'x64') { Join-Path $wizRel 'punktfunk-setup-pack.exe' } else { Join-Path $wizTarget 'release\punktfunk-setup-pack.exe' }
+
+# The {app} tree. A missing input is simply absent - the plan's DeployFiles lays down whatever
+# this assembles, verbatim, and the host's own probes decide what a partial tree can do.
+$appStage = Join-Path $OutDir 'app'
+if (Test-Path $appStage) { Remove-Item $appStage -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $appStage | Out-Null
+Copy-Item $exe, $trayExe, $hostEnvSrc -Destination $appStage -Force
+Copy-Item $readmeSrc -Destination (Join-Path $appStage 'README.txt') -Force
+Copy-Item $brandIco -Destination $appStage -Force
+Copy-Item $licStage -Destination (Join-Path $appStage 'licenses') -Recurse -Force
+if ($wantWeb -or $wantScripting) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $appStage 'bun') | Out-Null
+    Copy-Item $bunStage -Destination (Join-Path $appStage 'bun\bun.exe') -Force
 }
+if ($wantWeb) { Copy-Item $webStage -Destination (Join-Path $appStage 'web\.output') -Recurse -Force }
+if ($wantScripting) { Copy-Item $scrStage -Destination (Join-Path $appStage 'scripting') -Recurse -Force }
+if ($layerStage -and (Test-Path $layerStage)) { Copy-Item $layerStage -Destination (Join-Path $appStage 'vklayer') -Recurse -Force }
+# Driver payloads: extracted beside the wizard, handed to `driver install --dir <staging>\...`.
+$stagingRoot = Join-Path $OutDir 'staging'
+if (Test-Path $stagingRoot) { Remove-Item $stagingRoot -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
+if (-not $NoDriver) {
+    Copy-Item $stage -Destination (Join-Path $stagingRoot 'pfvdisplay') -Recurse -Force
+    Copy-Item $gpStage -Destination (Join-Path $stagingRoot 'gamepad') -Recurse -Force
+}
+
+# D6: the payload-less uninstaller lands in {app} as unins000.exe, signed before it is packed.
+$unins = Join-Path $appStage 'unins000.exe'
+& $packer pack-uninstaller --exe $wizExe --runtime $wizRel --version $Version --artifact host --out $unins
+if ($LASTEXITCODE -ne 0) { throw "pack-uninstaller failed ($LASTEXITCODE)" }
+Sign-File $unins
+
+& $packer pack --exe $wizExe --runtime $wizRel --app $appStage --staging $stagingRoot --version $Version --artifact host --out $setup
+if ($LASTEXITCODE -ne 0) { throw "pack failed ($LASTEXITCODE)" }
+& $packer inspect $setup
+if ($LASTEXITCODE -ne 0) { throw "inspect failed ($LASTEXITCODE)" }
 if (-not (Test-Path $setup)) { throw "expected installer not produced: $setup" }
 
 # --- sign the setup.exe + clean up ------------------------------------------------------------
@@ -486,6 +424,6 @@ elseif (-not $NoSign) {
 }
 if ($env:GITHUB_ENV) {
     "HOST_SETUP_PATH=$setup" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-    if ($Engine) { "HOST_PACK_TOOL=$packer" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+    "HOST_PACK_TOOL=$packer" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     if (-not $NoSign -and $signMode -ne 'azure') { "HOST_CER_PATH=$cerPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
 }

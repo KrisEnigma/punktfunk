@@ -203,6 +203,9 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleCrea
             device_name: opts.device_name,
             deck: false,
             fallback_ui: opts.fallback_ui,
+            // The same probe that gates the `CODEC_PYROWAVE` advertisement, so the codec
+            // row cannot offer a picture this GPU would never decode. Cached per process.
+            pyrowave_ok: crate::pyro::available(),
             store: Some(store.clone()),
             platform: Platform::Android,
             gpu_cache_bytes: opts.gpu_cache_bytes.max(16 << 20),

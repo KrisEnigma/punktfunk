@@ -120,7 +120,7 @@ punktfunk-host-setup-<ver>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
 Keep `/SUPPRESSMSGBOXES`: without it an unattended run can stop on a message box nobody can see.
 
 A silent **first** install takes the same defaults as the wizard, so add or drop individual options
-with Inno's `/MERGETASKS` — a bare name adds a task, a `!` prefix removes one.
+with `/MERGETASKS` — a bare name adds a task, a `!` prefix removes one.
 `/MERGETASKS="gamestream"` turns on Moonlight compatibility; `/MERGETASKS="!trayicon"` skips the
 status icon. The task names are `installdriver`, `installgamepad`, `installhdrlayer`, `gamestream`,
 `allowpublicfw`, `startservice` and `trayicon`.
@@ -140,8 +140,8 @@ Two things to know before you script it:
 - Setup **aborts with a non-zero exit code** if another Moonlight-compatible host — Sunshine, Apollo,
   Vibeshine, Vibepollo or LuminalShine — is installed *and* its service is set to start on its own.
   Stop and disable that service first. An installed but disabled host is not flagged.
-- There is no wizard, so the console password is generated for you. Read it afterwards from
-  `%ProgramData%\punktfunk\web-password`.
+- There is no wizard, so the console password is generated for you and nothing displays it. Print it
+  afterwards from an elevated PowerShell with `punktfunk-host web password`.
 
 ### Web console & pairing
 
@@ -154,8 +154,10 @@ flow): it bundles the console plus its own runtime, and the **`PunktfunkHost`** 
 
 #### Console login password
 
-You choose the console **login password** during setup — a secure random default is pre-filled and
-shown on the installer's final page. It's stored in `%ProgramData%\punktfunk\web-password`, readable
+The wizard lets you choose the console **login password** during setup, with a secure random default
+pre-filled, and shows it again on its final page. A silent install (winget, `/VERYSILENT`) has no
+wizard: it generates the password and displays nothing, so print it from an elevated PowerShell with
+`punktfunk-host web password`. It's stored in `%ProgramData%\punktfunk\web-password`, readable
 only by Administrators and SYSTEM. To read or change it (with the service restart), see
 [The Web Console → Login password](/docs/web-console#login-password); forgot it entirely?
 [Forgot your Password?](/docs/forgot-password).

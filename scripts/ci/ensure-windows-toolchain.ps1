@@ -1,5 +1,5 @@
-# Idempotent pre-flight for punktfunk's Windows CI dependencies: WDK + cargo-wdk (driver builds),
-# Inno Setup, and the aarch64-pc-windows-msvc rustup target. Run at the
+# Idempotent pre-flight for punktfunk's Windows CI dependencies: WDK + cargo-wdk (driver builds)
+# and the aarch64-pc-windows-msvc rustup target. Run at the
 # start of every Windows CI job so ANY runner - freshly built from unom/infra's windows-runner/
 # template, rebuilt, or a new one added later - self-provisions on first real use, instead of
 # needing a human to remember to dispatch a separate provisioning workflow first (and instead of
@@ -17,25 +17,23 @@ trap {
 }
 
 # --- reclaim disk before building -----------------------------------------------------------------
-# The windows-amd64 runner's system volume is intentionally small (100 GB) and a full Windows CI pass
-# writes ~50 GB of cargo target output into C:\t (x64) / C:\t-a64 (arm64). Left to accumulate across
-# runs that overflows the disk and the build dies with "no space on device" (os error 112) - exactly
-# what took the Windows host build down. The runner bakes in a reclaimer + a scheduled task that keeps
-# an idle box lean (unom/infra's setup-gitea-runner-base.ps1 ->
-# C:\Users\Public\act-runner\clean-runner-disk.ps1); call it here too so THIS job starts with headroom
-# regardless of when that task last ran. Threshold mode (no -Force): it only prunes when actually low,
-# so incremental-compile caches survive when there's room. Best-effort - a cleanup hiccup must never
-# fail the build.
+# The runner's 100 GB volume holds ~50 GB of cargo output per full Windows pass (C:\t, C:\t-a64).
+# Below the threshold, prune them before compiling; above it, keep the incremental caches warm.
+# The reclaimer (unom/infra -> C:\Users\Public\act-runner\clean-runner-disk.ps1) must get -Force
+# from here: without it, its job guard counts this very job as "in progress" and reclaims nothing.
+# The runner runs one job at a time, so no other job can be using those dirs. Best-effort - a
+# cleanup hiccup must never fail the build.
 $reclaimer = 'C:\Users\Public\act-runner\clean-runner-disk.ps1'
+$minFreeGb = 35
 try {
-  if (Test-Path $reclaimer) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $reclaimer
-  }
-  else {
-    # Fallback for a runner not yet re-baked with the infra reclaimer: prune the big target dirs when low.
-    $freeGb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
-    Write-Host "[ensure-toolchain] clean-runner-disk.ps1 absent; C: free ${freeGb} GB"
-    if ($freeGb -lt 35) {
+  $freeGb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
+  Write-Host "[ensure-toolchain] C: free ${freeGb} GB (reclaim below ${minFreeGb} GB)"
+  if ($freeGb -lt $minFreeGb) {
+    if (Test-Path $reclaimer) {
+      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $reclaimer -Force
+    }
+    else {
+      # A runner not yet re-baked with the infra reclaimer: prune the big target dirs directly.
       foreach ($d in 'C:\t', 'C:\t-a64') {
         if (Test-Path $d) { Write-Host "  reclaiming $d"; Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
       }

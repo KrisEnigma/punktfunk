@@ -224,13 +224,18 @@ pub struct ConsoleOptions {
     /// Host has another UI when the console is off (phone/tablet touch shell).
     /// False on desktop and Android TV — offering "off" would strand the user.
     pub fallback_ui: bool,
+    /// This device's GPU decodes PyroWave. Answer from the same probe that gates the
+    /// client's `CODEC_PYROWAVE` advertisement: a row that offers what the Hello never
+    /// asks for is a setting that silently does nothing.
+    pub pyrowave_ok: bool,
     /// Settings and profile catalog. `None` uses the desktop file store
     /// (`pf_client_core::trust`); every other host must supply one.
     pub store: Option<Arc<dyn SettingsStore>>,
     /// Which settings rows exist and which platform-native screens may open.
     pub platform: Platform,
     /// Skia GPU resource-cache budget, bytes. Desktop default is
-    /// [`DEFAULT_GPU_CACHE_BYTES`]; a 1 GB TV box wants a quarter of that.
+    /// [`DEFAULT_GPU_CACHE_BYTES`]; a memory-tight box may go down to
+    /// [`MIN_GPU_CACHE_BYTES`] but never below it.
     pub gpu_cache_bytes: usize,
 }
 
@@ -240,6 +245,9 @@ impl ConsoleOptions {
             device_name,
             deck,
             fallback_ui: false,
+            // The desktop probe reads the session's Vulkan device, which the console does
+            // not own yet. A GPU that runs this shell is a Vulkan 1.3 one, so it is yes.
+            pyrowave_ok: true,
             store: None,
             platform: Platform::Desktop,
             gpu_cache_bytes: DEFAULT_GPU_CACHE_BYTES,
@@ -254,6 +262,16 @@ impl ConsoleOptions {
 /// re-decoded JPEG on the render thread. A TV box passes its own through
 /// [`ConsoleOptions::gpu_cache_bytes`].
 pub const DEFAULT_GPU_CACHE_BYTES: usize = 160 << 20;
+
+/// The floor under [`ConsoleOptions::gpu_cache_bytes`], bytes.
+///
+/// A screenful of covers plus the render targets is ~74 MB at `k` 1.35, the
+/// scale a 1080p surface gives. Under that the cache evicts covers it is about
+/// to draw again and the next frame re-decodes them on the render thread, which
+/// on a television costs more than the frame. 96 MB leaves that ~30% of room.
+/// It is a ceiling, not an allocation, and the shell hands its covers back
+/// before a stream takes the GPU.
+pub const MIN_GPU_CACHE_BYTES: usize = 96 << 20;
 
 pub(crate) struct Shell {
     stack: Vec<Screen>,
@@ -270,6 +288,7 @@ pub(crate) struct Shell {
     device_name: String,
     deck: bool,
     fallback_ui: bool,
+    pyrowave_ok: bool,
     pub(crate) in_stream: bool,
     connecting: Option<Connecting>,
     launching: Option<Launching>,
@@ -382,6 +401,7 @@ impl Shell {
             device_name: opts.device_name,
             deck: opts.deck,
             fallback_ui: opts.fallback_ui,
+            pyrowave_ok: opts.pyrowave_ok,
             in_stream: false,
             connecting: None,
             launching: None,
@@ -618,6 +638,7 @@ impl Shell {
             pads: &self.pads,
             deck: self.deck,
             fallback_ui: self.fallback_ui,
+            pyrowave_ok: self.pyrowave_ok,
             device_name: &self.device_name,
             t,
         };
@@ -1131,6 +1152,7 @@ impl Shell {
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
+                pyrowave_ok: self.pyrowave_ok,
                 device_name: &self.device_name,
                 t: self.t0.elapsed().as_secs_f64(),
             };
@@ -1220,6 +1242,7 @@ impl Shell {
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
+                pyrowave_ok: self.pyrowave_ok,
                 device_name: &self.device_name,
                 t: self.t0.elapsed().as_secs_f64(),
             };
@@ -1253,6 +1276,7 @@ impl Shell {
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
+                pyrowave_ok: self.pyrowave_ok,
                 device_name: &self.device_name,
                 t: self.t0.elapsed().as_secs_f64(),
             };

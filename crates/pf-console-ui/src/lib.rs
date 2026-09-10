@@ -76,7 +76,7 @@ pub use model::{
     SpeedStatus, WakeStatus,
 };
 pub use platform::{Platform, PlatformScreen};
-pub use shell::{ConsoleOptions, DEFAULT_GPU_CACHE_BYTES};
+pub use shell::{ConsoleOptions, DEFAULT_GPU_CACHE_BYTES, MIN_GPU_CACHE_BYTES};
 #[cfg(all(any(target_os = "linux", windows), feature = "vulkan-overlay"))]
 pub use skia_overlay::SkiaOverlay;
 pub use store::{SettingsStore, SnapshotStore};

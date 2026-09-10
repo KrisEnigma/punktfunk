@@ -775,7 +775,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
             // dialed and probed where it lives. No disk write when unchanged.
             if let Some(a) = hosts
                 .iter()
-                .find(|h| h.fp_hex == k.fp_hex || (h.addr == k.addr && h.port == k.port))
+                .find(|h| pf_client_core::discovery::same_host(k, h))
             {
                 crate::trust::learn_from_advert(
                     &k.fp_hex,
@@ -1247,10 +1247,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
     let discovered: Vec<&DiscoveredHost> = hosts
         .iter()
         .filter(|h| {
-            !known.hosts.iter().any(|k| {
-                (!h.fp_hex.is_empty() && k.fp_hex == h.fp_hex)
-                    || (k.addr == h.addr && k.port == h.port)
-            })
+            !known
+                .hosts
+                .iter()
+                .any(|k| pf_client_core::discovery::same_host(k, h))
         })
         .collect();
     if discovered.is_empty() {

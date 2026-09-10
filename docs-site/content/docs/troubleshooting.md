@@ -219,6 +219,18 @@ See [GNOME](/docs/gnome) for the GL/EGL userspace details.
   auto-detects the live compositor, and the pin points it at one backend even when a different
   session is live (it also disables Gaming ↔ Desktop following).
 
+## A library launch says "Unable to open a connection to X" (Linux)
+
+Steam — or Lutris, or a native X11 game — opens that dialog instead of the game, and the same title
+launches fine once you have started Steam yourself. The host had no `DISPLAY` to hand the child: a
+systemd `--user` host starts before the session exports one, and `systemctl --user
+import-environment` never reaches a unit that is already running. The second attempt works because
+a Steam client that is already up takes the `steam://` URL over its own pipe and never needs X.
+
+Hosts after **0.35.0** read the session's display at each launch, so [update](/docs/updating)
+first. On an older one, add `DISPLAY=:0` to `~/.config/punktfunk/host.env` (`ls /tmp/.X11-unix/`
+names the number) and `systemctl --user restart punktfunk-host`.
+
 ## Games from my library open on a physical monitor, not on the stream (Hyprland / sway)
 
 The stream shows your bare desktop while the game is running on a screen at the machine. On

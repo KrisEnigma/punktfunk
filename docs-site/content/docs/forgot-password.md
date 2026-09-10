@@ -34,10 +34,11 @@ sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' ~/.config/punktfunk/web.env        # Steam
 ```
 
 On a **Windows host**, from an **elevated** PowerShell (the file is readable only by Administrators
-and SYSTEM):
+and SYSTEM). This is also how you get the password after a winget or silent install, which never
+displays one:
 
 ```powershell
-Get-Content "$env:ProgramData\punktfunk\web-password"
+punktfunk-host web password
 ```
 
 To replace it with one you pick, follow [Login password](/docs/web-console#login-password). It has

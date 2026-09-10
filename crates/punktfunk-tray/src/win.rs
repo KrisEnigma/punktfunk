@@ -18,10 +18,10 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_ACCESS_RIGHTS};
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Shell::{
     SetCurrentProcessExplicitAppUserModelID, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO,
@@ -125,26 +125,49 @@ fn log(msg: &str) {
     }
 }
 
+/// One tray per logon session. `Local\` resolves per session, so fast-user-switch and RDP each
+/// keep their own icon; the same name twice in one session is a duplicate.
+///
+/// The name being taken is the answer, however it is taken. `CreateMutexW` asks for full access,
+/// which a mutex created at a higher integrity level (or by another user in this session) refuses
+/// with `ERROR_ACCESS_DENIED` — reading that as "no tray" is what put two icons in one session.
+/// `SYNCHRONIZE` is allowed up, so the open below still sees it. The handle is deliberately
+/// leaked: it holds the name for this process's life. `punktfunk-host`'s `windows/tray.rs`
+/// opens the same name — keep the two literals in step.
+fn another_instance_holds_the_session() -> bool {
+    // SYNCHRONIZE only: existence is all that is asked.
+    const SYNCHRONIZE: SYNCHRONIZATION_ACCESS_RIGHTS = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
+    // SAFETY: both calls take a static nul-terminated name and no security attributes. The
+    // CreateMutexW handle is never closed (process-lifetime guard); the OpenMutexW one, which
+    // only answers a question, is closed here.
+    unsafe {
+        match CreateMutexW(None, false, w!("Local\\PunktfunkTray")) {
+            Ok(_) => GetLastError() == ERROR_ALREADY_EXISTS,
+            Err(_) => match OpenMutexW(SYNCHRONIZE, false, w!("Local\\PunktfunkTray")) {
+                Ok(h) => {
+                    let _ = CloseHandle(h);
+                    true
+                }
+                // Neither call reached the name: no evidence of a tray, so show an icon
+                // rather than leave the user without one.
+                Err(_) => false,
+            },
+        }
+    }
+}
+
 pub fn run(args: crate::Args) -> anyhow::Result<()> {
     let _ = args.autostart; // Linux-only; accepted so the command line matches
     if args.quit {
         return quit_existing();
     }
 
-    // `Local\` is per logon session (fast-user-switch). Handle leaked for process life.
-    // SAFETY: CreateMutexW with a valid nul-terminated name and no security attributes; the
-    // returned handle is never closed (process-lifetime singleton guard).
-    let already = unsafe {
-        match CreateMutexW(None, false, w!("Local\\PunktfunkTray")) {
-            Ok(_) => GetLastError() == ERROR_ALREADY_EXISTS,
-            Err(_) => false, // unknown: keep going rather than skip the icon
-        }
-    };
-    if already {
+    if another_instance_holds_the_session() {
         return Ok(());
     }
 
-    // AUMID must match `punktfunk-host.iss` [Registry] (DisplayName + IconUri). Call before
+    // AUMID must match the key the installer registers (punktfunk-setup's `registry_steps`).
+    // Call before
     // the notify icon exists. Unregistered (dev) degrades to default attribution, not an error.
     // SAFETY: static nul-terminated literal.
     unsafe {

@@ -98,9 +98,9 @@ pinned. The layers, from the outside in:
 - **The web console has its own password**, on every platform — which makes it the real remote-admin
   credential. Linux packages generate a random one on first start into
   `~/.config/punktfunk/web-password`; the SteamOS installer writes it to
-  `~/.config/punktfunk/web.env` and points you at that file when it finishes; on Windows you choose
-  it during install (a strong random default is pre-filled) and it is stored readable only by
-  Administrators and SYSTEM.
+  `~/.config/punktfunk/web.env` and points you at that file when it finishes; on Windows the wizard
+  lets you choose it (a strong random default is pre-filled) while a silent install generates one,
+  and either way it is stored readable only by Administrators and SYSTEM.
   Pick a strong one and keep it out of shared documents; repeated wrong guesses are rate-limited per
   IP. To read it back or change it, see [Forgot your Password?](/docs/forgot-password).
 - **The [shared clipboard](/docs/clipboard) is opt-in at both ends.** The host never advertises it

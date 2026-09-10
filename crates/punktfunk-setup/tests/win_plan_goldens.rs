@@ -184,6 +184,87 @@ fn golden_client_fresh() {
     );
 }
 
+/// A Windows 10 box must be refused before anything moves, or it takes the whole install and
+/// then fails every session on a virtual display that never starts. The plan holds NOTHING else:
+/// a refusal that still deploys files is worse than none.
+#[test]
+fn a_host_install_below_the_os_floor_refuses_and_touches_nothing() {
+    let facts = WinFacts {
+        os_build: plan::MIN_HOST_BUILD - 1,
+        ..fresh()
+    };
+    let choices = WinChoices::derive(&facts, Artifact::Host);
+    let built = plan::build(&facts, &choices, Artifact::Host, false);
+    let steps: Vec<&WinAction> = built.steps().collect();
+    assert!(
+        matches!(steps.as_slice(), [WinAction::Refuse(_)]),
+        "{steps:?}"
+    );
+
+    // The client runs on Windows 10, and an uninstall must work whatever the box is.
+    let client = WinChoices::derive(&facts, Artifact::Client);
+    assert!(!plan::build(&facts, &client, Artifact::Client, false)
+        .steps()
+        .any(|s| matches!(s, WinAction::Refuse(_))));
+    assert!(!plan::build(&facts, &choices, Artifact::Host, true)
+        .steps()
+        .any(|s| matches!(s, WinAction::Refuse(_))));
+}
+
+fn client_upgrade() -> WinFacts {
+    WinFacts {
+        client_installed: Some(WinInstall {
+            version: Some("0.35.0".into()),
+            location: Some(r"C:\Users\me\AppData\Local\Programs\Punktfunk".into()),
+        }),
+        ..fresh()
+    }
+}
+
+#[test]
+fn golden_client_uninstall() {
+    let facts = client_upgrade();
+    let choices = WinChoices::derive(&facts, Artifact::Client);
+    golden(
+        "win-client-uninstall",
+        &render(&facts, &choices, Artifact::Client, true),
+    );
+}
+
+/// Inno's uninstaller swept the `[Icons]` it had created; the engine creates them itself and
+/// so owes the sweep. Every link the install can lay down is deleted, `desktop_icon` or not —
+/// the box records that answer nowhere. A miss leaves a Start-menu tile aimed at a dead exe.
+#[test]
+fn the_client_uninstall_removes_every_shortcut_the_install_can_create() {
+    let facts = fresh();
+    let mut choices = WinChoices::derive(&facts, Artifact::Client);
+    choices.desktop_icon = true;
+    let created: Vec<String> = plan::build(&facts, &choices, Artifact::Client, false)
+        .phases
+        .iter()
+        .flat_map(|p| &p.steps)
+        .filter_map(|a| match a {
+            WinAction::Shortcut { link, .. } => Some(link.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 3, "{created:?}");
+
+    let deleted: Vec<String> = plan::build(&facts, &choices, Artifact::Client, true)
+        .phases
+        .iter()
+        .flat_map(|p| &p.steps)
+        .filter_map(|a| match a {
+            WinAction::DeleteFiles { paths } => Some(paths.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    for link in &created {
+        assert!(deleted.contains(link), "{link} is never deleted");
+    }
+}
+
 /// Host and client are two products under two registry keys (D1). On a box where the HOST is
 /// installed and the client is not, deriving the client's choices must read the CLIENT key:
 /// `installed` is the host's, and taking it made the client a false upgrade pinned to

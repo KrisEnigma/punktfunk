@@ -19,7 +19,7 @@ use super::plan::Artifact;
 use super::{NetCategory, NetProfile, TaskState, WinFacts, WinInstall};
 
 /// One per flow worth reviewing (WP2.3's list, plus M4's client manage mode).
-pub const WIN_PRESETS: [&str; 8] = [
+pub const WIN_PRESETS: [&str; 9] = [
     "win11-fresh",
     "win11-upgrade",
     "win11-sunshine",
@@ -28,6 +28,7 @@ pub const WIN_PRESETS: [&str; 8] = [
     "client-fresh",
     "client-win10",
     "client-upgrade",
+    "client-uninstall",
 ];
 
 /// A canned box plus the mode the payload manifest would have carried.
@@ -139,6 +140,17 @@ pub fn win_preset(name: &str) -> Option<WinPreset> {
             },
             artifact: Artifact::Client,
             uninstall: false,
+        },
+        "client-uninstall" => WinPreset {
+            facts: WinFacts {
+                client_installed: Some(WinInstall {
+                    version: Some("0.35.0".into()),
+                    location: Some(sandbox_app_dir()),
+                }),
+                ..fresh_box()
+            },
+            artifact: Artifact::Client,
+            uninstall: true,
         },
         _ => return None,
     })

@@ -8,9 +8,12 @@
 //!   only after [`PANEL_WIDEN_STREAK`] agreeing observations.
 //! - [`CadenceClock`] — type-2 loop. Due time is `src_pts + offset + cushion`;
 //!   timestamps are never smoothed.
+//! - [`SlotClock`] / [`pace_slot`] / [`SlotIntervals`] — present-phased vsync
+//!   slots, the one-slot-apart pacing rule, and the judder ruler.
 //!
 //! Evidence: `design/phase-locked-capture.md`,
-//! `design/presenter-cadence-rework.md`.
+//! `design/presenter-cadence-rework.md`,
+//! `design/android-asc-presenter-pacing-overhaul.md`.
 
 /// ~24 Hz to ~500 Hz. Outside this is a clock glitch, not a display mode.
 const PANEL_PERIOD_RANGE_NS: std::ops::RangeInclusive<i64> = 2_000_000..=42_000_000;
@@ -329,6 +332,164 @@ const fn shr_toward_zero(v: i64, shift: u8) -> i64 {
         -((-v) >> shift)
     } else {
         v >> shift
+    }
+}
+
+/// Lead samples beyond this are a stalled compositor, not a work duration.
+const LEAD_MAX_NS: i64 = 50_000_000;
+
+/// Present-phased vsync grid plus the lead the compositor needs ahead of it.
+///
+/// Phase is the last real present (a present fence), never a latch: the latch
+/// is the compositor's wakeup, one work duration before the vsync, and that
+/// duration differs per device. Slots are integer indices on the grid; a
+/// presenter that targets `present_ns(slot) − period/2` is ready for `slot` and
+/// not for `slot − 1` with half a period of tolerance either side. `lead_ns` is
+/// a decaying maximum of present − latch, the apply-ahead a slot needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotClock {
+    grid: PanelGrid,
+    /// A spacing of several periods is the panel slowing down (source at or
+    /// above the panel rate) or the source below the panel — only the former
+    /// may widen the grid.
+    learn_wider: bool,
+    phase_ns: i64,
+    phase_slot: i64,
+    lead_ns: i64,
+}
+
+impl SlotClock {
+    /// `panel_hz` seeds the period; `learn_wider` when the source rate is at
+    /// or above the panel rate (see the field).
+    pub fn seeded(panel_hz: i32, learn_wider: bool) -> SlotClock {
+        SlotClock {
+            grid: PanelGrid::seeded(panel_hz),
+            learn_wider,
+            phase_ns: 0,
+            phase_slot: 0,
+            lead_ns: 0,
+        }
+    }
+
+    /// A present has been observed; slot arithmetic is meaningful.
+    pub fn phased(&self) -> bool {
+        self.phase_ns > 0 && self.grid.period_ns() > 0
+    }
+
+    pub fn period_ns(&self) -> i64 {
+        self.grid.period_ns()
+    }
+
+    pub fn lead_ns(&self) -> i64 {
+        self.lead_ns
+    }
+
+    /// One real present and the latch that produced it. Returns the slot the
+    /// present landed on; the grid re-phases onto it.
+    pub fn observe(&mut self, present_ns: i64, latch_ns: i64) -> i64 {
+        let sample = present_ns - latch_ns;
+        if (0..=LEAD_MAX_NS).contains(&sample) {
+            if sample > self.lead_ns {
+                self.lead_ns = sample;
+            } else {
+                self.lead_ns -= (self.lead_ns - sample) >> 4;
+            }
+        }
+        if !self.phased() {
+            if self.grid.period_ns() == 0 && self.phase_ns > 0 {
+                self.grid.observe(present_ns - self.phase_ns);
+            }
+            self.phase_ns = present_ns;
+            self.phase_slot = 0;
+            return 0;
+        }
+        let slot = self.slot_nearest(present_ns);
+        let spacing = present_ns - self.phase_ns;
+        if slot == self.phase_slot + 1 || self.learn_wider {
+            self.grid.observe(spacing);
+        }
+        self.phase_ns = present_ns;
+        self.phase_slot = slot;
+        slot
+    }
+
+    /// First slot strictly after `t_ns`.
+    pub fn slot_after(&self, t_ns: i64) -> i64 {
+        self.phase_slot + (t_ns - self.phase_ns).div_euclid(self.period_ns()) + 1
+    }
+
+    /// The slot nearest `t_ns`.
+    pub fn slot_nearest(&self, t_ns: i64) -> i64 {
+        let p = self.period_ns();
+        self.phase_slot + (t_ns - self.phase_ns + p / 2).div_euclid(p)
+    }
+
+    pub fn present_ns(&self, slot: i64) -> i64 {
+        self.phase_ns + (slot - self.phase_slot) * self.period_ns()
+    }
+}
+
+/// The slot a frame presents on: never the previous frame's, never more than
+/// `max_ahead` beyond the first reachable one. Beyond that bound the frame
+/// re-targets the held slot and the compositor keeps the newer of the two.
+pub fn pace_slot(reachable: i64, last_slot: Option<i64>, max_ahead: i64) -> i64 {
+    let floor = last_slot.map_or(reachable, |l| l + 1);
+    reachable.max(floor).min(reachable + max_ahead.max(0))
+}
+
+/// Present spacings in whole slots. The mode is the cadence ratio (2 for
+/// 60-on-120); everything off the mode is judder. Bucket 0 is two frames on one
+/// vsync — the compositor kept only one of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SlotIntervals {
+    pub n0: u32,
+    pub n1: u32,
+    pub n2: u32,
+    pub n3p: u32,
+}
+
+impl SlotIntervals {
+    pub fn note(&mut self, slots: i64) {
+        match slots {
+            i64::MIN..=0 => self.n0 += 1,
+            1 => self.n1 += 1,
+            2 => self.n2 += 1,
+            _ => self.n3p += 1,
+        }
+    }
+
+    pub fn total(&self) -> u32 {
+        self.n0 + self.n1 + self.n2 + self.n3p
+    }
+
+    /// The bucket with the most intervals, in slots (3 stands for 3+).
+    pub fn mode(&self) -> i64 {
+        let m = self.n1.max(self.n2).max(self.n3p);
+        if m == 0 {
+            return 0;
+        }
+        if self.n1 == m {
+            1
+        } else if self.n2 == m {
+            2
+        } else {
+            3
+        }
+    }
+
+    /// Off-mode intervals per thousand. Bucket 0 is never the mode.
+    pub fn judder_permille(&self) -> u32 {
+        let total = self.total();
+        if total == 0 {
+            return 0;
+        }
+        let on_mode = match self.mode() {
+            1 => self.n1,
+            2 => self.n2,
+            3 => self.n3p,
+            _ => 0,
+        };
+        ((total - on_mode) as u64 * 1000 / total as u64) as u32
     }
 }
 
@@ -801,5 +962,142 @@ mod panel_grid_tests {
             g.observe(P120);
         }
         assert_eq!(g.period_ns(), P120, "and the real grid wins it back");
+    }
+}
+
+#[cfg(test)]
+mod slot_clock_tests {
+    use super::*;
+
+    const P: i64 = 8_333_333;
+    const LEAD: i64 = 4_000_000;
+
+    fn phased() -> SlotClock {
+        let mut c = SlotClock::seeded(120, true);
+        c.observe(1_000_000_000, 1_000_000_000 - LEAD);
+        c
+    }
+
+    #[test]
+    fn first_present_phases_the_grid_on_slot_zero() {
+        let mut c = SlotClock::seeded(120, true);
+        assert!(!c.phased());
+        assert_eq!(c.observe(1_000_000_000, 1_000_000_000 - LEAD), 0);
+        assert!(c.phased());
+        assert_eq!(c.lead_ns(), LEAD);
+        assert_eq!(c.present_ns(3), 1_000_000_000 + 3 * P);
+    }
+
+    #[test]
+    fn slot_arithmetic_is_strict_after_and_nearest() {
+        let c = phased();
+        let v0 = 1_000_000_000;
+        assert_eq!(c.slot_after(v0), 1, "the phase instant itself is not after");
+        assert_eq!(c.slot_after(v0 + 1), 1);
+        assert_eq!(c.slot_after(v0 + P - 1), 1);
+        assert_eq!(c.slot_after(v0 + P), 2);
+        assert_eq!(c.slot_after(v0 - 1), 0);
+        assert_eq!(c.slot_nearest(v0 + P / 2 - 1), 0);
+        assert_eq!(c.slot_nearest(v0 + P / 2 + 1), 1);
+        assert_eq!(c.slot_nearest(v0 - P + 100), -1);
+    }
+
+    #[test]
+    fn consecutive_presents_walk_the_slots_and_rephase() {
+        let mut c = phased();
+        let v0 = 1_000_000_000;
+        assert_eq!(c.observe(v0 + P + 40_000, v0 + P + 40_000 - LEAD), 1);
+        assert_eq!(
+            c.observe(v0 + 2 * P - 30_000, v0 + 2 * P - 30_000 - LEAD),
+            2
+        );
+        // Re-phased onto the last present: the next slot is one period from it.
+        assert_eq!(c.present_ns(3), v0 + 3 * P - 30_000);
+        assert_eq!(c.slot_after(v0 + 2 * P), 3);
+    }
+
+    #[test]
+    fn a_two_period_spacing_is_slot_plus_two_and_only_a_faster_source_widens() {
+        let mut c = SlotClock::seeded(120, false);
+        c.observe(1_000_000_000, 1_000_000_000 - LEAD);
+        let mut t = 1_000_000_000;
+        for i in 1..=10 {
+            t += 2 * P;
+            assert_eq!(c.observe(t, t - LEAD), 2 * i);
+        }
+        assert_eq!(
+            c.period_ns(),
+            P,
+            "60 fps on a 120 Hz panel keeps the 120 grid"
+        );
+        let mut c = SlotClock::seeded(120, true);
+        c.observe(1_000_000_000, 1_000_000_000 - LEAD);
+        let mut t = 1_000_000_000;
+        for _ in 0..PANEL_WIDEN_STREAK {
+            t += 2 * P;
+            c.observe(t, t - LEAD);
+        }
+        assert_eq!(c.period_ns(), 2 * P, "a panel that idled to 60 is learned");
+    }
+
+    #[test]
+    fn lead_is_a_decaying_maximum() {
+        let mut c = phased();
+        let v = 1_000_000_000;
+        c.observe(v + P, v + P - 6_000_000);
+        assert_eq!(c.lead_ns(), 6_000_000, "a larger sample is adopted at once");
+        for i in 2..40 {
+            c.observe(v + i * P, v + i * P - LEAD);
+        }
+        assert!(c.lead_ns() < 4_500_000 && c.lead_ns() >= LEAD);
+        c.observe(v + 40 * P, v + 40 * P - LEAD_MAX_NS - 1);
+        assert!(c.lead_ns() < 4_500_000, "a stalled sample is ignored");
+    }
+
+    #[test]
+    fn pace_slot_never_shares_a_slot_and_never_holds_past_the_bound() {
+        assert_eq!(pace_slot(10, None, 1), 10);
+        assert_eq!(
+            pace_slot(10, Some(7), 1),
+            10,
+            "after a gap: as soon as possible"
+        );
+        assert_eq!(
+            pace_slot(10, Some(10), 1),
+            11,
+            "an early frame takes the next slot"
+        );
+        assert_eq!(
+            pace_slot(10, Some(11), 1),
+            11,
+            "past the bound it re-targets the held slot"
+        );
+        assert_eq!(
+            pace_slot(10, Some(10), 0),
+            10,
+            "no pacing: today's collision"
+        );
+        assert_eq!(pace_slot(10, Some(12), 3), 13);
+    }
+
+    #[test]
+    fn intervals_judder_is_the_off_mode_fraction() {
+        let mut h = SlotIntervals::default();
+        for _ in 0..117 {
+            h.note(1);
+        }
+        h.note(0);
+        h.note(2);
+        h.note(3);
+        assert_eq!(h.mode(), 1);
+        assert_eq!(h.total(), 120);
+        assert_eq!(h.judder_permille(), 25);
+        let mut h = SlotIntervals::default();
+        for _ in 0..60 {
+            h.note(2);
+        }
+        assert_eq!(h.mode(), 2);
+        assert_eq!(h.judder_permille(), 0, "60-on-120 at 2,2,2 is not judder");
+        assert_eq!(SlotIntervals::default().judder_permille(), 0);
     }
 }

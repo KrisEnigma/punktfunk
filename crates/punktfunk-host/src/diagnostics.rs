@@ -28,6 +28,7 @@ pub mod ids {
     pub const SERVER_CONFLICT: &str = "server_conflict";
     pub const HYPRLAND_PERMISSIONS: &str = "hyprland_permissions";
     pub const OMARCHY_UPDATES: &str = "omarchy_updates";
+    pub const VDISPLAY_DRIVER: &str = "vdisplay_driver";
 }
 
 /// Probe result. `Inapplicable` is not `Ok`: "never on this box" and "works here" are different
@@ -487,6 +488,7 @@ mod tests {
             ids::SERVER_CONFLICT,
             ids::HYPRLAND_PERMISSIONS,
             ids::OMARCHY_UPDATES,
+            ids::VDISPLAY_DRIVER,
         ] {
             assert!(
                 ids.iter().any(|i| i == expected),

@@ -54,12 +54,12 @@ pub(crate) mod proc;
 
 #[path = "vdisplay/session.rs"]
 pub(crate) mod session;
-#[cfg(target_os = "linux")]
-pub use session::session_epoch;
 pub use session::{
     apply_session_env, compositor_for_kind, detect_active_session, observe_session_instance,
     settle_desktop_portal, try_recover_session, ActiveKind, ActiveSession, SessionEnv,
 };
+#[cfg(target_os = "linux")]
+pub use session::{session_epoch, session_x11_env};
 
 #[path = "vdisplay/routing.rs"]
 pub(crate) mod routing;
@@ -445,6 +445,41 @@ pub fn probe(compositor: Compositor) -> Result<()> {
         let _ = compositor;
         anyhow::bail!("virtual displays require Linux or Windows")
     }
+}
+
+/// The Windows virtual-display driver, as data for a diagnostics row. Off Windows it is
+/// always `Inapplicable`. Bounded: a driver that never answers reports `Wedged`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DriverHealth {
+    Inapplicable,
+    /// The control device opened and completed the version handshake.
+    Ok {
+        protocol: u32,
+    },
+    /// No device interface at all: not installed, or its host process crashed.
+    Absent,
+    /// The interface opens but the driver's host process never answers.
+    Wedged,
+    /// Installed, but speaks a protocol this host does not.
+    Outdated {
+        driver: u32,
+        host: u32,
+    },
+    /// Present and not openable — mid-arrival, a problem code, or an IOCTL error.
+    NotReady {
+        detail: String,
+    },
+}
+
+/// Read-only probe for a diagnostics UI; never reloads the adapter.
+#[cfg(target_os = "windows")]
+pub fn driver_health() -> DriverHealth {
+    driver::health()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn driver_health() -> DriverHealth {
+    DriverHealth::Inapplicable
 }
 
 // Management policy (keep-alive / topology / conflict / identity / layout).

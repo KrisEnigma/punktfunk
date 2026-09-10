@@ -499,6 +499,8 @@ pub fn serve(
         gamestream,
         "punktfunk host"
     );
+    crate::net_health::log_addresses();
+    crate::net_health::spawn_route_watch();
     // Scan once (cached for `/local/summary`). Warn only when a clash is active;
     // a dormant leftover logs at INFO so every boot is not a warning.
     let conflicts = crate::detect::init();

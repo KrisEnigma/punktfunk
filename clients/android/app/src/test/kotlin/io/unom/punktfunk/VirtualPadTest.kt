@@ -33,21 +33,28 @@ class VirtualPadTest {
     fun presets_carry_the_controls_the_design_names() {
         fun labels(layout: String) = padControls(layout, 933f, 420f).map { it.label }.toSet()
         val full = labels("full")
-        assertEquals(11, full.size)
-        assertTrue(full.containsAll(listOf("Left stick", "Right stick", "D-pad", "Face buttons", "Left trigger", "Right bumper", "Start")))
+        assertEquals(13, full.size)
+        assertTrue(
+            full.containsAll(
+                listOf(
+                    "Left stick", "Right stick", "D-pad", "Face buttons", "Left trigger", "Right bumper", "Start",
+                    "Left stick click", "Right stick click",
+                ),
+            ),
+        )
         val sticks = labels("sticks")
         assertTrue(sticks.containsAll(listOf("Left stick", "Right stick", "Left bumper", "Right trigger")))
         assertTrue("D-pad" !in sticks && "Face buttons" !in sticks)
         val dpad = labels("dpad")
         assertTrue(dpad.containsAll(listOf("D-pad", "Face buttons")))
-        assertTrue("Left stick" !in dpad && "Left trigger" !in dpad)
+        assertTrue("Left stick" !in dpad && "Left trigger" !in dpad && "Left stick click" !in dpad)
         assertEquals(full, labels("bogus"))
     }
 
     @Test
     fun preset_ids_are_the_schema_ids() {
         assertEquals(
-            setOf("lb", "lt", "rb", "rt", "ls", "rs", "dpad", "face", "select", "guide", "start"),
+            setOf("lb", "lt", "rb", "rt", "l3", "r3", "ls", "rs", "dpad", "face", "select", "guide", "start"),
             padControls("full", 933f, 420f).map { it.id }.toSet(),
         )
     }

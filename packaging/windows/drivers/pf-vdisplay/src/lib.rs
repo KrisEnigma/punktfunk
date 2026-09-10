@@ -50,7 +50,7 @@ pub(crate) const STATUS_ACCESS_DENIED: NTSTATUS = 0xC000_0022u32 as NTSTATUS;
 /// `10` = IddCx 1.10, the TRUTHFUL floor: the drain loop calls
 /// `IddCxSwapChainReleaseAndAcquireBuffer2` (1.10) unconditionally and the swap-chain worker uses
 /// `IddCxSetRealtimeGPUPriority` (1.9); the product floor is already Windows 11 22H2 / build 22621,
-/// whose framework is 1.10 (the installer gate — `MinVersion=10.0.22621` in punktfunk-host.iss —
+/// whose framework is 1.10 (the installer gate — `MIN_HOST_BUILD` in punktfunk-setup —
 /// exists precisely for this driver). The oracle's historical `4` predated that floor and would let
 /// the driver load against a SHORT `IddFunctions` table, where dispatching any post-1.4 DDI reads
 /// past the populated entries. With `10`, an older framework fails the bind cleanly (driver doesn't

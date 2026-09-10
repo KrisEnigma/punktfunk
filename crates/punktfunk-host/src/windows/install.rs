@@ -1,10 +1,9 @@
-//! Install-time `driver install|uninstall` and `web setup` that Inno `[Run]`/`[UninstallRun]`
-//! delegates to this EXE instead of BOM-less `.ps1` files.
+//! Install-time `driver install|uninstall` and `web setup`: the installer's plan spawns this
+//! EXE rather than a `.ps1` file.
 //!
 //! PowerShell 5.1 reads a `.ps1` *file* in the machine ANSI codepage; a non-ASCII byte on a
 //! non-English locale aborts as "unterminated string". A compiled subcommand has no such
 //! surface: `certutil`/`pnputil`/`nefconc`/`schtasks`/`netsh`/`icacls` are string literals.
-//! Inline `-Command` PowerShell in the `.iss` is a command-line string, not a file, so it stays.
 //! Same pattern as `service install` in `service.rs`.
 //!
 //! Best-effort: a hiccup warns but returns `Ok`. A non-zero exit aborts the installer; a
@@ -445,8 +444,41 @@ const WEB_TASK: &str = "PunktfunkWeb";
 pub fn web_main(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("setup") => web_setup(&args[1..]),
-        _ => bail!("usage: punktfunk-host web setup --app-dir <app> [--password-file <file>]"),
+        Some("password") => web_password(),
+        _ => bail!(
+            "usage: punktfunk-host web setup --app-dir <app> [--password-file <file>]\n       punktfunk-host web password"
+        ),
     }
+}
+
+/// Print the console login password, the one affordance a silent install leaves.
+///
+/// The file is ACL'd to Administrators + SYSTEM, so a non-elevated read fails on permission
+/// rather than absence. The two need different next moves, which is why this reads the file
+/// itself instead of the Option-returning `service::read_env_file_value`.
+fn web_password() -> Result<()> {
+    let path = pf_paths::config_dir().join("web-password");
+    let text = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
+            "Couldn't read the console password, which only Administrators may see. Run this from an elevated PowerShell."
+        ),
+        std::io::ErrorKind::NotFound => anyhow::anyhow!(
+            "Couldn't find the console password. Run this from an elevated PowerShell — a normal one can't see the file even when it is there."
+        ),
+        _ => anyhow::anyhow!("Couldn't read the console password — {e}"),
+    })?;
+    // Same split as `service::read_env_file_value`: first non-empty line, value after the `=`.
+    let value = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .map(|l| l.split_once('=').map_or(l, |(_, v)| v).trim())
+        .filter(|v| !v.is_empty())
+        .context(
+            "The console password file is empty, so the console admits nobody. Put a PUNKTFUNK_UI_PASSWORD line back and restart the host service.",
+        )?;
+    println!("{value}");
+    Ok(())
 }
 
 fn web_setup(args: &[String]) -> Result<()> {

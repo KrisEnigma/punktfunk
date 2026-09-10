@@ -47,10 +47,14 @@ impl PinHostsScreen {
     /// disagree with the carousel.
     fn pinned(&self, ctx: &Ctx, host_idx: usize) -> bool {
         let host = &ctx.hosts[host_idx];
+        // The host half of the key (a pinned card appends its profile id past a NUL), not the
+        // address: two OS installs of a dual-boot box are two hosts at one address.
+        fn host_key(k: &str) -> &str {
+            k.split('\0').next().unwrap_or(k)
+        }
+        let key = host_key(&host.key);
         ctx.hosts.iter().any(|r| {
-            r.addr == host.addr
-                && r.port == host.port
-                && r.pin.as_ref().is_some_and(|p| p.id == self.profile_id)
+            host_key(&r.key) == key && r.pin.as_ref().is_some_and(|p| p.id == self.profile_id)
         })
     }
 
@@ -236,6 +240,7 @@ mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -278,6 +283,7 @@ mod tests {
             pads: &pads,
             deck: false,
             fallback_ui: false,
+            pyrowave_ok: true,
             device_name: "t",
             t: 0.0,
         };

@@ -52,7 +52,7 @@ Standalone crate (own `[workspace]`), Windows-only `cdylib`:
 cargo build --release           # -> target/release/pf_vkhdr_layer.dll
 ```
 
-The host installer (`packaging/windows/pack-host-installer.ps1` → `punktfunk-host.iss`) builds it,
+The host installer (`packaging/windows/pack-host-installer.ps1`) builds it,
 lays `pf_vkhdr_layer.dll` + `pf_vkhdr_layer.json` into `{app}\vklayer`, and registers it under
 `HKLM64\SOFTWARE\Khronos\Vulkan\ImplicitLayers` (opt-out task "Install the HDR Vulkan layer").
 

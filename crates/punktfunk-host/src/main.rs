@@ -145,6 +145,7 @@ mod ctl;
 mod native;
 #[forbid(unsafe_code)]
 mod native_pairing;
+mod net_health;
 mod osinfo;
 mod plugins;
 mod power;
@@ -405,7 +406,7 @@ fn real_main() -> Result<()> {
             }
             print!("{}", detect::render_report(&found));
             // Exit 1 only for a host that runs or will auto-start. Dormant leftovers print, then 0
-            // (installers gate on this; see `detect` docs and `punktfunk-host.iss`).
+            // (installers gate on this; see `detect` docs).
             if detect::any_active(&found) {
                 std::process::exit(1);
             }

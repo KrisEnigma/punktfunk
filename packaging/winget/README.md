@@ -47,22 +47,21 @@ winget install unom.PunktfunkHost --override "/VERYSILENT /SUPPRESSMSGBOXES /NOR
 Task names: `installdriver`, `installgamepad`, `installhdrlayer`,
 `gamestream`, `allowpublicfw`, `startservice`, `trayicon`.
 
-## Two installer behaviours that exist for this path
+## Three installer behaviours that exist for this path
 
-Both are in `packaging/windows/punktfunk-host.iss` and both also fix pre-existing bugs on the
-plain double-click upgrade path:
+All three live in `crates/punktfunk-setup/src/platform/windows/` and also fix the plain
+double-click upgrade path:
 
-- **`InitializeSetup` uses `SuppressibleMsgBox`, not `MsgBox`.** A plain `MsgBox` ignores
-  `/SUPPRESSMSGBOXES` and displays even under `/VERYSILENT` — an unattended install on a box that
-  already runs Sunshine/Apollo would block on an invisible modal dialog. Suppressed it returns
-  `IDNO`, so that install aborts (Setup exits non-zero) rather than proceeding into the unsupported
-  dual-host state.
-- **`GamestreamParam` is fresh-install-only.** On an upgrade the flag is omitted entirely, which
+- **A competing host moves our port; it never aborts.** Sunshine/Apollo on the box means both want
+  TCP 47990, so `coexist_steps` writes `PUNKTFUNK_MGMT_BIND=0.0.0.0:47991` and carries on. The Inno
+  installer put up a modal and failed the install instead, which under `/VERYSILENT` was an
+  unattended run blocking on an invisible dialog.
+- **The GameStream flag is fresh-install-only.** On an upgrade the flag is omitted entirely, which
   `service install` reads as "keep host.env as-is". Passing an explicit on/off would rewrite
   `PUNKTFUNK_HOST_CMD` whenever it still holds either canonical value — so a silent upgrade, where
   no wizard carries the old choice forward, would flip a user's GameStream setting with nothing on
   screen.
-- **`PublicFwParam` is fresh-install-only too**, and `--allow-public-network` is now tri-state
+- **The Public-firewall flag is fresh-install-only too**, and `--allow-public-network` is tri-state
   (`=on` / `=off` / absent → keep the recorded choice, resolved from the `fw-allow-public` marker in
   `windows/service.rs`). This task is default-*unchecked*, so without the change a silent upgrade
   would have silently **revoked** a Public-network opt-in the user made once. The bare

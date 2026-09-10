@@ -123,10 +123,10 @@ export function needsPair(v: HostView): boolean {
 }
 
 function advertMatchesSaved(a: DiscoveredHost, s: SavedHost): boolean {
-  return (
-    (!!s.fp_hex && !!a.fp && s.fp_hex.toLowerCase() === a.fp.toLowerCase()) ||
-    (s.addr === a.addr && s.port === a.port)
-  );
+  // Two known fingerprints decide it alone: the other OS of a dual-boot box answers at the
+  // same lease with the same MAC, so the address would read it as the OS already saved.
+  if (s.fp_hex && a.fp) return s.fp_hex.toLowerCase() === a.fp.toLowerCase();
+  return s.addr === a.addr && s.port === a.port;
 }
 
 /**
