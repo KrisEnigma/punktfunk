@@ -187,7 +187,9 @@ pub enum Preset {
 /// File + mgmt GET/PUT shape. When [`preset`](Self::preset) is not
 /// [`Preset::Custom`], explicit fields are ignored; [`effective`](Self::effective)
 /// resolves both to [`EffectivePolicy`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+// Not `Eq`: a per-device overlay carries a scale, and a float has no total equality.
+// Nothing compares policies for anything but "did this change", which `PartialEq` answers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct DisplayPolicy {
     /// Schema version. Unknown versions load best-effort
     /// ([`DisplayPolicyStore::load_from`] warns) and write pins current.
@@ -237,6 +239,14 @@ pub struct DisplayPolicy {
     /// can pin without a console write undoing it.
     #[serde(default)]
     pub capture_monitor: Option<String>,
+    /// Connectors that stay lit while streaming, even under `exclusive`
+    /// (`design/web-console-overhaul.md` §5.5).
+    ///
+    /// The shared-desktop case the all-or-nothing topology axis cannot express: the
+    /// couch TV streams on the sole screen while the desk monitor stays usable. Only
+    /// meaningful under `exclusive` — nothing else turns a monitor off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep_monitors: Vec<String>,
     /// Per-device deviations, keyed by pairing fingerprint — what identity
     /// slots, admission and the device list already key on (never an address:
     /// a dual-boot box keeps its fingerprint and changes its IP).
@@ -259,7 +269,7 @@ pub struct DisplayPolicy {
 ///
 /// `max_displays` and `layout` are deliberately absent: they are properties of
 /// the host's desktop, not of a device connecting to it.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ClientOverlay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<KeepAlive>,
@@ -277,6 +287,28 @@ pub struct ClientOverlay {
     /// is what the field exists for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_monitor: Option<String>,
+    /// Scale this device's screen is created at, when the desktop has not already
+    /// remembered one for it (`display-management.md` §5.4). Mutter mints a fresh EDID
+    /// serial per session, so its own `monitors.xml` never rematches — without this the
+    /// operator re-sets the scale on every connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// Largest mode this device is granted, `WIDTHxHEIGHT@HZ`. A phone asking for 4K120
+    /// on a weak host degrades every other session; the operator caps it once and the
+    /// client is told the smaller mode rather than silently given one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_mode: Option<String>,
+}
+
+/// `WIDTHxHEIGHT@HZ` → the three numbers. Shared by the cap and its test.
+pub fn parse_mode(spec: &str) -> Option<(u32, u32, u32)> {
+    let (size, hz) = spec.trim().split_once('@')?;
+    let (w, h) = size.split_once(['x', 'X'])?;
+    Some((
+        w.trim().parse().ok()?,
+        h.trim().parse().ok()?,
+        hz.trim().parse().ok()?,
+    ))
 }
 
 impl ClientOverlay {
@@ -293,6 +325,14 @@ impl ClientOverlay {
             .capture_monitor
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        // The range every desktop actually offers. A 0 or a negative would reach a
+        // compositor as a scale and is not a smaller screen, it is a broken one.
+        self.scale = self.scale.filter(|s| (0.25..=6.0).contains(s));
+        // Stored only if it parses: an unreadable cap would silently grant everything,
+        // which is the opposite of what the operator asked for.
+        self.max_mode = self
+            .max_mode
+            .filter(|spec| parse_mode(spec).is_some_and(|(w, h, hz)| w > 0 && h > 0 && hz > 0));
         self
     }
 }
@@ -335,6 +375,7 @@ impl Default for DisplayPolicy {
             pnp_disable_monitors: false,
             edid_lock: false,
             capture_monitor: None,
+            keep_monitors: Vec::new(),
             clients: BTreeMap::new(),
         }
     }
@@ -410,6 +451,27 @@ impl DisplayPolicy {
             .or_else(|| self.capture_monitor.clone())
     }
 
+    /// Scale to create this device's screen at, if the operator set one.
+    pub fn scale_for(&self, fp: Option<&str>) -> Option<f64> {
+        self.overlay_for(fp).and_then(|o| o.scale)
+    }
+
+    /// Clamp a requested mode to this device's cap.
+    ///
+    /// Returns the mode to grant. Each axis is capped on its own: a device capped at
+    /// 2560x1440@60 asking for 3840x2160@120 gets 2560x1440@60, and one asking for
+    /// 1920x1080@120 keeps its size and loses only the refresh it cannot have.
+    pub fn cap_mode(&self, fp: Option<&str>, want: (u32, u32, u32)) -> (u32, u32, u32) {
+        let Some(cap) = self
+            .overlay_for(fp)
+            .and_then(|o| o.max_mode.as_deref())
+            .and_then(parse_mode)
+        else {
+            return want;
+        };
+        (want.0.min(cap.0), want.1.min(cap.1), want.2.min(cap.2))
+    }
+
     pub fn effective(&self) -> EffectivePolicy {
         if let Some(mut e) = preset_fields(self.preset) {
             // A preset fixes the six axes; workstation still honors an
@@ -442,6 +504,14 @@ impl DisplayPolicy {
             .capture_monitor
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        // A connector named twice, or blank, is one the operator cannot have meant.
+        self.keep_monitors = std::mem::take(&mut self.keep_monitors)
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         self.clients = std::mem::take(&mut self.clients)
             .into_iter()
             .map(|(fp, o)| (fp.trim().to_ascii_lowercase(), o.sanitized()))
@@ -1881,6 +1951,82 @@ mod tests {
             assert_eq!(p.effective_for(Some(PAD)).keep_alive, KeepAlive::Off);
             // A display with no recorded owner (shared / anonymous) follows the host.
             assert_eq!(p.effective_for(None).keep_alive, KeepAlive::Off);
+        }
+
+        /// A cap is per axis, so a device that asks for less than the cap in one
+        /// dimension keeps what it asked for there.
+        #[test]
+        fn a_mode_cap_clamps_each_axis_on_its_own() {
+            let mut p = DisplayPolicy::default();
+            p.clients.insert(
+                PAD.into(),
+                ClientOverlay {
+                    max_mode: Some("2560x1440@60".into()),
+                    ..ClientOverlay::default()
+                },
+            );
+            assert_eq!(p.cap_mode(Some(PAD), (3840, 2160, 120)), (2560, 1440, 60));
+            // Asked for less than the cap: nothing is taken away.
+            assert_eq!(p.cap_mode(Some(PAD), (1920, 1080, 60)), (1920, 1080, 60));
+            // Only the refresh is over the cap.
+            assert_eq!(p.cap_mode(Some(PAD), (1920, 1080, 240)), (1920, 1080, 60));
+            // Uncapped devices are untouched.
+            assert_eq!(p.cap_mode(Some(TV), (3840, 2160, 120)), (3840, 2160, 120));
+            assert_eq!(p.cap_mode(None, (3840, 2160, 120)), (3840, 2160, 120));
+        }
+
+        /// An unreadable cap must not silently grant everything, nor silently grant
+        /// nothing — it is refused at the door and the device stays uncapped.
+        #[test]
+        fn an_unparsable_cap_is_not_stored() {
+            let mut p = DisplayPolicy::default();
+            for spec in ["", "big", "1920x1080", "0x0@60"] {
+                p.clients.insert(
+                    PAD.into(),
+                    ClientOverlay {
+                        max_mode: Some(spec.into()),
+                        ..ClientOverlay::default()
+                    },
+                );
+                let s = p.clone().sanitized();
+                assert!(
+                    s.clients
+                        .get(PAD)
+                        .and_then(|o| o.max_mode.as_ref())
+                        .is_none(),
+                    "{spec:?} should not survive"
+                );
+            }
+        }
+
+        /// A scale is a number a compositor will act on; 0 or negative is not a smaller
+        /// screen, it is a broken one.
+        #[test]
+        fn only_a_usable_scale_is_stored() {
+            let overlay = |scale| ClientOverlay {
+                scale: Some(scale),
+                ..ClientOverlay::default()
+            };
+            let stored = |scale| {
+                let mut p = DisplayPolicy::default();
+                p.clients.insert(PAD.into(), overlay(scale));
+                p.sanitized().clients.get(PAD).and_then(|o| o.scale)
+            };
+            assert_eq!(stored(1.5), Some(1.5));
+            assert_eq!(stored(0.0), None);
+            assert_eq!(stored(-2.0), None);
+            assert_eq!(stored(99.0), None);
+        }
+
+        /// The shared-desktop case: one monitor stays lit through an exclusive stream.
+        #[test]
+        fn kept_monitors_are_deduplicated_and_trimmed() {
+            let p = DisplayPolicy {
+                keep_monitors: vec!["DP-1".into(), " DP-1 ".into(), "".into(), "HDMI-A-2".into()],
+                ..DisplayPolicy::default()
+            }
+            .sanitized();
+            assert_eq!(p.keep_monitors, vec!["DP-1", "HDMI-A-2"]);
         }
 
         /// Arranging must not clear what it does not mention — the trap the

@@ -23,6 +23,7 @@ import type {
 	Identity,
 	KeepAlive,
 	ModeConflict,
+	Topology,
 } from "@/api/gen/model";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,6 +44,7 @@ import { describePolicy } from "./describePolicy";
 export function overlaySummary(overlay: ClientOverlay | undefined): string {
 	const pinned = overlay ? stripNulls(overlay) : {};
 	const parts: string[] = [];
+	if (pinned.topology) parts.push(topologyLabel(pinned.topology));
 	if (pinned.mode_conflict) parts.push(conflictLabel(pinned.mode_conflict));
 	if (pinned.identity) parts.push(identityLabel(pinned.identity));
 	if (pinned.keep_alive) parts.push(keepLabel(pinned.keep_alive));
@@ -153,6 +155,29 @@ export const ClientPolicySheet: FC<{
 								>
 									{m.display_q_keep_forever()}
 								</Option>
+							</Question>
+						)}
+
+						{enforced.includes("topology") && (
+							<Question
+								label={m.display_q_monitors()}
+								inherited={topologyLabel(host.topology)}
+								pinned={overlay.topology != null}
+								busy={busy}
+								onFollow={() => write({ topology: null })}
+							>
+								{(["extend", "primary", "exclusive", "auto"] as const).map(
+									(v) => (
+										<Option
+											key={v}
+											selected={overlay.topology === v}
+											busy={busy}
+											onPick={() => write({ topology: v as Topology })}
+										>
+											{topologyLabel(v)}
+										</Option>
+									),
+								)}
 							</Question>
 						)}
 
@@ -270,6 +295,14 @@ const conflictLabel = (v: string): string =>
 		steal: m.display_q_second_steal(),
 		join: m.display_q_second_join(),
 		reject: m.display_q_second_reject(),
+	})[v] ?? v;
+
+const topologyLabel = (v: string): string =>
+	({
+		extend: m.display_q_monitors_extend(),
+		primary: m.display_q_monitors_primary(),
+		exclusive: m.display_q_monitors_exclusive(),
+		auto: m.display_q_monitors_auto(),
 	})[v] ?? v;
 
 const identityLabel = (v: string): string =>
