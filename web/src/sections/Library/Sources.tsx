@@ -1,7 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
 import { Check, Download, Settings2, Trash2 } from "lucide-react";
-import { type FC, useState } from "react";
+import { motion } from "motion/react";
+import { type FC, useMemo, useState } from "react";
 import {
 	getGetLibraryQueryKey,
 	getListLibraryScannersQueryKey,
@@ -17,6 +18,7 @@ import {
 	useStoreCatalog,
 } from "@/api/store";
 import { useDialogs } from "@/components/dialogs";
+import { ROW, ROW_GAP, Stagger } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -55,6 +57,7 @@ export const SourcesSection: FC<{
 	const catalog = useStoreCatalog();
 	const install = useInstallPlugin();
 	const [settingsFor, setSettingsFor] = useState<ScannerInfo | null>(null);
+	const nameOf = useSourceNames();
 
 	const onToggle = async (source: ScannerInfo) => {
 		try {
@@ -75,7 +78,10 @@ export const SourcesSection: FC<{
 		const provider = source.provider ?? source.id;
 		const count = source.entries ?? 0;
 		const ok = await confirm({
-			title: m.library_provider_purge_confirm({ provider, count }),
+			title: m.library_provider_purge_confirm({
+				provider: source.label,
+				count,
+			}),
 			description: m.library_provider_purge_body(),
 			confirmLabel: m.common_remove(),
 			destructive: true,
@@ -86,7 +92,7 @@ export const SourcesSection: FC<{
 			qc.invalidateQueries({ queryKey: getGetLibraryQueryKey() });
 			qc.invalidateQueries({ queryKey: getListLibraryScannersQueryKey() });
 			if (activeFilter === provider) onFilter(null);
-			toast.success(m.library_provider_purged({ provider }));
+			toast.success(m.library_provider_purged({ provider: source.label }));
 		} catch (e) {
 			toast.error(apiErrorMessage(e) ?? m.library_provider_purge_failed());
 		}
@@ -106,6 +112,11 @@ export const SourcesSection: FC<{
 	// This is a secondary control: when the API is down the grid's own QueryState already tells the
 	// story, so render nothing rather than a second error banner.
 	if (!scanners.data) return null;
+	// The host names only the stores that used to be built in; any other id it shows as itself.
+	const sources = scanners.data.map((s) => ({
+		...s,
+		label: nameOf(s.id) ?? s.label,
+	}));
 
 	// Catalog rows that are library sources and not already installed — the "Add a source" rail.
 	const installedPkgs = new Set(
@@ -134,7 +145,7 @@ export const SourcesSection: FC<{
 	// Against a v0.28.0+ host this is always empty (no source reports `builtin` any more) and the
 	// banner never renders. It stays for the N-1 host this console may be driving, where it is still
 	// the migration path.
-	const migratable = scanners.data
+	const migratable = sources
 		.filter((s) => s.origin === "builtin" && s.enabled)
 		.map((s) => ({
 			source: s,
@@ -152,7 +163,7 @@ export const SourcesSection: FC<{
 				/>
 			)}
 			<SourcesCard
-				sources={scanners.data}
+				sources={sources}
 				available={available}
 				running={running}
 				busyId={toggle.isPending ? (toggle.variables?.id ?? null) : null}
@@ -248,7 +259,7 @@ export const SourcesCard: FC<{
 			<CardTitle className="text-base">{m.library_sources_title()}</CardTitle>
 		</CardHeader>
 		<CardContent className="space-y-4">
-			<div className="flex flex-col gap-2">
+			<Stagger gap={ROW_GAP} className="flex flex-col gap-2">
 				{sources.map((source) => (
 					<SourceRow
 						key={source.id}
@@ -268,7 +279,7 @@ export const SourcesCard: FC<{
 						onPurge={() => onPurge(source)}
 					/>
 				))}
-			</div>
+			</Stagger>
 			<p className="max-w-prose text-xs text-muted-foreground">
 				{m.library_sources_help()}
 			</p>
@@ -276,7 +287,7 @@ export const SourcesCard: FC<{
 			{available.length > 0 && (
 				<div className="space-y-2 border-t pt-4">
 					<p className="text-sm font-medium">{m.library_add_source()}</p>
-					<div className="flex flex-wrap gap-2">
+					<Stagger gap={ROW_GAP} className="flex flex-wrap gap-2">
 						{available.map((entry) => (
 							<Button
 								key={entry.pkg}
@@ -298,7 +309,7 @@ export const SourcesCard: FC<{
 								)}
 							</Button>
 						))}
-					</div>
+					</Stagger>
 				</div>
 			)}
 		</CardContent>
@@ -328,7 +339,10 @@ const SourceRow: FC<{
 }) => {
 	const isPlugin = source.origin === "plugin";
 	return (
-		<div className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
+		<motion.div
+			variants={ROW}
+			className="flex flex-wrap items-center gap-3 rounded-lg border p-3"
+		>
 			<Button
 				size="sm"
 				variant={source.enabled ? "default" : "outline"}
@@ -381,6 +395,24 @@ const SourceRow: FC<{
 					</>
 				)}
 			</div>
-		</div>
+		</motion.div>
 	);
+};
+
+/**
+ * A source's display name by id — the one id a source, its store claim and its provider share. The
+ * plugin's own title wins (the kit's contract), then the host's label. A name that is only the id
+ * again counts as none, so each caller keeps its own fallback.
+ */
+export const useSourceNames = (): ((id: string) => string | undefined) => {
+	const scanners = useListLibraryScanners();
+	const plugins = usePlugins();
+	return useMemo(() => {
+		const names = new Map<string, string>();
+		for (const s of scanners.data ?? [])
+			if (s.label !== s.id) names.set(s.id, s.label);
+		for (const p of libraryPlugins(plugins.data))
+			if (p.title !== p.id) names.set(p.id, p.title);
+		return (id: string) => names.get(id);
+	}, [scanners.data, plugins.data]);
 };
