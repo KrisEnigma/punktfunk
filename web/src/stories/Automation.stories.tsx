@@ -21,8 +21,15 @@ import { nativeClients } from "./lib/fixtures";
  * so the option count stays bounded no matter how big the library is. An `<option>` per title
  * would put 10,000 nodes on the page for a field most people never open.
  */
+/** A stand-in cover, so the artwork path is visible without a host to serve real ones.
+ *  Every fourth title ships none, which is what exercises the monogram fallback. */
+const cover = (i: number) =>
+	`data:image/svg+xml;utf8,${encodeURIComponent(
+		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 60"><rect width="40" height="60" fill="hsl(${(i * 47) % 360} 45% 38%)"/><circle cx="20" cy="24" r="9" fill="hsl(${(i * 47) % 360} 60% 70%)"/></svg>`,
+	)}`;
+
 const game = (i: number): GameEntry => ({
-	art: {},
+	art: i % 4 === 3 ? {} : { portrait: cover(i) },
 	id: `steam:${100000 + i}`,
 	store: "steam",
 	title: `${TITLES[i % TITLES.length]} ${Math.floor(i / TITLES.length) + 1}`,

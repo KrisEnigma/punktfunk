@@ -53,6 +53,7 @@
 	"event_any_pairing": "Alle Kopplungs-Ereignisse",
 	"event_any_display": "Alle Anzeige-Ereignisse",
 	"automation_filter_app_help": "Trifft die id aus dem Ereignis, etwa steam:570 — der Titel hilft nur beim Finden.",
+	"automation_filter_none": "Kein Treffer — wird trotzdem so gespeichert.",
 	"automation_field_debounce": "Mindestabstand (ms)",
 	"automation_field_timeout": "Zeitlimit (s)",
 	"automation_confirm_title": "Automatisierung speichern?",

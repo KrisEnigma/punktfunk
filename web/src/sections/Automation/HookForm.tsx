@@ -4,6 +4,7 @@ import type { HookEntry } from "@/api/gen/model/hookEntry";
 import { useListNativeClients } from "@/api/gen/native/native";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Combobox, type ComboboxOption } from "@/components/ui/combobox";
 import {
 	Dialog,
 	DialogContent,
@@ -22,7 +23,6 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
-import { Suggest, type Suggestion } from "@/components/ui/suggest";
 import { EVENT_KINDS, eventKindLabel } from "@/lib/event-kinds";
 import { m } from "@/paraglide/messages";
 
@@ -60,11 +60,24 @@ export const HookForm: FC<{
 	// a library that can run to five figures.
 	const library = useGetLibrary(undefined, { query: { enabled: filtered } });
 	const clients = useListNativeClients({ query: { enabled: filtered } });
-	const appOptions: Suggestion[] = useMemo(
-		() => (library.data ?? []).map((g) => ({ value: g.id, label: g.title })),
+	const appOptions: ComboboxOption[] = useMemo(
+		() =>
+			(library.data ?? []).map((g) => ({
+				value: g.id,
+				label: g.title,
+				// Portrait first, header second — the same step-down the library grid does, so a
+				// title with only a wide banner still shows its face here.
+				image: g.art?.portrait ?? g.art?.header ?? null,
+				// Keeps the row height even for a title that ships no art at all.
+				fallback: (
+					<span className="text-xs font-medium text-muted-foreground">
+						{g.title.slice(0, 1).toUpperCase()}
+					</span>
+				),
+			})),
 		[library.data],
 	);
-	const clientOptions: Suggestion[] = useMemo(
+	const clientOptions: ComboboxOption[] = useMemo(
 		() => (clients.data ?? []).map((c) => ({ value: c.name })),
 		[clients.data],
 	);
@@ -220,9 +233,10 @@ export const HookForm: FC<{
 							<Label htmlFor="hook-client">
 								{m.automation_filter_client()}
 							</Label>
-							<Suggest
+							<Combobox
 								id="hook-client"
-								suggestions={clientOptions}
+								options={clientOptions}
+								empty={m.automation_filter_none()}
 								value={draft.filter?.client ?? ""}
 								onChange={(client) =>
 									set({ filter: { ...draft.filter, client } })
@@ -234,9 +248,10 @@ export const HookForm: FC<{
 							{/* The event carries the store-qualified id (`steam:570`), so that is what
 							    lands in the field — with the title beside it, because nobody knows
 							    their app ids by heart. */}
-							<Suggest
+							<Combobox
 								id="hook-app"
-								suggestions={appOptions}
+								options={appOptions}
+								empty={m.automation_filter_none()}
 								value={draft.filter?.app ?? ""}
 								onChange={(app) => set({ filter: { ...draft.filter, app } })}
 							/>
