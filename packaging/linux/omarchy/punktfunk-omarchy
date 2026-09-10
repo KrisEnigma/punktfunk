@@ -5,7 +5,6 @@
 #   punktfunk-omarchy setup     enable, open the firewall, add the console to the app menu
 #   punktfunk-omarchy remove    reverse every one of those, leaving nothing behind
 #   punktfunk-omarchy status    what is on, what is not, and what to do next
-#   punktfunk-omarchy ufw       re-apply the LAN-scoped ufw rules (hidden; path unit)
 #
 # Modelled on `omarchy-install-service-sunshine`, which is the shape an Omarchy user already knows:
 # LAN-scoped ufw rules tagged with a comment, a user systemd unit, a webapp entry in the menu. The
@@ -86,14 +85,12 @@ edits YOUR config. It will ask for sudo where it genuinely needs it (ufw, group 
 # ── ufw (D4) ───────────────────────────────────────────────────────────────────────────────────
 #
 # LAN-scoped rules tagged so `remove` can find them, using the package's app profiles so the port
-# list lives in one place. lan_sources adds tailscale0 only while the iface exists; the path unit
-# re-runs open_firewall when /sys/class/net/tailscale0 appears later.
+# list lives in one place. Ufw accepts a named interface before it exists; that rule stays dormant
+# until tailscale0 appears and remains scoped to that interface.
 
-# RFC1918 always. tailscale0 only while the iface exists — the path unit re-runs this then.
+# RFC1918 plus tailscale0. The interface rule is safe to install before the link exists.
 lan_sources() {
-  printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12
-  ip link show tailscale0 >/dev/null 2>&1 && printf '%s\n' tailscale0
-  return 0
+  printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12 tailscale0
 }
 
 ufw_rule() {  # ufw_rule <profile> <source> — idempotent (ufw dedupes identical rules)
@@ -114,7 +111,6 @@ ufw_unrule() {
   fi
 }
 
-# Idempotent. The path unit re-runs this when tailscale0 appears after setup.
 open_firewall() {
   have ufw || { warn "ufw is not installed — nothing to open"; return 0; }
   [[ -r /etc/ufw/applications.d/punktfunk ]] || {
@@ -138,20 +134,6 @@ open_firewall() {
     ok "ufw: $p opened to local networks (tagged \"$TAG\")"
   done
   sudo ufw reload >/dev/null 2>&1 || true
-}
-
-# Watch /sys/class/net/tailscale0 so a tailnet joined after setup still gets the ufw rule.
-enable_ufw_watch() {
-  if systemctl --user enable --now punktfunk-omarchy-ufw.path; then
-    ok "ufw recouples when tailscale0 appears"
-  else
-    warn "couldn't enable the tailscale0 ufw watch"
-  fi
-}
-
-disable_ufw_watch() {
-  systemctl --user disable --now punktfunk-omarchy-ufw.path 2>/dev/null \
-    && ok "tailscale0 ufw watch disabled" || true
 }
 
 close_firewall() {
@@ -655,7 +637,6 @@ then run this again. See https://punktfunk.com/docs/omarchy"
   setup_units
   step "Firewall"
   open_firewall
-  enable_ufw_watch
   setup_cert_trust
   setup_webapp
   setup_plugin
@@ -687,7 +668,6 @@ cmd_remove() {
   step "Removing the Omarchy integration"
   systemctl --user disable --now punktfunk-host.service 2>/dev/null && ok "punktfunk-host stopped and disabled" || true
   systemctl --user disable --now punktfunk-web.service 2>/dev/null && ok "punktfunk-web stopped and disabled" || true
-  disable_ufw_watch
   if [[ -f "$DROPIN" ]]; then
     rm -f "$DROPIN"
     rmdir --ignore-fail-on-non-empty "$DROPIN_DIR" 2>/dev/null || true
@@ -852,7 +832,6 @@ case "${1:-}" in
   setup)  shift; parse_setup_opts "$@"; cmd_setup ;;
   remove) cmd_remove ;;
   status) cmd_status ;;
-  ufw)    open_firewall ;;
   ""|-h|--help|help)
     cat <<'EOF'
 punktfunk-omarchy — wire a punktfunk host into an Omarchy box
