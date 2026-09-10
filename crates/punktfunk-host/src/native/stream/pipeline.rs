@@ -197,6 +197,9 @@ pub(super) fn is_permanent_build_error(chain: &str) -> bool {
         "is it installed",
         "capture/encoder negotiation mismatch",
         "driver encoder open failed",
+        // A backend compiled out cannot appear on a retry, and each one costs
+        // the user's real monitor a disable/restore cycle.
+        "this build left out",
     ];
     let lower = chain.to_ascii_lowercase();
     PERMANENT.iter().any(|p| lower.contains(p))
@@ -469,6 +472,10 @@ mod tests {
         ));
         assert!(!is_permanent_build_error(
             "create virtual output: timed out creating the KWin virtual output"
+        ));
+        assert!(is_permanent_build_error(
+            "open video encoder: hevc on NVIDIA needs the direct-SDK NVENC backend, which this \
+             build left out — build with --features punktfunk-host/nvenc"
         ));
         assert!(!is_permanent_build_error("open NVENC: device busy"));
     }

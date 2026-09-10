@@ -141,9 +141,10 @@ ok "build deps ready"
 
 # --- 2. build host (+ web) -------------------------------------------------
 log "Building punktfunk-host (release) — first build is slow (~10-15 min)"
-# vulkan-encode matches the packaged builds (deb/arch): the raw Vulkan Video HEVC/AV1 backend
-# (real RFI loss recovery). Pure-Rust ash — no extra system dep. A featureless hand build stays
-# on the native VAAPI session.
+# nvenc,vulkan-encode matches the packaged builds (deb/arch/rpm): the direct-SDK NVENC backend
+# plus the raw Vulkan Video HEVC/AV1 one (real RFI loss recovery). SteamOS also runs on NVIDIA
+# desktops, where a host without nvenc advertises HEVC and then dies at encoder open. Both entry
+# points are dlopen'd, so an AMD Deck pays nothing to carry them.
 #
 # punktfunk-encode-worker is built alongside: the capability-carrying PyroWave encode worker, a
 # SEPARATE binary that lands next to the host in $TARGET_DIR/release (which is how the host finds
@@ -152,7 +153,7 @@ log "Building punktfunk-host (release) — first build is slow (~10-15 min)"
 distrobox enter "$BOX" -- bash -lc "
 set -e
 export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR'
-cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/vulkan-encode
+cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/nvenc,punktfunk-host/vulkan-encode
 "
 [ -x "$BIN" ] || die "build did not produce $BIN"
 # ldd out here on SteamOS, never inside the box, where every soname resolves by construction. The
