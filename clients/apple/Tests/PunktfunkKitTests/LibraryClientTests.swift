@@ -269,16 +269,17 @@ final class LibraryClientTests: XCTestCase {
         XCTAssertNil(inlineHit, "a data: URL is already inline — caching it is a pure loss")
     }
 
+    /// Age-out reads the file mtime, so stamp it instead of sleeping past `maxAge`.
     func testArtCacheAgesEntriesOut() async throws {
         let directory = temporaryCacheDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let cache = ArtCache(directory: directory, maxAge: 0.4)
+        let cache = ArtCache(directory: directory, maxAge: 1)
         let url = URL(string: "https://cdn.example.com/stale.jpg")!
 
         await cache.store(Data("stale".utf8), for: url)
         let fresh = await cache.data(for: url)
         XCTAssertNotNil(fresh)
-        try await Task.sleep(nanoseconds: 700_000_000)
+        ageFiles(in: directory, by: 10)
         let expired = await cache.data(for: url)
         XCTAssertNil(expired)
     }
@@ -294,12 +295,25 @@ final class LibraryClientTests: XCTestCase {
             let url = URL(string: "https://cdn.example.com/blob\(i).jpg")!
             urls.append(url)
             await cache.store(blob, for: url)
-            try await Task.sleep(nanoseconds: 60_000_000) // distinct mtimes for LRU ordering
+            // Back-date what is already stored, so each blob lands newer than the last.
+            if i < 3 { ageFiles(in: directory, by: 1) }
         }
         let evicted = await cache.data(for: urls[0])
         XCTAssertNil(evicted, "the oldest entry should have been evicted")
         let newest = await cache.data(for: urls[3])
         XCTAssertEqual(newest, blob)
+    }
+
+    /// Move every cached file's mtime `seconds` into the past.
+    private func ageFiles(in directory: URL, by seconds: TimeInterval) {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        for file in files {
+            let values = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+            let date = values?.contentModificationDate ?? Date()
+            try? FileManager.default.setAttributes(
+                [.modificationDate: date.addingTimeInterval(-seconds)], ofItemAtPath: file.path)
+        }
     }
 
     func testBaseURLBracketsIPv6Only() {
