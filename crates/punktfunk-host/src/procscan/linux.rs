@@ -578,7 +578,7 @@ mod tests {
     }
 
     /// Spawn a real process to cover kernel `/proc` fields, the uid filter, and uptime matching.
-    /// Fixture tests cannot prove those values agree with the running kernel.
+    /// Fixture tests cannot prove those values agree with the running kernel. Wait on `/proc/<pid>`.
     #[test]
     fn finds_a_real_process_it_just_started() {
         // Run a copied binary from the install dir; a wrapper leaves no trace there.
@@ -597,8 +597,14 @@ mod tests {
             .arg("20")
             .spawn()
             .expect("spawn the fake game");
-        // 300 ms: the child must be visible in /proc before the scan.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let proc = std::path::PathBuf::from(format!("/proc/{}", child.id()));
+        for _ in 0..50 {
+            if proc.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(proc.exists(), "/proc/{} never appeared", child.id());
 
         let found = s.find(&DetectSpec::dir(td.path()), Some(before));
         assert!(
@@ -619,7 +625,12 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        for _ in 0..50 {
+            if !proc.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(s.find(&DetectSpec::dir(td.path()), Some(before)).is_empty());
         assert!(s.alive(&found).is_empty());
     }

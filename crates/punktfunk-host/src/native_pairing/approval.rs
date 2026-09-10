@@ -10,6 +10,8 @@
 //! clears the entry ([`ApprovalQueue::admit_and_clear`]).
 
 use std::net::IpAddr;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -76,11 +78,19 @@ pub(super) const PENDING_CAP: usize = 32;
 /// Max pending knocks one source IP may occupy so one host cannot fill the queue.
 /// QUIC address-validates the source, so this is not off-path spoofable.
 pub(super) const MAX_PENDING_PER_IP: usize = 4;
+/// Ceiling on the test-only ready wait. A spawn that panics before parking must fail
+/// the test, not stall the job until CI times out.
+#[cfg(test)]
+const WAITER_READY_LIMIT: Duration = Duration::from_secs(5);
 
 pub(super) struct ApprovalQueue {
     pending: Mutex<PendingState>,
     /// Fired when a fingerprint is paired or a pending knock is denied/dropped.
     changed: Notify,
+    #[cfg(test)]
+    waiter_ready_generation: AtomicU64,
+    #[cfg(test)]
+    waiter_ready_changed: Notify,
 }
 
 impl ApprovalQueue {
@@ -88,7 +98,37 @@ impl ApprovalQueue {
         ApprovalQueue {
             pending: Mutex::new(PendingState::default()),
             changed: Notify::new(),
+            #[cfg(test)]
+            waiter_ready_generation: AtomicU64::new(0),
+            #[cfg(test)]
+            waiter_ready_changed: Notify::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn waiter_ready_generation(&self) -> u64 {
+        self.waiter_ready_generation.load(Ordering::Acquire)
+    }
+
+    /// Park until a [`Self::wait_for_decision`] newer than `previous` is armed on the
+    /// notifier, so a test can approve without racing the waiter. A waiter that never
+    /// arms fails the test rather than hanging the job.
+    #[cfg(test)]
+    pub(super) async fn wait_for_waiter_ready(&self, previous: u64) {
+        let armed = async {
+            loop {
+                let notified = self.waiter_ready_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.waiter_ready_generation.load(Ordering::Acquire) > previous {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(WAITER_READY_LIMIT, armed)
+            .await
+            .expect("no knock parked on the approval queue");
     }
 
     /// Admitted-generation markers share the pending TTL; they only matter while
@@ -324,6 +364,11 @@ impl ApprovalQueue {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            #[cfg(test)]
+            {
+                self.waiter_ready_generation.fetch_add(1, Ordering::Release);
+                self.waiter_ready_changed.notify_waiters();
+            }
 
             // Once a newer knock owns the fingerprint this connection must never
             // be admitted, even if approval lands before we wake.

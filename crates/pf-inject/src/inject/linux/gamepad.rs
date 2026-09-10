@@ -658,6 +658,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// The evdev node for `name` that also advertises `FF`. A match without it is a
+    /// sibling node effects cannot be written to.
     fn find_ff_node(name: &str) -> Option<String> {
         let s = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
         let mut cur = String::new();
@@ -680,7 +682,21 @@ mod tests {
                 return node;
             }
         }
-        node
+        None
+    }
+
+    /// Poll for the node udev is still publishing, up to `timeout`.
+    fn wait_ff_node(name: &str, timeout: Duration) -> Option<String> {
+        let start = Instant::now();
+        loop {
+            if let Some(node) = find_ff_node(name) {
+                return Some(node);
+            }
+            if start.elapsed() >= timeout {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Upload + play an `FF_RUMBLE`. Returns the OPEN fd (close erases the process's effects)
@@ -719,8 +735,8 @@ mod tests {
     #[ignore = "creates a real /dev/uinput device; needs the input group"]
     fn ff_upload_reaches_pump_and_stops_on_erase() {
         let mut pad = VirtualPad::create(0, PadIdentity::xbox360()).expect("create uinput pad");
-        std::thread::sleep(Duration::from_millis(700)); // let udev settle the node
-        let node = find_ff_node("Microsoft X-Box 360 pad").expect("no X-Box 360 evdev node");
+        let node = wait_ff_node("Microsoft X-Box 360 pad", Duration::from_millis(700))
+            .expect("no force-feedback X-Box 360 evdev node");
         let game = std::thread::spawn(move || {
             let r = evdev_rumble(&node, 0xC000, 0x4000);
             std::thread::sleep(Duration::from_millis(1200)); // hold the effect, then erase
