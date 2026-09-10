@@ -19,9 +19,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `ready_for_review` and `labeled` are what make the opt-in take effect at the moment you ask
-    # for it; without them the gate is only re-read on the next push. Setting `types` at all
-    # replaces the default set, so the three defaults are listed again here.
+    # Setting `types` at all replaces the default set, so the three defaults are listed again.
+    # `ready_for_review` and `labeled` are listed for the day they work: measured on 1.27.1,
+    # neither starts a run. A Gitea draft is a `WIP:` title prefix, so undrafting is an edit,
+    # not its own event. Until then the gate is re-read on the next push or a manual re-run.
     types: [opened, reopened, synchronize, ready_for_review, labeled]
 
 # Shared compile cache: sccache -> RustFS S3 (storage.unom.io, LAN-pinned via ci-core's

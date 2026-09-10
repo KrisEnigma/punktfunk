@@ -2,7 +2,7 @@
 # Decide whether a pull request runs the expensive CI lanes. Reads the Gitea pull-request JSON
 # on stdin and prints `heavy=true` or `heavy=false`.
 #
-# Draft = cheap gates only. Ready for review, or labelled `ci:full`, = everything. The fleet
+# Draft = cheap gates only. Ready for review, or labelled `ci:all`, = everything. The fleet
 # cannot absorb a full run per push across many open pull requests, and Gitea does not cancel a
 # superseded pull-request run (gitea#35933), so each push stacks another one on the last.
 #
@@ -14,7 +14,7 @@
 
 set -eu
 
-LABEL=ci:full
+LABEL=ci:all
 
 decide() {
     body=$1
@@ -46,7 +46,7 @@ self_test() {
     }
     check ready        '{"number":1,"draft":false,"labels":[]}'                      heavy=true
     check draft        '{"number":1,"draft":true,"labels":[]}'                      heavy=false
-    check draft-label  '{"number":1,"draft":true,"labels":[{"name":"ci:full"}]}'     heavy=true
+    check draft-label  '{"number":1,"draft":true,"labels":[{"name":"ci:all"}]}'     heavy=true
     check draft-other  '{"number":1,"draft":true,"labels":[{"name":"ci:android"}]}'  heavy=false
     check garbage      'not json at all'                                            heavy=true
     check empty        ''                                                           heavy=true
@@ -54,7 +54,7 @@ self_test() {
     # A title quoting the field must not flip the decision.
     check title-spoof  '{"title":"fix \"draft\":false, really","draft":true,"labels":[]}' heavy=false
     # A branch named after the label must not turn the lanes on.
-    check label-spoof  '{"head":{"ref":"ci:full"},"draft":true,"labels":[]}'         heavy=false
+    check label-spoof  '{"head":{"ref":"ci:all"},"draft":true,"labels":[]}'         heavy=false
     # Ambiguity must resolve toward running everything, never toward skipping it.
     check both-values  '{"draft":true,"x":{"draft":false},"labels":[]}'              heavy=true
     [ "$fails" -eq 0 ] || return 1

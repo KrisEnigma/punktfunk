@@ -101,17 +101,16 @@ cp api/openapi.json docs-site/public/openapi.json
 
 ## Getting the expensive CI lanes to run
 
-Open the pull request as a **draft** while you iterate. A draft runs only the cheap gates —
-writing style, docs drift, secret scan, the plugin-kit and Decky typechecks — which is seconds
-of fleet time instead of an hour.
+Open the pull request as a **draft** while you iterate — in Gitea that is the `WIP:` title
+prefix. A draft runs only the cheap gates: writing style, docs drift, secret scan, and the
+plugin-kit and Decky typechecks. Seconds of fleet time instead of an hour.
 
-**Mark it ready for review** to turn on the expensive lanes: `rust`, `rust-arm64`, `web` and
-`docs-site`. To get them on a pull request you want to keep as a draft, add the **`ci:full`**
-label instead.
+**Mark it ready for review** to turn on `rust`, `rust-arm64`, `web` and `docs-site`. To get them
+on a pull request you want to keep as a draft, add the **`ci:all`** label instead.
 
-Either signal is read on the next run, so after marking ready (or labelling) push again, or
-re-run the latest run from the Actions tab. Gitea does not start a run for those events on its
-own.
+Neither of those starts a run by itself on Gitea 1.27 — measured, not assumed — so after marking
+ready or labelling, either push again or hit **Re-run** on the latest run in the Actions tab. The
+gate reads the pull request's state at that moment, so the re-run picks up the change.
 
 Push to `main` always runs everything, so nothing escapes verification — it moves to merge time.
 The platform workflows (Android, Apple, Windows, Nix, packaging) are unaffected here: they are
