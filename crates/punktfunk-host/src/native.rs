@@ -442,6 +442,14 @@ pub(crate) async fn serve(
             },
             () = done.notified(), if max_sessions != 0 => break,
         };
+        // A source that has not proved it can receive at the address it claims gets a Retry
+        // rather than a task and a TLS handshake, so a spoofed-source flood cannot make this
+        // host amplify. Costs the real client one RTT on first contact. A failed retry drops
+        // `Incoming`, which refuses.
+        if !incoming.remote_address_validated() {
+            let _ = incoming.retry();
+            continue;
+        }
         let opts = opts.clone();
         let audio_cap = audio_cap.clone();
         let np = np.clone();
@@ -2344,6 +2352,62 @@ fn delivered_mode(
 mod tests {
     use super::*;
 
+    /// The accept loop's address-validation gate. A first contact is unvalidated; a Retry turns
+    /// it into a second, validated arrival, and the client completes anyway. Pins the quinn
+    /// behaviour the gate rests on — a release that validated first contact would leave the
+    /// branch dead, and one that refused a legal retry would drop every new client.
+    #[test]
+    fn an_unvalidated_first_contact_is_retried_then_accepted() {
+        use punktfunk_core::quic::endpoint;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let server = endpoint::server("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = server.local_addr().unwrap();
+            let accept = tokio::spawn(async move {
+                let mut arrivals = Vec::new();
+                while let Some(incoming) = server.accept().await {
+                    let validated = incoming.remote_address_validated();
+                    arrivals.push(validated);
+                    // The same gate `serve` applies before it spends a task on a source.
+                    if !validated {
+                        assert!(
+                            incoming.retry().is_ok(),
+                            "retry is legal whenever the source is unvalidated"
+                        );
+                        continue;
+                    }
+                    let conn = incoming.await.expect("host side of the retried handshake");
+                    // Hold the endpoint: dropping it would close the connection under the client.
+                    return (arrivals, server, conn);
+                }
+                panic!("endpoint closed before a validated arrival");
+            });
+            let client = endpoint::client_insecure().unwrap();
+            let client_conn = client
+                .connect(addr, "punktfunk")
+                .unwrap()
+                .await
+                .expect("client completes across the Retry");
+            let (arrivals, _server, _host_conn) = accept.await.unwrap();
+            // An Initial the client retransmits before the Retry lands arrives unvalidated too,
+            // so pin the shape rather than the count: every arrival we turned away was
+            // unvalidated, and the one we accepted had proved its address.
+            let (accepted, retried) = arrivals.split_last().expect("at least one arrival");
+            assert!(
+                accepted,
+                "the accepted arrival is address-validated: {arrivals:?}"
+            );
+            assert!(
+                !retried.is_empty() && retried.iter().all(|v| !v),
+                "first contact is unvalidated and gets retried: {arrivals:?}"
+            );
+            drop(client_conn);
+        });
+    }
+
     /// The pipeline raises a pin miss under two layers of `.context`, so the close
     /// carries the user's sentence only if the downcast walks the whole chain.
     /// Reads the error `resolve` really produces, not a stand-in.
@@ -2782,7 +2846,7 @@ mod tests {
                     got += 1;
                 }
                 PunktfunkStatus::NoFrame => continue,
-                other => panic!("next_au: {other:?}"),
+                other => panic!("next_au: {other:?} after {got} of {count} frames"),
             }
         }
     }
@@ -2807,7 +2871,10 @@ mod tests {
                 port: 19777,
                 source: Punktfunk1Source::Synthetic,
                 seconds: 0,
-                frames: 25,
+                // More than the 25 each session pulls. The budget is one loop per session and a
+                // mid-stream mode change discards what is already queued at the old mode, so a
+                // client that pulls the whole budget only succeeds when its switch beats frame 0.
+                frames: 40,
                 max_sessions: 3,
                 max_concurrent: 1,
                 require_pairing: false,
