@@ -823,29 +823,37 @@ impl NativeClient {
     }
 
     /// Handshake-only reachability of `host:port`. Does not use mDNS (routed/VPN hosts
-    /// never advertise). No pin, no identity: transport accepts regardless of pairing, so
-    /// a completed handshake means reachable. Blocks up to `timeout`.
+    /// never advertise). Blocks up to `timeout`.
+    ///
+    /// Reachability alone: use it for a record with no pin to compare against. A caller
+    /// holding one asks [`NativeClient::probe_identity`] — an address is not an identity.
     pub fn probe(host: &str, port: u16, timeout: Duration) -> bool {
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        Self::probe_identity(host, port, timeout).is_some()
+    }
+
+    /// Who answers at `host:port`: the SHA-256 of the certificate the peer presents, or
+    /// `None` when nothing completed a handshake within `timeout`.
+    ///
+    /// The handshake itself is unpinned, so this reports the address's occupant rather than
+    /// verifying one — the caller compares. That comparison is what a presence pip owes: a
+    /// stranger who inherits a sleeping host's DHCP lease answers at its address, and reading
+    /// that as the host lights the pip AND, since wake is gated on `!online`, silences
+    /// Wake-on-LAN for exactly the machine that needs it. Two OS installs of a dual-boot box
+    /// share one lease the same way.
+    pub fn probe_identity(host: &str, port: u16, timeout: Duration) -> Option<[u8; 32]> {
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        else {
-            return false;
-        };
+            .ok()?;
         let host = host.to_string();
         rt.block_on(async move {
             // Hostname (MagicDNS, `.local`), not always an IP literal — resolve, don't parse.
-            let Ok(mut addrs) = tokio::net::lookup_host((host.as_str(), port)).await else {
-                return false;
-            };
-            let Some(remote) = addrs.next() else {
-                return false;
-            };
-            // pin = None accepts any cert. Failures are DNS / no route / connect timeout.
-            let (ep, _observed) = endpoint::client_pinned_with_identity(None, None);
-            let Ok(ep) = ep else {
-                return false;
-            };
+            let mut addrs = tokio::net::lookup_host((host.as_str(), port)).await.ok()?;
+            let remote = addrs.next()?;
+            // pin = None accepts any cert and records it. Failures are DNS / no route /
+            // connect timeout.
+            let (ep, observed) = endpoint::client_pinned_with_identity(None, None);
+            let ep = ep.ok()?;
             let reachable = match ep.connect(remote, "punktfunk") {
                 Ok(connecting) => {
                     matches!(tokio::time::timeout(timeout, connecting).await, Ok(Ok(_)))
@@ -854,7 +862,9 @@ impl NativeClient {
             };
             ep.close(0u32.into(), b"probe");
             let _ = tokio::time::timeout(Duration::from_millis(200), ep.wait_idle()).await;
-            reachable
+            // The slot is written by the cert verifier, so it is only meaningful once the
+            // handshake completed: a refused or timed-out connect leaves whatever it had.
+            reachable.then(|| *observed.lock().unwrap()).flatten()
         })
     }
 

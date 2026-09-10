@@ -219,14 +219,20 @@ public extension PunktfunkConnection {
         return rc == statusOK
     }
 
-    /// Bounded, trust-agnostic QUIC-handshake reachability probe to `host:port` — mDNS-INDEPENDENT,
-    /// so a host reached over a routed network (Tailscale/VPN/another subnet), which never
-    /// advertises, still reports reachable. No pin/identity presented. The display-side companion
-    /// to the dial-first connect fix: lets saved-host "online" pips reflect real reachability.
-    /// Blocking (builds its own runtime) — call OFF the main thread.
-    static func probe(host: String, port: UInt16, timeoutMs: UInt32 = 1500) -> Bool {
-        let rc: Int32 = host.withCString { punktfunk_probe($0, port, timeoutMs) }
-        return rc == statusOK
+    /// Who answers at `host:port` within `timeoutMs`: the SHA-256 of the certificate presented,
+    /// or nil when nothing completed a handshake. mDNS-INDEPENDENT, so a host reached over a
+    /// routed network (Tailscale/VPN/another subnet), which never advertises, still answers.
+    ///
+    /// The handshake is unpinned, so this names whoever holds the address rather than verifying
+    /// one — compare it against the saved pin. A stranger who inherits a sleeping host's lease
+    /// answers too, and counting that as the host lights the pip and shuts the wake gate against
+    /// the machine that needs waking. Blocking (builds its own runtime) — call OFF the main thread.
+    static func probeIdentity(host: String, port: UInt16, timeoutMs: UInt32 = 1500) -> Data? {
+        var fp = [UInt8](repeating: 0, count: 32)
+        let rc: Int32 = host.withCString { h in
+            fp.withUnsafeMutableBufferPointer { punktfunk_probe(h, port, timeoutMs, $0.baseAddress) }
+        }
+        return rc == statusOK ? Data(fp) : nil
     }
 }
 

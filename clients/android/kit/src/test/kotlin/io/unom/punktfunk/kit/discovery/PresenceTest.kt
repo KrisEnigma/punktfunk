@@ -2,7 +2,9 @@ package io.unom.punktfunk.kit.discovery
 
 import io.unom.punktfunk.kit.security.KnownHost
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -28,16 +30,27 @@ class PresenceTest {
     /** A stale live address no longer routes; the saved one answers. The host is up, there. */
     @Test
     fun a_host_that_answers_at_its_saved_address_is_up_when_the_advert_is_stale() {
-        val up = Presence.sweep(listOf(desk), liveFor = { advert("10.0.0.5") }) { addr, _ -> addr == "192.168.1.9" }
+        val up = Presence.sweep(listOf(desk), liveFor = { advert("10.0.0.5") }) { addr, _ -> fp.takeIf { addr == "192.168.1.9" } }
         assertEquals(HostAddr("192.168.1.9", 9777), up["desk"])
     }
 
     /** A cold boot on a new lease: the advert wins, and the sweep says where. */
     @Test
     fun a_host_on_a_new_lease_is_reported_at_the_address_that_answered() {
-        val up = Presence.sweep(listOf(desk), liveFor = { advert("192.168.1.20") }) { addr, _ -> addr == "192.168.1.20" }
+        val up = Presence.sweep(listOf(desk), liveFor = { advert("192.168.1.20") }) { addr, _ -> fp.takeIf { addr == "192.168.1.20" } }
         assertEquals(HostAddr("192.168.1.20", 9777), up["desk"])
-        assertNull(Presence.sweep(listOf(desk), liveFor = { null }) { _, _ -> false }["desk"])
+        assertNull(Presence.sweep(listOf(desk), liveFor = { null }) { _, _ -> null }["desk"])
+    }
+
+    /**
+     * A stranger holding the saved address completes the handshake, so the sweep must ask WHO
+     * answered: counting it lights the pip and, since wake reads `!online`, keeps the wake
+     * packet from the host that is actually asleep.
+     */
+    @Test
+    fun a_sweep_ignores_an_address_a_stranger_answers() {
+        val stranger = "cd".repeat(32)
+        assertNull(Presence.sweep(listOf(desk), liveFor = { null }) { _, _ -> stranger }["desk"])
     }
 
     @Test
@@ -49,5 +62,25 @@ class PresenceTest {
         // Back on the first answer; a host never seen up gets no grace.
         assertEquals(setOf("desk"), t.apply(setOf("desk", "sofa"), setOf("desk")))
         assertEquals(emptySet<String>(), t.apply(setOf("sofa"), emptySet()))
+    }
+
+    /**
+     * An address is not an identity: a stranger who inherits a sleeping host's lease completes
+     * the same handshake. Counting that as the host lights the pip and, since wake is gated on
+     * `!online`, silences Wake-on-LAN for the machine that needs it.
+     */
+    @Test
+    fun a_probe_answered_by_someone_else_is_not_this_host() {
+        val ours = "ab".repeat(32)
+        val theirs = "cd".repeat(32)
+        val pinned = KnownHost("192.168.1.9", 9777, "Desk", ours, true)
+        assertFalse(Presence.isSelf(pinned, null))
+        assertFalse(Presence.isSelf(pinned, theirs))
+        assertTrue(Presence.isSelf(pinned, ours))
+        assertTrue(Presence.isSelf(pinned, ours.uppercase()))
+        // Saved by address, never paired: no pin to compare, so any answer is the one it names.
+        val unpinned = KnownHost("192.168.1.9", 9777, "192.168.1.9", "", false)
+        assertTrue(Presence.isSelf(unpinned, theirs))
+        assertFalse(Presence.isSelf(unpinned, null))
     }
 }

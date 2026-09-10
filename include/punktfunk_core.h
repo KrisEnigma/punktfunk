@@ -2206,12 +2206,21 @@ PunktfunkStatus punktfunk_generate_identity(char *cert_pem_out,
 #endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)
-// QUIC reachability probe, trust-agnostic and mDNS-independent. `Ok` if the
-// host answered, `Timeout` otherwise. Blocks up to `timeout_ms`; off the UI thread.
+// QUIC reachability probe, mDNS-independent. `Ok` if something answered, `Timeout`
+// otherwise. Blocks up to `timeout_ms`; off the UI thread.
+//
+// The handshake is unpinned, so `Ok` says an address is occupied, not that it is YOUR
+// host: pass `observed_sha256_out` and compare it against the record's pin. A stranger
+// who inherits a sleeping host's lease answers too, and counting that as the host lights
+// the pip and shuts the wake gate against the machine that needs waking.
 //
 // # Safety
-// `host` is a NUL-terminated UTF-8 string.
-PunktfunkStatus punktfunk_probe(const char *host, uint16_t port, uint32_t timeout_ms);
+// `host` is a NUL-terminated UTF-8 string; `observed_sha256_out` is null, or writable
+// for 32 bytes.
+PunktfunkStatus punktfunk_probe(const char *host,
+                                uint16_t port,
+                                uint32_t timeout_ms,
+                                uint8_t *observed_sha256_out);
 #endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)

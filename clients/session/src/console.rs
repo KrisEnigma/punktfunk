@@ -903,9 +903,9 @@ impl ServiceState {
         if self.probe_inflight.swap(true, Ordering::SeqCst) {
             return;
         }
-        let targets: Vec<(String, (String, u16))> = rows
+        let targets: Vec<(String, (String, u16, String))> = rows
             .iter()
-            .map(|r| (r.key.clone(), (r.addr.clone(), r.port)))
+            .map(|r| (r.key.clone(), (r.addr.clone(), r.port, r.fp_hex.clone())))
             .collect();
         let probed = self.probed.clone();
         let inflight = self.probe_inflight.clone();
@@ -1145,7 +1145,7 @@ fn spawn_wake(
                     last_packet = Some(Instant::now());
                 }
                 let online = trust::probe_reachable_many(
-                    vec![(row.addr.clone(), row.port)],
+                    vec![(row.addr.clone(), row.port, row.fp_hex.clone())],
                     Duration::from_millis(900),
                 )
                 .first()

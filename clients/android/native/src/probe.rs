@@ -1,19 +1,22 @@
-//! JNI seam for the reachability probe: a bounded, trust-agnostic QUIC handshake to a saved host
-//! (`punktfunk_core::client::NativeClient::probe`). Like [`crate::wol`] it takes no session handle
-//! and links into the host workspace build (pure `jni` + `punktfunk_core`). Kotlin calls it
-//! periodically, on a background dispatcher, to light the "online" pip for saved hosts that never
-//! advertise on mDNS (reached over Tailscale / VPN / another subnet) — the display-side companion
-//! to the dial-first connect fix.
+//! JNI seam for the reachability probe: a bounded QUIC handshake to a saved host
+//! (`punktfunk_core::client::NativeClient::probe_identity`), reporting WHICH certificate
+//! answered. Like [`crate::wol`] it takes no session handle and links into the host workspace
+//! build (pure `jni` + `punktfunk_core`). Kotlin calls it periodically, on a background
+//! dispatcher, to light the "online" pip for saved hosts that never advertise on mDNS (reached
+//! over Tailscale / VPN / another subnet) — the display-side companion to the dial-first
+//! connect fix.
 
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JObject, JString};
-use jni::sys::{jboolean, jint};
+use jni::sys::{jint, jstring};
 use jni::EnvUnowned;
 use punktfunk_core::client::NativeClient;
 use std::time::Duration;
 
-/// `NativeBridge.nativeProbe(host, port, timeoutMs): Boolean` — true if `host:port` completed a
-/// QUIC handshake within `timeoutMs`. No pin/identity presented (trust-agnostic), mDNS-independent.
+/// `NativeBridge.nativeProbe(host, port, timeoutMs): String?` — the lowercase-hex SHA-256 of
+/// the certificate `host:port` presented within `timeoutMs`, or null if nothing answered.
+/// mDNS-independent; the handshake is unpinned, so the answer names whoever holds the address
+/// and the caller compares it against the record's pin.
 /// Blocking (builds its own runtime) — Kotlin runs it on `Dispatchers.IO`, never the main thread.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeProbe<'local>(
@@ -22,12 +25,20 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeProbe<'loca
     host: JString<'local>,
     port: jint,
     timeout_ms: jint,
-) -> jboolean {
-    env.with_env(|env| -> jni::errors::Result<bool> {
+) -> jstring {
+    env.with_env(|env| -> jni::errors::Result<jstring> {
         let host: String = host.try_to_string(env)?;
         let port = port.clamp(0, u16::MAX as jint) as u16;
         let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
-        Ok(NativeClient::probe(&host, port, timeout))
+        match NativeClient::probe_identity(&host, port, timeout) {
+            Some(fp) => Ok(env.new_string(hex(&fp))?.into_raw()),
+            None => Ok(std::ptr::null_mut()),
+        }
     })
     .resolve::<LogErrorAndDefault>()
+}
+
+/// Lowercase hex, the spelling every store and advert uses for a fingerprint.
+fn hex(fp: &[u8; 32]) -> String {
+    fp.iter().map(|b| format!("{b:02x}")).collect()
 }

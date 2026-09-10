@@ -154,13 +154,16 @@ object NativeBridge {
     external fun nativeWakeOnLan(macsCsv: String, lastIp: String): Boolean
 
     /**
-     * Bounded, trust-agnostic QUIC reachability probe to [host]:[port] (mDNS-independent): true if
-     * the host completed the handshake within [timeoutMs]. No pin/identity presented. Lets a saved
-     * host reached over a routed network (Tailscale/VPN/another subnet) — which never advertises on
-     * mDNS — still show as online. Blocking (builds its own runtime) — run on a background
-     * dispatcher, never the main thread.
+     * Bounded QUIC reachability probe to [host]:[port] (mDNS-independent): the lowercase-hex
+     * SHA-256 of the certificate that answered within [timeoutMs], or `null` if nothing did.
+     * Lets a saved host reached over a routed network (Tailscale/VPN/another subnet) — which
+     * never advertises on mDNS — still show as online.
+     *
+     * The handshake is unpinned, so the answer names whoever holds the address, not necessarily
+     * your host: compare it with [io.unom.punktfunk.kit.discovery.Presence.isSelf]. Blocking
+     * (builds its own runtime) — run on a background dispatcher, never the main thread.
      */
-    external fun nativeProbe(host: String, port: Int, timeoutMs: Int): Boolean
+    external fun nativeProbe(host: String, port: Int, timeoutMs: Int): String?
 
     /**
      * Start a bandwidth speed test on [handle]: the host bursts filler over the real data plane at

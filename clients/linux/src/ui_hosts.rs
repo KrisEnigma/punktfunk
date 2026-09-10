@@ -1062,20 +1062,22 @@ impl SimpleComponent for HostsPage {
                         .hosts
                         .iter()
                         .filter(|h| !h.addr.is_empty())
-                        .map(|h| (saved_key(h), h.addr.clone(), h.port))
+                        .map(|h| (saved_key(h), h.addr.clone(), h.port, h.fp_hex.clone()))
                         .collect();
                     if !entries.is_empty() {
                         let (tx, rx) = async_channel::bounded(1);
                         std::thread::Builder::new()
                             .name("punktfunk-probe".into())
                             .spawn(move || {
-                                let targets =
-                                    entries.iter().map(|(_, a, p)| (a.clone(), *p)).collect();
+                                let targets = entries
+                                    .iter()
+                                    .map(|(_, a, p, fp)| (a.clone(), *p, fp.clone()))
+                                    .collect();
                                 let results =
                                     crate::trust::probe_reachable_many(targets, PROBE_TIMEOUT);
                                 let map: HashMap<String, bool> = entries
                                     .into_iter()
-                                    .map(|(k, _, _)| k)
+                                    .map(|(k, _, _, _)| k)
                                     .zip(results)
                                     .collect();
                                 let _ = tx.send_blocking(map);
