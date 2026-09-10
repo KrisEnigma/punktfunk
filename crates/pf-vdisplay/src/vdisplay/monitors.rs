@@ -191,15 +191,75 @@ pub fn resolve<'a>(monitors: &'a [PhysicalMonitor], want: &str) -> Result<&'a Ph
     {
         return Ok(m);
     }
-    let available = monitors
-        .iter()
-        .map(|m| m.connector.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    if available.is_empty() {
-        bail!("no monitor named {want:?} — this compositor reports no monitors at all");
+    Err(MonitorNotFound {
+        want: want.to_string(),
+        available: monitors.iter().map(|m| m.connector.clone()).collect(),
     }
-    bail!("no monitor named {want:?} — this host has: {available}");
+    .into())
+}
+
+/// A [`resolve`] miss, typed so the host can hand the client a sentence naming the
+/// pin rather than the operator chain. `available` empty = the compositor reports
+/// no monitors at all.
+#[derive(Debug, Clone)]
+pub struct MonitorNotFound {
+    pub want: String,
+    pub available: Vec<String>,
+}
+
+/// The operator line. The session pipeline matches its `no monitor named` prefix to
+/// refuse a retry, so the opening is a contract, not a wording choice.
+impl std::fmt::Display for MonitorNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let want = &self.want;
+        if self.available.is_empty() {
+            return write!(
+                f,
+                "no monitor named {want:?} — this compositor reports no monitors at all"
+            );
+        }
+        write!(
+            f,
+            "no monitor named {want:?} — this host has: {}",
+            self.available.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for MonitorNotFound {}
+
+/// Names beyond this go unlisted: the sentence rides a 256-byte close frame, and
+/// losing the next move to a truncation costs more than losing the fifth name.
+const NAMED_IN_SENTENCE: usize = 4;
+
+impl MonitorNotFound {
+    /// The user's sentence — what did not happen, then the move that fixes it.
+    /// Naming the heads the host does have is that move: the pin is a setting.
+    pub fn user_message(&self) -> String {
+        let want = &self.want;
+        if self.available.is_empty() {
+            return format!(
+                "The host is set to capture a monitor called \"{want}\", and reports no \
+                 monitors at all. Clear that in the host's display settings to stream a \
+                 virtual display instead."
+            );
+        }
+        let mut names = self
+            .available
+            .iter()
+            .take(NAMED_IN_SENTENCE)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.available.len() > NAMED_IN_SENTENCE {
+            names.push_str(", …");
+        }
+        format!(
+            "The host is set to capture a monitor called \"{want}\", which isn't connected to \
+             it. Change it to one the host has ({names}) in the host's display settings, or \
+             clear it to stream a virtual display instead."
+        )
+    }
 }
 
 #[cfg(test)]
@@ -247,6 +307,50 @@ mod tests {
     fn a_miss_with_no_monitors_says_so() {
         let err = resolve(&[], "DP-1").unwrap_err().to_string();
         assert!(err.contains("no monitors at all"), "{err}");
+    }
+
+    /// Reads the sentence off the error `resolve` really produces, so a reworded
+    /// miss cannot leave the client's half behind.
+    #[test]
+    fn a_miss_words_the_pin_and_the_heads_for_the_user() {
+        let ms = [mon("HDMI-A-1"), mon("DP-1")];
+        let err = resolve(&ms, "HDMI-A-3").unwrap_err();
+        let said = err
+            .downcast_ref::<MonitorNotFound>()
+            .expect("a miss stays typed through anyhow")
+            .user_message();
+        assert!(said.contains("HDMI-A-3"), "names the pin: {said}");
+        assert!(said.contains("HDMI-A-1"), "names a head it has: {said}");
+        assert!(
+            !said.contains("no monitor named"),
+            "not the operator line: {said}"
+        );
+        assert!(
+            said.len() <= punktfunk_core::quic::REFUSED_REASON_MAX,
+            "fits one close frame uncut: {} bytes",
+            said.len()
+        );
+    }
+
+    /// Sixteen connectors is the policy ceiling; the sentence still has to arrive
+    /// whole, so the list is what gets cut, never the next move.
+    #[test]
+    fn a_miss_on_a_crowded_host_still_fits_the_close_frame() {
+        let ms = (0..16).map(|i| mon(&format!("DP-{i}"))).collect::<Vec<_>>();
+        let said = resolve(&ms, "HDMI-A-3")
+            .unwrap_err()
+            .downcast_ref::<MonitorNotFound>()
+            .unwrap()
+            .user_message();
+        assert!(
+            said.ends_with("virtual display instead."),
+            "keeps the move: {said}"
+        );
+        assert!(
+            said.len() <= punktfunk_core::quic::REFUSED_REASON_MAX,
+            "fits one close frame uncut: {} bytes",
+            said.len()
+        );
     }
 
     #[test]

@@ -106,16 +106,65 @@ pub(crate) struct WorkerArgs {
     /// Latched beside `end_reason` so an access-expiry close is not rendered as a
     /// generic host error.
     pub(crate) end_reject_code: Arc<AtomicU32>,
+    /// The host's own sentence for that close, when it sent one. Set once — a
+    /// connection closes once — and only ever with non-empty text.
+    pub(crate) end_reject_said: Arc<std::sync::OnceLock<String>>,
 }
 
-/// The host's stated rejection, if the connection closed with a typed application code.
-/// `None` for local errors, bare/legacy closes (including our own `LocallyClosed`), and
-/// transport failures — those keep their original error.
-pub(crate) fn reject_from_close(conn: &quinn::Connection) -> Option<crate::reject::RejectReason> {
+/// The host's stated rejection and the sentence it sent with it, if the connection
+/// closed with a typed application code. `None` for local errors, bare/legacy closes
+/// (including our own `LocallyClosed`), and transport failures — those keep their
+/// original error.
+///
+/// The sentence is empty whenever the host had no wording of its own; the caller
+/// falls back to ours. See [`sanitize_reason`] for why it is not taken as sent.
+pub(crate) fn reject_from_close(
+    conn: &quinn::Connection,
+) -> Option<(crate::reject::RejectReason, String)> {
     match conn.close_reason()? {
         quinn::ConnectionError::ApplicationClosed(ac) => u32::try_from(u64::from(ac.error_code))
             .ok()
-            .and_then(crate::reject::RejectReason::from_close_code),
+            .and_then(crate::reject::RejectReason::from_close_code)
+            .map(|r| (r, sanitize_reason(&ac.reason))),
         _ => None,
+    }
+}
+
+/// Make host-controlled close bytes safe to render. A host we have paired with is
+/// not thereby trusted to fill a client's screen: keep printable characters only,
+/// and cap at the wire's one-sentence budget.
+pub(crate) fn sanitize_reason(bytes: &[u8]) -> String {
+    let text: String = String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let text = text.trim();
+    let mut cut = text.len().min(crate::quic::REFUSED_REASON_MAX);
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text[..cut].to_string()
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::sanitize_reason;
+
+    #[test]
+    fn a_hostile_reason_cannot_fill_the_screen_or_move_the_cursor() {
+        let long = "é".repeat(4000);
+        let out = sanitize_reason(long.as_bytes());
+        assert!(
+            out.len() <= crate::quic::REFUSED_REASON_MAX,
+            "{}",
+            out.len()
+        );
+        assert!(out.chars().all(|c| c == 'é'), "kept only the text");
+
+        assert_eq!(sanitize_reason(b"one\x1b[2Jtwo\n"), "one[2Jtwo");
+        assert_eq!(sanitize_reason(b"  padded  "), "padded");
+        assert_eq!(sanitize_reason(b""), "");
+        // Invalid UTF-8 degrades to replacement characters, never a panic.
+        assert!(!sanitize_reason(&[0xff, 0xfe]).is_empty());
     }
 }

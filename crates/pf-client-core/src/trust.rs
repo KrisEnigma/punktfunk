@@ -773,6 +773,19 @@ pub fn pair_with_host(
     )
 }
 
+/// The sentence to show for a typed rejection: the host's own words when it sent
+/// any, else [`connect_reject_message`] for the code.
+///
+/// A host knows things no client can — which monitor it was told to capture, and
+/// that it no longer has one by that name. Only a host that had nothing specific
+/// to say leaves the text empty, and then the generic line is the better one.
+pub fn reject_message(reason: punktfunk_core::reject::RejectReason, said: Option<&str>) -> String {
+    match said {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => connect_reject_message(reason),
+    }
+}
+
 /// User-facing sentence for a typed host rejection, shared by every desktop/console
 /// surface so "declined" never renders as "timed out". The caller words other errors.
 pub fn connect_reject_message(reason: punktfunk_core::reject::RejectReason) -> String {
@@ -1494,6 +1507,23 @@ mod tests {
     /// 64-hex fingerprint of one repeated digit — readable and distinct per letter.
     fn fp(c: char) -> String {
         std::iter::repeat_n(c, 64).collect()
+    }
+
+    #[test]
+    fn the_hosts_own_words_outrank_our_generic_line() {
+        use punktfunk_core::reject::RejectReason as R;
+        let said = "The host is set to capture a monitor called \"HDMI-A-3\", which isn't \
+                    connected to it.";
+        assert_eq!(reject_message(R::SetupFailed, Some(said)), said);
+
+        // No sentence, or nothing but space: ours is the better line.
+        for empty in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                reject_message(R::SetupFailed, empty),
+                connect_reject_message(R::SetupFailed),
+                "{empty:?}"
+            );
+        }
     }
 
     /// A UTF-8 BOM must load, not fall back to `Default`. serde refuses `EF BB BF`

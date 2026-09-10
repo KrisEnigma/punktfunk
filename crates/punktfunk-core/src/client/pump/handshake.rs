@@ -242,7 +242,7 @@ pub(super) async fn connect_and_handshake(args: &WorkerArgs) -> Result<Handshake
                     .await;
             }
             Err(match reject_from_close(&conn) {
-                Some(r) => PunktfunkError::Rejected(r),
+                Some((r, _)) => PunktfunkError::Rejected(r),
                 None => e,
             })
         }

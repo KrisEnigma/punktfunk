@@ -96,7 +96,7 @@ impl NativeClient {
                             .await;
                         }
                         Err(match reject_from_close(&conn) {
-                            Some(r) => PunktfunkError::Rejected(r),
+                            Some((r, _)) => PunktfunkError::Rejected(r),
                             None => e,
                         })
                     }

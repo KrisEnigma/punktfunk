@@ -82,6 +82,7 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         access_deadline_unix,
         access_tx,
         end_reject_code,
+        end_reject_said,
         ..
     } = args;
     let clock_rtt_ns = negotiated.clock_rtt_ns;
@@ -247,7 +248,12 @@ pub(super) async fn run_pump(args: WorkerArgs) {
             // Reason before `shutdown`: different threads observe the two; the flag must not win.
             let reason = crate::client::PunktfunkEndReason::from(&why);
             // Mid-session typed close (access expiry, …) beside the coarse reason, same order.
-            if let Some(r) = reject_from_close(&conn) {
+            // The host's sentence lands before the code: a reader that sees the code must
+            // not find the text still missing.
+            if let Some((r, said)) = reject_from_close(&conn) {
+                if !said.is_empty() {
+                    let _ = end_reject_said.set(said);
+                }
                 end_reject_code.store(r.close_code(), Ordering::SeqCst);
             }
             end_reason.store(reason as u8, Ordering::SeqCst);
