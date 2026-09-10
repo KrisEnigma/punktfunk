@@ -132,15 +132,11 @@ signing runners for untrusted code. Each job also keeps its own fail-closed fork
 
 ### Installing the Android build from a pull request
 
-A pull request labelled `ci:android` publishes its debug APK to the generic package registry, and
-the job summary links it:
+A pull request labelled `ci:android` attaches its debug APK to the run, as a zip you can download
+in one click from the run page. That is the existing `Attach APK(s) to the workflow run` step; the
+label is now what makes the build happen at all, so it is also what produces the APK.
 
-```
-https://git.unom.io/api/packages/unom/generic/punktfunk-android-pr/pr-<number>/punktfunk-pr<number>-<sha>.apk
-```
-
-It is debug-signed, so it installs alongside a store build rather than replacing it. Workflow
-artifacts are not used for this — artifact downloads 400 on this instance.
+It is debug-signed, so it installs alongside a store build rather than replacing it.
 
 Push to `main` always runs everything, so nothing escapes verification — it moves to merge time.
 The platform workflows (Android, Apple, Windows, Nix, packaging) are unaffected here: they are

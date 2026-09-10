@@ -112,8 +112,11 @@ env:
 
 jobs:
   # An Android build is an hour of fleet time at worst, so on a pull request it is opt-in: add
-  # the `ci:android` label (or `ci:all`). Only someone with write access can label, which is
-  # also what keeps the APK below to trusted contributors. Pushes and tags are unaffected.
+  # the `ci:android` label (or `ci:all`). Pushes and tags are unaffected.
+  #
+  # ⚠ This also gates the APK. "Attach APK(s) to the workflow run" below is `if: always()` and
+  # ran on every pull request before this gate existed; now the label is what produces it. Since
+  # only a writer can label, that is also the trust boundary on who gets a build to sideload.
   #
   # The decision is shell rather than a label expression on the job's `if`, because the event
   # payload is a snapshot: a label added after the last push is not in it, and a re-run replays
@@ -317,43 +320,6 @@ jobs:
         env:
           VERSION_CODE: ${{ github.run_number }}
         run: ./gradlew :app:assembleDebug --stacktrace
-
-      # The point of labelling a pull request is to get something you can install. Workflow
-      # artifacts cannot do that here — Gitea redirects the download to a presigned URL its own
-      # client re-encodes, and the store answers 400 — so this uses the generic registry, the
-      # same path the canary/release upload below already proves works.
-      #
-      # Debug-signed, so it installs beside a store build rather than over it.
-      - name: Publish this pull request's APK
-        if: github.event_name == 'pull_request'
-        env:
-          REGISTRY: git.unom.io
-          OWNER: unom
-          PKG: punktfunk-android-pr
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-        run: |
-          set -eu
-          APK=$(find clients/android/app/build/outputs/apk/debug -name '*.apk' | head -1)
-          [ -n "$APK" ] || { echo "::error::assembleDebug produced no APK"; exit 1; }
-          if [ -z "${REGISTRY_TOKEN:-}" ]; then
-            # A fork pull request gets no secrets. Say so instead of failing a green build.
-            echo "::warning::no registry token in this run — APK not published (fork pull request?)"
-            exit 0
-          fi
-          short=$(printf '%s' "$HEAD_SHA" | cut -c1-9)
-          name="punktfunk-pr${PR}-${short}.apk"
-          url="https://$REGISTRY/api/packages/$OWNER/generic/$PKG/pr-$PR/$name"
-          # Same version+name twice is a 409, so drop first and a re-run replaces cleanly.
-          curl -fsS -o /dev/null --user "enricobuehler:$REGISTRY_TOKEN" -X DELETE "$url" || true
-          curl -fsS --user "enricobuehler:$REGISTRY_TOKEN" --upload-file "$APK" "$url"
-          echo "APK for PR #$PR: $url"
-          [ -z "${GITHUB_STEP_SUMMARY:-}" ] || {
-            echo "### Android APK for this pull request"
-            echo ""
-            echo "[\`$name\`]($url) — debug-signed, installs alongside a store build."
-          } >> "$GITHUB_STEP_SUMMARY"
 
       # Single source of the version name + the Play track for the release steps below. versionCode
       # stays github.run_number (monotonic across both tracks; Play rejects a regressed code).
