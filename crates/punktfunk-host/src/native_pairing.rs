@@ -540,12 +540,13 @@ mod tests {
         assert_eq!(d, PairingDecision::TimedOut);
         assert!(np.pending_contains("ab01"));
 
+        let ready = np.approval.waiter_ready_generation();
         let np2 = np.clone();
         let waiter = tokio::spawn(async move {
             np2.wait_for_decision("ab01", seq, Duration::from_secs(5))
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        np.approval.wait_for_waiter_ready(ready).await;
         let id = np
             .pending()
             .into_iter()
@@ -559,12 +560,13 @@ mod tests {
         assert!(np.is_paired("ab01"));
 
         let seq = np.note_pending("Knock2", "cd02", None);
+        let ready = np.approval.waiter_ready_generation();
         let np3 = np.clone();
         let waiter = tokio::spawn(async move {
             np3.wait_for_decision("cd02", seq, Duration::from_secs(5))
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        np.approval.wait_for_waiter_ready(ready).await;
         let id = np
             .pending()
             .into_iter()
@@ -610,12 +612,13 @@ mod tests {
         assert_eq!(d, PairingDecision::TimedOut);
 
         let seq = np.note_pending("Old Guest", "aa77", None);
+        let ready = np.approval.waiter_ready_generation();
         let np2 = np.clone();
         let waiter = tokio::spawn(async move {
             np2.wait_for_decision("aa77", seq, Duration::from_secs(5))
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        np.approval.wait_for_waiter_ready(ready).await;
         let id = np
             .pending()
             .into_iter()
@@ -646,24 +649,26 @@ mod tests {
         let np = Arc::new(NativePairing::load_with(Some(p.clone()), None, false).unwrap());
 
         let seq1 = np.note_pending("iPad Pro", "ee01", None);
+        let ready = np.approval.waiter_ready_generation();
         let np1 = np.clone();
         let waiter1 = tokio::spawn(async move {
             np1.wait_for_decision("ee01", seq1, Duration::from_secs(5))
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        np.approval.wait_for_waiter_ready(ready).await;
 
         let seq2 = np.note_pending("iPad Pro", "ee01", None);
         assert_ne!(seq1, seq2);
         assert_eq!(waiter1.await.unwrap(), PairingDecision::Superseded);
         assert_eq!(np.pending().len(), 1);
 
+        let ready = np.approval.waiter_ready_generation();
         let np2 = np.clone();
         let waiter2 = tokio::spawn(async move {
             np2.wait_for_decision("ee01", seq2, Duration::from_secs(5))
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        np.approval.wait_for_waiter_ready(ready).await;
         let id = np
             .pending()
             .into_iter()
