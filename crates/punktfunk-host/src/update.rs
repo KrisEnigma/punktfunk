@@ -151,6 +151,9 @@ struct Runtime {
     /// Version already emitted as `update.available`; a still-newer cache must
     /// not re-announce every auto-refresh.
     announced: Option<String>,
+    /// Commits `~/punktfunk` is behind its upstream — the source build's only
+    /// "newer" signal. Kept across a failed fetch; see [`source_newer`].
+    source_behind: Option<u64>,
     job: Option<jobs::JobSnapshot>,
 }
 
@@ -210,6 +213,15 @@ fn store_floor(path: &Path, channel: &str, serial: u64) {
     }
 }
 
+/// Is a newer build out, for an install with no published artifact to compare?
+///
+/// A checkout's version says nothing about the remote, so the count of upstream
+/// commits is the whole answer. An unanswered fetch is "nothing to show", never
+/// "up to date" — a Deck must not be told it is current on a guess.
+pub(crate) fn source_newer(behind: Option<u64>) -> bool {
+    behind.is_some_and(|n| n > 0)
+}
+
 /// Blocking feed fetch; call from a blocking thread.
 fn fetch_manifest_blocking(channel: &str) -> Result<Manifest, FeedError> {
     pf_update_check::feed::fetch_manifest_blocking(
@@ -225,6 +237,13 @@ fn fetch_manifest_blocking(channel: &str) -> Result<Manifest, FeedError> {
 
 pub(crate) fn refresh_blocking() -> Result<Checked, FeedError> {
     let (kind, channel) = detect::detect();
+    // Before the lock: this talks to the network. The manifest still fetches for the
+    // "latest published" row, but it cannot decide a source build's answer.
+    let source_build = kind == detect::InstallKind::SteamosSource;
+    #[cfg(target_os = "linux")]
+    let behind = source_build.then(linux::source_behind).flatten();
+    #[cfg(not(target_os = "linux"))]
+    let behind: Option<u64> = None;
     let result = fetch_manifest_blocking(channel.as_str()).and_then(|m| {
         let path = state_path();
         let floor = load_floor(&path, channel.as_str());
@@ -241,18 +260,25 @@ pub(crate) fn refresh_blocking() -> Result<Checked, FeedError> {
     let mut rt = runtime().lock().unwrap();
     rt.last_attempt = Some(Instant::now());
     rt.refreshing = false;
+    if behind.is_some() {
+        rt.source_behind = behind;
+    }
     match result {
         Ok(m) => {
             let checked = Checked {
                 manifest: m,
                 fetched_unix: now_unix(),
             };
-            let newer = detect::is_newer(
-                &checked.manifest.version,
-                checked.manifest.ci_run,
-                env!("PUNKTFUNK_VERSION"),
-                channel,
-            );
+            let newer = if source_build {
+                source_newer(rt.source_behind)
+            } else {
+                detect::is_newer(
+                    &checked.manifest.version,
+                    checked.manifest.ci_run,
+                    env!("PUNKTFUNK_VERSION"),
+                    channel,
+                )
+            };
             if newer && rt.announced.as_deref() != Some(checked.manifest.version.as_str()) {
                 rt.announced = Some(checked.manifest.version.clone());
                 crate::events::emit(crate::events::EventKind::UpdateAvailable {
@@ -306,6 +332,7 @@ pub(crate) fn snapshot_and_maybe_refresh() -> Snapshot {
             not_published: rt.not_published,
             job: rt.job.clone(),
             last_result: jobs::read_result(&jobs::result_path()),
+            source_behind: rt.source_behind,
         }
     };
     if kick {
@@ -340,6 +367,7 @@ pub(crate) async fn force_check() -> Result<Snapshot, ForceError> {
         not_published: rt.not_published,
         job: rt.job.clone(),
         last_result: jobs::read_result(&jobs::result_path()),
+        source_behind: rt.source_behind,
     })
 }
 
@@ -580,6 +608,8 @@ pub(crate) struct Snapshot {
     /// fresh intent is still in flight — see [`Snapshot::applying_from_intent`].
     pub job: Option<jobs::JobSnapshot>,
     pub last_result: Option<jobs::ResultRecord>,
+    /// Source builds only: commits behind upstream, `None` when git could not answer.
+    pub source_behind: Option<u64>,
 }
 
 impl Snapshot {
@@ -693,8 +723,18 @@ mod tests {
             not_published: false,
             job: None,
             last_result: None,
+            source_behind: None,
         };
         assert!(!mk(now_unix()).stale());
         assert!(mk(now_unix() - STALE_AFTER.as_secs() - 10).stale());
+    }
+
+    #[test]
+    fn a_source_build_is_current_only_when_git_says_so() {
+        // An unanswered fetch is not "up to date": the Deck keeps its last count and the
+        // console shows no update rather than promising one it cannot check.
+        assert!(source_newer(Some(3)));
+        assert!(!source_newer(Some(0)));
+        assert!(!source_newer(None));
     }
 }

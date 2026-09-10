@@ -205,7 +205,7 @@ export const UpdateCard: FC<{
 							)}
 
 							{!inFlight && s.last_result && (
-								<LastResult result={s.last_result} />
+								<LastResult result={s.last_result} kind={s.install_kind} />
 							)}
 
 							{s.manifest?.stale && (
@@ -449,16 +449,25 @@ const ApplyProgress: FC<{
 	);
 };
 
-/** Durable outcome of the last apply (written by the host across its own restart). */
+/**
+ * Durable outcome of the last apply (written by the host across its own restart).
+ *
+ * Equal versions mean the apply changed nothing. A source build says that in its own
+ * words: it has no package source to be behind, and its version carries the commit,
+ * so equal really does mean the checkout never moved.
+ */
 const LastResult: FC<{
 	result: NonNullable<UpdateStatus["last_result"]>;
-}> = ({ result }) =>
+	kind: string;
+}> = ({ result, kind }) =>
 	result.ok ? (
 		<p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm">
 			{result.staged
 				? m.update_result_staged({ to: result.to })
 				: result.from === result.to
-					? m.update_result_noop()
+					? kind === "steamos-source"
+						? m.update_result_noop_source()
+						: m.update_result_noop()
 					: m.update_result_ok({ from: result.from, to: result.to })}
 		</p>
 	) : (

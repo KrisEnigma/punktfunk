@@ -56,13 +56,21 @@ if [ "${1:-}" = "--pull" ]; then
     ok "pulled"
 fi
 
+# The console tells one build from the next by its version string alone. Without the commit
+# every rebuild reports the same X.Y.Z, and a finished update reads as "nothing newer".
+# An empty value is ignored by the build script, which falls back to the Cargo version.
+PF_BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1)"
+PF_SHA="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || true)"
+PF_BUILD_VERSION=""
+[ -z "$PF_BASE" ] || [ -z "$PF_SHA" ] || PF_BUILD_VERSION="$PF_BASE+g$PF_SHA"
+
 log "Rebuilding host (release)"
 # nvenc,vulkan-encode matches the packaged builds (deb/arch) — see install.sh.
 # punktfunk-encode-worker rides along: host and worker version-check each other over their socket
 # and fall back to the in-process encoder on any mismatch, so an update must never move one
 # without the other.
 distrobox enter "$BOX" -- bash -lc "set -e
-export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR'
+export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR' PUNKTFUNK_BUILD_VERSION='$PF_BUILD_VERSION'
 cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/nvenc,punktfunk-host/vulkan-encode"
 MISSING="$({ ldd "$BIN" 2>/dev/null || true; } | awk '/not found/ {print $1}' | sort -u | tr '\n' ' ')"
 [ -z "$MISSING" ] || die "the host rebuilt, but SteamOS still cannot load it. Missing: $MISSING

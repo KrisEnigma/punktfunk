@@ -92,11 +92,17 @@ fn status_from(snap: update::Snapshot) -> UpdateStatus {
     let (kind, channel) = detect::detect();
     let current = env!("PUNKTFUNK_VERSION");
     let stale = snap.stale();
-    let available = snap
-        .checked
-        .as_ref()
-        .map(|c| detect::is_newer(&c.manifest.version, c.manifest.ci_run, current, channel))
-        .unwrap_or(false);
+    // A source build's answer comes from its checkout, not the feed: its version can
+    // never reach a published canary label, so the manifest would flag one forever.
+    // Apply still refuses without a verified manifest, so an offer needs both.
+    let available = if kind == detect::InstallKind::SteamosSource {
+        update::source_newer(snap.source_behind) && snap.checked.is_some()
+    } else {
+        snap.checked
+            .as_ref()
+            .map(|c| detect::is_newer(&c.manifest.version, c.manifest.ci_run, current, channel))
+            .unwrap_or(false)
+    };
     // Leftover installer intent still shows as `restarting` so the console
     // poller does not see a gap after the previous host died.
     let job = snap
