@@ -63,6 +63,11 @@ pub const FLUSH_COOLDOWN: Duration = Duration::from_secs(2);
 /// delivery counts settle it for clients new enough to send one.
 pub const NO_VIDEO_RETRY: Duration = Duration::from_millis(2600);
 
+/// One adaptive-FEC / ABR report window. A window the client discards (probe
+/// tail, host pipeline gap) sends no [`crate::quic::LossReport`], so the host
+/// reads a report later than this by a window as a discard, not jitter.
+pub const ADAPT_REPORT_INTERVAL: Duration = Duration::from_millis(750);
+
 /// A clock-triggered jump that discarded fewer datagrams than this (and no queued
 /// AUs) found no local backlog. Flushing helps neither a wall-clock step (NTP
 /// shifts every future frame over-bound) nor an upstream queue (OWD already
@@ -75,6 +80,11 @@ pub(crate) const NOOP_FLUSH_DATAGRAMS: u64 = 64;
 /// queue. An applied mid-stream re-sync re-arms; disarm is the backstop between
 /// re-syncs.
 pub(crate) const NOOP_CLOCK_FLUSHES_TO_DISARM: u32 = 2;
+
+/// Real backlog sheds under a pinned rate before the client says it cannot
+/// keep up. [`FLUSH_COOLDOWN`] spaces them, so three is ≥ 4 s of falling
+/// behind — a condition, not a loading burst.
+pub(crate) const PIN_SHEDS_TO_WARN: u32 = 3;
 
 /// Periodic mid-stream clock re-sync ([`ClockResync`]): 60 s bounds slow drift
 /// and picks up an NTP step within a minute (8 tiny control messages per batch).

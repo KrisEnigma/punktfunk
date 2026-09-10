@@ -30,6 +30,9 @@ pub(super) struct DataPump {
     pub(super) mode_gen: Arc<AtomicU32>,
     pub(super) frames_dropped: Arc<std::sync::atomic::AtomicU64>,
     pub(super) fec_recovered: Arc<std::sync::atomic::AtomicU64>,
+    /// The pinned rate this client could not hold, kbps; `0` until it sheds
+    /// its backlog [`PIN_SHEDS_TO_WARN`] times. Embedders show it once.
+    pub(super) unsustainable_pin_kbps: Arc<AtomicU32>,
     /// Host `BitrateChanged` acks, drained in arrival order. A queue so a
     /// corrective short retarget cannot be clobbered by a full resolve ack
     /// in the same window (host-cap learning needs two consecutive shorts).
@@ -83,6 +86,7 @@ impl DataPump {
             mode_gen: pump_mode_gen,
             frames_dropped,
             fec_recovered,
+            unsustainable_pin_kbps,
             bitrate_ack,
             recovery_kf: pump_recovery_kf,
             pipeline_gap: pump_pipeline_gap,
@@ -101,7 +105,6 @@ impl DataPump {
         register_hot_tid(&pump_hot_tids); // UDP receive + FEC reassembly
                                           // Adaptive-FEC loss window. FLAG_PROBE filler would skew it, so
                                           // reports are suppressed for the whole speed-test burst.
-        const ADAPT_REPORT_INTERVAL: Duration = Duration::from_millis(750);
         let mut last_report = Instant::now();
         // DeliveryReport: every window while packets_received is 0, once
         // more when the first packets land, then never. Older hosts log
@@ -186,6 +189,9 @@ impl DataPump {
         // a re-sync (`pump_clock_gen`). First no-op also asks for re-sync.
         let mut noop_clock_flushes: u32 = 0;
         let mut clock_detector_armed = true;
+        // Flushes that found a real backlog. Under a pinned rate nothing
+        // else can lower the load, so the count is the "cannot keep up" fact.
+        let mut real_sheds: u32 = 0;
         // AUs dropped while nothing popped the channel (embedder decoder not
         // started yet). The first pop after one owes the host a keyframe.
         let mut unconsumed_aus: u64 = 0;
@@ -400,7 +406,6 @@ impl DataPump {
                     st.fec_recovered_shards.wrapping_sub(last_recovered),
                     st.fec_late_shards.wrapping_sub(last_late),
                     st.packets_received.wrapping_sub(last_received),
-                    window_dropped,
                 );
                 if discard {
                     // LossReport goes with the window: probe tail would
@@ -747,6 +752,16 @@ impl DataPump {
                                 }
                             } else {
                                 noop_clock_flushes = 0;
+                                real_sheds += 1;
+                                if bitrate_kbps != 0 && real_sheds == PIN_SHEDS_TO_WARN {
+                                    unsustainable_pin_kbps.store(bitrate_kbps, Ordering::Relaxed);
+                                    tracing::warn!(
+                                        pinned_kbps = bitrate_kbps,
+                                        sheds = real_sheds,
+                                        "pinned bitrate above what this client sustains — the \
+                                         receive backlog keeps being shed"
+                                    );
+                                }
                             }
                             continue; // this frame is the stale past
                         }
@@ -979,6 +994,7 @@ mod tests {
             encode_lat: Arc::new(Mutex::new(Default::default())),
             mode_gen: Arc::new(AtomicU32::new(0)),
             frames_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            unsustainable_pin_kbps: Arc::new(AtomicU32::new(0)),
             fec_recovered: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             bitrate_ack: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             recovery_kf: Arc::new(AtomicU32::new(0)),

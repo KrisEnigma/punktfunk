@@ -1,9 +1,9 @@
 //! The client worker: QUIC handshake + control/input/datagram tasks + the blocking data-plane pump.
 
 use super::frame_channel::{
-    StandingLatAction, StandingLatency, CLOCK_RESYNC_INTERVAL, FLUSH_AFTER, FLUSH_COOLDOWN,
-    FLUSH_LATENCY, NOOP_CLOCK_FLUSHES_TO_DISARM, NOOP_FLUSH_DATAGRAMS, QUEUE_HIGH, QUEUE_LOW,
-    STANDING_TIME,
+    StandingLatAction, StandingLatency, ADAPT_REPORT_INTERVAL, CLOCK_RESYNC_INTERVAL, FLUSH_AFTER,
+    FLUSH_COOLDOWN, FLUSH_LATENCY, NOOP_CLOCK_FLUSHES_TO_DISARM, NOOP_FLUSH_DATAGRAMS,
+    PIN_SHEDS_TO_WARN, QUEUE_HIGH, QUEUE_LOW, STANDING_TIME,
 };
 use super::worker::reject_from_close;
 use super::*;
@@ -72,6 +72,7 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         probe,
         frames_dropped,
         fec_recovered,
+        unsustainable_pin_kbps,
         mic_stats,
         hot_tids,
         clock_offset,
@@ -268,6 +269,7 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         mode_gen,
         frames_dropped,
         fec_recovered,
+        unsustainable_pin_kbps,
         bitrate_ack,
         recovery_kf,
         pipeline_gap,

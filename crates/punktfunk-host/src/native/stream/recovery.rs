@@ -210,55 +210,73 @@ impl StreamState {
 
     /// One forced IDR per cooldown. A stream whose recovery marks the client can lift on heals
     /// over ~0.5 s (2 s window); every other stream's only repair is the IDR, so the window is
-    /// short — swallow the round-trip echo, re-issue a lost IDR promptly.
+    /// short — swallow the round-trip echo, re-issue a lost IDR promptly. An IDR the client
+    /// re-asks after is one it lost or could not use; each such IDR doubles the cooldown
+    /// ([`idr_cooldown`]) so the repair stops feeding the overload that defeats it.
     fn force_keyframe(&mut self, rfi_declined: bool) {
         const IDR_COOLDOWN_INTRA: std::time::Duration = std::time::Duration::from_secs(2);
         const IDR_COOLDOWN_FULL: std::time::Duration = std::time::Duration::from_millis(750);
-        const RFI_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
-        const RFI_ECHO_MAX_SWALLOWED: u32 = 2;
-        const KF_EPISODE_RESET: std::time::Duration = std::time::Duration::from_secs(1);
-        let window = if self.enc.caps().intra_refresh_recovery {
+        let base = if self.enc.caps().intra_refresh_recovery {
             IDR_COOLDOWN_INTRA
         } else {
             IDR_COOLDOWN_FULL
         };
         let now = std::time::Instant::now();
-        if self
-            .last_kf_request
-            .is_some_and(|t| now.duration_since(t) > KF_EPISODE_RESET)
+        match self
+            .kf_gate
+            .decide(now, base, self.last_forced_idr, self.last_rfi, rfi_declined)
         {
-            self.rfi_echo_swallowed = 0;
-        }
-        self.last_kf_request = Some(now);
-        let idr_recent = self.last_forced_idr.is_some_and(|t| t.elapsed() < window);
-        let rfi_echo = !rfi_declined
-            && self.last_rfi.is_some_and(|t| t.elapsed() < RFI_ECHO_WINDOW)
-            && self.rfi_echo_swallowed < RFI_ECHO_MAX_SWALLOWED;
-        if idr_recent {
-            // In-flight IDR has not repaired the client yet — do not RFI-anchor over that damage.
-            self.enc.distrust_references();
-            tracing::debug!(
-                "keyframe request coalesced — within the IDR cooldown; RFI anchor trust \
-                 withdrawn until the IDR repairs the client"
-            );
-        } else if rfi_echo {
-            // Do not distrust: the recovery frame is still in flight. Hedge is RFI_ECHO_MAX_SWALLOWED.
-            self.rfi_echo_swallowed += 1;
-            tracing::debug!(
-                swallowed = self.rfi_echo_swallowed,
-                "keyframe request coalesced — echo of an RFI-recovered loss"
-            );
-        } else {
-            let rfi_unhealed = self.rfi_echo_swallowed > 0;
-            tracing::debug!(rfi_unhealed, "forcing keyframe (client decode recovery)");
-            if rfi_unhealed {
+            KeyframeVerdict::Coalesced { cooldown, unhealed } => {
+                // In-flight IDR has not repaired the client yet — do not RFI-anchor over that damage.
                 self.enc.distrust_references();
+                tracing::debug!(
+                    cooldown_ms = cooldown.as_millis() as u64,
+                    unhealed,
+                    "keyframe request coalesced — within the IDR cooldown; RFI anchor trust \
+                     withdrawn until the IDR repairs the client"
+                );
             }
-            self.enc.request_keyframe();
-            self.last_forced_idr = Some(now);
-            self.rfi_echo_swallowed = 0;
-            if let Some(period) = self.recovery_cadence.note(now) {
-                self.diagnose_recovery_cadence(period);
+            KeyframeVerdict::RfiEcho { swallowed } => {
+                // Do not distrust: the recovery frame is still in flight.
+                tracing::debug!(
+                    swallowed,
+                    "keyframe request coalesced — echo of an RFI-recovered loss"
+                );
+            }
+            KeyframeVerdict::Force {
+                cooldown,
+                unhealed,
+                rfi_unhealed,
+            } => {
+                tracing::debug!(
+                    rfi_unhealed,
+                    unhealed,
+                    cooldown_ms = cooldown.as_millis() as u64,
+                    "forcing keyframe (client decode recovery)"
+                );
+                if rfi_unhealed {
+                    self.enc.distrust_references();
+                }
+                self.enc.request_keyframe();
+                self.last_forced_idr = Some(now);
+                if unhealed == IDR_STORM {
+                    tracing::warn!(
+                        unhealed,
+                        cooldown_ms = cooldown.as_millis() as u64,
+                        "forced IDRs are not healing the client — each landed and a fresh \
+                         keyframe request followed. The client is losing the repair itself: a \
+                         client that cannot drain the stream (decoder, receive buffer) or a link \
+                         below the bitrate does this, and it is NOT a host display disturbance. \
+                         IDR cooldown backed off. Lower the bitrate or set it to Automatic; the \
+                         client log's 'receive backlog stopped draining' (queue_depth) decides"
+                    );
+                }
+                // A re-issue is the host's own cooldown, not a disturbance with a period.
+                if unhealed == 0 {
+                    if let Some(period) = self.recovery_cadence.note(now) {
+                        self.diagnose_recovery_cadence(period);
+                    }
+                }
             }
         }
     }
@@ -414,6 +432,107 @@ pub(super) fn run_loop_stage(
     }
 }
 
+/// A recovery frame's flight: encode, wire, decode. A request inside it echoes the loss the
+/// frame repairs; one past it says the frame landed and did not.
+const RECOVERY_FLIGHT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Longest wait between forced IDRs, whatever the backoff. 3 s of a broken picture is the
+/// ceiling a user tolerates over a storm of repairs that never take.
+const IDR_COOLDOWN_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Consecutive unhealed IDRs that name the state in the log, once.
+const IDR_STORM: u32 = 3;
+
+/// A request this long after the previous one opens a new episode: the run of unhealed IDRs,
+/// the swallowed RFI echoes and the previous request all belong to the old one.
+const KF_EPISODE_RESET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Requests the [`RECOVERY_FLIGHT`] echo hedge swallows before the next one forces an IDR.
+const RFI_ECHO_MAX_SWALLOWED: u32 = 2;
+
+/// `base` doubled per unhealed IDR, capped at [`IDR_COOLDOWN_MAX`].
+fn idr_cooldown(base: std::time::Duration, unhealed: u32) -> std::time::Duration {
+    base.saturating_mul(1u32 << unhealed.min(2))
+        .min(IDR_COOLDOWN_MAX)
+}
+
+/// What one keyframe request gets ([`KeyframeGate::decide`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum KeyframeVerdict {
+    /// Inside the IDR cooldown: nothing sent, RFI anchor trust withdrawn.
+    Coalesced {
+        cooldown: std::time::Duration,
+        unhealed: u32,
+    },
+    /// Echo of a loss an in-flight RFI repairs: nothing sent.
+    RfiEcho { swallowed: u32 },
+    /// Send the IDR. `unhealed` = consecutive IDRs the client re-asked after, this one
+    /// included; `rfi_unhealed` = an RFI echo was swallowed and the client still asks.
+    Force {
+        cooldown: std::time::Duration,
+        unhealed: u32,
+        rfi_unhealed: bool,
+    },
+}
+
+/// Episode state behind [`StreamState::force_keyframe`]: which requests coalesce, and how far
+/// the IDR cooldown has backed off. A request past the last IDR's [`RECOVERY_FLIGHT`] means
+/// that IDR landed and did not heal; each such IDR doubles the cooldown ([`idr_cooldown`]);
+/// a cooldown no such request lands in resets the run, as does a [`KF_EPISODE_RESET`] gap.
+#[derive(Default)]
+pub(super) struct KeyframeGate {
+    last_request: Option<std::time::Instant>,
+    rfi_echo_swallowed: u32,
+    unhealed: u32,
+}
+
+impl KeyframeGate {
+    pub(super) fn decide(
+        &mut self,
+        now: std::time::Instant,
+        base: std::time::Duration,
+        last_idr: Option<std::time::Instant>,
+        last_rfi: Option<std::time::Instant>,
+        rfi_declined: bool,
+    ) -> KeyframeVerdict {
+        let new_episode = self
+            .last_request
+            .is_none_or(|t| now.duration_since(t) > KF_EPISODE_RESET);
+        if new_episode {
+            self.rfi_echo_swallowed = 0;
+            self.unhealed = 0;
+        }
+        let prev_request = self.last_request.replace(now).filter(|_| !new_episode);
+        let cooldown = idr_cooldown(base, self.unhealed);
+        let since_idr = |t: Option<std::time::Instant>| t.map(|t| now.saturating_duration_since(t));
+        if since_idr(last_idr).is_some_and(|d| d < cooldown) {
+            return KeyframeVerdict::Coalesced {
+                cooldown,
+                unhealed: self.unhealed,
+            };
+        }
+        if !rfi_declined
+            && since_idr(last_rfi).is_some_and(|d| d < RECOVERY_FLIGHT)
+            && self.rfi_echo_swallowed < RFI_ECHO_MAX_SWALLOWED
+        {
+            self.rfi_echo_swallowed += 1;
+            return KeyframeVerdict::RfiEcho {
+                swallowed: self.rfi_echo_swallowed,
+            };
+        }
+        let missed = last_idr
+            .zip(prev_request)
+            .is_some_and(|(idr, req)| req.saturating_duration_since(idr) >= RECOVERY_FLIGHT);
+        self.unhealed = if missed { self.unhealed + 1 } else { 0 };
+        let rfi_unhealed = std::mem::take(&mut self.rfi_echo_swallowed) > 0;
+        KeyframeVerdict::Force {
+            cooldown: idr_cooldown(base, self.unhealed),
+            unhealed: self.unhealed,
+            rfi_unhealed,
+        }
+    }
+}
+
 /// ±10 % of [`FLUSH_COOLDOWN`]: a software cooldown is the most periodic thing in the system.
 fn matches_client_flush_cadence(period: std::time::Duration) -> bool {
     let flush = punktfunk_core::client::FLUSH_COOLDOWN;
@@ -433,6 +552,129 @@ fn matches_client_recovery_cooldown(period: std::time::Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Drives [`KeyframeGate`] like the encode loop: a request every `step` from `t`, each
+    /// answered by the verdict, a forced IDR stamping `last_idr`. Returns the forced IDRs'
+    /// `(offset_ms, unhealed, cooldown)`.
+    fn storm(
+        gate: &mut KeyframeGate,
+        base: Duration,
+        t0: Instant,
+        last_idr: &mut Option<Instant>,
+        from_ms: u64,
+        to_ms: u64,
+        step_ms: u64,
+    ) -> Vec<(u64, u32, Duration)> {
+        let mut forced = Vec::new();
+        let mut ms = from_ms;
+        while ms < to_ms {
+            let now = t0 + Duration::from_millis(ms);
+            if let KeyframeVerdict::Force {
+                cooldown, unhealed, ..
+            } = gate.decide(now, base, *last_idr, None, false)
+            {
+                *last_idr = Some(now);
+                forced.push((ms, unhealed, cooldown));
+            }
+            ms += step_ms;
+        }
+        forced
+    }
+
+    /// A client that asks again after every IDR has landed is not healed by IDRs: the
+    /// cooldown doubles to the cap and holds there; a cooldown it stays quiet through, or an
+    /// episode gap, puts the next loss back on the base cooldown.
+    #[test]
+    fn an_idr_the_client_reasks_after_backs_the_cooldown_off_to_the_cap() {
+        let base = Duration::from_millis(750);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut gate = KeyframeGate::default();
+        let mut last_idr = None;
+        // Requests every 230 ms for 10 s: the first forces, the rest land past the flight.
+        let forced = storm(&mut gate, base, t0, &mut last_idr, 0, 10_000, 230);
+        let shape: Vec<_> = forced.iter().map(|&(_, u, c)| (u, c)).collect();
+        assert_eq!(
+            &shape[..4],
+            &[(0, base), (1, ms(1500)), (2, ms(3000)), (3, ms(3000))],
+            "double, then hold at the cap"
+        );
+        assert!(shape[4..]
+            .iter()
+            .all(|&(u, c)| u >= IDR_STORM && c == ms(3000)));
+        assert!(
+            forced.len() < 10_000 / 750 / 2,
+            "{} IDRs in 10 s is the storm, not the backoff",
+            forced.len()
+        );
+        // Quiet through a whole cooldown after the last IDR: the next loss starts over.
+        let (last_ms, ..) = *forced.last().unwrap();
+        let quiet = t0 + ms(last_ms + 3_500);
+        assert!(matches!(
+            gate.decide(quiet, base, last_idr, None, false),
+            KeyframeVerdict::Force { unhealed: 0, cooldown, .. } if cooldown == base
+        ));
+        last_idr = Some(quiet);
+        // One late re-ask inside the cooldown, then a long healthy silence: the old episode's
+        // request must not turn the next unrelated loss into an unhealed IDR.
+        assert!(matches!(
+            gate.decide(quiet + ms(500), base, last_idr, None, false),
+            KeyframeVerdict::Coalesced { unhealed: 0, .. }
+        ));
+        assert!(matches!(
+            gate.decide(quiet + Duration::from_secs(600), base, last_idr, None, false),
+            KeyframeVerdict::Force { unhealed: 0, cooldown, .. } if cooldown == base
+        ));
+        // The intra-refresh window is capped too, never 8 s.
+        assert_eq!(idr_cooldown(Duration::from_secs(2), 3), IDR_COOLDOWN_MAX);
+    }
+
+    /// An echo inside an RFI's flight is swallowed twice and then forces with the anchor
+    /// distrusted; an echo inside an IDR's flight is the same loss, not an unhealed IDR.
+    #[test]
+    fn echoes_inside_a_recovery_flight_are_the_same_loss() {
+        let base = Duration::from_millis(750);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut gate = KeyframeGate::default();
+        let rfi = Some(t0);
+        assert_eq!(
+            gate.decide(t0 + ms(100), base, None, rfi, false),
+            KeyframeVerdict::RfiEcho { swallowed: 1 }
+        );
+        assert_eq!(
+            gate.decide(t0 + ms(200), base, None, rfi, false),
+            KeyframeVerdict::RfiEcho { swallowed: 2 }
+        );
+        assert!(matches!(
+            gate.decide(t0 + ms(250), base, None, rfi, false),
+            KeyframeVerdict::Force {
+                rfi_unhealed: true,
+                unhealed: 0,
+                ..
+            }
+        ));
+        // A declined RFI is proof, never an echo.
+        let mut gate = KeyframeGate::default();
+        assert!(matches!(
+            gate.decide(t0 + ms(100), base, None, rfi, true),
+            KeyframeVerdict::Force {
+                rfi_unhealed: false,
+                ..
+            }
+        ));
+        // IDR at t0, echo at +200 ms (inside the flight), next loss after the cooldown.
+        let idr = Some(t0);
+        assert!(matches!(
+            gate.decide(t0 + ms(200), base, idr, None, false),
+            KeyframeVerdict::Coalesced { .. }
+        ));
+        assert!(matches!(
+            gate.decide(t0 + ms(800), base, idr, None, false),
+            KeyframeVerdict::Force { unhealed: 0, .. }
+        ));
+    }
 
     /// The 2026-08-13 field log's exact reading — `period_s=2.0` — must be attributed to the
     /// client's backlog shedding, not to a host display disturbance. The whole point of routing

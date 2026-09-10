@@ -39,7 +39,7 @@ mod recovery;
 mod rumble;
 mod worker;
 
-pub use self::frame_channel::{FLUSH_COOLDOWN, NO_VIDEO_RETRY};
+pub use self::frame_channel::{ADAPT_REPORT_INTERVAL, FLUSH_COOLDOWN, NO_VIDEO_RETRY};
 pub use self::planes::AudioPacket;
 pub use self::probe::ProbeOutcome;
 pub use self::rumble::{ActuatorQuirks, RumbleCommand};
@@ -245,6 +245,8 @@ pub struct NativeClient {
     frames_dropped: Arc<AtomicU64>,
     /// Parity-repaired shards. HUD windows by diffing successive reads.
     fec_recovered: Arc<AtomicU64>,
+    /// See [`unsustainable_pin_kbps`](Self::unsustainable_pin_kbps).
+    unsustainable_pin_kbps: Arc<AtomicU32>,
     /// Shared loss-range detector for [`note_frame_index`](Self::note_frame_index): next
     /// expected `frame_index` plus RFI throttle. Avoids per-embedder wrapping arithmetic.
     rfi: Mutex<RfiRecovery>,
@@ -613,6 +615,7 @@ impl NativeClient {
         let probe = Arc::new(Mutex::new(ProbeState::default()));
         let frames_dropped = Arc::new(AtomicU64::new(0));
         let fec_recovered = Arc::new(AtomicU64::new(0));
+        let unsustainable_pin_kbps = Arc::new(AtomicU32::new(0));
         let mic_stats = Arc::new(MicUplinkCounters::default());
         let hot_tids = Arc::new(Mutex::new(Vec::new()));
         let clock_offset = Arc::new(AtomicI64::new(0));
@@ -637,6 +640,7 @@ impl NativeClient {
         let probe_w = probe.clone();
         let frames_dropped_w = frames_dropped.clone();
         let fec_recovered_w = fec_recovered.clone();
+        let unsustainable_pin_kbps_w = unsustainable_pin_kbps.clone();
         let mic_stats_w = mic_stats.clone();
         let hot_tids_w = hot_tids.clone();
         let clock_offset_w = clock_offset.clone();
@@ -712,6 +716,7 @@ impl NativeClient {
                     probe: probe_w,
                     frames_dropped: frames_dropped_w,
                     fec_recovered: fec_recovered_w,
+                    unsustainable_pin_kbps: unsustainable_pin_kbps_w,
                     mic_stats: mic_stats_w,
                     hot_tids: hot_tids_w,
                     clock_offset: clock_offset_w,
@@ -783,6 +788,7 @@ impl NativeClient {
             worker: Some(worker),
             frames_dropped,
             fec_recovered,
+            unsustainable_pin_kbps,
             rfi: Mutex::new(RfiRecovery::default()),
             hot_tids,
             clock_offset,
@@ -931,6 +937,13 @@ impl NativeClient {
     /// misses them. Monotonic; compare against the last observed value.
     pub fn frames_dropped(&self) -> u64 {
         self.frames_dropped.load(Ordering::Relaxed)
+    }
+
+    /// The pinned bitrate (kbps) this client could not keep up with — it shed its receive
+    /// backlog repeatedly and a pin leaves nothing else to give. `0` = not so far. Latches
+    /// for the session; show it to the user once with the next move (Automatic, or lower).
+    pub fn unsustainable_pin_kbps(&self) -> u32 {
+        self.unsustainable_pin_kbps.load(Ordering::Relaxed)
     }
 
     /// Parity-repaired shards (loss that never became a dropped frame). Monotonic; HUD diffs

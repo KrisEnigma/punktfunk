@@ -134,6 +134,9 @@ pub(super) async fn run(task: Task) {
     // without a count cap a client can pause video and pin the uplink.
     const MIN_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
     let mut last_probe: Option<std::time::Instant> = None;
+    // An RFI ask is a frame parity could not repair; the LossReport that
+    // closes the window carries only what parity did repair.
+    let mut unrecovered = UnrecoveredRun::default();
     // `select!` drops this future whenever a sibling fires. `io::read_msg`
     // would lose a partial frame and misalign the rest of the session.
     let mut ctrl_reader = io::MsgReader::new(ctrl_recv);
@@ -195,6 +198,7 @@ pub(super) async fn run(task: Task) {
                         last = req.last_frame,
                         "client requested reference-frame invalidation (loss recovery)"
                     );
+                    unrecovered.rfi();
                     if rfi_tx.send((req.first_frame, req.last_frame)).is_err() {
                         break;
                     }
@@ -207,18 +211,17 @@ pub(super) async fn run(task: Task) {
                         Ordering::Relaxed,
                     );
                 } else if let Ok(rep) = LossReport::decode(&msg) {
+                    let unrecovered_run = unrecovered.report(std::time::Instant::now());
                     // Data-plane send loop applies `fec_target_ctl` per frame.
                     // No-op when FEC is pinned (`PUNKTFUNK_FEC_PCT`).
                     if adaptive_fec {
-                        // Jump to what this report needs; decay one point per
-                        // clean ~750 ms window so a burst every few seconds
-                        // does not drop FEC to the floor between hits.
                         let prev = fec_target_ctl.load(Ordering::Relaxed);
-                        let target = adapt_fec(rep.loss_ppm).max(prev.saturating_sub(1));
+                        let target = fec_target(rep.loss_ppm, prev, unrecovered_run);
                         fec_target_ctl.store(target, Ordering::Relaxed);
                         if prev != target {
                             tracing::debug!(
                                 loss_ppm = rep.loss_ppm,
+                                unrecovered_run,
                                 fec_pct = target,
                                 prev_fec_pct = prev,
                                 "adaptive FEC adjusted"
