@@ -599,6 +599,14 @@ mod tests {
             GlyphStyle::Letters
         );
         assert_eq!(
+            GlyphStyle::from_pref(Some(GamepadPref::SteamController2)),
+            GlyphStyle::Letters
+        );
+        assert_eq!(
+            GlyphStyle::from_pref(Some(GamepadPref::SteamController2Puck)),
+            GlyphStyle::Letters
+        );
+        assert_eq!(
             GlyphStyle::from_pref(Some(GamepadPref::SwitchPro)),
             GlyphStyle::Nintendo
         );

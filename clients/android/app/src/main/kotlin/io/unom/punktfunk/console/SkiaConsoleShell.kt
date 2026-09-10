@@ -43,6 +43,7 @@ import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.models.ActiveSession
 import io.unom.punktfunk.models.LibraryReturn
 import io.unom.punktfunk.kit.Sc2BleLink
+import io.unom.punktfunk.kit.Sc2Device
 import io.unom.punktfunk.rememberConsoleHaptics
 import io.unom.punktfunk.testRumble
 import kotlin.math.roundToInt
@@ -205,6 +206,13 @@ fun SkiaConsoleShell(
     // D-pad keys (not SOURCE_GAMEPAD) go in as discrete events; hardware keys as `Key`s.
     val padState = remember { PadState() }
     val platformUp by rememberUpdatedState(platformScreen != null)
+    // Re-push the pad list whenever the SC2's own state moves: neither hot-plug nor the capture
+    // claim changes `Gamepad.pads()`, so nothing else here would notice.
+    val sc2Captured = activity?.sc2MenuActive == true
+    val sc2OnUsb = activity?.sc2UsbAttached == true
+    LaunchedEffect(handle, sc2Captured, sc2OnUsb) {
+        if (handle != 0L) SkiaConsole.padsChanged(Gamepad.firstPad(), sc2Extras(activity))
+    }
     DisposableEffect(handle, activity) {
         if (activity == null || handle == 0L) return@DisposableEffect onDispose {}
         val keyProbe: (KeyEvent) -> Boolean = probe@{ ev ->
@@ -234,7 +242,7 @@ fun SkiaConsoleShell(
                     // probe ran; refresh the chip when the pad behind the buttons changes.
                     if (padState.deviceId != ev.deviceId) {
                         padState.deviceId = ev.deviceId
-                        SkiaConsole.padsChanged(ev.device)
+                        SkiaConsole.padsChanged(ev.device, sc2Extras(activity))
                     }
                     return@probe true
                 }
@@ -320,7 +328,7 @@ fun SkiaConsoleShell(
         }
         val probes = MainActivity.PadProbes(keyProbe, motionProbe)
         activity.pushPadProbes(probes)
-        SkiaConsole.padsChanged(Gamepad.firstPad())
+        SkiaConsole.padsChanged(Gamepad.firstPad(), sc2Extras(activity))
         onDispose {
             // Remove OUR claim only — a platform screen pushed over us keeps its own, and when it
             // pops, this one resurfaces (the stack is what fixed the pad dying after Controllers).
@@ -377,30 +385,49 @@ fun SkiaConsoleShell(
                         if (ev.actionMasked == MotionEvent.ACTION_UP) v.performClick()
                         true
                     }
+                    // The uncaptured pointer: a mouse (or a lizard-mode SC2 trackpad) hovers
+                    // rather than touches, so its cursor never reaches the touch listener above.
+                    // Kind 0 is Move — it focuses a tile without acting on it; 4 is the wheel.
                     setOnGenericMotionListener { _, ev ->
-                        if (handle != 0L && ev.actionMasked == MotionEvent.ACTION_SCROLL &&
-                            ev.isFromSource(InputDevice.SOURCE_CLASS_POINTER)
-                        ) {
-                            NativeBridge.nativeConsolePointer(handle, 4, ev.x * currentRender, ev.y * currentRender, ev.getAxisValue(MotionEvent.AXIS_VSCROLL))
-                            true
-                        } else false
+                        if (handle == 0L) return@setOnGenericMotionListener false
+                        if (!ev.isFromSource(InputDevice.SOURCE_CLASS_POINTER)) {
+                            return@setOnGenericMotionListener false
+                        }
+                        val x = ev.x * currentRender
+                        val y = ev.y * currentRender
+                        when (ev.actionMasked) {
+                            MotionEvent.ACTION_SCROLL -> {
+                                val dy = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
+                                NativeBridge.nativeConsolePointer(handle, 4, x, y, dy)
+                                true
+                            }
+                            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                                NativeBridge.nativeConsolePointer(handle, 0, x, y, 0f)
+                                true
+                            }
+                            else -> false
+                        }
                     }
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     consoleView = this
                 }
             },
-            // Applied here rather than in `factory` so flipping the setting takes effect without
-            // leaving the console: `setFixedSize` re-creates the buffer and the render thread
-            // re-wraps it through the ordinary surfaceChanged path. `setSizeFromLayout` is the
-            // documented way back to "the view's own size" when the setting goes off again.
+            // Applied here rather than in `factory` so flipping the setting takes effect
+            // without leaving the console. Either call re-creates the buffer and tears the EGL
+            // surface down with it, and `update` runs on every recomposition — so compare
+            // against the live surface frame and ask only when the size really changes.
             update = { view ->
-                if (render < 1f) {
-                    view.holder.setFixedSize(
-                        (viewW * render).roundToInt().coerceAtLeast(1),
-                        (viewH * render).roundToInt().coerceAtLeast(1),
-                    )
-                } else {
-                    view.holder.setSizeFromLayout()
+                if (viewW > 0 && viewH > 0) {
+                    val frame = view.holder.surfaceFrame
+                    if (render < 1f) {
+                        val w = (viewW * render).roundToInt().coerceAtLeast(1)
+                        val h = (viewH * render).roundToInt().coerceAtLeast(1)
+                        if (frame.width() != w || frame.height() != h) {
+                            view.holder.setFixedSize(w, h)
+                        }
+                    } else if (frame.width() != viewW || frame.height() != viewH) {
+                        view.holder.setSizeFromLayout()
+                    }
                 }
             },
         )
@@ -507,6 +534,31 @@ private fun padAction(activity: MainActivity?, action: String, padKey: String) {
             }
         }
     }
+}
+
+/**
+ * The Steam Controller 2 as a pad row, when it has no [android.view.InputDevice] of its own:
+ * capture detaches the kernel node, and a USB one awaiting its grant never had one. Without the
+ * row the console's chip reads "TV remote" while the pad is driving it.
+ */
+private fun sc2Extras(activity: MainActivity?): List<ConsoleJson.ExtraPad> {
+    if (activity == null) return emptyList()
+    val usb = activity.getSystemService(Context.USB_SERVICE) as UsbManager
+    val dev = usb.deviceList.values.firstOrNull {
+        it.vendorId == Sc2Device.VID_VALVE && it.productId in Sc2Device.USB_PIDS
+    }
+    val captured = activity.sc2MenuActive
+    if (dev == null && !captured) return emptyList()
+    val puck = dev != null && dev.productId != Sc2Device.PID_WIRED
+    return listOf(
+        ConsoleJson.ExtraPad(
+            name = if (puck) "Steam Controller 2 Puck" else "Steam Controller 2",
+            key = "sc2:${dev?.vendorId ?: 0}:${dev?.productId ?: 0}",
+            pref = if (puck) Gamepad.PREF_STEAMCONTROLLER2_PUCK else Gamepad.PREF_STEAMCONTROLLER2,
+            detail = dev?.let { "%04X:%04X · usb".format(it.vendorId, it.productId) } ?: "captured",
+            forwarded = captured,
+        ),
+    )
 }
 
 /** The raw pad as one `MenuSample`, pushed whenever any part of it changes. */

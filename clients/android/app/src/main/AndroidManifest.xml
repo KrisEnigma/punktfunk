@@ -111,5 +111,22 @@
                 <data android:scheme="punktfunk" />
             </intent-filter>
         </activity>
+
+        <!-- The USB grant only persists for the activity that matches the attach filter, so it
+             cannot hang on MainActivity: launchMode is standard, and an attach would start a
+             second copy of it. This activity exists to match, and then finishes. -->
+        <activity
+            android:name=".UsbGrantActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
+        </activity>
     </application>
 </manifest>
