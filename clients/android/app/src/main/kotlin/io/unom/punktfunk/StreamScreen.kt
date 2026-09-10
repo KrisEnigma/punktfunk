@@ -377,6 +377,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             NativeBridge.nativeStopMic(handle)
             NativeBridge.nativeStopAudio(handle)
             NativeBridge.nativeStopVideo(handle)
+            NativeBridge.nativeVideoDrain(handle, false)
             NativeBridge.nativeClose(handle)
         }
     }
@@ -419,24 +420,92 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     }
     val scope = rememberCoroutineScope()
 
-    // Leaving the app (Home, task switch, screen off) MUST end the session. Android does not
-    // suspend a process for going to background, so without this the native worker kept running and
-    // its QUIC connection kept answering the host's keep-alives — the user was long gone but the
-    // host still saw a live client and held the session (and its display + encoder) open until the
-    // OS eventually reclaimed the process, which on a TV box is effectively never.
+    // The background keep-alive (Settings › General). Off — the default, and what every build
+    // before it did — means leaving the app ends the session. Never on a TV: the notification the
+    // End action lives on has nowhere to appear there, so a held session would be one nothing
+    // outside the app could stop.
+    val keepAliveSpan = keepAliveSpanMs(initialSettings, isTv)
+    val keepAlive = keepAliveSpan != null
+    var away by remember(handle) { mutableStateOf(false) }
+    val startedAt = remember(handle) { System.currentTimeMillis() }
+    // What the notification says. All of it is fixed at the handshake, so it is read once.
+    val noteHost = hostRecord?.name?.takeIf { it.isNotEmpty() }
+        ?: context.getString(R.string.app_name)
+    val noteTitle = session.launchHold?.game?.title
+    val modeLine = remember(handle) {
+        val mode = NativeBridge.nativeVideoSize(handle)
+        val w = mode?.getOrNull(0) ?: 0
+        val h = mode?.getOrNull(1) ?: 0
+        val hz = mode?.getOrNull(2) ?: 0
+        listOfNotNull(
+            if (w > 0 && h > 0) "$w×$h" else null,
+            if (hz > 0) "$hz Hz" else null,
+            NativeBridge.nativeVideoCodecLabel(handle).takeIf { it.isNotEmpty() },
+        ).joinToString(" · ")
+    }
+    fun note(deadline: Long?) = StreamNote(noteHost, noteTitle, modeLine, startedAt, deadline)
+
+    // Ending from a path that fires while the app is already away — minutes after the recomposer
+    // paused, so the disposal that `onSessionEnded` schedules will not run until the user comes
+    // back, leaving the host streaming to an empty room. Repeating is free: a stale handle makes
+    // every native call here a no-op, and the disposal runs the same ones.
+    fun endAway(deliberate: Boolean) {
+        if (deliberate) NativeBridge.nativeDisconnectQuit(handle) else NativeBridge.nativeClose(handle)
+        StreamKeepAliveService.stop(context)
+        onSessionEnded(SessionEndReason.LOCAL)
+    }
+
+    // The ongoing notification goes up when the session starts, not when the user leaves: an app
+    // already in the background may not start a foreground service, and without that service the
+    // OS freezes the process the moment the app is away — taking the audio and the QUIC traffic
+    // with it. Its End action is the ring's, a deliberate quit that closes the host session.
+    DisposableEffect(handle, keepAlive) {
+        if (keepAlive) {
+            StreamKeepAliveService.onEnd = { endAway(deliberate = true) }
+            StreamKeepAliveService.start(context, note(null))
+        }
+        onDispose {
+            StreamKeepAliveService.onEnd = null
+            StreamKeepAliveService.stop(context)
+        }
+    }
+
+    // Leaving the app (Home, task switch, screen off). Without the keep-alive this MUST end the
+    // session: Android does not suspend a process for going to background, so the native worker
+    // kept running and its QUIC connection kept answering the host's keep-alives — the user long
+    // gone, the host still holding the session (and its display + encoder) open until the OS
+    // reclaimed the process, which on a TV box is effectively never.
     //
     // Route it through `onSessionEnded()` so the composable's `onDispose` above runs the one real
     // teardown path. Deliberately NOT a `nativeDisconnectQuit`: backgrounding isn't a user "quit",
     // so the host should linger the display and make coming straight back a fast reconnect.
-    DisposableEffect(handle) {
+    DisposableEffect(handle, keepAlive) {
         val lifecycle = (context as? LifecycleOwner)?.lifecycle
         val obs = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) {
-                onSessionEnded(SessionEndReason.LOCAL)
+            when (event) {
+                Lifecycle.Event.ON_STOP -> if (keepAlive) away = true else onSessionEnded(SessionEndReason.LOCAL)
+                Lifecycle.Event.ON_START -> away = false
+                else -> {}
             }
         }
         lifecycle?.addObserver(obs)
         onDispose { lifecycle?.removeObserver(obs) }
+    }
+
+    // While away the notification counts down instead of up, and the session gets exactly that
+    // long: a host cannot tell a player who walked off from one who is watching, so something has
+    // to decide. Coming back re-keys this effect, which cancels the wait. The give-up is the same
+    // non-deliberate end as backgrounding without the keep-alive — the host lingers the display,
+    // so returning later still reconnects fast.
+    LaunchedEffect(handle, keepAliveSpan, away) {
+        val span = keepAliveSpan ?: return@LaunchedEffect
+        if (!away) {
+            StreamKeepAliveService.update(context, note(null))
+            return@LaunchedEffect
+        }
+        StreamKeepAliveService.update(context, note(System.currentTimeMillis() + span))
+        delay(span)
+        endAway(deliberate = false)
     }
 
     // Auto-engage pointer capture at stream start (setting on + a mouse actually present).
@@ -495,6 +564,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                         videoView = this
                         holder.addCallback(object : SurfaceHolder.Callback {
                             override fun surfaceCreated(holder: SurfaceHolder) {
+                                // The keep-alive's drain, if one is running: the decode thread is
+                                // about to take the frame queue back.
+                                NativeBridge.nativeVideoDrain(handle, false)
                                 // Low-latency mode: rank MediaCodecList decoders for the negotiated
                                 // MIME (framework-only API) and hand the chosen one to Rust, which
                                 // creates it by name and applies the per-SoC vendor low-latency keys.
@@ -586,8 +658,15 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                                     // standing (native keeps it on the handle), so the restart in
                                     // surfaceCreated brings the user's choice back with it.
                                     ui.micRunning = false
-                                    NativeBridge.nativeStopAudio(handle)
+                                    // Audio is the one plane the keep-alive does NOT stop — the
+                                    // sound carrying on is the whole point of it. Video stops
+                                    // either way (its Surface is gone), but with the session held
+                                    // something must keep popping access units, or the queue
+                                    // stands and the client asks the host for a keyframe every
+                                    // two seconds until the user comes back.
+                                    if (!keepAlive) NativeBridge.nativeStopAudio(handle)
                                     NativeBridge.nativeStopVideo(handle)
+                                    if (keepAlive) NativeBridge.nativeVideoDrain(handle, true)
                                 }
                             }
                         })

@@ -203,6 +203,23 @@ data class Settings(
      */
     val autoWakeEnabled: Boolean = true,
     /**
+     * Keep a streaming session ALIVE when the app leaves the screen. Off by default, which is
+     * today's behaviour: backgrounding ends the session (non-deliberately, so the host lingers the
+     * display and coming straight back reconnects fast).
+     *
+     * On, the session holds instead: host audio keeps playing behind an ongoing notification,
+     * video decode drops with the Surface it drew into, and [backgroundTimeoutMinutes] bounds the
+     * stay. The notification is what makes any of it possible — see [StreamKeepAliveService].
+     */
+    val backgroundKeepAlive: Boolean = false,
+    /**
+     * Minutes a backgrounded session runs before it disconnects itself — a battery, heat and
+     * bandwidth backstop, since a host cannot tell a player who walked away from one who is
+     * watching. The auto-disconnect is non-deliberate, so a late return still reconnects fast.
+     * Only read when [backgroundKeepAlive] is on; the UI offers 1/5/10/30.
+     */
+    val backgroundTimeoutMinutes: Int = 10,
+    /**
      * Opt-in: ALSO play the rumble the host addresses to controller 1 (wire pad 0) on this
      * phone's own vibration motor — for clip-on gamepads that ship without rumble motors, where
      * the phone body is the only actuator in the player's hands. Off by default; read once per
@@ -822,6 +839,14 @@ fun Settings.presentPriorityWire(): Int = if (presentPriority == "smooth") 1 els
 val PRESENT_PRIORITY_OPTIONS = listOf(
     "latency" to "Lowest latency",
     "smooth" to "Smoothness",
+)
+
+/** (minutes, label) for the background keep-alive's give-up timer — the Apple client's table. */
+val BACKGROUND_TIMEOUT_OPTIONS = listOf(
+    1 to "1 minute",
+    5 to "5 minutes",
+    10 to "10 minutes",
+    30 to "30 minutes",
 )
 
 /** (frames, label) for the smoothness-buffer picker; each buffered frame ≈ one refresh interval

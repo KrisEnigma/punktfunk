@@ -554,6 +554,7 @@ fn connect(req: ConnectRequest) -> jlong {
                 client: Arc::new(client),
                 stats: Arc::new(crate::stats::VideoStats::new()),
                 video: Mutex::new(None),
+                drain: Mutex::new(None),
                 #[cfg(target_os = "android")]
                 audio: Mutex::new(None),
                 #[cfg(target_os = "android")]

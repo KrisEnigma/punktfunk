@@ -27,6 +27,15 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Gamepad rumble feedback. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The background keep-alive's foreground service: it is what stops the OS freezing the
+         process the moment the app leaves the screen, which would take the audio and the QUIC
+         traffic down with it. mediaPlayback is the honest type — host audio keeps playing, and
+         that is the whole point of staying alive. POST_NOTIFICATIONS is a RUNTIME permission from
+         API 33; the settings toggle asks for it, and a refusal only hides the notification (the
+         service, and so the keep-alive, runs either way). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Steam Controller 2 over direct BLE (Sc2BleLink talks Valve's vendor GATT service to the
          bonded pad). A RUNTIME permission (NEARBY_DEVICES group) from API 31 — MainActivity asks
          for it when a BLE-paired SC2 is actually around, and the Controllers screen offers the
@@ -111,6 +120,14 @@
                 <data android:scheme="punktfunk" />
             </intent-filter>
         </activity>
+
+        <!-- The ongoing-session notification, and the background keep-alive behind it. Not
+             exported: the only things that start it are the stream screen and its own End
+             action's PendingIntent. -->
+        <service
+            android:name=".StreamKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
 
         <!-- The USB grant only persists for the activity that matches the attach filter, so it
              cannot hang on MainActivity: launchMode is standard, and an attach would start a
