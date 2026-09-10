@@ -465,11 +465,8 @@ mod live_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    /// LIVE gate for the IDD-push ring end to end (immunity plan WP5/WP7): a real virtual
-    /// display, the capturer opened exactly as a session opens it, the desktop kept composing by
-    /// pointer motion, and real `Source` frames counted. The attach log line names the
-    /// negotiated capabilities (`CAP_FENCE_RING` on a fence-capable driver) — read it from the
-    /// run's output. Elevated console session, host service stopped.
+    /// Live IDD-push ring: a session-shaped capturer must deliver Source frames.
+    /// Elevated console session; host service stopped.
     #[test]
     #[ignore = "live: needs the pf-vdisplay driver, a console session, the host service stopped"]
     fn live_idd_push_ring_delivers_source_frames() {
@@ -533,18 +530,15 @@ mod live_tests {
                 }
                 Err(e) => {
                     errors += 1;
-                    eprintln!("capture error: {e:#}");
                     assert!(errors <= 3, "the ring keeps failing: {e:#}");
                 }
             }
         }
-        eprintln!(
-            "ring: source={source} regen={regen} repeat={repeat} errors={errors} in {:?}",
-            start.elapsed()
-        );
         assert!(
             source >= 60,
-            "expected a steady stream of NEW source frames from the ring, got {source}"
+            "expected a steady stream of NEW source frames from the ring, got {source} \
+             (regen={regen} repeat={repeat} errors={errors} in {:?})",
+            start.elapsed()
         );
         drop(cap);
         drop(vd);
@@ -613,21 +607,8 @@ mod live_tests {
         })
     }
 
-    /// LIVE gate for WP13/WP14 — a live-but-stale capture. The driver's host process (WUDFHost)
-    /// is frozen by debugger attach for `PF_LIVE_FREEZE_SECS` (default 18 s): alive to the
-    /// death watch, publishing nothing, while the desktop keeps composing. The supervisor must
-    /// open an episode past the 15 s floor, a rung must land once the process thaws, real frames
-    /// must resume, and the capturer must hand back the measured outage (WP14) — all on the SAME
-    /// capturer object, i.e. no reconnect.
-    ///
-    /// What a WHOLE-process freeze produces (measured on `.173`): the classifier names
-    /// `Stalled(Worker)` at the floor, the ladder skips the unsupported swap-chain reset and
-    /// issues the presentation reset, and the UMDF framework terminates the unresponsive host
-    /// process at that mode-set — so the plane ends with the typed driver-died fault and the
-    /// host loop's pipeline rebuild is the DriverCycle rung. That is the contract asserted here:
-    /// no hang, no silent frozen frame, a typed end (or a recovery) within a bounded window,
-    /// and never before the ladder had its chance. A wedge that keeps the host alive (one stuck
-    /// worker thread) needs WP6's bounded worker stop before the presentation reset is safe.
+    /// Live WUDFHost freeze: the same capturer must recover or end with a typed fault.
+    /// Default hold 18 s (`PF_LIVE_FREEZE_SECS`). Elevated console; host service stopped.
     #[test]
     #[ignore = "live: freezes the pf-vdisplay WUDFHost for ~18 s; elevated console session, host service stopped"]
     fn live_frozen_driver_host_ends_the_plane_with_a_typed_fault() {
@@ -715,7 +696,6 @@ mod live_tests {
             attached.load(Ordering::SeqCst),
             "debugger attach to WUDFHost pid {pid} did not take"
         );
-        eprintln!("WUDFHost {pid} frozen for {hold:?}");
         let (mut during, mut after, mut outage, mut error) = (0u32, 0u32, None, None);
         let mut first_after: Option<Duration> = None;
         while t_freeze.elapsed() < hold + Duration::from_secs(60) {
@@ -738,16 +718,12 @@ mod live_tests {
         }
         let ended = t_freeze.elapsed();
         let _ = freezer.join();
-        eprintln!(
-            "frozen driver host: source during={during} after={after} first_after={first_after:?} \
-             outage={outage:?} error={error:?} ended_after={ended:?}"
-        );
-        // A frame the worker published just before the freeze is still in the ring and is
-        // consumed after it (measured: one); anything beyond an in-flight slot or two is a
-        // worker that is not frozen.
+        // An in-flight slot or two can still drain after the attach; more means the worker ran.
         assert!(
             during <= 2,
-            "a frozen worker cannot keep publishing: {during} source frames during the freeze"
+            "a frozen worker cannot keep publishing: {during} source frames during the freeze \
+             (after={after} first_after={first_after:?} outage={outage:?} error={error:?} \
+             ended_after={ended:?})"
         );
         match (outage, &error) {
             (Some(outage), _) => {
@@ -758,11 +734,7 @@ mod live_tests {
                 assert!(after >= 3, "real source frames must resume after the thaw");
             }
             (None, Some(e)) => {
-                // The framework may terminate the frozen host at any topology write — on a
-                // box whose exclusive watchdog is re-asserting, that can be before the floor —
-                // so the end time is reported, not bounded from below.
-                // The two typed ends: the death watch ("WUDFHost … exited") or the ladder's
-                // `CaptureFault::SourceStalled` ("no source frame for Ns …").
+                // Death watch ("WUDFHost … exited") or `SourceStalled` ("no source frame for Ns").
                 assert!(
                     e.contains("WUDFHost") || e.contains("no source frame"),
                     "the plane must end with a typed driver/source fault, got: {e}"

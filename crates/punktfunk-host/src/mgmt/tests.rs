@@ -574,122 +574,6 @@ async fn bearer_token_is_enforced() {
     );
 }
 
-/// Spot-check `plugin_may_access`: the plugin surface stays open, escalation routes stay closed.
-#[test]
-fn plugin_allowlist_excludes_escalation_routes() {
-    use axum::http::Method;
-
-    assert!(auth::plugin_may_access(&Method::GET, "/api/v1/status"));
-    assert!(auth::plugin_may_access(&Method::GET, "/api/v1/library"));
-    assert!(auth::plugin_may_access(&Method::GET, "/api/v1/clients"));
-    assert!(auth::plugin_may_access(&Method::GET, "/api/v1/plugins"));
-    assert!(auth::plugin_may_access(
-        &Method::PUT,
-        "/api/v1/plugins/rom-manager"
-    ));
-    assert!(auth::plugin_may_access(
-        &Method::DELETE,
-        "/api/v1/plugins/rom-manager"
-    ));
-
-    // Hooks: write is command execution; even the GET can expose webhook credentials.
-    assert!(!auth::plugin_may_access(&Method::GET, "/api/v1/hooks"));
-    assert!(!auth::plugin_may_access(&Method::PUT, "/api/v1/hooks"));
-
-    assert!(!auth::plugin_may_access(&Method::GET, "/api/v1/pair"));
-    assert!(!auth::plugin_may_access(&Method::POST, "/api/v1/pair/pin"));
-    assert!(!auth::plugin_may_access(
-        &Method::GET,
-        "/api/v1/native/pair"
-    ));
-    assert!(!auth::plugin_may_access(
-        &Method::POST,
-        "/api/v1/native/pair/arm"
-    ));
-    assert!(!auth::plugin_may_access(
-        &Method::GET,
-        "/api/v1/native/pending"
-    ));
-    assert!(!auth::plugin_may_access(
-        &Method::POST,
-        "/api/v1/native/pending/1/approve"
-    ));
-    assert!(!auth::plugin_may_access(
-        &Method::DELETE,
-        "/api/v1/clients/aabbcc"
-    ));
-    assert!(!auth::plugin_may_access(
-        &Method::DELETE,
-        "/api/v1/native/clients/aabbcc"
-    ));
-
-    // Another plugin's UI proxy secret.
-    assert!(!auth::plugin_may_access(
-        &Method::GET,
-        "/api/v1/plugins/x/ui-credential"
-    ));
-
-    // Store prefix: install runs new code as the operator; `POST /store/runtime` would switch
-    // this plugin's supervisor. Whole-prefix so a later route is denied by default.
-    for path in [
-        "/api/v1/store/catalog",
-        "/api/v1/store/installed",
-        "/api/v1/store/sources",
-        "/api/v1/store/jobs",
-        "/api/v1/store/jobs/job-1",
-        "/api/v1/store/runtime",
-        "/api/v1/store/some-route-that-does-not-exist-yet",
-    ] {
-        assert!(
-            !auth::plugin_may_access(&Method::GET, path),
-            "plugin token must not reach {path}"
-        );
-    }
-    for path in [
-        "/api/v1/store/install",
-        "/api/v1/store/uninstall",
-        "/api/v1/store/refresh",
-        "/api/v1/store/runtime",
-    ] {
-        assert!(
-            !auth::plugin_may_access(&Method::POST, path),
-            "plugin token must not reach {path}"
-        );
-    }
-
-    // Update prefix: `apply` is an installer / root helper. Whole-prefix, and not on the
-    // paired-cert allowlist either.
-    for path in [
-        "/api/v1/update",
-        "/api/v1/update/status",
-        "/api/v1/update/check",
-        "/api/v1/update/apply-does-not-exist-yet",
-    ] {
-        assert!(
-            !auth::plugin_may_access(&Method::GET, path),
-            "plugin token must not reach {path}"
-        );
-        assert!(
-            !auth::plugin_may_access(&Method::POST, path),
-            "plugin token must not reach {path}"
-        );
-        assert!(
-            !auth::cert_may_access(&Method::GET, path),
-            "a paired streaming cert must not reach {path}"
-        );
-    }
-    assert!(!auth::plugin_may_access(
-        &Method::PUT,
-        "/api/v1/store/sources/evil"
-    ));
-    assert!(!auth::plugin_may_access(
-        &Method::DELETE,
-        "/api/v1/store/sources/unom"
-    ));
-    // A path that merely starts with the same letters is unaffected.
-    assert!(auth::plugin_may_access(&Method::GET, "/api/v1/status"));
-}
-
 #[tokio::test]
 async fn plugin_token_lane_is_scoped_and_loopback_only() {
     use axum::http::Method;
@@ -1696,6 +1580,7 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
 }
 
 /// Segment-wise match: a path that merely starts with an allowed one is not swallowed.
+/// A prefix deny also covers routes that do not exist yet.
 #[test]
 fn plugin_allowlist_matches_whole_segments_only() {
     use axum::http::Method;
@@ -1728,6 +1613,25 @@ fn plugin_allowlist_matches_whole_segments_only() {
         &Method::GET,
         "/api/v1/library-secrets"
     ));
+    // Whole-prefix: a later store/update route is denied by default.
+    for path in [
+        "/api/v1/store/some-route-that-does-not-exist-yet",
+        "/api/v1/update",
+        "/api/v1/update/apply-does-not-exist-yet",
+    ] {
+        assert!(
+            !auth::plugin_may_access(&Method::GET, path),
+            "plugin token must not reach {path}"
+        );
+        assert!(
+            !auth::plugin_may_access(&Method::POST, path),
+            "plugin token must not reach {path}"
+        );
+        assert!(
+            !auth::cert_may_access(&Method::GET, path),
+            "a paired streaming cert must not reach {path}"
+        );
+    }
 }
 
 /// Unique operationIds (codegen) and a current checked-in snapshot. `api/openapi.json` is
@@ -3034,7 +2938,7 @@ fn a_recorded_launch_credits_its_run_to_the_library_stats() {
     let wait_for = |state: crate::gamelease::GameState, secs: u64| {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         while std::time::Instant::now() < deadline && shared.state() != state {
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_eq!(shared.state(), state);
     };
