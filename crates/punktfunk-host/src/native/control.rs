@@ -136,8 +136,7 @@ pub(super) async fn run(task: Task) {
     let mut last_probe: Option<std::time::Instant> = None;
     // An RFI ask is a frame parity could not repair; the LossReport that
     // closes the window carries only what parity did repair.
-    let mut rfi_since_report = false;
-    let mut unrecovered_run: u32 = 0;
+    let mut unrecovered = UnrecoveredRun::default();
     // `select!` drops this future whenever a sibling fires. `io::read_msg`
     // would lose a partial frame and misalign the rest of the session.
     let mut ctrl_reader = io::MsgReader::new(ctrl_recv);
@@ -199,7 +198,7 @@ pub(super) async fn run(task: Task) {
                         last = req.last_frame,
                         "client requested reference-frame invalidation (loss recovery)"
                     );
-                    rfi_since_report = true;
+                    unrecovered.rfi();
                     if rfi_tx.send((req.first_frame, req.last_frame)).is_err() {
                         break;
                     }
@@ -212,11 +211,7 @@ pub(super) async fn run(task: Task) {
                         Ordering::Relaxed,
                     );
                 } else if let Ok(rep) = LossReport::decode(&msg) {
-                    unrecovered_run = if std::mem::take(&mut rfi_since_report) {
-                        unrecovered_run.saturating_add(1)
-                    } else {
-                        0
-                    };
+                    let unrecovered_run = unrecovered.report(std::time::Instant::now());
                     // Data-plane send loop applies `fec_target_ctl` per frame.
                     // No-op when FEC is pinned (`PUNKTFUNK_FEC_PCT`).
                     if adaptive_fec {

@@ -1,9 +1,9 @@
 //! The client worker: QUIC handshake + control/input/datagram tasks + the blocking data-plane pump.
 
 use super::frame_channel::{
-    StandingLatAction, StandingLatency, CLOCK_RESYNC_INTERVAL, FLUSH_AFTER, FLUSH_COOLDOWN,
-    FLUSH_LATENCY, NOOP_CLOCK_FLUSHES_TO_DISARM, NOOP_FLUSH_DATAGRAMS, PIN_SHEDS_TO_WARN,
-    QUEUE_HIGH, QUEUE_LOW, STANDING_TIME,
+    StandingLatAction, StandingLatency, ADAPT_REPORT_INTERVAL, CLOCK_RESYNC_INTERVAL, FLUSH_AFTER,
+    FLUSH_COOLDOWN, FLUSH_LATENCY, NOOP_CLOCK_FLUSHES_TO_DISARM, NOOP_FLUSH_DATAGRAMS,
+    PIN_SHEDS_TO_WARN, QUEUE_HIGH, QUEUE_LOW, STANDING_TIME,
 };
 use super::worker::reject_from_close;
 use super::*;

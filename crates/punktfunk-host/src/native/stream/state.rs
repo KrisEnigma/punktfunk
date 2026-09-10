@@ -78,10 +78,7 @@ pub(super) struct StreamState {
     pub(super) last_forced_idr: Option<std::time::Instant>,
     /// Never re-anchors the IDR cooldown: sustained loss + RFI would swallow IDR pleas forever.
     pub(super) last_rfi: Option<std::time::Instant>,
-    pub(super) rfi_echo_swallowed: u32,
-    /// Forced IDRs in a row the client re-asked after; each doubles the IDR cooldown.
-    pub(super) idr_unhealed: u32,
-    pub(super) last_kf_request: Option<std::time::Instant>,
+    pub(super) kf_gate: super::recovery::KeyframeGate,
     pub(super) recovery_cadence: pf_frame::metronome::Metronome,
     pub(super) ir_wave_pos: u32,
     pub(super) st_cap: Vec<u32>,
@@ -860,9 +857,7 @@ impl StreamState {
             // Pipeline opened on an IDR — start the clock so the cold-GOP keyframe storm coalesces.
             last_forced_idr: Some(now),
             last_rfi: None,
-            rfi_echo_swallowed: 0,
-            idr_unhealed: 0,
-            last_kf_request: None,
+            kf_gate: super::recovery::KeyframeGate::default(),
             recovery_cadence: pf_frame::metronome::Metronome::new(),
             ir_wave_pos: 0,
             st_cap: Vec::new(),
