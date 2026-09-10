@@ -32,6 +32,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { m } from "@/paraglide/messages";
 import { describePolicy } from "./describePolicy";
 
@@ -51,6 +52,9 @@ export function overlaySummary(overlay: ClientOverlay | undefined): string {
 	if (overlay?.capture_monitor) {
 		parts.push(m.display_mirrors({ connector: overlay.capture_monitor }));
 	}
+	if (overlay?.max_mode)
+		parts.push(m.display_capped({ mode: overlay.max_mode }));
+	if (overlay?.scale) parts.push(`${overlay.scale}×`);
 	return parts.length === 0 ? m.display_follows_host() : parts.join(" · ");
 }
 
@@ -222,6 +226,52 @@ export const ClientPolicySheet: FC<{
 										</Option>
 									),
 								)}
+							</Question>
+						)}
+
+						{enforced.includes("max_mode") && (
+							<Question
+								label={m.display_q_max_mode()}
+								inherited={m.display_q_max_mode_none()}
+								pinned={overlay.max_mode != null}
+								busy={busy}
+								onFollow={() => write({ max_mode: null })}
+							>
+								<Input
+									aria-label={m.display_q_max_mode()}
+									placeholder="2560x1440@60"
+									className="w-40 font-mono"
+									defaultValue={overlay.max_mode ?? ""}
+									disabled={busy}
+									// On blur, not per keystroke: half a mode string is not a cap,
+									// and the host would refuse to store it anyway.
+									onBlur={(e) => {
+										const v = e.target.value.trim();
+										if (v === (overlay.max_mode ?? "")) return;
+										write({ max_mode: v === "" ? null : v });
+									}}
+								/>
+							</Question>
+						)}
+
+						{enforced.includes("scale") && (
+							<Question
+								label={m.display_q_scale()}
+								inherited={m.display_q_scale_desktop()}
+								pinned={overlay.scale != null}
+								busy={busy}
+								onFollow={() => write({ scale: null })}
+							>
+								{[1, 1.25, 1.5, 2].map((v) => (
+									<Option
+										key={v}
+										selected={overlay.scale === v}
+										busy={busy}
+										onPick={() => write({ scale: v })}
+									>
+										{`${v}×`}
+									</Option>
+								))}
 							</Question>
 						)}
 

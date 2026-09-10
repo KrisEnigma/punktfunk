@@ -67,6 +67,15 @@ fn edid_lock_available() -> bool {
     false
 }
 
+/// Whether KWin is the backend this host will drive. Cached like the gamescope probe beside
+/// it, and for the same reason: `available()` walks /proc and forks.
+#[cfg(target_os = "linux")]
+fn kwin_available() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PRESENT
+        .get_or_init(|| crate::vdisplay::available().contains(&crate::vdisplay::Compositor::Kwin))
+}
+
 /// Whether a gamescope backend is usable on this host. Cached: see the call site.
 fn gamescope_present() -> bool {
     #[cfg(target_os = "linux")]
@@ -129,6 +138,13 @@ pub(crate) fn display_settings_state() -> DisplaySettingsState {
     // advertise it off Linux — a stored pin would never take effect.
     if cfg!(target_os = "linux") {
         enforced.push("capture_monitor".into());
+    }
+    // KWin only. wlroots, Hyprland, Mutter and the Windows CCD isolate all darken every head
+    // they find, so the keep-list would store and do nothing there — the dead control this
+    // whole gate exists to prevent.
+    #[cfg(target_os = "linux")]
+    if kwin_available() {
+        enforced.push("keep_monitors".into());
     }
     // What acts per device. The rest are stored and served but read inside a backend
     // `create`, which takes no client — advertising one would put a control on the

@@ -323,16 +323,21 @@ export const SectionDisplays: FC = () => {
 					effective={effective}
 					busy={busy}
 					onPick={(connector) => write({ capture_monitor: connector })}
-					onKeepLit={(connector, keep) => {
-						const current = policy?.keep_monitors ?? [];
-						write({
-							keep_monitors: keep
-								? [...current, connector]
-								: current.filter(
-										(c) => c.toLowerCase() !== connector.toLowerCase(),
-									),
-						});
-					}}
+					// KWin is the only backend that honours a keep-list; the host says so.
+					onKeepLit={
+						acts("display", "keep_monitors")
+							? (connector, keep) => {
+									const current = policy?.keep_monitors ?? [];
+									write({
+										keep_monitors: keep
+											? [...current, connector]
+											: current.filter(
+													(c) => c.toLowerCase() !== connector.toLowerCase(),
+												),
+									});
+								}
+							: undefined
+					}
 				/>
 
 				<GameSessionDisclosure policy={policy} busy={busy} onSet={write} />
