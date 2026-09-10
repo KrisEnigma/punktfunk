@@ -17,9 +17,9 @@ encrypted per session. All you need to solve is how the friend reaches the host.
 |---|---|
 | A PC, Mac or Steam Deck with Steam | [Porthole](#porthole) — easiest, nothing to configure on your router |
 | A phone, tablet, Apple TV, or no Steam | [Tailscale machine sharing](#tailscale) |
-| Anything, and you manage your own router | [Port forwarding](#port-forwarding) |
+| Anything, and you manage your own router | [Port forwarding](#port-forwarding) — not recommended, and the only path that exposes the host to the internet |
 
-Both tunnels need the video port pinned first.
+Every path needs the video port pinned first.
 
 ## Pin the video port
 
@@ -85,10 +85,40 @@ disconnect" yet, so set an expiry that fits the evening.
 
 ## Port forwarding
 
-Forward UDP `9777` and `9779` to the host and give the friend your public address. A stranger who
-finds the ports gets a refusal, and a pairing attempt is only possible during the short window you
-arm. Two rules: admit only with a PIN, because the host cannot tell a stranger's knock from your
-friend's, and never forward `47990` or `9778`.
+**Not recommended. Prefer [Porthole](#porthole) or [Tailscale](#tailscale) whenever either one
+reaches your friend** — both leave the host unreachable from the internet, and this does not. Take
+this path only when neither fits, and take the rules below seriously.
+
+Forward UDP `9777` and `9779` to the host. **Never forward `47990` or `9778`.**
+
+Send a [link](/docs/profiles-and-links), not a bare address, so your friend's first connect is
+verified rather than blind. **Copy link** on a client already paired to this host writes one
+carrying `fp=`; swap the address in `host=` for your public one:
+
+```
+punktfunk://connect/<id>?host=203.0.113.5:9777&fp=<64 hex>
+```
+
+Strangers knock once the port is open. Nothing streams to them — an unpaired device is refused, and
+pairing answers only while a window is armed — but the host can't yet tell a knock from the internet
+apart from one on your couch, so two things fall to you.
+
+**Bind the window to their device.** The console's **Pair a device** window runs for two minutes and
+any device that knocks can consume it. Binding it to one device is CLI-only today:
+
+```sh
+punktfunk-host ctl pending --json    # their knock, with the full fingerprint
+punktfunk-host ctl pair arm --fingerprint <fp> --preset controller --expires-in 14400
+```
+
+Read the PIN out over voice chat. Don't use the one-click **Approve** here — the name on a pending
+device is one that device chose for itself.
+
+**Give it an expiry.** Arming from the console defaults to Full control, forever; pick Controller
+only and a deadline that fits the evening ([Admit them as a guest](#admit-them-as-a-guest)).
+
+A pairing that keeps being refused usually means a stranger is knocking into the same rate limit.
+Wait a moment and retry.
 
 ## What not to use
 
