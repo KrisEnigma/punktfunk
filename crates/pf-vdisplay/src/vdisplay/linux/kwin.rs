@@ -311,12 +311,27 @@ impl VirtualDisplay for KwinDisplay {
         // ([`CVT_H_GRANULARITY`]) or KWin kept a stored slot we could not move. It is
         // `preferred_mode` — capturer gate and encoder both key on it.
         let (final_dims, expect_exact_dims, achieved_hz) = if want_high {
+            // Both resolvers address the output by the size it is at, and KWin's stored
+            // setup can move it off its birth size before we ever look. Ask where it is.
+            let at = crate::kwin_output_mgmt::actual_dims(&our_prefix)
+                .map(|(w, h, _, _)| (w, h))
+                .unwrap_or((width, birth_h));
+            if at != (width, birth_h) {
+                tracing::info!(
+                    at_w = at.0,
+                    at_h = at.1,
+                    birth_w = width,
+                    birth_h,
+                    "KWin moved the new output off its birth size (a stored setup) — addressing \
+                     it where it is so the custom mode still lands"
+                );
+            }
             // Install+select the high-refresh custom mode. In-process first; kscreen-doctor
             // if KWin has no `set_custom_modes` or misses its budget.
             let active = crate::kwin_output_mgmt::set_custom_mode(
                 &our_prefix,
-                width,
-                birth_h,
+                at.0,
+                at.1,
                 width,
                 height,
                 mode.refresh_hz,
@@ -324,7 +339,7 @@ impl VirtualDisplay for KwinDisplay {
             .or_else(|| {
                 // Address by numeric kscreen id, never by name: a supersede reuses the
                 // per-slot name while the sibling is still alive, so a name hits the old one.
-                let addr = resolve_kscreen_addr(&name, width, birth_h);
+                let addr = resolve_kscreen_addr(&name, at.0, at.1);
                 self.last_name = Some(addr.clone());
                 set_custom_refresh(width, height, mode.refresh_hz, &addr)
             });
