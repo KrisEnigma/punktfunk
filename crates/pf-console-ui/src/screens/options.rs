@@ -206,7 +206,8 @@ impl OptionsScreen {
     fn label(&self, a: Action, default: Option<&str>) -> String {
         match a {
             Action::Wake => "Wake host".into(),
-            Action::MakeDefault if self.is_default(default) => "Default host \u{2713}".into(),
+            // Geist carries no U+2713, so a check mark here draws as a missing glyph.
+            Action::MakeDefault if self.is_default(default) => "Default host (on)".into(),
             Action::MakeDefault => "Make default host".into(),
             Action::Host(i) => match self.host().actions.get(i) {
                 Some(act) if self.armed == Some(a) => {
@@ -1179,7 +1180,7 @@ mod tests {
         assert_eq!(s.label(Action::MakeDefault, None), "Make default host");
         assert_eq!(
             s.label(Action::MakeDefault, Some("rec-1")),
-            "Default host \u{2713}"
+            "Default host (on)"
         );
         assert_eq!(
             s.label(Action::MakeDefault, Some("rec-2")),
