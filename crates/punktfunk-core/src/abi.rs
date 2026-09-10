@@ -5201,11 +5201,10 @@ pub unsafe extern "C" fn punktfunk_h265_concealer_conceal(
         if au.is_null() && len != 0 {
             return PunktfunkStatus::NullPointer;
         }
-        // SAFETY: `au` points to `len` readable bytes per the contract; an empty AU is a
-        // valid empty slice from a dangling pointer.
         let bytes: &[u8] = if len == 0 {
             &[]
         } else {
+            // SAFETY: `au` is non-null here and points to `len` readable bytes per the contract.
             unsafe { std::slice::from_raw_parts(au, len) }
         };
         *out_buf = std::ptr::null_mut();
