@@ -637,6 +637,10 @@ pub mod switch_pro;
 /// the IMU unit contract in `tests/motion_contract.rs` run on any host, Windows included.
 #[path = "inject/proto/switch_proto.rs"]
 pub mod switch_proto;
+/// Sysfs/procfs poll helpers shared by the Linux backends' `#[ignore]`d device tests.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "inject/linux/test_sysfs.rs"]
+mod test_sysfs;
 /// Steam Controller 2 (Triton) contract: state layout, feature query-dance, rumble parse.
 /// Not cfg-gated like `steam_controller2`: pure byte-packing, so layout tests run on any
 /// host — consumers are Linux uhid/usbip and Windows `triton_windows`.

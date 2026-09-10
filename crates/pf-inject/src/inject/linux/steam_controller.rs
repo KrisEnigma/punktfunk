@@ -527,6 +527,7 @@ pub type SteamCtrlManager = UhidManager<ScProto>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_sysfs::{input_devices, wait_input_gone};
 
     fn find_node(name: &str) -> Option<String> {
         let devs = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
@@ -582,7 +583,7 @@ mod tests {
         const BTN_A: u16 = 0x130;
         const ABS_HAT0X: u16 = 0x10; // left trackpad X
         let mut pad = SteamDeckPad::open(0).expect("open SteamDeckPad (/dev/uhid + input group?)");
-        // Past MODE_ENTER so the b9.6 pulse finishes and the handshake is serviced.
+        // Service past MODE_ENTER; hid-steam registers the gamepad before the IMU.
         let mut st = SteamState::from_gamepad(gs::BTN_A | gs::BTN_PADDLE2, 0, 0, 0, 0, 0, 0);
         st.apply_rich(RichInput::TouchpadEx {
             pad: 0,
@@ -598,9 +599,17 @@ mod tests {
         while start.elapsed() < Duration::from_millis(1200) {
             let _ = pad.service();
             pad.write_state(&st).expect("write_state");
+            let settled = find_node("Steam Deck").is_some_and(|n| {
+                input_devices().contains("Steam Deck Motion Sensors")
+                    && key_is_down(&n, BTN_A)
+                    && abs_value(&n, ABS_HAT0X) == Some(-8000)
+            });
+            if settled {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(4));
         }
-        let devs = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
+        let devs = input_devices();
         assert!(devs.contains("Steam Deck"), "gamepad evdev not created");
         assert!(
             devs.contains("Steam Deck Motion Sensors"),
@@ -617,10 +626,8 @@ mod tests {
             "left trackpad (TouchpadEx surface 1) did not reach ABS_HAT0X"
         );
         drop(pad);
-        std::thread::sleep(Duration::from_millis(200));
-        let devs = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
         assert!(
-            !devs.contains("Steam Deck Motion Sensors"),
+            wait_input_gone("Steam Deck Motion Sensors", Duration::from_millis(400)),
             "device not torn down on drop"
         );
     }
@@ -640,11 +647,15 @@ mod tests {
         while start.elapsed() < Duration::from_millis(900) {
             let _ = pad.service();
             pad.write_state(&st).expect("write_state");
+            let settled = find_node("Steam Controller")
+                .is_some_and(|n| key_is_down(&n, BTN_A) && abs_value(&n, ABS_RX) == Some(9000));
+            if settled {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(4));
         }
-        let devs = std::fs::read_to_string("/proc/bus/input/devices").unwrap_or_default();
         assert!(
-            devs.contains("Steam Controller"),
+            input_devices().contains("Steam Controller"),
             "SC gamepad evdev not created"
         );
         let node = find_node("Steam Controller").expect("SC evdev node");

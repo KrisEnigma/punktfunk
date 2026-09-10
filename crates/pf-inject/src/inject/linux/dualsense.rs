@@ -521,13 +521,23 @@ mod tests {
         let mut pad0 = DualSensePad::open(0, &DsUhidIdentity::dualsense()).expect("open pad 0");
         let mut pad1 = DualSensePad::open(1, &DsUhidIdentity::dualsense()).expect("open pad 1");
         let st = DsState::neutral();
-        // GET_REPORT handshake; hid-playstation registers nodes in ~1.5 s.
+        // GET_REPORT handshake; return as soon as hid-playstation registers both pads.
         let start = Instant::now();
         while start.elapsed() < Duration::from_millis(1500) {
             let _ = pad0.service(0);
             let _ = pad1.service(1);
             let _ = pad0.write_state(&st);
             let _ = pad1.write_state(&st);
+            let hidraws = hidraw_devices();
+            let has = |name: &str| hidraws.iter().any(|(n, _, _)| n == name);
+            if find_nodes("Punktfunk DualSense 0")
+                .iter()
+                .any(|(_, n)| has_ff(n))
+                && has("Punktfunk DualSense 0")
+                && has("Punktfunk DualSense 1")
+            {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(4));
         }
         let nodes = find_nodes("Punktfunk DualSense 0");

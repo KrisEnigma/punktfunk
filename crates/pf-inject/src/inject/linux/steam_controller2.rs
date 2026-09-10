@@ -366,10 +366,10 @@ pub type Triton2Manager = UhidManager<TritonProto>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_sysfs::hid_entry;
 
-    /// Creates a hidraw node under `hid-generic` (no evdev — nothing binds the PID) with
-    /// the Valve identity, mirrors a raw state report, tears down on drop. Ignored in CI
-    /// (touches `/dev/uhid`); on a Linux box: `cargo test -p punktfunk-host -- --ignored triton`.
+    /// `hid-generic` hidraw for `28DE:1302` (no evdev binds this PID). Needs `/dev/uhid`
+    /// and the input group.
     #[test]
     #[ignore = "creates a real /dev/uhid device; needs the input group"]
     fn triton_backend_creates_hidraw_and_mirrors_raw() {
@@ -381,15 +381,15 @@ mod tests {
         for _ in 0..50 {
             let _ = pad.service();
             pad.write_state(&st).expect("write_state");
+            if hid_entry(":28DE:1302").is_some() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(4));
         }
-        let found = std::fs::read_dir("/sys/bus/hid/devices")
-            .map(|d| {
-                d.flatten()
-                    .any(|e| e.file_name().to_string_lossy().contains(":28DE:1302"))
-            })
-            .unwrap_or(false);
-        assert!(found, "virtual 28DE:1302 HID device not created");
+        assert!(
+            hid_entry(":28DE:1302").is_some(),
+            "virtual 28DE:1302 HID device not created"
+        );
         drop(pad);
     }
 }
