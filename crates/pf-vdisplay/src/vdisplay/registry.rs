@@ -50,9 +50,12 @@ pub struct Snapshot {
 }
 
 /// Snapshot topology string. `effective_topology` resolves `Auto`; the arm is defensive.
+///
+/// The HOST's answer, not any one device's: this is the snapshot `/display/state` serves,
+/// and a per-device topology belongs on that device's row rather than on the whole list.
 fn topology_str() -> String {
     use super::policy::Topology;
-    match super::effective_topology() {
+    match super::effective_topology(None) {
         Topology::Extend => "extend",
         Topology::Primary => "primary",
         Topology::Exclusive => "exclusive",

@@ -151,7 +151,19 @@ impl VirtualDisplay for MutterDisplay {
             (mode.width, mode.height),
             crate::policy::Identity::Shared,
         );
-        let remembered_scale = crate::identity::scales().lock().unwrap().get(&scale_key);
+        // What the desktop last settled on for this device, else what the operator set for
+        // it (§6.3 P2). Learned beats configured: once someone has scaled the screen by
+        // hand, that is the answer, and Mutter mints a fresh EDID serial every session so
+        // its own monitors.xml never rematches to say so.
+        let remembered_scale = crate::identity::scales()
+            .lock()
+            .unwrap()
+            .get(&scale_key)
+            .or_else(|| {
+                crate::policy::prefs()
+                    .get()
+                    .scale_for(crate::policy::fp_hex(self.client_fp).as_deref())
+            });
         if let Some(scale) = remembered_scale {
             tracing::info!(scale, "mutter: reapplying the client's saved display scale");
         }
@@ -164,6 +176,7 @@ impl VirtualDisplay for MutterDisplay {
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let first_in_group = self.first_in_group;
         let hw_cursor = self.hw_cursor;
+        let client_fp = self.client_fp;
         thread::Builder::new()
             .name("punktfunk-mutter-vout".into())
             .spawn(move || {
@@ -177,6 +190,7 @@ impl VirtualDisplay for MutterDisplay {
                     hw_cursor,
                     scale_key,
                     remembered_scale,
+                    client_fp,
                 )
             })
             .context("spawn Mutter virtual-output thread")?;
@@ -258,6 +272,8 @@ fn session_thread(
     hw_cursor: bool,
     scale_key: String,
     remembered_scale: Option<f64>,
+    // Whose display this is, for the per-device topology (§6.1). `None` is the host policy.
+    client_fp: Option<[u8; 32]>,
 ) {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -278,7 +294,7 @@ fn session_thread(
         // Extend: no config change. Primary: virtual primary, physicals
         // kept. Exclusive: virtual sole output. `Auto` is resolved upstream.
         use crate::policy::Topology;
-        let topo = crate::effective_topology();
+        let topo = crate::effective_topology(client_fp);
         let topo_policy = matches!(topo, Topology::Primary | Topology::Exclusive);
         // Only the first display of the group applies topology. A later
         // sibling extends: Mutter connectors are un-nameable, so a config
