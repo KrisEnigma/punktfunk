@@ -2042,26 +2042,23 @@ mod live_tests {
     }
 
     /// Read-only against a live host: IddCx create/destroy wedges the slot pool.
-    /// Our display must not count as `external_physical` (it declares HDMI).
+    /// Our display must not count as `external_physical` (it declares HDMI). The
+    /// inventory must hold one, or the loop below asserts over an empty set.
     #[test]
     #[ignore = "hardware: reads the live display topology"]
     fn our_own_display_is_excluded_from_the_operators_physicals_on_real_hardware() {
         let inv = target_inventory();
-        for t in &inv {
-            println!(
-                "target {:>5}  active={:<5} external_physical={:<5} tech={:<18} {:?}  {}",
-                t.target_id,
-                t.active,
-                t.external_physical,
-                t.tech,
-                t.friendly,
-                t.monitor_device_path
-            );
-        }
-        for t in inv
+        let ours: Vec<_> = inv
             .iter()
             .filter(|t| is_our_virtual_display(&t.monitor_device_path))
-        {
+            .collect();
+        assert!(
+            !ours.is_empty(),
+            "no punktfunk virtual display among the {} live target(s) — bring one up before \
+             running this, or the check below proves nothing",
+            inv.len()
+        );
+        for t in ours {
             assert!(
                 !t.external_physical,
                 "our own display {} ({:?}) is still counted as one of the operator's physical \

@@ -525,8 +525,9 @@ mod tests {
     /// The wave replaces the IDR: an RFI with every reference tainted starts one; its start
     /// and close AU carry the mark, nothing in between does, no IDR follows frame 0, and a
     /// later loss of the plain P after the wave re-anchors on the close (a fully swept
-    /// picture is trusted). Dumps the full stream and the client's view with the pre-wave
-    /// P frames lost: decoded side by side, the close must match the full decode.
+    /// picture is trusted). `PF_WAVE_DUMP=<dir>` writes the full stream and the client's
+    /// view with the pre-wave P frames lost: decoded side by side, the close must match
+    /// the full decode.
     ///
     /// `cargo test -p pf-encode native_vaapi_wave -- --ignored --nocapture`
     fn run_wave_smoke(codec: Codec, ext: &str) {
@@ -590,18 +591,18 @@ mod tests {
                 "AU {i}: the only anchor P answers the post-wave loss"
             );
         }
-        if let Ok(home) = std::env::var("HOME") {
+        if let Ok(dir) = std::env::var("PF_WAVE_DUMP") {
             let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
-            let p = format!("{home}/vaenc-wave-smoke.{ext}");
-            let _ = std::fs::write(&p, &full);
+            let p = format!("{dir}/vaenc-wave-smoke.{ext}");
+            std::fs::write(&p, &full).unwrap_or_else(|e| panic!("write {p}: {e}"));
             let dropped: Vec<u8> = aus
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i == 0 || *i >= WAVE_START)
                 .flat_map(|(_, a)| a.data.iter().copied())
                 .collect();
-            let p2 = format!("{home}/vaenc-wave-smoke-dropped.{ext}");
-            let _ = std::fs::write(&p2, &dropped);
+            let p2 = format!("{dir}/vaenc-wave-smoke-dropped.{ext}");
+            std::fs::write(&p2, &dropped).unwrap_or_else(|e| panic!("write {p2}: {e}"));
             eprintln!(
                 "run_wave_smoke: wrote {p} ({} bytes, {} AUs) and {p2} (frames 1..{} dropped; \
                  the close at {} must decode identical to the full stream)",

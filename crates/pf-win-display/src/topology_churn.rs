@@ -161,10 +161,13 @@ mod tests {
         assert!(held());
         release();
         assert!(!held());
-        // Self-expiry: a millisecond-scale hold lapses on its own.
+        // A millisecond-scale hold lapses on its own.
         hold(Duration::from_millis(30));
         assert!(held());
-        std::thread::sleep(Duration::from_millis(60));
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while held() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert!(!held());
     }
 
@@ -188,9 +191,11 @@ mod tests {
             (Outcome::Changed, g0 + 1, g0 + 1)
         );
         assert_eq!(last().map(|l| (l.reason, l.id)), Some(("isolate", f.id)));
-        // Past its deadline a claimed change is not trusted.
+        // A claimed change past the deadline is Unknown, not a generation bump.
         let t = begin("late", Duration::from_millis(1));
-        std::thread::sleep(Duration::from_millis(5));
+        while Instant::now() <= t.deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let f = finish(t, Outcome::Changed);
         assert_eq!((f.outcome, generation()), (Outcome::Unknown, g0 + 1));
         release();

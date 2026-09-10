@@ -4,7 +4,7 @@
 //! takes the published slots out in `wire_seq` order and hands back the bytes.
 //!
 //! Pure over a mapped [`AuView`], so the same code reads the driver's section on Windows and
-//! a `Vec` in the tests (spike S7). Section creation, `SET_ENCODE`, and the `Encoder` proxy
+//! a `Vec` in the tests. Section creation, `SET_ENCODE`, and the `Encoder` proxy
 //! are `idd_push/driver_encode.rs`.
 
 // Off Windows only the tests read this module.
@@ -489,8 +489,6 @@ pub(crate) mod producer {
 mod tests {
     use super::producer::Producer;
     use super::*;
-    use std::sync::{mpsc, Arc, Condvar, Mutex};
-    use std::time::{Duration, Instant};
 
     /// An 8-aligned section of the smallest legal size.
     fn section() -> Vec<u64> {
@@ -638,129 +636,5 @@ mod tests {
             .store(u32::MAX, Ordering::Relaxed);
         assert!(matches!(rd.take_next(), Err(AuFault { slot, .. }) if slot == i));
         assert_eq!(prod.slot_state(i), au::FREE);
-    }
-
-    fn stats(mut us: Vec<u64>) -> (u64, u64, u64) {
-        us.sort_unstable();
-        (us[0], us[us.len() / 2], us[us.len() - 1])
-    }
-
-    /// Both consumers below: poll for `SPIN` before parking, the discipline `mpsc` already
-    /// applies inside `recv`, so the comparison is transport cost and not who parks first.
-    const SPIN: Duration = Duration::from_micros(50);
-
-    fn spin_then<T>(mut poll: impl FnMut() -> Option<T>, park: impl FnOnce()) -> Option<T> {
-        let until = Instant::now() + SPIN;
-        while Instant::now() < until {
-            if let Some(t) = poll() {
-                return Some(t);
-            }
-            std::hint::spin_loop();
-        }
-        park();
-        None
-    }
-
-    /// Encoder cadence for the S7 producers: one access unit per period, so the consumers
-    /// are idle between them and the number is wake plus handoff, not queueing.
-    const PERIOD: Duration = Duration::from_millis(2);
-
-    /// Sleep until access unit `seq` is due, then stamp its publish time into `stamps`.
-    fn pace(t0: Instant, seq: u32, stamps: &[AtomicU64]) {
-        let due = t0 + PERIOD * (seq + 1);
-        if let Some(left) = due.checked_duration_since(Instant::now()) {
-            std::thread::sleep(left);
-        }
-        stamps[seq as usize].store(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-
-    /// S7: publish→consume latency of the section against today's `Vec` handoff over a
-    /// channel, same bytes, producer and consumer on their own threads.
-    #[test]
-    fn s7_section_handoff_latency_against_a_vec_channel() {
-        const N: u32 = 500;
-        let payload = vec![0xABu8; 8 * 1024];
-        let mut buf = section();
-        let (p, len) = base(&mut buf);
-        let mut prod = Producer::init(p, len, 3, 0);
-        let mut rd = reader(&mut buf, 0);
-        let wake = Arc::new((Mutex::new(0u32), Condvar::new()));
-        let t0 = Instant::now();
-        let stamps: Arc<Vec<AtomicU64>> = Arc::new((0..N).map(|_| AtomicU64::new(0)).collect());
-        let producer = {
-            let (wake, stamps, payload) = (wake.clone(), stamps.clone(), payload.clone());
-            std::thread::spawn(move || {
-                for seq in 0..N {
-                    pace(t0, seq, &stamps);
-                    prod.publish(&payload, seq, seq, 0, WHOLE);
-                    *wake.0.lock().unwrap() += 1;
-                    wake.1.notify_one();
-                }
-            })
-        };
-        let mut section_us = Vec::with_capacity(N as usize);
-        let mut next = 0u32;
-        while next < N {
-            let taken = spin_then(
-                || rd.take_next().unwrap(),
-                || {
-                    // Park only while nothing new is published — the auto-reset event stays
-                    // set on Windows; this stand-in must not lose the wakeup either.
-                    let g = wake.0.lock().unwrap();
-                    if *g <= next {
-                        let _ = wake.1.wait_timeout(g, Duration::from_millis(1)).unwrap();
-                    }
-                },
-            );
-            if let Some(t) = taken {
-                assert_eq!((t.wire_seq, t.data.len()), (next, payload.len()));
-                let pub_ns = stamps[next as usize].load(Ordering::Relaxed);
-                section_us.push((t0.elapsed().as_nanos() as u64 - pub_ns) / 1000);
-                next += 1;
-            }
-        }
-        producer.join().unwrap();
-
-        let (tx, rx) = mpsc::sync_channel::<(u32, Vec<u8>)>(16);
-        let t1 = Instant::now();
-        let stamps2: Arc<Vec<AtomicU64>> = Arc::new((0..N).map(|_| AtomicU64::new(0)).collect());
-        let producer = {
-            let (stamps, payload) = (stamps2.clone(), payload.clone());
-            std::thread::spawn(move || {
-                for seq in 0..N {
-                    pace(t1, seq, &stamps);
-                    tx.send((seq, payload.clone())).unwrap();
-                }
-            })
-        };
-        let mut vec_us = Vec::with_capacity(N as usize);
-        let mut expect = 0u32;
-        while expect < N {
-            let got = spin_then(
-                || rx.try_recv().ok(),
-                || {
-                    let _ = rx.recv_timeout(Duration::from_millis(1)).map(|m| {
-                        assert_eq!((m.0, m.1.len()), (expect, payload.len()));
-                        let pub_ns = stamps2[m.0 as usize].load(Ordering::Relaxed);
-                        vec_us.push((t1.elapsed().as_nanos() as u64 - pub_ns) / 1000);
-                        expect += 1;
-                    });
-                },
-            );
-            if let Some((seq, data)) = got {
-                assert_eq!((seq, data.len()), (expect, payload.len()));
-                let pub_ns = stamps2[seq as usize].load(Ordering::Relaxed);
-                vec_us.push((t1.elapsed().as_nanos() as u64 - pub_ns) / 1000);
-                expect += 1;
-            }
-        }
-        producer.join().unwrap();
-        let (s_min, s_med, s_max) = stats(section_us);
-        let (v_min, v_med, v_max) = stats(vec_us);
-        println!(
-            "S7 publish→consume, {N} × {} B: section min/median/max = {s_min}/{s_med}/{s_max} µs; \
-             Vec channel = {v_min}/{v_med}/{v_max} µs",
-            payload.len()
-        );
     }
 }
