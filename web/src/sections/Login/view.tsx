@@ -52,7 +52,7 @@ export const LoginView: FC<{
 								autoComplete="current-password"
 							/>
 						</div>
-						{error && (
+						{error && !busy && (
 							<p className="text-sm text-destructive">{m.login_error()}</p>
 						)}
 						<Button type="submit" className="w-full" disabled={busy}>
