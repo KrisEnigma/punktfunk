@@ -356,6 +356,7 @@ mod tests {
             systemd_pid1: true,
             user_manager: true,
             web_unit_present: true,
+            web_password_present: false,
             scripting_unit_disabled: false,
             ip: None,
             user: "pf".into(),

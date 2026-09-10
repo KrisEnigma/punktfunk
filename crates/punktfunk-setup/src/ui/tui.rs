@@ -31,6 +31,11 @@ const CURSOR: &str = "▸";
 const RADIO_ON: &str = "●";
 const RADIO_OFF: &str = "○";
 const WARN: &str = "▲";
+/// Short enough to type on a couch keyboard, long enough that the console is not open to
+/// the LAN behind four characters.
+const MIN_PASSWORD: usize = 8;
+/// What a systemd EnvironmentFile value cannot carry through unquoting.
+const FORBIDDEN: &str = "\"'\\`$";
 
 pub struct Tui<'a> {
     term: RefCell<&'a mut dyn Terminal>,
@@ -383,6 +388,88 @@ impl<'a> Tui<'a> {
         }
     }
 
+    /// Prompt prose: each input line wrapped on its own, so a command keeps its line.
+    fn prose(&self, text: &str) -> String {
+        let mut out = String::new();
+        let mut first = true;
+        for line in text.lines() {
+            for wrapped in self.wrap(line) {
+                let lead = if first {
+                    self.accent(STEP_ACTIVE)
+                } else {
+                    self.bar()
+                };
+                out.push_str(&format!("{lead}  {wrapped}\n"));
+                first = false;
+            }
+        }
+        out
+    }
+
+    /// The password step: a fresh host install must not end with the console asking for
+    /// something the user never saw mentioned. `None` keeps the generated one — backing out
+    /// of either prompt is that same answer, never a cancelled install.
+    pub fn web_password(&self, url: &str, read_cmd: &str) -> Option<String> {
+        let prompt = format!(
+            "The web console ({url}) asks for a password.\nOne is generated for you unless you set your own. Print it any time with:\n{read_cmd}"
+        );
+        let options = ["Use the generated password", "Set my own now"];
+        match self.choose(&prompt, &options, 0)? {
+            0 => None,
+            _ => self.ask_secret(),
+        }
+    }
+
+    /// Inline text entry for the console password. `None` on Esc — the caller reads that as
+    /// "generate one after all", so there is no way to leave here with nothing set.
+    fn ask_secret(&self) -> Option<String> {
+        let mut typed = String::new();
+        let mut drawn = 0usize;
+        loop {
+            let bar = self.bar();
+            let short = typed.chars().count() < MIN_PASSWORD;
+            let hint = if short {
+                format!("at least {MIN_PASSWORD} characters · Esc generates one instead")
+            } else {
+                "Enter accepts · Esc generates one instead".to_string()
+            };
+            let mut frame = format!("{bar}\n");
+            frame.push_str(&self.prose("Type the console password. It is stored on this box only, and shown here as you type."));
+            frame.push_str(&format!(
+                "{bar}  {} {}\n",
+                self.accent(CURSOR),
+                self.highlight(&typed)
+            ));
+            frame.push_str(&format!("{bar}  {}\n", self.dim(&hint)));
+            frame.push_str(&format!("{bar}\n"));
+            if drawn > 0 {
+                self.term.borrow_mut().clear_last_lines(drawn);
+            }
+            let frame = self.fit(&frame);
+            drawn = frame.lines().count();
+            self.write(&frame);
+
+            let key = self.term.borrow_mut().read_key();
+            match key {
+                // The file is read as a systemd EnvironmentFile, which unquotes and
+                // unescapes: a quote or a backslash in the value would not survive it.
+                Key::Char(c) if c.is_ascii_graphic() && !FORBIDDEN.contains(c) => typed.push(c),
+                Key::Backspace => {
+                    typed.pop();
+                }
+                Key::Enter if !short => {
+                    self.term.borrow_mut().clear_last_lines(drawn);
+                    return Some(typed);
+                }
+                Key::Cancel => {
+                    self.term.borrow_mut().clear_last_lines(drawn);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Inline radio list. `None` if the user backed out.
     fn choose(&self, prompt: &str, options: &[&str], initial: usize) -> Option<usize> {
         let mut cursor = initial.min(options.len().saturating_sub(1));
@@ -391,14 +478,7 @@ impl<'a> Tui<'a> {
             let mut frame = String::new();
             let bar = self.bar();
             frame.push_str(&format!("{bar}\n"));
-            for (i, text) in self.wrap(prompt).iter().enumerate() {
-                let lead = if i == 0 {
-                    self.accent(STEP_ACTIVE)
-                } else {
-                    bar.clone()
-                };
-                frame.push_str(&format!("{lead}  {text}\n"));
-            }
+            frame.push_str(&self.prose(prompt));
             for (index, option) in options.iter().enumerate() {
                 let (glyph, text) = if index == cursor {
                     (self.accent(RADIO_ON), self.highlight(option))

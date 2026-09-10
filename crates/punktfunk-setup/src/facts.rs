@@ -242,6 +242,9 @@ pub struct Facts {
     pub systemd_pid1: bool,
     pub user_manager: bool,
     pub web_unit_present: bool,
+    /// A console login password already lives in the user's config dir; a re-run must not
+    /// ask about one it would only overwrite.
+    pub web_password_present: bool,
     pub scripting_unit_disabled: bool,
     pub ip: Option<String>,
     pub user: String,
@@ -308,6 +311,8 @@ impl Facts {
             web_unit_present: unit_files(run, "punktfunk-web.service")
                 .lines()
                 .any(|l| l.starts_with("punktfunk-web.service")),
+            web_password_present: std::fs::metadata(paths.config.join("punktfunk/web-password"))
+                .is_ok_and(|m| m.len() > 0),
             scripting_unit_disabled: unit_files(run, "punktfunk-scripting.service")
                 .contains("disabled"),
             ip: local_ip(run),

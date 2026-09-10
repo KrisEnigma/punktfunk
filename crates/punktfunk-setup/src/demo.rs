@@ -75,6 +75,7 @@ fn box_of(id: &str, pretty: &str, version: &str, family: Family, docs: &str) -> 
         systemd_pid1: true,
         user_manager: true,
         web_unit_present: true,
+        web_password_present: false,
         scripting_unit_disabled: false,
         ip: Some("192.168.1.24".into()),
         user: "you".into(),
@@ -99,6 +100,8 @@ fn installed(mut facts: Facts, channel: Channel) -> Facts {
     facts.current_channel = Some(channel);
     facts.host_version = Some("punktfunk-host 0.34.0".into());
     facts.has_web_server = true;
+    // A box that has run the console already has a password; only a fresh one is asked.
+    facts.web_password_present = true;
     facts.in_input_group = true;
     facts
 }

@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use punktfunk_setup::choices::{Action, Choices, Pins};
 use punktfunk_setup::exec::{Executor, Opts};
-use punktfunk_setup::facts::{Facts, Floor, DOCS};
+use punktfunk_setup::facts::{Facts, Family, Floor, DOCS};
 use punktfunk_setup::plan;
 use punktfunk_setup::report;
 use punktfunk_setup::seam::{BasePaths, CommandRunner, Env, SystemRunner};
@@ -309,6 +309,18 @@ fn main() -> ExitCode {
         let action = choices.action;
         choices = screen.choices;
         choices.action = action;
+        // After the settings screen, not a row on it: the console password is the one thing
+        // a fresh host install leaves the user needing, and a row is too easy to walk past.
+        // A box that already has one keeps it — this never overwrites a password in use.
+        if action == Action::Install
+            && choices.components.host
+            && !facts.web_password_present
+            && facts.family != Family::Steamos
+        {
+            let ip = facts.ip.clone().unwrap_or_else(|| "this box".to_string());
+            choices.web_password =
+                tui.web_password(&format!("https://{ip}:47992"), report::PASSWORD_READ);
+        }
     } else {
         report::choices_summary(ui, &choices);
     }
