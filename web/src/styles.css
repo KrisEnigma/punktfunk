@@ -27,10 +27,19 @@
 :root {
 	--radius: 0.625rem;
 
-	/* Brand — the violet lens mark (from the Punktfunk app icon). Theme-independent. */
+	/* The page's own far end. The mark's tones are mixed TOWARDS it, so "the tone that
+	   stands furthest off the page" stays that on white as well as on black. Mixing
+	   always toward white is what left the wordmark at 1.13:1 in light mode. */
+	--pf-tint-end: black;
+	/* The console's own page colour, untinted. Surfaces are mixed from it toward the
+	   accent, which is what the literals below always were — with the violet baked in. */
+	--pf-page: #ffffff;
+
+	/* Brand — the violet lens mark (from the Punktfunk app icon). Ordered by distance
+	   from the page, not by lightness: --pf-highlight carries the wordmark. */
 	--pf-brand: #6c5bf3; /* deep violet — primary on light */
-	--pf-brand-light: #a79ff8; /* light violet — primary on dark */
-	--pf-highlight: #d2c9fb; /* lens highlight */
+	--pf-brand-light: color-mix(in oklab, #6c5bf3 55%, var(--pf-tint-end));
+	--pf-highlight: color-mix(in oklab, #6c5bf3 15%, var(--pf-tint-end));
 	--pf-glow: rgb(108 91 243 / 0.45); /* the lens mark's drop shadow */
 
 	/* Surfaces — light · lavender (white bg, faint-violet cards/borders). */
@@ -86,6 +95,12 @@
 /* Dark · the violet-tinted app-icon chrome. Overrides only the raw values —
    the indirection tokens in :root resolve to these automatically. */
 .dark {
+	--pf-tint-end: white;
+	--pf-page: #141019;
+	/* Measured against the dark chrome; kept as literals so it does not drift. */
+	--pf-brand-light: #a79ff8;
+	--pf-highlight: #d2c9fb;
+
 	--background: #141019;
 	--foreground: oklch(0.985 0 0);
 	--card: #1c1530;
@@ -145,9 +160,30 @@
 	   are close (Tokyo Night) mixing them collapses the three tints into one flat blob.
 	   These also carry --primary and --ring, which is why they are worth this care. */
 	--pf-brand: color-mix(in oklab, var(--pf-accent) 88%, black);
-	--pf-brand-light: color-mix(in oklab, var(--pf-accent) 55%, white);
-	--pf-highlight: color-mix(in oklab, var(--pf-accent) 15%, white);
+	--pf-brand-light: color-mix(
+		in oklab,
+		var(--pf-accent) 55%,
+		var(--pf-tint-end)
+	);
+	--pf-highlight: color-mix(in oklab, var(--pf-accent) 15%, var(--pf-tint-end));
 	--pf-glow: color-mix(in oklab, var(--pf-accent) 45%, transparent);
+
+	/* Surfaces follow the accent too. They always were accent-tinted — #f6f2ff is 4%
+	   violet over white — the violet was just baked into the literal, so picking a red
+	   accent left every card and border violet. A desktop that publishes a real palette
+	   overrides all of this: [data-omarchy] comes after.
+
+	   Toward the accent ITSELF, not the accent dulled toward the page's far end: the latter
+	   is a grey, and mixing white toward a grey turns the light console grey with it. The
+	   steps are what has to be wide enough — 3% apart, a dark accent left card and
+	   background 1.02:1 from each other, which is no card at all. */
+	--background: color-mix(in oklab, var(--pf-page) 98%, var(--pf-accent));
+	--card: color-mix(in oklab, var(--pf-page) 90%, var(--pf-accent));
+	--popover: var(--card);
+	--muted: color-mix(in oklab, var(--pf-page) 87%, var(--pf-accent));
+	--secondary: color-mix(in oklab, var(--pf-page) 84%, var(--pf-accent));
+	--border: color-mix(in oklab, var(--pf-page) 78%, var(--pf-accent));
+	--input: var(--border);
 }
 
 /* Light mode takes --primary from --pf-brand and keeps :root's white text, so the
@@ -163,21 +199,25 @@
 	--background: var(--pf-bg);
 	--foreground: var(--pf-fg);
 	/* Cards, hovers and borders are the background lifted off itself by increasing
-	   amounts of foreground, so they stay in the theme's hue instead of sitting on it. */
-	--card: color-mix(in oklab, var(--pf-bg) 94%, var(--pf-fg));
+	   amounts of foreground, so they stay in the theme's hue instead of sitting on it.
+	   The lift carries a quarter of the accent, so an accent the OPERATOR picked reaches
+	   the surfaces here too — following the desktop still owns the page, and a surface
+	   that ignored the pick entirely is what "changing the colour does nothing" meant. */
+	--pf-lift: color-mix(in oklab, var(--pf-fg) 75%, var(--pf-accent));
+	--card: color-mix(in oklab, var(--pf-bg) 94%, var(--pf-lift));
 	--card-foreground: var(--pf-fg);
 	--popover: var(--card);
 	--popover-foreground: var(--pf-fg);
-	--muted: color-mix(in oklab, var(--pf-bg) 90%, var(--pf-fg));
+	--muted: color-mix(in oklab, var(--pf-bg) 90%, var(--pf-lift));
 	/* ponytail: 88% is as muted as this can go and stay readable, and on a theme whose
 	   own foreground is only 5.2:1 against its own background (Everforest Light) NO
 	   ratio reaches 4.5 on a card — the headroom is the theme's, not ours. Measured
 	   worst case 3.8:1 there; every dark theme clears 4.5 comfortably. Give this its own
 	   token if a theme ever needs a hand-picked value. */
 	--muted-foreground: color-mix(in oklab, var(--pf-fg) 88%, var(--pf-bg));
-	--secondary: color-mix(in oklab, var(--pf-bg) 86%, var(--pf-fg));
+	--secondary: color-mix(in oklab, var(--pf-bg) 86%, var(--pf-lift));
 	--secondary-foreground: var(--pf-fg);
-	--border: color-mix(in oklab, var(--pf-bg) 80%, var(--pf-fg));
+	--border: color-mix(in oklab, var(--pf-bg) 80%, var(--pf-lift));
 	--input: var(--border);
 
 	/* shadcn's `accent` is a subtle hover SURFACE (and @unom/ui's card ring), not the

@@ -120,33 +120,58 @@ const contrast = (a, b) => {
 // ── read the ratios back out of the stylesheet ─────────────────────────────────────────────
 const css = readFileSync(CSS, "utf8");
 
-/** The percentage in `--<token>: color-mix(in oklab, <first> N%, <second>)`. Throws rather than
- *  defaulting: a declaration this cannot find is one nobody is checking any more. */
-function ratio(token) {
-	const m = css.match(
-		// `.` stops at the newline, so this can only ever read the token's own declaration —
-		// and a character class excluding `)` would stop dead on the first `var(--pf-bg)`.
-		new RegExp(`--${token}:\\s*color-mix\\(in oklab,.*?(\\d+)%`),
-	);
+/** The body of one rule, so a ratio is read from the block that owns it. Two blocks now
+ *  declare `--card`; an unscoped search takes whichever comes first in the file and checks
+ *  the wrong derivation without saying so. */
+function rule(selector) {
+	const open = css.indexOf(`${selector} {`);
+	if (open < 0) {
+		throw new Error(
+			`check-omarchy-palette: no \`${selector}\` rule in styles.css. If the derivation ` +
+				"was restructured, update this check with it.",
+		);
+	}
+	return css.slice(open, css.indexOf("}", open));
+}
+
+/** The percentage in `--<token>: color-mix(in oklab, <first> N%, <second>)`, within one rule.
+ *  Throws rather than defaulting: a declaration this cannot find is one nobody is checking. */
+function ratio(token, selector) {
+	const scope = rule(selector);
+	// Bounded by the declaration's own `;` rather than by the end of the line: Biome wraps a
+	// long color-mix across five lines, and a line-bound match then reads nothing while a
+	// newline-crossing one would happily take the NEXT declaration's percentage.
+	const decl = scope.match(new RegExp(`--${token}:([\\s\\S]*?);`));
+	const m = decl?.[1].match(/color-mix\(\s*in oklab,[\s\S]*?(\d+)%/);
 	if (!m) {
 		throw new Error(
-			`check-omarchy-palette: no --${token} color-mix found in styles.css. If the ` +
+			`check-omarchy-palette: no --${token} color-mix in \`${selector}\`. If the ` +
 				"derivation was restructured, update this check with it.",
 		);
 	}
 	return Number(m[1]);
 }
 
+const OMARCHY = ":root[data-omarchy]";
+const ACCENT = ":root[data-accent]";
+
 const R = {
-	card: ratio("card"),
-	muted: ratio("muted"),
-	mutedFg: ratio("muted-foreground"),
-	secondary: ratio("secondary"),
-	border: ratio("border"),
-	accent: ratio("accent"),
-	brand: ratio("pf-brand"),
-	brandLight: ratio("pf-brand-light"),
-	highlight: ratio("pf-highlight"),
+	card: ratio("card", OMARCHY),
+	muted: ratio("muted", OMARCHY),
+	mutedFg: ratio("muted-foreground", OMARCHY),
+	secondary: ratio("secondary", OMARCHY),
+	border: ratio("border", OMARCHY),
+	accent: ratio("accent", OMARCHY),
+	lift: ratio("pf-lift", OMARCHY),
+	brand: ratio("pf-brand", ACCENT),
+	brandLight: ratio("pf-brand-light", ACCENT),
+	highlight: ratio("pf-highlight", ACCENT),
+	/* The accent-only half now tints the console's own surfaces too. */
+	aBackground: ratio("background", ACCENT),
+	aCard: ratio("card", ACCENT),
+	aMuted: ratio("muted", ACCENT),
+	aSecondary: ratio("secondary", ACCENT),
+	aBorder: ratio("border", ACCENT),
 	// The light-mode override, in its own `:not(.dark)` rule.
 	primaryLight: Number(
 		css.match(
@@ -168,13 +193,18 @@ for (const [name, [bgH, fgH, acH]] of Object.entries(THEMES)) {
 	const dark = lum(hex(bgH)) < lum(hex(fgH));
 	const [bg, fg, ac] = [hex(bgH), hex(fgH), hex(acH)];
 
-	const card = mix(bg, R.card, fg);
+	// The surface lift carries a quarter of the accent; --muted-foreground is text and
+	// stays the theme's own foreground.
+	const lift = mix(fg, R.lift, ac);
+	const card = mix(bg, R.card, lift);
 	const mutedFg = mix(fg, R.mutedFg, bg);
-	const border = mix(bg, R.border, fg);
+	const border = mix(bg, R.border, lift);
 	const accent = mix(bg, R.accent, ac);
 	const brand = mix(ac, R.brand, BLACK);
-	const brandLight = mix(ac, R.brandLight, WHITE);
-	const highlight = mix(ac, R.highlight, WHITE);
+	// Toward the page's own far end, which is what --pf-tint-end carries in the stylesheet.
+	const end = dark ? WHITE : BLACK;
+	const brandLight = mix(ac, R.brandLight, end);
+	const highlight = mix(ac, R.highlight, end);
 	// `.dark` puts --primary on the light tint with the theme's background as its text;
 	// light mode uses its own deepened override with :root's white.
 	const primary = dark ? brandLight : mix(ac, R.primaryLight, BLACK);
@@ -194,6 +224,12 @@ for (const [name, [bgH, fgH, acH]] of Object.entries(THEMES)) {
 		// The lens mark is three tints of one accent; too close and it reads as a blob.
 		["mark: light circle vs deep circle", brandLight, brand, 1.4],
 		["mark: highlight vs light circle", highlight, brandLight, 1.25],
+		// ...and separation from each other is not visibility. Checking only the tints
+		// against ONE ANOTHER is how three near-white tones passed while the wordmark sat
+		// at 1.13:1 on a white page. --pf-highlight is the wordmark, so it reads as text.
+		["mark: wordmark tone on the page", highlight, bg, 3],
+		["mark: light circle on the page", brandLight, bg, 1.5],
+		["mark: deep circle on the page", brand, bg, 1.5],
 	];
 	for (const [what, a, b, floor] of checks) {
 		const r = contrast(a, b);
@@ -207,12 +243,19 @@ for (const [name, [bgH, fgH, acH]] of Object.entries(THEMES)) {
 for (const [name, acH] of Object.entries(ACCENTS)) {
 	const ac = hex(acH);
 	// Mirrors :root[data-accent] in styles.css.
-	const brand = mix(ac, 88, BLACK);
-	const brandLight = mix(ac, 55, WHITE);
-	const highlight = mix(ac, 15, WHITE);
+	const brand = mix(ac, R.brand, BLACK);
 	for (const [mode, { bg: bgH, fg: fgH }] of Object.entries(CONSOLE_SURFACES)) {
-		const [bg, fg] = [hex(bgH), hex(fgH)];
+		const [page, fg] = [hex(bgH), hex(fgH)];
 		const dark = mode === "dark";
+		const end = dark ? WHITE : BLACK;
+		const brandLight = mix(ac, R.brandLight, end);
+		const highlight = mix(ac, R.highlight, end);
+		// The console's own surfaces, tinted from the page toward the accent.
+		const bg = mix(page, R.aBackground, ac);
+		const card = mix(page, R.aCard, ac);
+		const muted = mix(page, R.aMuted, ac);
+		const secondary = mix(page, R.aSecondary, ac);
+		const border = mix(page, R.aBorder, ac);
 		// Dark takes --primary from the light tint with the page background as its text;
 		// light takes the 75%-toward-black mix with white text. Same rule as the themed half.
 		const primary = dark ? brandLight : mix(ac, 75, BLACK);
@@ -221,9 +264,17 @@ for (const [name, acH] of Object.entries(ACCENTS)) {
 			["text on a primary button", primaryFg, primary, 4.5],
 			["mark: light circle vs deep circle", brandLight, brand, 1.4],
 			["mark: highlight vs light circle", highlight, brandLight, 1.25],
+			["mark: wordmark tone on the page", highlight, bg, 3],
+			["mark: light circle on the page", brandLight, bg, 1.5],
+			["mark: deep circle on the page", brand, bg, 1.5],
 			["primary distinguishable from the page", primary, bg, 1.5],
-			// Nothing here repaints surfaces, so the page's own text stays the console's.
+			// The page's own text over surfaces that now carry the accent.
 			["foreground on background", fg, bg, 4.5],
+			["foreground on card", fg, card, 4.5],
+			["foreground on the secondary surface", fg, secondary, 4.5],
+			["foreground on the muted surface", fg, muted, 4.5],
+			["card distinguishable from background", card, bg, 1.02],
+			["border distinguishable from card", border, card, 1.05],
 		];
 		for (const [what, a, b, floor] of checks) {
 			const r = contrast(a, b);
