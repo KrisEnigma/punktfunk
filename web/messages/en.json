@@ -428,6 +428,7 @@
 	"login_password": "Password",
 	"login_submit": "Sign in",
 	"login_error": "Wrong password.",
+	"login_throttled": "Too many sign-in attempts. Try again {when}.",
 	"login_signing_in": "Signing in…",
 	"action_logout": "Sign out",
 	"settings_logout_failed": "Couldn't sign you out — you're still signed in. Try again.",

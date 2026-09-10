@@ -6,13 +6,21 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useLocale } from "@/lib/i18n";
 import { m } from "@/paraglide/messages";
+
+/** Why the last attempt did not sign in. The throttle answers before the password is read, so
+ * the two are different facts to the person typing, not two flavours of "no". */
+export type LoginError =
+	| { kind: "wrong" }
+	| { kind: "throttled"; seconds: number };
 
 export const LoginView: FC<{
 	action: (data: FormData) => void;
-	error: boolean;
+	error: LoginError | null;
 	busy: boolean;
 }> = ({ action, error, busy }) => {
+	const locale = useLocale();
 	return (
 		<div className="flex flex-col min-h-screen items-center justify-center p-6">
 			<motion.div
@@ -53,7 +61,13 @@ export const LoginView: FC<{
 							/>
 						</div>
 						{error && !busy && (
-							<p className="text-sm text-destructive">{m.login_error()}</p>
+							<p className="text-sm text-destructive" role="alert">
+								{error.kind === "throttled"
+									? m.login_throttled({
+											when: retryWhen(error.seconds, locale),
+										})
+									: m.login_error()}
+							</p>
 						)}
 						<Button type="submit" className="w-full" disabled={busy}>
 							{busy ? m.login_signing_in() : m.login_submit()}
@@ -64,3 +78,12 @@ export const LoginView: FC<{
 		</div>
 	);
 };
+
+/** "in 30 seconds" / "in 5 Minuten" — the platform owns the wording, so a wait costs no strings
+ * of ours in either locale. Minutes past a minute: nobody counts down 273 seconds. */
+function retryWhen(seconds: number, locale: string): string {
+	const fmt = new Intl.RelativeTimeFormat(locale, { numeric: "always" });
+	return seconds < 60
+		? fmt.format(seconds, "second")
+		: fmt.format(Math.ceil(seconds / 60), "minute");
+}
