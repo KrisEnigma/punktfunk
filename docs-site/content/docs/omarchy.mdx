@@ -10,9 +10,9 @@ Omarchy menu, and updates go through `omarchy update`. One command handles all o
 
 <Callout type="info">
 Omarchy already ships Sunshine as an installable service and preinstalls moonlight-qt. Punktfunk
-is the remote desktop on this box — leave Sunshine off unless you are migrating. They
-**coexist** on native ports during a trial; see [Sunshine on the same
-box](#sunshine-on-the-same-box) before you turn either GameStream plane on.
+is the remote desktop on this box — leave Sunshine off unless you are migrating. Both services
+default to TCP 47990 even with GameStream off; see [Sunshine on the same
+box](#sunshine-on-the-same-box) before you run them together.
 </Callout>
 
 **One command instead?** The [guided installer](/docs/install#guided-install-preview) (preview) does
@@ -113,7 +113,8 @@ punktfunk-omarchy mode --status
 
 `--status` reads the settings file only, so the menu's checked rows do not start the host.
 This screen is the [Streamed screen](/docs/virtual-displays#stream-a-real-monitor-instead)
-pin; Dedicated clears it. A change applies to the **next** connection.
+pin; Dedicated clears it. Changing the mode restarts a running host, ends its active stream,
+and applies to the next connection.
 
 ## Keep-alive and window re-home
 
@@ -227,10 +228,10 @@ systemctl --user restart punktfunk-host
 
 The cost is one concurrent session on that port; extra sessions fall back to ephemeral ports again.
 
-**Tailscale later still gets a rule.** Setup opens `tailscale0` only while the iface exists.
-A user path unit watches `/sys/class/net/tailscale0` and re-runs the same tagged rules when
-the iface appears after setup — joining a tailnet the next day is enough. `punktfunk-omarchy
-remove` disables the watch.
+**Tailscale later triggers a rule update.** Setup opens `tailscale0` only while the iface exists.
+A user path unit watches `/sys/class/net/tailscale0` and tries the same tagged rules when the
+iface appears after setup. The unit cannot answer a `sudo` password prompt; if the rule is
+missing, run `punktfunk-omarchy ufw` in a terminal. `punktfunk-omarchy remove` disables the watch.
 
 ## Updating
 
@@ -252,14 +253,14 @@ live in `/home` and persist. Nothing needs re-pairing after a rollback.
 
 Punktfunk is the remote desktop on this box. Leave Sunshine off unless you are migrating.
 
-`omarchy install service sunshine` and Punktfunk can share a machine during a trial, with one
-caveat:
+The packages can share a machine during a trial, but the services do not run together unchanged:
 
-- **The native plane coexists.** Ports 9777 (QUIC), 47990 (management API) and 47992 (console) are
-  ours alone, so the Punktfunk apps and the console work with Sunshine running and untouched.
+- **The management ports collide.** Sunshine's web UI and Punktfunk's management API both default
+  to TCP 47990. Stop Sunshine, or [move Punktfunk's management API](/docs/configuration) before
+  starting both.
 - **The GameStream plane collides.** Moonlight compatibility uses 47984/47989/48010 and
-  47998–48010 — exactly Sunshine's ports. Ours are **off by default**; leave them off unless you
-  are migrating, and only one host can bind them.
+  47998/47999/48000 — exactly Sunshine's TCP and UDP ports. Ours are **off by default**; leave them
+  off unless you are migrating, and only one host can bind them.
 
 To migrate: `omarchy remove service sunshine`, then turn GameStream on only if you still want
 stock Moonlight clients. More in [Switching from Sunshine](/docs/switching-from-sunshine).
