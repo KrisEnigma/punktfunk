@@ -282,6 +282,7 @@ export const pendingDevices: PendingDevice[] = [
 		fingerprint:
 			"9f8e7d6c5b4a39281706f5e4d3c2b1a0998877665544332211ffeeddccbbaa00",
 		age_secs: 8,
+		source: "lan",
 	},
 	{
 		id: 2,
@@ -289,6 +290,16 @@ export const pendingDevices: PendingDevice[] = [
 		fingerprint:
 			"ff00eeddccbbaa998877665544332211009f8e7d6c5b4a39281706f5e4d3c2b1",
 		age_secs: 30,
+		source: "lan",
+	},
+	// A knock from the internet: badged, and offered an "Arm PIN" instead of Approve.
+	{
+		id: 4,
+		name: "Friend's Deck",
+		fingerprint:
+			"5c5b5a595857565554535251504f4e4d4c4b4a494847464544434241403f3e3d",
+		age_secs: 3,
+		source: "wan",
 	},
 ];
 
@@ -299,6 +310,7 @@ export const pendingGuestReknock: PendingDevice = {
 	fingerprint:
 		"0011223344556677889900aabbccddeeff102030405060708090a0b0c0d0e0f0",
 	age_secs: 12,
+	source: "lan",
 	access_level: "controller",
 	grants: 0x01,
 	granted_unix: accessNowUnix - 6 * 3600,

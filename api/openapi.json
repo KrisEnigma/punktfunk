@@ -2831,6 +2831,16 @@
               }
             }
           },
+          "409": {
+            "description": "Knock came from the internet; arm a fingerprint-bound PIN instead",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Couldn't save the paired-device list",
             "content": {
@@ -8023,7 +8033,8 @@
           "id",
           "name",
           "fingerprint",
-          "age_secs"
+          "age_secs",
+          "source"
         ],
         "properties": {
           "access_level": {
@@ -8078,6 +8089,11 @@
             "type": "string",
             "description": "Client's own name, else fingerprint-derived.",
             "example": "Enrico's MacBook"
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the knock came from: `\"lan\"` or `\"wan\"`. A `\"wan\"` device cannot be admitted by\napprove — arm a PIN bound to its fingerprint instead.",
+            "example": "lan"
           }
         }
       },

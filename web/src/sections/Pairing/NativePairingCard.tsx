@@ -23,7 +23,17 @@ import {
 	type AccessDraft,
 	draftExpirySecs,
 	GRANT_ALL,
+	PRESET_CONTROLLER,
 } from "./access";
+
+/**
+ * The device an armed window is named for. A window carrying one is the only thing that admits
+ * a knock from the internet, where a device's own name proves nothing.
+ */
+export interface BoundDevice {
+	fingerprint: string;
+	name: string;
+}
 
 /** Seconds → `m:ss`. */
 function fmtTime(secs: number): string {
@@ -35,7 +45,11 @@ function fmtTime(secs: number): string {
  * Container: native (punktfunk/1) pairing — arm a window, poll fast while armed
  * for the live countdown, slow otherwise.
  */
-export const NativePairingSection: FC = () => {
+export const NativePairingSection: FC<{
+	/** Name this window for one device — set by a WAN knock's "Arm PIN". */
+	boundTo?: BoundDevice | null;
+	onClearBound?: () => void;
+}> = ({ boundTo = null, onClearBound }) => {
 	const qc = useQueryClient();
 	const native = useGetNativePairing({
 		query: { refetchInterval: (q) => (q.state.data?.armed ? 1_000 : 4_000) },
@@ -73,7 +87,12 @@ export const NativePairingSection: FC = () => {
 	const onArm = (access: Partial<ArmNativePairing>, password: string) => {
 		setWrongPassword(false);
 		arm.mutate(
-			{ ttl_secs: 120, ...access, password },
+			{
+				ttl_secs: 120,
+				...(boundTo ? { fingerprint: boundTo.fingerprint } : {}),
+				...access,
+				password,
+			},
 			{
 				onSuccess: (status) => {
 					setPin(status.pin ?? null);
@@ -89,6 +108,7 @@ export const NativePairingSection: FC = () => {
 		disarm.mutate(undefined, {
 			onSuccess: () => {
 				setPin(null);
+				onClearBound?.();
 				refresh();
 			},
 		});
@@ -97,6 +117,8 @@ export const NativePairingSection: FC = () => {
 		<NativePairingCard
 			status={native}
 			pin={pin}
+			boundTo={boundTo}
+			onClearBound={onClearBound}
 			onArm={onArm}
 			onDisarm={onDisarm}
 			isArming={arm.isPending}
@@ -111,6 +133,9 @@ export const NativePairingCard: FC<{
 	status: Loadable<NativePairStatus>;
 	/** The PIN of the window THIS console armed, or null — never from the polled status. */
 	pin: string | null;
+	/** The device this window is named for, or null for any device (trusted LAN only). */
+	boundTo?: BoundDevice | null;
+	onClearBound?: () => void;
 	/** Arm, carrying the chosen device access (empty = today's full/permanent behavior) and the
 	 * console password the BFF re-verifies. */
 	onArm: (access: Partial<ArmNativePairing>, password: string) => void;
@@ -122,6 +147,8 @@ export const NativePairingCard: FC<{
 }> = ({
 	status,
 	pin,
+	boundTo = null,
+	onClearBound,
 	onArm,
 	onDisarm,
 	isArming,
@@ -136,6 +163,17 @@ export const NativePairingCard: FC<{
 		expiry: "forever",
 		customHours: 4,
 	});
+	// A window named for a device is being armed for someone else's — a knock from the internet
+	// is the only way to get here today — so it starts at Controller · 4 h. Keyed on the
+	// fingerprint, not the object, so a re-render never wipes the operator's edits mid-form.
+	const boundFp = boundTo?.fingerprint;
+	useEffect(() => {
+		setDraft(
+			boundFp
+				? { grants: PRESET_CONTROLLER, expiry: "4h", customHours: 4 }
+				: { grants: GRANT_ALL, expiry: "forever", customHours: 4 },
+		);
+	}, [boundFp]);
 	const [password, setPassword] = useState("");
 	const arm = () => {
 		const secs = draftExpirySecs(draft);
@@ -169,7 +207,11 @@ export const NativePairingCard: FC<{
 						</p>
 					) : d.armed && pin ? (
 						<div className="space-y-3">
-							<p className="text-sm">{m.pairing_native_enter()}</p>
+							<p className="text-sm">
+								{boundTo
+									? m.pairing_native_bound_for({ name: boundTo.name })
+									: m.pairing_native_enter()}
+							</p>
 							<div className="rounded-lg border bg-muted/40 py-5 text-center font-mono text-4xl font-semibold tracking-[0.3em]">
 								{pin}
 							</div>
@@ -193,6 +235,28 @@ export const NativePairingCard: FC<{
 							<p className="text-sm text-muted-foreground">
 								{m.pairing_native_desc()}
 							</p>
+							{boundTo && (
+								<div className="flex items-start justify-between gap-2 rounded-md border border-dashed p-3">
+									<div>
+										<p className="text-sm font-medium">
+											{m.pairing_native_bound_for({ name: boundTo.name })}
+										</p>
+										<p className="text-xs text-muted-foreground">
+											{m.pairing_native_bound_hint()}
+										</p>
+									</div>
+									{onClearBound && (
+										<Button
+											variant="ghost"
+											size="sm"
+											className="shrink-0"
+											onClick={onClearBound}
+										>
+											{m.pairing_native_bound_clear()}
+										</Button>
+									)}
+								</div>
+							)}
 							{/* The window's device-access choice — whichever device completes the
 							    ceremony gets exactly this (design §6.2). */}
 							<AccessControls

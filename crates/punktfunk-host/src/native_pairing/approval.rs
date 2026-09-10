@@ -46,6 +46,54 @@ struct PendingState {
     admitted: Vec<(String, u32, Instant)>,
 }
 
+/// Where a knock came from. The host cannot tell a stranger on the internet from a friend on
+/// the couch by name — the name is whatever the device sent — so admission rules hang off the
+/// address instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KnockSource {
+    /// Loopback, RFC 1918, link-local, IPv6 unique-local, or the 100.64/10 range Tailscale
+    /// hands its peers. Reaching any of these means the peer is already on a network the
+    /// operator let it onto.
+    Lan,
+    /// Routable from the internet, or an address we could not read. Fails closed: every rule
+    /// that treats a source as untrusted must land here rather than on a guess.
+    Wan,
+}
+
+/// Classify a knock's source. `None` is [`KnockSource::Wan`] — an admission rule reading an
+/// unknown address must refuse, not admit.
+pub fn classify_source(ip: Option<IpAddr>) -> KnockSource {
+    let Some(ip) = ip else {
+        return KnockSource::Wan;
+    };
+    let v4 = match ip {
+        IpAddr::V4(v4) => Some(v4),
+        // A v4-mapped v6 source is the v4 address wearing a hat; classify what it really is.
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // Loopback (::1), link-local fe80::/10, unique local fc00::/7.
+            if v6.is_loopback() || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xfe00) == 0xfc00 {
+                return KnockSource::Lan;
+            }
+            v6.to_ipv4_mapped()
+        }
+    };
+    match v4 {
+        Some(v4)
+            if v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                // 100.64/10: carrier-grade NAT, and the range Tailscale assigns. A knock can
+                // only reach us from it over such an overlay, which authenticated the peer
+                // before we ever saw the packet.
+                || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])) =>
+        {
+            KnockSource::Lan
+        }
+        _ => KnockSource::Wan,
+    }
+}
+
 /// Pending-approval snapshot for the management API.
 pub struct PendingRequest {
     /// Per-process id for approve/deny; stable for this entry's lifetime.
@@ -55,6 +103,8 @@ pub struct PendingRequest {
     /// Hex SHA-256 of the knocking client's certificate; approval pins this.
     pub fingerprint: String,
     pub age_secs: u64,
+    /// Where the knock arrived from. A bare approve is refused for [`KnockSource::Wan`].
+    pub source: KnockSource,
 }
 
 /// Outcome of a `wait_for_decision` park on an unpaired knock.
@@ -259,6 +309,7 @@ impl ApprovalQueue {
                 name: p.name.clone(),
                 fingerprint: p.fp_hex.clone(),
                 age_secs: p.requested_at.elapsed().as_secs(),
+                source: classify_source(p.src_ip),
             })
             .collect()
     }
@@ -271,6 +322,18 @@ impl ApprovalQueue {
             .items
             .iter()
             .any(|p| p.fp_hex.eq_ignore_ascii_case(fp_hex))
+    }
+
+    /// Where pending `id` knocked from, or `None` if the entry is gone. Read before
+    /// admitting: a bare approve must refuse a knock from the internet.
+    pub(super) fn source_of(&self, id: u32) -> Option<KnockSource> {
+        let mut pending = self.pending.lock().unwrap();
+        Self::expire_pending(&mut pending);
+        pending
+            .items
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| classify_source(p.src_ip))
     }
 
     /// `(name, fingerprint)` of pending `id` without removing it. `None` if missing

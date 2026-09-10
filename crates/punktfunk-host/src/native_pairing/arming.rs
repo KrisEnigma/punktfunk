@@ -27,6 +27,9 @@ pub enum PinAttempt {
     Disarmed,
     /// Bound to a different fingerprint. Reject without consuming the PIN.
     BoundToOther,
+    /// Armed for anyone, and this knock came from the internet. Reject without consuming
+    /// the PIN: a window the operator opened for the couch must not answer the WAN.
+    UnboundForWan,
     Pin(String),
 }
 
@@ -85,8 +88,13 @@ impl ArmState {
         arm.access
     }
 
-    /// PIN for this fingerprint, or [`PinAttempt::BoundToOther`] without consuming the window.
-    pub(super) fn pin_for_attempt(&self, client_fp_hex: &str) -> PinAttempt {
+    /// PIN for this fingerprint, or a refusal that does not consume the window. `source` is
+    /// read under the same lock as the binding, so a window cannot be widened between the two.
+    pub(super) fn pin_for_attempt(
+        &self,
+        client_fp_hex: &str,
+        source: super::KnockSource,
+    ) -> PinAttempt {
         let mut arm = self.arm.lock().unwrap();
         Self::expire(&mut arm);
         match &arm.pin {
@@ -95,6 +103,10 @@ impl ArmState {
                 Some(bound) if !bound.eq_ignore_ascii_case(client_fp_hex) => {
                     PinAttempt::BoundToOther
                 }
+                // An open window answers whoever knocks first. On the LAN that is the device
+                // in the operator's hands; from the internet it is whoever found the port, so
+                // a WAN ceremony needs a window named for its fingerprint.
+                None if source == super::KnockSource::Wan => PinAttempt::UnboundForWan,
                 _ => PinAttempt::Pin(pin.clone()),
             },
         }

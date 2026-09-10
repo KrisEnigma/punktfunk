@@ -193,11 +193,13 @@ async fn pair(
         *last = Some(std::time::Instant::now());
     }
     let client_fp = sha256(&req.device_key);
+    let source = crate::native_pairing::classify_source(Some(conn.remote_address().ip()));
     let pin = match serving.plane.pairing.pin_for_attempt(
         &client_fp
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>(),
+        source,
     ) {
         crate::native_pairing::PinAttempt::Pin(pin) => pin,
         crate::native_pairing::PinAttempt::Disarmed => {
@@ -210,6 +212,14 @@ async fn pair(
             return Err(refused(
                 punktfunk_core::reject::PAIR_BOUND_OTHER_CLOSE_CODE,
                 "pairing is armed for a different device",
+            ))
+        }
+        // Same rule as the native plane: an open window is for the device in the operator's
+        // hands, so a browser knocking from the internet reads as not armed.
+        crate::native_pairing::PinAttempt::UnboundForWan => {
+            return Err(refused(
+                punktfunk_core::reject::PAIR_NOT_ARMED_CLOSE_CODE,
+                "pairing is not armed for this device — arm a PIN bound to its fingerprint",
             ))
         }
     };

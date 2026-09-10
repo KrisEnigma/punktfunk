@@ -149,6 +149,10 @@ pub(crate) struct PendingDevice {
     /// [`NativeClient`], where it is always derivable.
     #[schema(example = "controller")]
     access_level: Option<String>,
+    /// Where the knock came from: `"lan"` or `"wan"`. A `"wan"` device cannot be admitted by
+    /// approve — arm a PIN bound to its fingerprint instead.
+    #[schema(example = "lan")]
+    source: String,
 }
 
 /// Approve body. `{}` keeps the knock name and, on re-approve, stored access
@@ -556,6 +560,10 @@ pub(crate) async fn list_pending_devices(
                     expires_unix: stored.and_then(|c| c.expires_unix),
                     granted_unix: stored.and_then(|c| c.granted_unix),
                     access_level: stored.map(|c| access_level(c.grants).to_string()),
+                    source: match p.source {
+                        crate::native_pairing::KnockSource::Lan => "lan".into(),
+                        crate::native_pairing::KnockSource::Wan => "wan".into(),
+                    },
                 }
             })
             .collect(),
@@ -578,6 +586,7 @@ pub(crate) async fn list_pending_devices(
         (status = OK, description = "Device paired; the stored record as now in force", body = NativeClient),
         (status = BAD_REQUEST, description = "Reserved grant bits set", body = ApiError),
         (status = NOT_FOUND, description = "No pending request with that id (expired?)", body = ApiError),
+        (status = CONFLICT, description = "Knock came from the internet; arm a fingerprint-bound PIN instead", body = ApiError),
         (status = SERVICE_UNAVAILABLE, description = "Native host not enabled", body = ApiError),
         (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the paired-device list", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
@@ -597,15 +606,20 @@ pub(crate) async fn approve_pending_device(
     }
     let access = chosen_access(req.grants, req.expires_in_secs);
     match np.approve_pending(id, req.name.as_deref(), access) {
-        Ok(Some(client)) => {
+        Ok(crate::native_pairing::ApproveOutcome::Paired(client)) => {
             tracing::info!(name = %client.name, fingerprint = %client.fingerprint,
                 with_access = access.is_some(),
                 "management API: pending device approved (delegated pairing)");
             Json(NativeClient::from_record(client)).into_response()
         }
-        Ok(None) => api_error(
+        Ok(crate::native_pairing::ApproveOutcome::NotFound) => api_error(
             StatusCode::NOT_FOUND,
             "no pending request with that id (it may have expired — have the device retry)",
+        ),
+        Ok(crate::native_pairing::ApproveOutcome::WanNeedsBoundPin) => api_error(
+            StatusCode::CONFLICT,
+            "This device knocked from the internet, where its name proves nothing. Arm a PIN \
+             bound to its fingerprint and read the PIN out to whoever is holding it.",
         ),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,

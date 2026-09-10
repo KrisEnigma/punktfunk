@@ -1155,8 +1155,10 @@ async fn serve_session(
             }
             *last = Some(std::time::Instant::now());
         }
-        // Live PIN per attempt so a lapsed window no longer pairs; honor fingerprint binding.
-        let pin = match np.pin_for_attempt(&client_fp_hex) {
+        // Live PIN per attempt so a lapsed window no longer pairs; honor fingerprint binding
+        // and the address the knock came from.
+        let source = crate::native_pairing::classify_source(Some(peer.ip()));
+        let pin = match np.pin_for_attempt(&client_fp_hex, source) {
             crate::native_pairing::PinAttempt::Pin(pin) => pin,
             crate::native_pairing::PinAttempt::Disarmed => {
                 close_rejected(&conn, punktfunk_core::reject::RejectReason::PairingNotArmed);
@@ -1172,6 +1174,15 @@ async fn serve_session(
                 );
                 anyhow::bail!(
                     "pairing is armed for a different device — this attempt does not consume the window"
+                )
+            }
+            // An open window is for the device in the operator's hands. This one is on the
+            // internet, so it reads as not armed and the window survives for its owner.
+            crate::native_pairing::PinAttempt::UnboundForWan => {
+                close_rejected(&conn, punktfunk_core::reject::RejectReason::PairingNotArmed);
+                anyhow::bail!(
+                    "a knock from {peer} needs a pairing window bound to its fingerprint \
+                     ({client_fp_hex}) — an open window does not answer the internet"
                 )
             }
         };
@@ -3232,6 +3243,7 @@ mod tests {
             np_approve
                 .approve_pending(pend.id, Some("Approved Device"), None)
                 .unwrap()
+                .paired()
                 .expect("pending id must approve");
         });
 
@@ -3851,6 +3863,7 @@ mod tests {
                     }),
                 )
                 .unwrap()
+                .paired()
                 .expect("re-approval");
         });
 
