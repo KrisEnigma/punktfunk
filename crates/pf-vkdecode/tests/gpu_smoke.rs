@@ -161,7 +161,7 @@ fn h264_decodes_48_aus_holding_four_frames_like_the_real_client() {
         // Decode-only is enough (nothing else submits) and exercises EXCLUSIVE
         // picture-pool sharing.
         graphics: common::Graphics::DecodeFamilyIsFine,
-        report_families: true,
+        report_families: false,
     });
     let handles = setup.handles();
     {
@@ -194,7 +194,7 @@ fn h265_decodes_48_aus_holding_four_frames_like_the_real_client() {
     let setup = common::bring_up(&common::Request {
         codec: common::H265,
         graphics: common::Graphics::DecodeFamilyIsFine,
-        report_families: true,
+        report_families: false,
     });
     let handles = setup.handles();
     {
@@ -227,7 +227,7 @@ fn h265_decodes_48_aus_holding_four_frames_like_the_real_client() {
 /// Same 48 AUs and hold depth as H.26x, but AV1 keeps hidden frames resident.
 ///
 /// The first 48 temporal units decode more pictures than they show (the CPU
-/// guard below prints the counts); each hidden frame occupies a pool image as
+/// guard below asserts the counts); each hidden frame occupies a pool image as
 /// a reference. A pool sized one-picture-per-AU starves here rather than in
 /// `gpu_parity`, where the same miss looks like a generic decode failure.
 #[test]
@@ -239,7 +239,7 @@ fn av1_decodes_48_aus_holding_four_frames_like_the_real_client() {
     let setup = common::bring_up(&common::Request {
         codec: common::AV1,
         graphics: common::Graphics::DecodeFamilyIsFine,
-        report_families: true,
+        report_families: false,
     });
     let handles = setup.handles();
     {
@@ -326,10 +326,6 @@ fn the_delivery_floor_is_under_what_the_planners_emit_from_the_first_48_aus() {
         }
         (outputs, frames)
     };
-    eprintln!(
-        "outputs from the first {AUS} AUs: h264={h264} h265={h265} av1={av1} \
-         (av1 decoded {av1_frames} frames to show {av1} — the hidden ones)"
-    );
     // No `flush` here on purpose: the smoke legs do not flush either, so the
     // planner's un-flushed output count is exactly the frame budget they have.
     assert!(
