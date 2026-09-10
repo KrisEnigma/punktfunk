@@ -1,5 +1,7 @@
-import { type FC, useEffect, useState } from "react";
+import { type FC, useEffect, useMemo, useState } from "react";
+import { useGetLibrary } from "@/api/gen/library/library";
 import type { HookEntry } from "@/api/gen/model/hookEntry";
+import { useListNativeClients } from "@/api/gen/native/native";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -20,36 +22,9 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Suggest, type Suggestion } from "@/components/ui/suggest";
+import { EVENT_KINDS, eventKindLabel } from "@/lib/event-kinds";
 import { m } from "@/paraglide/messages";
-
-/** The event kinds the host publishes, plus the `domain.*` wildcards the hook filter accepts.
- * Same vocabulary as the SSE `?kinds=` filter, so the two stay learnable together. */
-export const EVENT_KINDS = [
-	"client.*",
-	"client.connected",
-	"client.disconnected",
-	"session.*",
-	"session.started",
-	"session.ended",
-	"stream.*",
-	"stream.started",
-	"stream.stopped",
-	"game.*",
-	"game.running",
-	"game.exited",
-	"pairing.*",
-	"pairing.pending",
-	"pairing.completed",
-	"pairing.denied",
-	"display.*",
-	"display.created",
-	"display.released",
-	"library.changed",
-	"update.available",
-	"update.applied",
-	"host.started",
-	"host.stopping",
-] as const;
 
 const EMPTY: HookEntry = { on: "session.started", run: "" };
 
@@ -80,6 +55,19 @@ export const HookForm: FC<{
 
 	const set = (patch: Partial<HookEntry>) =>
 		setDraft((d) => ({ ...d, ...patch }));
+
+	// Only while the filter section is open: a hook that does not filter has no reason to pull
+	// a library that can run to five figures.
+	const library = useGetLibrary(undefined, { query: { enabled: filtered } });
+	const clients = useListNativeClients({ query: { enabled: filtered } });
+	const appOptions: Suggestion[] = useMemo(
+		() => (library.data ?? []).map((g) => ({ value: g.id, label: g.title })),
+		[library.data],
+	);
+	const clientOptions: Suggestion[] = useMemo(
+		() => (clients.data ?? []).map((c) => ({ value: c.name })),
+		[clients.data],
+	);
 
 	const action = kind === "run" ? (draft.run ?? "") : (draft.webhook ?? "");
 	const ready = draft.on.trim().length > 0 && action.trim().length > 0;
@@ -112,9 +100,10 @@ export const HookForm: FC<{
 
 				<div className="space-y-2">
 					<Label htmlFor="hook-on">{m.automation_field_on()}</Label>
-					{/* The event kinds are IDENTIFIERS, not prose — deliberately not routed through
-					    i18n, and shown in the host's own `domain.event` spelling so what you pick here
-					    reads the same as what you'd type into the SSE `?kinds=` filter. */}
+					{/* Both, not one. The identifier is what gets written to the config file and what
+					    the SSE `?kinds=` filter takes, so it stays in the host's own spelling — but
+					    on its own it asked the operator to already know the vocabulary. The name
+					    comes from the same table the activity feed labels its rows with. */}
 					<Select value={draft.on} onValueChange={(on) => set({ on })}>
 						<SelectTrigger id="hook-on">
 							<SelectValue />
@@ -122,7 +111,12 @@ export const HookForm: FC<{
 						<SelectContent>
 							{EVENT_KINDS.map((k) => (
 								<SelectItem key={k} value={k}>
-									{k}
+									<span className="flex w-full items-center justify-between gap-4">
+										{eventKindLabel(k)}
+										<span className="font-mono text-xs text-muted-foreground">
+											{k}
+										</span>
+									</span>
 								</SelectItem>
 							))}
 						</SelectContent>
@@ -152,23 +146,42 @@ export const HookForm: FC<{
 							</Button>
 						))}
 					</div>
-					<Input
-						id="hook-action"
-						aria-label={m.automation_field_action()}
-						autoComplete="off"
-						spellCheck={false}
-						value={action}
-						placeholder={
-							kind === "run" ? "/usr/local/bin/on-stream.sh" : "https://…"
-						}
-						onChange={(e) =>
-							set(
+					{/* A shell command, dressed as one: the prompt marks where the line starts, the
+					    monospace makes a path with a typo in it look wrong, and the correction
+					    attributes stop a phone capitalising `/usr` or "fixing" a flag. A URL gets
+					    none of that — it is prose to the browser and reads better unstyled. */}
+					<div className="relative">
+						{kind === "run" && (
+							<span
+								aria-hidden
+								className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 select-none font-mono text-sm text-muted-foreground"
+							>
+								$
+							</span>
+						)}
+						<Input
+							id="hook-action"
+							aria-label={m.automation_field_action()}
+							autoComplete="off"
+							autoCapitalize="off"
+							autoCorrect="off"
+							spellCheck={false}
+							className={kind === "run" ? "pl-7 font-mono text-sm" : undefined}
+							value={action}
+							placeholder={
 								kind === "run"
-									? { run: e.target.value }
-									: { webhook: e.target.value },
-							)
-						}
-					/>
+									? '/usr/local/bin/on-stream.sh "$PF_EVENT_CLIENT_NAME"'
+									: "https://…"
+							}
+							onChange={(e) =>
+								set(
+									kind === "run"
+										? { run: e.target.value }
+										: { webhook: e.target.value },
+								)
+							}
+						/>
+					</div>
 					<p className="text-xs text-muted-foreground">
 						{kind === "run"
 							? m.automation_action_run_help()
@@ -207,23 +220,29 @@ export const HookForm: FC<{
 							<Label htmlFor="hook-client">
 								{m.automation_filter_client()}
 							</Label>
-							<Input
+							<Suggest
 								id="hook-client"
+								suggestions={clientOptions}
 								value={draft.filter?.client ?? ""}
-								onChange={(e) =>
-									set({ filter: { ...draft.filter, client: e.target.value } })
+								onChange={(client) =>
+									set({ filter: { ...draft.filter, client } })
 								}
 							/>
 						</div>
 						<div className="space-y-2">
 							<Label htmlFor="hook-app">{m.automation_filter_app()}</Label>
-							<Input
+							{/* The event carries the store-qualified id (`steam:570`), so that is what
+							    lands in the field — with the title beside it, because nobody knows
+							    their app ids by heart. */}
+							<Suggest
 								id="hook-app"
+								suggestions={appOptions}
 								value={draft.filter?.app ?? ""}
-								onChange={(e) =>
-									set({ filter: { ...draft.filter, app: e.target.value } })
-								}
+								onChange={(app) => set({ filter: { ...draft.filter, app } })}
 							/>
+							<p className="text-xs text-muted-foreground">
+								{m.automation_filter_app_help()}
+							</p>
 						</div>
 					</div>
 				)}

@@ -21,6 +21,7 @@ import { STAGGER_GAP } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { eventKindLabel } from "@/lib/event-kinds";
 import { fmtDateTime } from "@/lib/format";
 import { m } from "@/paraglide/messages";
 
@@ -77,7 +78,7 @@ export const ActivityList: FC<{ entries: ActivityEntry[] }> = ({ entries }) => (
 					}}
 					className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 first:pt-0 last:pb-0"
 				>
-					<Badge variant={toneFor(e.kind)}>{kindLabel(e.kind)}</Badge>
+					<Badge variant={toneFor(e.kind)}>{eventKindLabel(e.kind)}</Badge>
 					<span className="min-w-0 flex-1 truncate text-sm">{describe(e)}</span>
 					<time
 						dateTime={new Date(e.ts_ms).toISOString()}
@@ -202,32 +203,4 @@ function toneFor(
 		return "outline";
 	if (kind.endsWith(".stopped") || kind.endsWith(".exited")) return "outline";
 	return "secondary";
-}
-
-/** Translated label per kind, falling back to the raw kind so a new host event still shows. */
-const KIND_LABEL: Record<string, () => string> = {
-	"client.connected": () => m.activity_client_connected(),
-	"client.disconnected": () => m.activity_client_disconnected(),
-	"session.started": () => m.activity_session_started(),
-	"session.ended": () => m.activity_session_ended(),
-	"stream.started": () => m.activity_stream_started(),
-	"stream.stopped": () => m.activity_stream_stopped(),
-	"game.running": () => m.activity_game_running(),
-	"game.exited": () => m.activity_game_exited(),
-	"pairing.pending": () => m.activity_pairing_pending(),
-	"pairing.completed": () => m.activity_pairing_completed(),
-	"pairing.denied": () => m.activity_pairing_denied(),
-	"display.created": () => m.activity_display_created(),
-	"display.released": () => m.activity_display_released(),
-	"library.changed": () => m.activity_library_changed(),
-	"update.available": () => m.activity_update_available(),
-	"update.applied": () => m.activity_update_applied(),
-	"plugins.changed": () => m.activity_plugins_changed(),
-	"store.changed": () => m.activity_store_changed(),
-	"host.started": () => m.activity_host_started(),
-	"host.stopping": () => m.activity_host_stopping(),
-};
-
-function kindLabel(kind: string): string {
-	return KIND_LABEL[kind]?.() ?? kind;
 }
