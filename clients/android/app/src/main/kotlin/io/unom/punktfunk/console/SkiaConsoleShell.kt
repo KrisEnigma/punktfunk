@@ -219,7 +219,9 @@ fun SkiaConsoleShell(
             if (platformUp) return@probe false
             val down = ev.action == KeyEvent.ACTION_DOWN
             if (ev.action != KeyEvent.ACTION_DOWN && ev.action != KeyEvent.ACTION_UP) return@probe false
-            val fromPad = ev.isFromSource(InputDevice.SOURCE_GAMEPAD)
+            // Not the event's source class alone: a pad whose keys arrive stamped SOURCE_KEYBOARD,
+            // and an SC2 in lizard mode, both belong here. [Gamepad.eventFromPad] draws the line.
+            val fromPad = Gamepad.eventFromPad(ev)
             if (fromPad) {
                 // The CORRECTED keycode: a pad Android has no key layout for delivers its buttons
                 // under other buttons' names, so read raw this console answered ✕ with whatever
@@ -262,10 +264,9 @@ fun SkiaConsoleShell(
                     NativeBridge.nativeConsoleMenu(handle, 0) // ▲ opens the tile's options on Home
                     return@probe true
                 }
-                // Only a key a pad can produce stops here. The source class is the platform's
-                // per-device guess and a composite keyboard (dongle receiver, Fire OS) stamps
-                // GAMEPAD on every key it sends — dropping those left its Enter and its typing
-                // dead in the menus. See [MainActivity.fromPad], which asks the same question.
+                // Only a key a pad can produce stops here. A composite keyboard (dongle
+                // receiver, Fire OS) stamps GAMEPAD on every key it sends — dropping those left
+                // its Enter and its typing dead in the menus.
                 if (padShaped(code)) return@probe false
             }
             // A remote / keyboard. D-pad keys and DPAD_CENTER as discrete events with the
