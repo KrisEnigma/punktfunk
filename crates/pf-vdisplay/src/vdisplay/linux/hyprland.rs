@@ -166,6 +166,33 @@ impl HyprlandDisplay {
         })
     }
 
+    /// Attach a cast to `name`. A successful recast makes that reused output
+    /// the workspace source for the next `create`.
+    fn session_cast_for_with(
+        &mut self,
+        name: &str,
+        start: impl FnOnce(&str, bool) -> Result<(OwnedFd, u32, crate::portal_cursor::Mode)>,
+    ) -> Result<Option<SessionCastParts>> {
+        if let Some(pending) = self.pending_cast.take() {
+            if pending.name == name {
+                return Ok(Some((
+                    pending.node_id,
+                    Some(pending.fd),
+                    Box::new(SessionCast(pending.name)),
+                )));
+            }
+            stop_cast(&pending.name);
+        }
+        let (fd, node_id, cursor_mode) = start(name, self.hw_cursor)?;
+        self.last_cursor_mode = Some(cursor_mode);
+        self.prev_output = Some(name.to_string());
+        Ok(Some((
+            node_id,
+            Some(fd),
+            Box::new(SessionCast(name.to_string())),
+        )))
+    }
+
     /// Apply [`crate::policy::Topology`] for `ours` and stash the restore the
     /// registry runs on real teardown. Called at the END of `create` so nothing
     /// can fail after it and unwind past the hand-off. Physical heads stay lit
@@ -186,6 +213,11 @@ impl HyprlandDisplay {
                 crate::backend::stash_topology_restore(&mut self.pending_restore, prepared);
             }
         }
+    }
+
+    /// Record `name` and return the output whose workspace it replaces.
+    fn replace_output(&mut self, name: &str) -> Option<String> {
+        self.prev_output.replace(name.to_string())
     }
 }
 
@@ -257,23 +289,7 @@ impl VirtualDisplay for HyprlandDisplay {
     }
 
     fn session_cast_for(&mut self, name: &str) -> Result<Option<SessionCastParts>> {
-        if let Some(pending) = self.pending_cast.take() {
-            if pending.name == name {
-                return Ok(Some((
-                    pending.node_id,
-                    Some(pending.fd),
-                    Box::new(SessionCast(pending.name)),
-                )));
-            }
-            stop_cast(&pending.name);
-        }
-        let (fd, node_id, cursor_mode) = start_cast(name, self.hw_cursor)?;
-        self.last_cursor_mode = Some(cursor_mode);
-        Ok(Some((
-            node_id,
-            Some(fd),
-            Box::new(SessionCast(name.to_string())),
-        )))
+        self.session_cast_for_with(name, start_cast)
     }
 
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput> {
@@ -322,14 +338,11 @@ impl VirtualDisplay for HyprlandDisplay {
         );
         // Last, so no failure path unwinds past the restore hand-off.
         self.apply_topology(&name);
-        // A resize replaces the head (create-before-drop). Hyprland hands every
-        // new monitor an empty workspace, so carry the superseded head's active
-        // one over. After `apply_topology`: nothing fails past here, so no unwind
-        // strands a moved workspace on a head error cleanup is about to remove.
-        if let Some(prev) = self.prev_output.take() {
+        // Hyprland gives each replacement an empty workspace. Carry the active
+        // workspace only after every fallible setup step has completed.
+        if let Some(prev) = self.replace_output(&name) {
             adopt_active_workspace(&prev, &name);
         }
-        self.prev_output = Some(name.clone());
         let output_keepalive = OutputKeepalive {
             _reload: watch_config_reloads(name.clone(), mode),
             _output: output,
@@ -2112,6 +2125,25 @@ mod tests {
             linger_reuse_decision("hyprland", m, None, "kwin", m, None, Some("PF-1-1")),
             LingerReuse::Create
         );
+    }
+
+    /// A reconnect backend must adopt from the pooled head when a later mode
+    /// rebuild creates its replacement.
+    #[test]
+    fn reconnect_then_rebuild_adopts_the_reused_outputs_workspace() {
+        let mut display = HyprlandDisplay::new().unwrap();
+        let cast = display
+            .session_cast_for_with("PF-1-1", |_, _| {
+                let (fd, peer) = UnixStream::pair()?;
+                drop(peer);
+                Ok((fd.into(), 42, crate::portal_cursor::Mode::Embedded))
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(display.replace_output("PF-1-2").as_deref(), Some("PF-1-1"));
+        assert_eq!(display.prev_output.as_deref(), Some("PF-1-2"));
+        drop(cast);
     }
 
     /// `hyprctl keyword` under Lua answers "keyword can't work with non-legacy
