@@ -1058,7 +1058,7 @@ impl SimpleComponent for HostsPage {
             let sender = sender.clone();
             glib::spawn_future_local(async move {
                 loop {
-                    let entries: Vec<(String, String, u16)> = KnownHosts::load()
+                    let entries: Vec<(String, String, u16, String)> = KnownHosts::load()
                         .hosts
                         .iter()
                         .filter(|h| !h.addr.is_empty())
