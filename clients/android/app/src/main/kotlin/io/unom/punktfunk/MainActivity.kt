@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -492,13 +493,10 @@ class MainActivity : ComponentActivity() {
         lastPadIsGamepad = true
         lastPadStyle = Gamepad.PadStyle.XBOX // Valve pads carry A/B/X/Y in Xbox positions
         val action = if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
-        // The console UI navigates through padKeyProbe (GamepadNavEffect's held-state + repeat
-        // machinery — A/X/Y/D-pad/Select), NOT the focus system: synthesized events must be
-        // offered there first, exactly like real ones in dispatchKeyEvent (tester-diagnosed:
-        // routing everything via super.dispatchKeyEvent bypassed the probe, so only B — which
-        // never rides key events — did anything). The probes gate on keycode only, so a
-        // synthetic KeyEvent satisfies them.
-        padKeyProbe?.let { if (it(KeyEvent(action, keyCode))) return }
+        // The console UI navigates through padKeyProbe, not the focus system, so a synthesized
+        // key has to reach it exactly like a real one. The Skia probe asks the event's source,
+        // and a 2-arg KeyEvent is the virtual keyboard — a captured pad read as a TV remote.
+        padKeyProbe?.let { if (it(padKeyEvent(action, keyCode))) return }
         when (keyCode) {
             // B → back, on release (same edge the real-pad path uses).
             KeyEvent.KEYCODE_BUTTON_B -> if (!down) onBackPressedDispatcher.onBackPressed()
@@ -515,6 +513,15 @@ class MainActivity : ComponentActivity() {
             KeyEvent.KEYCODE_DPAD_RIGHT -> if (down) moveSc2Focus(androidx.compose.ui.focus.FocusDirection.Right)
             else -> super.dispatchKeyEvent(KeyEvent(action, keyCode))
         }
+    }
+
+    /** A capture-synthesized pad key, stamped SOURCE_GAMEPAD the way a real pad's event is. */
+    private fun padKeyEvent(action: Int, keyCode: Int): KeyEvent {
+        val now = SystemClock.uptimeMillis()
+        return KeyEvent(
+            now, now, action, keyCode, 0, 0,
+            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_GAMEPAD,
+        )
     }
 
     private fun moveSc2Focus(dir: androidx.compose.ui.focus.FocusDirection) {
