@@ -88,7 +88,7 @@ jobs:
           tee -a "$GITHUB_OUTPUT" < /tmp/changed-outputs
 
       # The expensive lanes are opt-in on a pull request. A draft runs the cheap gates only;
-      # marking it ready for review — or labelling it `ci:full` — turns the rest on. Push to
+      # marking it ready for review — or labelling it `ci:all` — turns the rest on. Push to
       # main always runs everything, so nothing escapes verification, it only moves to merge
       # time. Reads the PR's CURRENT state rather than the event payload: a label added after
       # the last push is not in the payload, and a re-run replays the old one.
