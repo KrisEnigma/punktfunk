@@ -232,7 +232,7 @@ mod tests {
     }
 
     /// Live: darken this box's panels and read sysfs. Skips when a compositor already
-    /// masters the card. Sysfs is the latch; a miss of Off or restore fails.
+    /// masters the card. The same heads must reach Off, then restore exactly.
     #[test]
     #[ignore = "on glass: needs a connected head and no compositor holding /dev/dri/card*"]
     fn live_the_panels_go_dark_and_come_back() {
@@ -282,12 +282,26 @@ mod tests {
         let Some(hold) = super::darken() else {
             return;
         };
-        let during = wait_until(|now| now.iter().all(|(_, _, dpms)| dpms == "Off"));
+        let during = wait_until(|now| {
+            now.len() == before.len()
+                && now
+                    .iter()
+                    .zip(&before)
+                    .all(|((name, _, dpms), (before_name, _, _))| {
+                        name == before_name && dpms == "Off"
+                    })
+        });
 
         drop(hold);
         let after = wait_until(|now| now == before);
 
-        for (name, en, dpms) in &during {
+        assert_eq!(
+            during.len(),
+            before.len(),
+            "connected heads changed while the panels were darkened"
+        );
+        for ((name, en, dpms), (before_name, _, _)) in during.iter().zip(&before) {
+            assert_eq!(name, before_name, "connected heads changed while darkened");
             assert_eq!(dpms, "Off", "{name} should be DPMS-off while held ({en})");
         }
         assert_eq!(
