@@ -215,3 +215,53 @@ describe("SyncEngine fs-change min-interval", () => {
 		}
 	});
 });
+
+// `start` must not return before the watchers exist. The acquire that opens them runs inside a
+// forked fiber, so a write landing in that window is invisible until the next poll — 15 minutes on
+// a library plugin's default, and the game a person just installed looks lost.
+describe("SyncEngine watch readiness", () => {
+	test("a write immediately after start syncs without waiting for the poll", async () => {
+		const fs = await import("node:fs");
+		const os = await import("node:os");
+		const path = await import("node:path");
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pf-sync-ready-"));
+		try {
+			const computes = await run(
+				Effect.gen(function* () {
+					const computed = yield* Ref.make(0);
+					const last = yield* Ref.make<LastSync | undefined>(undefined);
+					const engine = yield* makeSyncEngine<
+						Report,
+						ReadonlyArray<string>,
+						never
+					>({
+						compute: () =>
+							Ref.updateAndGet(computed, (n) => n + 1).pipe(
+								Effect.map((n) => ({
+									entries: [`e${n}`],
+									report: { included: 1 },
+								})),
+							),
+						apply: () => Effect.void,
+						lastSync: { get: Ref.get(last), set: (l) => Ref.set(last, l) },
+						settings: Effect.succeed({
+							// An hour, so only the watcher can produce the second sync.
+							pollInterval: Duration.minutes(60),
+							watch: true,
+							debounce: Duration.millis(20),
+							minInterval: Duration.millis(400),
+							watchDirs: [dir],
+						}),
+					});
+					yield* engine.start; // startup sync (1)
+					fs.writeFileSync(path.join(dir, "a.txt"), "1");
+					yield* Effect.sleep("300 millis"); // past the 20 ms debounce
+					return yield* Ref.get(computed);
+				}),
+			);
+			expect(computes).toBe(2);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
