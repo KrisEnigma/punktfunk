@@ -1,14 +1,24 @@
-// The [ Change ] sheet (design/web-console-overhaul.md D4, §5.3).
+// How this host treats a device that connects (design/web-console-overhaul.md D4, §5.3).
 //
-// Five preset cards, each captioned by the sentence it will produce — so picking one means
-// reading what it does — and Customise, four questions that SAVE ON CHANGE.
+// The presets are ON THE PAGE. They used to live behind a [ Change ] button, which meant the five
+// answers to the page's central question — and the sentence each one produces — were invisible
+// until you guessed that a small button held them. A picker you can read without opening anything
+// is the whole point of captioning each preset with what it does.
+//
+// It also puts the preview where it belongs: hovering a preset redraws the map, and the map is now
+// beside the cards instead of behind a modal covering it.
+//
+// Customise stays a dialog. It is five questions and a live sentence — a focused edit, not
+// something to read at a glance — and it is the one place the page asks for attention.
 //
 // What is deliberately absent: the draft buffer, `seeded`, `deepEqual`, the dirty ring, the
 // discard prompt, `useBlocker`, the sticky save bar and the tab dot. They existed only to make
 // three persistence models coexist on one page (auto-applying preset, Save-gated Custom,
 // auto-applying axis). With one model there is nothing left for them to protect: the host
 // applies at the next connect either way, so a mid-edit policy cannot disturb a live session.
+
 import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { motion } from "motion/react";
 import { type FC, type ReactNode, useState } from "react";
 import type {
 	CustomPreset,
@@ -19,6 +29,7 @@ import type {
 	ModeConflict,
 	Topology,
 } from "@/api/gen/model";
+import { Stagger } from "@/components/stagger";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -41,37 +52,41 @@ const PRESET_ORDER = [
 	"gaming-rig",
 ] as const;
 
-export interface BehaviourSheetProps {
-	open: boolean;
-	onOpenChange: (open: boolean) => void;
-	/** What the host reports as in force — never a local draft. */
-	effective: EffectivePolicy;
-	/** The stored policy, so a per-field save can be written on top of it. */
+/**
+ * A question's own arrival. `Card` and `Button` bring their own `from`/`enter` values; a plain
+ * `fieldset` brings none, so a stagger container above it had nothing to animate and the whole
+ * editor landed on one frame.
+ */
+const QUESTION_VARIANTS = {
+	from: { opacity: 0, y: 8 },
+	enter: { opacity: 1, y: 0 },
+};
+
+export interface BehaviourPickerProps {
+	/** The stored policy: which preset is ringed, and the base a preset click writes on top of. */
 	policy: DisplayPolicy;
 	presets: { id: string; summary: string; fields: EffectivePolicy }[];
 	customPresets: CustomPreset[];
 	/** Apply a whole policy (a preset click). */
 	onApply: (policy: DisplayPolicy) => void;
-	/** Save one field on top of the stored policy — the only write Customise makes. */
-	onSetField: (patch: Partial<DisplayPolicy>) => void;
+	/** Open the five questions. */
+	onCustomise: () => void;
 	onSavePreset: () => void;
 	onRenamePreset: (p: CustomPreset) => void;
 	onUpdatePreset: (p: CustomPreset) => void;
 	onDeletePreset: (p: CustomPreset) => void;
 	busy?: boolean;
-	/** Preview the hovered preset on the map behind the sheet. */
+	/** Preview the hovered preset on the map. */
 	onPreview?: (fields: EffectivePolicy | undefined) => void;
 }
 
-export const BehaviourSheet: FC<BehaviourSheetProps> = ({
-	open,
-	onOpenChange,
-	effective,
+/** The presets, in the open. */
+export const BehaviourPicker: FC<BehaviourPickerProps> = ({
 	policy,
 	presets,
 	customPresets,
 	onApply,
-	onSetField,
+	onCustomise,
 	onSavePreset,
 	onRenamePreset,
 	onUpdatePreset,
@@ -79,127 +94,95 @@ export const BehaviourSheet: FC<BehaviourSheetProps> = ({
 	busy,
 	onPreview,
 }) => {
-	const [customising, setCustomising] = useState(false);
 	const current = policy.preset ?? "custom";
 	return (
-		<Dialog
-			open={open}
-			onOpenChange={(next) => {
-				if (!next) {
-					setCustomising(false);
-					onPreview?.(undefined);
-				}
-				onOpenChange(next);
-			}}
-		>
-			<DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
-				<DialogHeader>
-					<DialogTitle>{m.display_behaviour_title()}</DialogTitle>
-				</DialogHeader>
-
-				{customising ? (
-					<Customise
-						effective={effective}
-						policy={policy}
-						onSetField={onSetField}
-						busy={busy}
-					/>
-				) : (
-					<div className="grid gap-3 sm:grid-cols-2">
-						{PRESET_ORDER.map((id) => {
-							const p = presets.find((x) => x.id === id);
-							if (!p) return null;
-							return (
-								<PickCard
-									key={id}
-									selected={current === id}
-									busy={busy}
-									// Hover and focus both preview: a keyboard user gets the same
-									// answer as a mouse user before committing to it.
-									onPreview={() => onPreview?.(p.fields)}
-									onPreviewEnd={() => onPreview?.(undefined)}
-									onPick={() => {
-										onApply({ ...policy, preset: id });
-										onOpenChange(false);
-									}}
-									title={presetLabel(id)}
-									caption={describePolicy(p.fields)}
-								/>
-							);
-						})}
-						{customPresets.map((p) => (
-							<PickCard
-								key={p.id}
-								selected={false}
-								busy={busy}
-								onPreview={() => onPreview?.(p.fields)}
-								onPreviewEnd={() => onPreview?.(undefined)}
-								onPick={() => {
-									onApply({
-										...policy,
-										preset: "custom",
-										...p.fields,
-										game_session:
-											p.game_session ?? policy.game_session ?? "auto",
-									});
-									onOpenChange(false);
-								}}
-								title={p.name}
-								caption={describePolicy(p.fields)}
-								// Three always-visible icon buttons is where the old tile got busy;
-								// they ride the card's footer now, not its header.
-								actions={
-									<>
-										<IconAction
-											label={m.display_preset_edit()}
-											onClick={() => onRenamePreset(p)}
-										>
-											<Pencil className="size-3.5" />
-										</IconAction>
-										<IconAction
-											label={m.display_preset_update()}
-											onClick={() => onUpdatePreset(p)}
-										>
-											<RefreshCw className="size-3.5" />
-										</IconAction>
-										<IconAction
-											label={m.display_preset_delete()}
-											onClick={() => onDeletePreset(p)}
-										>
-											<Trash2 className="size-3.5" />
-										</IconAction>
-									</>
-								}
-							/>
-						))}
+		<div className="space-y-4">
+			<Stagger className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+				{PRESET_ORDER.map((id) => {
+					const p = presets.find((x) => x.id === id);
+					if (!p) return null;
+					return (
 						<PickCard
-							selected={current === "custom"}
+							key={id}
+							selected={current === id}
 							busy={busy}
-							onPick={() => setCustomising(true)}
-							title={m.display_customise()}
-							caption={m.display_customise_desc()}
+							// Hover and focus both preview: a keyboard user gets the same
+							// answer as a mouse user before committing to it.
+							onPreview={() => onPreview?.(p.fields)}
+							onPreviewEnd={() => onPreview?.(undefined)}
+							onPick={() => onApply({ ...policy, preset: id })}
+							title={presetLabel(id)}
+							caption={describePolicy(p.fields)}
 						/>
-					</div>
-				)}
+					);
+				})}
+				{customPresets.map((p) => (
+					<PickCard
+						key={p.id}
+						selected={false}
+						busy={busy}
+						onPreview={() => onPreview?.(p.fields)}
+						onPreviewEnd={() => onPreview?.(undefined)}
+						onPick={() =>
+							onApply({
+								...policy,
+								preset: "custom",
+								...p.fields,
+								game_session: p.game_session ?? policy.game_session ?? "auto",
+							})
+						}
+						title={p.name}
+						caption={describePolicy(p.fields)}
+						// Three always-visible icon buttons is where the old tile got busy;
+						// they ride the card's footer now, not its header.
+						actions={
+							<>
+								<IconAction
+									label={m.display_preset_edit()}
+									onClick={() => onRenamePreset(p)}
+								>
+									<Pencil className="size-3.5" />
+								</IconAction>
+								<IconAction
+									label={m.display_preset_update()}
+									onClick={() => onUpdatePreset(p)}
+								>
+									<RefreshCw className="size-3.5" />
+								</IconAction>
+								<IconAction
+									label={m.display_preset_delete()}
+									onClick={() => onDeletePreset(p)}
+								>
+									<Trash2 className="size-3.5" />
+								</IconAction>
+							</>
+						}
+					/>
+				))}
+				<PickCard
+					selected={current === "custom"}
+					busy={busy}
+					onPick={onCustomise}
+					title={m.display_customise()}
+					caption={m.display_customise_desc()}
+				/>
+			</Stagger>
 
-				<div className="flex flex-wrap items-center gap-2 border-t pt-4">
-					{customising && (
-						<Button variant="ghost" onClick={() => setCustomising(false)}>
-							{m.common_back()}
-						</Button>
-					)}
-					<Button
-						variant="outline"
-						className="ml-auto"
-						disabled={busy}
-						onClick={onSavePreset}
-					>
-						<Plus className="size-4" />
-						{m.display_preset_save_as()}
-					</Button>
-				</div>
-			</DialogContent>
-		</Dialog>
+			{/* Customise is a card in the grid above, not a second button down here saying the
+			    same word: it is one of the answers, and it reads as one beside the presets. */}
+			<div className="flex flex-wrap items-center gap-2">
+				<Button
+					variant="outline"
+					size="sm"
+					className="ml-auto"
+					disabled={busy}
+					onClick={onSavePreset}
+				>
+					<Plus className="size-4" />
+					{m.display_preset_save_as()}
+				</Button>
+			</div>
+		</div>
 	);
 };
 
@@ -272,10 +255,42 @@ const IconAction: FC<{
 	</Button>
 );
 
+/** The five questions, in the one place on this page that asks for attention. */
+export const CustomiseDialog: FC<{
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	effective: EffectivePolicy;
+	policy: DisplayPolicy;
+	onSetField: (patch: Partial<DisplayPolicy>) => void;
+	busy?: boolean;
+}> = ({ open, onOpenChange, effective, policy, onSetField, busy }) => (
+	<Dialog open={open} onOpenChange={onOpenChange}>
+		<DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+			<DialogHeader>
+				<DialogTitle>{m.display_customise()}</DialogTitle>
+			</DialogHeader>
+			<Customise
+				effective={effective}
+				policy={policy}
+				onSetField={onSetField}
+				busy={busy}
+			/>
+			<div className="flex justify-end border-t pt-4">
+				<Button variant="outline" onClick={() => onOpenChange(false)}>
+					{m.common_done()}
+				</Button>
+			</div>
+		</DialogContent>
+	</Dialog>
+);
+
 /**
- * The four questions. Every one writes `PUT /display/settings` with a single field on top of
+ * The five questions. Every one writes `PUT /display/settings` with a single field on top of
  * the stored policy — the generalised `applyAxis` that three controls already used, now the
  * only write path on the page.
+ *
+ * `root`, because a dialog is not inside the page's `<Section>`: there is no ancestor driving
+ * `from → enter` here, so the group has to run its own.
  */
 const Customise: FC<{
 	effective: EffectivePolicy;
@@ -298,7 +313,7 @@ const Customise: FC<{
 				: { preset: "custom", ...effective, ...patch },
 		);
 	return (
-		<div className="space-y-5">
+		<Stagger root className="space-y-5">
 			<Question label={m.display_q_keep()}>
 				<Segmented
 					busy={busy}
@@ -397,10 +412,13 @@ const Customise: FC<{
 			{/* The sentence updates on every change, which is what replaces "review, then apply":
 			    a mid-edit policy has no effect on a live session, and the answer is on screen
 			    before the next connect. */}
-			<p className="rounded-md border bg-muted/40 p-3 text-sm">
+			<motion.p
+				variants={QUESTION_VARIANTS}
+				className="rounded-md border bg-muted/40 p-3 text-sm"
+			>
 				{describePolicy(effective)}
-			</p>
-		</div>
+			</motion.p>
+		</Stagger>
 	);
 };
 
@@ -409,11 +427,11 @@ const Question: FC<{ label: string; help?: string; children: ReactNode }> = ({
 	help,
 	children,
 }) => (
-	<fieldset className="space-y-2">
+	<motion.fieldset variants={QUESTION_VARIANTS} className="space-y-2">
 		<legend className="text-sm font-medium">{label}</legend>
 		<div className="flex flex-wrap items-center gap-2">{children}</div>
 		{help && <p className="text-xs text-muted-foreground">{help}</p>}
-	</fieldset>
+	</motion.fieldset>
 );
 
 const Segmented: FC<{

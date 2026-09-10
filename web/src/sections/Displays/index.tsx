@@ -42,7 +42,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { apiErrorMessage } from "@/lib/errors";
 import { useLocale } from "@/lib/i18n";
 import { m } from "@/paraglide/messages";
-import { BehaviourSheet } from "./BehaviourSheet";
+import { BehaviourPicker, CustomiseDialog } from "./Behaviour";
 import { DesktopMap } from "./DesktopMap";
 import { AdvancedDisclosure, GameSessionDisclosure } from "./Disclosures";
 import { describePolicy } from "./describePolicy";
@@ -73,7 +73,7 @@ export const SectionDisplays: FC = () => {
 	const updatePreset = useUpdateCustomPreset();
 	const deletePreset = useDeleteCustomPreset();
 
-	const [sheetOpen, setSheetOpen] = useState(false);
+	const [customiseOpen, setCustomiseOpen] = useState(false);
 	// What the map should show while a preset card is hovered — never written anywhere.
 	const [preview, setPreview] = useState<EffectivePolicy | undefined>();
 
@@ -239,26 +239,6 @@ export const SectionDisplays: FC = () => {
 									busy={release.isPending || saveLayout.isPending}
 								/>
 							)}
-							{shown && (
-								<div className="flex flex-wrap items-start gap-3">
-									<p className="min-w-0 flex-1 text-sm">
-										{/* Read from the host's `effective`, never a local draft — the old
-										    badge row restated the operator's unsaved edits back to them
-										    as though the host had already adopted them. */}
-										{describePolicy(shown, { live })}
-										{shown.layout.mode === "manual" && (
-											<> {m.display_arranged_by_you()}</>
-										)}
-									</p>
-									<Button
-										size="sm"
-										disabled={busy || !policy}
-										onClick={() => setSheetOpen(true)}
-									>
-										{m.display_change()}
-									</Button>
-								</div>
-							)}
 							{displays.length > 1 && (
 								<p className="text-xs text-muted-foreground">
 									{m.display_arrange_hint()}
@@ -268,6 +248,55 @@ export const SectionDisplays: FC = () => {
 						</QueryState>
 					</CardContent>
 				</Card>
+
+				{/* The page's central question, answered in the open. Under the map on purpose:
+				    hovering a preset redraws the map, and a picker in a modal covered the very
+				    thing it was previewing. */}
+				{policy && effective && settings.data && (
+					<Card>
+						<CardContent className="space-y-4">
+							<h2 className="text-sm font-medium">
+								{m.display_behaviour_title()}
+							</h2>
+							{shown && (
+								<p className="text-sm">
+									{/* Read from the host's `effective`, never a local draft — the old
+									    badge row restated the operator's unsaved edits back to them
+									    as though the host had already adopted them. */}
+									{describePolicy(shown, { live })}
+									{shown.layout.mode === "manual" && (
+										<> {m.display_arranged_by_you()}</>
+									)}
+								</p>
+							)}
+							<BehaviourPicker
+								policy={policy}
+								presets={settings.data.presets}
+								customPresets={settings.data.custom_presets}
+								onApply={(p) => write(p)}
+								onCustomise={() => setCustomiseOpen(true)}
+								onSavePreset={savePreset}
+								onRenamePreset={renamePreset}
+								onUpdatePreset={(p) =>
+									updatePreset.mutate(
+										{
+											id: p.id,
+											data: {
+												name: p.name,
+												fields: effective,
+												game_session: policy.game_session ?? "auto",
+											},
+										},
+										{ onSuccess: invalidate },
+									)
+								}
+								onDeletePreset={removePreset}
+								busy={busy}
+								onPreview={setPreview}
+							/>
+						</CardContent>
+					</Card>
+				)}
 
 				{/* The rows are the map in words: the keyboard and screen-reader path, and what a
 				    phone falls back to when a box would be under 44 px. */}
@@ -344,34 +373,14 @@ export const SectionDisplays: FC = () => {
 				<AdvancedDisclosure policy={policy} busy={busy} onSet={write} />
 			</div>
 
-			{policy && effective && settings.data && (
-				<BehaviourSheet
-					open={sheetOpen}
-					onOpenChange={setSheetOpen}
+			{policy && effective && (
+				<CustomiseDialog
+					open={customiseOpen}
+					onOpenChange={setCustomiseOpen}
 					effective={effective}
 					policy={policy}
-					presets={settings.data.presets}
-					customPresets={settings.data.custom_presets}
-					onApply={(p) => write(p)}
 					onSetField={write}
-					onSavePreset={savePreset}
-					onRenamePreset={renamePreset}
-					onUpdatePreset={(p) =>
-						updatePreset.mutate(
-							{
-								id: p.id,
-								data: {
-									name: p.name,
-									fields: effective,
-									game_session: policy.game_session ?? "auto",
-								},
-							},
-							{ onSuccess: invalidate },
-						)
-					}
-					onDeletePreset={removePreset}
 					busy={busy}
-					onPreview={setPreview}
 				/>
 			)}
 		</Section>
