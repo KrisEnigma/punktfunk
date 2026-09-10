@@ -1,0 +1,74 @@
+//! The Win32 half of `mgmt::theme`: the console session user's SID, and a DWORD out of their
+//! hive. It lives here because `mgmt` forbids `unsafe`, and each of these reads is a Win32 call.
+
+use windows::core::{HSTRING, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL};
+use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_USERS, RRF_RT_REG_DWORD};
+use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+
+/// The console session user's SID, as the string `HKEY_USERS` is keyed by.
+///
+/// The host is SYSTEM in session 0, so `HKEY_CURRENT_USER` is the service account's empty
+/// profile — the operator's hive is only reachable through their SID. A locked or signed-out
+/// session has no token, and reporting nothing is then correct.
+pub(crate) fn console_session_sid() -> Option<String> {
+    // SAFETY: no arguments; returns 0xFFFFFFFF when no console session is attached.
+    let session = unsafe { WTSGetActiveConsoleSessionId() };
+    if session == u32::MAX {
+        return None;
+    }
+    let mut token = HANDLE::default();
+    // SAFETY: `token` is a live out-param; needs SE_TCB, which SYSTEM has.
+    unsafe { WTSQueryUserToken(session, &mut token) }.ok()?;
+    // Sized in two calls: the first asks how big the variable-length SID is.
+    let mut needed = 0u32;
+    // SAFETY: a deliberate size probe — null buffer with zero length is the documented way
+    // to ask, and it fails with ERROR_INSUFFICIENT_BUFFER while setting `needed`.
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut needed) };
+    let mut buf = vec![0u8; needed as usize];
+    // SAFETY: `buf` is `needed` bytes, which is what the probe above asked for.
+    let got = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            needed,
+            &mut needed,
+        )
+    };
+    // SAFETY: the token handle is ours and closed exactly once, on every path below.
+    let _ = unsafe { CloseHandle(token) };
+    got.ok()?;
+    // SAFETY: on success the buffer holds a TOKEN_USER whose `Sid` points inside it.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut out = PWSTR::null();
+    // SAFETY: `sid` is the live SID above; `out` receives a LocalAlloc'd string we free.
+    unsafe { ConvertSidToStringSidW(sid, &mut out) }.ok()?;
+    // SAFETY: `out` is a NUL-terminated wide string from the successful call above.
+    let text = unsafe { out.to_string() }.ok();
+    // SAFETY: freeing exactly what ConvertSidToStringSidW allocated.
+    unsafe { LocalFree(Some(HLOCAL(out.0.cast()))) };
+    text
+}
+
+/// A DWORD under `HKEY_USERS\<subkey>`, or `None` when the value is absent or not a DWORD.
+pub(crate) fn read_dword(subkey: &str, name: &str) -> Option<u32> {
+    let mut value: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: both strings are NUL-terminated HSTRINGs; `value`/`size` are live out-params
+    // sized for the DWORD the flags demand.
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_USERS,
+            &HSTRING::from(subkey),
+            &HSTRING::from(name),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(std::ptr::addr_of_mut!(value).cast()),
+            Some(&mut size),
+        )
+    };
+    (rc == ERROR_SUCCESS).then_some(value)
+}

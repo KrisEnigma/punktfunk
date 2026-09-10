@@ -12,7 +12,8 @@
 //! its back would be a second, quietly wrong code path.
 //!
 //! Windows reads the CONSOLE SESSION's hive. The host is SYSTEM in session 0 and has no HKCU
-//! of its own, so `HKEY_CURRENT_USER` here would be the service account's empty profile.
+//! of its own, so `HKEY_CURRENT_USER` here would be the service account's empty profile. Its Win32
+//! calls live in `crate::windows::theme`, because this module forbids `unsafe`.
 
 use axum::Json;
 use serde::Serialize;
@@ -113,59 +114,9 @@ fn rgb_hex(r: f64, g: f64, b: f64) -> String {
     format!("#{:02x}{:02x}{:02x}", ch(r), ch(g), ch(b))
 }
 
-/// The console session user's SID, as the string `HKEY_USERS` is keyed by.
-///
-/// The host is SYSTEM in session 0, so `HKEY_CURRENT_USER` is the service account's empty
-/// profile — the operator's hive is only reachable through their SID. A locked or signed-out
-/// session has no token, and reporting nothing is then correct.
-#[cfg(target_os = "windows")]
-fn console_session_sid() -> Option<String> {
-    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
-    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
-    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-
-    // SAFETY: no arguments; returns 0xFFFFFFFF when no console session is attached.
-    let session = unsafe { WTSGetActiveConsoleSessionId() };
-    if session == u32::MAX {
-        return None;
-    }
-    let mut token = HANDLE::default();
-    // SAFETY: `token` is a live out-param; needs SE_TCB, which SYSTEM has.
-    unsafe { WTSQueryUserToken(session, &mut token) }.ok()?;
-    // Sized in two calls: the first asks how big the variable-length SID is.
-    let mut needed = 0u32;
-    // SAFETY: a deliberate size probe — null buffer with zero length is the documented way
-    // to ask, and it fails with ERROR_INSUFFICIENT_BUFFER while setting `needed`.
-    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut needed) };
-    let mut buf = vec![0u8; needed as usize];
-    // SAFETY: `buf` is `needed` bytes, which is what the probe above asked for.
-    let got = unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            Some(buf.as_mut_ptr().cast()),
-            needed,
-            &mut needed,
-        )
-    };
-    // SAFETY: the token handle is ours and closed exactly once, on every path below.
-    let _ = unsafe { CloseHandle(token) };
-    got.ok()?;
-    // SAFETY: on success the buffer holds a TOKEN_USER whose `Sid` points inside it.
-    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    let mut out = windows::core::PWSTR::null();
-    // SAFETY: `sid` is the live SID above; `out` receives a LocalAlloc'd string we free.
-    unsafe { ConvertSidToStringSidW(sid, &mut out) }.ok()?;
-    // SAFETY: `out` is a NUL-terminated wide string from the successful call above.
-    let text = unsafe { out.to_string() }.ok();
-    // SAFETY: freeing exactly what ConvertSidToStringSidW allocated.
-    unsafe { LocalFree(Some(HLOCAL(out.0.cast()))) };
-    text
-}
-
 #[cfg(target_os = "windows")]
 fn read() -> HostTheme {
+    use crate::windows::theme::{console_session_sid, read_dword};
     let Some(sid) = console_session_sid() else {
         // Locked, signed out, or no console session: there is no user hive to read, and
         // saying nothing is correct.
@@ -201,29 +152,6 @@ fn read() -> HostTheme {
 fn abgr_hex(v: u32) -> String {
     let [b, g, r] = [(v >> 16) as u8, (v >> 8) as u8, v as u8];
     format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-#[cfg(target_os = "windows")]
-fn read_dword(subkey: &str, name: &str) -> Option<u32> {
-    use windows::core::HSTRING;
-    use windows::Win32::Foundation::ERROR_SUCCESS;
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_USERS, RRF_RT_REG_DWORD};
-    let mut value: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    // SAFETY: both strings are NUL-terminated HSTRINGs; `value`/`size` are live out-params
-    // sized for the DWORD the flags demand.
-    let rc = unsafe {
-        RegGetValueW(
-            HKEY_USERS,
-            &HSTRING::from(subkey),
-            &HSTRING::from(name),
-            RRF_RT_REG_DWORD,
-            None,
-            Some(std::ptr::addr_of_mut!(value).cast()),
-            Some(&mut size),
-        )
-    };
-    (rc == ERROR_SUCCESS).then_some(value)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
