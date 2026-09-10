@@ -389,18 +389,22 @@ fun SkiaConsoleShell(
                     consoleView = this
                 }
             },
-            // Applied here rather than in `factory` so flipping the setting takes effect without
-            // leaving the console: `setFixedSize` re-creates the buffer and the render thread
-            // re-wraps it through the ordinary surfaceChanged path. `setSizeFromLayout` is the
-            // documented way back to "the view's own size" when the setting goes off again.
+            // Applied here rather than in `factory` so flipping the setting takes effect
+            // without leaving the console. Either call re-creates the buffer and tears the EGL
+            // surface down with it, and `update` runs on every recomposition — so compare
+            // against the live surface frame and ask only when the size really changes.
             update = { view ->
-                if (render < 1f) {
-                    view.holder.setFixedSize(
-                        (viewW * render).roundToInt().coerceAtLeast(1),
-                        (viewH * render).roundToInt().coerceAtLeast(1),
-                    )
-                } else {
-                    view.holder.setSizeFromLayout()
+                if (viewW > 0 && viewH > 0) {
+                    val frame = view.holder.surfaceFrame
+                    if (render < 1f) {
+                        val w = (viewW * render).roundToInt().coerceAtLeast(1)
+                        val h = (viewH * render).roundToInt().coerceAtLeast(1)
+                        if (frame.width() != w || frame.height() != h) {
+                            view.holder.setFixedSize(w, h)
+                        }
+                    } else if (frame.width() != viewW || frame.height() != viewH) {
+                        view.holder.setSizeFromLayout()
+                    }
                 }
             },
         )
