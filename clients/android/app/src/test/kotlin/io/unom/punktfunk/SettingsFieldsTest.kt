@@ -37,6 +37,7 @@ class SettingsFieldsTest {
         statsVerbosity = StatsVerbosity.DETAILED, touchMode = TouchMode.TOUCH, gamepadUiEnabled = false,
         reduceUiResolution = true, gamepadUiMode = GAMEPAD_UI_ALWAYS, uiPalette = "ember",
         lowLatencyMode = false, presentPriority = "smooth", smoothBuffer = 2, autoWakeEnabled = false,
+        backgroundKeepAlive = true, backgroundTimeoutMinutes = 30,
         rumbleOnPhone = true, gyroOnPhone = true, sc2Capture = false, dsCapture = false,
         padHaptics = false, padSpeaker = true, mouseMode = MouseMode.CAPTURE, invertScroll = true,
         overlayActions = "{\"ring\":[]}", startIn = "library", defaultHost = "desk",

@@ -241,6 +241,31 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeStopVideo(
     })
 }
 
+/// `NativeBridge.nativeVideoDrain(handle, on)` — the background keep-alive's video drain.
+///
+/// While the app is backgrounded the decode thread is down: its `Surface` was destroyed with the
+/// window. Nothing else pops the frame queue, so it stands, the jump-to-live detector trips, and
+/// the host is asked for a keyframe every two seconds until the user comes back. `on` starts a
+/// thread that pops and discards instead; `off` stops and joins it. Idempotent either way, and a
+/// no-op on `0`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoDrain(
+    _env: EnvUnowned,
+    _this: JObject,
+    handle: jlong,
+    on: jboolean,
+) {
+    jni_guard((), || {
+        if let Some(h) = get_session(handle) {
+            if on {
+                h.start_drain();
+            } else {
+                h.stop_drain();
+            }
+        }
+    })
+}
+
 /// `NativeBridge.nativeVideoStats(handle): DoubleArray?` — drain ~1 s of decode stats for the HUD
 /// (unified stats spec, `design/stats-unification.md`). Returns 38 doubles
 /// `[fps, mbps, e2eP50Ms, e2eP95Ms, latValid, skewCorrected, width, height, refreshHz, framesLost,

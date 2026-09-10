@@ -2,6 +2,7 @@ package io.unom.punktfunk
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -609,6 +610,13 @@ private fun CategoryDetail(
 
 @Composable
 private fun GeneralSettings(s: Settings, update: (Settings) -> Unit) {
+    val context = LocalContext.current
+    // Turning the keep-alive on asks for notifications, because the ongoing notification is how
+    // the session announces itself and the only way to end it from outside the app. A refusal
+    // keeps the setting: the keep-alive still works, it just has nothing on screen.
+    val noteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {}
     DeviceScopeOnly {
         SettingsGroup("Session") {
             ToggleRow(
@@ -618,6 +626,35 @@ private fun GeneralSettings(s: Settings, update: (Settings) -> Unit) {
                 checked = s.autoWakeEnabled,
                 onCheckedChange = { on -> update(s.copy(autoWakeEnabled = on)) },
             )
+            // Hidden on a TV, where the notification the End button lives on has nowhere to
+            // appear: a session left running would be one nobody outside the app can stop.
+            if (!isTvDevice(context)) {
+                ToggleRow(
+                    title = "Keep streaming in the background",
+                    subtitle = "Leaving the app holds the session instead of ending it — audio " +
+                        "keeps playing, and the picture comes back where you left it. An " +
+                        "ongoing notification shows the session and can end it.",
+                    checked = s.backgroundKeepAlive,
+                    onCheckedChange = { on ->
+                        if (on && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            noteLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        update(s.copy(backgroundKeepAlive = on))
+                    },
+                )
+                // Only decides anything while the switch above is on, so it is hidden rather than
+                // dimmed when it isn't — the same rule the console-UI group follows below.
+                if (s.backgroundKeepAlive) {
+                    SettingDropdown(
+                        label = "Give up after",
+                        options = BACKGROUND_TIMEOUT_OPTIONS,
+                        selected = s.backgroundTimeoutMinutes,
+                        caption = "A host cannot tell someone who walked away from someone who " +
+                            "is watching, so a session nobody comes back to disconnects itself. " +
+                            "Returning later reconnects.",
+                    ) { v -> update(s.copy(backgroundTimeoutMinutes = v)) }
+                }
+            }
         }
     }
     SettingsGroup("Statistics") {

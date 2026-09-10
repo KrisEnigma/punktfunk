@@ -56,6 +56,11 @@ pub(crate) struct SessionHandle {
     /// `nativeStartVideo` — enabling resets the window, so no stale data leaks across restarts.
     pub stats: Arc<crate::stats::VideoStats>,
     video: Mutex<Option<VideoThread>>,
+    /// The background keep-alive's AU drain: the decode thread is down (its Surface is gone) but
+    /// something must still pop the frame queue, or the standing-queue detector jumps to live and
+    /// asks the host for a keyframe every `FLUSH_COOLDOWN` for the whole background stay. Reuses
+    /// [`VideoThread`] because it is the same contract — a flag and a join.
+    drain: Mutex<Option<VideoThread>>,
     #[cfg(target_os = "android")]
     audio: Mutex<Option<crate::audio::AudioPlayback>>,
     #[cfg(target_os = "android")]
@@ -158,6 +163,48 @@ impl SessionHandle {
         }
     }
 
+    /// Run the keep-alive AU drain, replacing any already running. Pops video AUs and discards
+    /// them so the queue never stands: no jump-to-live, no keyframe cadence, and the host keeps
+    /// pacing against a client that is still reading.
+    pub(crate) fn start_drain(&self) {
+        self.stop_drain();
+        let client = self.client.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let sd = shutdown.clone();
+        let spawned = std::thread::Builder::new()
+            .name("pf-video-drain".into())
+            .spawn(move || {
+                while !sd.load(Ordering::Relaxed) {
+                    // `NoFrame` is the 5 ms timeout — re-check the flag and poll again. Anything
+                    // else is a closed session, and there is nothing left to drain.
+                    match client.next_frame(std::time::Duration::from_millis(5)) {
+                        Ok(_) => {}
+                        Err(punktfunk_core::PunktfunkError::NoFrame) => {}
+                        Err(_) => break,
+                    }
+                }
+            });
+        match spawned {
+            Ok(join) => {
+                *lock_recover(&self.drain) = Some(VideoThread {
+                    shutdown,
+                    join: Some(join),
+                });
+            }
+            Err(e) => log::error!("video drain thread spawn failed: {e}"),
+        }
+    }
+
+    /// Stop and join the keep-alive drain once. No-op when none runs.
+    pub(crate) fn stop_drain(&self) {
+        if let Some(mut dt) = lock_recover(&self.drain).take() {
+            dt.shutdown.store(true, Ordering::SeqCst);
+            if let Some(j) = dt.join.take() {
+                let _ = j.join();
+            }
+        }
+    }
+
     /// Drop audio playback once; its destructor joins decode and closes AAudio.
     #[cfg(target_os = "android")]
     fn stop_audio(&self) {
@@ -180,6 +227,7 @@ impl SessionHandle {
 impl Drop for SessionHandle {
     fn drop(&mut self) {
         self.stop_video();
+        self.stop_drain();
         #[cfg(target_os = "android")]
         self.stop_audio();
         #[cfg(target_os = "android")]

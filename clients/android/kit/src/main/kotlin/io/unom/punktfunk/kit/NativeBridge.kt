@@ -279,6 +279,13 @@ object NativeBridge {
     external fun nativeStopVideo(handle: Long)
 
     /**
+     * The background keep-alive's video drain: pop access units and discard them while no decode
+     * thread runs. Without it the frame queue stands, the client jumps to live and asks the host
+     * for a keyframe every two seconds for as long as the app is away. Idempotent; no-op on `0`.
+     */
+    external fun nativeVideoDrain(handle: Long, on: Boolean)
+
+    /**
      * The resolved decoder identity for the HUD, e.g. `c2.qti.avc.decoder · low-latency`, or `""`
      * before the decode thread has resolved one. One-shot (fixed for the session); poll once after
      * the HUD appears.
