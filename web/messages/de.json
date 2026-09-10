@@ -97,6 +97,8 @@
 	"stream_bitrate": "Bitrate",
 	"activity_title": "Letzte Aktivität",
 	"activity_empty": "Noch nichts — Ereignisse erscheinen hier, sobald sie auf dem Host passieren.",
+	"activity_show_all": "Alle anzeigen",
+	"activity_ring_note": "Diese Liste beginnt bei jedem Seitenaufruf neu — der Host führt kein Aktivitätsprotokoll.",
 	"activity_client_connected": "Verbunden",
 	"activity_client_disconnected": "Getrennt",
 	"activity_session_started": "Sitzung gestartet",

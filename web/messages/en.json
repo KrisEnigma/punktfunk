@@ -97,6 +97,8 @@
 	"stream_bitrate": "Bitrate",
 	"activity_title": "Recent activity",
 	"activity_empty": "Nothing yet — events show up here as they happen on the host.",
+	"activity_show_all": "Show all",
+	"activity_ring_note": "This list starts fresh on every page load — the host keeps no activity log.",
 	"activity_client_connected": "Connected",
 	"activity_client_disconnected": "Disconnected",
 	"activity_session_started": "Session started",

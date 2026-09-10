@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { fmtNumber } from "@/lib/format";
 import type { Loadable } from "@/lib/query";
 import { m } from "@/paraglide/messages";
-import { ActivityCard } from "./Activity";
+import { ActivityCard } from "@/sections/Activity";
 import { RunningGames } from "./RunningGames";
 
 export const DashboardView: FC<{
