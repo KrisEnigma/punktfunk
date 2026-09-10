@@ -483,16 +483,19 @@ impl NativePairing {
         name_override: Option<&str>,
         access: Option<Access>,
     ) -> Result<ApproveOutcome> {
+        // The pending card shows a name the device chose for itself, so from the internet a
+        // one-click approve is a guess about who knocked. Only a PIN window bound to this
+        // fingerprint can admit one. Read before the entry, not after: an entry that expires
+        // between the two lookups must read as gone, never as a knock with no source.
+        match self.approval.source_of(id) {
+            None => return Ok(ApproveOutcome::NotFound),
+            Some(KnockSource::Wan) => return Ok(ApproveOutcome::WanNeedsBoundPin),
+            Some(KnockSource::Lan) => {}
+        }
         let (knock_name, fp_hex) = match self.approval.read_entry(id) {
             Some(x) => x,
             None => return Ok(ApproveOutcome::NotFound),
         };
-        // The pending card shows a name the device chose for itself, so from the internet a
-        // one-click approve is a guess about who knocked. Only a PIN window bound to this
-        // fingerprint can admit one.
-        if self.approval.source_of(id) == Some(KnockSource::Wan) {
-            return Ok(ApproveOutcome::WanNeedsBoundPin);
-        }
         let name = name_override.unwrap_or(&knock_name).to_string();
         self.add_with_access(&name, &fp_hex, access)?;
 

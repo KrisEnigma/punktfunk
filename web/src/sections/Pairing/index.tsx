@@ -1,4 +1,4 @@
-import { type FC, useState } from "react";
+import { type FC, useCallback, useState } from "react";
 import { useGetHostInfo } from "@/api/gen/host/host";
 import type { PendingDevice } from "@/api/gen/model/pendingDevice";
 import { useLocale } from "@/lib/i18n";
@@ -20,6 +20,8 @@ export const SectionPairing: FC = () => {
 	const [armFor, setArmFor] = useState<BoundDevice | null>(null);
 	const bindTo = (device: PendingDevice) =>
 		setArmFor({ fingerprint: device.fingerprint, name: device.name });
+	// Stable identity: the arm card clears the binding from an effect keyed on it.
+	const clearBound = useCallback(() => setArmFor(null), []);
 	// Moonlight/GameStream pairing only works when the host runs the compat planes (`--gamestream`,
 	// off by default). Otherwise a Moonlight PIN can never arrive, so the card is dead UI — hide it
 	// (and until host info loads, to avoid a flash of an un-actionable card).
@@ -29,10 +31,7 @@ export const SectionPairing: FC = () => {
 		<PairingView
 			pending={<PendingDevicesSection onArmFor={bindTo} />}
 			native={
-				<NativePairingSection
-					boundTo={armFor}
-					onClearBound={() => setArmFor(null)}
-				/>
+				<NativePairingSection boundTo={armFor} onClearBound={clearBound} />
 			}
 			moonlight={gamestream ? <MoonlightPairingSection /> : null}
 			paired={<PairedDevicesSection />}

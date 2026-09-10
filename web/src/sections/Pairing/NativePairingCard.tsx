@@ -71,9 +71,13 @@ export const NativePairingSection: FC<{
 			pairedCount !== prevPairedCount.current
 		) {
 			qc.invalidateQueries({ queryKey: getListNativeClientsQueryKey() });
+			// The window was named for a device and that device has now taken it. Releasing the
+			// binding matters: the card would otherwise keep their name, and the next PIN armed
+			// from here would silently be for them and nobody else.
+			onClearBound?.();
 		}
 		prevPairedCount.current = pairedCount;
-	}, [pairedCount, qc]);
+	}, [pairedCount, qc, onClearBound]);
 
 	const refresh = () =>
 		qc.invalidateQueries({ queryKey: getGetNativePairingQueryKey() });

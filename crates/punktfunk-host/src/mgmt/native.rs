@@ -643,8 +643,9 @@ pub(crate) async fn approve_pending_device(
         ),
         Ok(crate::native_pairing::ApproveOutcome::WanNeedsBoundPin) => api_error(
             StatusCode::CONFLICT,
-            "This device knocked from the internet, where its name proves nothing. Arm a PIN \
-             bound to its fingerprint and read the PIN out to whoever is holding it.",
+            "Couldn't admit this device: it knocked from the internet, where the name it sent \
+             proves nothing. Arm a PIN bound to its fingerprint instead, then read the PIN out \
+             to whoever is holding it.",
         ),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
