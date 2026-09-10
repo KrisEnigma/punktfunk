@@ -54,6 +54,15 @@ export const MonitorCard: FC = () => {
 	const pinSupported = monitors.data?.pin_supported ?? true;
 	// Both reasons produce the same read-only card; only the explanation above it differs.
 	const locked = envLocked || !pinSupported;
+	// A pin naming a screen the host does not have. Every session fails on it until it changes,
+	// and the rows below list only screens the host HAS — so without this the card shows nothing
+	// selected and no hint that anything is wrong. The host reports the pin for exactly this
+	// (`MonitorsResponse.pinned`: "even when it matches no head").
+	const danglingPin =
+		pinned &&
+		!rows.some((r) => r.connector.toLowerCase() === pinned.toLowerCase())
+			? pinned
+			: null;
 
 	const choose = (connector: string | null) => {
 		if (!policy || locked) return;
@@ -150,6 +159,11 @@ export const MonitorCard: FC = () => {
 						{m.display_monitor_env_locked()}
 					</p>
 				)}
+				{danglingPin && (
+					<p className="text-sm text-destructive">
+						{m.display_monitor_missing_warning()}
+					</p>
+				)}
 				<QueryState
 					isLoading={monitors.isLoading}
 					error={monitors.error}
@@ -164,6 +178,18 @@ export const MonitorCard: FC = () => {
 							undefined,
 							() => choose(null),
 						)}
+						{danglingPin &&
+							row(
+								"__dangling__",
+								true,
+								danglingPin,
+								m.display_monitor_missing_hint(),
+								[
+									<Badge key="x" variant="destructive">
+										{m.display_monitor_missing()}
+									</Badge>,
+								],
+							)}
 						{rows.map(monitorRow)}
 						{rows.length === 0 && (
 							<p className="text-sm text-muted-foreground">

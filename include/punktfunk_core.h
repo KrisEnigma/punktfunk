@@ -2725,6 +2725,22 @@ PunktfunkStatus punktfunk_connection_access_expires_in(const PunktfunkConnection
 #endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)
+// The sentence the host sent with its mid-session rejection, NUL-terminated, into
+// the caller's buffer; empty when it sent none — render the client's own wording
+// for the code then. Ask alongside [`punktfunk_connection_end_reject`]. A 512-byte
+// buffer is ample: the wire caps this at 256.
+//
+// Already stripped of control characters and capped by the core; a host cannot make
+// this longer or make it move a terminal's cursor.
+//
+// # Safety
+// `c` is a valid connection handle; `out` is writable for `cap` bytes.
+PunktfunkStatus punktfunk_connection_end_reject_said(const PunktfunkConnection *c,
+                                                     char *out,
+                                                     uintptr_t cap);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
 // Mid-session typed rejection (`PUNKTFUNK_STATUS_REJECTED_*`); `0` = none.
 // Ask after `Closed`, before free. Connect-time rejections come from connect.
 //

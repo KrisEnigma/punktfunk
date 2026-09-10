@@ -366,15 +366,15 @@ async fn session(
                 .downcast_ref::<session::Refusal>()
                 .map_or(punktfunk_core::reject::SETUP_FAILED_CLOSE_CODE, |r| r.code);
             let detail = format!("{e:#}");
-            let mut cut = detail.len().min(256);
-            while !detail.is_char_boundary(cut) {
+            // A browser renders this text, so prefer the user sentence; the chain is
+            // the fallback only because there is nothing better to show yet.
+            let said = crate::native::setup_failed_sentence(&e).unwrap_or(detail.clone());
+            let mut cut = said.len().min(256);
+            while !said.is_char_boundary(cut) {
                 cut -= 1;
             }
-            refuse(&connection, code, &detail[..cut]).await;
-            connection.close(
-                wtransport::VarInt::from_u32(code),
-                &detail.as_bytes()[..cut],
-            );
+            refuse(&connection, code, &said[..cut]).await;
+            connection.close(wtransport::VarInt::from_u32(code), &said.as_bytes()[..cut]);
             tracing::warn!(%peer, code, error = %detail, "browser session ended with error");
         }
     }

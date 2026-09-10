@@ -2012,6 +2012,23 @@ public final class PunktfunkConnection: @unchecked Sendable {
         return HostRejection(status: status)
     }
 
+    /// What the host itself said about that close, when it sent a sentence — it knows
+    /// things this client cannot, a capture monitor it no longer has being the case
+    /// this exists for. `nil` for every close the host had nothing specific to say
+    /// about: show `HostRejection.userMessage` then. Same read discipline as
+    /// `endRejection` (ask after the end, before teardown).
+    public var endRejectionMessage: String? {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return nil }
+        // The wire caps the sentence at 256 bytes; this is that plus room for the NUL.
+        var buf = [CChar](repeating: 0, count: 512)
+        guard punktfunk_connection_end_reject_said(h, &buf, UInt(buf.count)) == statusOK
+        else { return nil }
+        let said = String(cString: buf)
+        return said.isEmpty ? nil : said
+    }
+
     deinit { close() }
 
     /// Snapshot the handle unless close is pending (callers hold their plane lock).

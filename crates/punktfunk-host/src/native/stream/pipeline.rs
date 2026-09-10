@@ -200,6 +200,9 @@ pub(super) fn is_permanent_build_error(chain: &str) -> bool {
         // A backend compiled out cannot appear on a retry, and each one costs
         // the user's real monitor a disable/restore cycle.
         "this build left out",
+        // A pinned monitor the host does not have. Retrying holds the client on a
+        // black screen for the whole backoff before saying so.
+        "no monitor named",
     ];
     let lower = chain.to_ascii_lowercase();
     PERMANENT.iter().any(|p| lower.contains(p))
@@ -478,6 +481,9 @@ mod tests {
         assert!(is_permanent_build_error(
             "open video encoder: hevc on NVIDIA needs the direct-SDK NVENC backend, which this \
              build left out — build with --features punktfunk-host/nvenc"
+        ));
+        assert!(is_permanent_build_error(
+            "create virtual output: no monitor named \"HDMI-A-3\" — this host has: HDMI-A-1"
         ));
         assert!(!is_permanent_build_error("open NVENC: device busy"));
     }

@@ -503,14 +503,12 @@ pub(crate) async fn serve(
                 Err(e) => {
                     // Typed setup-failed close so the client does not see a bare mid-frame drop.
                     // First-wins: a gate that already closed, or a peer close, makes this a no-op.
+                    // The reason bytes are read by a person, so they carry the user sentence and
+                    // the operator chain stays in the log.
                     let detail = format!("{e:#}");
-                    let mut cut = detail.len().min(256);
-                    while !detail.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
                     conn_err.close(
                         punktfunk_core::reject::SETUP_FAILED_CLOSE_CODE.into(),
-                        &detail.as_bytes()[..cut],
+                        setup_failed_sentence(&e).unwrap_or_default().as_bytes(),
                     );
                     tracing::warn!(%peer, error = %detail, "session ended with error")
                 }
@@ -1081,6 +1079,18 @@ pub(crate) enum Served {
 /// the pairing ceremony instead.
 // Distinct host-lifetime handles from `serve`; a context struct would hide the lifetimes.
 #[allow(clippy::too_many_arguments)]
+/// The sentence a person reads when setup fails, or `None` where the host has no
+/// wording better than the client's own generic one. Every close that carries text
+/// goes through here: the reason bytes reach a user, and an `anyhow` chain is
+/// operator register.
+///
+/// `downcast_ref` walks the context chain, so a failure keeps its sentence however
+/// deep under `.context()` it was raised.
+pub(crate) fn setup_failed_sentence(e: &anyhow::Error) -> Option<String> {
+    e.downcast_ref::<pf_vdisplay::monitors::MonitorNotFound>()
+        .map(|m| m.user_message())
+}
+
 async fn serve_session(
     conn: link::SessionLink,
     opts: &Arc<Punktfunk1Options>,
@@ -2330,6 +2340,48 @@ fn delivered_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pipeline raises a pin miss under two layers of `.context`, so the close
+    /// carries the user's sentence only if the downcast walks the whole chain.
+    /// Reads the error `resolve` really produces, not a stand-in.
+    #[test]
+    fn a_buried_pin_miss_still_reaches_the_client_in_words() {
+        use anyhow::Context;
+        let heads = [pf_vdisplay::monitors::PhysicalMonitor {
+            connector: "HDMI-A-1".into(),
+            description: String::new(),
+            width: 1920,
+            height: 1080,
+            refresh_mhz: 60000,
+            x: 0,
+            y: 0,
+            scale: 1.0,
+            primary: true,
+            enabled: true,
+            managed: false,
+        }];
+        let buried = pf_vdisplay::monitors::resolve(&heads, "HDMI-A-3")
+            .map(|_| ())
+            .context("create virtual output")
+            .context("build the session pipeline")
+            .unwrap_err();
+
+        let said = setup_failed_sentence(&buried).expect("a pin miss has words for the user");
+        assert!(
+            said.contains("HDMI-A-3") && said.contains("HDMI-A-1"),
+            "{said}"
+        );
+        assert!(
+            said.len() <= punktfunk_core::quic::REFUSED_REASON_MAX,
+            "one close frame, uncut: {} bytes",
+            said.len()
+        );
+
+        // Anything else keeps the client's own wording rather than leaking a chain.
+        let other =
+            anyhow::anyhow!("open NVENC: device busy").context("build the session pipeline");
+        assert_eq!(setup_failed_sentence(&other), None);
+    }
 
     #[test]
     fn full_apply_readback_is_the_request_not_the_deflated_roundtrip() {

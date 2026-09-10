@@ -233,6 +233,8 @@ pub struct NativeClient {
     access_deadline_unix: Arc<AtomicU64>,
     /// Mid-session [`crate::reject::RejectReason`] close code; `0` = none.
     end_reject_code: Arc<AtomicU32>,
+    /// The sentence the host sent with that close, if any.
+    end_reject_said: Arc<std::sync::OnceLock<String>>,
     probe: Arc<Mutex<ProbeState>>,
     shutdown: Arc<AtomicBool>,
     /// [`PunktfunkEndReason`] as `u8`, latched with `shutdown`.
@@ -630,6 +632,8 @@ impl NativeClient {
         let access_grants = Arc::new(AtomicU32::new(crate::quic::GRANT_ALL));
         let access_deadline_unix = Arc::new(AtomicU64::new(0));
         let end_reject_code = Arc::new(AtomicU32::new(0));
+        let end_reject_said: Arc<std::sync::OnceLock<String>> =
+            Arc::new(std::sync::OnceLock::new());
 
         let host = host.to_string();
         let frame_chan_w = frame_chan.clone();
@@ -650,6 +654,7 @@ impl NativeClient {
         let access_grants_w = access_grants.clone();
         let access_deadline_w = access_deadline_unix.clone();
         let end_reject_w = end_reject_code.clone();
+        let end_reject_said_w = end_reject_said.clone();
         let ctrl_tx_pump = ctrl_tx.clone(); // pump sends adaptive-FEC LossReports
         let worker = std::thread::Builder::new()
             .name("punktfunk-client".into())
@@ -726,6 +731,7 @@ impl NativeClient {
                     access_deadline_unix: access_deadline_w,
                     access_tx,
                     end_reject_code: end_reject_w,
+                    end_reject_said: end_reject_said_w,
                 }));
             })
             .map_err(PunktfunkError::Io)?;
@@ -769,6 +775,7 @@ impl NativeClient {
             access_grants,
             access_deadline_unix,
             end_reject_code,
+            end_reject_said,
             input_tx,
             mic_tx,
             mic_stats,
@@ -995,6 +1002,16 @@ impl NativeClient {
     /// are [`PunktfunkError::Rejected`] from [`connect`](Self::connect).
     pub fn end_reject(&self) -> Option<crate::reject::RejectReason> {
         crate::reject::RejectReason::from_close_code(self.end_reject_code.load(Ordering::SeqCst))
+    }
+
+    /// What the host said about that close, in its own words — already stripped of
+    /// control characters and capped ([`worker::sanitize_reason`]).
+    ///
+    /// `None` whenever the host sent no sentence, which is most closes: render
+    /// [`end_reject`](Self::end_reject)'s own wording then. A host names what only it
+    /// can know, a mis-set capture monitor being the case this exists for.
+    pub fn end_reject_said(&self) -> Option<&str> {
+        self.end_reject_said.get().map(String::as_str)
     }
 
     /// Fold the calling thread into [`hot_thread_ids`](Self::hot_thread_ids) (decode/audio

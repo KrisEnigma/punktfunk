@@ -1139,6 +1139,9 @@ final class SessionModel: ObservableObject {
         // (per-client access §4) files under `.hostError` there, and "ended with an error"
         // is the wrong sentence for "your access expired".
         let rejection = conn.endRejection
+        // The host's own words when it sent any: it can name the monitor it was told to
+        // capture and no longer has, which our generic line cannot.
+        let said = conn.endRejectionMessage
         // Where a game exit sends us: back into the library this session started from, so the
         // next title is a tap away. A plain desktop connect has no shelf, and so no way back.
         let host = activeHost
@@ -1150,8 +1153,9 @@ final class SessionModel: ObservableObject {
         sessionLog.info("\(endLine, privacy: .public)")
         disconnect(deliberate: false) // host/network ended it — keep the linger for a reconnect
         if let rejection {
-            // The shared typed-rejection wording ("Your access to this host has expired…").
-            errorMessage = "\(name): \(rejection.userMessage)"
+            // The host's sentence, else the shared typed-rejection wording
+            // ("Your access to this host has expired…").
+            errorMessage = "\(name): \(said ?? rejection.userMessage)"
             return
         }
         switch reason {

@@ -1407,7 +1407,10 @@ fn pump(
                 // A typed mid-session rejection names itself — access expiry would
                 // otherwise file under HostError as "the host ended with an error".
                 if let Some(reason) = connector.end_reject() {
-                    break Some(crate::trust::connect_reject_message(reason));
+                    break Some(crate::trust::reject_message(
+                        reason,
+                        connector.end_reject_said(),
+                    ));
                 }
                 break match connector.end_reason() {
                     End::GameExited => None,

@@ -4326,6 +4326,46 @@ pub unsafe extern "C" fn punktfunk_connection_access_expires_in(
     })
 }
 
+/// The sentence the host sent with its mid-session rejection, NUL-terminated, into
+/// the caller's buffer; empty when it sent none — render the client's own wording
+/// for the code then. Ask alongside [`punktfunk_connection_end_reject`]. A 512-byte
+/// buffer is ample: the wire caps this at 256.
+///
+/// Already stripped of control characters and capped by the core; a host cannot make
+/// this longer or make it move a terminal's cursor.
+///
+/// # Safety
+/// `c` is a valid connection handle; `out` is writable for `cap` bytes.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_end_reject_said(
+    c: *const PunktfunkConnection,
+    out: *mut c_char,
+    cap: usize,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        if out.is_null() || cap == 0 {
+            return PunktfunkStatus::NullPointer;
+        }
+        let said = c.inner.end_reject_said().unwrap_or_default();
+        if said.len() + 1 > cap {
+            return PunktfunkStatus::InvalidArg;
+        }
+        // SAFETY: `out` is non-null and holds `cap` >= said.len() + 1 bytes.
+        unsafe {
+            // `.cast()`: `c_char` is i8 on x86_64 and u8 on aarch64.
+            std::ptr::copy_nonoverlapping(said.as_ptr(), out.cast::<u8>(), said.len());
+            *out.add(said.len()) = 0;
+        }
+        PunktfunkStatus::Ok
+    })
+}
+
 /// Mid-session typed rejection (`PUNKTFUNK_STATUS_REJECTED_*`); `0` = none.
 /// Ask after `Closed`, before free. Connect-time rejections come from connect.
 ///
