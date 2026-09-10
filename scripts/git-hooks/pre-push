@@ -5,9 +5,9 @@
 #     git config core.hooksPath scripts/git-hooks
 #
 # Kept to the CHEAP checks on purpose (seconds, no cargo build): clippy/tests stay in CI and the
-# per-box verify recipes. Every gate here only reports — a hook that rewrites a file puts bytes
-# in a commit its author never read. Runs regardless of how the commits were made (plain
-# `git commit`, amends, or plumbing like commit-tree — pre-push sees them all).
+# per-box verify recipes. Check-only, because the commits already exist here — nothing is left
+# to re-stage, and pre-commit is where staged files get formatted. Runs however the commits were
+# made (plain commit, amends, or plumbing like commit-tree).
 #
 # Escape hatch for a genuine emergency: `git push --no-verify`.
 

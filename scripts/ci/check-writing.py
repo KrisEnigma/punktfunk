@@ -419,8 +419,32 @@ def commits_since(base: str) -> list[tuple[str, str, str]]:
     return out
 
 
-def check_repo() -> list[str]:
+def check_repo(staged: bool = False) -> list[str]:
     errors: list[str] = []
+    if staged:
+        diff = subprocess.check_output(
+            ["git", "diff", "--cached", "-U0", "--", *DIFF_GLOBS],
+            cwd=ROOT,
+            text=True,
+        )
+        changed = parse_diff_changed_lines(diff)
+        for rel, lines_touched in sorted(changed.items()):
+            if "/vendor/" in rel.split("/"):
+                continue
+            try:
+                text = subprocess.check_output(
+                    ["git", "show", f":{rel}"],
+                    cwd=ROOT,
+                    text=True,
+                )
+            except subprocess.CalledProcessError:
+                continue
+            lines = text.splitlines()
+            if rel.endswith((".rs", ".swift")):
+                errors.extend(check_blocks(rel, lines, lines_touched))
+            errors.extend(check_messages(rel, lines, lines_touched))
+        return errors
+
     base = git_merge_base()
     if base:
         for sha, subject, body in commits_since(base):
@@ -588,8 +612,11 @@ def self_test() -> int:
 def main(argv: list[str]) -> int:
     if argv[1:] == ["--self-test"]:
         return self_test()
+    if argv[1:] not in ([], ["--staged"]):
+        print("usage: check-writing.py [--self-test | --staged]", file=sys.stderr)
+        return 2
     os.chdir(ROOT)
-    errors = check_repo()
+    errors = check_repo(staged=argv[1:] == ["--staged"])
     if errors:
         for e in errors:
             print(f"::error::{e}")
