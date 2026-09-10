@@ -33,8 +33,12 @@ const ALLOWED = new Set(["GET", "PUT"]);
 
 export default defineEventHandler(async (event) => {
 	const id = getRouterParam(event, "id");
+	// 400, not 404: the console reads a 404 from here as "this plugin serves no `__config`, its
+	// settings are its own page". `PLUGIN_ID_RE` is deliberately narrower than the host's provider
+	// rule (which allows `.` and `_`), so a listed source can land here with an id we won't dial —
+	// and saying "no settings surface" about it would be a lie.
 	if (!id || !PLUGIN_ID_RE.test(id)) {
-		setResponseStatus(event, 404);
+		setResponseStatus(event, 400);
 		return { error: "not a valid plugin id" };
 	}
 	const method = event.method;

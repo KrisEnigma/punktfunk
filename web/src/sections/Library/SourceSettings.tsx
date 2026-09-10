@@ -82,8 +82,8 @@ export const SourceSettingsDialog: FC<{
 				});
 				// `config` is optional on the kit's `serveUi`, and a plugin that omits it answers
 				// `__config` 404 — it keeps its settings on the page it already serves. Not a
-				// failure, so it must not read as one. The route's own 404 (a malformed id) cannot
-				// reach here: `pluginId` is a source the host itself listed.
+				// failure, so it must not read as one. The route reserves 404 for exactly this:
+				// its own refusals are 400 (bad id) and 502 (plugin unreachable).
 				if (res.status === 404) {
 					if (!cancelled) setState({ tag: "ownPage" });
 					return;
