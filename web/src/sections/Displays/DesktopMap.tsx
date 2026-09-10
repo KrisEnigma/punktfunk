@@ -189,13 +189,21 @@ export const DesktopMap: FC<{
 
 	const onPointerDown = (b: MapBox) => (e: ReactPointerEvent<HTMLElement>) => {
 		if (!onMove || !b.draggable || b.slot === undefined || busy) return;
+		// The Release button lives inside the box. Capturing the pointer here would retarget
+		// its `pointerup` to the box, so the click would never reach it and ✕ would do nothing.
+		if ((e.target as HTMLElement).closest("button")) return;
 		const container = e.currentTarget.parentElement;
 		if (!container) return;
 		const rect = container.getBoundingClientRect();
 		if (rect.width === 0) return;
-		// Desktop pixels per screen pixel — the map is uniformly scaled, so one ratio does both
-		// axes.
-		const scale = box.w / rect.width;
+		// Desktop pixels per screen pixel, read fresh on every move: dragging a screen past
+		// the current edge widens the bounding box, the container re-scales, and a ratio
+		// captured once would let the box drift away from the cursor for the rest of the drag.
+		const ratio = () => {
+			const live = container.getBoundingClientRect().width;
+			return live > 0 ? box.w / live : box.w / rect.width;
+		};
+		const scale = ratio();
 		const grabX = e.clientX * scale - b.x;
 		const grabY = e.clientY * scale - b.y;
 		// Every other box's edges are what a drag snaps to.
@@ -209,10 +217,11 @@ export const DesktopMap: FC<{
 		e.currentTarget.setPointerCapture(e.pointerId);
 
 		const move = (ev: PointerEvent) => {
+			const s = ratio();
 			setDrag({
 				slot: b.slot as number,
-				x: Math.round(snap(ev.clientX * scale - grabX, b.w, xEdges, tolerance)),
-				y: Math.round(snap(ev.clientY * scale - grabY, b.h, yEdges, tolerance)),
+				x: Math.round(snap(ev.clientX * s - grabX, b.w, xEdges, tolerance)),
+				y: Math.round(snap(ev.clientY * s - grabY, b.h, yEdges, tolerance)),
 			});
 		};
 		const up = () => {
