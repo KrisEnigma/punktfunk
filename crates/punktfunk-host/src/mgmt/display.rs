@@ -330,6 +330,14 @@ pub(crate) async fn set_display_client(
         return api_error(StatusCode::BAD_REQUEST, "no device named");
     }
     let store = crate::vdisplay::policy::prefs();
+    // An empty overlay is "follow the host", which is what an absent key already means. On an
+    // UNCONFIGURED host writing one would materialise a whole default policy as a side effect
+    // — flipping `configured()` process-wide, adopting a 10 s linger where there was none, and
+    // silently retiring the legacy topology env knobs. Nothing to store, so store nothing.
+    let overlay = overlay.sanitized();
+    if overlay.is_empty() && store.configured().is_none() {
+        return Json(display_settings_state()).into_response();
+    }
     let mut policy = store.get();
     // `sanitized` drops an overlay that pins nothing, so this covers the reset
     // case too without a second path.
