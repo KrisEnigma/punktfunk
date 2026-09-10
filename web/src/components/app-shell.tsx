@@ -120,7 +120,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 	);
 }
 
-/** The sidebar's three groups: the primary five, Manage, then whatever the operator pinned. */
+/** The sidebar's three groups: the primary five, Manage, then the plugin pages the operator pinned. */
 function Sidebar() {
 	const [pins] = usePins();
 	const { data } = usePlugins();
@@ -146,18 +146,14 @@ function Sidebar() {
 			{pinned.length > 0 && (
 				<Stagger root className="flex flex-col gap-1">
 					<GroupLabel>{m.nav_group_pinned()}</GroupLabel>
-					{pinned.map((p) =>
-						p.kind === "nav" ? (
-							<SidebarLink key={`pin-${p.entry.to}`} entry={p.entry} />
-						) : (
-							<PluginLink
-								key={`pin-${p.plugin.id}`}
-								id={p.plugin.id}
-								title={p.plugin.title}
-								icon={p.plugin.ui?.icon}
-							/>
-						),
-					)}
+					{pinned.map((p) => (
+						<PluginLink
+							key={`pin-${p.id}`}
+							id={p.id}
+							title={p.title}
+							icon={p.ui?.icon}
+						/>
+					))}
 				</Stagger>
 			)}
 		</motion.nav>

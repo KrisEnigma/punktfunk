@@ -730,7 +730,7 @@
 	"nav_pin": "Pin to sidebar",
 	"nav_unpin": "Unpin",
 	"settings_navigation": "Navigation",
-	"settings_navigation_help": "Pinned pages join the top of the sidebar.",
+	"settings_navigation_help": "A pinned plugin page gets its own entry in the sidebar.",
 	"plugin_uis_title": "Plugin interfaces",
 	"plugin_installed_toast": "{name} added — open it under Plugins, or pin it.",
 	"settings_account": "Account",

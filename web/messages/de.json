@@ -722,7 +722,7 @@
 	"nav_pin": "An Seitenleiste anheften",
 	"nav_unpin": "Lösen",
 	"settings_navigation": "Navigation",
-	"settings_navigation_help": "Angeheftete Seiten stehen oben in der Seitenleiste.",
+	"settings_navigation_help": "Eine angeheftete Plugin-Seite bekommt einen eigenen Eintrag in der Seitenleiste.",
 	"plugin_uis_title": "Plugin-Oberflächen",
 	"plugin_installed_toast": "{name} hinzugefügt — unter Plugins zu finden, oder anheften.",
 	"settings_account": "Konto",

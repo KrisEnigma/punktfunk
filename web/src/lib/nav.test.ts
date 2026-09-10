@@ -39,26 +39,21 @@ describe("nav table", () => {
 });
 
 describe("resolvePins", () => {
-	test("keeps the operator's order across both kinds", () => {
+	test("keeps the operator's order", () => {
 		const resolved = resolvePins(
-			[pluginPin("rom-manager"), "/logs"],
-			[plugin("rom-manager")],
+			[pluginPin("virtualhere"), pluginPin("rom-manager")],
+			[plugin("rom-manager"), plugin("virtualhere")],
 		);
-		expect(resolved.map((p) => p.kind)).toEqual(["plugin", "nav"]);
-		expect(resolved[0]).toMatchObject({ plugin: { id: "rom-manager" } });
-		expect(resolved[1]).toMatchObject({ entry: { to: "/logs" } });
+		expect(resolved.map((p) => p.id)).toEqual(["virtualhere", "rom-manager"]);
 	});
 
 	// The pin outlives the plugin on purpose: uninstall/reinstall must not silently lose it.
 	test("drops a pin nothing resolves, without touching its neighbours", () => {
 		const resolved = resolvePins(
-			["/logs", pluginPin("since-removed"), "/stats"],
-			[],
+			[pluginPin("a"), pluginPin("since-removed"), pluginPin("b")],
+			[plugin("a"), plugin("b")],
 		);
-		expect(resolved.map((p) => p.kind === "nav" && p.entry.to)).toEqual([
-			"/logs",
-			"/stats",
-		]);
+		expect(resolved.map((p) => p.id)).toEqual(["a", "b"]);
 	});
 
 	// A plugin id is not a route. Without the prefix a plugin called "logs" would resolve to
@@ -68,14 +63,16 @@ describe("resolvePins", () => {
 		expect(resolvePins([pluginPin("logs")], [plugin("logs")])).toHaveLength(1);
 	});
 
-	test("a primary destination cannot be pinned — it is already there", () => {
-		expect(resolvePins(["/host"], [])).toEqual([]);
+	// The sidebar lists every page already; a pinned route only listed it a second time.
+	test("a route never resolves", () => {
+		expect(resolvePins(["/stats", "/host"], [])).toEqual([]);
 	});
 });
 
 describe("togglePin", () => {
 	test("appends, then removes, leaving order otherwise intact", () => {
-		expect(togglePin(["/logs"], "/stats")).toEqual(["/logs", "/stats"]);
-		expect(togglePin(["/logs", "/stats"], "/logs")).toEqual(["/stats"]);
+		const [a, b] = [pluginPin("a"), pluginPin("b")];
+		expect(togglePin([a], b)).toEqual([a, b]);
+		expect(togglePin([a, b], a)).toEqual([b]);
 	});
 });

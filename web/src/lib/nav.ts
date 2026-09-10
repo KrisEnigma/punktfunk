@@ -121,10 +121,12 @@ export const PRIMARY = NAV.filter((n) => n.group === "primary");
 export const MANAGE = NAV.filter((n) => n.group === "manage");
 
 /**
- * A pin id: a Manage route (`/stats`) or a plugin (`plugin:rom-manager`).
+ * A pin id: a plugin (`plugin:rom-manager`). A plugin's page is the only destination the
+ * sidebar does not already list, so it is the only thing a pin can add.
  *
- * Plugins carry a prefix because a plugin id is not a route — its page is
- * `/plugins/<id>/`, and the two namespaces must not be able to collide.
+ * The prefix keeps a plugin id apart from a route — its page is `/plugins/<id>/`, and a plugin
+ * called "logs" must not match Troubleshooting. Route pins an older console stored no longer
+ * resolve.
  */
 export const PLUGIN_PIN = "plugin:";
 export const pluginPin = (id: string) => `${PLUGIN_PIN}${id}`;
@@ -132,7 +134,7 @@ export const pinnedPluginId = (pin: string) =>
 	pin.startsWith(PLUGIN_PIN) ? pin.slice(PLUGIN_PIN.length) : undefined;
 
 /**
- * Which Manage entries and plugins the operator promoted to the sidebar's primary group.
+ * Which plugin pages the operator put in the sidebar.
  *
  * Per browser, by design (D8): a phone and a desk want different shortcuts, and nothing here
  * is worth a round trip to the host. An id that no longer resolves — a plugin since removed —
@@ -146,11 +148,6 @@ export const usePins = () => useLocalPref("pf-nav", NO_PINS, isStringArray);
 export const togglePin = (pins: string[], id: string) =>
 	pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
 
-/** A resolved pin: a Manage page, or a plugin that surfaces a UI. */
-export type Pinned =
-	| { kind: "nav"; entry: NavEntry }
-	| { kind: "plugin"; plugin: PinnablePlugin };
-
 /** The slice of a plugin a pin needs — kept structural so a test needs no API fixture. */
 export interface PinnablePlugin {
 	id: string;
@@ -159,21 +156,18 @@ export interface PinnablePlugin {
 }
 
 /**
- * Turn stored pin ids into things that can be rendered, in the operator's order.
+ * The pinned plugins, in the operator's order.
  *
- * An id that resolves to neither — a plugin since uninstalled, or a route that no longer
- * exists — is dropped here rather than pruned on read: uninstalling and reinstalling a plugin
- * would otherwise silently lose its pin.
+ * A pin nothing resolves — a plugin since uninstalled, or a route an older console let you pin —
+ * is dropped here rather than pruned on read: uninstalling and reinstalling a plugin would
+ * otherwise silently lose its pin.
  */
 export function resolvePins(
 	pins: readonly string[],
 	plugins: readonly PinnablePlugin[],
-): Pinned[] {
-	return pins.flatMap<Pinned>((id) => {
-		const entry = MANAGE.find((n) => n.to === id);
-		if (entry) return [{ kind: "nav", entry }];
-		const pluginId = pinnedPluginId(id);
-		const plugin = plugins.find((p) => p.id === pluginId);
-		return plugin ? [{ kind: "plugin", plugin }] : [];
+): PinnablePlugin[] {
+	return pins.flatMap((id) => {
+		const plugin = plugins.find((p) => p.id === pinnedPluginId(id));
+		return plugin ? [plugin] : [];
 	});
 }

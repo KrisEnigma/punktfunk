@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { changeLocale, type Locale, locales, useLocale } from "@/lib/i18n";
-import { MANAGE, pluginPin, togglePin, usePins } from "@/lib/nav";
+import { pluginPin, togglePin, usePins } from "@/lib/nav";
 import { m } from "@/paraglide/messages";
 import { AppearanceCard } from "./Appearance";
 
@@ -82,16 +82,15 @@ export const SectionSettings: FC = () => {
 };
 
 /**
- * Which Manage pages and plugin UIs sit in the sidebar's primary group.
- *
- * The list is what CAN be pinned, so an operator who never opens Automation can see that the
- * page exists without it costing a permanent slot. A plugin appears here as soon as it
- * surfaces a UI — that is the pin the install toast points at.
+ * Which plugin pages get an entry in the sidebar. Every console page is there already; a
+ * plugin's page is not until it is pinned. A plugin appears here as soon as it surfaces a UI —
+ * the pin the install toast points at — and with none installed there is no card.
  */
 const NavigationCard: FC = () => {
 	const [pins, setPins] = usePins();
 	const { data } = usePlugins();
 	const plugins = uiPlugins(data);
+	if (plugins.length === 0) return null;
 	const row = (id: string, title: string, Icon: typeof LogOut) => (
 		<li key={id} className="flex items-center gap-3 py-1.5">
 			<Checkbox
@@ -118,7 +117,6 @@ const NavigationCard: FC = () => {
 					{m.settings_navigation_help()}
 				</p>
 				<ul>
-					{MANAGE.map((n) => row(n.to, n.label(), n.icon))}
 					{plugins.map((p) =>
 						row(pluginPin(p.id), p.title, pluginIcon(p.ui?.icon)),
 					)}
