@@ -4,6 +4,8 @@
 // PUNKTFUNK_UI_PASSWORD is unset, so a misconfigured LAN-exposed server admits no one.
 import {
 	defineEventHandler,
+	getCookie,
+	getQuery,
 	getRequestHeader,
 	getRequestURL,
 	type H3Event,
@@ -14,7 +16,9 @@ import {
 } from "h3";
 import {
 	isPublicPath,
+	SESSION_NAME,
 	type SessionData,
+	safeNextPath,
 	sessionConfig,
 	sessionEpoch,
 	uiPassword,
@@ -91,6 +95,24 @@ export default defineEventHandler(async (event) => {
 		if (site && site !== "same-origin" && site !== "none") {
 			setResponseStatus(event, 403);
 			return { error: "cross-site request refused" };
+		}
+	}
+
+	// A signed-in visitor on the login page is sent on to `next`. This is also what makes a login
+	// land when the browser lost the client's redirect: Firefox aborts in-flight chunk imports on
+	// navigation, and the stale-chunk recovery then reloads /login over the target.
+	//
+	// Gated on the cookie EXISTING, not just on the path: `useSession` issues a sealed one when it
+	// finds none, and the login page is the one place a visitor with no session is expected.
+	if (pathname === "/login" && uiPassword() && getCookie(event, SESSION_NAME)) {
+		const session = await useSession<SessionData>(event, sessionConfig());
+		if (session.data.authenticated && session.data.epoch === sessionEpoch()) {
+			const next = getQuery(event).next;
+			return sendRedirect(
+				event,
+				safeNextPath(typeof next === "string" ? next : undefined),
+				302,
+			);
 		}
 	}
 
