@@ -129,6 +129,9 @@ jobs:
       # looks like a header mismatch, not a CI config error.
       CC_x86_64_unknown_linux_gnu: sccache cc
       CXX_x86_64_unknown_linux_gnu: sccache c++
+      # Line tables keep file:line in panics and shrink target/ and every link. The value is
+      # part of each sccache key, so changing it means bumping the target key's -vN- too.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -187,37 +190,29 @@ jobs:
 
       - name: Cache keys
         run: echo "rustc=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_ENV"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Restore only: the save steps at the end of the job run on a push to main, so a pull
+      # request never uploads a multi-GB cache.
+      - name: Restore cargo home
+        id: cargo-home
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             /usr/local/cargo/registry
             /usr/local/cargo/git
-          # Namespaced `-ci-` so a fork PR's cargo-home cache can never land in the `cargo-home-`
-          # pool the SIGNED release builds (deb.yml / android.yml) restore: registry/src holds
-          # already-extracted crate sources that cargo compiles WITHOUT re-checksumming past
-          # `.cargo-ok`, so a poisoned entry would be arbitrary Rust source compiled into a release
-          # artifact with no Cargo.lock diff. security-review 2026-08-15 finding 5. (The definitive
-          # control is operator-side: Gitea's "require approval for fork PRs".)
+          # `-ci-`, never the release builds' `cargo-home-` pool: extracted crate sources compile
+          # without a re-checksum, so an entry here must never reach a signed build.
           key: cargo-home-ci-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-home-ci-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore target
+        id: target
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          # -v3-: the prior `cargo-target-<rustc>-*` cache was poisoned when the runner ran
-          # out of disk mid-build and actions/cache saved a truncated target/ (a dep's .rmeta
-          # went missing -> E0463 "can't find crate"). A suffix bump wouldn't help — restore-keys
-          # would fall back to the poisoned prefix — so the prefix itself is versioned.
-          #
-          # `-debug-`: THIS JOB BUILDS DEBUG. deb.yml builds RELEASE and used to share this exact
-          # key, with a comment claiming the release build "reuses ci.yml's clean artifacts" — it
-          # never could. actions/cache is first-saver-wins on an exact key and this job is the
-          # faster of the two, so what landed under the shared key was always a debug-only target/
-          # (target/debug, no target/release). deb.yml restored a tree containing nothing it could
-          # use and, because the key was already taken, never got to save its own — so every
-          # release build re-linked from scratch, forever. Splitting the profiles into separate key
-          # families is the fix; do not merge them again, however tempting the dedupe looks.
-          key: cargo-target-debug-v3-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-target-debug-v3-${{ env.rustc }}-
+          # The prefix carries the version: bump it, never a suffix, to drop a bad cache, because
+          # restore-keys falls back to the old prefix. `-debug-` keeps this apart from deb.yml's
+          # release tree; an exact key is first-saver-wins, so sharing one starves the slower job.
+          key: cargo-target-debug-v4-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-target-debug-v4-${{ env.rustc }}-
 
       - name: Format
         run: cargo fmt --all --check
@@ -356,6 +351,23 @@ jobs:
             clients/android/app/src/main/assets/THIRD-PARTY-NOTICES.txt \
             || (echo "::error::attribution is stale — run scripts/gen-third-party-notices.sh and commit" && exit 1)
 
+      # Main writes the caches every pull request restores. A job whose restore missed or
+      # timed out would otherwise upload another full copy of the same key.
+      - name: Save cargo home
+        if: github.event_name == 'push' && steps.cargo-home.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: cargo-home-ci-${{ hashFiles('Cargo.lock') }}
+      - name: Save target
+        if: github.event_name == 'push' && steps.target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-debug-v4-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
+
   # The client stack cross-checked for aarch64. NOT an artifact job — deb.yml ships those —
   # this exists so a portability defect fails here instead of surfacing in a release build or
   # on a user's board. It earns its runtime: the bug that motivated it (a Vulkan extension
@@ -388,31 +400,26 @@ jobs:
 
       - name: Cache keys
         run: echo "rustc=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_ENV"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Restore only: the save steps at the end of the job run on a push to main, so a pull
+      # request never uploads a multi-GB cache.
+      - name: Restore cargo home
+        id: cargo-home
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             /usr/local/cargo/registry
             /usr/local/cargo/git
-          # Namespaced `-ci-` so a fork PR's cargo-home cache can never land in the `cargo-home-`
-          # pool the SIGNED release builds (deb.yml / android.yml) restore: registry/src holds
-          # already-extracted crate sources that cargo compiles WITHOUT re-checksumming past
-          # `.cargo-ok`, so a poisoned entry would be arbitrary Rust source compiled into a release
-          # artifact with no Cargo.lock diff. security-review 2026-08-15 finding 5. (The definitive
-          # control is operator-side: Gitea's "require approval for fork PRs".)
+          # `-ci-`, never the release builds' `cargo-home-` pool: extracted crate sources compile
+          # without a re-checksum, so an entry here must never reach a signed build.
           key: cargo-home-ci-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-home-ci-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore target
+        id: target
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          # Its OWN prefix: aarch64 artifacts must never share the amd64 jobs' target cache.
-          #
-          # `-debug-` in the name is load-bearing. This job builds DEBUG (clippy + a
-          # `cargo build`), while deb.yml's arm64 leg builds RELEASE into the same
-          # target/aarch64-unknown-linux-gnu tree. They used to share this exact key, and
-          # actions/cache is first-saver-wins on an exact key: this job finishes in ~1.5 min and
-          # saved a debug-only tree, so the .deb leg's release artifacts were NEVER persisted and
-          # it re-linked everything from sccache on every run. Same disease as the amd64 pair —
-          # see the note on deb.yml's `cargo-target-release-v1-` key.
+          # Own prefix: aarch64 artifacts never share the amd64 target cache. `-debug-` keeps it
+          # apart from deb.yml's arm64 release tree, since an exact key is first-saver-wins.
           key: cargo-target-arm64-debug-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-target-arm64-debug-v1-${{ env.rustc }}-
 
@@ -429,6 +436,22 @@ jobs:
         run: |
           cargo build --release --target aarch64-unknown-linux-gnu --locked \
             -p punktfunk-client-session --no-default-features
+
+      # Main writes the caches; see the save steps at the end of the `rust` job.
+      - name: Save cargo home
+        if: github.event_name == 'push' && steps.cargo-home.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: cargo-home-ci-${{ hashFiles('Cargo.lock') }}
+      - name: Save target
+        if: github.event_name == 'push' && steps.target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-arm64-debug-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
 
       # Visibility only — but the ONLY way to tell a warm cache from a cold one after the fact.
       # Every Rust job in this repo ends with this line for that reason; a hit rate that quietly

@@ -14,6 +14,11 @@ use crate::facts::{Facts, Nvidia, DOCS};
 use crate::seam::CommandRunner;
 use crate::ui::Reporter;
 
+/// Printing the password is one command, and it is the same one in the step that offers to
+/// generate it, in the outro, and in the docs.
+pub const PASSWORD_READ: &str =
+    "sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' ~/.config/punktfunk/web-password";
+
 pub fn banner(ui: &dyn Reporter) {
     ui.blank();
     ui.line("  punktfunk guided host installer — PREVIEW");
@@ -163,9 +168,11 @@ fn next_steps(
         ui.line(&format!(
             "  Console: https://{ip}:47992  (its certificate is this host's own)"
         ));
-        ui.line(
-            "  Password: sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' ~/.config/punktfunk/web-password",
-        );
+        let password = match choices.web_password {
+            Some(_) => format!("  Password: the one you typed — print it with: {PASSWORD_READ}"),
+            None => format!("  Password: {PASSWORD_READ}"),
+        };
+        ui.line(&password);
     } else {
         ui.line("  The web console is NOT on this box, and pairing and every setting live there.");
         ui.line(&format!(

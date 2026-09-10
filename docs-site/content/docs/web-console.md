@@ -70,9 +70,11 @@ In practice:
 The console is password-protected; where the password lives and how you change it depends on the
 host platform.
 
-**Linux packages (apt / RPM / Bazzite).** On first start `punktfunk-web-init` generates a random
-password and saves it to `~/.config/punktfunk/web-password` (as `PUNKTFUNK_UI_PASSWORD=…`). Read it
-from the file — the journal names the file but never the password, so the secret stays 0600:
+**Linux packages (apt / RPM / Bazzite).** The guided installer asks, right before it installs:
+take a generated password, or type your own. Either way it ends up in
+`~/.config/punktfunk/web-password` (as `PUNKTFUNK_UI_PASSWORD=…`) — a generated one is written by
+`punktfunk-web-init` on the console's first start. Read it from the file — the journal names the
+file but never the password, so the secret stays 0600:
 
 ```sh
 sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' ~/.config/punktfunk/web-password

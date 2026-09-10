@@ -24,6 +24,7 @@ pub enum Phase {
     Uninstall,
     Switch,
     Install,
+    Password,
     Omarchy,
     Conflicts,
     Groups,
@@ -63,6 +64,10 @@ pub enum StepAction {
     StartUnits {
         units: Vec<String>,
     },
+    /// Writes the console login password the user typed to `~/.config/punktfunk/web-password`,
+    /// 0600. The value stays in `Choices`: a plan is echoed, dry-run printed and pinned in
+    /// goldens, and a password belongs in none of the three.
+    WebPassword,
     /// Files the console's certificate in the user's NSS store. Resolved in `exec`: the host
     /// mints the certificate on its first start, so the step has to wait for the file.
     TrustCert,
@@ -171,6 +176,19 @@ pub fn build(facts: &Facts, choices: &Choices) -> Plan {
         }
         None => install_phase(&mut plan, facts, choices, backend),
     };
+
+    // Before Omarchy, whose hand-off ends the run, and long before the console starts: the
+    // console's own first start generates a password only when the file is not there yet.
+    if choices.components.host && choices.web_password.is_some() {
+        plan.push(
+            Phase::Password,
+            "Web console password",
+            vec![Step {
+                action: StepAction::WebPassword,
+                ends_run: false,
+            }],
+        );
+    }
 
     if facts.omarchy {
         plan.push(Phase::Omarchy, "Omarchy", omarchy_steps(facts, choices));

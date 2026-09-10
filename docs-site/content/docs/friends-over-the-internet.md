@@ -91,7 +91,8 @@ now** or **Unpair** on the Paired devices table ends a running session at once.
 reaches your friend** — both leave the host unreachable from the internet, and this does not. Take
 this path only when neither fits, and take the rules below seriously.
 
-Forward UDP `9777` and `9779` to the host. **Never forward `47990` or `9778`.**
+Forward UDP `9777` and `9779` to the host. **Never forward `47990`, `47992` or `9778`** — the
+management API, the web console and the browser plane.
 
 Send a [link](/docs/profiles-and-links), not a bare address, so your friend's first connect is
 verified rather than blind. The **Connect** card on the Host page writes one; swap its address for

@@ -77,6 +77,11 @@ pub struct Choices {
     /// Trust the console's certificate in the user's browser store. On by default on every
     /// host install and never a row on the screen: it is one certificate, this machine's own.
     pub console_cert: bool,
+    /// The console login password the user typed. `None` leaves it to the console's own
+    /// first start, which generates one into `~/.config/punktfunk/web-password`. Never
+    /// echoed: `exec` writes the file, the plan step carries no value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_password: Option<String>,
     /// Why the box chose these — shown next to the row when it is on.
     pub group_why: Option<String>,
     pub gamestream_why: Option<String>,
@@ -144,6 +149,8 @@ impl Choices {
             omarchy_theme: pins.omarchy_theme.unwrap_or(omarchy_setup),
             // The trust lands in this box's browser store; a box with no desktop has none.
             console_cert: pins.console_cert.unwrap_or(facts.desktop_sessions),
+            // Asked after the settings screen, so nothing derives it here.
+            web_password: None,
             group_why: punktfunk_group.then_some(group_why).flatten(),
             gamestream_why: (gamestream && facts.sunshine_active)
                 .then(|| "Sunshine/Apollo already on this box".to_string()),
@@ -203,6 +210,7 @@ mod tests {
             systemd_pid1: true,
             user_manager: true,
             web_unit_present: true,
+            web_password_present: false,
             scripting_unit_disabled: false,
             ip: Some("192.168.1.10".into()),
             user: "pf".into(),

@@ -279,6 +279,7 @@ jobs:
         # Recommends both). Both need bun (ensured in Prep).
         run: |
           PF_VERSION="$PF_VERSION" PF_RELEASE="$PF_RELEASE" \
+            PF_RPM_TOPDIR=/tmp/pf-rpmbuild \
             PF_WITH_WEB=1 PF_WITH_SCRIPTING=1 \
             PF_PREBUILT_WEB_OUTPUT="$GITHUB_WORKSPACE/web/.output" \
             bash packaging/rpm/build-rpm.sh

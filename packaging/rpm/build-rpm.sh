@@ -44,8 +44,15 @@ HOST_OPT=()
 ROOTDIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOTDIR"
 
-TOP="$(mktemp -d)"
-trap 'rm -rf "$TOP"' EXIT
+# PF_RPM_TOPDIR pins the build tree. sccache keys carry each crate's absolute path, so a fresh
+# mktemp dir per run misses every workspace crate. A pinned dir is the caller's to remove.
+if [ -n "${PF_RPM_TOPDIR:-}" ]; then
+  TOP="$PF_RPM_TOPDIR"
+  rm -rf "$TOP/RPMS"   # never ship a previous run's packages
+else
+  TOP="$(mktemp -d)"
+  trap 'rm -rf "$TOP"' EXIT
+fi
 mkdir -p "$TOP"/{SOURCES,SPECS,BUILD,BUILDROOT,RPMS,SRPMS}
 
 # Source tarball with the prefix %autosetup expects (punktfunk-<version>/). From HEAD so the
