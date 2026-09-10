@@ -281,9 +281,30 @@ pub fn headless_set_host(selector: &str) -> glib::ExitCode {
 
 /// `--forget-host <fp|host[:port]>` — remove a saved host (drops the pinned fingerprint; a later
 /// connect must re-pair/trust). Prints `forgot N`; succeeds even if nothing matched (idempotent).
+///
+/// An address naming two PINNED records is refused: both OS installs of a dual-boot box answer
+/// at one lease, and forgetting a host is not undoable. The fingerprint selects one of them.
 pub fn headless_forget_host(selector: &str) -> glib::ExitCode {
     let sel = parse_selector(selector);
     let mut known = KnownHosts::load();
+    if let Selector::Addr(addr, port) = &sel {
+        let pinned: Vec<&KnownHost> = known
+            .hosts
+            .iter()
+            .filter(|h| h.addr == *addr && h.port == *port && !h.fp_hex.is_empty())
+            .collect();
+        if pinned.len() > 1 {
+            eprintln!(
+                "Couldn't forget {addr}:{port} — it names {} saved hosts. \
+                 Forget one by its fingerprint:",
+                pinned.len()
+            );
+            for h in pinned {
+                eprintln!("  {}  {}", h.fp_hex, h.name);
+            }
+            return glib::ExitCode::FAILURE;
+        }
+    }
     let before = known.hosts.len();
     known.hosts.retain(|h| !sel.matches(h));
     let removed = before - known.hosts.len();
