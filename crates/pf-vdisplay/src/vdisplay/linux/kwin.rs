@@ -307,11 +307,10 @@ impl VirtualDisplay for KwinDisplay {
             embedded_pointer = !self.hw_cursor,
             "KWin virtual output ready"
         );
-        let mut expect_exact_dims = false;
-        // Ends up as the request unless CVT shrinks the width ([`CVT_H_GRANULARITY`]).
-        // This is `preferred_mode` — capturer gate and encoder both key on it.
-        let mut final_dims = (width, height);
-        let achieved_hz = if want_high {
+        // `final_dims` ends up as the request unless CVT shrinks the width
+        // ([`CVT_H_GRANULARITY`]) or KWin kept a stored slot we could not move. It is
+        // `preferred_mode` — capturer gate and encoder both key on it.
+        let (final_dims, expect_exact_dims, achieved_hz) = if want_high {
             // Install+select the high-refresh custom mode. In-process first; kscreen-doctor
             // if KWin has no `set_custom_modes` or misses its budget.
             let active = crate::kwin_output_mgmt::set_custom_mode(
@@ -333,9 +332,7 @@ impl VirtualDisplay for KwinDisplay {
             // also proves we left the sacrificial birth size so the stream will renegotiate.
             match active {
                 Some((aw, ah, ahz)) if mode_satisfies((aw, ah), width, height) => {
-                    expect_exact_dims = true;
-                    final_dims = (aw, ah);
-                    ahz
+                    ((aw, ah), true, ahz)
                 }
                 other => {
                     // Install rejected: stuck at sacrificial size. Recreate at the real
@@ -360,95 +357,16 @@ impl VirtualDisplay for KwinDisplay {
                         height,
                         "KWin virtual output ready (fallback)"
                     );
-                    60
+                    // The recreate takes the same stored slot as a ≤60 Hz create. Unverified,
+                    // the session streams whatever `kwinoutputconfig.json` restored.
+                    let (dims, exact) = verify_or_reassert(&our_prefix, width, height);
+                    (dims, exact, 60)
                 }
             }
         } else {
             // ≤60 Hz installs no mode, so nothing here learned what KWin built.
-            // `kwinoutputconfig.json` restores mode+scale by our stable name — a slot
-            // last at 1080p comes back 1080p on a 4K request. Unverified, capture and
-            // encoder open at KWin's size while the client decoded the negotiated one.
-            match crate::kwin_output_mgmt::actual_dims(&our_prefix) {
-                // Honoured. Do not force scale 1.0: the stable name exists so KDE
-                // reapplies this client's scale. Screencast is PIXEL size, so scale
-                // should not move captured dims.
-                Some((aw, ah, _, scale)) if (aw, ah) == (width, height) => {
-                    if scale != 1.0 {
-                        tracing::debug!(
-                            width,
-                            height,
-                            scale,
-                            "KWin virtual output verified at the requested size, carrying a stored \
-                             non-unity scale (per-client scaling — capture is unaffected)"
-                        );
-                    }
-                }
-                Some((aw, ah, _, scale)) => {
-                    tracing::warn!(
-                        actual_w = aw,
-                        actual_h = ah,
-                        requested_w = width,
-                        requested_h = height,
-                        stored_scale = scale,
-                        our_prefix,
-                        "KWin built our virtual output at a DIFFERENT size than requested (a stored \
-                         kwinoutputconfig.json mode/scale for this output name) — re-asserting the \
-                         requested mode so the stream matches what the client negotiated"
-                    );
-                    // Same install+select as the sacrificial birth: `aw`/`ah` are the
-                    // current (wrong) size. 60 Hz, not `mode.refresh_hz` — this arm is
-                    // ≤60 Hz and only the size is wrong; asking the client's rate would
-                    // install 30 Hz for a 30 fps client and throttle the compositor.
-                    match crate::kwin_output_mgmt::set_custom_mode(
-                        &our_prefix,
-                        aw,
-                        ah,
-                        width,
-                        height,
-                        60,
-                    ) {
-                        // Same test as the high-refresh arm so they cannot drift. Moving
-                        // the mode also proves the screencast will renegotiate.
-                        Some((cw, ch, _)) if mode_satisfies((cw, ch), width, height) => {
-                            expect_exact_dims = true;
-                            final_dims = (cw, ch);
-                            tracing::info!(
-                                active_w = cw,
-                                active_h = ch,
-                                "KWin virtual output corrected to the requested size"
-                            );
-                        }
-                        other => {
-                            // Report the size that is there, not the request: dims-keyed
-                            // resolves and the encoder key on `final_dims`. The session
-                            // still runs; a monitor mirror legitimately streams a size
-                            // the client never asked for.
-                            tracing::warn!(
-                                active = ?other,
-                                actual_w = aw,
-                                actual_h = ah,
-                                requested_w = width,
-                                requested_h = height,
-                                "KWin would not re-assert the requested mode — the output is STUCK \
-                                 at its stored size. Clear this output's entry from \
-                                 kwinoutputconfig.json (or set it to the streamed resolution in \
-                                 System Settings → Display) and reconnect"
-                            );
-                            final_dims = (aw, ah);
-                        }
-                    }
-                }
-                // Management unavailable, or a same-name supersede in flight. Do not
-                // reconfigure an output we cannot identify.
-                None => {
-                    tracing::debug!(
-                        our_prefix,
-                        "KWin: could not read back the virtual output's actual mode (management \
-                         unavailable or a same-named supersede in flight) — proceeding unverified"
-                    );
-                }
-            }
-            mode.refresh_hz
+            let (dims, exact) = verify_or_reassert(&our_prefix, width, height);
+            (dims, exact, mode.refresh_hz)
         };
         let disabled = self.apply_topology(&name, &our_prefix, final_dims, &pre_enabled);
         // Stash restore on the group, not this session's keepalive: a per-session
@@ -836,6 +754,83 @@ fn mode_satisfies(active: (u32, u32), want_w: u32, want_h: u32) -> bool {
     ah == want_h && aw <= want_w && want_w - aw < CVT_H_GRANULARITY
 }
 
+/// Verify a just-created virtual output really sits at `width`×`height`, re-asserting the mode
+/// when a stored slot won instead. Returns the dims to stream at and whether they are ours
+/// (arms the capture's birth-mode gate).
+///
+/// `kwinoutputconfig.json` restores mode+scale by our stable output name, so a slot last at
+/// 1080p comes back 1080p on a 4K request. Unverified, capture and encoder open at KWin's size
+/// while the client decodes the size it negotiated. A size we cannot correct is returned as it
+/// is: everything dims-keyed runs off it, and a monitor mirror legitimately streams a size the
+/// client never asked for.
+fn verify_or_reassert(our_prefix: &str, width: u32, height: u32) -> ((u32, u32), bool) {
+    match crate::kwin_output_mgmt::actual_dims(our_prefix) {
+        // Honoured. Do not force scale 1.0: the stable name exists so KDE reapplies this
+        // client's scale. Screencast is PIXEL size, so scale should not move captured dims.
+        Some((aw, ah, _, scale)) if (aw, ah) == (width, height) => {
+            if scale != 1.0 {
+                tracing::debug!(
+                    width,
+                    height,
+                    scale,
+                    "KWin virtual output verified at the requested size, carrying a stored \
+                     non-unity scale (per-client scaling — capture is unaffected)"
+                );
+            }
+            ((width, height), false)
+        }
+        Some((aw, ah, _, scale)) => {
+            tracing::warn!(
+                actual_w = aw,
+                actual_h = ah,
+                requested_w = width,
+                requested_h = height,
+                stored_scale = scale,
+                our_prefix,
+                "KWin built our virtual output at a DIFFERENT size than requested (a stored \
+                 kwinoutputconfig.json mode/scale for this output name) — re-asserting the \
+                 requested mode so the stream matches what the client negotiated"
+            );
+            // 60 Hz, not the client's rate: only the size is wrong here, and a 30 fps client
+            // would install 30 Hz and throttle the compositor.
+            match crate::kwin_output_mgmt::set_custom_mode(our_prefix, aw, ah, width, height, 60) {
+                Some((cw, ch, _)) if mode_satisfies((cw, ch), width, height) => {
+                    tracing::info!(
+                        active_w = cw,
+                        active_h = ch,
+                        "KWin virtual output corrected to the requested size"
+                    );
+                    ((cw, ch), true)
+                }
+                other => {
+                    tracing::warn!(
+                        active = ?other,
+                        actual_w = aw,
+                        actual_h = ah,
+                        requested_w = width,
+                        requested_h = height,
+                        "KWin would not re-assert the requested mode — the output is STUCK at \
+                         its stored size. Clear this output's entry from kwinoutputconfig.json \
+                         (or set it to the streamed resolution in System Settings → Display) \
+                         and reconnect"
+                    );
+                    ((aw, ah), false)
+                }
+            }
+        }
+        // Management unavailable, or a same-name supersede in flight. Do not reconfigure an
+        // output we cannot identify.
+        None => {
+            tracing::debug!(
+                our_prefix,
+                "KWin: could not read back the virtual output's actual mode (management \
+                 unavailable or a same-named supersede in flight) — proceeding unverified"
+            );
+            ((width, height), false)
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct KModeRow {
     /// kscreen mode id — address by this, never the requested `WxH@Hz` string.
@@ -968,12 +963,17 @@ fn set_custom_refresh(width: u32, height: u32, hz: u32, output: &str) -> Option<
     };
     match read_active_mode(&output) {
         Some((w, h, achieved)) => {
-            if achieved >= hz && (w, h) == (width, height) {
-                tracing::info!(
+            if !mode_satisfies((w, h), width, height) {
+                tracing::warn!(
                     output,
-                    requested = hz,
+                    requested_w = width,
+                    requested_h = height,
+                    active_w = w,
+                    active_h = h,
                     achieved,
-                    "KWin virtual output: custom refresh applied"
+                    applied,
+                    "KWin kept a mode that is not the one selected — a stored \
+                     kwinoutputconfig.json slot for this output name, not a CVT alignment"
                 );
             } else if achieved >= hz {
                 tracing::info!(
@@ -982,7 +982,7 @@ fn set_custom_refresh(width: u32, height: u32, hz: u32, output: &str) -> Option<
                     achieved,
                     active_w = w,
                     active_h = h,
-                    "KWin virtual output: custom refresh applied at a CVT-aligned size"
+                    "KWin virtual output: custom mode applied"
                 );
             } else {
                 tracing::warn!(
@@ -1908,9 +1908,12 @@ mod tests {
     }
 
     /// A stored 1080p for the output name is not an alignment of a 4K request.
+    /// The second pair is the field case: a stored slot streamed for a whole
+    /// session because the create path never re-read the recreated output.
     #[test]
     fn a_restored_stored_mode_does_not_pass_for_the_requested_one() {
         assert!(!mode_satisfies((1920, 1080), 3840, 2160));
+        assert!(!mode_satisfies((3600, 2260), 1800, 880));
     }
 
     /// libxcvt rounds a 2868-wide request down to 2864; rejecting it would strand
