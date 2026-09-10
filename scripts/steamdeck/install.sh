@@ -146,13 +146,21 @@ log "Building punktfunk-host (release) — first build is slow (~10-15 min)"
 # desktops, where a host without nvenc advertises HEVC and then dies at encoder open. Both entry
 # points are dlopen'd, so an AMD Deck pays nothing to carry them.
 #
+# The console tells one build from the next by its version string alone. Without the commit
+# every rebuild reports the same X.Y.Z, and a finished update reads as "nothing newer".
+# An empty value is ignored by the build script, which falls back to the Cargo version.
+PF_BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1)"
+PF_SHA="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || true)"
+PF_BUILD_VERSION=""
+[ -z "$PF_BASE" ] || [ -z "$PF_SHA" ] || PF_BUILD_VERSION="$PF_BASE+g$PF_SHA"
+
 # punktfunk-encode-worker is built alongside: the capability-carrying PyroWave encode worker, a
 # SEPARATE binary that lands next to the host in $TARGET_DIR/release (which is how the host finds
 # it — sibling of /proc/self/exe). The sudo block further down setcaps that one and only that one;
 # the host must stay capability-free or KWin cannot identify it and Desktop mode dies.
 distrobox enter "$BOX" -- bash -lc "
 set -e
-export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR'
+export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR='$TARGET_DIR' PUNKTFUNK_BUILD_VERSION='$PF_BUILD_VERSION'
 cd '$SRC' && cargo build -r -p punktfunk-host -p punktfunk-encode-worker --features punktfunk-host/nvenc,punktfunk-host/vulkan-encode
 "
 [ -x "$BIN" ] || die "build did not produce $BIN"

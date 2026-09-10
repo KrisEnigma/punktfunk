@@ -92,6 +92,53 @@ pub(super) fn opt_in_hint() -> String {
         .to_string()
 }
 
+/// The Deck's build tree, or `None` where there is no on-device source build.
+fn source_tree() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let dir = Path::new(&home).join("punktfunk");
+    dir.join(".git").is_dir().then_some(dir)
+}
+
+/// Commits the tracked upstream has and this checkout does not.
+///
+/// A source build carries no published artifact, so the signed manifest cannot answer
+/// "is anything newer" for it — only the remote can. `None` is "git could not answer"
+/// (no checkout, a detached tag, an unreachable forge), which keeps the last count
+/// rather than reporting a Deck up to date on one bad network moment.
+pub(super) fn source_behind() -> Option<u64> {
+    let dir = source_tree()?;
+    // lowSpeed is git's own timeout: an unreachable forge must not wedge the refresh
+    // thread. GIT_TERMINAL_PROMPT stops a credential prompt waiting on a tty the host
+    // does not have.
+    let fetched = Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args([
+            "-c",
+            "http.lowSpeedLimit=1000",
+            "-c",
+            "http.lowSpeedTime=30",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+        ])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .status()
+        .ok()?
+        .success();
+    if !fetched {
+        return None;
+    }
+    capture(Command::new("git").arg("-C").arg(&dir).args([
+        "rev-list",
+        "--count",
+        "HEAD..@{upstream}",
+    ]))?
+    .trim()
+    .parse()
+    .ok()
+}
+
 /// Deck source rebuild via `systemd-run` so the script's host restart cannot
 /// kill a child in our cgroup. Fail: we survive, the unit fails. Success: we
 /// die mid-poll; the `source_build` intent at next boot is the signal.

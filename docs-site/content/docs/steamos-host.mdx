@@ -176,6 +176,10 @@ no root, because this install is owned by your own user. It asks for the console
 rebuilds on the device, so expect several minutes; the card shows progress and the full log lands in
 `~/.config/punktfunk/logs/update-steamos.log`. See [Updating](/docs/updating).
 
+A source build has no package feed to be behind, so the card compares your checkout with `main`:
+the button appears when there are commits to pull, and the version it reports carries the commit it
+was built from (`0.35.0+g1a2b3c4`), which is how one rebuild is told from the next.
+
 **From a terminal.** One command — `--pull` fetches the new source first:
 
 ```sh

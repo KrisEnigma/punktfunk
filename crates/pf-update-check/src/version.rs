@@ -126,6 +126,21 @@ mod tests {
     }
 
     #[test]
+    fn a_source_build_commit_suffix_is_not_a_ci_run() {
+        // The Deck stamps `X.Y.Z+g<sha>` so one rebuild can be told from the next. A hex
+        // sha cannot spell `ci`, so the canary axis still reads "no run number" and a
+        // published run never compares against a checkout.
+        assert_eq!(triple("0.35.0+gad2aee123"), Some((0, 35, 0)));
+        assert_eq!(canary_run("0.35.0+gad2aee123"), None);
+        assert!(!is_newer(
+            "0.35.0~ci412.gdeadbeef",
+            Some(412),
+            "0.35.0+gad2aee123",
+            Channel::Canary
+        ));
+    }
+
+    #[test]
     fn newer_stable() {
         assert!(is_newer("0.23.0", None, "0.22.2", Channel::Stable));
         assert!(!is_newer("0.22.2", None, "0.22.2", Channel::Stable));
