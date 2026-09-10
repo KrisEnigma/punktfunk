@@ -258,13 +258,13 @@ export const SectionDisplays: FC = () => {
 							<h2 className="text-sm font-medium">
 								{m.display_behaviour_title()}
 							</h2>
-							{shown && (
+							{effective && (
 								<p className="text-sm">
-									{/* Read from the host's `effective`, never a local draft — the old
-									    badge row restated the operator's unsaved edits back to them
-									    as though the host had already adopted them. */}
-									{describePolicy(shown, { live })}
-									{shown.layout.mode === "manual" && (
+									{/* The policy in effect: never a local draft, and never the hovered preview. This sits
+									    right above the preset grid, so text that followed the hover would move the grid under
+									    the cursor. The map and each card's caption show the preview instead. */}
+									{describePolicy(effective, { live })}
+									{effective.layout.mode === "manual" && (
 										<> {m.display_arranged_by_you()}</>
 									)}
 								</p>
