@@ -1868,6 +1868,21 @@ mod tests {
             assert_eq!(p.effective_for(Some(TV)).keep_alive, KeepAlive::Forever);
         }
 
+        /// Teardown is where "keep forever" has to land, and it runs on the linger
+        /// thread with no session in scope — it reaches the device through the identity
+        /// slot's recorded owner. Asserted here on the resolution the registry performs.
+        #[test]
+        fn a_kept_display_resolves_its_own_owners_keep_alive() {
+            let mut p = host();
+            p.preset = Preset::Custom;
+            p.keep_alive = KeepAlive::Off;
+            // The TV pinned Forever; the tablet pinned nothing.
+            assert_eq!(p.effective_for(Some(TV)).keep_alive, KeepAlive::Forever);
+            assert_eq!(p.effective_for(Some(PAD)).keep_alive, KeepAlive::Off);
+            // A display with no recorded owner (shared / anonymous) follows the host.
+            assert_eq!(p.effective_for(None).keep_alive, KeepAlive::Off);
+        }
+
         /// Arranging must not clear what it does not mention — the trap the
         /// old six-argument rebuild kept falling into.
         #[test]

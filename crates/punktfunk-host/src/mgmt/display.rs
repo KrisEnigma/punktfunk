@@ -130,11 +130,14 @@ pub(crate) fn display_settings_state() -> DisplaySettingsState {
     if cfg!(target_os = "linux") {
         enforced.push("capture_monitor".into());
     }
-    // Wired through a call site that has the client's fingerprint. The rest are
-    // stored and served but not yet consulted: they are read where no
-    // fingerprint is in scope (the registry entry, the open path), which is its
-    // own change. Advertising them would put dead controls on the device sheet.
-    let client_enforced: Vec<String> = vec!["mode_conflict".into(), "identity".into()];
+    // What acts per device. The rest are stored and served but read inside a backend
+    // `create`, which takes no client — advertising one would put a control on the
+    // device sheet that this host would store and ignore.
+    let client_enforced: Vec<String> = vec![
+        "keep_alive".into(),
+        "mode_conflict".into(),
+        "identity".into(),
+    ];
     // Overlays ride their own field, never `settings`. The console PUTs `settings`
     // back whole, and the PUT refuses a body carrying `clients` — so leaving them
     // in here would make every host-wide save fail the moment one device had an

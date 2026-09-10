@@ -131,6 +131,31 @@ export const ClientPolicySheet: FC<{
 
 				{host && (
 					<div className="space-y-5">
+						{enforced.includes("keep_alive") && (
+							<Question
+								label={m.display_q_keep()}
+								inherited={keepLabel(host.keep_alive)}
+								pinned={overlay.keep_alive != null}
+								busy={busy}
+								onFollow={() => write({ keep_alive: null })}
+							>
+								<Option
+									selected={overlay.keep_alive?.mode === "off"}
+									busy={busy}
+									onPick={() => write({ keep_alive: { mode: "off" } })}
+								>
+									{m.display_q_keep_off()}
+								</Option>
+								<Option
+									selected={overlay.keep_alive?.mode === "forever"}
+									busy={busy}
+									onPick={() => write({ keep_alive: { mode: "forever" } })}
+								>
+									{m.display_q_keep_forever()}
+								</Option>
+							</Question>
+						)}
+
 						{enforced.includes("mode_conflict") && (
 							<Question
 								label={m.display_q_second()}
