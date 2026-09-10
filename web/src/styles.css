@@ -186,8 +186,11 @@
 	--secondary: color-mix(in oklab, var(--pf-page) 76%, var(--pf-accent));
 	--border: color-mix(in oklab, var(--pf-page) 66%, var(--pf-accent));
 	--input: var(--border);
-	--accent: color-mix(in oklab, var(--pf-page) 72%, var(--pf-accent));
-	--accent-foreground: var(--foreground);
+	/* NOT a wash of the accent. `--accent` is the card's ring as well as its hover
+	   surface, and the hover already dilutes it to 30% at the call site — so a token
+	   diluted here too left every unselected card with no visible outline. :root does
+	   the same thing with the brand violet, which is what this follows. */
+	--accent: var(--pf-accent);
 }
 
 /* Light mode takes --primary from --pf-brand and keeps :root's white text, so the
