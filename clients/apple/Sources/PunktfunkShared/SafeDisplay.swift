@@ -24,6 +24,7 @@
 // A notched Mac is the same problem rotated: the camera housing eats the TOP of a landscape panel,
 // so its safe mode is shorter rather than narrower.
 
+import CoreGraphics
 import Foundation
 
 public enum SafeDisplay {
@@ -109,5 +110,29 @@ public enum SafeDisplay {
     /// about half the time.
     private static func evenFloor(_ value: Double, _ minimum: Int) -> Int {
         max(Int(value.rounded(.down)), minimum) / 2 * 2
+    }
+
+    /// The box a FULL-SCREEN picture is aspect-fit into on a Mac with a camera housing.
+    ///
+    /// The whole view by default: a full-screen stream is meant to fill the panel, housing and
+    /// all — a thin occluded strip at top centre is the deal the viewer took. The one exception is
+    /// a mode that is EXACTLY this screen's safe-area mode, which was chosen to clear the housing:
+    /// centred in the full panel its top rows land back under the notch, so it fits the shortened
+    /// box and sits flush below instead. Those are the two cases, and the chosen mode is what
+    /// picks between them.
+    ///
+    /// `bounds` is a non-flipped view rect (origin bottom-left), so the top is trimmed off the
+    /// height. Everything the picture is measured against — the fit, the pointer mapping, the
+    /// cursor scale — must use this rect or a click lands the height of the housing off.
+    public static func videoBox(
+        bounds: CGRect, topInsetPoints: Double,
+        content: (width: Int, height: Int)?, safeMode: (width: Int, height: Int)?
+    ) -> CGRect {
+        guard topInsetPoints > 0, let content, let safeMode,
+            content.width == safeMode.width, content.height == safeMode.height
+        else { return bounds }
+        return CGRect(
+            x: bounds.minX, y: bounds.minY,
+            width: bounds.width, height: max(bounds.height - topInsetPoints, 1))
     }
 }

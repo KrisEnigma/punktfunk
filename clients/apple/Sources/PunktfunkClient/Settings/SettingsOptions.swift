@@ -240,51 +240,22 @@ enum SettingsOptions {
 
     #if os(macOS)
     /// This display's real modes: the PANEL first, then — on a notched Mac — the variant that
-    /// clears the camera housing, which is the mode a full-screen stream can show whole.
+    /// clears the camera housing, which is the mode a full-screen stream can show whole (see
+    /// `NSScreen.panelPixelSize`, the one definition the fullscreen video fit reads too).
     ///
     /// The two are deduped here, so a second entry means "this display has a housing" and a caller
     /// can offer the choice on exactly the Macs that have one.
     @MainActor
     static func macDisplayModes() -> [(name: String, w: Int, h: Int)] {
         guard let screen = NSScreen.main else { return [] }
-        let native = nativePixelSize(screen)
-        let safe = SafeDisplay.mode(
-            nativeWidth: native.w, nativeHeight: native.h,
-            topInsetPoints: Double(screen.safeAreaInsets.top),
-            // Points → panel pixels. NOT backingScaleFactor — see `SafeDisplay.mode(topInset:)`.
-            scale: Double(native.h) / max(Double(screen.frame.height), 1))
+        let panel = screen.panelPixelSize
+        let safe = screen.notchSafePixelSize
         let modes: [(name: String, w: Int, h: Int)] = [
-            (name: "This display", w: native.w, h: native.h),
+            (name: "This display", w: panel.width, h: panel.height),
             (name: "This display (below the notch)", w: safe.width, h: safe.height),
         ]
         var seen = Set<String>()
         return modes.filter { seen.insert("\($0.w)x\($0.h)").inserted }
-    }
-
-    /// IOKit's flag for the mode that drives the panel 1:1 (`kDisplayModeNativeFlag`).
-    private static let displayModeNativeFlag: UInt32 = 0x0200_0000
-
-    /// The PANEL's pixels, which are not the framebuffer's. A scaled mode ("More Space") renders
-    /// into a buffer LARGER than the panel and the window server shrinks it, so
-    /// `frame × backingScaleFactor` reads 3420×2224 on a 2560×1664 MacBook Air — a mode the host
-    /// would really drive, at a third more pixels than the screen can show. The mode list carries
-    /// the panel size on the modes IOKit marks native.
-    ///
-    /// Falls back to the framebuffer for a display that publishes no native mode at all (Sidecar,
-    /// screen sharing, some virtual outputs), which is the best guess available there.
-    @MainActor
-    private static func nativePixelSize(_ screen: NSScreen) -> (w: Int, h: Int) {
-        let fallback = (Int(screen.frame.width * screen.backingScaleFactor),
-                        Int(screen.frame.height * screen.backingScaleFactor))
-        guard let number = screen.deviceDescription[
-            NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-            let modes = CGDisplayCopyAllDisplayModes(
-                CGDirectDisplayID(number.uint32Value), nil) as? [CGDisplayMode],
-            let panel = modes
-                .filter({ $0.ioFlags & displayModeNativeFlag != 0 })
-                .max(by: { $0.pixelWidth * $0.pixelHeight < $1.pixelWidth * $1.pixelHeight })
-        else { return fallback }
-        return (panel.pixelWidth, panel.pixelHeight)
     }
     #endif
 

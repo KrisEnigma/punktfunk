@@ -91,6 +91,43 @@ final class SafeDisplayTests: XCTestCase {
         XCTAssertEqual(m.height, 1600)
     }
 
+    func testFullScreenVideoBoxPicksItsCaseFromTheMode() {
+        // A 13" Air full-screen at "More Space": 1710×1112 pt of view, a 42.8 pt housing.
+        let bounds = CGRect(x: 0, y: 0, width: 1710, height: 1112)
+        let safe = (width: 2560, height: 1600)
+
+        // The panel mode fills the whole screen — the housing occludes a strip, which is the deal
+        // the viewer took by choosing it.
+        XCTAssertEqual(
+            SafeDisplay.videoBox(
+                bounds: bounds, topInsetPoints: 42.8, content: (2560, 1664), safeMode: safe),
+            bounds)
+
+        // The below-the-notch mode is trimmed instead, so it lands flush under the housing rather
+        // than centred with its top rows behind it. Bottom-left origin: the TOP comes off.
+        let trimmed = SafeDisplay.videoBox(
+            bounds: bounds, topInsetPoints: 42.8, content: (2560, 1600), safeMode: safe)
+        XCTAssertEqual(trimmed.height, 1112 - 42.8, accuracy: 0.001)
+        XCTAssertEqual(trimmed.minY, 0)
+        XCTAssertEqual(trimmed.width, 1710)
+    }
+
+    func testVideoBoxIsTheWholeViewWithoutAHousingOrAMode() {
+        let bounds = CGRect(x: 0, y: 0, width: 2560, height: 1440)
+        // No housing: nothing to route around, whatever the mode.
+        XCTAssertEqual(
+            SafeDisplay.videoBox(
+                bounds: bounds, topInsetPoints: 0, content: (2560, 1440),
+                safeMode: (width: 2560, height: 1440)),
+            bounds)
+        // Before the first frame there is no mode to match — never trim on a guess.
+        XCTAssertEqual(
+            SafeDisplay.videoBox(
+                bounds: bounds, topInsetPoints: 42.8, content: nil,
+                safeMode: (width: 2560, height: 1600)),
+            bounds)
+    }
+
     func testMacWithoutAHousingYieldsTheNativeModeSoTheRowDedups() {
         // Every Mac without a notch, and any external display: zero inset ⇒ the panel itself, which
         // `macDisplayModes` dedups away instead of offering the same size twice.
