@@ -21,6 +21,9 @@
 // under aspect-fit only one axis can bind, and on a landscape phone that axis is always the
 // horizontal one. Insetting the height too would shrink the picture without uncovering anything.
 
+// A notched Mac is the same problem rotated: the camera housing eats the TOP of a landscape panel,
+// so its safe mode is shorter rather than narrower.
+
 import Foundation
 
 public enum SafeDisplay {
@@ -78,9 +81,33 @@ public enum SafeDisplay {
     ) -> (width: Int, height: Int) {
         let insetPixels = max(0, sideInsetPoints) * max(scale, 1) * 2 // both sides
         let width = Double(nativeWidth) - insetPixels
-        let evenFloor: (Double, Int) -> Int = { value, minimum in
-            max(Int(value.rounded(.down)), minimum) / 2 * 2
-        }
         return (evenFloor(width, minWidth), evenFloor(Double(nativeHeight), minHeight))
+    }
+
+    /// The Mac safe-area mode in PIXELS: full native width, height reduced by the camera housing
+    /// above it.
+    ///
+    /// A Mac's housing sits on the TOP edge of a landscape panel, so the axis that binds is the
+    /// vertical one — the mirror of the phone case — and it eats ONE side, not two.
+    ///
+    /// `scale` again converts the point-valued inset into native pixels, but on a Mac it is NOT
+    /// `backingScaleFactor`: a scaled mode renders into a framebuffer larger than the panel and the
+    /// window server shrinks it, so the honest factor is `nativeHeight / screen.frame.height`. That
+    /// makes it a ratio of two scaled sizes, which lands the inset a hair off a whole pixel — round
+    /// before subtracting or the even-floor eats 2 px off a 64 px housing.
+    public static func mode(
+        nativeWidth: Int, nativeHeight: Int, topInsetPoints: Double, scale: Double
+    ) -> (width: Int, height: Int) {
+        let insetPixels = (max(0, topInsetPoints) * max(scale, 1)).rounded()
+        return (
+            evenFloor(Double(nativeWidth), minWidth),
+            evenFloor(Double(nativeHeight) - insetPixels, minHeight)
+        )
+    }
+
+    /// Host-valid rounding: the encoder rejects odd dimensions, and an inset subtraction lands odd
+    /// about half the time.
+    private static func evenFloor(_ value: Double, _ minimum: Int) -> Int {
+        max(Int(value.rounded(.down)), minimum) / 2 * 2
     }
 }

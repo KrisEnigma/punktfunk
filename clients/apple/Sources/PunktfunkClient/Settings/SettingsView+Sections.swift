@@ -83,7 +83,7 @@ extension SettingsView {
                     format: .number.grouping(.never))
             }
             LabeledContent("") {
-                Button("Use this display's mode") { fillFromMainScreen() }
+                displayModeControl
             }
             #endif
         }

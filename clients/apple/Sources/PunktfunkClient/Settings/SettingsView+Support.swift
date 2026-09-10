@@ -192,13 +192,12 @@ extension SettingsView {
         }
     }
 
+    /// Fill the mode fields from the screen this app is on. On a Mac that is the PANEL, never the
+    /// framebuffer a scaled mode renders into — see `SettingsOptions.macDisplayModes`.
     func fillFromMainScreen() {
         #if os(macOS)
-        guard let screen = NSScreen.main else { return }
-        let scale = screen.backingScaleFactor
-        setResolution(
-            width: Int(screen.frame.width * scale), height: Int(screen.frame.height * scale))
-        scoped(SettingsFields.refreshHz).wrappedValue = screen.maximumFramesPerSecond
+        guard let panel = SettingsOptions.macDisplayModes().first else { return }
+        applyDisplayMode(panel)
         #else
         // nativeBounds is portrait-oriented pixels — streams are landscape.
         let bounds = UIScreen.main.nativeBounds
@@ -212,4 +211,30 @@ extension SettingsView {
         #endif
         #endif
     }
+
+    #if os(macOS)
+    /// Write one of `SettingsOptions.macDisplayModes()` into the mode fields, at the screen's top
+    /// rate.
+    func applyDisplayMode(_ mode: (name: String, w: Int, h: Int)) {
+        setResolution(width: mode.w, height: mode.h)
+        scoped(SettingsFields.refreshHz).wrappedValue = NSScreen.main?.maximumFramesPerSecond ?? 60
+    }
+
+    /// "Use this display's mode" — a menu on a Mac with a camera housing, where the panel and the
+    /// area a full-screen stream can show whole are different sizes and only the viewer knows which
+    /// they want. Every other Mac has one answer and keeps the plain button.
+    @ViewBuilder var displayModeControl: some View {
+        let modes = SettingsOptions.macDisplayModes()
+        if modes.count > 1 {
+            Menu("Use this display's mode") {
+                ForEach(modes, id: \.name) { mode in
+                    Button("\(mode.name) · \(mode.w) × \(mode.h)") { applyDisplayMode(mode) }
+                }
+            }
+            .fixedSize()
+        } else {
+            Button("Use this display's mode") { fillFromMainScreen() }
+        }
+    }
+    #endif
 }
