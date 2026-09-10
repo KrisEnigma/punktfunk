@@ -64,7 +64,9 @@ export const MonitorRows: FC<{
 						{m.display_monitor_env_locked()}
 					</p>
 				)}
-				<ul className="divide-y rounded-md border">
+				{/* `overflow-hidden` because the selected row paints its own square-cornered
+				    background: without it that background runs past the rounded corner. */}
+				<ul className="divide-y overflow-hidden rounded-md border">
 					{pinSupported && (
 						<Row
 							selected={!pinned}
