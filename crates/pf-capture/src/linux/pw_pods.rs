@@ -495,6 +495,9 @@ mod tests {
 
     #[test]
     fn the_hdr_pods_carry_mandatory_pq_and_bt2020() {
+        use spa::pod::{deserialize::PodDeserializer, ChoiceValue, Value};
+        use spa::utils::{Choice, ChoiceEnum};
+
         for fmt in [VideoFormat::xRGB_210LE, VideoFormat::xBGR_210LE] {
             let pod = build_hdr_dmabuf_format(fmt, None, false).unwrap();
             for (name, key) in [
@@ -520,13 +523,27 @@ mod tests {
                     .any(|w| w == spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT2020.to_ne_bytes()),
                 "{fmt:?} pod does not carry BT.2020 primaries"
             );
-            // Choice Long, same as [`build_dmabuf_format`]. A scalar Long(0) does
-            // not intersect gamescope's `{default:0, alt:0}` modifier choice.
-            assert!(
-                pod.windows(4)
-                    .any(|w| w == spa::sys::SPA_TYPE_Choice.to_ne_bytes()),
-                "{fmt:?} HDR modifier must be a Choice, not a scalar Long"
-            );
+            let (_, Value::Object(obj)) =
+                PodDeserializer::deserialize_any_from(&pod).expect("parse HDR format pod")
+            else {
+                panic!("{fmt:?} HDR format is not an object pod");
+            };
+            let modifier = obj
+                .properties
+                .iter()
+                .find(|p| p.key == spa::sys::SPA_FORMAT_VIDEO_modifier)
+                .expect("HDR modifier property");
+            let Value::Choice(ChoiceValue::Long(Choice(
+                _,
+                ChoiceEnum::Enum {
+                    default,
+                    alternatives,
+                },
+            ))) = &modifier.value
+            else {
+                panic!("{fmt:?} HDR modifier is not a Long choice enum");
+            };
+            assert_eq!((*default, alternatives.as_slice()), (0, &[0][..]));
         }
     }
 
