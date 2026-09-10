@@ -90,6 +90,10 @@ function RootComponent() {
 	// desktop is all-or-nothing; the accent still carries over.
 	const modeOverridden =
 		appearance.mode !== "system" && appearance.mode !== theme?.mode;
+	// An accent the operator CHOSE outranks the desktop's whole palette, not just its own
+	// accent: picking a colour and watching the page stay the desktop's is the thing this
+	// setting is for. A followed accent leaves the desktop's surfaces alone.
+	const accentChosen = appearance.accent !== "system";
 	const surfaces =
 		!modeOverridden && theme?.background && theme.foreground ? theme : null;
 	const vars: Record<string, string> = {};
@@ -102,7 +106,7 @@ function RootComponent() {
 		<html
 			lang={locale}
 			className={mode === "light" ? undefined : "dark"}
-			data-accent={accent ? "" : undefined}
+			data-accent={accent ? (accentChosen ? "custom" : "") : undefined}
 			data-omarchy={surfaces ? "" : undefined}
 			style={Object.keys(vars).length > 0 ? (vars as CSSProperties) : undefined}
 		>

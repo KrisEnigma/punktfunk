@@ -152,7 +152,7 @@ function ratio(token, selector) {
 	return Number(m[1]);
 }
 
-const OMARCHY = ":root[data-omarchy]";
+const OMARCHY = ':root[data-omarchy]:not([data-accent="custom"])';
 const ACCENT = ":root[data-accent]";
 
 const R = {

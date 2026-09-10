@@ -174,16 +174,20 @@
 	   overrides all of this: [data-omarchy] comes after.
 
 	   Toward the accent ITSELF, not the accent dulled toward the page's far end: the latter
-	   is a grey, and mixing white toward a grey turns the light console grey with it. The
-	   steps are what has to be wide enough — 3% apart, a dark accent left card and
-	   background 1.02:1 from each other, which is no card at all. */
-	--background: color-mix(in oklab, var(--pf-page) 98%, var(--pf-accent));
-	--card: color-mix(in oklab, var(--pf-page) 90%, var(--pf-accent));
+	   is a grey, and mixing white toward a grey turns the light console grey with it.
+
+	   These proportions are meant to be SEEN. At 2% on the page the difference between a
+	   red console and a green one was two points of sRGB, which is not a colour anyone
+	   picked a colour to get. */
+	--background: color-mix(in oklab, var(--pf-page) 90%, var(--pf-accent));
+	--card: color-mix(in oklab, var(--pf-page) 84%, var(--pf-accent));
 	--popover: var(--card);
-	--muted: color-mix(in oklab, var(--pf-page) 87%, var(--pf-accent));
-	--secondary: color-mix(in oklab, var(--pf-page) 84%, var(--pf-accent));
-	--border: color-mix(in oklab, var(--pf-page) 78%, var(--pf-accent));
+	--muted: color-mix(in oklab, var(--pf-page) 80%, var(--pf-accent));
+	--secondary: color-mix(in oklab, var(--pf-page) 76%, var(--pf-accent));
+	--border: color-mix(in oklab, var(--pf-page) 66%, var(--pf-accent));
 	--input: var(--border);
+	--accent: color-mix(in oklab, var(--pf-page) 72%, var(--pf-accent));
+	--accent-foreground: var(--foreground);
 }
 
 /* Light mode takes --primary from --pf-brand and keeps :root's white text, so the
@@ -194,15 +198,17 @@
 }
 
 /* Surfaces. Needs the background/foreground pair, so only a source that publishes all
-   four values switches this on. */
-:root[data-omarchy] {
+   four values switches this on — and it steps aside for an accent the operator CHOSE,
+   which is a decision to stop following the desktop's palette rather than a request to
+   tint it. Stepping aside beats overriding it afterwards: the whole block goes, so the
+   console's own foregrounds stay with the console's own surfaces. */
+:root[data-omarchy]:not([data-accent="custom"]) {
 	--background: var(--pf-bg);
 	--foreground: var(--pf-fg);
 	/* Cards, hovers and borders are the background lifted off itself by increasing
 	   amounts of foreground, so they stay in the theme's hue instead of sitting on it.
-	   The lift carries a quarter of the accent, so an accent the OPERATOR picked reaches
-	   the surfaces here too — following the desktop still owns the page, and a surface
-	   that ignored the pick entirely is what "changing the colour does nothing" meant. */
+	   The lift carries a quarter of the desktop's own accent, which is all this block ever
+	   sees: an accent the operator chose has already taken the block out of the cascade. */
 	--pf-lift: color-mix(in oklab, var(--pf-fg) 75%, var(--pf-accent));
 	--card: color-mix(in oklab, var(--pf-bg) 94%, var(--pf-lift));
 	--card-foreground: var(--pf-fg);
@@ -229,7 +235,7 @@
 
 /* `.dark` takes --primary from the LIGHT tint, so the text on it has to be the dark
    end of the theme — its own background. Needs --pf-bg, so it stays with the surfaces. */
-:root[data-omarchy].dark {
+:root[data-omarchy]:not([data-accent="custom"]).dark {
 	--primary-foreground: var(--pf-bg);
 }
 
