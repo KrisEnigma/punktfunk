@@ -113,8 +113,14 @@ export const SourcesSection: FC<{
 			.filter((p) => p.installed_version)
 			.map((p) => p.pkg),
 	);
+	// Compatible only: this rail is a row of Install buttons, and one for a scanner that cannot
+	// run on this OS is a control that does nothing (design/web-console-overhaul.md §2.1). The
+	// full catalog, incompatible entries included, is a checkbox away on the Store page.
 	const available = (catalog.data?.plugins ?? []).filter(
-		(p) => p.categories?.includes("library") && !installedPkgs.has(p.pkg),
+		(p) =>
+			p.categories?.includes("library") &&
+			!installedPkgs.has(p.pkg) &&
+			p.compatible,
 	);
 	// Every live registration, NOT just the `library`-category ones. A plugin's nav categorisation
 	// cannot decide whether its liveness badge is honest: a library plugin that registers without
@@ -132,7 +138,7 @@ export const SourcesSection: FC<{
 		.filter((s) => s.origin === "builtin" && s.enabled)
 		.map((s) => ({
 			source: s,
-			entry: available.find((p) => p.id === s.id && p.compatible),
+			entry: available.find((p) => p.id === s.id),
 		}))
 		.filter((r): r is { source: ScannerInfo; entry: StoreEntry } => !!r.entry);
 
@@ -276,8 +282,8 @@ export const SourcesCard: FC<{
 								key={entry.pkg}
 								size="sm"
 								variant="outline"
-								disabled={!entry.compatible || installBusy}
-								title={entry.incompatible_reason ?? entry.description}
+								disabled={installBusy}
+								title={entry.description}
 								onClick={() => onInstall(entry)}
 							>
 								<Download className="size-4" />
