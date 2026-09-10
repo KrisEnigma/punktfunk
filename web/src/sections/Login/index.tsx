@@ -1,25 +1,25 @@
-import { type FC, useState } from "react";
+import { type FC, useActionState } from "react";
 import { useLocale } from "@/lib/i18n";
 import { LoginView } from "./view";
 
 export const SectionLogin: FC<{ next?: string }> = ({ next }) => {
 	useLocale();
-	const [error, setError] = useState(false);
-	const [busy, setBusy] = useState(false);
-
-	const onSubmit = async (password: string) => {
-		setBusy(true);
-		setError(false);
-		try {
-			const res = await fetch("/_auth/login", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ password }),
-			});
-			if (!res.ok) {
-				setError(true);
-				setBusy(false);
-				return;
+	// A form action reads the fields from the DOM, so a password Firefox filled or restored
+	// before hydration counts. A submit before the bundle runs is captured by React's inline
+	// runtime and replayed once the form hydrates; nothing ever leaves as a native GET.
+	const [error, action, busy] = useActionState(
+		async (_prev: boolean, data: FormData) => {
+			try {
+				const res = await fetch("/_auth/login", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						password: String(data.get("password") ?? ""),
+					}),
+				});
+				if (!res.ok) return true;
+			} catch {
+				return true;
 			}
 			// Full reload to the target so SSR re-runs WITH the new session cookie. Resolve `next`
 			// against our own origin and accept it ONLY if it stays same-origin, rejecting absolute
@@ -36,11 +36,10 @@ export const SectionLogin: FC<{ next?: string }> = ({ next }) => {
 				safe = "/";
 			}
 			window.location.href = safe;
-		} catch {
-			setError(true);
-			setBusy(false);
-		}
-	};
+			return false;
+		},
+		false,
+	);
 
-	return <LoginView onSubmit={onSubmit} error={error} busy={busy} />;
+	return <LoginView action={action} error={error} busy={busy} />;
 };

@@ -1,6 +1,6 @@
 import { ease } from "@unom/style";
 import { motion } from "motion/react";
-import { type FC, useState } from "react";
+import type { FC } from "react";
 import Logo from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,11 +9,10 @@ import { Label } from "@/components/ui/label";
 import { m } from "@/paraglide/messages";
 
 export const LoginView: FC<{
-	onSubmit: (password: string) => void;
+	action: (data: FormData) => void;
 	error: boolean;
 	busy: boolean;
-}> = ({ onSubmit, error, busy }) => {
-	const [password, setPassword] = useState("");
+}> = ({ action, error, busy }) => {
 	return (
 		<div className="flex flex-col min-h-screen items-center justify-center p-6">
 			<motion.div
@@ -39,32 +38,24 @@ export const LoginView: FC<{
 					</p>
 				</CardHeader>
 				<CardContent>
-					<form
-						onSubmit={(e) => {
-							e.preventDefault();
-							onSubmit(password);
-						}}
-						className="space-y-4"
-					>
+					{/* The button never gates on field content: what is in the field reaches the
+					    action as FormData, and `required` alone refuses an empty submit. */}
+					<form action={action} className="space-y-4">
 						<div className="space-y-2">
 							<Label htmlFor="pw">{m.login_password()}</Label>
 							<Input
 								id="pw"
+								name="password"
 								type="password"
 								autoFocus
+								required
 								autoComplete="current-password"
-								value={password}
-								onChange={(e) => setPassword(e.target.value)}
 							/>
 						</div>
 						{error && (
 							<p className="text-sm text-destructive">{m.login_error()}</p>
 						)}
-						<Button
-							type="submit"
-							className="w-full"
-							disabled={busy || !password}
-						>
+						<Button type="submit" className="w-full" disabled={busy}>
 							{busy ? m.login_signing_in() : m.login_submit()}
 						</Button>
 					</form>

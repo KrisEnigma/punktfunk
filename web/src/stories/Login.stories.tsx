@@ -5,7 +5,7 @@ const meta = {
 	title: "Pages/Login",
 	component: LoginView,
 	parameters: { layout: "fullscreen" },
-	args: { onSubmit: () => {}, error: false, busy: false },
+	args: { action: () => {}, error: false, busy: false },
 } satisfies Meta<typeof LoginView>;
 
 export default meta;
