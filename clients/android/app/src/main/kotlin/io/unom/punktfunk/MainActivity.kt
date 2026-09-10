@@ -37,6 +37,7 @@ import io.unom.punktfunk.kit.Keymap
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.RingNav
 import io.unom.punktfunk.kit.Sc2BleLink
+import io.unom.punktfunk.kit.Sc2Device
 import io.unom.punktfunk.kit.SessionAccess
 import io.unom.punktfunk.kit.ringNavForKey
 import io.unom.punktfunk.kit.link.DeepLinkResult
@@ -229,6 +230,10 @@ class MainActivity : ComponentActivity() {
     private var sc2Menu: io.unom.punktfunk.kit.Sc2Capture? = null
     var sc2MenuActive by mutableStateOf(false)
         private set
+
+    /** A wired SC2 or Puck is plugged in — the console lists it before the capture grant lands. */
+    var sc2UsbAttached by mutableStateOf(false)
+        private set
     private var sc2Receiver: BroadcastReceiver? = null
     private var sc2PermissionAsked = false
 
@@ -292,7 +297,9 @@ class MainActivity : ComponentActivity() {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, intent: Intent?) {
                 when (intent?.action) {
-                    UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    UsbManager.ACTION_USB_DEVICE_ATTACHED,
+                    UsbManager.ACTION_USB_DEVICE_DETACHED,
+                    -> {
                         sc2PermissionAsked = false // a fresh attach may ask once again
                         startSc2MenuNav()
                         dsPermissionAsked = false
@@ -309,6 +316,7 @@ class MainActivity : ComponentActivity() {
         sc2Receiver = receiver
         val filter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
             addAction(SC2_MENU_PERMISSION)
         }
         if (Build.VERSION.SDK_INT >= 33) {
@@ -375,9 +383,16 @@ class MainActivity : ComponentActivity() {
      * dialog, for the Controllers screen's explicit grant button) — else an already-paired BLE
      * controller, asking for Bluetooth access once if one appears to be attached
      * ([maybeAskSc2BtPermission]). Safe to call repeatedly.
+     *
+     * [sc2UsbAttached] is refreshed first, before any of the gates below: the console lists the
+     * pad whether or not this client may capture it.
      */
     fun startSc2MenuNav(forceAsk: Boolean = false) {
         if (forceAsk) sc2PermissionAsked = false
+        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        sc2UsbAttached = usbManager.deviceList.values.any {
+            it.vendorId == Sc2Device.VID_VALVE && it.productId in Sc2Device.USB_PIDS
+        }
         if (streamHandle != 0L) return // StreamScreen owns the pad while streaming
         if (sc2Menu?.isActive == true) return
         if (!SettingsStore(this).load().sc2Capture) return
@@ -386,7 +401,6 @@ class MainActivity : ComponentActivity() {
             c.onActiveChanged = { on -> runOnUiThread { sc2MenuActive = on } }
             sc2Menu = c
         }
-        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         val dev = cap.findUsbDevice()
         when {
             dev != null && usbManager.hasPermission(dev) -> cap.startUsb(dev)
