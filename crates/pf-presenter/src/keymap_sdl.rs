@@ -127,6 +127,13 @@ pub fn scancode_to_vk(sc: Scancode) -> Option<u8> {
         S::Apostrophe => 0xDE,
         S::NonUsBackslash => 0xE2,
 
+        // IME keys, as `keymap::evdev_to_vk`. JIS 半角/全角 sits on Grave and stays VK_OEM_3.
+        S::Lang1 => 0x15,
+        S::Lang2 => 0x19,
+        S::International4 => 0x1C,
+        S::International5 => 0x1D,
+        S::International2 => 0xF2,
+
         _ => return None,
     })
 }
@@ -181,6 +188,11 @@ mod tests {
             (S::Semicolon, 39),
             (S::Grave, 41),
             (S::NonUsBackslash, 86),
+            (S::Lang1, 122),
+            (S::Lang2, 123),
+            (S::International4, 92),
+            (S::International5, 94),
+            (S::International2, 93),
         ];
         for &(sc, ev) in same_key {
             assert_eq!(scancode_to_vk(sc), evdev_to_vk(ev), "scancode {sc:?}");

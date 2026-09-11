@@ -1,5 +1,6 @@
 package io.unom.punktfunk.kit
 
+import android.view.KeyEvent
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -39,5 +40,17 @@ class KeymapTest {
         assertEquals(0, Keymap.evdevToVk(1)) // KEY_ESC — layout-invariant, keycode path
         assertEquals(0, Keymap.evdevToVk(59)) // KEY_F1
         assertEquals(0, Keymap.evdevToVk(304)) // BTN_SOUTH — gamepad, never a typing key
+    }
+
+    /** Korean and JIS IME keys leave as the VKs the hosts map, under Android's odd names. */
+    @Test
+    fun imeKeysReachTheWire() {
+        assertEquals(0x15, Keymap.toVk(KeyEvent.KEYCODE_KANA)) // 한/영
+        assertEquals(0x19, Keymap.toVk(KeyEvent.KEYCODE_EISU)) // 한자
+        assertEquals(0x1C, Keymap.toVk(KeyEvent.KEYCODE_HENKAN))
+        assertEquals(0x1D, Keymap.toVk(KeyEvent.KEYCODE_MUHENKAN))
+        assertEquals(0xF2, Keymap.toVk(KeyEvent.KEYCODE_KATAKANA_HIRAGANA))
+        assertEquals(0xF3, Keymap.toVk(KeyEvent.KEYCODE_ZENKAKU_HANKAKU))
+        assertEquals(0, Keymap.toVk(KeyEvent.KEYCODE_LANGUAGE_SWITCH)) // Android keeps it
     }
 }

@@ -149,6 +149,15 @@ object Keymap {
         KeyEvent.KEYCODE_RIGHT_BRACKET -> 0xDD
         KeyEvent.KEYCODE_APOSTROPHE -> 0xDE
 
+        // IME keys. Android's Generic.kl names a Korean board's 한/영 (KEY_HANGEUL) KANA and its
+        // 한자 (KEY_HANJA) EISU; Windows gives Korean and Japanese the same two VKs anyway.
+        KeyEvent.KEYCODE_KANA -> 0x15 // VK_HANGUL / VK_KANA
+        KeyEvent.KEYCODE_EISU -> 0x19 // VK_HANJA / VK_KANJI
+        KeyEvent.KEYCODE_HENKAN -> 0x1C // VK_CONVERT
+        KeyEvent.KEYCODE_MUHENKAN -> 0x1D // VK_NONCONVERT
+        KeyEvent.KEYCODE_KATAKANA_HIRAGANA -> 0xF2 // VK_DBE_HIRAGANA
+        KeyEvent.KEYCODE_ZENKAKU_HANKAKU -> 0xF3 // VK_DBE_SBCSCHAR
+
         else -> 0 // unmapped → Rust drops it
     }
 }

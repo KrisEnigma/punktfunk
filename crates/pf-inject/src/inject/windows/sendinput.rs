@@ -430,9 +430,11 @@ fn forced_extended(vk: u16) -> bool {
 }
 
 /// US-positional VK → set-1 make scancode for the layout-variant typing area (letters,
-/// digit row, OEM punctuation, ISO 102nd key). Mirror of Linux `crate::vk_to_evdev` —
-/// for these keys the evdev code IS the set-1 scancode. Layout-invariant keys are
-/// absent (`MapVirtualKeyExW` resolves them under any layout). Never E0-extended.
+/// digit row, OEM punctuation, ISO 102nd key) and the Korean/Japanese IME keys. Mirror
+/// of Linux `crate::vk_to_evdev` — for the typing area the evdev code IS the set-1
+/// scancode. Other layout-invariant keys are absent (`MapVirtualKeyExW` resolves them
+/// under any layout); the IME keys it resolves only under a Korean or Japanese one, so
+/// they carry the scancode the physical key sends. Never E0-extended.
 fn positional_vk_to_scan(vk: u16) -> Option<u16> {
     Some(match vk {
         0x30 => 0x0B,                    // VK_0
@@ -475,6 +477,12 @@ fn positional_vk_to_scan(vk: u16) -> Option<u16> {
         0xDD => 0x1B,                    // VK_OEM_6      ]}
         0xDE => 0x28,                    // VK_OEM_7      '"  (DE: ä)
         0xE2 => 0x56,                    // VK_OEM_102    <>| (ISO key next to left shift)
+        0x15 => 0x72,                    // VK_HANGUL     한/영
+        0x19 => 0x71,                    // VK_HANJA      한자
+        0x1C => 0x79,                    // VK_CONVERT    変換
+        0x1D => 0x7B,                    // VK_NONCONVERT 無変換
+        0xF2 => 0x70,                    // VK_DBE_HIRAGANA カタカナ/ひらがな
+        0xF3 => 0x29,                    // VK_DBE_SBCSCHAR 半角/全角 (the JIS grave position)
         _ => return None,
     })
 }
@@ -505,21 +513,38 @@ mod tests {
 
     /// The positional table must mirror Linux `vk_to_evdev` exactly — for the typing
     /// area the evdev code IS the set-1 scancode, so a divergence lands the same wire
-    /// VK on different physical keys on the two hosts.
+    /// VK on different physical keys on the two hosts. The IME keys are the one place
+    /// the two codes differ; both hosts must still know every one of them.
     #[test]
     fn positional_table_mirrors_linux_vk_to_evdev() {
+        let ime: &[(u16, u16, u16)] = &[
+            (0x15, 0x72, 122),
+            (0x19, 0x71, 123),
+            (0x1C, 0x79, 92),
+            (0x1D, 0x7B, 94),
+            (0xF2, 0x70, 93),
+            (0xF3, 0x29, 85),
+        ];
         let mut checked = 0;
         for vk in 0x01..=0xFEu16 {
             if let Some(scan) = positional_vk_to_scan(vk) {
+                let evdev = ime
+                    .iter()
+                    .find(|(k, _, _)| *k == vk)
+                    .map(|&(_, s, e)| {
+                        assert_eq!(scan, s, "vk 0x{vk:02X}: IME scancode");
+                        e
+                    })
+                    .unwrap_or(scan);
                 assert_eq!(
-                    Some(scan),
+                    Some(evdev),
                     crate::vk_to_evdev(vk as u8),
                     "vk 0x{vk:02X}: sendinput scancode diverges from vk_to_evdev"
                 );
                 checked += 1;
             }
         }
-        assert_eq!(checked, 48, "typing-area coverage changed unexpectedly");
+        assert_eq!(checked, 54, "typing-area coverage changed unexpectedly");
     }
 
     /// US-position VKs for physical Y/Z/ö/ü must resolve to those positions, not a layout.
