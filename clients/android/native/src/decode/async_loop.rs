@@ -240,10 +240,11 @@ pub(super) fn run_async(
     };
     stats.set_presenter_active(presenter.is_some() || asc.is_some());
     // The vsync clock, started LAZILY on the first decoded frame (see `vsync.rs`); its ticks ride
-    // the same event channel. The ASC backend derives its present clock from the real transaction
-    // latches instead, so it needs no choreographer.
+    // the same event channel. Both presenters need it: the SurfaceView one for its timelines, the
+    // ASC one for the panel period (its phase comes from present fences) and the fence poll on
+    // every tick.
     let mut vsync: Option<VsyncClock> = None;
-    let mut vsync_tx = presenter.is_some().then(|| ev_tx.clone());
+    let mut vsync_tx = (presenter.is_some() || asc.is_some()).then(|| ev_tx.clone());
     let ctx = Ctx {
         codec,
         client: client.clone(),
