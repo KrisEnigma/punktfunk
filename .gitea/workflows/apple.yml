@@ -786,7 +786,9 @@ jobs:
   # `clients/apple/tools/screenshots.sh macos`.
   screenshots:
     needs: swift
-    if: gitea.event_name != 'pull_request'
+    # Release tags and manual runs only: the App Store takes screenshots per release, and each
+    # capture holds the only Mac slot for ~16 min.
+    if: startsWith(gitea.ref, 'refs/tags/v') || gitea.event_name == 'workflow_dispatch'
     runs-on: macos-arm64
     timeout-minutes: 90
     steps:
