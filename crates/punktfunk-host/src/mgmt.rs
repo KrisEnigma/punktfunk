@@ -44,6 +44,7 @@ mod stats;
 mod store;
 #[cfg(test)]
 mod tests;
+mod theme;
 mod update;
 mod webtransport;
 
@@ -300,6 +301,7 @@ fn api_router_parts() -> (Router<Arc<MgmtState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(host::get_health))
         .routes(routes!(host::get_host_info))
         .routes(routes!(host::list_compositors))
+        .routes(routes!(theme::get_host_theme))
         .routes(routes!(gpu::list_gpus))
         .routes(routes!(gpu::set_gpu_preference))
         .routes(routes!(display::get_display_settings))
@@ -315,6 +317,12 @@ fn api_router_parts() -> (Router<Arc<MgmtState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(
             display::update_custom_preset,
             display::delete_custom_preset
+        ))
+        // Three methods, one path — one `routes!` (same-path merge).
+        .routes(routes!(
+            display::get_display_client,
+            display::set_display_client,
+            display::delete_display_client
         ))
         .routes(routes!(host::get_status))
         .routes(routes!(host::get_local_summary))

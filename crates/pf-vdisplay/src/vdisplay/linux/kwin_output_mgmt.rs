@@ -763,6 +763,12 @@ pub(crate) fn apply_topology(
     // Extend adds a screen beside the others and never takes primary.
     let take_primary = kind != TopologyKind::Extend && !sibling_is_primary;
 
+    // Monitors the operator asked to keep lit through an exclusive stream (§5.5). Matched
+    // case-insensitively: a connector reaches us from the console, from a config file and
+    // from KWin itself, and `DP-1` / `dp-1` are the same screen to the person who typed it.
+    let keep_lit = crate::policy::prefs().get().keep_monitors;
+    let kept = |name: &str| keep_lit.iter().any(|k| k.eq_ignore_ascii_case(name));
+
     let mut to_disable: Vec<(OutputDevice, String, String)> = Vec::new();
     if kind == TopologyKind::Exclusive {
         for d in sess.state.devices.values() {
@@ -771,7 +777,8 @@ pub(crate) fn apply_topology(
                 .name
                 .as_deref()
                 .is_some_and(|n| n.starts_with(MANAGED_PREFIX));
-            if d.enabled && !is_ours && !managed {
+            let stays_lit = d.name.as_deref().is_some_and(kept);
+            if d.enabled && !is_ours && !managed && !stays_lit {
                 if let (Some(name), Some(proxy)) = (d.name.clone(), d.proxy.clone()) {
                     let spec = sess.current_dims(d).map(mode_spec).unwrap_or_default();
                     to_disable.push((proxy, name, spec));

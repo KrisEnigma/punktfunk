@@ -318,6 +318,27 @@ pub(super) async fn negotiate(
         "video codec negotiated"
     );
 
+    // The operator's cap for this device, applied BEFORE mode-conflict and before Welcome
+    // — the client is then told the mode it actually gets, rather than asking for 4K120,
+    // being told yes, and receiving something else (§6.3 P2).
+    {
+        let fp = crate::vdisplay::policy::fp_hex(conn.peer_fingerprint());
+        let want = (hello.mode.width, hello.mode.height, hello.mode.refresh_hz);
+        let capped = crate::vdisplay::policy::prefs()
+            .get()
+            .cap_mode(fp.as_deref(), want);
+        if capped != want {
+            tracing::info!(
+                requested = %format_args!("{}x{}@{}", want.0, want.1, want.2),
+                granted = %format_args!("{}x{}@{}", capped.0, capped.1, capped.2),
+                "per-device mode cap applied"
+            );
+            hello.mode.width = capped.0;
+            hello.mode.height = capped.1;
+            hello.mode.refresh_hz = capped.2;
+        }
+    }
+
     // Mode-conflict before Welcome. Same-client reconnect never conflicts. This session
     // registers in the live set only once its data plane is up, so a later client can steal it.
     {

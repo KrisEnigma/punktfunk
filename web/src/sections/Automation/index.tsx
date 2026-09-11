@@ -1,6 +1,6 @@
 import Section from "@unom/ui/section";
 import { toast } from "@unom/ui/toast";
-import { Pencil, Plus, Terminal, Trash2, Webhook } from "lucide-react";
+import { Pencil, Plus, Terminal, Trash2, Webhook, Zap } from "lucide-react";
 import { type FC, useEffect, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import { useGetHooks } from "@/api/gen/hooks/hooks";
@@ -110,7 +110,10 @@ export const SectionAutomation: FC = () => {
 
 				<Card>
 					<CardHeader className="flex-row items-center justify-between space-y-0">
-						<CardTitle>{m.automation_hooks_title()}</CardTitle>
+						<CardTitle className="flex items-center gap-2">
+							<Zap className="size-4" />
+							{m.automation_hooks_title()}
+						</CardTitle>
 						<Button
 							size="sm"
 							variant="outline"

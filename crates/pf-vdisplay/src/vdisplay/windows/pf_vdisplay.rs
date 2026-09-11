@@ -1712,8 +1712,8 @@ mod tests {
     /// the operator's real policy back on drop — including when the case panics.
     ///
     /// The isolate branch this file's Phase-3 cases exercise runs ONLY under `Exclusive`, and a
-    /// real install is usually configured otherwise (`topology_action()` returns
-    /// `effective_topology()` as soon as ANY policy is configured). `KeepAlive::Off` is equally
+    /// real install is usually configured otherwise (`topology_action(client)` returns
+    /// `effective_topology(client)` as soon as ANY policy is configured). `KeepAlive::Off` is equally
     /// load-bearing: every post-teardown assertion here needs the lease drop to actually tear the
     /// monitor down — under the default 10 s linger the probe races the reaper, and under the
     /// gaming-rig `forever` the group restore never runs at all (measured on .173: both members
@@ -1732,7 +1732,7 @@ mod tests {
                 .set(forced)
                 .expect("force Topology::Exclusive + KeepAlive::Off for this case");
             assert_eq!(
-                crate::effective_topology(),
+                crate::effective_topology(None),
                 crate::policy::Topology::Exclusive,
                 "the forced policy did not resolve to Exclusive"
             );

@@ -4,6 +4,10 @@ import type { FC } from "react";
 /** The house cadence, in seconds between siblings. */
 export const STAGGER_GAP = 0.1;
 
+/** Rows are lighter than cards: a tighter gap, a shorter rise. */
+export const ROW_GAP = 0.05;
+export const ROW = { from: { opacity: 0, y: 6 }, enter: { opacity: 1, y: 0 } };
+
 /**
  * The stagger-container contract as plain props — for the places that need a specific element
  * (`motion.nav`) rather than the `<Stagger>` div below.
@@ -31,9 +35,15 @@ export const staggerProps = (gap: number = STAGGER_GAP) => ({
  * Nothing in the types catches that; it only shows up in a browser, beside a page that does it
  * right. Wrapping the grid re-establishes the cadence.
  *
- * `root` is for a container with no animating motion ancestor to inherit from (the sidebar nav): it
- * drives `from → enter` itself. Inside a `<Section>` or a card, leave it off — supplying
- * `initial`/`animate` there would run the group on its own clock instead of the page's.
+ * `root` is for a group with no animating motion ancestor, or one whose ancestor may no longer be
+ * driving when it mounts: it runs `from → enter` itself. A tab panel is the clear case; a dialog is
+ * not, since `DialogContent` drives its sections. Inside a `<Section>` or a card, leave it off —
+ * there it would run on its own clock instead of the page's.
+ *
+ * A group that mounts late still staggers, through plain wrappers too. A child that mounts after
+ * its container animated does not: it enters alone, at once. So a container whose children wait
+ * for data renders inside the loaded branch, with them. A child that names a variant label of its
+ * own (`exit="exit"` counts) stops inheriting; give it an object instead.
  */
 export const Stagger: FC<
 	HTMLMotionProps<"div"> & {

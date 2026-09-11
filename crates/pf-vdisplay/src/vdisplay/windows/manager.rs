@@ -1487,7 +1487,10 @@ impl VirtualDisplayManager {
                 }
                 use crate::policy::Topology;
                 let first_member = inner.slots.is_empty();
-                match topology_action() {
+                // Host topology: the CCD isolate is a property of the whole managed GROUP,
+                // not of one member, so a per-device topology has no meaning here — the
+                // first member's answer already governs the group (design §6.1).
+                match topology_action(None) {
                     Topology::Exclusive => {
                         // The managed keep-set: every live sibling + the new monitor.
                         let mut keep = inner.target_keys();
@@ -1953,7 +1956,8 @@ impl VirtualDisplayManager {
     /// this body performs no unsafe operation. (`&mut MgrInner` already proves the lock is held.)
     fn reisolate_after_swap(&self, inner: &mut MgrInner, new_target: CcdTargetKey) {
         use crate::policy::Topology;
-        match topology_action() {
+        // As above: one isolate for the group, so the host's answer.
+        match topology_action(None) {
             Topology::Exclusive => {
                 // Grown-set semantics: isolate to the surviving siblings + the new target. The returned
                 // snapshot is DISCARDED — the group keeps the first member's (design §6.1).

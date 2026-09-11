@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
+import { ArrowUpCircle } from "lucide-react";
 import { type FC, type ReactNode, useState } from "react";
 import { ApiError } from "@/api/fetcher";
 import type { UpdateStatus } from "@/api/gen/model";
@@ -114,7 +115,10 @@ export const UpdateCard: FC<{
 	return (
 		<Card>
 			<CardHeader className="flex flex-row items-center justify-between">
-				<CardTitle>{m.update_title()}</CardTitle>
+				<CardTitle className="flex items-center gap-2">
+					<ArrowUpCircle className="size-4" />
+					{m.update_title()}
+				</CardTitle>
 				{s?.available && !inFlight && (
 					<Badge>{m.update_available_badge()}</Badge>
 				)}

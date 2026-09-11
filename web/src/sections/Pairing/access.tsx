@@ -233,6 +233,9 @@ const GRANT_TOGGLES: {
  * The shared access controls: Access level (three presets + an Advanced expander with the six
  * grant toggles) and Access expires (Forever / 1 h / 4 h / 8 h / custom). Three grant moments,
  * one component — approve dialog, arm card, edit sheet.
+ *
+ * The two sit side by side in an `@container` with room for both (the arm card alone on its row)
+ * and stack everywhere else. The dialogs declare no container, so they always stack.
  */
 export const AccessControls: FC<{
 	value: AccessDraft;
@@ -258,7 +261,7 @@ export const AccessControls: FC<{
 	};
 
 	return (
-		<div className="space-y-4">
+		<div className="grid items-start gap-4 @xl:grid-cols-2">
 			<div className="space-y-2">
 				<Label htmlFor={`${idPrefix}-level`}>{m.access_level_label()}</Label>
 				<Select value={level} onValueChange={setLevel}>

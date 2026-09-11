@@ -19,6 +19,7 @@ import {
 	useUninstallPlugin,
 } from "@/api/store";
 import { useDialogs } from "@/components/dialogs";
+import { Stagger } from "@/components/stagger";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useLocale } from "@/lib/i18n";
 import { m } from "@/paraglide/messages";
@@ -30,6 +31,7 @@ import {
 } from "./InstallDialogs";
 import { InstalledTab } from "./Installed";
 import { BatchPendingCard, JobProgressSection } from "./JobProgress";
+import { PluginUis } from "./PluginUis";
 import { SourcesTab } from "./Sources";
 
 type StoreTab = "browse" | "installed" | "sources";
@@ -256,6 +258,8 @@ export const SectionStore: FC = () => {
 					step && <BatchPendingCard step={step} />
 				)}
 
+				<PluginUis />
+
 				<Tabs value={tab} onValueChange={(v) => setTab(v as StoreTab)}>
 					<TabsList>
 						<TabsTrigger value="browse">{m.store_tab_browse()}</TabsTrigger>
@@ -283,26 +287,33 @@ export const SectionStore: FC = () => {
 						<TabsTrigger value="sources">{m.store_tab_sources()}</TabsTrigger>
 					</TabsList>
 
+					{/* Each panel drives its own entrance: switching tabs mounts it after the page animated. */}
 					<TabsContent value="browse">
-						<BrowseTab
-							onInstall={setTarget}
-							onInstallSpec={() => setSpecOpen(true)}
-						/>
+						<Stagger root className="contents">
+							<BrowseTab
+								onInstall={setTarget}
+								onInstallSpec={() => setSpecOpen(true)}
+							/>
+						</Stagger>
 					</TabsContent>
 					<TabsContent value="installed">
-						<InstalledTab
-							onUpdate={onUpdate}
-							onUpdateAll={() => setUpdateAllTarget(plan)}
-							onUninstall={onUninstall}
-							updateCount={plan.updates.length}
-							busyPkg={
-								uninstall.isPending ? (uninstall.variables ?? null) : null
-							}
-							batchRunning={run !== null}
-						/>
+						<Stagger root className="contents">
+							<InstalledTab
+								onUpdate={onUpdate}
+								onUpdateAll={() => setUpdateAllTarget(plan)}
+								onUninstall={onUninstall}
+								updateCount={plan.updates.length}
+								busyPkg={
+									uninstall.isPending ? (uninstall.variables ?? null) : null
+								}
+								batchRunning={run !== null}
+							/>
+						</Stagger>
 					</TabsContent>
 					<TabsContent value="sources">
-						<SourcesTab />
+						<Stagger root className="contents">
+							<SourcesTab />
+						</Stagger>
 					</TabsContent>
 				</Tabs>
 

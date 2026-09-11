@@ -1,3 +1,4 @@
+import { Radio } from "lucide-react";
 import { type FC, useMemo } from "react";
 import { ApiError } from "@/api/fetcher";
 import type { Capture } from "@/api/gen/model/capture";
@@ -57,7 +58,10 @@ export const LiveCard: FC<{ live: Loadable<Capture> }> = ({ live }) => {
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle>{m.stats_live_title()}</CardTitle>
+				<CardTitle className="flex items-center gap-2">
+					<Radio className="size-4" />
+					{m.stats_live_title()}
+				</CardTitle>
 			</CardHeader>
 			<CardContent className="space-y-8">
 				<QueryState isLoading={false} error={error} refetch={live.refetch}>

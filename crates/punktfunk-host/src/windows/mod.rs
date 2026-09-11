@@ -15,6 +15,8 @@ pub(crate) mod interactive;
 // What this host reads of the multi-seat contract; unset means the console host.
 pub(crate) mod seat;
 pub(crate) mod service;
+// The console user's theme values, read for `mgmt::theme` — which forbids the `unsafe` they need.
+pub(crate) mod theme;
 // Per-user tray start/stop/status — the only recovery path after a crash or upgrade.
 pub(crate) mod tray;
 

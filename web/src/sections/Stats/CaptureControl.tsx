@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
-import { Circle, Square } from "lucide-react";
+import { Circle, CircleDot, Square } from "lucide-react";
 import type { FC } from "react";
 import type { StatsStatus } from "@/api/gen/model/statsStatus";
 import {
@@ -81,7 +81,10 @@ export const CaptureControlCard: FC<{
 			<Card>
 				<CardHeader>
 					<CardTitle className="flex items-center justify-between gap-3">
-						<span>{m.stats_capture_title()}</span>
+						<span className="flex items-center gap-2">
+							<CircleDot className="size-4" />
+							{m.stats_capture_title()}
+						</span>
 						{armed ? (
 							<Badge variant="destructive" className="gap-1.5">
 								<Circle className="size-2.5 animate-pulse fill-current" />

@@ -410,6 +410,11 @@ pub(crate) async fn unpair_native_client(
                     "unpair: live native session(s) stopped"
                 );
             }
+            // The overlay is keyed by fingerprint, and a fingerprint is a
+            // certificate — but a device re-paired after a key rotation is a
+            // different device to the operator, and inheriting settings made for
+            // the old one is a surprise. Drop them with the pairing.
+            crate::mgmt::display::forget_display_overlay(&fingerprint);
             tracing::info!(fingerprint, "management API: native client unpaired");
             StatusCode::NO_CONTENT.into_response()
         }
@@ -563,6 +568,9 @@ pub(crate) async fn unpair_all_native_clients(State(st): State<Arc<MgmtState>>) 
                 .sum();
             if stopped > 0 {
                 tracing::info!(stopped, "unpair-all: live native session(s) stopped");
+            }
+            for fp in &removed {
+                crate::mgmt::display::forget_display_overlay(fp);
             }
             let unpaired = removed.len() as u32;
             tracing::info!(unpaired, "management API: all native clients unpaired");

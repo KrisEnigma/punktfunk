@@ -8,18 +8,20 @@ import { Card } from "@/components/ui/card";
 import { m } from "@/paraglide/messages";
 
 /**
- * Display label for a store badge. Steam and custom keep their localized strings; every other store
- * (lutris, heroic, epic, …) is a proper noun shown capitalized, so new providers surface correctly
- * without a translation per store.
+ * Display label for a store badge. Steam and custom keep their localized strings; any other store
+ * shows its source's name (`nameOf`), or its id capitalized where nothing names it.
  */
-function storeLabel(store: string): string {
+function storeLabel(
+	store: string,
+	nameOf?: (id: string) => string | undefined,
+): string {
 	switch (store) {
 		case "custom":
 			return m.library_store_custom();
 		case "steam":
 			return m.library_store_steam();
 		default:
-			return store.charAt(0).toUpperCase() + store.slice(1);
+			return nameOf?.(store) ?? store.charAt(0).toUpperCase() + store.slice(1);
 	}
 }
 
@@ -32,6 +34,8 @@ export interface GameCardProps {
 	onToggleHidden: () => void;
 	/** This card's hide/un-hide is in flight — only this one disables. */
 	hiding: boolean;
+	/** A source's display name by id (`useSourceNames`). */
+	nameOf?: (id: string) => string | undefined;
 }
 
 /**
@@ -46,6 +50,7 @@ export const GameCard: FC<GameCardProps> = ({
 	deleting,
 	onToggleHidden,
 	hiding,
+	nameOf,
 }) => {
 	// Hiding is available for EVERY store, unlike edit/delete: the titles most worth hiding are the
 	// ones the operator cannot edit — a launcher's own scanned entries, a Proton tool, a demo. The
@@ -107,7 +112,7 @@ export const GameCard: FC<GameCardProps> = ({
 						variant={isCustom ? "secondary" : "outline"}
 						className="bg-background/80 backdrop-blur"
 					>
-						{storeLabel(game.store)}
+						{storeLabel(game.store, nameOf)}
 					</Badge>
 					{/* Platform badge — "PC" is implied by every installed store, so only
 					    non-PC platforms (the emulation case) earn a second badge. */}
@@ -117,10 +122,13 @@ export const GameCard: FC<GameCardProps> = ({
 						</Badge>
 					)}
 					{/* Who owns this entry, when it isn't the operator — the reason the edit/delete
-					    buttons are absent here and present on the card next to it. */}
-					{game.provider && (
+					    buttons are absent here and present on the card next to it. Not when the owner is the
+					    store the first badge already names: "Steam", then "via Steam". */}
+					{game.provider && game.provider !== game.store && (
 						<Badge variant="outline" className="bg-background/80 backdrop-blur">
-							{m.library_owned_by({ provider: game.provider })}
+							{m.library_owned_by({
+								provider: nameOf?.(game.provider) ?? game.provider,
+							})}
 						</Badge>
 					)}
 					{/* Says WHY this poster is faded. Without it a dimmed tile reads as a broken cover

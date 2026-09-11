@@ -50,9 +50,12 @@ pub struct Snapshot {
 }
 
 /// Snapshot topology string. `effective_topology` resolves `Auto`; the arm is defensive.
+///
+/// The HOST's answer, not any one device's: this is the snapshot `/display/state` serves,
+/// and a per-device topology belongs on that device's row rather than on the whole list.
 fn topology_str() -> String {
     use super::policy::Topology;
-    match super::effective_topology() {
+    match super::effective_topology(None) {
         Topology::Extend => "extend",
         Topology::Primary => "primary",
         Topology::Exclusive => "exclusive",
@@ -952,11 +955,19 @@ mod linux {
             .unwrap_or(0)
     }
 
-    /// Linger from console `keep_alive`, else Immediate (disconnect tears down now).
-    fn linger() -> Linger {
+    /// Linger from console `keep_alive`, for the device that owns this display.
+    ///
+    /// A per-device overlay is the reason this takes a slot rather than reading the host
+    /// policy flat: the TV keeps its screen forever while the tablet's goes at once, and
+    /// teardown is where that difference has to land (§6.1). A slot with no recorded owner
+    /// is shared or anonymous and follows the host, which is the right answer.
+    ///
+    /// Absent config is still `Immediate` — an unconfigured host tears down on disconnect.
+    fn linger_for(identity_slot: Option<u32>) -> Linger {
+        let fp = crate::identity::slot_owner(identity_slot);
         policy::prefs()
-            .configured_effective()
-            .map(|e| e.keep_alive.linger())
+            .configured()
+            .map(|p| p.effective_for(fp.as_deref()).keep_alive.linger())
             .unwrap_or(Linger::Immediate)
     }
 
@@ -1343,12 +1354,14 @@ mod linux {
     /// Torn-down keepalive drops after the lock is released.
     fn release(generation: u64, force_immediate: bool) {
         let Some(r) = REG.get() else { return };
-        let linger = effective_linger(force_immediate, linger());
         let (torn_down, restore) = {
             let mut es = r.entries.lock().unwrap();
             let Some(idx) = es.iter().position(|e| e.generation == generation) else {
                 return; // stale lease (entry reused + re-stamped, or already gone) — no-op
             };
+            // Resolved here, not before the lookup: the answer belongs to the display's
+            // OWNER, and the entry is what names it.
+            let linger = effective_linger(force_immediate, linger_for(es[idx].identity_slot));
             match es[idx].life.release(Instant::now(), linger) {
                 Release::Teardown => {
                     let mut e = es.remove(idx);

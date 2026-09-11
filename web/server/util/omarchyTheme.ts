@@ -21,14 +21,22 @@ export interface OmarchyTheme {
 	/** `light` | `dark` — drives the `.dark` class the whole palette keys off. */
 	mode: "light" | "dark";
 	/** The theme's accent, as a CSS colour. Mapped onto `--pf-brand`, which `--primary`,
-	 *  `--accent` and `--ring` all derive from, so one value re-tints the console. */
-	accent: string;
+	 *  `--accent` and `--ring` all derive from, so one value re-tints the console.
+	 *  Optional: a desktop may publish a mode and no accent. */
+	accent?: string;
 	/** The desktop's own page colour. Mapped onto `--pf-bg`, which the console's cards, hovers
 	 *  and borders are all mixed out of — this is the value that makes the console look like it
-	 *  belongs to the theme rather than merely agreeing with its accent. */
-	background: string;
+	 *  belongs to the theme rather than merely agreeing with its accent.
+	 *
+	 *  Optional since the theme can also come from the HOST's read of the desktop
+	 *  (design/web-console-overhaul.md §7), which publishes mode and accent only. Absent leaves
+	 *  the console's own surfaces in place — half a palette is worse than none. */
+	background?: string;
 	/** The desktop's own text colour (`--pf-fg`), and the other end of every one of those mixes. */
-	foreground: string;
+	foreground?: string;
+	/** Which reader answered: `omarchy`, or the host's `portal` / `windows`. Names the source
+	 *  on the Appearance panel's "Follow host" position. */
+	source?: string;
 }
 
 /** Where Omarchy renders our template. `XDG_STATE_HOME` first, because that is what the spec says

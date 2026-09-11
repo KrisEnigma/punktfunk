@@ -1,6 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
-import { Pencil, SlidersHorizontal, Trash2 } from "lucide-react";
+import {
+	MonitorPlay,
+	MonitorSmartphone,
+	Pencil,
+	SlidersHorizontal,
+	Trash2,
+} from "lucide-react";
 import { type FC, useState } from "react";
 import {
 	getListPairedClientsQueryKey,
@@ -9,6 +15,8 @@ import {
 	useUnpairAllClients,
 	useUnpairClient,
 } from "@/api/gen/clients/clients";
+import { useGetDisplaySettings } from "@/api/gen/display/display";
+import type { DisplaySettingsState } from "@/api/gen/model";
 import type { UpdateNativeAccess } from "@/api/gen/model/updateNativeAccess";
 import {
 	getListNativeClientsQueryKey,
@@ -19,18 +27,24 @@ import {
 } from "@/api/gen/native/native";
 import { useDialogs } from "@/components/dialogs";
 import { QueryState } from "@/components/query-state";
+import { ROW, ROW_GAP, staggerProps } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+	MotionTableBody,
+	MotionTableRow,
 	Table,
-	TableBody,
 	TableCell,
 	TableHead,
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
 import { m } from "@/paraglide/messages";
+import {
+	ClientPolicySheet,
+	overlaySummary,
+} from "@/sections/Displays/ClientPolicySheet";
 import { AccessChip, useNowUnix } from "./access";
 import { EditAccessSheet, type EditAccessTarget } from "./EditAccessSheet";
 
@@ -89,6 +103,8 @@ export const PairedDevicesSection: FC = () => {
 	const unpairAllMoonlight = useUnpairAllClients();
 	const renameMoonlight = useRenameClient();
 	const patchAccess = useUpdateNativeClientAccess();
+	const displaySettings = useGetDisplaySettings();
+	const [displayTarget, setDisplayTarget] = useState<PairedRow | null>(null);
 	// One clock for every countdown in the card AND the sheet — recomputed client-side from
 	// `expires_unix`, so the tick never refetches anything.
 	const nowUnix = useNowUnix();
@@ -264,9 +280,22 @@ export const PairedDevicesSection: FC = () => {
 				onRename={onRename}
 				onUnpair={onUnpair}
 				onUnpairAll={onUnpairAll}
+				onDisplaySettings={setDisplayTarget}
+				settings={displaySettings.data}
+				perDevice={(displaySettings.data?.client_enforced ?? []).length > 0}
 				pendingFingerprint={pendingFingerprint}
 				isUnpairingAll={isUnpairingAll}
 			/>
+			{displayTarget && (
+				<ClientPolicySheet
+					open
+					onOpenChange={(open) => !open && setDisplayTarget(null)}
+					fingerprint={displayTarget.fingerprint}
+					deviceName={
+						displayTarget.name || displayTarget.fingerprint.slice(0, 12)
+					}
+				/>
+			)}
 			<EditAccessSheet
 				target={editing}
 				nowUnix={nowUnix}
@@ -290,6 +319,16 @@ export const PairedDevices: FC<{
 	nowUnix: number;
 	/** Open the access editor for a native row (only offered where `hasAccess`). */
 	onEditAccess: (row: PairedRow) => void;
+	/** Open this device's display settings. Native only — the overlay is keyed by the
+	 * pairing fingerprint the native plane presents, which a GameStream cert is not. */
+	onDisplaySettings: (row: PairedRow) => void;
+	/** Display policy + stored overlays, so the Display column can be rendered without a
+	 * second fetch per row. */
+	settings?: DisplaySettingsState;
+	/** Whether this host acts on ANY per-device field. False hides the column and its
+	 * control — an older host has no `/display/clients` at all, and a sheet with no
+	 * questions in it is the dead control D1 exists to prevent. */
+	perDevice: boolean;
 	/**
 	 * Name a Moonlight row. Offered only on those: a native device already carries the name it gave
 	 * at pairing, while a Moonlight certificate carries nothing that identifies the device at all.
@@ -312,23 +351,31 @@ export const PairedDevices: FC<{
 	onRename,
 	onUnpair,
 	onUnpairAll,
+	onDisplaySettings,
+	settings,
+	perDevice,
 	pendingFingerprint,
 	isUnpairingAll,
 }) => (
 	<Card>
 		{/* flex-row: CardHeader stacks by default, and this one carries a trailing action. */}
 		<CardHeader className="flex-row items-center justify-between gap-4 space-y-0">
-			<h2 className="text-lg font-medium">{m.pairing_native_devices()}</h2>
+			<CardTitle>
+				<h2 className="flex items-center gap-2">
+					<MonitorSmartphone className="size-4" />
+					{m.pairing_native_devices()}
+				</h2>
+			</CardTitle>
 			{/* Nothing to unpair in bulk when the list is empty (or still loading) — an enabled
 			    button there would open a confirmation reading "Unpair all 0 devices?". */}
 			{rows.length > 0 && (
 				<Button
-					variant="destructive"
+					variant="outline"
 					size="sm"
 					disabled={isUnpairingAll}
 					onClick={onUnpairAll}
 				>
-					<Trash2 className="size-4" />
+					<Trash2 className="size-4 text-destructive" />
 					{m.action_unpair_all()}
 				</Button>
 			)}
@@ -345,13 +392,19 @@ export const PairedDevices: FC<{
 								<TableHead>{m.clients_name()}</TableHead>
 								<TableHead>{m.pairing_protocol()}</TableHead>
 								<TableHead>{m.pairing_access()}</TableHead>
+								{perDevice && (
+									<TableHead>{m.display_device_column()}</TableHead>
+								)}
 								<TableHead>{m.clients_fingerprint()}</TableHead>
 								<TableHead className="w-20" />
 							</TableRow>
 						</TableHeader>
-						<TableBody>
+						<MotionTableBody {...staggerProps(ROW_GAP)}>
 							{rows.map((r) => (
-								<TableRow key={`${r.protocol}:${r.fingerprint}`}>
+								<MotionTableRow
+									key={`${r.protocol}:${r.fingerprint}`}
+									variants={ROW}
+								>
 									<TableCell className="font-medium">{r.name || "—"}</TableCell>
 									<TableCell>
 										<Badge
@@ -388,6 +441,20 @@ export const PairedDevices: FC<{
 											<span className="text-muted-foreground">—</span>
 										)}
 									</TableCell>
+									{perDevice && (
+										<TableCell className="max-w-[22rem] text-sm text-muted-foreground">
+											{/* Only a native device has an overlay: the map is keyed by
+											    the pairing fingerprint the native plane presents, and a
+											    GameStream client's cert is not that. */}
+											{r.protocol === "native" ? (
+												<span>
+													{overlaySummary(settings?.clients?.[r.fingerprint])}
+												</span>
+											) : (
+												<span>—</span>
+											)}
+										</TableCell>
+									)}
 									<TableCell className="font-mono text-xs text-muted-foreground">
 										{r.fingerprint.slice(0, 16)}…
 									</TableCell>
@@ -405,6 +472,21 @@ export const PairedDevices: FC<{
 													onClick={() => onRename(r)}
 												>
 													<Pencil className="size-4" />
+												</Button>
+											)}
+											{perDevice && r.protocol === "native" && (
+												<Button
+													variant="ghost"
+													size="icon"
+													aria-label={m.display_device_settings()}
+													title={m.display_device_settings()}
+													disabled={
+														isUnpairingAll ||
+														pendingFingerprint === r.fingerprint
+													}
+													onClick={() => onDisplaySettings(r)}
+												>
+													<MonitorPlay className="size-4" />
 												</Button>
 											)}
 											{hasAccess(r) && (
@@ -434,9 +516,9 @@ export const PairedDevices: FC<{
 											</Button>
 										</div>
 									</TableCell>
-								</TableRow>
+								</MotionTableRow>
 							))}
-						</TableBody>
+						</MotionTableBody>
 					</Table>
 				)}
 			</QueryState>

@@ -1428,6 +1428,10 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         ("GET", "/api/v1/status", true, true),
         ("GET", "/api/v1/local/summary", true, false), // loopback-only, handled before the gates
         ("GET", "/api/v1/compositors", true, true),
+        // Mode + accent of the desktop, for a console that follows it. Operator
+        // decoration, so it sits with the other host configuration rather than on
+        // the cert lane — no streaming client asks what colour the desktop is.
+        ("GET", "/api/v1/host/theme", true, false),
         ("GET", "/api/v1/events", true, false),
         // Unredacted host tracing (webhook URLs, hook command lines). Plugin access would void `/hooks`.
         ("GET", "/api/v1/logs", false, false),
@@ -1484,6 +1488,18 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         ("POST", "/api/v1/display/presets", true, false),
         ("PUT", "/api/v1/display/presets/{id}", true, false),
         ("DELETE", "/api/v1/display/presets/{id}", true, false),
+        // Per-device display settings. Same lane as the host-wide policy above and
+        // deliberately no stricter: this route changes ONE device's behaviour, while
+        // `PUT /display/settings` changes every device's. It carries no device identity
+        // either — the fingerprint is the key, and the body is display behaviour.
+        ("GET", "/api/v1/display/clients/{fingerprint}", true, false),
+        ("PUT", "/api/v1/display/clients/{fingerprint}", true, false),
+        (
+            "DELETE",
+            "/api/v1/display/clients/{fingerprint}",
+            true,
+            false,
+        ),
         // Session control.
         ("DELETE", "/api/v1/session", true, false),
         ("POST", "/api/v1/session/idr", true, false),
@@ -1857,11 +1873,147 @@ async fn display_settings_surface() {
     assert!(enforced.contains(&"mode_conflict"));
     assert!(enforced.contains(&"identity"));
     assert!(enforced.contains(&"layout"));
-    // DDC/CI, PnP-disable, and EDID-lock are acted on (Windows exclusive-isolate;
-    // edid_lock additionally needs an AMD driver).
-    assert!(enforced.contains(&"ddc_power_off"));
-    assert!(enforced.contains(&"pnp_disable_monitors"));
-    assert!(enforced.contains(&"edid_lock"));
+    // The console renders this list verbatim and hides anything absent from it
+    // (design/web-console-overhaul.md D1), so a name here is a control an operator can
+    // click. A build that cannot act on a field must not advertise it.
+    assert_eq!(
+        enforced.contains(&"ddc_power_off"),
+        cfg!(target_os = "windows"),
+        "DDC/CI power-off is the Windows exclusive-isolate lever"
+    );
+    assert_eq!(
+        enforced.contains(&"pnp_disable_monitors"),
+        cfg!(target_os = "windows"),
+        "PnP monitor-disable is the Windows exclusive-isolate lever"
+    );
+    // These three are additionally conditional ON their platform — an AMD driver, the
+    // MIRROR backend, a gamescope binary — so only the negative direction is universal.
+    assert!(
+        !enforced.contains(&"edid_lock") || cfg!(target_os = "windows"),
+        "EDID lock is the AMD driver's connector emulation, which exists only on Windows"
+    );
+    assert!(
+        !enforced.contains(&"capture_monitor") || cfg!(target_os = "linux"),
+        "pinning a real monitor needs the Linux MIRROR backend"
+    );
+    assert!(
+        !enforced.contains(&"game_session") || cfg!(target_os = "linux"),
+        "a dedicated game session is a headless gamescope spawn"
+    );
+}
+
+/// The per-device overlay routes (`design/web-console-overhaul.md` §6.1).
+///
+/// **Read-only on purpose.** `policy::prefs()` is a process-global `OnceLock`
+/// bound to whatever `PUNKTFUNK_CONFIG_DIR` said at its FIRST use anywhere in
+/// this binary, so `ConfigDirOverride` cannot move it afterwards — a test that
+/// PUT a policy here wrote to the developer's real `display-settings.json`.
+/// Resolution, sanitisation and the insert/remove round-trip are covered
+/// against in-memory policies in `pf-vdisplay`'s `policy::tests::client_overlay`;
+/// what is worth asserting HERE is the wiring the console depends on.
+#[tokio::test]
+async fn display_client_overlay_is_served_beside_the_policy_never_inside_it() {
+    let app = test_app(test_state(), None);
+
+    // An unknown device is "follows host", not 404: absent fields ARE the answer.
+    let (status, body) = send(&app, get_req("/api/v1/display/clients/aa11")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!({}));
+
+    let (status, body) = send(&app, get_req("/api/v1/display/settings")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("clients").is_some(),
+        "overlays ride their own field so one fetch paints the device rows"
+    );
+    assert!(
+        body["settings"].get("clients").is_none(),
+        "and never inside `settings`, which the console PUTs back whole"
+    );
+
+    // Only fields this build actually acts on per device, and never one the host
+    // does not act on at all — the console renders this list verbatim (D1).
+    let per_device: Vec<&str> = body["client_enforced"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(per_device.contains(&"mode_conflict"));
+    let host_wide: Vec<&str> = body["enforced"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    // A field that IS a host axis must be enforced host-wide too — offering it per device
+    // while the host ignores it everywhere would be the dead control D1 is about. Fields
+    // that exist only per device (a mode cap, a scale) have no host-wide twin to check.
+    const HOST_AXES: [&str; 4] = ["keep_alive", "topology", "mode_conflict", "identity"];
+    for field in per_device.iter().filter(|f| HOST_AXES.contains(f)) {
+        assert!(
+            host_wide.contains(field),
+            "{field} is offered per-device but this build does not act on it at all"
+        );
+    }
+}
+
+/// The bug this exists for: `clients` never rides the wire, so a host-wide PUT always arrives
+/// with an empty map, and the store replaces the whole policy. Without the carry-across, every
+/// preset click silently reverted every device to the host policy.
+///
+/// Pure on purpose — `policy::prefs()` is a process-global bound to the config dir at its first
+/// use anywhere in this binary, so a test that drove the real route would write to the
+/// developer's own `display-settings.json`.
+#[test]
+fn a_host_wide_save_carries_the_stored_overlays_across() {
+    use crate::vdisplay::policy::{ClientOverlay, DisplayPolicy, KeepAlive, Preset};
+    let mut stored = DisplayPolicy::default();
+    stored.clients.insert(
+        "aa11".into(),
+        ClientOverlay {
+            keep_alive: Some(KeepAlive::Forever),
+            ..ClientOverlay::default()
+        },
+    );
+    // What the console sends back: the policy it was served, which carries no overlays.
+    let incoming = DisplayPolicy {
+        preset: Preset::Workstation,
+        ..DisplayPolicy::default()
+    };
+    assert!(incoming.clients.is_empty(), "the wire never carries them");
+
+    let merged = super::display::with_stored_overlays(incoming, &stored);
+    assert_eq!(
+        merged.preset,
+        Preset::Workstation,
+        "the operator's change lands"
+    );
+    assert_eq!(
+        merged.effective_for(Some("aa11")).keep_alive,
+        KeepAlive::Forever,
+        "and the device keeps its own pin"
+    );
+}
+
+/// A stale console must not be able to revert per-device work it never saw by
+/// PUTting back the whole policy object it fetched earlier. Refused before any
+/// write, so this asserts the guard without touching the store.
+#[tokio::test]
+async fn the_host_wide_policy_put_refuses_to_carry_overlays() {
+    let app = test_app(test_state(), None);
+    let (status, _) = send(
+        &app,
+        put_json(
+            "/api/v1/display/settings",
+            serde_json::json!({
+                "preset": "default",
+                "clients": {"aa11": {"mode_conflict": "join"}}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 /// No backend has created a display here (non-Windows reports none): empty `/state`, no-op `/release`.

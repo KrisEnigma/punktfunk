@@ -1,5 +1,6 @@
 import Section from "@unom/ui/section";
 import type { FC, ReactNode } from "react";
+import { cn } from "@/lib/utils";
 import { m } from "@/paraglide/messages";
 
 /**
@@ -18,7 +19,13 @@ export const PairingView: FC<{
 			<h1 className="text-2xl font-semibold">{m.pairing_title()}</h1>
 
 			{pending}
-			<div className="lg:grid lg:grid-cols-2 flex flex-col gap-card">
+			{/* Two pairing cards share a row. Without GameStream there is one, and it takes the row. */}
+			<div
+				className={cn(
+					"flex flex-col gap-card",
+					moonlight && "lg:grid lg:grid-cols-2",
+				)}
+			>
 				{native}
 				{moonlight}
 			</div>
