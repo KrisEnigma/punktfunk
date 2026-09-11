@@ -48,63 +48,52 @@ pub(crate) struct HostTheme {
     )
 )]
 pub(crate) async fn get_host_theme() -> Json<HostTheme> {
-    // `read()` blocks — a D-Bus round trip on Linux, a registry read on Windows — and the
-    // console polls `ui-config` every two seconds per open tab. Holding a runtime worker for
-    // that is how one unresponsive portal starves every other management request.
-    Json(tokio::task::spawn_blocking(read).await.unwrap_or_default())
+    Json(read().await)
 }
 
+/// Awaited on the host's own runtime, never on one built for the call. ashpd keeps one
+/// session D-Bus connection per process and zbus pumps it from whichever runtime made it;
+/// a runtime dropped after this read took that connection down with it, and every later
+/// portal call in the process timed out. The await holds no worker while the portal thinks.
 #[cfg(target_os = "linux")]
-fn read() -> HostTheme {
+async fn read() -> HostTheme {
     // A desktop running no portal must not stall the request. Anything slower than this is
-    // "no answer" as far as the console is concerned.
+    // "no answer" as far as the console is concerned, and the budget covers the whole
+    // exchange: a portal that accepts the connection and then never answers is the case
+    // worth bounding.
     const BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::debug!("host theme: no runtime for the portal read ({e})");
+    match tokio::time::timeout(BUDGET, async {
+        let Ok(settings) = ashpd::desktop::settings::Settings::new().await else {
             return HostTheme::default();
-        }
-    };
-    rt.block_on(async {
-        // The budget covers the whole exchange, not each call: a portal that accepts the
-        // connection and then never answers is the case worth bounding.
-        match tokio::time::timeout(BUDGET, async {
-            let Ok(settings) = ashpd::desktop::settings::Settings::new().await else {
-                return HostTheme::default();
-            };
-            // 0 = no preference, 1 = dark, 2 = light (`org.freedesktop.appearance`).
-            let mode = match settings.color_scheme().await {
-                Ok(ashpd::desktop::settings::ColorScheme::PreferDark) => Some("dark".into()),
-                Ok(ashpd::desktop::settings::ColorScheme::PreferLight) => Some("light".into()),
-                _ => None,
-            };
-            let accent = settings
-                .accent_color()
-                .await
-                .ok()
-                .map(|c| rgb_hex(c.red(), c.green(), c.blue()));
-            // Only claim a source when something actually answered, or a box with no portal
-            // would read as "following" a desktop that said nothing.
-            let source = (mode.is_some() || accent.is_some()).then(|| "portal".to_string());
-            HostTheme {
-                source,
-                mode,
-                accent,
-            }
-        })
-        .await
-        {
-            Ok(theme) => theme,
-            Err(_) => {
-                tracing::debug!("host theme: the desktop portal did not answer in time");
-                HostTheme::default()
-            }
+        };
+        // 0 = no preference, 1 = dark, 2 = light (`org.freedesktop.appearance`).
+        let mode = match settings.color_scheme().await {
+            Ok(ashpd::desktop::settings::ColorScheme::PreferDark) => Some("dark".into()),
+            Ok(ashpd::desktop::settings::ColorScheme::PreferLight) => Some("light".into()),
+            _ => None,
+        };
+        let accent = settings
+            .accent_color()
+            .await
+            .ok()
+            .map(|c| rgb_hex(c.red(), c.green(), c.blue()));
+        // Only claim a source when something actually answered, or a box with no portal
+        // would read as "following" a desktop that said nothing.
+        let source = (mode.is_some() || accent.is_some()).then(|| "portal".to_string());
+        HostTheme {
+            source,
+            mode,
+            accent,
         }
     })
+    .await
+    {
+        Ok(theme) => theme,
+        Err(_) => {
+            tracing::debug!("host theme: the desktop portal did not answer in time");
+            HostTheme::default()
+        }
+    }
 }
 
 /// The portal reports each channel as 0.0..=1.0.
@@ -114,8 +103,16 @@ fn rgb_hex(r: f64, g: f64, b: f64) -> String {
     format!("#{:02x}{:02x}{:02x}", ch(r), ch(g), ch(b))
 }
 
+/// The registry read blocks, and the console polls this every two seconds per open tab.
 #[cfg(target_os = "windows")]
-fn read() -> HostTheme {
+async fn read() -> HostTheme {
+    tokio::task::spawn_blocking(read_registry)
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn read_registry() -> HostTheme {
     use crate::windows::theme::{console_session_sid, read_dword};
     let Some(sid) = console_session_sid() else {
         // Locked, signed out, or no console session: there is no user hive to read, and
@@ -155,7 +152,7 @@ fn abgr_hex(v: u32) -> String {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn read() -> HostTheme {
+async fn read() -> HostTheme {
     // No host runs here; the console falls back to its own palette.
     HostTheme::default()
 }
