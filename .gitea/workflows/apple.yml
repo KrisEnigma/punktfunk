@@ -129,7 +129,11 @@ on:
       testflight:
         description: "Upload the iOS/macOS/tvOS builds to TestFlight (true/false)"
         required: false
-        default: "true"
+        default: "false"
+      dmg:
+        description: "Notarize the macOS DMG and publish it to the registry's canary/ path (true/false)"
+        required: false
+        default: "false"
 
 # Shared compile cache: sccache -> RustFS S3 (storage.unom.io — the mini resolves it via
 # the router, i.e. the hairpin path whose TLS always validated). Covers every cargo/rustc
@@ -402,9 +406,10 @@ jobs:
           chmod 600 "$RUNNER_TEMP/asc.p8"
 
       - name: macOS — archive, codesign Developer ID, notarize, DMG
-        # Stable releases only — the notarized DMG is a Gatekeeper/direct-download artifact, not
-        # relevant to TestFlight testers (the canary channel). Skipped on canary main pushes.
-        if: startsWith(gitea.ref, 'refs/tags/v')
+        # Stable releases, and a dispatch that asks for it. Skipped on canary main pushes: the
+        # notarized DMG is a Gatekeeper/direct-download artifact, not relevant to TestFlight
+        # testers (the canary channel).
+        if: startsWith(gitea.ref, 'refs/tags/v') || inputs.dmg == 'true'
         run: |
           # Archive UNSIGNED, then codesign with the Developer ID Application identity from the
           # login keychain. Unsigned archive sidesteps Xcode's keychain-access-groups
@@ -481,11 +486,11 @@ jobs:
           RID=$(ensure_release "$GITHUB_REF_NAME" "$GITHUB_REF_NAME" auto)
           upsert_asset "$RID" "$DMG" "Punktfunk-$VERSION.dmg"
 
-      - name: Publish the DMG to the generic registry (stable tags only)
+      - name: Publish the DMG to the generic registry
         # The download page hands out one fixed URL per file; a release attachment has none.
-        # Versioned path immutable (a re-run's 409 is a no-op), latest/ delete-then-reupload —
-        # the same shape as windows-client.yml.
-        if: startsWith(gitea.ref, 'refs/tags/v')
+        # A tag fills the immutable versioned path (a re-run's 409 is a no-op) and latest/; a
+        # dispatch fills canary/ only. Aliases delete-then-reupload, as in windows-client.yml.
+        if: startsWith(gitea.ref, 'refs/tags/v') || inputs.dmg == 'true'
         env:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
@@ -497,9 +502,13 @@ jobs:
               *) echo "upload failed (HTTP $code): $2"; exit 1 ;;
             esac
           }
-          put "$DMG" "$BASE/$VERSION/Punktfunk-$VERSION.dmg"
-          curl -sS -o /dev/null --user "enricobuehler:$REGISTRY_TOKEN" -X DELETE "$BASE/latest/Punktfunk.dmg" || true
-          put "$DMG" "$BASE/latest/Punktfunk.dmg"
+          case "$GITHUB_REF" in
+            refs/tags/v*) put "$DMG" "$BASE/$VERSION/Punktfunk-$VERSION.dmg"; ALIAS=latest ;;
+            # A branch build carries the NEXT minor as its version — that path is the release's.
+            *) ALIAS=canary ;;
+          esac
+          curl -sS -o /dev/null --user "enricobuehler:$REGISTRY_TOKEN" -X DELETE "$BASE/$ALIAS/Punktfunk.dmg" || true
+          put "$DMG" "$BASE/$ALIAS/Punktfunk.dmg"
 
       - name: macOS App Store — archive + upload to TestFlight
         if: gitea.event_name != 'workflow_dispatch' || inputs.testflight == 'true'
