@@ -695,6 +695,9 @@ impl State {
             if let Some(p) = self.presenter.as_mut() {
                 p.on_vsync();
             }
+            if let Some(a) = self.asc.as_mut() {
+                a.poll_fences(ctx.offset(), &ctx.stats, &ctx.video_e2e);
+            }
         }
         ctx.stats.note_skipped_overflow(pass.aus_dropped); // parked-AU overflow: skips, flagged as such
         if pass.fmt_dirty {

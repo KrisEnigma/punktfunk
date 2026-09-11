@@ -169,6 +169,8 @@ pub(super) struct AscBackend {
     released: u64,
     skipped: u64,
     displays: u64,
+    /// Completions that carried no latch time: the transaction never reached glass as a frame.
+    unlatched: u64,
     forced: u64,
     held: u64,
     slot_miss: u64,
@@ -305,6 +307,7 @@ impl AscBackend {
             released: 0,
             skipped: 0,
             displays: 0,
+            unlatched: 0,
             forced: 0,
             held: 0,
             slot_miss: 0,
@@ -592,6 +595,9 @@ impl AscBackend {
         video_e2e: &AtomicU64,
     ) {
         self.inflight = self.inflight.saturating_sub(1);
+        if pc.latch_ns == 0 {
+            self.unlatched += 1;
+        }
         if pc.latch_ns > 0 {
             // Two transactions latched in one commit share the latch instant: SurfaceFlinger showed
             // only the newer. The present-interval histogram sees the same pair as a 0-slot spacing.
@@ -645,8 +651,9 @@ impl AscBackend {
 
     /// Read every present fence that has signalled, oldest first; a pending one stops the scan
     /// (order is what the intervals measure). One that outlives its patience never signals and
-    /// is recorded off its latch instead.
-    fn poll_fences(
+    /// is recorded off its latch instead. Runs on every completion and on every vsync tick, so
+    /// the last frame before a pause is scored off its fence, not off its latch 200 ms later.
+    pub(super) fn poll_fences(
         &mut self,
         clock_offset: i64,
         stats: &crate::stats::VideoStats,
@@ -695,10 +702,12 @@ impl AscBackend {
             }
             self.last_present_ns = present_ns;
         }
-        let latch_ns = (present_ns - a.release_mono).clamp(0, 10_000_000_000);
-        let displayed_real = a.release_real + latch_ns as i128;
+        // Apply → on glass: what the HUD and the log line call `latch`, which is SurfaceFlinger's
+        // whole share and not its latch instant.
+        let on_glass_ns = (present_ns - a.release_mono).clamp(0, 10_000_000_000);
+        let displayed_real = a.release_real + on_glass_ns as i128;
         let e2e_ns = displayed_real + clock_offset as i128 - a.pts_us as i128 * 1000;
-        let latch_use = (latch_ns / 1000) as u64;
+        let latch_use = (on_glass_ns / 1000) as u64;
         let display_use = ((displayed_real - a.decoded_real).max(0) / 1000) as u64;
         self.latch_us.push(latch_use);
         self.displays += 1;
@@ -771,7 +780,7 @@ impl AscBackend {
             "asc released={} displays={} inflight={} qDepth={} paceMs p50={:.2} max={:.2} \
              latchMs p50={:.2} max={:.2} e2eMs p50={:.2} max={:.2} panelMs={:.2} leadMs={:.2} \
              marginUs={} held={} slotMiss={} coalesced={} n0={} n1={} n2={} n3+={} judder={}‰ \
-             mode={} phaseErrMs p50={:.2} max={:.2} forced={} fence={}{}",
+             mode={} phaseErrMs p50={:.2} max={:.2} forced={} unlatched={} fence={}{}",
             self.released,
             self.displays,
             self.inflight,
@@ -797,11 +806,13 @@ impl AscBackend {
             err_p50,
             err_max,
             self.forced,
+            self.unlatched,
             u8::from(self.fence_live),
             cadence,
         );
         self.released = 0;
         self.displays = 0;
+        self.unlatched = 0;
         self.held = 0;
         self.slot_miss = 0;
         self.coalesced = 0;
