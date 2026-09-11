@@ -986,8 +986,8 @@ impl State {
 
     /// The backends' decision point, run EVERY pass — frame arrivals, vsync ticks and the 5 ms
     /// housekeeping wake all land here, which is what reopens the glass budget on time even when
-    /// the choreographer clock is absent. The ASC backend's clock is the real transaction latches,
-    /// so it consults no choreographer.
+    /// the choreographer clock is absent. The ASC backend phases on its own present fences and
+    /// takes only the panel period from the choreographer.
     fn pump(&mut self, ctx: &Ctx, clock: Option<&VsyncShared>) {
         if let Some(p) = self.presenter.as_mut() {
             let now = now_monotonic_ns();
@@ -1001,7 +1001,8 @@ impl State {
         }
         if let Some(a) = self.asc.as_mut() {
             if let Some(tx) = ctx.present_tx.as_ref() {
-                if a.pump(now_monotonic_ns(), &ctx.stats, tx) {
+                let panel = clock.map_or(0, VsyncShared::panel_period_ns);
+                if a.pump(now_monotonic_ns(), panel, &ctx.stats, tx) {
                     self.rendered += 1;
                 }
             }

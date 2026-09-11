@@ -342,29 +342,31 @@ const LEAD_MAX_NS: i64 = 50_000_000;
 ///
 /// Phase is the last real present (a present fence), never a latch: the latch
 /// is the compositor's wakeup, one work duration before the vsync, and that
-/// duration differs per device. Slots are integer indices on the grid; a
-/// presenter that targets `present_ns(slot) − period/2` is ready for `slot` and
-/// not for `slot − 1` with half a period of tolerance either side. `lead_ns` is
-/// a decaying maximum of present − latch, the apply-ahead a slot needs.
+/// duration differs per device. The period is the panel's as the compositor
+/// states it ([`SlotClock::set_period`]); presents may narrow it, never widen
+/// it — a source below the panel rate presents on every Nth vsync and must
+/// not teach a slower panel. Slots are integer indices on the grid; a
+/// presenter that targets `present_ns(slot) − period/2` is ready for `slot`
+/// and not for `slot − 1` with half a period of tolerance either side.
+/// `lead_ns` is a decaying maximum of present − latch, the apply-ahead a slot
+/// needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlotClock {
-    grid: PanelGrid,
-    /// A spacing of several periods is the panel slowing down (source at or
-    /// above the panel rate) or the source below the panel — only the former
-    /// may widen the grid.
-    learn_wider: bool,
+    period_ns: i64,
     phase_ns: i64,
     phase_slot: i64,
     lead_ns: i64,
 }
 
 impl SlotClock {
-    /// `panel_hz` seeds the period; `learn_wider` when the source rate is at
-    /// or above the panel rate (see the field).
-    pub fn seeded(panel_hz: i32, learn_wider: bool) -> SlotClock {
+    /// `panel_hz` seeds the period; 0 leaves it to the first present spacing.
+    pub fn seeded(panel_hz: i32) -> SlotClock {
         SlotClock {
-            grid: PanelGrid::seeded(panel_hz),
-            learn_wider,
+            period_ns: if panel_hz > 0 {
+                1_000_000_000 / i64::from(panel_hz)
+            } else {
+                0
+            },
             phase_ns: 0,
             phase_slot: 0,
             lead_ns: 0,
@@ -373,19 +375,28 @@ impl SlotClock {
 
     /// A present has been observed; slot arithmetic is meaningful.
     pub fn phased(&self) -> bool {
-        self.phase_ns > 0 && self.grid.period_ns() > 0
+        self.phase_ns > 0 && self.period_ns > 0
     }
 
     pub fn period_ns(&self) -> i64 {
-        self.grid.period_ns()
+        self.period_ns
     }
 
     pub fn lead_ns(&self) -> i64 {
         self.lead_ns
     }
 
+    /// The panel period as the compositor states it. Slots re-index from the
+    /// last present; an implausible value is ignored.
+    pub fn set_period(&mut self, period_ns: i64) {
+        if PANEL_PERIOD_RANGE_NS.contains(&period_ns) {
+            self.period_ns = period_ns;
+        }
+    }
+
     /// One real present and the latch that produced it. Returns the slot the
-    /// present landed on; the grid re-phases onto it.
+    /// present landed on; the grid re-phases onto it. A spacing narrower than
+    /// the period is the panel running faster than stated and narrows it.
     pub fn observe(&mut self, present_ns: i64, latch_ns: i64) -> i64 {
         let sample = present_ns - latch_ns;
         if (0..=LEAD_MAX_NS).contains(&sample) {
@@ -395,19 +406,19 @@ impl SlotClock {
                 self.lead_ns -= (self.lead_ns - sample) >> 4;
             }
         }
+        let spacing = present_ns - self.phase_ns;
+        if self.phase_ns > 0
+            && PANEL_PERIOD_RANGE_NS.contains(&spacing)
+            && (self.period_ns == 0 || spacing < self.period_ns - PANEL_GRID_TOLERANCE_NS)
+        {
+            self.period_ns = spacing;
+        }
         if !self.phased() {
-            if self.grid.period_ns() == 0 && self.phase_ns > 0 {
-                self.grid.observe(present_ns - self.phase_ns);
-            }
             self.phase_ns = present_ns;
             self.phase_slot = 0;
             return 0;
         }
         let slot = self.slot_nearest(present_ns);
-        let spacing = present_ns - self.phase_ns;
-        if slot == self.phase_slot + 1 || self.learn_wider {
-            self.grid.observe(spacing);
-        }
         self.phase_ns = present_ns;
         self.phase_slot = slot;
         slot
@@ -973,14 +984,14 @@ mod slot_clock_tests {
     const LEAD: i64 = 4_000_000;
 
     fn phased() -> SlotClock {
-        let mut c = SlotClock::seeded(120, true);
+        let mut c = SlotClock::seeded(120);
         c.observe(1_000_000_000, 1_000_000_000 - LEAD);
         c
     }
 
     #[test]
     fn first_present_phases_the_grid_on_slot_zero() {
-        let mut c = SlotClock::seeded(120, true);
+        let mut c = SlotClock::seeded(120);
         assert!(!c.phased());
         assert_eq!(c.observe(1_000_000_000, 1_000_000_000 - LEAD), 0);
         assert!(c.phased());
@@ -1017,27 +1028,33 @@ mod slot_clock_tests {
     }
 
     #[test]
-    fn a_two_period_spacing_is_slot_plus_two_and_only_a_faster_source_widens() {
-        let mut c = SlotClock::seeded(120, false);
+    fn a_half_rate_source_never_widens_the_grid() {
+        let mut c = SlotClock::seeded(120);
         c.observe(1_000_000_000, 1_000_000_000 - LEAD);
         let mut t = 1_000_000_000;
-        for i in 1..=10 {
+        for i in 1..=240 {
             t += 2 * P;
             assert_eq!(c.observe(t, t - LEAD), 2 * i);
         }
+        assert_eq!(c.period_ns(), P, "two seconds at 60 fps keep the 120 grid");
+    }
+
+    #[test]
+    fn the_compositor_sets_the_period_and_a_faster_present_narrows_it() {
+        let mut c = phased();
+        let t = 1_000_000_000;
+        c.set_period(2 * P);
+        assert_eq!(c.period_ns(), 2 * P, "a 60 Hz panel is taken as stated");
+        assert_eq!(c.slot_after(t), 1);
+        assert_eq!(c.present_ns(1), t + 2 * P);
+        c.set_period(1);
+        assert_eq!(c.period_ns(), 2 * P, "an implausible period is ignored");
+        assert_eq!(c.observe(t + P, t + P - LEAD), 1);
         assert_eq!(
             c.period_ns(),
             P,
-            "60 fps on a 120 Hz panel keeps the 120 grid"
+            "one present a 120 Hz period on narrows the grid"
         );
-        let mut c = SlotClock::seeded(120, true);
-        c.observe(1_000_000_000, 1_000_000_000 - LEAD);
-        let mut t = 1_000_000_000;
-        for _ in 0..PANEL_WIDEN_STREAK {
-            t += 2 * P;
-            c.observe(t, t - LEAD);
-        }
-        assert_eq!(c.period_ns(), 2 * P, "a panel that idled to 60 is learned");
     }
 
     #[test]

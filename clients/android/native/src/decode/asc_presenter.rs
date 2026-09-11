@@ -45,11 +45,12 @@ const READER_MAX_IMAGES: i32 = 8;
 const FALLBACK_PERIOD_NS: i64 = 8_333_333;
 
 /// Apply-ahead beyond the learned lead: the binder hop plus SurfaceFlinger's wakeup→latch gap.
-/// Starts small and widens [`APPLY_MARGIN_STEP_NS`] per slot miss to [`APPLY_MARGIN_MAX_NS`] — the
-/// desktop gate's constants.
-const APPLY_MARGIN_NS: i64 = 500_000;
+/// Starts at zero (measured as enough on the A024), widens [`APPLY_MARGIN_STEP_NS`] per slot miss
+/// to [`APPLY_MARGIN_MAX_NS`], and narrows one step per [`MARGIN_DECAY_PRESENTS`] clean presents.
+const APPLY_MARGIN_NS: i64 = 0;
 const APPLY_MARGIN_STEP_NS: i64 = 500_000;
 const APPLY_MARGIN_MAX_NS: i64 = 2_500_000;
+const MARGIN_DECAY_PRESENTS: u32 = 120;
 
 /// A completion that never arrives force-opens the budget after this long (the gate's backstop).
 const STALE_REOPEN_NS: i64 = 100_000_000;
@@ -136,6 +137,8 @@ pub(super) struct AscBackend {
     /// under smooth. 0 is the collision the sysprop A/B reproduces.
     max_ahead: i64,
     apply_margin_ns: i64,
+    /// Presents since the last slot miss; [`MARGIN_DECAY_PRESENTS`] of them narrow the margin.
+    clean_presents: u32,
     /// `debug.punktfunk.asc_pacing` = 0: as-soon-as-possible targets, two pending — the pre-overhaul
     /// behaviour, for the on-glass A/B.
     pacing: bool,
@@ -279,12 +282,11 @@ impl AscBackend {
             fifo: VecDeque::new(),
             presented: VecDeque::new(),
             awaiting: VecDeque::new(),
-            // A source at or above the panel rate may teach the grid a slower panel; a slower
-            // source presents on every Nth vsync and must not.
-            clock: SlotClock::seeded(panel_hz, source_hz as i64 >= i64::from(panel_hz.max(1))),
+            clock: SlotClock::seeded(panel_hz),
             last_slot: None,
             max_ahead,
             apply_margin_ns: APPLY_MARGIN_NS,
+            clean_presents: 0,
             pacing,
             fence_live: false,
             last_latch_ns: 0,
@@ -402,13 +404,20 @@ impl AscBackend {
     }
 
     /// Drain the reader into the held set (newest-wins candidate, or the smoothing FIFO), then
-    /// present the due frame if the budget is open. Returns `true` when a frame was applied.
+    /// present the due frame if the budget is open. `panel_period_ns` is the choreographer's
+    /// panel period (0 = none yet): the compositor's own statement of the grid, which a source
+    /// below the panel rate can never bias the way present spacings can. Returns `true` when a
+    /// frame was applied.
     pub(super) fn pump(
         &mut self,
         now_mono: i64,
+        panel_period_ns: i64,
         stats: &crate::stats::VideoStats,
         ev_tx: &mpsc::Sender<DecodeEvent>,
     ) -> bool {
+        if panel_period_ns > 0 {
+            self.clock.set_period(panel_period_ns);
+        }
         self.drain_reader();
         // The budget: one undisplayed transaction until the slots are live (then two — distinct
         // targets cannot collide, and SurfaceFlinger holds the second), force-opened when a
@@ -722,8 +731,15 @@ impl AscBackend {
             // SurfaceFlinger woke before the apply landed, or the uid's frame-rate override
             // skipped that vsync: the next frame must not aim at the slot this one took.
             self.slot_miss += 1;
+            self.clean_presents = 0;
             self.apply_margin_ns =
                 (self.apply_margin_ns + APPLY_MARGIN_STEP_NS).min(APPLY_MARGIN_MAX_NS);
+        } else {
+            self.clean_presents += 1;
+            if self.clean_presents >= MARGIN_DECAY_PRESENTS {
+                self.clean_presents = 0;
+                self.apply_margin_ns = (self.apply_margin_ns - APPLY_MARGIN_STEP_NS).max(0);
+            }
         }
         if self.last_slot.is_none_or(|l| observed > l) {
             self.last_slot = Some(observed);
