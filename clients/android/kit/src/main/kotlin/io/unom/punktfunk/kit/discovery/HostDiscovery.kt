@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -119,6 +120,7 @@ class HostDiscovery private constructor(context: Context) {
 
     private val handler = Handler(Looper.getMainLooper())
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var wifiLocks: List<WifiManager.WifiLock> = emptyList()
     private var nativeHandle = 0L
     private var running = false
     private var last: List<DiscoveredHost> = emptyList()
@@ -336,11 +338,23 @@ class HostDiscovery private constructor(context: Context) {
             setReferenceCounted(true)
             runCatching { acquire() }
         }
+        // The MulticastLock unblocks the filter but leaves Wi-Fi power save on. A power-saving
+        // client misses the multicast IGMP queries a snooping AP sends, is pruned, and stops
+        // getting the group — the stream holds these same locks to stay awake, so does the browse.
+        wifiLocks = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "punktfunk:mdns-ll")?.let(::add)
+            }
+            @Suppress("DEPRECATION")
+            wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "punktfunk:mdns-hp")?.let(::add)
+        }.onEach { it.setReferenceCounted(false); runCatching { it.acquire() } }
     }
 
     private fun releaseMulticastLock() {
         multicastLock?.takeIf { it.isHeld }?.let { runCatching { it.release() } }
         multicastLock = null
+        wifiLocks.forEach { l -> l.takeIf { it.isHeld }?.let { runCatching { it.release() } } }
+        wifiLocks = emptyList()
     }
 
     companion object {
