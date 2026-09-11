@@ -239,11 +239,8 @@ jobs:
       - name: Build PunktfunkCore.xcframework (mac + iOS + tvOS slices)
         # iOS and tvOS slices on purpose: the two scheme builds below need them. A rebuild replaces
         # the whole xcframework and drops any slice not asked for, so this must stay in step with
-        # them. The target dir outlives the job, so distribute and screenshots reuse this build.
-        run: |
-          CARGO_TARGET_DIR="$(sh scripts/ci/mac-cargo-target.sh apple)"
-          export CARGO_TARGET_DIR
-          BUILD_IOS=1 BUILD_TVOS=1 bash scripts/build-xcframework.sh
+        # them. The bundle is parked per commit, so distribute and screenshots copy it instead.
+        run: sh scripts/ci/mac-xcframework.sh
 
       - name: Build (PunktfunkKit + PunktfunkClient app shell)
         working-directory: clients/apple
@@ -393,13 +390,9 @@ jobs:
           echo "disk after prune:"; df -h /System/Volumes/Data | tail -1
 
       - name: Build PunktfunkCore.xcframework (mac + iOS + tvOS)
-        # The `swift` job built these slices into the same persistent target dir moments earlier,
-        # so this is a cargo no-op plus lipo and the bundle. Built on canary too, so the tvOS
-        # archive/upload below runs on the same track as iOS/macOS.
-        run: |
-          CARGO_TARGET_DIR="$(sh scripts/ci/mac-cargo-target.sh apple)"
-          export CARGO_TARGET_DIR
-          BUILD_IOS=1 BUILD_TVOS=1 bash scripts/build-xcframework.sh
+        # The `swift` job parked this commit's bundle on the runner, so this copies it in. Built on
+        # canary too, so the tvOS archive/upload below runs on the same track as iOS/macOS.
+        run: sh scripts/ci/mac-xcframework.sh
 
       - name: Stage App Store Connect API key
         env:
@@ -846,10 +839,7 @@ jobs:
           fi
 
       - name: Build PunktfunkCore.xcframework (mac + iOS + tvOS slices)
-        run: |
-          CARGO_TARGET_DIR="$(sh scripts/ci/mac-cargo-target.sh apple)"
-          export CARGO_TARGET_DIR
-          BUILD_IOS=1 BUILD_TVOS=1 bash scripts/build-xcframework.sh
+        run: sh scripts/ci/mac-xcframework.sh
 
       - name: Capture screenshots (iPhone 6.9" + iPad 13" + Apple TV; auto-creates the Simulators)
         working-directory: clients/apple
