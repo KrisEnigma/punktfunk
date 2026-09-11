@@ -110,7 +110,7 @@ host advertises over mDNS as `_punktfunk._udp`, so clients discover it automatic
 ## Gotchas
 
 - **distrobox required.** If missing: `curl -sfL https://raw.githubusercontent.com/89luca89/distrobox/main/install | sh -s -- --prefix ~/.local` (then ensure `~/.local/bin` is on PATH).
-- **First build is slow** (~10–15 min + ~1 GB toolchain/image). Incremental afterwards.
+- **First build is slow** (~20 min with the HDR gamescope, + ~1 GB toolchain/image). Incremental afterwards.
 - **No passwordless sudo** → the installer skips the sysctl/udev/group steps with a warning; high
   bitrates will drop packets until you apply `99-punktfunk-net.conf` and join `input` (and
   `punktfunk`, for the native Deck pad) yourself. The script prints the exact commands.

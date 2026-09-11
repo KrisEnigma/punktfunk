@@ -63,7 +63,7 @@ if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$want_stamp" ] && verifies; then
     exit 0
 fi
 
-log "Building punktfunk-gamescope (HDR 10-bit capture; ~5-10 min, best-effort)"
+log "Building punktfunk-gamescope (HDR 10-bit capture; ~5 min, best-effort)"
 # gamescope's build deps in the box (trixie names, mirroring packaging/gamescope/PKGBUILD — keep
 # the two lists in step). Provisioned here, not in install.sh's main pass, so a dep problem can
 # only ever cost this feature. glm/stb come in as meson wraps; wlroots/libliftoff/vkroots/

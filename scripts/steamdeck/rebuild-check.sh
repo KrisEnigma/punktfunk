@@ -44,7 +44,7 @@ fi
 [ "$NEED" = 0 ] && exit 0 # everything resolves — nothing to do (every normal boot)
 
 # One attempt per source tree and OS version. When a rebuild cannot fix the breakage the next
-# boot builds the same unloadable binary again, and each attempt costs ~25 minutes.
+# boot builds the same unloadable binary again, and each attempt costs ~20 minutes.
 STAMP="$HOME/.cache/punktfunk/rebuild-attempt"
 ATTEMPT="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown)@$(. /etc/os-release 2>/dev/null; echo "${BUILD_ID:-${VERSION_ID:-unknown}}")"
 if [ "$(cat "$STAMP" 2>/dev/null || true)" = "$ATTEMPT" ]; then
