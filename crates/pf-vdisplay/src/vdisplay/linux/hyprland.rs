@@ -1680,8 +1680,8 @@ fn portal_thread(
     // Shared, never-dropped runtime — not per-cast. ashpd caches its D-Bus
     // connection process-globally; a per-cast runtime takes that connection's
     // background reader down with it, leaving later handshakes awaiting a
-    // reply nothing is alive to read. See [`crate::portal_rt`].
-    let rt = match crate::portal_rt::portal_runtime() {
+    // reply nothing is alive to read. See [`pf_capture::portal_rt`].
+    let rt = match pf_capture::portal_rt::portal_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             let _ = setup_tx.send(Err(e));

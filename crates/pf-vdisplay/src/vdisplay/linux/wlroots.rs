@@ -788,9 +788,9 @@ fn portal_thread(
     use ashpd::enumflags2::BitFlags;
 
     // Multi-thread: zbus's reader must run across create_session → select_sources →
-    // start. Shared, never dropped ([`crate::portal_rt`]): a per-cast runtime kills
+    // start. Shared, never dropped ([`pf_capture::portal_rt`]): a per-cast runtime kills
     // ashpd's process-global cached connection and every later handshake hangs.
-    let rt = match crate::portal_rt::portal_runtime() {
+    let rt = match pf_capture::portal_rt::portal_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             let _ = setup_tx.send(Err(e));

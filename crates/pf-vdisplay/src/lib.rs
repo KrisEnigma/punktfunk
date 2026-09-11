@@ -678,12 +678,6 @@ mod portal_cursor;
 #[path = "vdisplay/linux/portal_picker.rs"]
 mod portal_picker;
 
-/// Never-dropped tokio runtime for portal handshakes. Outlives ashpd's
-/// process-global cached D-Bus connection; only Linux backends speak to it.
-#[cfg(target_os = "linux")]
-#[path = "vdisplay/linux/portal_rt.rs"]
-mod portal_rt;
-
 #[cfg(target_os = "linux")]
 #[path = "vdisplay/linux/hyprland.rs"]
 mod hyprland;
