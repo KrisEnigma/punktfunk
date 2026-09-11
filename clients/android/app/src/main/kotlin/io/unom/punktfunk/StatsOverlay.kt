@@ -68,9 +68,9 @@ internal fun StatsOverlay(
     /**
      * The rate this app is allowed to render at (`display.refreshRate`, 0 = unknown) and the
      * panel's active mode (`display.mode.refreshRate`). The first below the second is Android's
-     * per-uid cap (the game default frame rate), named as such on the first line; the first below
-     * the stream rate without a cap is a real mode switch and reads `panel N Hz`. Either otherwise
-     * shows up only as skipped frames and an extra refresh of latency.
+     * per-uid cap (the game default frame rate), named as such on the first line. A panel below
+     * the stream rate with both equal is the display idled down under that same cap (the A024
+     * shape: mode and render both read 60) or a real mode switch, so the line names the next move.
      */
     panelHz: Float = 0f,
     panelModeHz: Float = 0f,
@@ -84,7 +84,8 @@ internal fun StatsOverlay(
     val panelBelowStream = panelHz > 0f && hz > 0 && panelHz + 1f < hz.toFloat()
     val panelTag = when {
         capped -> "   ⚠ app capped ${panelHz.roundToInt()} Hz by the system"
-        panelBelowStream -> "   ⚠ panel ${panelHz.roundToInt()} Hz"
+        panelBelowStream ->
+            "   ⚠ panel ${panelHz.roundToInt()} Hz, not $hz · check the game frame-rate limit"
         else -> ""
     }
     val latValid = s[4] != 0.0

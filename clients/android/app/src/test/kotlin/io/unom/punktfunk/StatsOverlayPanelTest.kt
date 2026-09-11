@@ -41,7 +41,8 @@ class StatsOverlayPanelTest {
     @Test
     fun aRealModeSwitchReadsAsThePanel() {
         show(panelHz = 60f, panelModeHz = 60f)
-        compose.onNodeWithText("⚠ panel 60 Hz", substring = true).assertExists()
+        compose.onNodeWithText("⚠ panel 60 Hz, not 120 · check the game frame-rate limit", substring = true)
+            .assertExists()
         compose.onNodeWithText("capped", substring = true).assertDoesNotExist()
     }
 
