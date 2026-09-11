@@ -478,7 +478,7 @@ fn bring_up(
             continue;
         }
         log::info!(
-            "decode: decoder started (async) at {}x{} through {}",
+            "decode: decoder started (async) at {}x{} through {} (rung {rung})",
             mode.width,
             mode.height,
             // `asc.as_ref().and(backend)`, not `backend`: an ASC rung whose backend failed to
