@@ -139,6 +139,23 @@ pub fn vk_to_evdev(vk: u8) -> Option<u16> {
         0xDE => Some(40), // VK_OEM_7      -> KEY_APOSTROPHE
         0xE2 => Some(86), // VK_OEM_102    -> KEY_102ND
 
+        // IME keys. Windows gives Korean and Japanese the same two VKs (HANGUL = KANA,
+        // HANJA = KANJI); the clients send the JIS toggles as the DBE codes so the two
+        // stay apart here. Positional on Windows too — `MapVirtualKeyExW` only knows them
+        // under a Korean or Japanese layout.
+        0x15 => Some(122), // VK_HANGUL       -> KEY_HANGEUL
+        0x19 => Some(123), // VK_HANJA        -> KEY_HANJA
+        0x1C => Some(92),  // VK_CONVERT      -> KEY_HENKAN
+        0x1D => Some(94),  // VK_NONCONVERT   -> KEY_MUHENKAN
+        0xF2 => Some(93),  // VK_DBE_HIRAGANA -> KEY_KATAKANAHIRAGANA
+        0xF3 => Some(85),  // VK_DBE_SBCSCHAR -> KEY_ZENKAKUHANKAKU
+
+        // The three keys a US board lacks. Windows reuses OEM_5/OEM_102 for them, so the
+        // wire borrows the ABNT and AX labels instead; the scancode is what gets injected.
+        0xC1 => Some(89),  // VK_ABNT_C1 -> KEY_RO       (JIS ろ, ABNT2 /?)
+        0xC2 => Some(121), // VK_ABNT_C2 -> KEY_KPCOMMA  (ABNT2 keypad .)
+        0xE1 => Some(124), // VK_OEM_AX  -> KEY_YEN      (JIS ¥)
+
         _ => None,
     }
 }

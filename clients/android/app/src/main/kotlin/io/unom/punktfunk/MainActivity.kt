@@ -98,10 +98,25 @@ private fun HoldWindowInsetsListeners() {
 class MainActivity : ComponentActivity() {
     /**
      * The active stream session handle (0 = not streaming). Set by [StreamScreen] while it's shown.
-     * `dispatchKeyEvent` is the earliest, most reliable key hook — above Compose's focus system —
-     * so hardware keys are forwarded to the host regardless of which view holds focus.
+     * `dispatchKeyEvent` is the earliest key hook an app has — above Compose's focus system — so
+     * hardware keys are forwarded regardless of which view holds focus; [KeyCaptureService] is
+     * earlier still, and follows this handle and the window's focus.
      */
     var streamHandle: Long = 0L
+        set(value) {
+            field = value
+            syncKeyCapture()
+        }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        syncKeyCapture()
+    }
+
+    /** The key-filtering service forwards to this window only while a stream has focus. */
+    private fun syncKeyCapture() {
+        KeyCaptureService.stream = if (streamHandle != 0L && hasWindowFocus()) ::streamKey else null
+    }
 
     /**
      * The active session's access-grant mask ([SessionAccess] bits) — set with [streamHandle] by
@@ -160,6 +175,11 @@ class MainActivity : ComponentActivity() {
      * ring drivable from a TV remote.
      */
     var ringKeys: ((RingNav) -> Unit)? = null
+
+    /** Opens the ring at the screen centre, for Ctrl+Alt+Shift+O. Null while not streaming. */
+    var openRing: (() -> Unit)? = null
+
+    private val isTv by lazy { isTvDevice(this) }
 
     /**
      * TV remote-as-pointer for the active session (StreamScreen builds it on TV devices only):
@@ -647,14 +667,20 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    /** The grave key went down as Tab ([Keymap.altTabAlias]); its repeats and release follow. */
+    private var graveAsTab = false
+
+    /**
+     * A key while streaming: true = ours (forwarded, claimed by the mouse/pad/ring, or swallowed),
+     * false = the system's. Asked twice on a false answer — by the capture view before the IME
+     * sees a hardware key, then by [dispatchKeyEvent] — so no false path has a side effect.
+     */
+    fun streamKey(event: KeyEvent): Boolean {
         val handle = streamHandle
         if (handle != 0L) {
-            // A mouse's side buttons, when they arrive key-shaped, are X1/X2 — not navigation.
+            // A mouse's side buttons, when they arrive key-shaped, are X1/X2 — not the ring.
             // Resolved before the gamepad and remote-pointer hooks so neither can claim them as
-            // its own BACK. See [mouseSideButton] for how a mouse's BACK is told from a pad's or
-            // a remote's; it answers null for every device that cannot be a mouse, so asking it
-            // first re-routes nothing else.
+            // its own BACK; [mouseSideButton] answers null for a pad's and a TV remote's.
             mouseSideButton(event)?.let { back ->
                 when (event.action) {
                     KeyEvent.ACTION_DOWN ->
@@ -680,11 +706,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
             // The ring is modal: its scrim owns every finger, the router masks the pad behind it,
-            // and this is the same claim for keys. A remote/keyboard reaches neither of those, so
-            // its D-pad used to open the ring and then walk the game underneath it. Non-nav keys
-            // are swallowed rather than sent: nothing aimed at the menu reaches the host.
+            // and this is the same claim for keys. Non-nav keys are swallowed, not sent — except
+            // modifiers, so the Ctrl+Alt+Shift that opened it still lift on the host.
             ringKeys?.let { nav ->
-                if (!fromPad(event) && event.keyCode !in SYSTEM_KEYS) {
+                if (!fromPad(event) && event.keyCode !in SYSTEM_KEYS &&
+                    !KeyEvent.isModifierKey(event.keyCode)
+                ) {
                     if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                         ringNavForKey(event.keyCode)?.let(nav)
                     }
@@ -706,28 +733,32 @@ class MainActivity : ComponentActivity() {
                 }
                 return true
             }
+            // Ctrl+Alt+Shift+O — the cross-client quick-action chord. It only opens: while the
+            // ring is up it owns the keys above, and Escape closes it.
+            if (event.keyCode == KeyEvent.KEYCODE_O &&
+                event.isCtrlPressed && event.isAltPressed && event.isShiftPressed
+            ) {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) openRing?.invoke()
+                return true
+            }
             when (event.keyCode) {
-                // Whatever [mouseSideButton] and the pad branch didn't claim. A view-level FALLBACK
-                // BACK appears when a BUTTON_* press goes unconsumed, and an air-mouse remote stamps
-                // its own BACK SOURCE_MOUSE; both are duplicates of something already handled, and
-                // letting either through doubles as Android navigation and yanks the user out of the
-                // stream. A remote/keyboard BACK is never mouse-sourced and never gamepad-sourced,
-                // so it still falls through to the BackHandler and exits — which for a device with
-                // no pad on it is the documented way out.
+                // What [mouseSideButton] and the pad branch left: a FALLBACK duplicate of an
+                // unconsumed BUTTON_* press, or a mouse-sourced BACK whose motion edge already went
+                // (a captured mouse stamps SOURCE_MOUSE_RELATIVE). The rest open the ring.
                 KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_FORWARD ->
                     if (event.isFromSource(InputDevice.SOURCE_MOUSE) ||
+                        event.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE) ||
                         event.flags and KeyEvent.FLAG_FALLBACK != 0
                     ) {
                         return true
                     }
                 // Leave these to the system even while streaming.
-                // (BACK above → BackHandler leaves the stream.)
                 in SYSTEM_KEYS -> {}
                 else -> {
                     val down = when (event.action) {
                         KeyEvent.ACTION_DOWN -> true
                         KeyEvent.ACTION_UP -> false
-                        else -> return super.dispatchKeyEvent(event)
+                        else -> return false
                     }
                     // Without the KEYBOARD grant the key path is inert: consumed (so nothing
                     // drives Android navigation under the stream) but never sent — the host
@@ -735,7 +766,14 @@ class MainActivity : ComponentActivity() {
                     if (streamAccess and SessionAccess.KEYBOARD == 0) return true
                     // Full-event overload: evdev scancode first (positional under ANY selected
                     // physical-keyboard layout), keycode fallback — see Keymap docs.
-                    val vk = Keymap.toVk(event)
+                    var vk = Keymap.toVk(event)
+                    // Android keeps Alt+Tab for its own switcher unless the key service is on;
+                    // Alt+` is the stand-in.
+                    if (vk == 0xC0 && !KeyCaptureService.running) {
+                        val altOnly = event.isAltPressed && !event.isCtrlPressed && !event.isMetaPressed
+                        graveAsTab = Keymap.altTabAlias(down, event.repeatCount > 0, altOnly, graveAsTab)
+                        if (graveAsTab) vk = 0x09
+                    }
                     if (vk != 0) {
                         // Soft-keyboard events (the IME's virtual device — the stream's
                         // KeyCaptureView path) carry Shift only as META state, where a real
@@ -753,6 +791,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+        return false
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (streamHandle != 0L) {
+            if (streamKey(event)) return true
         } else {
             // Note which input the console UI is being driven by, so its glyphs match (a TV remote's
             // D-pad is not from SOURCE_GAMEPAD; a pad's face buttons / D-pad are) — and, for a real
@@ -801,19 +846,13 @@ class MainActivity : ComponentActivity() {
         Gamepad.eventFromPad(event, includeSc2Fallback = streamHandle == 0L)
 
     /**
-     * `true` (back) / `false` (forward) when this key event is a MOUSE side button, null when it is
-     * anything else — including a remote's or keyboard's BACK, which must keep exiting the stream.
+     * `true` (back) / `false` (forward) when this key event is a MOUSE side button, null when it
+     * belongs to the ring or a pad. The rule, and why a TV differs, is [isMouseSideKey].
      *
      * A mouse that carries its side buttons on the HID consumer page (AC Back / AC Forward) reaches
      * us only as `KEYCODE_BACK`/`KEYCODE_FORWARD`, with no `BUTTON_BACK`/`BUTTON_FORWARD` motion
-     * edge behind it — on those, the motion path alone leaves the side buttons dead. The event may
-     * even be stamped SOURCE_KEYBOARD rather than SOURCE_MOUSE, because the consumer-page collection
-     * is a separate sub-device, so the DEVICE is what we ask: it has to be able to be a mouse.
-     *
-     * A D-pad-capable device is excluded even when it also reports a pointer: that is an air-mouse
-     * remote, whose BACK is the couch user's way out of the stream and must stay navigation.
-     * FLAG_FALLBACK events are excluded too — those are a duplicate the framework raises after an
-     * unconsumed BUTTON_* press, i.e. one the motion path already forwarded.
+     * edge behind it, and may stamp them SOURCE_KEYBOARD — so the DEVICE is what we ask. A captured
+     * mouse reports SOURCE_MOUSE_RELATIVE instead of SOURCE_MOUSE; both count.
      */
     private fun mouseSideButton(event: KeyEvent): Boolean? {
         val back = when (event.keyCode) {
@@ -821,11 +860,17 @@ class MainActivity : ComponentActivity() {
             KeyEvent.KEYCODE_FORWARD -> false
             else -> return null
         }
-        if (event.flags and KeyEvent.FLAG_FALLBACK != 0) return null
         val device = event.device ?: return null
-        if (!device.supportsSource(InputDevice.SOURCE_MOUSE)) return null
-        if (device.supportsSource(InputDevice.SOURCE_DPAD)) return null
-        return back
+        val claimed = isMouseSideKey(
+            tv = isTv,
+            external = device.isExternalDevice(),
+            pad = fromPad(event) || Gamepad.isPad(device),
+            fallback = event.flags and KeyEvent.FLAG_FALLBACK != 0,
+            mouse = device.supportsSource(InputDevice.SOURCE_MOUSE) ||
+                device.supportsSource(InputDevice.SOURCE_MOUSE_RELATIVE),
+            dpad = device.supportsSource(InputDevice.SOURCE_DPAD),
+        )
+        return if (claimed) back else null
     }
 
     /** Last D-pad direction synthesised from a stick/HAT — edge detection (one focus move per push). */

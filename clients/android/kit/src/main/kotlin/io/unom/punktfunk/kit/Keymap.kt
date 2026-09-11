@@ -149,6 +149,28 @@ object Keymap {
         KeyEvent.KEYCODE_RIGHT_BRACKET -> 0xDD
         KeyEvent.KEYCODE_APOSTROPHE -> 0xDE
 
+        // IME keys. Android's Generic.kl names a Korean board's 한/영 (KEY_HANGEUL) KANA and its
+        // 한자 (KEY_HANJA) EISU; Windows gives Korean and Japanese the same two VKs anyway.
+        KeyEvent.KEYCODE_KANA -> 0x15 // VK_HANGUL / VK_KANA
+        KeyEvent.KEYCODE_EISU -> 0x19 // VK_HANJA / VK_KANJI
+        KeyEvent.KEYCODE_HENKAN -> 0x1C // VK_CONVERT
+        KeyEvent.KEYCODE_MUHENKAN -> 0x1D // VK_NONCONVERT
+        KeyEvent.KEYCODE_KATAKANA_HIRAGANA -> 0xF2 // VK_DBE_HIRAGANA
+        KeyEvent.KEYCODE_ZENKAKU_HANKAKU -> 0xF3 // VK_DBE_SBCSCHAR
+        // The keys a US board lacks, under the ABNT/AX labels the hosts map by scancode.
+        KeyEvent.KEYCODE_RO -> 0xC1 // JIS ろ, ABNT2 /?
+        KeyEvent.KEYCODE_NUMPAD_COMMA -> 0xC2 // ABNT2 keypad .
+        KeyEvent.KEYCODE_YEN -> 0xE1 // JIS ¥
+
         else -> 0 // unmapped → Rust drops it
     }
+
+    /**
+     * Android keeps Alt+Tab (its app switcher) and every Meta chord for itself, so Alt+` stands
+     * in: the grave key goes out as Tab while Alt alone holds it down, and a Shift with it walks
+     * the switcher backwards like the real key. Answers for one grave event; [wasTab] is the
+     * answer for the previous one, carried through repeats and the release so a Tab never sticks.
+     */
+    fun altTabAlias(down: Boolean, repeat: Boolean, altOnly: Boolean, wasTab: Boolean): Boolean =
+        if (down && !repeat) altOnly else wasTab
 }

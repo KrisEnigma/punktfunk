@@ -76,8 +76,19 @@ microphone mute; the in-stream hint over the video doesn't, to stay one readable
   **⌘⎋** toggles capture in either direction. **⌃⌥⇧D** (disconnect) and **⌃⌥⇧S** (stats) come from
   the app's Stream shortcuts rather than from the stream itself; if they don't respond while you're
   captured, release first or use the on-screen controls.
-- **Android and Android TV** honour **Ctrl+Alt+Shift+Q** only; it toggles pointer capture. The
-  system Back button leaves the stream.
+- **Android and Android TV** honour **Ctrl+Alt+Shift+Q** (pointer capture) and **Ctrl+Alt+Shift+O**
+  (the [quick-action dial](#the-quick-action-dial)). Android keeps **Alt+Tab**, every **Win** chord
+  and a keyboard's **Language** key for itself before any app sees them. Turn on **Punktfunk
+  keyboard shortcuts** under Android's Accessibility settings (**Settings → Input → Keyboard
+  shortcuts** opens the page) and they reach the host too — it reads keys only while a stream is on
+  screen. On Android 13 and newer a build installed outside the Play Store first needs **Allow
+  restricted settings** from the app's info page. Without the service, **Alt+`** stands in for
+  Alt+Tab (with Shift to walk backwards) and Win chords go on the dial as shortcuts. Every other
+  key reaches the host: the Korean **한/영** and **한자** keys, the JIS **変換**, **無変換**,
+  **カタカナ/ひらがな**, **半角/全角**, **ろ** and **¥** keys, and the ABNT2 **/?** and keypad
+  **.** keys included. **Ctrl+Space** reaches the host from Android 13 on; Android 12 and older
+  use it to switch their own layout. The system Back button opens the dial; a mouse's Back button
+  goes to the host.
 - **Apple TV** has no keyboard path, and a short press of the Siri Remote's Back button deliberately
   does nothing — so a controller's B button can't end your session by accident. To leave, **hold
   Back for about a second and let go**. During a session the remote's touch surface drives the host
@@ -224,9 +235,10 @@ your fingers: about 10° starts it opening, 30° commits it, and lifting short o
 in and sends nothing. The centre button opens a sheet with the whole catalogue and the resolution
 presets. On Android the **Back** gesture opens the same dial at the screen centre instead of ending
 the session; on iPhone and iPad the corner disc does; on Apple TV a short press of the remote's
-Back; on macOS, Linux and Windows **Ctrl+Alt+Shift+O** (**⌃⌥⇧O** on a Mac, also the **Stream** menu's
-Quick Actions item); with a controller, **Select+A** (Select first) on every client, and the host
-never sees the two presses. What the six buttons hold is the **Quick actions** setting, and the
+Back; on Android, macOS, Linux and Windows **Ctrl+Alt+Shift+O** (**⌃⌥⇧O** on a Mac, also the
+**Stream** menu's Quick Actions item); with a controller, **Select+A** (Select first) on every
+client, and the host never sees the two presses. A mouse's Back button goes to the host, not to
+the dial. What the six buttons hold is the **Quick actions** setting, and the
 editor is the dial itself — on every client but Apple TV, which takes whatever the profile carries.
 
 While the dial is up the controller belongs to it and the host sees nothing. The **left stick

@@ -1,5 +1,6 @@
 package io.unom.punktfunk
 
+import android.os.Build
 import android.view.InputDevice
 import android.view.MotionEvent
 import io.unom.punktfunk.kit.NativeBridge
@@ -8,6 +9,39 @@ import kotlin.math.roundToInt
 /** True when any connected input device is a pointer (USB/BT mouse, or a touchpad driving one). */
 fun hasPhysicalMouse(): Boolean = InputDevice.getDeviceIds().any { id ->
     InputDevice.getDevice(id)?.supportsSource(InputDevice.SOURCE_MOUSE) == true
+}
+
+/** True when a full keyboard is attached — not the box's own buttons. */
+fun hasPhysicalKeyboard(): Boolean = InputDevice.getDeviceIds().any { id ->
+    InputDevice.getDevice(id)?.let {
+        it.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC && it.isExternalDevice()
+    } == true
+}
+
+/** Below API 29 there is no `isExternal`; built-in keys and the nav bar carry no vendor id. */
+fun InputDevice.isExternalDevice(): Boolean =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) isExternal else vendorId != 0
+
+/**
+ * Whether a BACK/FORWARD key is a mouse side button, sent to the host as X1/X2, rather than the
+ * quick-action ring's Back. Plain facts in, so the rule is tested ([MouseSideKeyTest]).
+ *
+ * Android gives a mouse's consumer-page Back the same device shape as a remote's, so off a TV
+ * nothing is guessed: the Back gesture, the twist and Ctrl+Alt+Shift+O open the ring, and every
+ * external non-pad Back belongs to the host. On a TV the remote's Back is the way in, so only a
+ * mouse with no D-pad claims it — an air-mouse remote keeps its Back.
+ */
+fun isMouseSideKey(
+    tv: Boolean,
+    external: Boolean,
+    pad: Boolean,
+    fallback: Boolean,
+    mouse: Boolean,
+    dpad: Boolean,
+): Boolean = when {
+    fallback || pad || !external -> false
+    !tv -> true
+    else -> mouse && !dpad
 }
 
 /**

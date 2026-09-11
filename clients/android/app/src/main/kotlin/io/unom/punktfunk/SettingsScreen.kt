@@ -54,6 +54,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
@@ -904,7 +905,8 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
             OverrideBadge("overlay_actions")
             ClickableRow(
                 title = "Quick actions",
-                subtitle = "Back, a two-finger twist or Select + A on a pad opens it mid-stream. " +
+                subtitle = "Back, a two-finger twist, Ctrl+Alt+Shift+O or Select + A on a pad " +
+                    "opens it mid-stream. " +
                     "Which actions the in-stream dial offers and the shortcuts it can send; " +
                     "a profile that changes it owns the whole dial",
                 onClick = onOpenQuickActions,
@@ -927,6 +929,42 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
             field = "invert_scroll",
             onCheckedChange = { on -> update(s.copy(invertScroll = on)) },
         )
+        // Alt+Tab, the Meta chords and the Language key never reach an app; the key service
+        // filters them ahead of Android. It is enabled under Accessibility, which we can only
+        // open — after the disclosure Play requires of a service that is not an accessibility tool.
+        val context = LocalContext.current
+        var disclose by remember { mutableStateOf(false) }
+        ClickableRow(
+            title = if (KeyCaptureService.running) "Keyboard shortcuts · on" else "Keyboard shortcuts",
+            subtitle = if (KeyCaptureService.running) {
+                "Every shortcut reaches the host, Alt+Tab and the Windows key included"
+            } else {
+                "Android keeps Alt+Tab and the Windows key for itself. Turn Punktfunk on under " +
+                    "Accessibility to send them; until then Alt+` stands in for Alt+Tab"
+            },
+            onClick = { if (KeyCaptureService.running) openAccessibilitySettings(context) else disclose = true },
+        )
+        if (disclose) {
+            AlertDialog(
+                onDismissRequest = { disclose = false },
+                title = { Text("Keyboard shortcuts") },
+                text = {
+                    Text(
+                        "Punktfunk reads the keys you press on a hardware keyboard while a stream is " +
+                            "on screen, so Alt+Tab, the Windows key and your keyboard's language key " +
+                            "reach the host instead of Android. Outside a stream nothing is read, and " +
+                            "nothing is stored or shared. Android asks you to allow this under " +
+                            "Accessibility.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { disclose = false; openAccessibilitySettings(context) }) {
+                        Text("Continue")
+                    }
+                },
+                dismissButton = { TextButton(onClick = { disclose = false }) { Text("Not now") } },
+            )
+        }
         // "Shared clipboard" is NOT here: it is a trust decision about one host, so it lives on the
         // host record and is edited from that host's Edit sheet.
     }
@@ -1218,6 +1256,13 @@ private fun ToggleRow(
             }
             Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
         }
+    }
+}
+
+/** Android's Accessibility page, where the key service is switched on; a TV without one is a no-op. */
+private fun openAccessibilitySettings(context: android.content.Context) {
+    runCatching {
+        context.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 }
 
