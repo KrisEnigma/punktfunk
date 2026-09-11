@@ -652,7 +652,15 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    /** The grave key went down as Tab ([Keymap.altTabAlias]); its repeats and release follow. */
+    private var graveAsTab = false
+
+    /**
+     * A key while streaming: true = ours (forwarded, claimed by the mouse/pad/ring, or swallowed),
+     * false = the system's. Asked twice on a false answer — by the capture view before the IME
+     * sees a hardware key, then by [dispatchKeyEvent] — so no false path has a side effect.
+     */
+    fun streamKey(event: KeyEvent): Boolean {
         val handle = streamHandle
         if (handle != 0L) {
             // A mouse's side buttons, when they arrive key-shaped, are X1/X2 — not the ring.
@@ -735,7 +743,7 @@ class MainActivity : ComponentActivity() {
                     val down = when (event.action) {
                         KeyEvent.ACTION_DOWN -> true
                         KeyEvent.ACTION_UP -> false
-                        else -> return super.dispatchKeyEvent(event)
+                        else -> return false
                     }
                     // Without the KEYBOARD grant the key path is inert: consumed (so nothing
                     // drives Android navigation under the stream) but never sent — the host
@@ -743,7 +751,13 @@ class MainActivity : ComponentActivity() {
                     if (streamAccess and SessionAccess.KEYBOARD == 0) return true
                     // Full-event overload: evdev scancode first (positional under ANY selected
                     // physical-keyboard layout), keycode fallback — see Keymap docs.
-                    val vk = Keymap.toVk(event)
+                    var vk = Keymap.toVk(event)
+                    // Android keeps Alt+Tab for its own switcher; Alt+` is the stand-in.
+                    if (vk == 0xC0) {
+                        val altOnly = event.isAltPressed && !event.isCtrlPressed && !event.isMetaPressed
+                        graveAsTab = Keymap.altTabAlias(down, event.repeatCount > 0, altOnly, graveAsTab)
+                        if (graveAsTab) vk = 0x09
+                    }
                     if (vk != 0) {
                         // Soft-keyboard events (the IME's virtual device — the stream's
                         // KeyCaptureView path) carry Shift only as META state, where a real
@@ -761,6 +775,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+        return false
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (streamHandle != 0L) {
+            if (streamKey(event)) return true
         } else {
             // Note which input the console UI is being driven by, so its glyphs match (a TV remote's
             // D-pad is not from SOURCE_GAMEPAD; a pad's face buttons / D-pad are) — and, for a real
@@ -826,9 +847,7 @@ class MainActivity : ComponentActivity() {
         val device = event.device ?: return null
         val claimed = isMouseSideKey(
             tv = isTv,
-            // Below API 29 there is no isExternal; built-in keys and the nav bar carry no vendor id.
-            external = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) device.isExternal
-            else device.vendorId != 0,
+            external = device.isExternalDevice(),
             pad = fromPad(event) || Gamepad.isPad(device),
             fallback = event.flags and KeyEvent.FLAG_FALLBACK != 0,
             mouse = device.supportsSource(InputDevice.SOURCE_MOUSE) ||

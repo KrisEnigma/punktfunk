@@ -2,6 +2,8 @@ package io.unom.punktfunk.kit
 
 import android.view.KeyEvent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -52,5 +54,17 @@ class KeymapTest {
         assertEquals(0xF2, Keymap.toVk(KeyEvent.KEYCODE_KATAKANA_HIRAGANA))
         assertEquals(0xF3, Keymap.toVk(KeyEvent.KEYCODE_ZENKAKU_HANKAKU))
         assertEquals(0, Keymap.toVk(KeyEvent.KEYCODE_LANGUAGE_SWITCH)) // Android keeps it
+    }
+
+    /** Alt+` is Alt+Tab: the grave goes out as Tab from its Alt-held press to its release. */
+    @Test
+    fun altGraveStaysTabUntilReleased() {
+        var tab = Keymap.altTabAlias(down = true, repeat = false, altOnly = true, wasTab = false)
+        assertTrue(tab)
+        tab = Keymap.altTabAlias(down = true, repeat = true, altOnly = false, wasTab = tab)
+        assertTrue("Alt let go mid-repeat", tab)
+        tab = Keymap.altTabAlias(down = false, repeat = false, altOnly = false, wasTab = tab)
+        assertTrue("the release matches the press", tab)
+        assertFalse("a plain grave", Keymap.altTabAlias(down = true, repeat = false, altOnly = false, wasTab = tab))
     }
 }

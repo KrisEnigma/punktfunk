@@ -160,4 +160,13 @@ object Keymap {
 
         else -> 0 // unmapped → Rust drops it
     }
+
+    /**
+     * Android keeps Alt+Tab (its app switcher) and every Meta chord for itself, so Alt+` stands
+     * in: the grave key goes out as Tab while Alt alone holds it down, and a Shift with it walks
+     * the switcher backwards like the real key. Answers for one grave event; [wasTab] is the
+     * answer for the previous one, carried through repeats and the release so a Tab never sticks.
+     */
+    fun altTabAlias(down: Boolean, repeat: Boolean, altOnly: Boolean, wasTab: Boolean): Boolean =
+        if (down && !repeat) altOnly else wasTab
 }
