@@ -928,6 +928,25 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
             field = "invert_scroll",
             onCheckedChange = { on -> update(s.copy(invertScroll = on)) },
         )
+        // Alt+Tab, the Meta chords and the Language key never reach an app; the key service
+        // filters them ahead of Android. It is enabled under Accessibility, which we can only open.
+        val context = LocalContext.current
+        ClickableRow(
+            title = if (KeyCaptureService.running) "Keyboard shortcuts · on" else "Keyboard shortcuts",
+            subtitle = if (KeyCaptureService.running) {
+                "Every shortcut reaches the host, Alt+Tab and the Windows key included"
+            } else {
+                "Android keeps Alt+Tab and the Windows key for itself. Turn Punktfunk on under " +
+                    "Accessibility to send them; until then Alt+` stands in for Alt+Tab"
+            },
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS),
+                    )
+                }
+            },
+        )
         // "Shared clipboard" is NOT here: it is a trust decision about one host, so it lives on the
         // host record and is edited from that host's Edit sheet.
     }

@@ -129,6 +129,22 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <!-- Keys ahead of Android's own shortcuts (Alt+Tab, the Meta chords, the Language key):
+             an accessibility service filters hardware keys before the window policy takes them.
+             The user turns it on under Accessibility; until then it is never bound. -->
+        <service
+            android:name=".KeyCaptureService"
+            android:exported="true"
+            android:label="@string/key_capture_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/key_capture_service" />
+        </service>
+
         <!-- The USB grant only persists for the activity that matches the attach filter, so it
              cannot hang on MainActivity: launchMode is standard, and an attach would start a
              second copy of it. This activity exists to match, and then finishes. -->

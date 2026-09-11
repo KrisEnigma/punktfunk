@@ -755,7 +755,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                             )
                             if (gestures) add("three-finger tap for stats")
                             // Android keeps Alt+Tab; the alias is only learnable from here.
-                            if (keyboard) add("Alt+` for Alt+Tab")
+                            if (keyboard && !KeyCaptureService.running) add("Alt+` for Alt+Tab")
                         }
                     }.joinToString(" · "),
                     alpha = bannerAlpha,

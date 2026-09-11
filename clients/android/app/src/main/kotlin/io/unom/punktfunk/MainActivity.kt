@@ -98,10 +98,25 @@ private fun HoldWindowInsetsListeners() {
 class MainActivity : ComponentActivity() {
     /**
      * The active stream session handle (0 = not streaming). Set by [StreamScreen] while it's shown.
-     * `dispatchKeyEvent` is the earliest, most reliable key hook — above Compose's focus system —
-     * so hardware keys are forwarded to the host regardless of which view holds focus.
+     * `dispatchKeyEvent` is the earliest key hook an app has — above Compose's focus system — so
+     * hardware keys are forwarded regardless of which view holds focus; [KeyCaptureService] is
+     * earlier still, and follows this handle and the window's focus.
      */
     var streamHandle: Long = 0L
+        set(value) {
+            field = value
+            syncKeyCapture()
+        }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        syncKeyCapture()
+    }
+
+    /** The key-filtering service forwards to this window only while a stream has focus. */
+    private fun syncKeyCapture() {
+        KeyCaptureService.stream = if (streamHandle != 0L && hasWindowFocus()) ::streamKey else null
+    }
 
     /**
      * The active session's access-grant mask ([SessionAccess] bits) — set with [streamHandle] by
@@ -752,8 +767,9 @@ class MainActivity : ComponentActivity() {
                     // Full-event overload: evdev scancode first (positional under ANY selected
                     // physical-keyboard layout), keycode fallback — see Keymap docs.
                     var vk = Keymap.toVk(event)
-                    // Android keeps Alt+Tab for its own switcher; Alt+` is the stand-in.
-                    if (vk == 0xC0) {
+                    // Android keeps Alt+Tab for its own switcher unless the key service is on;
+                    // Alt+` is the stand-in.
+                    if (vk == 0xC0 && !KeyCaptureService.running) {
                         val altOnly = event.isAltPressed && !event.isCtrlPressed && !event.isMetaPressed
                         graveAsTab = Keymap.altTabAlias(down, event.repeatCount > 0, altOnly, graveAsTab)
                         if (graveAsTab) vk = 0x09

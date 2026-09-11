@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Punktfunk</string>
+    <string name="key_capture_service_label">Punktfunk keyboard shortcuts</string>
+    <string name="key_capture_service_description">Lets a stream take every keyboard shortcut, Alt+Tab and the Windows key included. Only keys meant for a stream on screen are read; nothing else is seen or stored.</string>
 </resources>
