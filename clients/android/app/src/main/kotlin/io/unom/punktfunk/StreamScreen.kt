@@ -746,8 +746,8 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                             if (ui.micRunning) add("Select + Y mic")
                             add("Select + X stats")
                         } else {
-                            // No pad: Back opens the dial (gesture, key, or a TV remote's button — all
-                            // land on the same BackHandler). Leaving is a slot inside it, not this.
+                            // No pad: Back opens the dial (the gesture, or a TV remote's button; a
+                            // mouse's Back goes to the host). Leaving is a slot inside it, not this.
                             add(
                                 if (gestures) "Back or a two-finger twist opens quick actions"
                                 else "Back opens quick actions"

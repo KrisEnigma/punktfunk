@@ -11,6 +11,28 @@ fun hasPhysicalMouse(): Boolean = InputDevice.getDeviceIds().any { id ->
 }
 
 /**
+ * Whether a BACK/FORWARD key is a mouse side button, sent to the host as X1/X2, rather than the
+ * quick-action ring's Back. Plain facts in, so the rule is tested ([MouseSideKeyTest]).
+ *
+ * Android gives a mouse's consumer-page Back the same device shape as a remote's, so off a TV
+ * nothing is guessed: the Back gesture, the twist and Ctrl+Alt+Shift+O open the ring, and every
+ * external non-pad Back belongs to the host. On a TV the remote's Back is the way in, so only a
+ * mouse with no D-pad claims it — an air-mouse remote keeps its Back.
+ */
+fun isMouseSideKey(
+    tv: Boolean,
+    external: Boolean,
+    pad: Boolean,
+    fallback: Boolean,
+    mouse: Boolean,
+    dpad: Boolean,
+): Boolean = when {
+    fallback || pad || !external -> false
+    !tv -> true
+    else -> mouse && !dpad
+}
+
+/**
  * Physical mouse → wire, in two modes (the iPadOS/desktop model):
  *  * **uncaptured** (default): hover/drag positions forward as absolute cursor moves
  *    (`MouseMoveAbs`, host-normalized against the window size) — desktop-style pointing. The

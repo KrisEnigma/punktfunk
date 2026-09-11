@@ -224,9 +224,10 @@ your fingers: about 10° starts it opening, 30° commits it, and lifting short o
 in and sends nothing. The centre button opens a sheet with the whole catalogue and the resolution
 presets. On Android the **Back** gesture opens the same dial at the screen centre instead of ending
 the session; on iPhone and iPad the corner disc does; on Apple TV a short press of the remote's
-Back; on macOS, Linux and Windows **Ctrl+Alt+Shift+O** (**⌃⌥⇧O** on a Mac, also the **Stream** menu's
-Quick Actions item); with a controller, **Select+A** (Select first) on every client, and the host
-never sees the two presses. What the six buttons hold is the **Quick actions** setting, and the
+Back; on Android, macOS, Linux and Windows **Ctrl+Alt+Shift+O** (**⌃⌥⇧O** on a Mac, also the
+**Stream** menu's Quick Actions item); with a controller, **Select+A** (Select first) on every
+client, and the host never sees the two presses. A mouse's Back button goes to the host, not to
+the dial. What the six buttons hold is the **Quick actions** setting, and the
 editor is the dial itself — on every client but Apple TV, which takes whatever the profile carries.
 
 While the dial is up the controller belongs to it and the host sees nothing. The **left stick

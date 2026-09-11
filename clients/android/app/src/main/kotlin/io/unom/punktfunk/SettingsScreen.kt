@@ -904,7 +904,8 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
             OverrideBadge("overlay_actions")
             ClickableRow(
                 title = "Quick actions",
-                subtitle = "Back, a two-finger twist or Select + A on a pad opens it mid-stream. " +
+                subtitle = "Back, a two-finger twist, Ctrl+Alt+Shift+O or Select + A on a pad " +
+                    "opens it mid-stream. " +
                     "Which actions the in-stream dial offers and the shortcuts it can send; " +
                     "a profile that changes it owns the whole dial",
                 onClick = onOpenQuickActions,
