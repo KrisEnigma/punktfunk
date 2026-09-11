@@ -273,10 +273,16 @@ private fun audioFormatLine(s: DoubleArray): String? {
 /** `quic::AUDIO_CODEC_PCM` — the `0xD3` lossless plane's wire byte. */
 private const val AUDIO_CODEC_PCM_WIRE = 2
 
-/** One monospace HUD line — the shared type ramp so every tier's rows line up. */
+/**
+ * One monospace HUD line — the shared type ramp so every tier's rows line up. Line height and
+ * tracking are pinned: the theme's `bodyLarge` would set 12 sp text on a 24 sp line.
+ */
 @Composable
 private fun statLine(text: String, color: Color) {
-    Text(text, color = color, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    Text(
+        text, color = color, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
+        lineHeight = 16.sp, letterSpacing = 0.sp,
+    )
 }
 
 /**

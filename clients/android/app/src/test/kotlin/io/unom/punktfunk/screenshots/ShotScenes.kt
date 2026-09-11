@@ -56,6 +56,7 @@ import io.unom.punktfunk.ConnectModal
 import io.unom.punktfunk.ConnectPhase
 import androidx.compose.runtime.CompositionLocalProvider
 import io.unom.punktfunk.GamepadInk
+import io.unom.punktfunk.OsdScaled
 import io.unom.punktfunk.GamepadPalette
 import coil.ImageLoader
 import coil.test.FakeImageLoaderEngine
@@ -448,6 +449,7 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
         // decodeP50, hostP50, netP50, lost, skipped, fec, frames, dispValid, displayP50,
         // e2eDispP50, e2eDispP95, paceP50, latchP50, presents, presenterActive, feedP50, codecP50,
         // skippedOverflow, audioBufferMs, audioAvOffsetMs, audioCodec, audioRateHz, audioBits].
+        // OsdScaled as in StreamScreen, so the tv- shots carry the TV overlay scale.
         // 10/9/16/1 = a 10-bit BT.2020 PQ (HDR) 4:2:0 feed so the DETAILED HUD renders its
         // video-feed line; the display stage is valid (dispValid 1) so the headline is the
         // directly-measured capture→displayed pair, less the excluded OS present floor (the 0.3
@@ -457,7 +459,7 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
         // low-latency decoder. Light per-window loss
         // (lost 2 · skipped 1 · FEC 5 of 238) so the reliability line (NORMAL/DETAILED) and the
         // compact loss flag both render.
-        StatsOverlay(
+        OsdScaled { StatsOverlay(
             doubleArrayOf(
                 238.0, 921.4, 1.3, 2.1, 1.0, 1.0, 5120.0, 1440.0, 240.0, 2.0,
                 10.0, 9.0, 16.0, 1.0, 0.9, 0.4, 0.6, 0.3,
@@ -481,7 +483,7 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
             decoderLabel = "c2.qti.hevc.decoder · low-latency",
             codecLabel = "HEVC",
             modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
-        )
+        ) }
     }
 }
 
