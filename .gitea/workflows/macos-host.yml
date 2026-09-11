@@ -109,6 +109,13 @@ jobs:
           RUSTUP="$(command -v rustup || echo "$HOME/.cargo/bin/rustup")"
           dirname "$RUSTUP" >> "$GITHUB_PATH"
 
+      # target/ outlives the job on this persistent runner (see the script), so a run recompiles
+      # only what changed.
+      - name: Persistent cargo target dir
+        run: |
+          dir="$(sh scripts/ci/mac-cargo-target.sh macos-host)"
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+
       - name: sccache (self-healing install)
         run: sh scripts/ci/ensure-sccache.sh
 
