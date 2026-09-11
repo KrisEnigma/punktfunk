@@ -395,8 +395,9 @@ impl SlotClock {
     }
 
     /// One real present and the latch that produced it. Returns the slot the
-    /// present landed on; the grid re-phases onto it. A spacing narrower than
-    /// the period is the panel running faster than stated and narrows it.
+    /// present landed on; the grid re-phases onto it. A spacing under nine
+    /// tenths of the period is the panel running faster than stated and
+    /// narrows it; anything closer is fence jitter (250 µs on the A024).
     pub fn observe(&mut self, present_ns: i64, latch_ns: i64) -> i64 {
         let sample = present_ns - latch_ns;
         if (0..=LEAD_MAX_NS).contains(&sample) {
@@ -409,7 +410,7 @@ impl SlotClock {
         let spacing = present_ns - self.phase_ns;
         if self.phase_ns > 0
             && PANEL_PERIOD_RANGE_NS.contains(&spacing)
-            && (self.period_ns == 0 || spacing < self.period_ns - PANEL_GRID_TOLERANCE_NS)
+            && (self.period_ns == 0 || spacing < self.period_ns / 10 * 9)
         {
             self.period_ns = spacing;
         }
