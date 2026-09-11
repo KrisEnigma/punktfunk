@@ -3398,6 +3398,7 @@ dependencies = [
  "futures-util",
  "hex",
  "libc",
+ "pf-capture",
  "pf-driver-proto",
  "pf-frame",
  "pf-gpu",

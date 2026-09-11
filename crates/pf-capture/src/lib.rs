@@ -656,6 +656,12 @@ pub use idd_push::driver_encode::{open_driver_encoder, DriverEncodeOpenError, Dr
 #[cfg(target_os = "linux")]
 #[path = "linux/mod.rs"]
 mod linux;
+/// Never-dropped tokio runtime for portal handshakes. Outlives ashpd's
+/// process-global cached D-Bus connection; every portal thread in the process
+/// parks on it, pf-vdisplay's and pf-inject's included.
+#[cfg(target_os = "linux")]
+#[path = "linux/portal_rt.rs"]
+pub mod portal_rt;
 // GNOME BT.2100 colour-mode probe — host gate for offering HDR on the portal
 // monitor path (`open_portal_monitor` `want_hdr`).
 #[cfg(target_os = "linux")]

@@ -6,8 +6,9 @@
 //! device `start_emulating` → emit → `frame`.
 //!
 //! The portal/Mutter session and the EIS connection must stay alive, and the event
-//! stream must be polled (resume/pause/ping). The worker owns its own tokio runtime;
-//! the control thread only enqueues via [`LibeiInjector::inject`].
+//! stream must be polled (resume/pause/ping). The worker parks on the shared portal
+//! runtime (`pf_capture::portal_rt`); the control thread only enqueues via
+//! [`LibeiInjector::inject`].
 //!
 //! Keyboard codes are Linux evdev. The compositor supplies the keymap, so there is
 //! no keymap to upload and no modifier mask to serialize — modifier keys arrive as
@@ -77,14 +78,12 @@ impl InputInjector for LibeiInjector {
 }
 
 fn worker(rx: UnboundedReceiver<InputEvent>, source: EiSource) {
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-    {
+    // Shared, never dropped: a per-worker runtime took ashpd's process-global
+    // D-Bus connection down with it, and the next session's portal open hung.
+    let rt = match pf_capture::portal_rt::portal_runtime() {
         Ok(rt) => rt,
         Err(e) => {
-            tracing::error!(error = %e, "libei: build tokio runtime failed");
+            tracing::error!(error = %e, "libei: no portal runtime");
             return;
         }
     };
@@ -92,9 +91,9 @@ fn worker(rx: UnboundedReceiver<InputEvent>, source: EiSource) {
 }
 
 async fn session_main(mut rx: UnboundedReceiver<InputEvent>, source: EiSource) {
-    // Dropping the portal session closes EIS. Bound setup so an unanswered approval
-    // dialog cannot hang the worker.
-    let (_keepalive, context, mut events, output_hint) = match tokio::time::timeout(
+    // Closing the portal session (end of fn) closes EIS. Bound setup so an unanswered
+    // approval dialog cannot hang the worker.
+    let (keepalive, context, mut events, output_hint) = match tokio::time::timeout(
         Duration::from_secs(30),
         connect(source),
     )
@@ -149,12 +148,47 @@ async fn session_main(mut rx: UnboundedReceiver<InputEvent>, source: EiSource) {
     // Mutter keeps the implicit grab of a destroyed device's held button until the
     // focused app restarts. Release before the EIS connection (and its devices) go.
     state.release_all(&context);
+    keepalive.close().await;
 }
 
-/// Connect-step return. Keep-alive must outlive the session — dropping the
-/// portal/Mutter session closes EIS. Direct-socket path uses `Box::new(())`.
+/// What holds the EIS server's session open, and how it ends. The portal session
+/// lives on ashpd's process-global connection, which outlives this worker, so only
+/// `Session.Close` ends it; Mutter's rides a private connection that ends with the
+/// value; the relayed socket has nothing to close.
+enum Keepalive {
+    Portal(ashpd::desktop::Session<RemoteDesktop>),
+    Mutter(Box<dyn Send>),
+    Socket,
+}
+
+/// Bounds `Session.Close` so a wedged portal cannot hang the worker's exit.
+const CLOSE_BUDGET: Duration = Duration::from_secs(3);
+
+impl Keepalive {
+    async fn close(self) {
+        match self {
+            Keepalive::Portal(session) => {
+                match tokio::time::timeout(CLOSE_BUDGET, session.close()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "libei: closing the RemoteDesktop session failed")
+                    }
+                    Err(_) => tracing::warn!(
+                        budget_s = CLOSE_BUDGET.as_secs(),
+                        "libei: the portal did not answer Session.Close in time"
+                    ),
+                }
+            }
+            Keepalive::Mutter(conn) => drop(conn),
+            Keepalive::Socket => {}
+        }
+    }
+}
+
+/// Connect-step return. The keep-alive outlives the EIS connection and is closed
+/// after it (see [`Keepalive`]).
 type Connected = (
-    Box<dyn Send>,
+    Keepalive,
     ei::Context,
     reis::tokio::EiConvertEventStream,
     // Relay-file "WxH" scale target when EIS advertises a degenerate region
@@ -163,21 +197,21 @@ type Connected = (
 );
 
 async fn connect(source: EiSource) -> Result<Connected> {
-    let (keepalive, stream, output_hint): (Box<dyn Send>, UnixStream, Option<(u32, u32)>) =
-        match source {
-            EiSource::Portal => {
-                let (rd, session, fd) = connect_portal().await?;
-                (Box::new((rd, session)), UnixStream::from(fd), None)
-            }
-            EiSource::MutterEis => {
-                let (keepalive, fd) = connect_mutter().await?;
-                (keepalive, UnixStream::from(fd), None)
-            }
-            EiSource::SocketPathFile(file) => {
-                let (stream, hint) = connect_socket_file(&file).await?;
-                (Box::new(()), stream, hint)
-            }
-        };
+    let (keepalive, stream, output_hint): (Keepalive, UnixStream, Option<(u32, u32)>) = match source
+    {
+        EiSource::Portal => {
+            let (_rd, session, fd) = connect_portal().await?;
+            (Keepalive::Portal(session), UnixStream::from(fd), None)
+        }
+        EiSource::MutterEis => {
+            let (keepalive, fd) = connect_mutter().await?;
+            (Keepalive::Mutter(keepalive), UnixStream::from(fd), None)
+        }
+        EiSource::SocketPathFile(file) => {
+            let (stream, hint) = connect_socket_file(&file).await?;
+            (Keepalive::Socket, stream, hint)
+        }
+    };
     let context = ei::Context::new(stream).map_err(|e| anyhow!("reis EI context: {e}"))?;
     // `UnixStream::connect` succeeds as soon as the path exists; a stale gamescope
     // socket never completes the EI handshake. Bound so InjectorService can reopen.
