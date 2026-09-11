@@ -133,6 +133,9 @@ pub fn scancode_to_vk(sc: Scancode) -> Option<u8> {
         S::International4 => 0x1C,
         S::International5 => 0x1D,
         S::International2 => 0xF2,
+        S::International1 => 0xC1, // JIS ろ, ABNT2 /?
+        S::KpComma => 0xC2,        // ABNT2 keypad .
+        S::International3 => 0xE1, // JIS ¥
 
         _ => return None,
     })
@@ -193,6 +196,9 @@ mod tests {
             (S::International4, 92),
             (S::International5, 94),
             (S::International2, 93),
+            (S::International1, 89),
+            (S::KpComma, 121),
+            (S::International3, 124),
         ];
         for &(sc, ev) in same_key {
             assert_eq!(scancode_to_vk(sc), evdev_to_vk(ev), "scancode {sc:?}");

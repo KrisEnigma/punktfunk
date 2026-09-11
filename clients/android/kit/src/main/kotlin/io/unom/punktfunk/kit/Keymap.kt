@@ -157,6 +157,10 @@ object Keymap {
         KeyEvent.KEYCODE_MUHENKAN -> 0x1D // VK_NONCONVERT
         KeyEvent.KEYCODE_KATAKANA_HIRAGANA -> 0xF2 // VK_DBE_HIRAGANA
         KeyEvent.KEYCODE_ZENKAKU_HANKAKU -> 0xF3 // VK_DBE_SBCSCHAR
+        // The keys a US board lacks, under the ABNT/AX labels the hosts map by scancode.
+        KeyEvent.KEYCODE_RO -> 0xC1 // JIS ろ, ABNT2 /?
+        KeyEvent.KEYCODE_NUMPAD_COMMA -> 0xC2 // ABNT2 keypad .
+        KeyEvent.KEYCODE_YEN -> 0xE1 // JIS ¥
 
         else -> 0 // unmapped → Rust drops it
     }

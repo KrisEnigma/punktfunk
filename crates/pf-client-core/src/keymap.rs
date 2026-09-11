@@ -132,6 +132,9 @@ pub fn evdev_to_vk(evdev: u16) -> Option<u8> {
         94 => 0x1D,  // KEY_MUHENKAN         -> VK_NONCONVERT
         93 => 0xF2,  // KEY_KATAKANAHIRAGANA -> VK_DBE_HIRAGANA
         85 => 0xF3,  // KEY_ZENKAKUHANKAKU   -> VK_DBE_SBCSCHAR
+        89 => 0xC1,  // KEY_RO               -> VK_ABNT_C1 (JIS ろ, ABNT2 /?)
+        121 => 0xC2, // KEY_KPCOMMA          -> VK_ABNT_C2
+        124 => 0xE1, // KEY_YEN              -> VK_OEM_AX
 
         _ => return None,
     })
@@ -197,6 +200,9 @@ mod tests {
             (0x1D, 94),
             (0xF2, 93),
             (0xF3, 85),
+            (0xC1, 89),
+            (0xC2, 121),
+            (0xE1, 124),
         ];
         for &(vk, evdev) in host_pairs {
             assert_eq!(evdev_to_vk(evdev), Some(vk), "evdev {evdev}");

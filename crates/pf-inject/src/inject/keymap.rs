@@ -150,6 +150,12 @@ pub fn vk_to_evdev(vk: u8) -> Option<u16> {
         0xF2 => Some(93),  // VK_DBE_HIRAGANA -> KEY_KATAKANAHIRAGANA
         0xF3 => Some(85),  // VK_DBE_SBCSCHAR -> KEY_ZENKAKUHANKAKU
 
+        // The three keys a US board lacks. Windows reuses OEM_5/OEM_102 for them, so the
+        // wire borrows the ABNT and AX labels instead; the scancode is what gets injected.
+        0xC1 => Some(89),  // VK_ABNT_C1 -> KEY_RO       (JIS ろ, ABNT2 /?)
+        0xC2 => Some(121), // VK_ABNT_C2 -> KEY_KPCOMMA  (ABNT2 keypad .)
+        0xE1 => Some(124), // VK_OEM_AX  -> KEY_YEN      (JIS ¥)
+
         _ => None,
     }
 }

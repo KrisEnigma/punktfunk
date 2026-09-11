@@ -483,6 +483,9 @@ fn positional_vk_to_scan(vk: u16) -> Option<u16> {
         0x1D => 0x7B,                    // VK_NONCONVERT 無変換
         0xF2 => 0x70,                    // VK_DBE_HIRAGANA カタカナ/ひらがな
         0xF3 => 0x29,                    // VK_DBE_SBCSCHAR 半角/全角 (the JIS grave position)
+        0xC1 => 0x73,                    // VK_ABNT_C1    JIS ろ, ABNT2 /?
+        0xC2 => 0x7E,                    // VK_ABNT_C2    ABNT2 keypad .
+        0xE1 => 0x7D,                    // VK_OEM_AX     JIS ¥
         _ => return None,
     })
 }
@@ -524,6 +527,9 @@ mod tests {
             (0x1D, 0x7B, 94),
             (0xF2, 0x70, 93),
             (0xF3, 0x29, 85),
+            (0xC1, 0x73, 89),
+            (0xC2, 0x7E, 121),
+            (0xE1, 0x7D, 124),
         ];
         let mut checked = 0;
         for vk in 0x01..=0xFEu16 {
@@ -544,7 +550,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 54, "typing-area coverage changed unexpectedly");
+        assert_eq!(checked, 57, "typing-area coverage changed unexpectedly");
     }
 
     /// US-position VKs for physical Y/Z/ö/ü must resolve to those positions, not a layout.

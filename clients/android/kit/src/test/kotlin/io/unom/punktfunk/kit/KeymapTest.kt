@@ -53,6 +53,9 @@ class KeymapTest {
         assertEquals(0x1D, Keymap.toVk(KeyEvent.KEYCODE_MUHENKAN))
         assertEquals(0xF2, Keymap.toVk(KeyEvent.KEYCODE_KATAKANA_HIRAGANA))
         assertEquals(0xF3, Keymap.toVk(KeyEvent.KEYCODE_ZENKAKU_HANKAKU))
+        assertEquals(0xC1, Keymap.toVk(KeyEvent.KEYCODE_RO)) // JIS ろ, ABNT2 /?
+        assertEquals(0xC2, Keymap.toVk(KeyEvent.KEYCODE_NUMPAD_COMMA))
+        assertEquals(0xE1, Keymap.toVk(KeyEvent.KEYCODE_YEN))
         assertEquals(0, Keymap.toVk(KeyEvent.KEYCODE_LANGUAGE_SWITCH)) // Android keeps it
     }
 
