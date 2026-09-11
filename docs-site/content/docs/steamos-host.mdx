@@ -48,9 +48,9 @@ Vulkan encode behind that flag, and without it sessions quietly fall back to VAA
   curl -sfL https://raw.githubusercontent.com/89luca89/distrobox/main/install | sh -s -- --prefix ~/.local
   ```
   Make sure `~/.local/bin` is on your `PATH` (re-open the terminal).
-- The first build downloads a container image + toolchain (~1 GB) and takes ~10–15 minutes, then
-  another ~5–10 minutes for the HDR gamescope build (a second set of dependencies plus a fresh
-  gamescope clone). Budget around 25 minutes for a first install. Later rebuilds are incremental,
+- The first build downloads a container image + toolchain (~1 GB) and takes ~15 minutes, then
+  another ~5 minutes for the HDR gamescope build (a second set of dependencies plus a fresh
+  gamescope clone). Budget around 20 minutes for a first install. Later rebuilds are incremental,
   and the gamescope step is a no-op unless its sources changed.
 
 ## 1. Get the source and run the installer

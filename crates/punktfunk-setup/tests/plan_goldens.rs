@@ -718,14 +718,14 @@ fn trap_the_steamos_clone_tolerates_a_tree_that_is_already_there() {
 }
 
 /// The progress line captures the build's output, so the wait is announced before the script
-/// starts; otherwise the run looks frozen for 25 minutes.
+/// starts; otherwise the run looks frozen for 20 minutes.
 #[test]
 fn trap_the_steamos_build_is_announced_before_it_runs() {
     let plan = plan_for(&fresh("steamos", Family::Steamos), &pins());
     let steps: Vec<&StepAction> = plan.steps().map(|s| &s.action).collect();
     let note = steps
         .iter()
-        .position(|a| matches!(a, StepAction::Note(_, t) if t.contains("30 minutes")))
+        .position(|a| matches!(a, StepAction::Note(_, t) if t.contains("20 minutes")))
         .expect("the wait is announced");
     let build = steps
         .iter()
