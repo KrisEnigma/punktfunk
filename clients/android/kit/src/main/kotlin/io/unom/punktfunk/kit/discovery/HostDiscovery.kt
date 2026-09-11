@@ -233,7 +233,7 @@ class HostDiscovery private constructor(context: Context) {
      */
     private fun networkChanged() {
         Log.i(TAG, "default network changed — rebuilding the browse")
-        if (listeners.isNotEmpty()) restart()
+        restart()
         networkListeners.toList().forEach { it() }
     }
 
@@ -290,11 +290,12 @@ class HostDiscovery private constructor(context: Context) {
      * re-binds :5353 and re-joins the groups, and one that fails leaves the device blind.
      *
      * The shown host set is left alone across the swap; the first poll of the new browse
-     * publishes the fresh one.
+     * publishes the fresh one. A browse nobody holds up is not rebuilt: a grant that lands
+     * mid-stream must not put a daemon beside the session, with nothing left to stop it.
      */
     fun restart() {
         stop()
-        start()
+        if (listeners.isNotEmpty()) start()
     }
 
     private fun stop() {

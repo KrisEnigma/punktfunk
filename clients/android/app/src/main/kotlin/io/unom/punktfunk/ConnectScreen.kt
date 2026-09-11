@@ -7,8 +7,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -114,6 +112,10 @@ fun ConnectScreen(
     // link must go through all of them, not around them.
     deepLink: String? = null,
     onDeepLinkHandled: () -> Unit = {},
+    // Whether ACCESS_LOCAL_NETWORK is held. App asks on entry and re-checks on resume, since the
+    // console shell needs the grant too; this screen gates on it and re-asks from its banner.
+    lnpGranted: Boolean,
+    onAskLocalNetwork: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -133,74 +135,28 @@ fun ConnectScreen(
     val (w, h, hz) = settings.effectiveMode(context)
 
     // mDNS discovery scoped to this screen, via the native mdns-sd browse (HostDiscovery) — its
-    // onChange fires on the main thread, so it can set Compose state directly. (Emulator SLIRP drops
-    // multicast → empty; that's the network, not the API.) Raw multicast reception only needs the
-    // Wi-Fi MulticastLock (HostDiscovery holds it), NOT NEARBY_WIFI_DEVICES — that gated the old
-    // NsdManager path. We still request NEARBY_WIFI_DEVICES opportunistically (some OEMs filter
-    // multicast without it; harmless where it isn't), but never block discovery on the grant — a
-    // denial used to leave discovery dead forever.
+    // onChange fires on the main thread, so it can set Compose state directly. The grants it needs
+    // are asked in App, above both shells; `lnpGranted` here only gates what would otherwise EPERM
+    // its way to a timeout, and a denial shows as the grid's banner.
     val discovery = remember { HostDiscovery.shared(context) }
     val discoveredState = remember { mutableStateOf<List<DiscoveredHost>>(emptyList()) }
     val discovered by discoveredState
     // One value, because subscribing IS what runs the browse: the pauses below (a dial, a wake, a
     // speed test) drop this exact subscriber and the resumes hand back the same one.
     val subscriber = remember { { hosts: List<DiscoveredHost> -> discoveredState.value = hosts } }
-    // Android 17 Local Network Protection: with targetSdk 37, EVERYTHING this screen does — the mDNS
-    // browse, the QUIC dial (UDP 9777), Wake-on-LAN, the library fetch — is blocked until the user
-    // grants ACCESS_LOCAL_NETWORK (a runtime permission in the NEARBY_DEVICES group). Blocked UDP
-    // fails with EPERM, which quinn experiences as a silent handshake timeout — so without this gate
-    // a denial looks exactly like a dead host. Unlike NEARBY_WIFI_DEVICES below, this one is
-    // load-bearing: request it on entry, and surface a denial as an actionable dialog/banner (with a
-    // system-settings deep link) instead of dead-ending on timeouts.
-    var lnpGranted by remember { mutableStateOf(hasLocalNetworkPermission(context)) }
+    // The rationale dialog: raised by the banner, and by a dial or wake attempted without the grant.
     var lnpPrompt by remember { mutableStateOf(false) }
-    val localNetLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        lnpGranted = granted
-        if (granted) {
-            lnpPrompt = false
-            // The browse started while blocked (its sockets failed or received nothing) — restart it
-            // now that the grant makes them work.
-            discovery.restart()
-        } else {
-            lnpPrompt = true // rationale + "Open settings" (a permanently-denied request returns instantly)
-        }
-    }
-    val nearbyLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { _ -> /* best-effort hint; discovery runs regardless of the result */ }
-    LaunchedEffect(Unit) {
-        if (!lnpGranted) {
-            localNetLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNearbyPermission(context)) {
-            // The old opportunistic multicast hedge (some OEMs filter multicast without it). On API
-            // 37+ it shares the NEARBY_DEVICES group with ACCESS_LOCAL_NETWORK, so once that is
-            // granted this auto-grants without a second prompt.
-            nearbyLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
-        }
-    }
-    // Re-check on resume: our dialog deep-links to system settings, and granting there doesn't kill
-    // or otherwise notify the app — this observer is what turns the grant into a live discovery.
+    // Back from the background the browse sat idle with its re-query interval doubling: ask again,
+    // so returning to the screen is enough. Not on first entry, where ON_RESUME fires right after
+    // the effect below starts the browse.
     DisposableEffect(Unit) {
         val lifecycle = (context as? LifecycleOwner)?.lifecycle
-        // Whether we've actually been away. ON_RESUME also fires on first entry, right after the
-        // effect below starts the browse — restarting it there would be pure churn.
         var wasPaused = false
         val obs = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> wasPaused = true
                 Lifecycle.Event.ON_RESUME -> {
-                    if (!lnpGranted && hasLocalNetworkPermission(context)) {
-                        lnpGranted = true
-                        lnpPrompt = false
-                        discovery.restart()
-                    } else if (wasPaused) {
-                        // Coming back from the background: the browse has been sitting idle while
-                        // we were away and its own re-query interval has kept doubling. Ask again,
-                        // so returning to the screen is enough — no app restart.
-                        discovery.rescan()
-                    }
+                    if (wasPaused) discovery.rescan()
                     wasPaused = false
                 }
                 else -> {}
@@ -1038,7 +994,7 @@ fun ConnectScreen(
         lnpPrompt = lnpPrompt,
         onAllowLocalNetwork = {
             lnpPrompt = false
-            localNetLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+            onAskLocalNetwork()
         },
         onOpenSystemSettings = {
             lnpPrompt = false

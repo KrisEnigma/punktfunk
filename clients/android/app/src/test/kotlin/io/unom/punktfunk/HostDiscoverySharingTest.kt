@@ -1,14 +1,18 @@
 package io.unom.punktfunk
 
 import android.content.Context
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.discovery.HostDiscovery
+import java.time.Duration
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -61,6 +65,28 @@ class HostDiscoverySharingTest {
         } finally {
             discovery.removeListener(screen)
             discovery.removeListener(console)
+        }
+    }
+
+    /**
+     * A grant that lands while nobody is subscribed (mid-stream, from system settings) rebuilds
+     * nothing: a browse with no subscriber would run beside the session, and nothing would ever
+     * stop it. Without the native library a start that IS attempted fails and schedules its
+     * retry, which is how "attempted" shows up here.
+     */
+    @Test
+    fun a_restart_with_no_subscriber_builds_no_browse() {
+        val discovery = HostDiscovery.shared(context)
+        val looper = shadowOf(Looper.getMainLooper())
+        looper.idleFor(Duration.ofSeconds(5)) // let an earlier test's browse quiesce
+        discovery.restart()
+        assertEquals(Duration.ZERO, looper.nextScheduledTaskTime)
+        val screen = subscriber()
+        try {
+            discovery.addListener(screen)
+            assertNotEquals(Duration.ZERO, looper.nextScheduledTaskTime)
+        } finally {
+            discovery.removeListener(screen)
         }
     }
 }
