@@ -142,6 +142,13 @@ pub(super) struct AscBackend {
     /// `debug.punktfunk.asc_pacing` = 0: as-soon-as-possible targets, two pending — the pre-overhaul
     /// behaviour, for the on-glass A/B.
     pacing: bool,
+    /// `debug.punktfunk.asc_hold_chain` = 0 under `latency`: a hold never follows a hold — the
+    /// frame shares the held frame's slot and SurfaceFlinger keeps the newer. Default 1: the
+    /// depth-one elastic queue, which on an exact-rate source holds every frame after the first
+    /// burst (A024: 71 of 120 a second, one period of latency). The on-glass A/B.
+    hold_chain: bool,
+    /// The last assigned slot was a hold.
+    last_held: bool,
     /// A present fence has been read at least once this session.
     fence_live: bool,
     last_latch_ns: i64,
@@ -253,13 +260,14 @@ impl AscBackend {
             ),
         };
         let pacing = sysprop(c"debug.punktfunk.asc_pacing").is_none_or(|v| v != "0");
+        let hold_chain = sysprop(c"debug.punktfunk.asc_hold_chain").is_none_or(|v| v != "0");
         #[cfg(debug_assertions)]
         let jitter_us = sysprop(c"debug.punktfunk.asc_jitter_us")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0)
             .min(50_000);
         log::info!(
-            "asc: backend up — {}, reader usage {} ({}x{} @ {} Hz src, panel seed {} Hz, dataspace {:#x}, pacing {})",
+            "asc: backend up — {}, reader usage {} ({}x{} @ {} Hz src, panel seed {} Hz, dataspace {:#x}, pacing {}, hold chain {})",
             match priority {
                 PresentPriority::Latency => "latency (newest-wins)".to_string(),
                 PresentPriority::Smooth { buffer } => format!("smooth (buffer {buffer})"),
@@ -271,6 +279,7 @@ impl AscBackend {
             panel_hz,
             dataspace,
             if pacing { "on" } else { "OFF (sysprop)" },
+            if hold_chain { "on" } else { "OFF (sysprop)" },
         );
         Some(AscBackend {
             reader,
@@ -290,6 +299,8 @@ impl AscBackend {
             apply_margin_ns: APPLY_MARGIN_NS,
             clean_presents: 0,
             pacing,
+            hold_chain,
+            last_held: false,
             fence_live: false,
             last_latch_ns: 0,
             last_present_ns: 0,
@@ -395,10 +406,18 @@ impl AscBackend {
         let reachable = self
             .clock
             .slot_after(earliest + self.clock.lead_ns() + self.apply_margin_ns);
-        let slot = pace_slot(reachable, self.last_slot, self.max_ahead);
-        if slot > reachable {
+        let mut slot = pace_slot(reachable, self.last_slot, self.max_ahead);
+        let mut held = slot > reachable;
+        if held && self.last_held && !self.hold_chain && self.fifo_capacity == 0 {
+            // A hold never follows a hold: share the held frame's slot, SurfaceFlinger keeps the
+            // newer, the stale held frame drops (`coalesced` counts it).
+            slot = self.last_slot.unwrap_or(reachable);
+            held = false;
+        }
+        if held {
             self.held += 1;
         }
+        self.last_held = held;
         self.last_slot = Some(slot);
         (
             self.clock.present_ns(slot) - self.clock.period_ns() / 2,
