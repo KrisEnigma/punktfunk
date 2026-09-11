@@ -41,11 +41,12 @@ import kotlin.math.roundToInt
  * [verbosity] selects how many lines render (each tier a superset of the last — see
  * [StatsVerbosity]):
  * - [StatsVerbosity.COMPACT] — one line, `fps · end-to-end ms · Mb/s` (+ a loss flag).
- * - [StatsVerbosity.NORMAL] — the res/fps/Mb·s line, the end-to-end p50/p95 headline, and the
- *   reliability counters (18–21) when nonzero.
- * - [StatsVerbosity.DETAILED] — also the decoder label, the video-feed descriptor (10–13), the
- *   stage equation (14/15, split into `host + network` when the Phase-2 terms at 16/17 are nonzero),
- *   the excluded-floor line when one was measured, and the audio plane's own latency (33/34).
+ * - [StatsVerbosity.NORMAL] — the res/fps/Mb·s line, the end-to-end p50/p95 headline, and
+ *   `lost` (18) when nonzero — the one counter a user can act on.
+ * - [StatsVerbosity.DETAILED] — also the decoder + feed line (10–13), the stage equation (14–17,
+ *   23), the excluded-floor line when one was measured, the audio plane's own latency (33/34),
+ *   `skipped` / `FEC` (19/20/32) and the cadence line (38/39). Those last sit here on purpose: a
+ *   hold the client cannot act on (a 114 fps source on a 120 Hz panel) reads as a fault at NORMAL.
  *
  * The RESOLVED audio format (35–37) is the one figure that is not reserved for
  * [StatsVerbosity.DETAILED] — it renders from [StatsVerbosity.NORMAL] up, and only on a lossless
@@ -100,11 +101,10 @@ internal fun StatsOverlay(
             "$w×$h@$hz   ${s[0].roundToInt()} fps   ${"%.1f".format(s[1])} Mb/s$profileTag$panelTag",
             Color.White,
         )
-        if (detailed && decoderLabel.isNotEmpty()) {
-            statLine(decoderLabel, Color(0xFFB0D0FF))
-        }
         if (detailed) {
-            videoFeedLine(s, codecLabel)?.let { statLine(it, Color.White) }
+            // What decodes what, on one line: decoder · codec · depth · range · chroma.
+            val parts = listOfNotNull(decoderLabel.ifEmpty { null }, videoFeedLine(s, codecLabel))
+            if (parts.isNotEmpty()) statLine(parts.joinToString(" · "), Color(0xFFB0D0FF))
         }
         if (latValid) {
             // Display stage (s[22]–s[25], from OnFrameRendered): when a render timestamp landed
@@ -137,38 +137,16 @@ internal fun StatsOverlay(
                 } else {
                     "host+network ${"%.1f".format(s[14])}"
                 }
-                // Timeline-presenter split (s[26]/s[27], when s[29] flags it active): the display
-                // term decomposes into pace (store + glass budget) + latch (SurfaceFlinger), and
-                // s[28] is the on-glass confirm count — presents ≪ fps means the presenter is
-                // dropping/serializing, an fps deficit is upstream.
-                val split = s.size >= 30 && s[29] != 0.0 && (s[26] > 0 || s[27] > 0)
-                val displayTerm = when {
-                    // Floor excluded: what remains of the `display` term is the half Punktfunk
-                    // owns (the presenter's pace wait), and the excluded line below carries the
-                    // latch — printing the split too would report the same milliseconds twice.
-                    dispValid && floorMs > 0 ->
-                        " + display ${"%.1f".format(shave(s[23], floorMs))}"
-                    dispValid && split ->
-                        " + display ${"%.1f".format(s[23])} " +
-                            "(pace ${"%.1f".format(s[26])} + latch ${"%.1f".format(s[27])})"
-                    dispValid -> " + display ${"%.1f".format(s[23])}"
-                    else -> ""
-                }
-                val presents = if (s.size >= 30 && s[29] != 0.0) {
-                    "   · presents ${s[28].toInt()}"
-                } else {
-                    ""
-                }
-                // P3 decode split (s[30]/s[31]): `feed` = received→queued (hand-off + input-slot
-                // wait) + `codec` = queued→decoded (codec-pure) — rendered when a sample landed.
-                val decodeTerm = if (s.size >= 33 && (s[30] > 0 || s[31] > 0)) {
-                    "decode ${"%.1f".format(s[15])} " +
-                        "(feed ${"%.1f".format(s[30])} + codec ${"%.1f".format(s[31])})"
-                } else {
-                    "decode ${"%.1f".format(s[15])}"
-                }
+                // The display term is shaved like the headline (a 0 floor leaves it raw). s[28]
+                // is the on-glass confirm count while the presenter runs (s[29]): presents ≪ fps
+                // means the presenter is dropping or serializing; an fps deficit is upstream. The
+                // pace/latch and feed/codec splits stay on the native 1 Hz log line.
+                val displayTerm =
+                    if (dispValid) " + display ${"%.1f".format(shave(s[23], floorMs))}" else ""
+                val presents =
+                    if (s.size >= 30 && s[29] != 0.0) "   · presents ${s[28].toInt()}" else ""
                 statLine(
-                    "= $hostTerms + $decodeTerm$displayTerm$presents",
+                    "= $hostTerms + decode ${"%.1f".format(s[15])}$displayTerm$presents",
                     Color.White,
                 )
                 // What the numbers above leave out, named — the Apple client's
@@ -195,8 +173,8 @@ internal fun StatsOverlay(
         // enough (176.4 kHz fits only the ladder's shortest 1 ms rung, and hi-res surround fits no
         // rung at all) that "the setting says one thing" is not evidence of anything.
         audioFormatLine(s)?.let { statLine(it, Color(0xFFB0FFD0)) }
-        counterLine(s, lost)?.let { statLine(it, Color(0xFFFFB0B0)) }
-        cadenceLine(s)?.let { statLine(it, Color(0xFFFFD9A0)) }
+        counterLine(s, lost, detailed)?.let { statLine(it, Color(0xFFFFB0B0)) }
+        if (detailed) cadenceLine(s)?.let { statLine(it, Color(0xFFFFD9A0)) }
     }
 }
 
@@ -337,14 +315,7 @@ private fun compactLine(s: DoubleArray, latValid: Boolean): String {
 }
 
 /**
- * Format the spec's line-4 counters from the per-window doubles at 18–21 —
- * `lost {n} ({pct}%) · skipped {m} · FEC {k}`, each term only when nonzero, the whole line `null`
- * when all are zero (spec: "only rendered when any value is nonzero"). `pct = lost/(frames+lost)`
- * (the received count rides at index 21). A pre-window layout (< 22 doubles) falls back to the
- * session-cumulative `lostTotal` so an older native lib still reports loss.
- */
-/**
- * The presenter's cadence readout at 38/39: `judder 25‰ · coalesced 3` — off-mode present
+ * The presenter's cadence readout at 38/39, DETAILED only: `judder 25‰ · coalesced 3` — off-mode
  * intervals per thousand and frames SurfaceFlinger folded onto one vsync in the last second. Both
  * zero is the common case and draws nothing; either one is what a stutter looks like in numbers,
  * which no latency figure on this HUD can show. `null` on an older native layout.
@@ -360,11 +331,17 @@ private fun cadenceLine(s: DoubleArray): String? {
     }.joinToString(" · ")
 }
 
-private fun counterLine(s: DoubleArray, lostTotal: Long): String? {
+/**
+ * The per-window counters at 18–21 — `lost {n} ({pct}%) · skipped {m} · FEC {k}`, each term only
+ * when nonzero, `null` when nothing is. Below DETAILED only `lost` renders: `pct = lost/(frames+lost)`
+ * is the network's share and the one number a user can act on. A pre-window layout (< 22 doubles)
+ * falls back to the session-cumulative `lostTotal` so an older native lib still reports loss.
+ */
+private fun counterLine(s: DoubleArray, lostTotal: Long, detailed: Boolean): String? {
     if (s.size < 22) return if (lostTotal > 0) "lost $lostTotal" else null
     val lost = s[18].toLong()
-    val skipped = s[19].toLong()
-    val fec = s[20].toLong()
+    val skipped = if (detailed) s[19].toLong() else 0L
+    val fec = if (detailed) s[20].toLong() else 0L
     val frames = s[21].toLong()
     if (lost == 0L && skipped == 0L && fec == 0L) return null
     // The overflow subset of `skipped` (s[32]): whole AUs dropped before feeding — the decoder

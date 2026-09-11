@@ -339,10 +339,10 @@ enum class MouseMode(val storedName: String, val label: String) {
  * of the previous one, so toning down never hides a number a lower tier keeps:
  * - [OFF] — no overlay (and native sampling is gated off, one atomic load per frame).
  * - [COMPACT] — one line: `fps · end-to-end ms · Mb/s` (+ a loss flag when frames drop).
- * - [NORMAL] — adds the resolution/refresh line, the end-to-end p50/p95 headline, and the
- *   reliability counters (lost / skipped / FEC) when nonzero. The default.
- * - [DETAILED] — the full HUD: also the decoder label, the video-feed descriptor, and the
- *   `host+network + decode` stage equation.
+ * - [NORMAL] — adds the resolution/refresh line, the end-to-end p50/p95 headline, and `lost`
+ *   when nonzero. The default.
+ * - [DETAILED] — the full HUD: also the decoder/feed line, the stage equation, the audio
+ *   latency, and the pipeline counters (skipped / FEC / judder) that read as faults at NORMAL.
  * A 3-finger tap in-stream cycles Off → Compact → Normal → Detailed → Off (see [next]).
  */
 enum class StatsVerbosity(val label: String) {
