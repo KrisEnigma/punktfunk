@@ -302,9 +302,10 @@ impl UsbDevice {
         result
     }
 
-    /// The service interval of `ep` — one packet's worth of time. High/Super speed express
-    /// `bInterval` as `2^(n-1)` 125 µs microframes; full/low speed as whole milliseconds.
-    fn service_interval(&self, ep: UsbEndpoint) -> std::time::Duration {
+    /// The service interval of `ep`: one packet's worth of time, and the interrupt-IN poll period.
+    /// High/Super speed express `bInterval` as `2^(n-1)` 125 µs microframes; full/low speed as
+    /// whole milliseconds.
+    pub(crate) fn service_interval(&self, ep: UsbEndpoint) -> std::time::Duration {
         if self.speed == UsbSpeed::High as u32
             || self.speed == UsbSpeed::Super as u32
             || self.speed == UsbSpeed::SuperPlus as u32
@@ -324,8 +325,8 @@ impl UsbDevice {
     /// **Paced by `bInterval` × the packet count, and that pacing is the device's audio clock.**
     /// Isochronous endpoints move exactly one packet per service interval on real hardware, and
     /// `snd-usb-audio` advances its PCM pointer from URB *completions* — it has no other time
-    /// reference. `vhci_hcd` does not throttle the server side (the same reason the interrupt path
-    /// above is paced), so completing instantly would both spin the loopback link and tell the
+    /// reference. `vhci_hcd` does not throttle the server side (the same reason `handler` paces
+    /// interrupt IN), so completing instantly would both spin the loopback link and tell the
     /// kernel the device consumed a whole URB's worth of samples in no time, running the stream's
     /// clock away and xrunning it continuously.
     ///
@@ -642,24 +643,8 @@ impl UsbDevice {
                 }
             }
             (Some(_), _) => {
-                // others (interrupt / bulk / iso transfers to an endpoint)
-                // punktfunk modification: pace IN transfers by bInterval so a virtual interrupt-IN
-                // endpoint mimics a real device's NAK-until-bInterval behaviour instead of
-                // free-running as fast as the transport allows (vhci_hcd does not throttle the
-                // server side, so an unpaced sim would spin the loopback link). HS bInterval N →
-                // 2^(N-1) microframes × 125µs.
-                if let In = ep.direction() {
-                    let period = if self.speed == UsbSpeed::High as u32
-                        || self.speed == UsbSpeed::Super as u32
-                        || self.speed == UsbSpeed::SuperPlus as u32
-                    {
-                        let n = ep.interval.clamp(1, 16) as u32;
-                        std::time::Duration::from_micros((1u64 << (n - 1)) * 125)
-                    } else {
-                        std::time::Duration::from_millis(ep.interval.max(1) as u64)
-                    };
-                    tokio::time::sleep(period).await;
-                }
+                // Interrupt / bulk OUT. `handler` paces and dispatches IN itself (punktfunk
+                // modification), so a poll never holds up the connection.
                 let intf = intf.unwrap();
                 let mut handler = intf.handler.lock().unwrap();
                 handler.handle_urb(intf, ep, transfer_buffer_length, setup_packet, out_data)
