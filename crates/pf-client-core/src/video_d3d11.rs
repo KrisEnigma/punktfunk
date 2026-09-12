@@ -663,6 +663,36 @@ fn log_layout_once(
     }
 }
 
+/// User-mode driver version of the adapter behind `luid`, as Device Manager shows it
+/// ([`crate::video::umd_version_parts`]). `None` when no adapter matches or DXGI refuses.
+pub fn adapter_driver_version(luid: [u8; 8]) -> Option<[u16; 4]> {
+    use windows::Win32::dxgi::IDXGIDevice;
+    // SAFETY: plain DXGI factory creation; the returned interface is owned by this scope.
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    for i in 0.. {
+        // SAFETY: read-only enumeration on the live factory; the adapter is owned here.
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(i) }) else {
+            break;
+        };
+        // SAFETY: `DXGI_ADAPTER_DESC1` is plain-old-data, so all-zeroes is a valid value.
+        let mut desc: DXGI_ADAPTER_DESC1 = unsafe { std::mem::zeroed() };
+        // SAFETY: fills the zeroed local through the out-param; checked before it is read.
+        if unsafe { adapter.GetDesc1(&mut desc) }.is_err() {
+            continue;
+        }
+        let mut have = [0u8; 8];
+        have[..4].copy_from_slice(&desc.AdapterLuid.LowPart.to_le_bytes());
+        have[4..].copy_from_slice(&desc.AdapterLuid.HighPart.to_le_bytes());
+        if have != luid {
+            continue;
+        }
+        // SAFETY: a query on the live adapter; the IID is a static the callee only reads.
+        let raw = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.ok()?;
+        return Some(crate::video::umd_version_parts(raw));
+    }
+    None
+}
+
 /// This desktop's HDR volume (`IDXGIOutput6::GetDesc1`) for Hello `display_hdr`, so
 /// the host EDID matches this panel. `pos` selects the output containing that point
 /// (`--window-pos`); no `pos` or no match uses the output at the desktop origin.
