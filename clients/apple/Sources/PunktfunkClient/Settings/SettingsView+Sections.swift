@@ -29,12 +29,14 @@ extension SettingsView {
     /// (the caption rule). macOS says it differently because USB is the preferred transport
     /// there and its cost is the Input Monitoring grant, not Bluetooth — the controller
     /// interface carries the lizard keyboard collection, so macOS gates the open behind that
-    /// permission (on-glass 2026-08-31). Only iOS names menus: a Mac reaches them through
-    /// GameController, which never sees the pad on iOS.
+    /// permission. Only iOS names menus: a Mac or Apple TV reaches them through GameController,
+    /// which never sees the pad on iOS.
     static var sc2CaptureCaption: String {
         #if os(macOS)
         return "Stream a Steam Controller 2 or Puck as-is; needs Input Monitoring "
             + "(or Bluetooth) access."
+        #elseif os(tvOS)
+        return "Stream a Steam Controller 2 as-is; needs Bluetooth access."
         #else
         return "Browse and stream with a Steam Controller 2 as-is; needs Bluetooth access."
         #endif
@@ -878,20 +880,13 @@ extension SettingsView {
                     }
                     .disabled(!effective.gamepadForwarding)
                 }
-                #if os(iOS) || os(macOS)
                 // Steam Controller 2 as-is passthrough — device tier like the pad rows above
-                // (EffectiveSettings.sc2Capture: deliberately not profileable, it is about
-                // hardware THIS device captures). tvOS has neither capture path.
-                // The capture engages at the next stream; the in-stream badge announces it.
-                // One clause of what it does + one of what it costs (the caption rule); the
-                // opening clause is Android's word-for-word, the rider is the Apple-only cost —
-                // Input Monitoring on macOS (the lizard keyboard rides the same interface),
-                // Bluetooth elsewhere. See sc2CaptureCaption.
+                // (EffectiveSettings.sc2Capture is not profileable). The capture engages at the
+                // next stream; the in-stream badge announces it. Caption: see sc2CaptureCaption.
                 described(Self.sc2CaptureCaption) {
                     Toggle("Steam Controller 2 passthrough", isOn: $sc2Capture)
                         .disabled(!effective.gamepadForwarding)
                 }
-                #endif
             }
             described("The virtual pad the host creates — Automatic matches your controller.",
                 field: "gamepad") {

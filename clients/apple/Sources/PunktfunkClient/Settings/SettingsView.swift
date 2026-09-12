@@ -127,9 +127,8 @@ struct SettingsView: View {
     // when this is false (see `isCustomResolution`), so it survives relaunches without persisting.
     @State var customMode = false
     #endif
-    /// Steam Controller 2 passthrough (device tier — the controllers section's row; the row
-    /// itself is #if os(iOS)||os(macOS), so the storage sits OUTSIDE the iOS-only block
-    /// above — declared there it is invisible to the macOS build that reads it.
+    /// Steam Controller 2 passthrough (device tier). Every platform shows the row, so the
+    /// storage sits outside the per-platform blocks.
     @AppStorage(DefaultsKey.sc2Capture) var sc2Capture = false
     #if os(macOS)
     @AppStorage(DefaultsKey.mouseMode) var mouseMode = MouseInputMode.capture.rawValue
@@ -427,6 +426,10 @@ struct SettingsView: View {
         Binding(get: { gamepadUIEnabled ? "on" : "off" }, set: { gamepadUIEnabled = $0 == "on" })
     }
 
+    private var sc2CaptureTag: Binding<String> {
+        Binding(get: { sc2Capture ? "on" : "off" }, set: { sc2Capture = $0 == "on" })
+    }
+
     private var autoWakeEnabledTag: Binding<String> {
         Binding(get: { autoWakeEnabled ? "on" : "off" }, set: { autoWakeEnabled = $0 == "on" })
     }
@@ -535,6 +538,10 @@ struct SettingsView: View {
                 TVSelectionRow(
                     title: "Controller type", options: SettingsOptions.padTypes,
                     selection: $gamepadType)
+                TVSelectionRow(
+                    title: "Steam Controller 2 passthrough",
+                    options: [("On", "on"), ("Off", "off")], selection: sc2CaptureTag)
+                tvCaption(Self.sc2CaptureCaption)
                 TVSelectionRow(
                     title: "Gamepad-optimized browsing",
                     options: [("On", "on"), ("Off", "off")], selection: gamepadUIEnabledTag)

@@ -1050,9 +1050,8 @@ struct GamepadSettingsView: View {
                 at: at + 1)
         }
         #endif
-        #if os(iOS) || os(macOS)
         // The SC2 as-is passthrough slots in after "Use controller" — the same neighborhood the
-        // desktop settings window gives it. tvOS has neither capture path, so no row there.
+        // desktop settings window gives it.
         if let at = list.firstIndex(where: { $0.id == "pad" })
             ?? list.firstIndex(where: { $0.id == "padForward" }) {
             list.insert(
@@ -1064,7 +1063,6 @@ struct GamepadSettingsView: View {
                     enabled: gamepadForwarding),
                 at: at + 1)
         }
-        #endif
         #if os(iOS)
         // The device-rumble mirror slots in after "Controller type", inside the Controller tab.
         // iPhone only in practice: hidden where the device itself can't play haptics (iPad).

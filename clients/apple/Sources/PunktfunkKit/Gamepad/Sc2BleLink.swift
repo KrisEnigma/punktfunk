@@ -5,13 +5,12 @@
 // bench (2026-06-08/09): OS-paired acquisition via the connected set, the per-report output
 // characteristics, and feature writes on 100F6C34.
 //
-// OS-paired is FINE: the controller is normally connected via iOS/macOS Settings, holding the
+// OS-paired is FINE: the controller is normally connected via the system Settings, holding the
 // standard HID (0x1812) binding — we open our own handle to the CUSTOM Valve service, which
 // coexists with it (exactly what Steam Link does). "Lizard mode" is just the controller's
 // default reporting, cleared by the disable-lizard write — not a barrier to the vendor service.
 //
-// Simulator has no BLE radio — physical device only. tvOS is excluded for now (the shared
-// Info.plist carries the usage strings harmlessly; this file simply doesn't compile there).
+// Simulator has no BLE radio — physical device only.
 //
 // ⚠ DIFFER from Android's `Sc2BleLink.kt`: no `requestMtu(100)` / connection-priority-HIGH
 // equivalents — CoreBluetooth negotiates MTU and connection interval itself; the
@@ -20,8 +19,6 @@
 // virtual pad only relays what Steam sends AFTER it claims the pad, so until then nothing else
 // would feed the firmware watchdog and the controller would fall back to lizard mode. The client
 // NEVER self-enables the gyro — Steam's own forwarded write drives `Sc2ImuGate`.
-
-#if os(iOS) || os(macOS)
 
 import CoreBluetooth
 import Foundation
@@ -427,5 +424,3 @@ extension Sc2BleLink: CBPeripheralDelegate {
         }
     }
 }
-
-#endif

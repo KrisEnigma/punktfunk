@@ -290,7 +290,6 @@ final class Sc2DeviceTests: XCTestCase {
     }
 }
 
-#if os(iOS) || os(macOS)
 /// `Sc2Capture` re-declares the escape chord (the original is `@MainActor`-isolated and the
 /// capture reads its mask on the BLE queue) — this pins the two masks and the hold duration
 /// together, because the failure of a drift is invisible until someone can't leave a stream
@@ -324,4 +323,3 @@ final class Sc2EscapeChordMirrorTests: XCTestCase {
         }
     }
 }
-#endif

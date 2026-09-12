@@ -50,8 +50,6 @@
 // the main actor, and a source's reports are dropped until its claim lands (a few frames at
 // ~66 Hz — idempotent state, nothing missed).
 
-#if os(iOS) || os(macOS)
-
 #if os(macOS)
 import AppKit
 #else
@@ -634,5 +632,3 @@ public final class Sc2Capture {
         for key in keys { releaseSource(key, reason: reason) }
     }
 }
-
-#endif

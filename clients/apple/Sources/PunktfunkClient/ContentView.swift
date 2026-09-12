@@ -1169,9 +1169,9 @@ struct ContentView: View {
                             MotionUnreachableBadge()
                                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         }
-                        // The SC2 passthrough's claim edge (never true on tvOS — no capture
-                        // there). Same transient contract as the motion hint above; without it
-                        // the raw BLE capture engages with no visible trace anywhere in the app.
+                        // The SC2 passthrough's claim edge. Same transient contract as the motion
+                        // hint above; without it the raw BLE capture engages with no visible
+                        // trace anywhere in the app.
                         if captureEnabled, model.sc2CapturedHint {
                             Sc2CapturedBadge()
                                 .transition(.opacity.combined(with: .scale(scale: 0.9)))

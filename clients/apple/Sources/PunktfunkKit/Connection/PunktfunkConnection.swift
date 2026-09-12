@@ -353,7 +353,7 @@ public final class PunktfunkConnection: @unchecked Sendable {
         /// glyphs + positional layout on the host side.
         case switchPro = 8
         /// New Steam Controller (2026, `28DE:1302`), passed through as-is on Linux hosts (raw
-        /// report mirroring; Steam Input is the consumer). CAPTURABLE on iOS/macOS over BLE
+        /// report mirroring; Steam Input is the consumer). CAPTURABLE over BLE everywhere
         /// (`Sc2BleLink`) and on macOS over USB (`Sc2UsbLink`) — GameController never surfaces
         /// the raw Valve device, so `Sc2Capture` opens it directly and declares this kind.
         case steamController2 = 9
