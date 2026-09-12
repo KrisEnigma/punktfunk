@@ -372,6 +372,7 @@ mod pump_tests {
 
     struct MockMic {
         alive: Arc<AtomicBool>,
+        polled: Arc<AtomicBool>,
         pushed: Arc<AtomicUsize>,
         discards: Arc<AtomicUsize>,
     }
@@ -384,6 +385,7 @@ mod pump_tests {
             true
         }
         fn alive(&self) -> bool {
+            self.polled.store(true, Ordering::Release);
             self.alive.load(Ordering::Acquire)
         }
         fn discard(&self) {
@@ -395,6 +397,9 @@ mod pump_tests {
         tx: std::sync::mpsc::SyncSender<MicFrame>,
         opens: Arc<AtomicUsize>,
         alive: Arc<Mutex<Option<Arc<AtomicBool>>>>, // latest instance's kill switch
+        // Set by the pump's first idle `alive()` poll, which runs after its open-time drain.
+        // `alive` is set inside the opener, before that drain, so a frame sent on it can vanish.
+        polled: Arc<AtomicBool>,
         pushed: Arc<AtomicUsize>,
         discards: Arc<AtomicUsize>,
         join: std::thread::JoinHandle<()>,
@@ -406,11 +411,13 @@ mod pump_tests {
         let (tx, rx) = std::sync::mpsc::sync_channel::<MicFrame>(MIC_QUEUE_CAP);
         let opens = Arc::new(AtomicUsize::new(0));
         let alive = Arc::new(Mutex::new(None::<Arc<AtomicBool>>));
+        let polled = Arc::new(AtomicBool::new(false));
         let pushed = Arc::new(AtomicUsize::new(0));
         let discards = Arc::new(AtomicUsize::new(0));
-        let (opens2, alive2, pushed2, discards2) = (
+        let (opens2, alive2, polled2, pushed2, discards2) = (
             opens.clone(),
             alive.clone(),
+            polled.clone(),
             pushed.clone(),
             discards.clone(),
         );
@@ -433,6 +440,7 @@ mod pump_tests {
                     *alive2.lock().unwrap() = Some(a.clone());
                     Ok(Box::new(MockMic {
                         alive: a,
+                        polled: polled2.clone(),
                         pushed: pushed2.clone(),
                         discards: discards2.clone(),
                     }) as Box<dyn VirtualMic>)
@@ -444,6 +452,7 @@ mod pump_tests {
             tx,
             opens,
             alive,
+            polled,
             pushed,
             discards,
             join,
@@ -514,7 +523,7 @@ mod pump_tests {
     #[test]
     fn decodes_and_pushes() {
         let h = start(0);
-        wait_until("open", || h.alive.lock().unwrap().is_some());
+        wait_until("pump polled", || h.polled.load(Ordering::Acquire));
         h.tx.send(mic_frame(0)).unwrap();
         wait_until("pcm pushed", || h.pushed.load(Ordering::SeqCst) > 0);
         drop(h.tx);
@@ -576,7 +585,7 @@ mod pump_tests {
     #[test]
     fn seq_gap_is_concealed() {
         let h = start(0);
-        wait_until("instance", || h.alive.lock().unwrap().is_some());
+        wait_until("pump polled", || h.polled.load(Ordering::Acquire));
         h.tx.send(mic_frame(0)).unwrap();
         h.tx.send(mic_frame(2)).unwrap();
         // 0 plays now; 2 is held ≤ 30 ms for 1, then conceal + play 2.
@@ -590,7 +599,7 @@ mod pump_tests {
     #[test]
     fn discards_after_gap() {
         let h = start(0);
-        wait_until("instance", || h.alive.lock().unwrap().is_some());
+        wait_until("pump polled", || h.polled.load(Ordering::Acquire));
         h.tx.send(mic_frame(0)).unwrap();
         wait_until("first push", || h.pushed.load(Ordering::SeqCst) > 0);
         std::thread::sleep(Duration::from_millis(150)); // > stale_gap
