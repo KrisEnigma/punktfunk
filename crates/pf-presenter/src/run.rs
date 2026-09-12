@@ -468,6 +468,9 @@ impl StreamState {
         }
         self.cadence.reset();
         self.pacer.reset();
+        // The slot margin was sized by the old panel's misses.
+        self.margin_ns = 0;
+        self.win_misses = 0;
         tracing::info!(
             refresh_hz = hz,
             "display changed — relearning the latch grid"
@@ -826,7 +829,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 // The panel's rate changed under the window (60 ↔ 165 Hz in the OS
                 // settings): no window event fires, and the grid describes the old rate.
                 Event::Display {
-                    display_event: DisplayEvent::CurrentModeChanged,
+                    display_event:
+                        DisplayEvent::CurrentModeChanged | DisplayEvent::DesktopModeChanged,
                     display,
                     ..
                 } if window.get_display().is_ok_and(|d| d == display) => {
