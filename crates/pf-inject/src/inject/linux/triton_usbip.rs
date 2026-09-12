@@ -119,6 +119,9 @@ fn triton_hid_desc() -> Vec<u8> {
     ]
 }
 
+/// Feature GET reply for a Puck slot: report 2 answers the dongle's queries, report 1 the pad's.
+/// Tag 4 of the `0x83` attributes is [`pf_driver_proto::triton::FW_BUILD_TIME`], as in the
+/// report-1 `0xF2` reply. An older build time makes Steam offer a firmware update.
 fn triton_puck_feature_reply(last_set: &[u8], serial: &str, unit_id: u32, status: u8) -> [u8; 64] {
     let Some((&report_id, body)) = last_set.split_first() else {
         return triton_feature_reply(last_set, serial, unit_id);
@@ -154,7 +157,7 @@ fn triton_puck_feature_reply(last_set: &[u8], serial: &str, unit_id: u32, status
                 (0x01, TRITON_PUCK_PRODUCT as u32),
                 (0x02, 0),
                 (0x0A, unit_id ^ 0xFC),
-                (0x04, unit_id ^ 0x0296_DA2C),
+                (0x04, pf_driver_proto::triton::FW_BUILD_TIME),
                 (0x09, 0x47),
             ];
             let mut o = 3;
@@ -903,6 +906,21 @@ mod tests {
             .handle_urb(&iface, interrupt_in, 64, SetupPacket::default(), &[],)
             .unwrap()
             .is_empty());
+    }
+
+    /// A stale tag-4 build time makes Steam offer to flash the Puck's pad on every stream.
+    #[test]
+    fn puck_attributes_carry_the_firmware_build_time() {
+        let (serial, unit) = (triton_serial(1), triton_unit_id(1));
+        let r = triton_puck_feature_reply(&[0x02, 0x83, 0x00], &serial, unit, 0x02);
+        assert_eq!(&r[..3], &[0x02, 0x83, 0x19]);
+        assert_eq!(r[18], 0x04);
+        assert_eq!(
+            r[19..23],
+            pf_driver_proto::triton::FW_BUILD_TIME.to_le_bytes()
+        );
+        let f2 = triton_puck_feature_reply(&[0x01, 0xF2, 0x00, 0x00], &serial, unit, 0x02);
+        assert_eq!(f2[4..8], r[19..23]); // report-1 firmware info agrees
     }
 
     #[test]
