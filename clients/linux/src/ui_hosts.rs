@@ -1051,35 +1051,25 @@ impl SimpleComponent for HostsPage {
 
         // Periodic reachability sweep — the ONLY thing presence is made of, since an advert
         // outlives the machine it describes. Each cycle probes every saved host off the main
-        // thread (bounded, trust-agnostic QUIC handshake — the display-side companion to
-        // dial-first) and feeds results back as `Probed`; the first sweep runs immediately, then
-        // every `PROBE_INTERVAL`.
+        // thread (bounded QUIC handshake, then the addresses a silent host left) and feeds results
+        // back as `Probed`; the first sweep runs immediately, then every `PROBE_INTERVAL`.
         {
             let sender = sender.clone();
             glib::spawn_future_local(async move {
                 loop {
-                    let entries: Vec<(String, String, u16, String)> = KnownHosts::load()
+                    let hosts: Vec<KnownHost> = KnownHosts::load()
                         .hosts
-                        .iter()
+                        .into_iter()
                         .filter(|h| !h.addr.is_empty())
-                        .map(|h| (saved_key(h), h.addr.clone(), h.port, h.fp_hex.clone()))
                         .collect();
-                    if !entries.is_empty() {
+                    if !hosts.is_empty() {
                         let (tx, rx) = async_channel::bounded(1);
                         std::thread::Builder::new()
                             .name("punktfunk-probe".into())
                             .spawn(move || {
-                                let targets = entries
-                                    .iter()
-                                    .map(|(_, a, p, fp)| (a.clone(), *p, fp.clone()))
-                                    .collect();
-                                let results =
-                                    crate::trust::probe_reachable_many(targets, PROBE_TIMEOUT);
-                                let map: HashMap<String, bool> = entries
-                                    .into_iter()
-                                    .map(|(k, _, _, _)| k)
-                                    .zip(results)
-                                    .collect();
+                                let results = crate::trust::probe_known(&hosts, PROBE_TIMEOUT);
+                                let map: HashMap<String, bool> =
+                                    hosts.iter().map(saved_key).zip(results).collect();
                                 let _ = tx.send_blocking(map);
                             })
                             .expect("spawn probe thread");
@@ -1293,10 +1283,8 @@ impl HostsPage {
                 // exactly the host it was meant to wake.
                 let online = self.probed.get(&saved_key(k)).copied().unwrap_or(false);
                 // Learn what this host's live advert teaches: its wake MAC(s), its OS chain (so
-                // the icon survives it going offline), its management port — not cosmetic, since
-                // a host that moved off 47990 loses its library the moment mDNS is unavailable
-                // and the advert is the only place the real port ever lived — and the address
-                // itself, so a host back on a new lease is dialed and probed where it now lives.
+                // the icon survives it going offline), and its management port, which a host
+                // moved off 47990 needs once mDNS is gone.
                 let advert = self.adverts.values().find(|a| matches(k, a));
                 if let Some(a) = advert {
                     crate::trust::learn_from_advert(
@@ -1307,7 +1295,11 @@ impl HostsPage {
                         &a.os,
                         a.mgmt_port,
                     );
-                    crate::trust::rekey_addr(&k.fp_hex, &a.addr, a.port);
+                    // Follow the advert only once the saved address stopped answering: a routed
+                    // one (Tailscale) answers on the LAN too, and must survive coming home.
+                    if self.probed.get(&saved_key(k)) == Some(&false) {
+                        crate::trust::rekey_addr(&k.fp_hex, &a.addr, a.port);
+                    }
                 }
                 // Keep this host's advertised actions warm, so the card's menu is built from a
                 // settled answer rather than one that arrives while the menu is open. Gated on

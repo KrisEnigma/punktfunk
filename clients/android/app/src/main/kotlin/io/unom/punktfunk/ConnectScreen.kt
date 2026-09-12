@@ -479,11 +479,10 @@ fun ConnectScreen(
                     },
                     onOnline = {
                         val live = liveAdvert()
-                        // Woke back on a new address? Re-key the saved record so it (and future
-                        // connects) point at the live one, then dial there (no fallback on this
-                        // redial — a second failure surfaces as the plain error).
-                        if (live != null && kh != null && (live.host != kh.address || live.port != kh.port)) {
-                            knownHostStore.save(kh.copy(address = live.host, port = live.port))
+                        // Woke back on a new address? Re-point the saved record at it, keeping
+                        // the one it left, then dial there (no fallback on this redial — a
+                        // second failure surfaces as the plain error).
+                        if (live != null && kh != null && knownHostStore.learnAddress(kh.fpHex, live.host, live.port)) {
                             savedHosts = knownHostStore.all()
                         }
                         doConnectDirect(

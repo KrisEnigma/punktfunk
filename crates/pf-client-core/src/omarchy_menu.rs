@@ -296,6 +296,7 @@ mod tests {
             pinned_profiles: vec![],
             game_profiles: Default::default(),
             id: None,
+            prev_addrs: vec![],
         }
     }
 

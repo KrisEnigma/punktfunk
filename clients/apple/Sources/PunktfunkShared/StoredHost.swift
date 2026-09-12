@@ -57,13 +57,21 @@ public struct StoredHost: Identifiable, Codable, Hashable, Sendable {
     /// mDNS `os` TXT while online, so the card's OS mark survives the host going to sleep.
     /// Optional and appended last for the same widget-contract reason; nil until first learned.
     public var osChain: String?
+    /// Addresses this host was moved away from automatically, newest first, at most
+    /// `maxPreviousAddresses`. A host lives at more than one — its LAN lease at home, a
+    /// Tailscale address anywhere — so when `address` goes silent the sweep asks these too.
+    /// Optional and appended last for the same widget-contract reason; nil until the first move.
+    public var previousAddresses: [String]?
+
+    /// How many left-behind addresses a host keeps.
+    public static let maxPreviousAddresses = 3
 
     public init(
         id: UUID = UUID(), name: String, address: String, port: UInt16 = 9777,
         pinnedSHA256: Data? = nil, lastConnected: Date? = nil, mgmtPort: UInt16? = nil,
         macAddresses: [String]? = nil, clipboardSync: Bool? = nil,
         profileID: String? = nil, pinnedProfileIDs: [String]? = nil, addedAt: Date? = nil,
-        osChain: String? = nil
+        osChain: String? = nil, previousAddresses: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -78,12 +86,23 @@ public struct StoredHost: Identifiable, Codable, Hashable, Sendable {
         self.pinnedProfileIDs = pinnedProfileIDs
         self.addedAt = addedAt
         self.osChain = osChain
+        self.previousAddresses = previousAddresses
     }
 
     public var displayName: String { name.isEmpty ? address : name }
     public var effectiveMgmtPort: UInt16 { mgmtPort ?? punktfunkDefaultMgmtPort }
     /// Wake-capable, in a form the wake helper accepts (empty when none learned yet).
     public var wakeMacs: [String] { macAddresses ?? [] }
+
+    /// Re-point at `address`:`port`, remembering the address it leaves.
+    public mutating func move(to address: String, port: UInt16) {
+        let old = self.address
+        var previous = (previousAddresses ?? []).filter { $0 != address && $0 != old }
+        if old != address { previous.insert(old, at: 0) }
+        previousAddresses = previous.isEmpty ? nil : Array(previous.prefix(Self.maxPreviousAddresses))
+        self.address = address
+        self.port = port
+    }
 }
 
 public extension StoredHost {
