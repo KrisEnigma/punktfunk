@@ -90,6 +90,8 @@ pub(crate) struct WorkerArgs {
     /// Seeded with the connect-time estimate; the control task's mid-stream re-syncs
     /// update it.
     pub(crate) clock_offset: Arc<AtomicI64>,
+    /// Smoothed QUIC round trip (µs) for the overlay; a pump task samples it.
+    pub(crate) rtt_us: Arc<AtomicU32>,
     /// Embedder decode-stage samples. The pump drains a window mean into the ABR
     /// decode signal.
     pub(crate) decode_lat: Arc<Mutex<DecodeLatAcc>>,
