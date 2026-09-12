@@ -1375,6 +1375,444 @@ fn collections_shell_no_art() -> (Shell, ConsoleShared, crate::library::LibraryS
     collections_shell_inner(false)
 }
 
+/// Play Store TV captures. `PF_CONSOLE_STORE=<dir> cargo test -p pf-console-ui -- --ignored store_shots`.
+/// Android TV passes scale 0 (`SkiaConsoleShell.kt`), so a 1080p panel takes the couch
+/// formula: k = 1080 / 800 = 1.35, the same `render` derives for a plain 1920×1080 viewport.
+#[test]
+#[ignore]
+fn store_shots() {
+    let dir = std::env::var("PF_CONSOLE_STORE").expect("set PF_CONSOLE_STORE to an output dir");
+    let fonts = crate::theme::build_fonts().unwrap();
+    let pads = store_pads();
+    let frames = |s: &mut Shell, n: usize| {
+        let mut surface = skia_safe::surfaces::raster_n32_premul((1920, 1080)).unwrap();
+        for _ in 0..n {
+            s.render(
+                surface.canvas(),
+                1920,
+                1080,
+                &fonts,
+                Some(&pads[0].name),
+                Some(GamepadPref::Xbox360),
+                &pads,
+            );
+        }
+        surface
+    };
+    let save = |mut surface: skia_safe::Surface, name: &str| {
+        let png = surface
+            .image_snapshot()
+            .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+            .unwrap();
+        std::fs::write(format!("{dir}/{name}.png"), png.as_bytes()).unwrap();
+    };
+    // Fixed 60 Hz step: springs and the aurora land on the same frame every run.
+    let store_shell = |stack: Vec<Screen>, library: LibraryShared| {
+        fake_home();
+        let console = ConsoleShared::default();
+        console.set_hosts(store_hosts());
+        let mut s = Shell::new(
+            console,
+            library,
+            ConsoleBus::default(),
+            test_options(),
+            stack,
+        )
+        .unwrap();
+        s.platform = crate::platform::Platform::Android;
+        s.settings.ui_palette = "violet".into();
+        s.fake_clock = Some((0.0, 1.0 / 60.0));
+        s
+    };
+
+    let mut s = store_shell(
+        vec![Screen::Home(HomeScreen::new())],
+        LibraryShared::default(),
+    );
+    frames(&mut s, 30);
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    save(frames(&mut s, 90), "tv-console-home");
+
+    // Art before the list, so the shelf decodes it before the entrance arms.
+    let library = LibraryShared::default();
+    for (i, title) in STORE_TITLES.iter().enumerate() {
+        library.push_art(format!("steam:{i}"), store_poster(i, title, &fonts));
+    }
+    library.set_games(store_games());
+    let host = store_hosts()[2].clone();
+    let mut s = store_shell(
+        vec![
+            Screen::Home(HomeScreen::new()),
+            Screen::Library(LibraryScreen::new(&host, 0)),
+        ],
+        library,
+    );
+    frames(&mut s, 60);
+    // Past the Desktop and Steam tiles onto the first title.
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    save(frames(&mut s, 90), "tv-library");
+
+    let mut s = store_shell(
+        vec![
+            Screen::Home(HomeScreen::new()),
+            Screen::Controllers(crate::screens::controllers::ControllersScreen::new()),
+        ],
+        LibraryShared::default(),
+    );
+    save(frames(&mut s, 60), "tv-console-controllers");
+}
+
+/// Battlestation sits third so the focused tile has neighbours on both sides.
+fn store_hosts() -> Vec<HostRow> {
+    let host = |name: &str, os: &str, octet: u8, paired: bool, online: bool| HostRow {
+        key: if paired {
+            format!("fp{octet}")
+        } else {
+            format!("192.168.1.{octet}:9777")
+        },
+        id: paired.then(|| format!("id{octet}")),
+        name: name.into(),
+        addr: format!("192.168.1.{octet}"),
+        port: 9777,
+        fp_hex: if paired {
+            format!("fp{octet}")
+        } else {
+            String::new()
+        },
+        paired,
+        saved: paired,
+        online,
+        mgmt_port: 47990,
+        can_wake: paired && !online,
+        clipboard_sync: false,
+        last_used: None,
+        os: os.into(),
+        actions: Vec::new(),
+        pin: None,
+        bound_profile: None,
+        running: String::new(),
+        game_profiles: Default::default(),
+    };
+    let mut hosts = vec![
+        host("Living Room PC", "linux/fedora/bazzite", 21, true, true),
+        host("Office NUC", "linux/debian/ubuntu", 22, true, false),
+        host("Battlestation", "windows", 20, true, true),
+        host("Workshop", "linux/arch/cachyos", 23, true, true),
+        host("Editing Rig", "windows", 24, true, false),
+        host("Bedroom Mini", "linux/arch/steamos", 25, true, true),
+        host("Studio PC", "windows", 30, false, true),
+    ];
+    hosts[2].running = "Aurora Drift".into();
+    hosts
+}
+
+fn store_pads() -> Vec<PadInfo> {
+    let pad = |name: &str, id: &str, pref: GamepadPref, percent: u8| PadInfo {
+        name: name.into(),
+        key: format!("{}:{name}", id.to_lowercase()),
+        pref,
+        steam_virtual: false,
+        battery: Some(pf_client_core::menu_nav::PadBattery {
+            percent,
+            charging: false,
+        }),
+        detail: format!("{id} · gamepad · dpad"),
+        forwarded: true,
+        rumble: true,
+    };
+    vec![
+        pad(
+            "Xbox Wireless Controller",
+            "045E:0B13",
+            GamepadPref::Xbox360,
+            80,
+        ),
+        pad(
+            "DualSense Wireless Controller",
+            "054C:0CE6",
+            GamepadPref::DualSense,
+            65,
+        ),
+    ]
+}
+
+/// Fictional titles only: these ship in store listings.
+const STORE_TITLES: [&str; 7] = [
+    "Aurora Drift",
+    "Starfall Vale",
+    "Neon Circuit",
+    "Ember Keep",
+    "Tidebound",
+    "Glacier Run",
+    "Echo Station",
+];
+
+fn store_games() -> Vec<crate::library::LibraryGame> {
+    let game = |id: String, title: &str, launcher: bool| crate::library::LibraryGame {
+        id,
+        title: title.into(),
+        store: "steam".into(),
+        launcher,
+        icon: if launcher {
+            "steam".into()
+        } else {
+            String::new()
+        },
+        platform: None,
+        developer: None,
+        year: None,
+        genres: Vec::new(),
+        running: false,
+    };
+    let mut games = vec![game("steam:launcher".into(), "Steam", true)];
+    games.extend(
+        STORE_TITLES
+            .iter()
+            .enumerate()
+            .map(|(i, t)| game(format!("steam:{i}"), t, false)),
+    );
+    games
+}
+
+/// 600×900 poster in the Apple harness's style (`ShotPosterArt.swift`): dark sky, glowing
+/// strokes, the title over a soft floor. Deterministic per `i`.
+fn store_poster(i: usize, title: &str, fonts: &crate::theme::Fonts) -> Vec<u8> {
+    use crate::theme::W;
+    use skia_safe::{gradient, BlendMode, Canvas, Color4f, MaskFilter, Path, PathBuilder, Point};
+    use std::f32::consts::PI;
+
+    fn rgb(hex: u32, a: f32) -> Color4f {
+        let ch = |s: u32| ((hex >> s) & 0xff) as f32 / 255.0;
+        Color4f::new(ch(16), ch(8), ch(0), a)
+    }
+    fn vertical(c: &Canvas, y0: f32, y1: f32, colors: &[Color4f]) {
+        let mut p = crate::theme::fill(Color4f::new(0.0, 0.0, 0.0, 1.0));
+        p.set_shader(gradient::shaders::linear_gradient(
+            (Point::new(0.0, y0), Point::new(0.0, y1)),
+            &gradient::Gradient::new(
+                gradient::Colors::new_evenly_spaced(colors, skia_safe::TileMode::Clamp, None),
+                gradient::Interpolation::default(),
+            ),
+            None,
+        ));
+        c.draw_rect(skia_safe::Rect::from_ltrb(0.0, y0, 600.0, y1), &p);
+    }
+    /// Wide-faint to thin-bright, screen-blended: the neon trick every poster leans on.
+    fn glow(c: &Canvas, path: &Path, width: f32, color: Color4f) {
+        for (mult, alpha, blur) in [(2.6, 0.2, true), (1.3, 0.4, true), (0.55, 0.95, false)] {
+            let mut p = crate::theme::stroke(Color4f { a: alpha, ..color }, width * mult);
+            p.set_blend_mode(BlendMode::Screen);
+            p.set_stroke_cap(skia_safe::PaintCap::Round);
+            p.set_stroke_join(skia_safe::PaintJoin::Round);
+            if blur {
+                p.set_mask_filter(MaskFilter::blur(
+                    skia_safe::BlurStyle::Normal,
+                    width * mult * 0.5,
+                    None,
+                ));
+            }
+            c.draw_path(path, &p);
+        }
+    }
+    fn dot(c: &Canvas, x: f32, y: f32, r: f32, color: Color4f) {
+        let mut p = crate::theme::fill(color);
+        p.set_shader(gradient::shaders::radial_gradient(
+            (Point::new(x, y), r),
+            &gradient::Gradient::new(
+                gradient::Colors::new_evenly_spaced(
+                    &[color, Color4f { a: 0.0, ..color }],
+                    skia_safe::TileMode::Clamp,
+                    None,
+                ),
+                gradient::Interpolation::default(),
+            ),
+            None,
+        ));
+        c.draw_circle((x, y), r, &p);
+    }
+    fn ridge(c: &Canvas, rnd: &mut dyn FnMut(f32, f32) -> f32, base: f32, color: Color4f) {
+        let mut p = PathBuilder::new();
+        p.move_to((0.0, 900.0));
+        for s in 0..=10 {
+            p.line_to((s as f32 * 60.0, base + rnd(-36.0, 36.0)));
+        }
+        p.line_to((600.0, 900.0));
+        p.close();
+        c.draw_path(&p.detach(), &crate::theme::fill(color));
+    }
+
+    // (sky top, horizon, glow) per title.
+    let (top, horizon, hue) = [
+        (0x0B0830, 0x2B2475, 0x8F7BFF),
+        (0x1D0818, 0xB8467E, 0xFFD3E6),
+        (0x04161C, 0x0C3440, 0x35D0C5),
+        (0x1A0703, 0x9A3E16, 0xFFB067),
+        (0x03132A, 0x0E4A6E, 0x6FD8F5),
+        (0x0A1530, 0x3A6FA0, 0xDDF4FF),
+        (0x14052A, 0x6A1B7A, 0xFF6AD5),
+    ][i % 7];
+    let (glow_c, sky) = (rgb(hue, 1.0), rgb(top, 1.0));
+    let shade = |f: f32| Color4f::new(sky.r * f, sky.g * f, sky.b * f, 1.0);
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ i as u64;
+    let mut rnd = move |lo: f32, hi: f32| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        lo + (seed >> 40) as f32 / (1u64 << 24) as f32 * (hi - lo)
+    };
+
+    let mut surface = skia_safe::surfaces::raster_n32_premul((600, 900)).unwrap();
+    let c = surface.canvas();
+    vertical(c, 0.0, 900.0, &[sky, rgb(horizon, 1.0)]);
+    for _ in 0..40 {
+        let (x, y, r, a) = (
+            rnd(0.0, 600.0),
+            rnd(0.0, 520.0),
+            rnd(1.5, 3.5),
+            rnd(0.3, 0.9),
+        );
+        dot(c, x, y, r, rgb(0xFFFFFF, a));
+    }
+    match i % 5 {
+        // Ribbons.
+        0 => {
+            for (base, amp, freq, phase, w, col) in [
+                (560.0, 55.0, 1.15, 0.4, 26.0, glow_c),
+                (480.0, 70.0, 1.4, 2.2, 20.0, rgb(0x35D0C5, 1.0)),
+                (400.0, 45.0, 0.95, 4.1, 14.0, rgb(0xFFFFFF, 1.0)),
+            ] {
+                let mut p = PathBuilder::new();
+                for s in 0..=60 {
+                    let t = s as f32 / 60.0;
+                    let pt = (
+                        t * 600.0,
+                        base + amp * (t * PI * freq + phase).sin() - 40.0 * t,
+                    );
+                    if s == 0 {
+                        p.move_to(pt);
+                    } else {
+                        p.line_to(pt);
+                    }
+                }
+                glow(c, &p.detach(), w, col);
+            }
+            ridge(c, &mut rnd, 700.0, shade(1.6));
+            ridge(c, &mut rnd, 770.0, shade(0.7));
+        }
+        // Falling stars.
+        1 => {
+            for _ in 0..6 {
+                let (x, y, len) = (rnd(80.0, 560.0), rnd(140.0, 540.0), rnd(90.0, 170.0));
+                let mut p = PathBuilder::new();
+                p.move_to((x, y));
+                p.line_to((x - 0.55 * len, y - 0.83 * len));
+                glow(c, &p.detach(), 4.0, glow_c);
+                dot(c, x, y, 12.0, rgb(0xFFFFFF, 0.9));
+            }
+            ridge(c, &mut rnd, 640.0, shade(2.2));
+            ridge(c, &mut rnd, 730.0, shade(0.8));
+        }
+        // Circuit: a ring and right-angle traces on a 40 px grid.
+        2 => {
+            glow(c, &Path::circle((300.0, 380.0), 105.0, None), 10.0, glow_c);
+            for t in 0..9 {
+                let (mut x, mut y) = if t < 4 {
+                    (
+                        300.0 + [-105.0, 105.0, 0.0, 0.0][t],
+                        380.0 + [0.0, 0.0, -105.0, 105.0][t],
+                    )
+                } else {
+                    (40.0 * rnd(1.0, 14.0).round(), 40.0 * rnd(1.0, 21.0).round())
+                };
+                let mut p = PathBuilder::new();
+                p.move_to((x, y));
+                let mut horizontal = rnd(0.0, 1.0) > 0.5;
+                for _ in 0..rnd(3.0, 6.0) as usize {
+                    let step =
+                        40.0 * rnd(1.0, 4.0).round() * if rnd(0.0, 1.0) > 0.5 { 1.0 } else { -1.0 };
+                    if horizontal {
+                        x = (x + step).clamp(20.0, 580.0);
+                    } else {
+                        y = (y + step).clamp(20.0, 880.0);
+                    }
+                    p.line_to((x, y));
+                    horizontal = !horizontal;
+                }
+                glow(c, &p.detach(), 5.0, glow_c);
+                dot(c, x, y, 12.0, Color4f { a: 0.9, ..glow_c });
+            }
+        }
+        // Sun behind a keep.
+        3 => {
+            dot(c, 300.0, 470.0, 190.0, Color4f { a: 0.85, ..glow_c });
+            ridge(c, &mut rnd, 600.0, shade(3.0));
+            let keep = crate::theme::fill(shade(1.8));
+            for (x, y, w) in [
+                (250.0, 520.0, 100.0),
+                (205.0, 590.0, 45.0),
+                (350.0, 590.0, 45.0),
+            ] {
+                c.draw_rect(skia_safe::Rect::from_xywh(x, y, w, 900.0 - y), &keep);
+                for m in 0..(w / 20.0) as usize {
+                    let mx = x + m as f32 * 20.0 + 3.0;
+                    c.draw_rect(skia_safe::Rect::from_xywh(mx, y - 14.0, 12.0, 14.0), &keep);
+                }
+            }
+            ridge(c, &mut rnd, 720.0, shade(1.2));
+            for _ in 0..20 {
+                let (x, y, r, a) = (
+                    rnd(30.0, 570.0),
+                    rnd(300.0, 700.0),
+                    rnd(2.5, 6.0),
+                    rnd(0.35, 0.9),
+                );
+                dot(c, x, y, r, Color4f { a, ..glow_c });
+            }
+        }
+        // Moon over rolling waves.
+        _ => {
+            dot(c, 420.0, 230.0, 170.0, Color4f { a: 0.35, ..glow_c });
+            dot(c, 420.0, 230.0, 58.0, rgb(0xFFFFFF, 0.95));
+            for w in 0..6 {
+                let (base, amp) = (480.0 + w as f32 * 56.0, 22.0 - w as f32 * 2.0);
+                let mut p = PathBuilder::new();
+                for s in 0..=60 {
+                    let t = s as f32 / 60.0;
+                    let pt = (t * 600.0, base + amp * (t * PI * 3.0 + w as f32).sin());
+                    if s == 0 {
+                        p.move_to(pt);
+                    } else {
+                        p.line_to(pt);
+                    }
+                }
+                glow(c, &p.detach(), 6.0 - w as f32 * 0.5, glow_c);
+            }
+        }
+    }
+    // Soft floor under the caption keeps it legible over any art.
+    vertical(c, 620.0, 900.0, &[rgb(0x000000, 0.0), rgb(0x000000, 0.75)]);
+    let caption = title.to_uppercase();
+    let size = 46.0 * (540.0 / f64::from(fonts.measure(&caption, W::Bold, 46.0))).min(1.0);
+    let width = f64::from(fonts.measure(&caption, W::Bold, size));
+    fonts.draw(
+        c,
+        &caption,
+        (600.0 - width) / 2.0,
+        836.0,
+        W::Bold,
+        size,
+        rgb(0xFFFFFF, 0.94),
+    );
+    surface
+        .image_snapshot()
+        .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+        .unwrap()
+        .as_bytes()
+        .to_vec()
+}
+
 /// Bounding box of lit pixels: `(left, right, bottom)`. White ink on black, any channel.
 fn ink_bounds(surface: &mut skia_safe::Surface, w: i32, h: i32) -> (i32, i32, i32) {
     let mut pixels = vec![0u8; (w * h * 4) as usize];
