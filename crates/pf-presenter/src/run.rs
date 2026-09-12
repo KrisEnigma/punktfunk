@@ -32,7 +32,7 @@ use pf_client_core::video::VulkanDecodeDevice;
 use pf_client_core::video::{DecodedFrame, DecodedImage};
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::config::{CompositorPref, Mode};
-use sdl3::event::{Event, WindowEvent};
+use sdl3::event::{DisplayEvent, Event, WindowEvent};
 use sdl3::keyboard::Mod;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -452,6 +452,29 @@ impl StreamState {
 /// cushion's ceiling.
 ///
 /// The negotiated stream mode's refresh is the only source-rate signal a client has.
+impl StreamState {
+    /// Re-seed the latch grid, VRR verdict and pacer anchor from the window's current
+    /// display mode. Re-anchoring costs one frame; measured jitter survives, because
+    /// that describes the link.
+    fn relearn_grid(&mut self, window: &sdl3::video::Window) {
+        let hz = window
+            .get_display()
+            .and_then(|d| d.get_mode())
+            .map(|m| m.refresh_rate.round().max(0.0) as u32)
+            .unwrap_or(0);
+        if hz > 0 {
+            self.clock = LatchClock::new(hz);
+            self.mode_period_ns = 1_000_000_000 / u64::from(hz);
+        }
+        self.cadence.reset();
+        self.pacer.reset();
+        tracing::info!(
+            refresh_hz = hz,
+            "display changed — relearning the latch grid"
+        );
+    }
+}
+
 /// Measured fps sags when the transport is struggling, which is when a ceiling
 /// derived from it would license a bigger hold.
 ///
@@ -791,25 +814,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     // Dragged to another monitor: latch grid and VRR verdict belong to
                     // the old panel. A 60 Hz-seeded clock must not keep pacing a 144 Hz panel.
                     WindowEvent::DisplayChanged(..) => {
-                        let hz = window
-                            .get_display()
-                            .and_then(|d| d.get_mode())
-                            .map(|m| m.refresh_rate.round().max(0.0) as u32)
-                            .unwrap_or(0);
                         if let Some(st) = stream.as_mut() {
-                            if hz > 0 {
-                                st.clock = LatchClock::new(hz);
-                                st.mode_period_ns = 1_000_000_000 / u64::from(hz);
-                            }
-                            st.cadence.reset();
-                            // The estimate was built against a panel this stream is no
-                            // longer on. Re-anchoring costs one frame; measured jitter
-                            // survives, because that describes the link.
-                            st.pacer.reset();
-                            tracing::info!(
-                                refresh_hz = hz,
-                                "display changed — relearning the latch grid"
-                            );
+                            st.relearn_grid(&window);
                         }
                     }
                     WindowEvent::Exposed => {
@@ -817,6 +823,17 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     }
                     _ => {}
                 },
+                // The panel's rate changed under the window (60 ↔ 165 Hz in the OS
+                // settings): no window event fires, and the grid describes the old rate.
+                Event::Display {
+                    display_event: DisplayEvent::CurrentModeChanged,
+                    display,
+                    ..
+                } if window.get_display().is_ok_and(|d| d == display) => {
+                    if let Some(st) = stream.as_mut() {
+                        st.relearn_grid(&window);
+                    }
+                }
                 Event::KeyDown {
                     scancode: Some(sc),
                     keymod,
