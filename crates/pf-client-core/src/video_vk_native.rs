@@ -778,13 +778,6 @@ impl NativeVulkanDecoder {
         // A rung refusing every AU must not report `damaged 0 · failed 0 · run 0`.
         let delivered = match self.dec.decode(au) {
             Ok(delivered) => delivered,
-            // Not fed: no health note, no strike. The IDR request rides the
-            // concealment path so the host resends parameter sets.
-            Err(e) if e.awaits_idr() => {
-                self.want_recovery = true;
-                tracing::debug!(error = %e, "native decode idle until the next IDR");
-                return Ok(None);
-            }
             Err(e) => {
                 // Nothing from a refused AU reaches the screen. AV1 can leave frame 1
                 // in `ready` when frame 2 fails; `take_ready` on the next AU would ship
@@ -799,6 +792,16 @@ impl NativeVulkanDecoder {
                 // carrying them would make the next AU look freshly damaged.
                 let _ = self.dec.take_warnings();
                 let verdicts = self.settle_statuses();
+                // Not fed: idle until the IDR, not a refusal. The IDR request rides
+                // the concealment path so the host resends parameter sets.
+                if e.awaits_idr() {
+                    if verdicts.total() > 0 {
+                        self.health.note(false, false, verdicts.total());
+                    }
+                    self.want_recovery = true;
+                    tracing::debug!(error = %e, "native decode idle until the next IDR");
+                    return Ok(None);
+                }
                 self.health.note(false, true, verdicts.total());
                 tracing::warn!(
                     error = %e,

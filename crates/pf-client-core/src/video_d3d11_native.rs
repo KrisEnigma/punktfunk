@@ -977,8 +977,8 @@ pub(crate) fn adapter_decodes_hevc(luid: Option<[u8; 8]>) -> bool {
     let Ok(video) = device.cast::<ID3D11VideoDevice>() else {
         return false;
     };
-    profile_supported(&video, pf_dxvadec::HEVC_VLD_MAIN).is_ok()
-        || profile_supported(&video, pf_dxvadec::HEVC_VLD_MAIN10).is_ok()
+    profile_supported(&video, pf_dxvadec::config::HEVC_VLD_MAIN).is_ok()
+        || profile_supported(&video, pf_dxvadec::config::HEVC_VLD_MAIN10).is_ok()
 }
 
 /// Does the adapter expose this decode profile for this surface format?
