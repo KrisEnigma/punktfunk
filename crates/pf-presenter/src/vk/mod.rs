@@ -285,13 +285,15 @@ impl Presenter {
     }
 
     /// True when the swapchain itself can queue presents — the only modes the glass gate
-    /// governs. MAILBOX, IMMEDIATE, and `FIFO_LATEST_READY` replace or drop stale images
-    /// in the driver; gating on top would serialise twice.
+    /// governs. MAILBOX and IMMEDIATE replace or drop stale images in the driver, and
+    /// so does `FIFO_LATEST_READY` — except on Windows, where DXGI keeps up to three
+    /// composed presents queued ahead of DWM and LATEST_READY drains none of them.
     pub(crate) fn needs_glass_gate(&self) -> bool {
-        matches!(
+        let fifo = matches!(
             self.present_mode,
             vk::PresentModeKHR::FIFO | vk::PresentModeKHR::FIFO_RELAXED
-        )
+        );
+        fifo || (cfg!(windows) && self.present_mode == setup::fifo_latest_ready::MODE)
     }
 
     /// True when presents land on the vblank grid — the VRR cadence probe's premise.
