@@ -3,7 +3,14 @@ package io.unom.punktfunk.screenshots
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.BlendMode
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import kotlin.math.roundToInt
 import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Paint
@@ -431,11 +438,31 @@ internal fun PairDialog() {
 }
 
 /**
- * The live stats HUD (the real StatsOverlay) over a synthetic "streamed frame" gradient, at the
- * given [verbosity] tier — one scene per tier documents how far each tones the overlay down.
+ * The live stats HUD (the real StatsOverlay) at the given [verbosity] tier, over a real captured
+ * frame when `PUNKTFUNK_SHOT_HERO` names a PNG, else a synthetic gradient. The mode line is this
+ * canvas's own pixel size and refresh rate, as a stream sized to the display would report.
+ * [loss] false zeroes the lost, skipped and FEC counters, so a store shot has no counter line.
  */
 @Composable
-internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
+internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED, loss: Boolean = true) {
+    val config = LocalConfiguration.current
+    val density = LocalDensity.current.density
+    val w = (config.screenWidthDp * density).roundToInt()
+    val h = (config.screenHeightDp * density).roundToInt()
+    val hz = LocalView.current.display?.refreshRate?.roundToInt()?.takeIf { it > 0 } ?: 60
+    // 921.4 Mb/s at 5120×1440@240: the bitrate scales with pixel rate.
+    val mbps = w.toDouble() * h * hz * (921.4 / (5120.0 * 1440 * 240))
+    val fps = hz * 238.0 / 240.0
+    val (lost, skipped, fec) = if (loss) Triple(2.0, 1.0, 5.0) else Triple(0.0, 0.0, 0.0)
+    val hero = remember {
+        System.getenv("PUNKTFUNK_SHOT_HERO")?.takeIf { it.isNotEmpty() }
+            ?.let {
+                BitmapFactory.decodeFile(
+                    it,
+                    BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 },
+                )
+            }?.asImageBitmap()
+    }
     Box(
         Modifier
             .fillMaxSize()
@@ -443,6 +470,7 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
                 Brush.linearGradient(listOf(Color(0xFF2A1E5C), Color(0xFF0E1B3D), Color(0xFF06122B))),
             ),
     ) {
+        hero?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
         // The full 38-double unified layout — NativeBridge.nativeVideoStats' KDoc is the
         // authoritative index list: [fps, mbps, e2eP50, e2eP95, latValid, skew, w, h, hz,
         // lostTotal, bitDepth, colorPrimaries, colorTransfer, chromaFormatIdc, hostNetP50,
@@ -456,17 +484,17 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
         // latch p50) — 1.5/2.3 shown from 1.8/2.6 raw — and the Phase-2 stage terms
         // (host 0.6 + network 0.3 + decode 0.4 + display 0.2) tile the shaved headline, with the
         // `os present +0.3 excluded` line naming what came off; the decoder label shows the ranked
-        // low-latency decoder. Light per-window loss (lost 2 · skipped 1 · FEC 5 of 238) so the
+        // low-latency decoder. Light per-window loss (lost 2 · skipped 1 · FEC 5) so the
         // counter line (`lost` alone at NORMAL, all three at DETAILED) and the compact loss flag
         // both render.
         OsdScaled { StatsOverlay(
             doubleArrayOf(
-                238.0, 921.4, 1.3, 2.1, 1.0, 1.0, 5120.0, 1440.0, 240.0, 2.0,
+                fps, mbps, 1.3, 2.1, 1.0, 1.0, w.toDouble(), h.toDouble(), hz.toDouble(), lost,
                 10.0, 9.0, 16.0, 1.0, 0.9, 0.4, 0.6, 0.3,
-                2.0, 1.0, 5.0, 238.0,
+                lost, skipped, fec, fps,
                 1.0, 0.5, 1.8, 2.6,
                 // Presenter samples: the 0.3 latch p50 is the excluded OS floor; presents ≈ fps.
-                0.2, 0.3, 236.0, 1.0,
+                0.2, 0.3, hz * 236.0 / 240.0, 1.0,
                 // feed + codec = 0.4 (logged, no longer drawn), and no overflow — the one
                 // `skipped` above is benign newest-wins pacing, not a decoder falling behind.
                 0.1, 0.3, 0.0,

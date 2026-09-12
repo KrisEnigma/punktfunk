@@ -39,9 +39,10 @@ class TvScreenshotTest {
     }
 
     @Test
-    fun stream() = shootRoot("stream") { StreamScene(io.unom.punktfunk.StatsVerbosity.COMPACT) }
+    fun stream() =
+        shootRoot("stream") { StreamScene(io.unom.punktfunk.StatsVerbosity.COMPACT, loss = false) }
 
     @Test
     fun streamDetailed() =
-        shootRoot("stream-detailed") { StreamScene(io.unom.punktfunk.StatsVerbosity.DETAILED) }
+        shootRoot("stream-detailed") { StreamScene(io.unom.punktfunk.StatsVerbosity.DETAILED, loss = false) }
 }

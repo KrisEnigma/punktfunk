@@ -1435,24 +1435,33 @@ fn store_shots() {
     save(frames(&mut s, 90), "tv-console-home");
 
     // Art before the list, so the shelf decodes it before the entrance arms.
-    let library = LibraryShared::default();
-    for (i, title) in STORE_TITLES.iter().enumerate() {
-        library.push_art(format!("steam:{i}"), store_poster(i, title, &fonts));
-    }
-    library.set_games(store_games());
-    let host = store_hosts()[2].clone();
-    let mut s = store_shell(
-        vec![
-            Screen::Home(HomeScreen::new()),
-            Screen::Library(LibraryScreen::new(&host, 0)),
-        ],
-        library,
-    );
-    frames(&mut s, 60);
-    // Past the Desktop and Steam tiles onto the first title.
-    s.handle_menu(MenuEvent::Move(MenuDir::Right));
-    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    let shelf = || {
+        let library = LibraryShared::default();
+        for (i, (title, ..)) in STORE_TITLES.iter().enumerate() {
+            library.push_art(format!("steam:{i}"), store_poster(i, title, &fonts));
+        }
+        library.set_games(store_games());
+        let host = store_hosts()[2].clone();
+        let mut s = store_shell(
+            vec![
+                Screen::Home(HomeScreen::new()),
+                Screen::Library(LibraryScreen::new(&host, 0)),
+            ],
+            library,
+        );
+        frames(&mut s, 60);
+        // Past the Desktop and Steam tiles onto the first title.
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+        s
+    };
+    let mut s = shelf();
     save(frames(&mut s, 90), "tv-library");
+
+    let mut s = shelf();
+    frames(&mut s, 90);
+    s.handle_menu(MenuEvent::Confirm);
+    save(frames(&mut s, 120), "tv-console-launch");
 
     let mut s = store_shell(
         vec![
@@ -1462,6 +1471,54 @@ fn store_shots() {
         LibraryShared::default(),
     );
     save(frames(&mut s, 60), "tv-console-controllers");
+
+    // Settings opens on the Stream tab. Explicit values, the stream shot's mode, over Native.
+    let mut s = store_shell(
+        vec![Screen::Home(HomeScreen::new())],
+        LibraryShared::default(),
+    );
+    (s.settings.width, s.settings.height, s.settings.refresh_hz) = (1920, 1080, 60);
+    s.settings.bitrate_kbps = 50_000;
+    frames(&mut s, 30);
+    s.handle_menu(MenuEvent::Tertiary);
+    save(frames(&mut s, 90), "tv-console-settings");
+
+    // Name filled, the address mid-entry on the keyboard tray.
+    let mut s = store_shell(
+        vec![
+            Screen::Home(HomeScreen::new()),
+            Screen::AddHost(crate::screens::add_host::AddHostScreen::new()),
+        ],
+        LibraryShared::default(),
+    );
+    frames(&mut s, 30);
+    s.handle_menu(MenuEvent::Confirm);
+    s.text_input("Guest Room PC");
+    s.handle_menu(MenuEvent::Back);
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Confirm);
+    s.text_input("192.168.1.40");
+    save(frames(&mut s, 60), "tv-console-addhost");
+
+    // PIN typed, focus on Pair.
+    let studio = store_hosts()[6].clone();
+    let mut s = store_shell(
+        vec![
+            Screen::Home(HomeScreen::new()),
+            Screen::Pair(crate::screens::pair::PairScreen::new(
+                &studio,
+                "Living Room TV",
+            )),
+        ],
+        LibraryShared::default(),
+    );
+    frames(&mut s, 30);
+    s.handle_menu(MenuEvent::Confirm);
+    s.text_input("4827");
+    s.handle_menu(MenuEvent::Back);
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    save(frames(&mut s, 60), "tv-console-pair");
 }
 
 /// Battlestation sits third so the focused tile has neighbours on both sides.
@@ -1538,15 +1595,25 @@ fn store_pads() -> Vec<PadInfo> {
     ]
 }
 
-/// Fictional titles only: these ship in store listings.
-const STORE_TITLES: [&str; 7] = [
-    "Aurora Drift",
-    "Starfall Vale",
-    "Neon Circuit",
-    "Ember Keep",
-    "Tidebound",
-    "Glacier Run",
-    "Echo Station",
+/// Fictional titles and studios only: these ship in store listings.
+const STORE_TITLES: [(&str, &str, u16, [&str; 2]); 7] = [
+    ("Aurora Drift", "Lumen Forge", 2025, ["Racing", "Arcade"]),
+    (
+        "Starfall Vale",
+        "Hollowpine",
+        2024,
+        ["Adventure", "Exploration"],
+    ),
+    ("Neon Circuit", "Relay Nine", 2025, ["Action", "Cyberpunk"]),
+    ("Ember Keep", "Emberlight", 2023, ["Strategy", "Fantasy"]),
+    (
+        "Tidebound",
+        "Tidewater Games",
+        2024,
+        ["Sailing", "Open world"],
+    ),
+    ("Glacier Run", "Northwind", 2022, ["Platformer", "Speedrun"]),
+    ("Echo Station", "Signal Hill", 2025, ["Puzzle", "Sci-fi"]),
 ];
 
 fn store_games() -> Vec<crate::library::LibraryGame> {
@@ -1571,7 +1638,14 @@ fn store_games() -> Vec<crate::library::LibraryGame> {
         STORE_TITLES
             .iter()
             .enumerate()
-            .map(|(i, t)| game(format!("steam:{i}"), t, false)),
+            .map(
+                |(i, (title, studio, year, genres))| crate::library::LibraryGame {
+                    developer: Some((*studio).into()),
+                    year: Some(*year),
+                    genres: genres.iter().map(|g| (*g).into()).collect(),
+                    ..game(format!("steam:{i}"), title, false)
+                },
+            ),
     );
     games
 }
