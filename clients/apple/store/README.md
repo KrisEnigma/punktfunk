@@ -14,6 +14,7 @@ python3 clients/apple/store/check-limits.py
 | [`tvos.md`](tvos.md) | tvOS Promotional Text, Description, Keywords (DE + EN) |
 | [`review-notes.md`](review-notes.md) | App Review notes template + pre-submission checklist |
 | [`privacy-app-addendum.md`](privacy-app-addendum.md) | App-specific privacy text to add to the existing policy page |
+| [`privacy-tvos.md`](privacy-tvos.md) | Privacy Policy text for the Apple TV field (DE + EN), standalone |
 
 German is primary throughout and uses the same informal "du" voice as the website
 (`punktfunk-website/messages/de.json`). English is a localisation, not a translation exercise — a
