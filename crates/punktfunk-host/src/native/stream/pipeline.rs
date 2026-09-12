@@ -98,10 +98,11 @@ pub(in crate::native) fn prepare_display(
     Ok(PreparedDisplay { vd, pipeline })
 }
 
-/// Retry transient first-frame races. Permanent errors short-circuit; each failed attempt drops
-/// its capturer so the next create is clean. `supersedes` is the lease this build replaces
-/// (create-before-drop): without it the registry counts the old lease as a live sibling and
-/// the new display extends the group instead of heading it.
+/// Retry transient first-frame races. Permanent errors short-circuit, except a driver with no
+/// render device, which gets one adapter reload first ([`cycled_driver_for`]). Each failed
+/// attempt drops its capturer so the next create is clean. `supersedes` is the lease this
+/// build replaces (create-before-drop): without it the registry counts the old lease as a live
+/// sibling and the new display extends the group instead of heading it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_pipeline_with_retry(
     vd: &mut Box<dyn crate::vdisplay::VirtualDisplay>,
@@ -160,7 +161,7 @@ pub(super) fn build_pipeline_with_retry(
             }
             Err(e) => {
                 let chain = format!("{e:#}");
-                let permanent = is_permanent_build_error(&chain);
+                let permanent = is_permanent_build_error(&chain) && !cycled_driver_for(&e);
                 if permanent || attempt == max_attempts {
                     let why = if permanent {
                         "permanent"
@@ -184,6 +185,50 @@ pub(super) fn build_pipeline_with_retry(
         }
     }
     unreachable!("the final attempt returns inside the loop")
+}
+
+/// A driver that cannot create its render device fails every open until the adapter reloads
+/// into a fresh WUDFHost, so that failure earns one reload and a retry. At most once a minute
+/// host-wide: the rebuild loop calls this once per build.
+#[cfg(target_os = "windows")]
+fn cycled_driver_for(e: &anyhow::Error) -> bool {
+    const COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if !is_driver_no_device(e) {
+        return false;
+    }
+    {
+        let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+        if last.is_some_and(|t| t.elapsed() < COOLDOWN) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    match crate::vdisplay::driver::force_driver_cycle_if_sole() {
+        Ok(()) => {
+            tracing::warn!("driver adapter reloaded for a missing render device — retrying");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "driver cycle for a missing render device did not run"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cycled_driver_for(_: &anyhow::Error) -> bool {
+    false
+}
+
+/// `SET_ENCODE` answered `NO_DEVICE`: the driver has no render device for the monitor.
+#[cfg(target_os = "windows")]
+fn is_driver_no_device(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<pf_capture::DriverEncodeOpenError>()
+        .is_some_and(|d| d.status == pf_driver_proto::encode::SET_ENCODE_NO_DEVICE)
 }
 
 /// Permanent = retrying cannot help this session. Match our English prefix, not KWin's translated payload.
@@ -486,5 +531,23 @@ mod tests {
             "create virtual output: no monitor named \"HDMI-A-3\" — this host has: HDMI-A-1"
         ));
         assert!(!is_permanent_build_error("open NVENC: device busy"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn driver_no_device_is_found_through_the_context_chain() {
+        use pf_driver_proto::encode::{SET_ENCODE_NO_BACKEND, SET_ENCODE_NO_DEVICE};
+        let open = |status| {
+            anyhow::Error::new(pf_capture::DriverEncodeOpenError {
+                backends: [1, 0, 0, 0],
+                status,
+                error: 0x8007_000Eu32 as i32,
+                name: "d3d11".into(),
+            })
+            .context("open video encoder")
+        };
+        use pf_driver_proto::encode::{SET_ENCODE_NO_BACKEND, SET_ENCODE_NO_DEVICE};
+        assert!(is_driver_no_device(&open(SET_ENCODE_NO_DEVICE)));
+        assert!(!is_driver_no_device(&open(SET_ENCODE_NO_BACKEND)));
     }
 }
