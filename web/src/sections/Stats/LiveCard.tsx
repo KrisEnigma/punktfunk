@@ -10,7 +10,13 @@ import { QueryState } from "@/components/query-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { Loadable } from "@/lib/query";
 import { m } from "@/paraglide/messages";
-import { HealthChart, LatencyChart, ThroughputChart } from "./charts";
+import {
+	HealthChart,
+	hasRtt,
+	LatencyChart,
+	RttChart,
+	ThroughputChart,
+} from "./charts";
 import { ChartBlock } from "./helpers";
 
 /**
@@ -55,6 +61,7 @@ export const LiveCard: FC<{ live: Loadable<Capture> }> = ({ live }) => {
 		live.error instanceof ApiError && live.error.status === 404
 			? null
 			: live.error;
+	const fps = live.data?.meta?.fps ?? 0;
 	return (
 		<Card>
 			<CardHeader>
@@ -75,18 +82,21 @@ export const LiveCard: FC<{ live: Loadable<Capture> }> = ({ live }) => {
 								title={m.stats_latency_title()}
 								desc={m.stats_latency_desc()}
 							>
-								<LatencyChart samples={samples} />
+								<LatencyChart samples={samples} fps={fps} toggle />
 							</ChartBlock>
 							<ChartBlock title={m.stats_throughput_title()}>
-								<ThroughputChart samples={samples} />
+								<ThroughputChart samples={samples} fps={fps} />
 							</ChartBlock>
-							{/* Loss/recovery was only ever visible AFTER stopping and reopening the
-							    saved recording — which is backwards: dropped frames and FEC recovery
-							    are what you watch a live capture FOR. The `kind` note keeps the
-							    GameStream caveat (only `frames` is instrumented there). */}
+							{/* Loss is what a live capture is watched FOR, so it plots here too, not
+							    only in the saved recording. */}
 							<ChartBlock title={m.stats_health_title()}>
-								<HealthChart samples={samples} kind={live.data?.meta?.kind} />
+								<HealthChart samples={samples} />
 							</ChartBlock>
+							{hasRtt(samples) && (
+								<ChartBlock title={m.stats_rtt_title()}>
+									<RttChart samples={samples} />
+								</ChartBlock>
+							)}
 							{(live.data?.samples?.length ?? 0) > LIVE_WINDOW && (
 								<p className="text-xs text-muted-foreground">
 									{m.stats_live_window({ count: LIVE_WINDOW })}

@@ -192,21 +192,28 @@ export const statsStatusIdle: StatsStatus = {
 	elapsed_ms: 0,
 };
 
-// A native-path pipeline: capture → submit → encode → send. Deterministic (no
-// Math.random) so the screenshot is byte-stable across CI runs; a gentle sine
-// gives the charts a realistic shape without a live capture.
+// A Linux native pipeline: queue → capture → submit → encode → send. Deterministic (no
+// Math.random) so the screenshot is byte-stable across CI runs; a gentle sine gives the charts
+// a realistic shape without a live capture.
 const STAGE_BASE_US: Record<string, number> = {
+	queue: 180,
 	capture: 320,
 	submit: 90,
 	encode: 760,
 	send: 140,
 };
-const STAGE_ORDER = ["capture", "submit", "encode", "send"];
+const STAGE_ORDER = ["queue", "capture", "submit", "encode", "send"];
 
 function buildSamples(n: number): StatsSample[] {
 	const out: StatsSample[] = [];
 	for (let i = 0; i < n; i++) {
 		const wobble = Math.sin(i / 4);
+		const stages = STAGE_ORDER.map((name) => {
+			const base = STAGE_BASE_US[name] ?? 100;
+			const p50 = Math.round(base + wobble * base * 0.15);
+			return { name, p50_us: p50, p99_us: Math.round(p50 * 1.8) };
+		});
+		const host = stages.reduce((sum, st) => sum + st.p50_us, 0) + 220;
 		out.push({
 			t_ms: i * 1000,
 			session_id: 1,
@@ -214,15 +221,43 @@ function buildSamples(n: number): StatsSample[] {
 			repeat_fps: i % 3 === 0 ? 2 : 1,
 			mbps: 920 + wobble * 55,
 			bitrate_kbps: 150_000,
-			frames_dropped: i % 17 === 0 ? 1 : 0,
-			packets_dropped: i % 9 === 0 ? 2 : 0,
+			// The host measures its own send drops; loss and FEC are the client's to count.
+			send_dropped: i % 23 === 0 ? 1 : 0,
+			host_p50_us: host,
+			host_p99_us: Math.round(host * 1.7),
+			rtt_us: Math.round(900 + wobble * 150),
+			stages,
+		});
+	}
+	return out;
+}
+
+// The Windows driver path at 120 Hz: the driver's lump sits just under one 8.3 ms frame, and
+// the pool drops a frame now and then.
+function buildDriverSamples(n: number): StatsSample[] {
+	const out: StatsSample[] = [];
+	for (let i = 0; i < n; i++) {
+		const wobble = Math.sin(i / 3);
+		const driver = Math.round(7_400 + wobble * 600);
+		const stages = [
+			{ name: "driver", p50_us: driver, p99_us: Math.round(driver * 1.25) },
+			{ name: "copy", p50_us: 180, p99_us: 260 },
+			{ name: "send", p50_us: 240, p99_us: 410 },
+		];
+		const host = driver + 180 + 240 + 90;
+		out.push({
+			t_ms: i * 2000,
+			session_id: 1,
+			fps: 118 + (i % 4 === 0 ? -6 : 0),
+			repeat_fps: 0,
+			mbps: 64 + wobble * 6,
+			bitrate_kbps: 80_000,
+			frames_dropped: i % 11 === 0 ? 2 : 0,
 			send_dropped: 0,
-			fec_recovered: i % 5 === 0 ? 3 : 1,
-			stages: STAGE_ORDER.map((name) => {
-				const base = STAGE_BASE_US[name] ?? 100;
-				const p50 = Math.round(base + wobble * base * 0.15);
-				return { name, p50_us: p50, p99_us: Math.round(p50 * 1.8) };
-			}),
+			host_p50_us: host,
+			host_p99_us: Math.round(host * 1.3),
+			rtt_us: Math.round(1_600 + wobble * 300),
+			stages,
 		});
 	}
 	return out;
@@ -244,6 +279,21 @@ export const captureMetas: CaptureMeta[] = [
 		gpu: "NVIDIA GeForce RTX 4090",
 	},
 	{
+		id: "cap-20260628-1955",
+		client: "living-room-pc",
+		kind: "native",
+		codec: "hevc",
+		width: 3840,
+		height: 2160,
+		fps: 120,
+		duration_ms: 7_200_000,
+		sample_count: 5400,
+		started_unix_ms: 1_782_412_500_000,
+		encoder_backend: "driver-nvenc",
+		gpu: "NVIDIA GeForce RTX 4090",
+		truncated: true,
+	},
+	{
 		id: "cap-20260628-1903",
 		client: "living-room-tv",
 		kind: "gamestream",
@@ -260,6 +310,11 @@ export const captureMetas: CaptureMeta[] = [
 export const captureDetail: Capture = {
 	meta: captureMetas[0] as CaptureMeta,
 	samples: buildSamples(60),
+};
+
+export const captureDetailDriver: Capture = {
+	meta: captureMetas[1] as CaptureMeta,
+	samples: buildDriverSamples(60),
 };
 
 // --- Pairing page ------------------------------------------------------------
