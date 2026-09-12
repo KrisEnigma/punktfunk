@@ -55,9 +55,10 @@ class Sc2UsbLink(
     /**
      * Replay one raw report from the host on the device: kind 0 = output report (Steam's `0x80`
      * rumble & friends), kind 1 = feature report. [data] is the full report, id byte first,
-     * exactly as hidapi framed it host-side.
+     * exactly as hidapi framed it host-side. Rumble coalesces per [Sc2Device.outputCoalesceKey].
      */
-    fun writeRaw(kind: Int, data: ByteArray) = link.writeRaw(kind, data)
+    fun writeRaw(kind: Int, data: ByteArray) =
+        link.writeRaw(kind, data, Sc2Device.outputCoalesceKey(data))
 
     /** Stop the read loop and release the interfaces. Idempotent; does not fire the closed callback. */
     fun stop() = link.stop()

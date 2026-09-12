@@ -69,6 +69,13 @@ object Sc2Device {
     }
 
     /**
+     * The pending-OUT queue key for an output frame. Steam re-sends `0x80` grip rumble as a level,
+     * so a newer one supersedes the pending one; every other id is a one-shot that must not be lost.
+     */
+    fun outputCoalesceKey(frame: ByteArray): Int =
+        if (frame.firstOrNull() == 0x80.toByte()) OutReportQueue.KEY_RUMBLE else OutReportQueue.NO_COALESCE
+
+    /**
      * Incoming: a GATT characteristic value is the bare payload with no HID report-id byte, so
      * re-prepend [ID_STATE_BLE] on state-sized (40 B and up) payloads — the wire then carries the
      * same id-first framing as USB. Short payloads (battery/status) pass through unmodified.

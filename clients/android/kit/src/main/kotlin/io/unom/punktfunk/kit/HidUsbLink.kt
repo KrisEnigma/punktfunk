@@ -86,6 +86,7 @@ class HidUsbLink(
     private val outQueue = OutReportQueue()
 
     private var reader: Thread? = null
+    private var keepAlive: Thread? = null
     private var detachReceiver: BroadcastReceiver? = null
 
     @Volatile private var running = false
@@ -133,8 +134,9 @@ class HidUsbLink(
     val fileDescriptor: Int get() = connection?.fileDescriptor ?: -1
 
     /**
-     * Claim [dev]'s controller interface(s) and start the read loop. The caller has already
-     * obtained USB permission. Returns false when nothing could be claimed.
+     * Claim [dev]'s controller interface(s), then start the read loop and, when configured, the
+     * keep-alive thread. The caller has already obtained USB permission. Returns false when
+     * nothing could be claimed.
      */
     fun start(dev: UsbDevice): Boolean {
         if (!usb.hasPermission(dev)) {
@@ -194,7 +196,32 @@ class HidUsbLink(
             isDaemon = true
             start()
         }
+        if (config.keepAliveFeatures.isNotEmpty() && config.keepAliveMs > 0) {
+            keepAlive = Thread({ keepAliveLoop(conn, claimed) }, "${config.threadName}-keepalive").apply {
+                isDaemon = true
+                start()
+            }
+        }
         return true
+    }
+
+    /**
+     * Re-send the keep-alive features every [Config.keepAliveMs] to the streaming interface (else
+     * every claimed one); replaying also repairs settings another consumer changed. Its own
+     * thread, because each EP0 transfer blocks up to [WRITE_TIMEOUT_MS] and the reader must not.
+     */
+    private fun keepAliveLoop(conn: UsbDeviceConnection, claims: List<Claim>) {
+        while (running) {
+            try {
+                Thread.sleep(config.keepAliveMs)
+            } catch (_: InterruptedException) {
+                return
+            }
+            if (!running) return
+            val target = activeClaim
+            if (target != null) sendKeepAlive(conn, target.iface.id)
+            else claims.forEach { sendKeepAlive(conn, it.iface.id) }
+        }
     }
 
     /**
@@ -233,7 +260,8 @@ class HidUsbLink(
 
     /**
      * The multiplexed read loop: one IN request queued per claimed interface at all times, OUT
-     * writes submitted from [outQueue], completions routed via [UsbRequest.getClientData].
+     * writes submitted from [outQueue], completions routed via [UsbRequest.getClientData]. It
+     * never blocks on EP0, so input keeps flowing while a control transfer is in flight.
      */
     private fun readLoop(conn: UsbDeviceConnection, claims: List<Claim>) {
         val live = claims.filter { c ->
@@ -265,22 +293,10 @@ class HidUsbLink(
             return
         }
         val scratch = ByteArray(64)
-        var lastKeepAlive = android.os.SystemClock.elapsedRealtime()
         var errorsSince = 0L // elapsedRealtime of the first hard error in the current streak
         try {
             while (running) {
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (config.keepAliveFeatures.isNotEmpty() && config.keepAliveMs > 0 &&
-                    now - lastKeepAlive >= config.keepAliveMs
-                ) {
-                    // Refresh the firmware settings on the streaming interface (else every live
-                    // one, before a streaming interface is known) — replaying also repairs state
-                    // some other consumer changed after capture started.
-                    val target = activeClaim
-                    if (target != null) sendKeepAlive(conn, target.iface.id)
-                    else live.forEach { sendKeepAlive(conn, it.iface.id) }
-                    lastKeepAlive = now
-                }
                 // Submit the next pending OUT report on the active (else first) interface.
                 val outTarget = (activeClaim ?: live.first()).takeIf { it.outReq != null && !it.outBusy }
                 if (outTarget != null) {
@@ -479,10 +495,12 @@ class HidUsbLink(
     }
 
     /**
-     * Stop the read loop and release the interfaces. Idempotent; does not fire [onClosed].
+     * Stop the read loop and the keep-alive, then release the interfaces. Idempotent; does not
+     * fire [onClosed].
      *
-     * Safe to call from the `onClosed` handler itself — that is how an unplug now gets cleaned up,
-     * and it arrives on the reader thread, which must not try to join itself.
+     * Safe to call from the `onClosed` handler itself — that is how an unplug gets cleaned up,
+     * and it arrives on the reader thread, which must not try to join itself. Both threads are
+     * joined before the connection closes: a transfer in flight must not lose its descriptor.
      */
     fun stop() {
         running = false
@@ -490,6 +508,8 @@ class HidUsbLink(
         down.set(true)
         detachReceiver?.let { runCatching { context.unregisterReceiver(it) } }
         detachReceiver = null
+        keepAlive?.let { it.interrupt(); runCatching { it.join(1000) } }
+        keepAlive = null
         if (reader !== Thread.currentThread()) {
             runCatching { reader?.join(1000) }
             // Only forget the thread once it is actually gone: clearing it while it still runs
