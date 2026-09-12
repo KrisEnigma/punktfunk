@@ -957,13 +957,23 @@ public final class StreamViewController: StreamViewControllerBase {
         }
     }
 
-    /// Ask the system for the lock back after it dropped one we still want (see the Escape-drop
-    /// note on the state above). Bounded to a short burst; idempotent within it. Main queue.
+    /// SpringBoard grants the lock only to a frontmost scene that fills its screen. A windowed
+    /// scene — including the one its title-strip double-click leaves behind — is refused outright.
+    private var sceneCanHoldPointerLock: Bool {
+        guard let window = view.window, let scene = window.windowScene,
+              scene.activationState == .foregroundActive
+        else { return false }
+        return window.bounds.size == scene.screen.bounds.size
+    }
+
+    /// Ask for the lock back after a drop we didn't want (see the Escape-drop note on the state
+    /// above), only while the scene can hold it. Bounded to a short burst; idempotent within it.
+    /// Main queue.
     private func requestPointerRelock() {
-        // Only a frontmost scene can hold the lock at all. Anywhere else the drop is the system
-        // saying we don't qualify, not the Esc key — re-asking would be noise, and the qualifying
-        // states (foreground, appearance, reparent) each re-resolve on their own already.
-        guard view.window?.windowScene?.activationState == .foregroundActive else {
+        // Anywhere else the drop is SpringBoard saying we don't qualify, not the Esc key. Asking
+        // would hide the cursor and mute motion for a lock that isn't coming; the qualifying
+        // states (foreground, appearance, reparent, full screen again) re-resolve on their own.
+        guard sceneCanHoldPointerLock else {
             pointerRelockPending = false
             return
         }
@@ -1049,10 +1059,9 @@ public final class StreamViewController: StreamViewControllerBase {
         pointerRelockQuietAttempt += 1
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            // Still wanted, still ours to want, and still not held — otherwise the tail is moot.
+            // Still wanted, still grantable, and still not held — otherwise the tail is moot.
             guard self.wantsPointerLock, self.pointerLockWasEngaged,
-                self.pointerLockEngaged() != true,
-                self.view.window?.windowScene?.activationState == .foregroundActive
+                self.pointerLockEngaged() != true, self.sceneCanHoldPointerLock
             else { return }
             self.pointerLockForcedOff = true
             self.setNeedsUpdateOfPrefersPointerLocked()
