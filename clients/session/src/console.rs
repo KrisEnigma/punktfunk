@@ -979,8 +979,7 @@ impl ServiceState {
                 let online = probed.get(&key).copied().unwrap_or(false);
                 // Everything the advert teaches, while it is visible: mgmt port, OS chain, wake
                 // MAC — a Deck in Gaming Mode runs only this console and the Decky panel, and a
-                // record with no MAC can never be woken — and the address, so a host back on a
-                // new lease is dialed and probed where it lives. No disk write when unchanged.
+                // record with no MAC can never be woken. No disk write when unchanged.
                 if let Some(a) = advert {
                     pf_client_core::trust::learn_from_advert(
                         &h.fp_hex,
@@ -990,7 +989,11 @@ impl ServiceState {
                         &a.os,
                         a.mgmt_port,
                     );
-                    pf_client_core::trust::rekey_addr(&h.fp_hex, &a.addr, a.port);
+                    // Follow the advert only once the saved address stopped answering: a routed
+                    // one (Tailscale) answers on the LAN too, and must survive coming home.
+                    if probed.get(&key) == Some(&false) {
+                        pf_client_core::trust::rekey_addr(&h.fp_hex, &a.addr, a.port);
+                    }
                 }
                 let row = HostRow {
                     key: key.clone(),
