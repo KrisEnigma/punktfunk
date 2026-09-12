@@ -272,4 +272,19 @@ class Sc2DeviceTest {
         assertNull(Sc2Device.strippedOutputLen(0x8A))
         assertNull(Sc2Device.strippedOutputLen(0x00))
     }
+
+    @Test
+    fun `a rumble stream collapses while a queued pulse survives`() {
+        // More rumbles than the queue holds: uncoalesced, the overflow evicts the pulse.
+        val q = OutReportQueue()
+        val pulse = byteArrayOf(0x81.toByte(), 1)
+        q.offer(pulse, Sc2Device.outputCoalesceKey(pulse))
+        repeat(OutReportQueue.CAP + 8) { n ->
+            val rumble = byteArrayOf(0x80.toByte(), n.toByte())
+            q.offer(rumble, Sc2Device.outputCoalesceKey(rumble))
+        }
+        assertEquals(2, q.size)
+        assertArrayEquals(pulse, q.poll())
+        assertArrayEquals(byteArrayOf(0x80.toByte(), (OutReportQueue.CAP + 7).toByte()), q.poll())
+    }
 }
