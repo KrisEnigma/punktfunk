@@ -420,8 +420,8 @@ public enum SessionSettings {
     }
 
     /// The one value that legitimately moves mid-session: the stats tier, which every client
-    /// cycles live (⌃⌥⇧S, the three-finger tap). The cycle writes the global as before AND moves
-    /// the session's own value, so cycling works in a profile-driven session too.
+    /// cycles live (⌃⌥⇧S, the three-finger tap). Only the session's value moves; the global stays
+    /// the tier the next session starts at.
     public static func setStatsVerbosity(_ raw: String) {
         guard var s = box.active else { return }
         s.statsVerbosity = raw

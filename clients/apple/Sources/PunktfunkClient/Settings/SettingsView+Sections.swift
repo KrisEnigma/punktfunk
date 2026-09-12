@@ -469,6 +469,13 @@ extension SettingsView {
                     }
                 }
                 .disabled(effective.statsVerbosity == StatsVerbosity.off.rawValue)
+                // The vocabulary is this device's choice, never a profile's (tier G).
+                described(Self.advancedStatisticsDescription) {
+                    Toggle("Advanced statistics", isOn: $advancedStats)
+                }
+                #if !os(tvOS)
+                Link("What each number means", destination: Self.statsDocsURL)
+                #endif
             }
         }
     }
@@ -800,8 +807,8 @@ extension SettingsView {
     /// ONCE in the section footer instead of riding all five lossless rows.
     ///
     /// ⚠ The rule this caption exists to keep is the design's: **the UI states the RESOLVED
-    /// format, never the requested one.** Nothing here may read as a guarantee — the HUD's
-    /// `audioFormatLabel` is built from the connection's `Welcome`, and that is the only place a
+    /// format, never the requested one.** Nothing here may read as a guarantee — the stats
+    /// overlay's audio line is built from the connection's `Welcome`, and that is the only place a
     /// format is asserted as fact. The footer's "falls back to Standard" line is what carries that
     /// now that the per-row gate riders are gone; do not drop it without replacing it.
     private var audioFormatCaption: String {
