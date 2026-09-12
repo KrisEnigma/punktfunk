@@ -226,6 +226,7 @@ impl VirtualDisplay for WlrootsDisplay {
             // HEADLESS-* sits beside them.
             output_name: Some(name),
             seat: None,
+            pid: None,
         })
     }
 }

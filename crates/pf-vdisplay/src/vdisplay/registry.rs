@@ -289,6 +289,9 @@ mod pool {
         /// is exactly the one that launches into a live compositor, so losing it there is what
         /// would deliver a launch to another seat.
         pub(super) seat: Option<String>,
+        /// Our child compositor at create ([`crate::VirtualOutput::pid`]). Reuse requires it
+        /// alive. Its unreaped `Child` in `keepalive` pins the pid, so it cannot be recycled.
+        pub(super) pid: Option<u32>,
         /// Colourimetry at create (HDR vs SDR). Reuse requires an exact match:
         /// a kept SDR gamescope has no `--hdr-enabled`, and the reverse would
         /// negotiate 8-bit off a PQ composite.
@@ -556,6 +559,7 @@ mod pool {
                 topology_restore: restore,
                 isolation: None,
                 seat: None,
+                pid: None,
                 epoch: 0,
                 generation,
                 hw_cursor: false,
@@ -1079,8 +1083,8 @@ mod linux {
         // Gated on `poolable_now()`: gamescope managed/attach shares the
         // `"gamescope"` name with a bare spawn and must not reuse it.
         if vd.poolable_now() {
-            // Probe `kept_display_alive` (may shell `pw-dump`) outside the lock:
-            // snapshot (generation, node_id), probe, re-find by generation.
+            // Probe liveness (may shell `pw-dump`) outside the lock:
+            // snapshot (generation, node_id, pid), probe, re-find by generation.
             // A concurrent reuse/remove just misses and creates fresh.
             let candidate = {
                 let es = r.entries.lock().unwrap();
@@ -1109,10 +1113,13 @@ mod linux {
                                     crate::hyprland::LingerReuse::Recast { .. }
                                 ))
                     })
-                    .map(|e| (e.generation, e.node_id))
+                    .map(|e| (e.generation, e.node_id, e.pid))
             };
-            if let Some((cand_gen, node_id)) = candidate {
-                let alive = vd.kept_display_alive(node_id); // OUTSIDE the lock (may block)
+            if let Some((cand_gen, node_id, pid)) = candidate {
+                // OUTSIDE the lock (may block). A dead compositor is dead whatever PipeWire
+                // still lists under its node id.
+                let alive =
+                    pid.is_none_or(crate::proc::pid_alive) && vd.kept_display_alive(node_id);
                 let reuse = {
                     let mut es = r.entries.lock().unwrap();
                     match es.iter().position(|e| {
@@ -1259,6 +1266,7 @@ mod linux {
             topology_restore,
             isolation: isolation.clone(),
             seat: real.seat.clone(),
+            pid: real.pid,
             epoch: cur_epoch,
             generation,
             hw_cursor: vd.hw_cursor(),
