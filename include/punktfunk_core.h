@@ -25,7 +25,7 @@
 // Not [`WIRE_VERSION`]. The C surface can grow without a wire byte changing.
 // Pin the integer in `abi.rs` (`abi_version_is_pinned`). Per-bump notes live
 // in `CHANGELOG.md`.
-#define PUNKTFUNK_ABI_VERSION 29
+#define PUNKTFUNK_ABI_VERSION 30
 
 // punktfunk/1 wire version. `Hello`/`Welcome` carry it; hosts equality-check it.
 //
@@ -1713,6 +1713,28 @@ typedef struct {
 } PunktfunkClipEvent;
 #endif
 
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Facts only the embedder knows, for [`punktfunk_connection_hud_text`]. Zero-init, set
+// `struct_size = sizeof(PunktfunkHudFacts)`, then the fields you mean. Append only; bump ABI.
+typedef struct {
+    // `sizeof(PunktfunkHudFacts)` as this caller was compiled.
+    uint32_t struct_size;
+    // The displayed stamps are true on-glass instants.
+    bool on_glass;
+    // Take the measured OS present floor off end-to-end and display (iOS, tvOS).
+    bool shave_os_floor;
+    // Decoded audio queued ahead of the speaker, ms, for an embedder that plays audio itself.
+    // `0` keeps the core's reading.
+    uint32_t audio_buffer_ms;
+    // Where that buffer puts audio against the picture, ms; positive = audio behind.
+    int32_t av_offset_ms;
+    // NUL-terminated settings-profile name, or null.
+    const char *profile;
+    // Embedder-only Advanced Detailed lines, `<role>\t<text>\n` each, or null.
+    const char *extras;
+} PunktfunkHudFacts;
+#endif
+
 // Speed-test measurement from [`punktfunk_connection_probe_result`]. `done` is 0
 // until the host's end-of-burst report, then 1. `throughput_kbps` is delivered
 // wire throughput; `loss_pct` is link loss; `host_drop_pct` is send-buffer drop
@@ -2944,6 +2966,66 @@ PunktfunkStatus punktfunk_connection_note_frame_index_ex(const PunktfunkConnecti
 // # Safety
 // `c` is a valid connection handle; `out` is writable (NULL is skipped).
 PunktfunkStatus punktfunk_connection_frames_dropped(const PunktfunkConnection *c, uint64_t *out);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Stats overlay: one frame left the decoder. `pts_ns` is its capture stamp; `received_ns` (the
+// AU's reassembly stamp) and `decoded_ns` are client `CLOCK_REALTIME`. A zero `received_ns`
+// counts the frame without a decode sample.
+//
+// # Safety
+// `c` is a valid connection handle.
+PunktfunkStatus punktfunk_connection_hud_decoded(const PunktfunkConnection *c,
+                                                 uint64_t pts_ns,
+                                                 uint64_t received_ns,
+                                                 uint64_t decoded_ns);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Stats overlay: one frame reached the screen at `displayed_ns`, client `CLOCK_REALTIME`.
+//
+// # Safety
+// `c` is a valid connection handle.
+PunktfunkStatus punktfunk_connection_hud_displayed(const PunktfunkConnection *c,
+                                                   uint64_t pts_ns,
+                                                   uint64_t decoded_ns,
+                                                   uint64_t displayed_ns);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Stats overlay: one sample of the OS present pipeline's depth, ns: how far ahead of glass the
+// compositor takes a frame. Shaved off the shown figures when the facts ask for it.
+//
+// # Safety
+// `c` is a valid connection handle.
+PunktfunkStatus punktfunk_connection_hud_os_floor(const PunktfunkConnection *c, uint64_t floor_ns);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Close the stats overlay's window, about once a second. [`punktfunk_connection_hud_text`]
+// formats what this kept as often as the tier changes.
+//
+// # Safety
+// `c` is a valid connection handle.
+PunktfunkStatus punktfunk_connection_hud_drain(const PunktfunkConnection *c);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// The last drained window as overlay lines, `<role>\t<text>\n` each (role 0 primary, 1 detail,
+// 2 muted, 3 warning), NUL-terminated into `out`. `tier` is 0 off to 3 detailed; `advanced`
+// picks the Advanced vocabulary; `facts` may be null. When `cap` is too small nothing is
+// written and the status is `InvalidArg`; `*needed` (when non-null) always holds the size.
+//
+// # Safety
+// `c` is a valid connection handle; `out` is writable for `cap` bytes; `facts` is null or
+// valid per [`PunktfunkHudFacts`]; `needed` is null or writable.
+PunktfunkStatus punktfunk_connection_hud_text(const PunktfunkConnection *c,
+                                              uint32_t tier,
+                                              bool advanced,
+                                              const PunktfunkHudFacts *facts,
+                                              char *out,
+                                              uintptr_t cap,
+                                              uintptr_t *needed);
 #endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)
