@@ -386,7 +386,13 @@ enum DecKind {
 impl AudioDec {
     /// Build for the plane the host resolved — `codec`/`rate_hz`/`bits` off Welcome,
     /// never off what this client asked for.
-    fn new(codec: u8, channels: u8, rate_hz: u32, bits: u8) -> Result<AudioDec, opus::Error> {
+    fn new(
+        codec: u8,
+        channels: u8,
+        rate_hz: u32,
+        bits: u8,
+        layout: punktfunk_core::audio::AudioLayout,
+    ) -> Result<AudioDec, opus::Error> {
         let ch = channels.max(1) as usize;
         // A lossless session never reaches libopus. libopus accepts only
         // 8/12/16/24/48 kHz, which is why the hi-res ladder is a second plane.
@@ -414,7 +420,7 @@ impl AudioDec {
         let kind = if channels == 2 {
             DecKind::Stereo(opus::Decoder::new(rate_hz, opus::Channels::Stereo)?)
         } else {
-            let l = punktfunk_core::audio::layout_for(channels, false);
+            let l = punktfunk_core::audio::layout_for(channels, layout);
             DecKind::Surround(opus::MSDecoder::new(
                 rate_hz, l.streams, l.coupled, l.mapping,
             )?)
@@ -845,6 +851,8 @@ fn pump(
         params.audio_channels,
         audio_rate_hz,
         audio_bits,
+        // Legacy coupling: this client decodes either, and only NDL-class sinks need the other.
+        punktfunk_core::audio::AudioLayout::Legacy,
         advertised_codecs,
         preferred,
         // Env hatch wins so an A/B run can pin an exact peak (`PUNKTFUNK_CLIENT_PEAK_NITS`).
@@ -1749,6 +1757,14 @@ fn spawn_audio(
         return None;
     }
     let lossless = connector.audio_codec == punktfunk_core::quic::AUDIO_CODEC_PCM;
+    // Same refusal for the coupling: a wrong pairing plays, and plays the wrong speakers.
+    let Some(layout) = punktfunk_core::audio::AudioLayout::from_wire(connector.audio_layout) else {
+        tracing::warn!(
+            layout = connector.audio_layout,
+            "the host resolved an audio layout this client cannot decode — streaming video-only"
+        );
+        return None;
+    };
     // Zero is inexpressible off the wire, but everything below divides by it and
     // libopus refuses it. This is the one value that must not depend on a peer.
     let rate_hz = match connector.audio_sample_rate_hz {
@@ -1784,6 +1800,7 @@ fn spawn_audio(
         channels,
         rate_hz,
         connector.audio_bits,
+        layout,
     )
     .map_err(|e| tracing::warn!(error = %e, "opus decoder failed — audio disabled"))
     .ok()?;

@@ -24,6 +24,7 @@ pub(super) fn audio_budget(
     wants_redundancy: bool,
     video_kbps: u32,
     channels: u8,
+    layout: punktfunk_core::audio::AudioLayout,
 ) -> punktfunk_core::audio::AudioBudget {
     let configured = pf_host_config::config().audio_quality.as_deref();
     let requested = match configured {
@@ -41,7 +42,13 @@ pub(super) fn audio_budget(
             punktfunk_core::audio::AudioTier::default()
         }),
     };
-    punktfunk_core::audio::plan_audio_budget(video_kbps, channels, requested, wants_redundancy)
+    punktfunk_core::audio::plan_audio_budget(
+        video_kbps,
+        channels,
+        layout,
+        requested,
+        wants_redundancy,
+    )
 }
 
 pub(super) fn redundancy_offered(client_caps: u8) -> bool {
@@ -60,6 +67,8 @@ pub(super) struct AudioPlane {
     pub bits: u8,
     /// Frame duration in µs on the PCM plane; `0` on Opus (`0xC9` is a fixed 5 ms).
     pub frame_us: u16,
+    /// Surround coupling the encoder uses: the client's ask when this host knows it, else legacy.
+    pub layout: punktfunk_core::audio::AudioLayout,
 }
 
 impl AudioPlane {
@@ -70,6 +79,7 @@ impl AudioPlane {
             rate_hz: punktfunk_core::audio::SAMPLE_RATE_HZ,
             bits: punktfunk_core::audio::pcm::BITS_16,
             frame_us: 0,
+            layout: punktfunk_core::audio::AudioLayout::Legacy,
         }
     }
 
@@ -84,6 +94,8 @@ impl AudioPlane {
             rate_hz: w.audio_rate_hz,
             bits: w.audio_bits,
             frame_us: w.audio_frame_us,
+            layout: punktfunk_core::audio::AudioLayout::from_wire(w.audio_layout)
+                .unwrap_or_default(),
         }
     }
 }
@@ -217,6 +229,7 @@ pub(super) fn resolve_audio_plane(
         rate_hz: requested_rate_hz,
         bits: requested_bits,
         frame_us: frame_us as u16,
+        layout: punktfunk_core::audio::AudioLayout::Legacy,
     }
 }
 
@@ -479,7 +492,19 @@ pub(super) async fn negotiate(
         "session cipher"
     );
 
-    let audio_plane = negotiate_audio_plane(conn, &hello, audio_channels, bitrate_kbps).await?;
+    let mut audio_plane = negotiate_audio_plane(conn, &hello, audio_channels, bitrate_kbps).await?;
+    // The coupling the client asked for, when this host knows it. Anything else is answered as
+    // legacy, which is also what an older client's absent byte means.
+    audio_plane.layout = match punktfunk_core::audio::AudioLayout::from_wire(hello.audio_layout) {
+        Some(layout) => layout,
+        None => {
+            tracing::info!(
+                requested = hello.audio_layout,
+                "audio layout unknown to this host — encoding legacy"
+            );
+            punktfunk_core::audio::AudioLayout::Legacy
+        }
+    };
 
     let welcome = Welcome {
         abi_version: punktfunk_core::WIRE_VERSION,
@@ -558,6 +583,7 @@ pub(super) async fn negotiate(
                     redundancy_offered(hello.client_caps),
                     bitrate_kbps,
                     audio_channels,
+                    audio_plane.layout,
                 )
                 .redundancy
             {
@@ -597,6 +623,8 @@ pub(super) async fn negotiate(
         audio_rate_hz: audio_plane.rate_hz,
         audio_bits: audio_plane.bits,
         audio_frame_us: audio_plane.frame_us,
+        // The coupling the encoder runs; a legacy answer keeps the Welcome byte-identical.
+        audio_layout: audio_plane.layout.wire(),
         // Idle-keepalive re-encodes are marked `USER_FLAG_REPEAT` so client ABR treats an
         // unflagged AU as new content.
         host_caps2: punktfunk_core::quic::HOST_CAP2_REPEAT_MARK
