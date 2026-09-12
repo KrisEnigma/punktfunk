@@ -14,8 +14,8 @@ use ash::vk as avk;
 use ash::vk::Handle as _;
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use pf_presenter::overlay::{
-    FrameCtx, Overlay, OverlayAction, OverlayFrame, PointerInput, RingCommand, RingInput,
-    SessionPhase, SharedDevice,
+    FrameCtx, HudLine, Overlay, OverlayAction, OverlayFrame, PointerInput, RingCommand, RingInput,
+    Role, SessionPhase, SharedDevice,
 };
 use skia_safe::gpu::vk as skvk;
 use skia_safe::gpu::{self, DirectContext, SurfaceOrigin};
@@ -40,7 +40,7 @@ struct Slot {
 struct Drawn {
     width: u32,
     height: u32,
-    stats: Option<String>,
+    stats: Option<Vec<HudLine>>,
     hint: Option<String>,
     /// Chip text. Countdown ticks once a minute, so a still chip is free per frame.
     access: Option<String>,
@@ -456,7 +456,7 @@ impl Overlay for SkiaOverlay {
         let want = Drawn {
             width: ctx.width,
             height: ctx.height,
-            stats: ctx.stats.map(str::to_owned),
+            stats: ctx.stats.map(<[HudLine]>::to_vec),
             hint: ctx.hint.map(str::to_owned),
             access: ctx.access.map(str::to_owned),
             notice: ctx.notice.map(str::to_owned),
@@ -717,15 +717,14 @@ fn fit_scale(scale: f32, width_at_scale: f32, budget: f32) -> f32 {
     }
 }
 
-/// Stats OSD: translucent rounded panel, top-left, one line per `\n`, at UI `scale`.
-fn draw_osd_panel(canvas: &Canvas, base_font: &Font, text: &str, width: u32, scale: f32) {
-    let lines: Vec<&str> = text.lines().collect();
+/// Stats OSD: translucent rounded panel, top-left, one line each, painted by role.
+fn draw_osd_panel(canvas: &Canvas, base_font: &Font, lines: &[HudLine], width: u32, scale: f32) {
     // Width is linear in scale; measure once, then fit so Detailed-tier lines stay in-window.
     let width_at = |s: f32| {
         let font = chrome_font(base_font, s);
         let widest = lines
             .iter()
-            .map(|l| font.measure_str(l, None).0)
+            .map(|l| font.measure_str(&l.text, None).0)
             .fold(0.0f32, f32::max);
         widest + 2.0 * (base::OSD_PAD_X + base::OSD_MARGIN) * s
     };
@@ -736,7 +735,7 @@ fn draw_osd_panel(canvas: &Canvas, base_font: &Font, text: &str, width: u32, sca
     let line_h = metrics.descent - metrics.ascent + metrics.leading;
     let widest = lines
         .iter()
-        .map(|l| font.measure_str(l, None).0)
+        .map(|l| font.measure_str(&l.text, None).0)
         .fold(0.0f32, f32::max);
     let (pad_x, pad_y) = (base::OSD_PAD_X * scale, base::OSD_PAD_Y * scale);
     let (x, y) = (base::OSD_MARGIN * scale, base::OSD_MARGIN * scale);
@@ -751,14 +750,23 @@ fn draw_osd_panel(canvas: &Canvas, base_font: &Font, text: &str, width: u32, sca
         RRect::new_rect_xy(panel, radius, radius),
         &fill(Color4f::new(0.0, 0.0, 0.0, 0.62)),
     );
-    let text_paint = fill(Color4f::new(1.0, 1.0, 1.0, 0.92));
     for (i, line) in lines.iter().enumerate() {
         canvas.draw_str(
-            line,
+            &line.text,
             Point::new(x + pad_x, y + pad_y - metrics.ascent + line_h * i as f32),
             &font,
-            &text_paint,
+            &fill(role_color(line.role)),
         );
+    }
+}
+
+/// Headline bright, breakdowns softer, asides dimmer, warnings in status red.
+fn role_color(role: Role) -> Color4f {
+    match role {
+        Role::Primary => Color4f::new(1.0, 1.0, 1.0, 0.92),
+        Role::Detail => Color4f::new(1.0, 1.0, 1.0, 0.78),
+        Role::Muted => Color4f::new(1.0, 1.0, 1.0, 0.6),
+        Role::Warn => crate::theme::ERROR,
     }
 }
 

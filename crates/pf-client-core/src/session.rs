@@ -95,6 +95,9 @@ pub struct SessionParams {
     /// reads it. It rides so a browse-mode presenter (one window, many sessions) can
     /// adopt a per-launch choice; the in-stream cycle chord still wins for that stream.
     pub stats_verbosity: crate::trust::StatsVerbosity,
+    /// Overlay vocabulary this launch resolved: Standard (`false`) or Advanced. Rides per
+    /// launch like the tier, so a browse-mode presenter adopts a change made between streams.
+    pub advanced_stats: bool,
     /// Advertise `CLIENT_CAP_PHASE_LOCK`: the presenter has real on-glass latch stamps
     /// (`VK_KHR_present_wait`) and will feed [`latch_grid`](Self::latch_grid). Never
     /// set without present timing — the host arms on report receipt.
@@ -115,118 +118,14 @@ pub struct LatchGrid {
     pub period_ns: std::sync::atomic::AtomicU64,
 }
 
-/// Pump share of the unified stats window (`design/stats-unification.md`): stream
-/// facts plus the two stages measured before the presenter. `ui_stream` contributes
-/// `display` and the end-to-end percentiles.
-#[derive(Clone, Copy, Default)]
-pub struct Stats {
-    /// AUs received per second, actual-elapsed-time denominator.
-    pub fps: f32,
-    /// Received payload bytes × 8 / elapsed (goodput, excludes FEC overhead).
-    pub mbps: f32,
-    /// p50 capture → received, host-clock corrected (ms).
-    pub host_net_ms: f32,
-    /// p50 host capture→fully-sent, from per-AU 0xCF timings. Valid only when `split`.
-    pub host_ms: f32,
-    /// p50 `hostnet − host` per frame, saturating. Valid only when `split`.
-    pub net_ms: f32,
-    /// Window matched 0xCF timings. An old host never emits them, so this stays false
-    /// and the combined stage renders unchanged.
-    pub split: bool,
-    /// p50 host-stage split, valid only when `staged`: queue age, encode, seal/FEC +
-    /// send wait (`host − queue − encode − pace`), and paced-send spread. They tile
-    /// `host_ms`.
-    pub host_queue_ms: f32,
-    pub host_encode_ms: f32,
-    pub host_xfer_ms: f32,
-    pub host_pace_ms: f32,
-    /// Window had staged 0xCF timings. An older host sends the 13-byte form and the OSD
-    /// keeps the plain `host` figure.
-    pub staged: bool,
-    /// p50 received → decode complete, client-local (ms). Hardware waits the frame's
-    /// timeline fence (submit returning in ~0.1 ms is not decoded); software is the
-    /// synchronous CPU decode.
-    pub decode_ms: f32,
-    /// `decode_ms` overlaps the presenter's `display` stage instead of tiling with it
-    /// — true on the async native-Vulkan rung. There `receive_frame` returns at
-    /// submission, so GPU decode happens inside `display`; the fence-complete figure
-    /// re-counts that work. The OSD renders it off the partition line.
-    pub decode_overlaps_display: bool,
-    /// Unrecoverable drops this window, and their share of received+lost (%). The OSD
-    /// shows the counter only when nonzero.
-    pub lost: u32,
-    pub lost_pct: f32,
-    /// Mic uplink frames handed to QUIC this window, and shed client-side (see
-    /// [`NativeClient::mic_stats`]). Both stay 0 while off or muted (mute stops sending,
-    /// not capture), so the OSD line is only while voice is going out.
-    pub mic_sent: u32,
-    pub mic_dropped: u32,
-    /// Decoded audio queued ahead of the speaker right now (ms) — playback-ring depth.
-    pub audio_buffer_ms: u32,
-    /// Smoothed A/V offset (ms): positive = audio behind the picture, negative = ahead.
-    /// `0` before the loop has evidence, or with sync disabled. Depth alone cannot tell
-    /// "deep because the link needs it" from "deep and therefore late".
-    pub audio_av_offset_ms: i32,
-    /// Host resolved the lossless `0xD3` PCM plane (`AUDIO_CODEC_PCM`). Resolved, not
-    /// requested: Settings shows what this device asked for, and the host can decline.
-    pub audio_lossless: bool,
-    /// Resolved sample rate (Hz) and depth (bits), off the Welcome. `0` = the host said
-    /// nothing (an old host always does) — treat as "no reading", not a rate. `spawn_audio`
-    /// folds `0` to 48 kHz for its own arithmetic; the OSD has nothing honest to print.
-    pub audio_rate_hz: u32,
-    pub audio_bits: u8,
-    /// Path frames actually took (`"vaapi"`/`"software"`, empty until the first frame).
-    /// Tracks a mid-session fallback.
+/// Decode-side facts the overlay window cannot read off the connector, about once a
+/// second. Levels, not a window: the presenter diffs `health` over its own window.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DecodeFacts {
+    /// Path frames actually took (the `stats:` tag spelling). Empty until the first frame.
     pub decoder: &'static str,
-    /// Encoder's current target (kbps): Welcome resolve, then live `BitrateChanged`.
-    /// What `mbps` is judged against. `0` = an old host that never reported one.
-    pub target_kbps: u32,
-    /// ABR is armed (it moves `target_kbps`). The OSD tags the target `(auto)` so a
-    /// moving figure reads as policy, not a broken setting.
-    pub auto_rate: bool,
-    pub chroma_444: bool,
-    /// This session advertised `VIDEO_CAP_444`. With `chroma_444` false, the host
-    /// declined — the OSD can say so.
-    pub asked_444: bool,
-    /// The decode lane can answer integrity questions at all. True on native hardware
-    /// rungs, false on CPU and PyroWave. Counters below are meaningless without it:
-    /// zeros on a blind lane are unmeasured, not clean.
-    pub decode_integrity: bool,
-    /// AUs whose plan needed concealment this window (lost reference, `frame_num` gap,
-    /// short NALU walk). Each cost a frame and a re-anchor request.
-    pub decode_damaged: u32,
-    /// Frames the driver reported corrupt this window via `RESULT_STATUS`. Always 0
-    /// where `decode_status_queries` is false: no verdict, not nothing to report.
-    pub decode_failed: u32,
-    /// AUs the decoder refused this window (plan error, Vulkan/session failure).
-    /// Concealment means it coped; refusal means it could not run and the screen is
-    /// frozen.
-    pub decode_refused: u32,
-    /// Consecutive AUs with no showable picture at this window's end (`0` = decoding
-    /// clean now). Separates a lossy link from a stream that never came back.
-    pub concealed_run: u32,
-    /// Longest such run of the session. Session-cumulative on purpose: `concealed_run`
-    /// is sampled once a second and misses the bad moment. A window with run 0 and
-    /// worst 40 froze and recovered — no other field says that.
-    pub worst_concealed_run: u32,
-    /// Device answers per-op decode-status queries. False on RADV: recording one hangs
-    /// the VCN ring, so the integrity report covers the parser's half only.
-    pub decode_status_queries: bool,
-}
-
-/// Frames waiting for their 0xCF host timing. 256 ≈ 2 s at 120 Hz — a timing arrives
-/// within a frame or two of its AU; against an old host this caps the ring.
-const PENDING_SPLIT_CAP: usize = 256;
-
-/// In-place `(p50, p95)`: `sorted[len/2]`, `sorted[min(len*95/100, len-1)]`; empty → 0.
-pub fn window_percentiles(samples: &mut [u64]) -> (u64, u64) {
-    if samples.is_empty() {
-        return (0, 0);
-    }
-    samples.sort_unstable();
-    let p50 = samples[samples.len() / 2];
-    let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
-    (p50, p95)
+    /// Session-cumulative integrity counters. `None` on a lane that cannot see damage.
+    pub health: Option<crate::video::DecodeHealth>,
 }
 
 pub enum SessionEvent {
@@ -255,7 +154,8 @@ pub enum SessionEvent {
         retry_caps: u8,
         msg: String,
     },
-    Stats(Stats),
+    /// About once a second while the pump runs.
+    DecodeFacts(DecodeFacts),
     /// Session access, once after [`Self::Connected`] from Welcome, then on every
     /// mid-session `AccessUpdate`. Latest wins. `notice` is the toast line for a change
     /// worth interrupting for; `None` on the initial snapshot. The host enforces the
@@ -960,11 +860,6 @@ fn pump(
         let _ = ev_tx.send_blocking(SessionEvent::Notice(msg));
     }
     let force_software = params.force_software.clone();
-    // Session-constant stats facts. `target_kbps` itself is read live per window —
-    // an Automatic session's ABR moves it.
-    let auto_rate = connector.wants_decode_latency();
-    let chroma_444 = connector.chroma_format == punktfunk_core::quic::CHROMA_IDC_444;
-    let asked_444 = params.video_caps & punktfunk_core::quic::VIDEO_CAP_444 != 0;
     let PlaneThreads {
         audio_thread,
         pad_audio_thread,
@@ -1011,34 +906,13 @@ fn pump(
     let mut window_start = Instant::now();
     // The pin-unsustainable notice goes out once per session.
     let mut pin_noticed = false;
-    let mut frames_n = 0u32;
-    let mut bytes_n = 0u64;
-    // Stage windows (µs): `host+network` = capture→received, `decode` =
-    // received→decoded. p50 per 1 s window.
-    let mut hostnet_us: Vec<u64> = Vec::with_capacity(256);
-    let mut decode_us: Vec<u64> = Vec::with_capacity(256);
-    // Whether this window's decode samples came from the async (submission-stamped)
-    // rung. Latched per window with the samples, so a demote mid-window changes both.
-    let mut decode_overlaps = false;
+    // One fence-waited decode sample per window on the async rung: a per-frame wait
+    // would serialize decode to 1/latency.
+    let mut fence_sampled = false;
     // Report decode stage to ABR only when armed. Constant for the session.
     let wants_decode = connector.wants_decode_latency();
-    // Frames awaiting per-AU 0xCF host timing, by pts_ns. An old host never sends
-    // any, so entries age out.
-    let mut pending_split: std::collections::VecDeque<(u64, u64)> =
-        std::collections::VecDeque::with_capacity(PENDING_SPLIT_CAP);
-    let mut host_us_win: Vec<u64> = Vec::with_capacity(256);
-    let mut net_us_win: Vec<u64> = Vec::with_capacity(256);
-    // Host-stage windows (extended 0xCF only; empty against an older host).
-    let mut queue_us_win: Vec<u64> = Vec::with_capacity(256);
-    let mut enc_us_win: Vec<u64> = Vec::with_capacity(256);
-    let mut xfer_us_win: Vec<u64> = Vec::with_capacity(256);
-    let mut pace_us_win: Vec<u64> = Vec::with_capacity(256);
     // What actually decoded the last frame — VAAPI can demote mid-session.
     let mut dec_path: &'static str = "";
-    // Stats window keeps its own drop cursor — the OSD shows the per-window delta.
-    let mut window_dropped = connector.frames_dropped();
-    // Mic uplink cursor. A healthy 10 ms-frame mic reads ~100 sent/s.
-    let mut window_mic = connector.mic_stats();
     let mut last_kf_req: Option<Instant> = None;
     // Lost range the ask throttle swallowed, `(first, last)`, widened by later gaps
     // and sent by `flush_pending_rfi` once the throttle opens. Without it a second
@@ -1065,9 +939,6 @@ fn pump(
     // re-asks without re-arming — discarding an in-flight heal would be wrong).
     let mut gate_arms = gate.arms();
     let mut arm_decode_order: u64 = 0;
-    // Decode-integrity cursor: decoder counters are session-cumulative, OSD shows
-    // the delta. `None` on a lane that cannot answer.
-    let mut window_health = decoder.decode_health();
     // Set when the ladder ran out of rungs. `Some` is the only way the pump ends
     // with a retry attached.
     let mut codec_fallback: Option<SessionEvent> = None;
@@ -1134,8 +1005,6 @@ fn pump(
                 if params.phase_lock && phase_arrivals.len() < 256 {
                     phase_arrivals.push(received_ns);
                 }
-                frames_n += 1;
-                bytes_n += frame.data.len() as u64;
                 // Host numbers frames consecutively, so a jump means a frame is missing
                 // and this AU references a picture we never decoded. Arm the freeze at
                 // the first such frame — ~120 ms before `frames_dropped` — so concealment
@@ -1303,19 +1172,7 @@ fn pump(
                         }
                         // Travels with the frame so the presenter can measure `display`.
                         let decoded_ns = now_ns();
-                        // Received in the host's capture clock, minus capture pts
-                        // (clamped (0, 10 s)).
-                        let clock_offset =
-                            clock_offset_live.load(std::sync::atomic::Ordering::Relaxed);
-                        let hn = (received_ns as i128 + clock_offset as i128 - frame.pts_ns as i128)
-                            .max(0) as u64;
-                        if hn > 0 && hn < 10_000_000_000 {
-                            hostnet_us.push(hn / 1000);
-                            if pending_split.len() >= PENDING_SPLIT_CAP {
-                                pending_split.pop_front();
-                            }
-                            pending_split.push_back((frame.pts_ns, hn / 1000));
-                        }
+                        connector.hud().note_decoded(frame.pts_ns, decoded_ns);
                         // Ship first, then the decode stat. Vulkan returns at submission;
                         // a per-frame fence wait serializes to 1/decode_latency. One
                         // honest sample per window. Polling would quantize by a whole
@@ -1328,30 +1185,33 @@ fn pump(
                             _ => None,
                         };
                         if present {
-                            let _ = frame_tx.force_send(DecodedFrame {
+                            // A displaced frame decoded and was never shown: newest wins.
+                            if let Ok(Some(_)) = frame_tx.force_send(DecodedFrame {
                                 pts_ns: frame.pts_ns,
                                 decoded_ns,
                                 image,
-                            });
+                            }) {
+                                connector.hud().note_skipped(1, 0);
+                            }
                         } else {
                             // Withhold this frame so the presenter redraws the last good
                             // picture. `hw_fence` still samples (handle stays valid).
                             tracing::trace!("holding last frame — awaiting post-loss re-anchor");
                         }
                         match hw_fence {
+                            // `decoded_ns` is a submission stamp here, so GPU decode sits
+                            // inside `display` and this sample re-counts it.
                             Some((sem, value)) => {
-                                // A fence means `decoded_ns` was stamped at submission, so
-                                // GPU decode lands inside `display` and this figure
-                                // re-counts it. Recorded for `decode_overlaps_display`.
-                                decode_overlaps = true;
-                                if decode_us.is_empty()
-                                    && decoder.wait_hw_decoded(sem, value, 50_000_000)
+                                if !fence_sampled && decoder.wait_hw_decoded(sem, value, 50_000_000)
                                 {
-                                    decode_us.push(now_ns().saturating_sub(received_ns) / 1000);
+                                    fence_sampled = true;
+                                    let us = now_ns().saturating_sub(received_ns) / 1000;
+                                    connector.hud().note_decode_us(us, true);
                                 }
                             }
                             None => {
-                                decode_us.push(decoded_ns.saturating_sub(received_ns) / 1000);
+                                let us = decoded_ns.saturating_sub(received_ns) / 1000;
+                                connector.hud().note_decode_us(us, false);
                             }
                         }
                         // ABR: decoder-backlog every frame, using the CPU-side stamp.
@@ -1460,8 +1320,7 @@ fn pump(
             }
         }
 
-        // Drain per-AU 0xCF timings and match by pts. An old host never emits any —
-        // the deque fills to its cap and the OSD keeps combined `host+network`.
+        // Drain per-AU 0xCF timings; the connector matches each to its frame for the overlay.
         while let Ok(t) = connector.next_host_timing(Duration::ZERO) {
             // Host's applied grid offset rides the 0xCF tail. Log transitions so an
             // on-glass run can watch the controller engage.
@@ -1474,23 +1333,6 @@ fn pump(
                     applied_phase_ns = t.applied_phase_ns.unwrap_or(0),
                     "host phase-lock: applied capture-grid offset"
                 );
-            }
-            if let Some(i) = pending_split.iter().position(|(p, _)| *p == t.pts_ns) {
-                let (_, hn_us) = pending_split.remove(i).unwrap();
-                host_us_win.push(t.host_us as u64);
-                net_us_win.push(hn_us.saturating_sub(t.host_us as u64));
-                // Extended 0xCF: per-stage host split; residual derived so the four
-                // stages tile host_us exactly.
-                if let Some(s) = t.stages {
-                    queue_us_win.push(s.queue_us as u64);
-                    enc_us_win.push(s.encode_us as u64);
-                    pace_us_win.push(s.pace_us as u64);
-                    xfer_us_win.push(
-                        (t.host_us as u64).saturating_sub(
-                            s.queue_us as u64 + s.encode_us as u64 + s.pace_us as u64,
-                        ),
-                    );
-                }
             }
         }
 
@@ -1556,118 +1398,12 @@ fn pump(
                 }
                 phase_arrivals.clear();
             }
-            let secs = window_start.elapsed().as_secs_f32();
-            let (hn_p50, _) = window_percentiles(&mut hostnet_us);
-            let (dec_p50, _) = window_percentiles(&mut decode_us);
-            let split = !host_us_win.is_empty();
-            let (host_p50, _) = window_percentiles(&mut host_us_win);
-            let (net_p50, _) = window_percentiles(&mut net_us_win);
-            let staged = !queue_us_win.is_empty();
-            let (queue_p50, _) = window_percentiles(&mut queue_us_win);
-            let (enc_p50, _) = window_percentiles(&mut enc_us_win);
-            let (xfer_p50, _) = window_percentiles(&mut xfer_us_win);
-            let (pace_p50, _) = window_percentiles(&mut pace_us_win);
-            let lost = dropped.saturating_sub(window_dropped) as u32;
-            window_dropped = dropped;
-            let mic_now = connector.mic_stats();
-            let mic_sent = mic_now.sent.saturating_sub(window_mic.sent) as u32;
-            let mic_dropped = (mic_now.dropped_full + mic_now.dropped_stale)
-                .saturating_sub(window_mic.dropped_full + window_mic.dropped_stale)
-                as u32;
-            window_mic = mic_now;
-            // Session-cumulative integrity counters, diffed per window. `None` on a
-            // lane that cannot see damage stays distinguishable from "saw none".
-            let health_now = decoder.decode_health();
-            let (decode_damaged, decode_failed, decode_refused) = match (health_now, window_health)
-            {
-                (Some(now), Some(prev)) => (
-                    now.damaged.saturating_sub(prev.damaged) as u32,
-                    now.failed.saturating_sub(prev.failed) as u32,
-                    now.refused.saturating_sub(prev.refused) as u32,
-                ),
-                // Lane that could not answer at the last window and can now.
-                // Unreachable today (ladder only demotes away from native); keep the
-                // match total with the cumulative figure rather than an `unwrap`.
-                (Some(now), None) => (now.damaged as u32, now.failed as u32, now.refused as u32),
-                (None, _) => (0, 0, 0),
-            };
-            window_health = health_now;
-            tracing::debug!(
-                fps = frames_n,
-                hostnet_p50_us = hn_p50,
-                host_p50_us = host_p50,
-                net_p50_us = net_p50,
-                queue_p50_us = queue_p50,
-                encode_p50_us = enc_p50,
-                xfer_p50_us = xfer_p50,
-                pace_p50_us = pace_p50,
-                decode_p50_us = dec_p50,
-                lost,
-                mic_sent,
-                mic_dropped,
-                decode_damaged,
-                decode_failed,
-                decode_refused,
-                concealed_run = health_now.map(|h| h.run).unwrap_or(0),
-                worst_concealed_run = health_now.map(|h| h.worst_run).unwrap_or(0),
-                decode_status_queries = health_now.map(|h| h.status_queries).unwrap_or(false),
-                total_frames,
-                "stream window"
-            );
-            let _ = ev_tx.try_send(SessionEvent::Stats(Stats {
-                fps: frames_n as f32 / secs,
-                mbps: bytes_n as f32 * 8.0 / 1e6 / secs,
-                host_net_ms: hn_p50 as f32 / 1000.0,
-                host_ms: host_p50 as f32 / 1000.0,
-                net_ms: net_p50 as f32 / 1000.0,
-                split,
-                host_queue_ms: queue_p50 as f32 / 1000.0,
-                host_encode_ms: enc_p50 as f32 / 1000.0,
-                host_xfer_ms: xfer_p50 as f32 / 1000.0,
-                host_pace_ms: pace_p50 as f32 / 1000.0,
-                staged,
-                decode_ms: dec_p50 as f32 / 1000.0,
-                decode_overlaps_display: decode_overlaps,
-                lost,
-                lost_pct: if lost > 0 {
-                    lost as f32 * 100.0 / (frames_n + lost) as f32
-                } else {
-                    0.0
-                },
-                mic_sent,
-                mic_dropped,
-                audio_buffer_ms: connector.audio_buffer_ms(),
-                audio_av_offset_ms: connector.audio_av_offset_ms() as i32,
-                // Welcome's answer, not `params` — the request lives one struct away
-                // so they cannot be confused.
-                audio_lossless: connector.audio_codec == punktfunk_core::quic::AUDIO_CODEC_PCM,
-                audio_rate_hz: connector.audio_sample_rate_hz,
-                audio_bits: connector.audio_bits,
+            let _ = ev_tx.try_send(SessionEvent::DecodeFacts(DecodeFacts {
                 decoder: dec_path,
-                target_kbps: connector.current_bitrate_kbps(),
-                auto_rate,
-                chroma_444,
-                asked_444,
-                decode_integrity: health_now.is_some(),
-                decode_damaged,
-                decode_failed,
-                decode_refused,
-                concealed_run: health_now.map(|h| h.run).unwrap_or(0),
-                worst_concealed_run: health_now.map(|h| h.worst_run).unwrap_or(0),
-                decode_status_queries: health_now.is_some_and(|h| h.status_queries),
+                health: decoder.decode_health(),
             }));
             window_start = Instant::now();
-            frames_n = 0;
-            bytes_n = 0;
-            hostnet_us.clear();
-            decode_us.clear();
-            decode_overlaps = false;
-            host_us_win.clear();
-            net_us_win.clear();
-            queue_us_win.clear();
-            enc_us_win.clear();
-            xfer_us_win.clear();
-            pace_us_win.clear();
+            fence_sampled = false;
         }
     };
 

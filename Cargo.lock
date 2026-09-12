@@ -3354,6 +3354,7 @@ dependencies = [
  "pf-vkdecode",
  "punktfunk-core",
  "sdl3",
+ "serde_json",
  "tracing",
  "windows-sys 0.61.2",
 ]

@@ -480,6 +480,7 @@ mod session_main {
             // the overlay before the app is restarted. Single mode passes the same value its
             // presenter options already hold, so it changes nothing there.
             stats_verbosity: stats_tier(settings),
+            advanced_stats: settings.advanced_stats,
             // Phase-locked capture (design/phase-locked-capture.md, Apple/Android parity):
             // advertised only when the presenter has real on-glass latch stamps
             // (VK_KHR_present_wait) — without them there is no latch grid to report. The

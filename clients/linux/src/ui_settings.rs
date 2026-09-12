@@ -1507,6 +1507,26 @@ pub fn show_scoped(
         "Compact = fps · latency · bitrate in one line — Ctrl+Alt+Shift+S cycles the tiers live",
         &["Off", "Compact", "Normal", "Detailed"],
     );
+    let adv_stats_row = adw::SwitchRow::builder()
+        .title("Advanced statistics")
+        .subtitle(
+            "Off shows the figures Moonlight's overlay also shows. On shows capture to glass \
+             as p50/p95 and every stage between",
+        )
+        .build();
+    let stats_docs_row = adw::ActionRow::builder()
+        .title("What each number means")
+        .subtitle("docs.punktfunk.unom.io/docs/stats")
+        .activatable(true)
+        .build();
+    stats_docs_row.add_suffix(&gtk::Image::from_icon_name("adw-external-link-symbolic"));
+    stats_docs_row.connect_activated(|_| {
+        gtk::UriLauncher::new("https://docs.punktfunk.unom.io/docs/stats").launch(
+            None::<&gtk::Window>,
+            gtk::gio::Cancellable::NONE,
+            |_| {},
+        );
+    });
 
     // ---- Input ----
     let touch_row = ChoiceRow::new(
@@ -1815,6 +1835,7 @@ pub fn show_scoped(
                 .unwrap_or(1) as u32,
         );
         fullscreen_row.set_active(s.fullscreen_on_stream);
+        adv_stats_row.set_active(s.advanced_stats);
         theme_row.set_active(s.follow_os_theme);
         menu_row.set_active(pf_client_core::omarchy_menu::enabled());
         wake_row.set_active(s.auto_wake);
@@ -2196,6 +2217,11 @@ pub fn show_scoped(
     }
     let stats_group = group("Statistics", "");
     stats_group.add(stats_row.widget());
+    // Device-wide: a profile never carries the vocabulary.
+    if !profile_mode {
+        stats_group.add(&adv_stats_row);
+    }
+    stats_group.add(&stats_docs_row);
     general.add(&session_group);
     general.add(&stats_group);
 
@@ -2417,6 +2443,7 @@ pub fn show_scoped(
             .as_str()
             .to_string();
             s.fullscreen_on_stream = fullscreen_row.is_active();
+            s.advanced_stats = adv_stats_row.is_active();
             s.follow_os_theme = theme_row.is_active();
             // Live: the switch must not wait out the shell's 2 s poll to mean something.
             crate::omarchy::set_enabled(s.follow_os_theme);
