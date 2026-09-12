@@ -496,16 +496,10 @@ private struct ShotConnect: View {
 private struct ShotControllers: View {
     var body: some View {
         #if os(macOS)
-        // The panel is a window-modal sheet in the app — float it at sheet width over the
-        // dimmed host grid, the way the other mac sheet shots read.
-        ZStack {
-            ShotHome().blur(radius: 24).overlay(Color.black.opacity(0.45))
-            ControllerTestView(shotPads: Self.pads)
-                .frame(width: 500, height: 840)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(radius: 40, y: 16)
-        }
+        // The app presents the panel as a sheet on Settings → Controllers, at its minimum size.
+        ShotMacSettingsWindow(
+            tab: "Controllers",
+            sheet: AnyView(ControllerTestView(shotPads: Self.pads).frame(width: 420, height: 540)))
         #else
         // Landscape canvas: one column per pad, so neither story is cut by the short height —
         // the DualSense feedback surface left, the Xbox live-input readout right.
@@ -567,15 +561,7 @@ private struct ShotEditHost: View {
 private struct ShotSettings: View {
     var body: some View {
         #if os(macOS)
-        // The mac Settings window is a fixed-size tabbed panel — float it over a dimmed host
-        // grid so the shot reads as the preferences window over the running app.
-        ZStack {
-            ShotHome().blur(radius: 24).overlay(Color.black.opacity(0.45))
-            SettingsView()
-                .fixedSize()
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(radius: 40, y: 16)
-        }
+        ShotMacSettingsWindow()
         #elseif os(iOS)
         // SettingsView owns its NavigationSplitView (sidebar + detail) and Done button, so it is
         // rendered directly — a wrapping NavigationStack would nest a split view in a stack. Open
@@ -588,9 +574,59 @@ private struct ShotSettings: View {
     }
 }
 
+#if os(macOS)
+/// The host grid with the app's real Settings window in front, as ⌘, opens it: the toolbar tabs
+/// only exist in the Settings scene. `tab` picks a toolbar tab by its label; `sheet` rides on the
+/// Settings window the way Test Controller does.
+private struct ShotMacSettingsWindow: View {
+    var tab: String?
+    var sheet: AnyView?
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        ShotHome().task {
+            // After the capture window has gone full screen, so Settings joins that Space.
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            openSettings()
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            arrange()
+        }
+    }
+
+    private func arrange() {
+        let windows = NSApp.windows
+        guard let main = windows.first(where: { $0.styleMask.contains(.fullScreen) })
+                ?? NSApp.mainWindow,
+              let settings = windows.first(where: {
+                  $0.identifier?.rawValue.contains("Settings") == true
+              })
+        else { return }
+        settings.collectionBehavior.insert(.fullScreenAuxiliary)
+        settings.setFrameOrigin(NSPoint(
+            x: main.frame.midX - settings.frame.width / 2,
+            y: main.frame.midY - settings.frame.height / 2))
+        if let tab, let item = settings.toolbar?.items.first(where: { $0.label == tab }),
+           let action = item.action {
+            NSApp.sendAction(action, to: item.target, from: item)
+        }
+        // Opening Settings from a full-screen Space leaves the app inactive: grey controls.
+        NSApp.activate(ignoringOtherApps: true)
+        settings.makeKeyAndOrderFront(nil)
+        if let sheet {
+            settings.beginSheet(NSWindow(contentViewController: NSHostingController(
+                rootView: sheet.tint(.brand))))
+        }
+    }
+}
+#endif
+
 // MARK: - Pair (PIN ceremony)
 
 private struct ShotPair: View {
+    #if os(macOS)
+    @State private var sheetShown = false
+    #endif
+
     /// The PIN as the host's web console shows it, and a device name that doesn't depend on what
     /// the capture simulator happens to be called.
     private var sheet: some View {
@@ -617,17 +653,14 @@ private struct ShotPair: View {
         // tvOS pushes the ceremony as a full screen (HomeView's `navigationDestination`).
         NavigationStack { sheet }
         #else
-        // macOS: a fixed-width panel (`.frame(width: 400).fixedSize()`) that hugs its content, so
-        // floating it over the dimmed grid matches how the window-modal sheet reads. `screencapture
-        // -l<windowID>` grabs one window, and an AppKit sheet is a child window — a real `.sheet`
-        // would fall outside the capture.
-        ZStack {
-            ShotHome().blur(radius: 28).overlay(Color.black.opacity(0.5))
-            sheet
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-                .shadow(radius: 40, y: 16)
-        }
+        // macOS: the window-modal sheet the app presents, raised once the window is full screen
+        // (a window with a sheet up refuses to go full screen). The display capture takes it in.
+        ShotHome()
+            .sheet(isPresented: $sheetShown) { sheet }
+            .task {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                sheetShown = true
+            }
         #endif
     }
 }

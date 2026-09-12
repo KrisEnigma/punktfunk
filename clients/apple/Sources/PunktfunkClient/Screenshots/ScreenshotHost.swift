@@ -78,9 +78,9 @@ struct ScreenshotHostView: View {
             .environment(\.gamepadMetrics, gamepadMetrics)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // The scene keeps its safe area, so the HUD clears the Dynamic Island; the streamed
-            // frame ignores it itself. Black matches the dark iOS/macOS window. tvOS keeps the
-            // system backdrop, which is what the real app sits on.
-            #if !os(tvOS)
+            // frame ignores it itself. Black matches the dark iOS window. tvOS and macOS keep the
+            // system backdrop and window background the real app sits on.
+            #if os(iOS)
             .background(Color.black.ignoresSafeArea())
             #endif
             #if os(macOS)
@@ -109,8 +109,13 @@ struct ScreenshotHostView: View {
 }
 
 #if os(macOS)
-/// Sizes the hosting window to the mac canvas, strips the title bar to a clean full-bleed
-/// surface, and prints the CGWindowID for `screencapture -l`.
+/// Sizes the hosting window to the mac canvas, strips the title bar, and prints the CGWindowID
+/// for `screencapture -l`.
+///
+/// A display whose mode IS the canvas (1440×900 pt at 2×, a Retina panel or a virtual display)
+/// takes the window full screen: square corners, no titlebar strip, and exactly the App Store
+/// pixels. The window id and the display's rect print once full screen has settled. Anywhere
+/// else the window floats at the canvas size, with the rounded corners a floating window has.
 private struct MacShotWindowConfigurator: NSViewRepresentable {
     let scene: ShotScene
 
@@ -120,10 +125,9 @@ private struct MacShotWindowConfigurator: NSViewRepresentable {
         DispatchQueue.main.async {
             guard let window = view.window, !context.coordinator.configured else { return }
             context.coordinator.configured = true
-            // NavigationStack / Form / material chrome follow the WINDOW's appearance, not the
-            // SwiftUI colorScheme — without this the dark scenes render on a light window (white
-            // background, washed-out materials).
-            window.appearance = NSAppearance(named: scene.colorScheme == .dark ? .darkAqua : .aqua)
+            // NavigationStack / Form / material chrome follow the appearance, not the SwiftUI
+            // colorScheme. App-wide, so the Settings window and sheets a scene opens match.
+            NSApp.appearance = NSAppearance(named: scene.colorScheme == .dark ? .darkAqua : .aqua)
             let size = ShotDevice.mac.points(scene.orientation)
             window.styleMask = [.titled, .fullSizeContentView]
             window.titlebarAppearsTransparent = true
@@ -133,13 +137,45 @@ private struct MacShotWindowConfigurator: NSViewRepresentable {
                 window.standardWindowButton(button)?.isHidden = true
             }
             window.setContentSize(size)
-            window.center()
+            let canvas = NSScreen.screens.first {
+                $0.frame.size == size && $0.backingScaleFactor == ShotDevice.mac.scale
+            }
+            if let canvas { window.setFrameOrigin(canvas.frame.origin) } else { window.center() }
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            print("PF_SHOT_WINDOW=\(window.windowNumber) scene=\(scene.name) "
-                + "size=\(Int(size.width))x\(Int(size.height))pt")
-            fflush(stdout)
+            let name = scene.name
+            guard let canvas else { return Self.announce(window, name, size, rect: nil) }
+            let rect = Self.globalRect(canvas)
+            // After SwiftUI has dressed the window, which can mark it `.fullScreenNone`: a toggle
+            // made earlier, or with that bit still set, is refused.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                window.styleMask.insert(.resizable)
+                window.collectionBehavior.remove(.fullScreenNone)
+                window.collectionBehavior.insert(.fullScreenPrimary)
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main
+                ) { _ in
+                    MainActor.assumeIsolated { Self.announce(window, name, size, rect: rect) }
+                }
+                window.toggleFullScreen(nil)
+            }
         }
+    }
+
+    /// The display in the top-left global space `screencapture -R` takes. Full screen moves the
+    /// toolbar into a window of its own, so the driver captures the display, not one window.
+    private static func globalRect(_ screen: NSScreen) -> String? {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        guard let id = screen.deviceDescription[key] as? CGDirectDisplayID else { return nil }
+        let b = CGDisplayBounds(id)
+        return "\(Int(b.minX)),\(Int(b.minY)),\(Int(b.width)),\(Int(b.height))"
+    }
+
+    private static func announce(_ window: NSWindow, _ name: String, _ size: CGSize, rect: String?) {
+        if let rect { print("PF_SHOT_RECT=\(rect)") }
+        print("PF_SHOT_WINDOW=\(window.windowNumber) scene=\(name) "
+            + "size=\(Int(size.width))x\(Int(size.height))pt")
+        fflush(stdout)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }

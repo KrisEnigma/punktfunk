@@ -9,7 +9,8 @@
 #                       the exact App Store size for that device).
 #
 # The captured pixels are exactly App Store Connect's required sizes:
-#   mac        2880×1800   (a 1× display yields 1440×900 — also accepted)
+#   mac        2880×1800   (full screen on a 1440×900 @2x display — a 1× monitor needs a HiDPI
+#                           virtual display; elsewhere a floating window, 1440×900 at 1×)
 #   iphone-6.9 1320×2868   (portrait)  /  2868×1320 (the landscape hero)
 #   ipad-13    2064×2752   (portrait)
 #   appletv    1920×1080
@@ -21,8 +22,8 @@
 # landscape iPad hero, rotate the Simulator by hand (⌘←) and re-run just that scene.
 #
 # Requirements:
-#   • macOS target: just the Swift toolchain (`swift build`) + a one-time Screen Recording grant
-#     for your terminal (System Settings → Privacy & Security → Screen Recording).
+#   • macOS target: full Xcode + a one-time Screen Recording grant for your terminal
+#     (System Settings → Privacy & Security → Screen Recording).
 #   • iOS/iPadOS/tvOS targets: full Xcode (xcodebuild + Simulators), not just Command Line Tools.
 #
 # Usage:
@@ -67,10 +68,15 @@ shoot_macos() {
   # DEBUG build, deliberately: the whole shot harness lives behind `#if DEBUG`
   # (ScreenshotHost/ScreenshotScenes), so a release binary launches as the NORMAL app, never
   # prints PF_SHOT_WINDOW, and every scene "never reported a window". Debug renders the same
-  # pixels — SwiftUI has no release-only visuals.
-  log "macOS — building (swift build)…"
-  swift build >/dev/null
-  local bin=".build/debug/PunktfunkClient"
+  # pixels — SwiftUI has no release-only visuals. xcodebuild, not `swift build`: SwiftPM copies
+  # asset catalogs uncompiled, which blanks every OS mark and launcher icon.
+  require_xcode
+  log "macOS — building (xcodebuild PunktfunkClient)…"
+  local dd="${PF_SHOT_DERIVED_DATA:-$APPLE_DIR/.build/shots-macos}"
+  xcodebuild -project Punktfunk.xcodeproj -scheme PunktfunkClient -configuration Debug \
+    -destination platform=macOS -derivedDataPath "$dd" CODE_SIGNING_ALLOWED=NO build >/dev/null \
+    || die "macOS: xcodebuild failed"
+  local bin="$dd/Build/Products/Debug/PunktfunkClient"
   [ -x "$bin" ] || die "build produced no $bin"
 
   for scene in "${SCENES[@]}"; do
@@ -88,8 +94,18 @@ shoot_macos() {
       kill -9 "$pid" 2>/dev/null || true
       warn "macOS/$scene: app never reported a window — skipping"; cat "$logf" >&2; continue
     fi
+    # The previous capture's recording dot lingers in the display's corner for a few seconds.
+    sleep "$SETTLE"
+    # Anyone using this Mac can take focus mid-settle, and an inactive app draws grey controls.
+    osascript -e "tell application \"System Events\" to set frontmost of \
+(first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
+    sleep 1
+    # A full-screen canvas display prints its rect. Capture that, not the window: full screen
+    # moves the toolbar into its own window and hangs a hidden titlebar above the display.
+    local rect; rect="$(grep -o 'PF_SHOT_RECT=[0-9,-]*' "$logf" | head -1 | cut -d= -f2 || true)"
+    local how=(-o -l"$win"); [ -n "$rect" ] && how=(-R"$rect")
     local dest="$OUT/mac-$scene.png"
-    if screencapture -x -o -l"$win" "$dest" 2>/dev/null && [ -s "$dest" ]; then
+    if screencapture -x "${how[@]}" "$dest" 2>/dev/null && [ -s "$dest" ]; then
       log "macOS/$scene → $dest ($(pixels "$dest"))"
     else
       warn "macOS/$scene: screencapture failed — grant your terminal Screen Recording permission
