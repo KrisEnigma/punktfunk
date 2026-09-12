@@ -13,7 +13,9 @@ class MouseSideKeyTest {
         fallback: Boolean = false,
         mouse: Boolean = true,
         dpad: Boolean = false,
-    ) = isMouseSideKey(tv, external, pad, fallback, mouse, dpad)
+        injected: Boolean = false,
+        mousePresent: Boolean = false,
+    ) = isMouseSideKey(tv, external, pad, fallback, mouse, dpad, injected, mousePresent)
 
     @Test
     fun offTvEveryExternalBackIsTheHosts() {
@@ -27,6 +29,17 @@ class MouseSideKeyTest {
         assertFalse("nav bar or gesture Back", claim(external = false))
         assertFalse("a pad's Select-as-Back", claim(pad = true))
         assertFalse("the framework's fallback duplicate", claim(fallback = true))
+    }
+
+    /** A side button remapped in Android's mouse settings arrives as an injected Back. */
+    @Test
+    fun anInjectedBackIsTheMousesWhileOneIsAttached() {
+        val virtual = { present: Boolean, tv: Boolean ->
+            claim(tv = tv, external = false, mouse = false, dpad = true, injected = true, mousePresent = present)
+        }
+        assertTrue("mouse attached", virtual(true, false))
+        assertFalse("no mouse: the nav bar's Back", virtual(false, false))
+        assertFalse("a TV keeps its Back", virtual(true, true))
     }
 
     @Test

@@ -869,6 +869,8 @@ class MainActivity : ComponentActivity() {
             mouse = device.supportsSource(InputDevice.SOURCE_MOUSE) ||
                 device.supportsSource(InputDevice.SOURCE_MOUSE_RELATIVE),
             dpad = device.supportsSource(InputDevice.SOURCE_DPAD),
+            injected = event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD,
+            mousePresent = hasPhysicalMouse(),
         )
         return if (claimed) back else null
     }
