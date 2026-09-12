@@ -9389,7 +9389,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Pipeline order, named per path. Linux native: `queue capture submit encode send`.\nWindows driver: `driver copy send`. GameStream: `capture encode packetize send\nsend_spread`, or `driver copy send send_spread` on the Windows driver."
+            "description": "Pipeline order, named per path. Linux native: `queue capture submit encode send`.\nWindows driver: `pool encode ipc copy send`, or `driver copy send` from a driver that\ndoes not stamp its slots. GameStream: `capture encode packetize send send_spread`, with\nthe same two driver sets on Windows."
           },
           "p50_us": {
             "type": "number",
