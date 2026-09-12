@@ -335,6 +335,10 @@ per-platform shortcut. The Apple app also picks the corner (Top/Bottom × Left/R
 home has the tier picker under **Interface**. Shortcuts and every number:
 [Understanding the stats overlay](/docs/stats).
 
+**Advanced statistics** — *default: off.* Off shows the figures Moonlight's overlay also shows, as
+averages. On shows Punktfunk's own view: capture to screen as a median and a slow-frame figure, and
+every stage between. It belongs to the device, so a settings profile never changes it.
+
 ## Settings that are facts about your device
 
 These describe the machine you're sitting at, stay global, and **cannot be put in a settings

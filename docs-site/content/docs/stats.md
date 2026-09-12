@@ -1,253 +1,169 @@
 ---
 title: Understanding the Stats Overlay
-description: What every number in the Punktfunk stats HUD means, and how to compare them fairly with Moonlight/Sunshine.
+description: What every number in the Punktfunk stats overlay means, in the Standard and Advanced views, and how the Standard view lines up with Moonlight's.
 ---
 
-Every Punktfunk client has an in-stream stats overlay. All clients use **the same
-vocabulary and the same four measurement points**, so a stage name on your phone means
-what the same name means on your desktop.
+Every Punktfunk client has an in-stream stats overlay, and every client builds it from the same
+measurements with the same labels. It speaks one of two vocabularies:
 
-Some platforms differ in the *math*: on **iOS, tvOS and Android** the headline is
-**floor-shaved**. The depth of the OS present pipeline — the compositor's own wait, which
-no client can pace under — is excluded from it, and the Detailed tier prints the excluded
-term on its own line as `os present +X.X excluded (display pipeline minimum)`. Add that
-floor back before holding an iPhone, iPad, Apple TV or Android device's headline next to a
-macOS, Linux or Windows one. (The macOS client shaves nothing: it presents straight to the
-display, with no such pipeline depth to measure, so its numbers are raw.)
+- **Standard**, the default, shows the figures Moonlight's overlay shows, measured the same way
+  (averages over the last second), so you can hold the two side by side.
+- **Advanced** shows Punktfunk's own view: how long a frame takes from capture on the host to your
+  screen, as a median and a slow-frame figure, and every stage in between.
 
-The floor is **measured, not assumed**, and it is not small: it is commonly one to two
-refresh intervals, which on a 60 Hz phone is more than 30 ms — enough on its own to dwarf
-everything Moonlight's overlay displays. Charging it to the stream made Punktfunk look
-slower than clients that simply never measure that far (see
-[Comparing with Moonlight / Sunshine](#comparing-with-moonlight--sunshine)), so we report
-it rather than bury it in the total.
-
-## The four measurement points
-
-Every latency figure is the time between two of these four points in a video frame's
-life:
-
-1. **capture** — the host grabs the frame from the (virtual) display. Stamped on the
-   host's clock and carried with the frame.
-2. **received** — your client has fully received and reassembled the frame from the
-   network (after any FEC recovery), before decoding.
-3. **decoded** — the video decoder has produced the picture.
-4. **displayed** — the picture is handed to the screen (as close to "photons" as the
-   platform lets us measure).
+Turn on **Advanced statistics** in each client's [Settings](/docs/client-settings#overlay) to switch.
+The setting belongs to the device, so a settings profile never changes it.
 
 ## Detail levels
 
-The overlay has four levels — **Off → Compact → Normal → Detailed** — that you cycle live
-in-stream:
+Both views have four levels — **Off → Compact → Normal → Detailed**. Each level shows everything the
+one below it shows. Settings picks the level a stream starts at; cycle it live in-stream:
 
 | Platform | Cycle with |
 |---|---|
-| Linux · Windows · Steam Deck | **Ctrl+Alt+Shift+S** |
+| Linux · Windows · Steam Deck | **Ctrl+Alt+Shift+S**, a **three-finger tap** on a touchscreen, or the quick-action ring |
 | macOS / iPad (pointer or trackpad) | **⌃⌥⇧S** or a **three-finger tap** |
 | Android · iPhone | a **three-finger tap** |
 | Apple TV | **hold Play/Pause** on the Siri Remote |
-| Any Apple client, controller in hand | **Select + X** |
+| Any Apple or Android client, controller in hand | **Select + X** |
+| LG TV (webOS) | the **green** button on the remote |
 
-**Select + X** is there for the times your hands are on a controller and the other routes aren't:
-no keyboard for the combo, no free screen for the tap. On an **Apple TV** it is the only one of
-the two you can reach with a game controller, and holding **Play/Pause** is the equivalent on the
-Siri Remote — a *tap* on that button still right-clicks, only the hold cycles the overlay.
-
-**Ctrl+Alt+Shift+S** is one of a small set of shortcuts a stream reserves; the others — release
-captured input, switch mouse mode, disconnect, mute the microphone — are in
+A cycle lasts for that stream; the next stream starts at the level in Settings again.
+**Ctrl+Alt+Shift+S** is one of a small set of shortcuts a stream reserves; the others are in
 [Getting your input back](/docs/input#getting-your-input-back).
 
-**Compact** is a one-line pill (fps · end-to-end ms · Mb/s, plus a loss flag when frames are being
-lost). **Normal** adds the stream line and the p50/p95 headline. **Detailed** adds the per-stage
-breakdown everywhere; on Linux/Windows it also adds the encoder's target bitrate, the decode path,
-an HDR tag and a chroma tag, on Android the decoder plus the full codec/bit-depth/colour line, and
-on iOS, tvOS and Android the excluded OS present floor.
-You can also set the level a stream starts at in each client's
-[Settings](/docs/client-settings#overlay). The examples below are the **Detailed** view.
-
-The overlay follows your display's scaling, so it should already be readable. On Android TV it draws larger
-again, because a set across the room asks for more than pixel density accounts for. To nudge it on a desktop client, set `PUNKTFUNK_OSD_SCALE` in the **client's**
-environment (0.5×–4×) — see [Configuration →
+The overlay follows your display's scaling. To nudge it on a desktop client, set
+`PUNKTFUNK_OSD_SCALE` in the **client's** environment (0.5×–4×) — see [Configuration →
 Client-side](/docs/configuration#client-side-native-clients).
 
-## Reading the overlay
-
-Every client reports the same measurements, but each family lays them out a little
-differently. Linux · Windows · Steam Deck:
+## Standard view
 
 ```
-1920×1080@120 · 120 fps · 24.3 Mb/s · target 30 Mb/s (auto) · native-vulkan · HDR
-e2e 14.2/19.8 ms (p50/p95) · host 3.1 · net 6.7 · decode 2.1 · display 2.3 ms (pace 0.6 + latch 1.7)
+1920×1080@120 · HEVC 10-bit · native-vulkan · HDR
+received 120 fps · decoded 120 · presented 119 · 24.3 Mb/s
+host 3.1 ms · decode 2.1 ms · display 2.3 ms (avg)
+lost 0.0% · skipped 0.0% · rtt 0.6 ms
+```
+
+**Compact** is one line: `120 fps · 24.3 Mb/s · decode 2.1 ms`, plus `lost N%` when frames are lost.
+**Normal** is the four lines above. **Detailed** adds the host's fastest and slowest frame, the two
+halves of `display` where your device measures them, the encoder's target bitrate, and the audio
+buffer.
+
+Every time is an average over the last second, like Moonlight's. A figure your device cannot measure
+is left out rather than shown as zero.
+
+| Standard | What it measures | Moonlight's line |
+|---|---|---|
+| `received N fps` | Frames that arrived from the network | Incoming frame rate from network |
+| `decoded N` | Frames the decoder produced | Decoding frame rate |
+| `presented N` | Frames that reached the screen | Rendering frame rate |
+| `Mb/s` | The video you received, without error-correction overhead | (bitrate, where shown) |
+| `host X ms` | Capture to sent, reported by the host for every frame | Host processing latency (average) |
+| `decode X ms` | Received to decoded, on your device | Average decoding time |
+| `display X ms` | Decoded to on screen: the wait for a refresh, drawing, and vsync | Average frame queue delay + average rendering time |
+| `lost N%` | Frames the network lost beyond what error correction could rebuild | Frames dropped by your network connection |
+| `skipped N%` | Frames your device chose not to show because a newer one had arrived | Frames dropped due to network jitter |
+| `rtt X ms` | Round trip of the connection | Average network latency |
+
+Three differences remain, and none of them makes Punktfunk look better than it is:
+
+- Punktfunk's `host` includes the paced send of the frame; Sunshine's stops just before it.
+- Moonlight's headline FPS estimates what the host produced, lost frames included. `received` counts
+  what arrived and reports loss separately; the two agree while nothing is lost.
+- On Android, Moonlight measures nothing after the decoder. Punktfunk shows `display` anyway, with
+  the phone's own compositor wait left out (see [Advanced view](#advanced-view)).
+
+## Advanced view
+
+Every Advanced figure is the time between two of four points in a frame's life:
+
+1. **capture** — the host grabs the frame. Stamped on the host's clock and carried with the frame.
+2. **received** — your device has the whole frame from the network, after any error correction.
+3. **decoded** — the video decoder has produced the picture.
+4. **displayed** — the picture reaches the screen, as close to the light leaving the panel as the
+   platform lets an app measure.
+
+```
+1920×1080@120 · 120 fps · 24.3 Mb/s · target 30 Mb/s (auto) · HEVC 10-bit · native-vulkan · HDR
+end-to-end 14.2 ms p50 · 19.8 p95 · capture→on-glass
+= host 3.1 + network 6.7 + decode 2.1 + display 2.3 (pace 0.6 + latch 1.7) · presented 119
 host: queue 0.6 · encode 1.8 · xfer 0.2 · pace 0.5 ms
-present: mailbox
-lost 3 (2.4%)
-audio buffer 28 ms · a/v +4 ms
-```
-
-Android (headline and `display` both floor-shaved, like the Apple clients — the raw
-end-to-end here is 30.9 ms, the 16.7 ms floor of a 120 Hz panel included):
-
-```
-1920×1080@120   120 fps   24.3 Mb/s
-c2.qti.hevc.decoder · low-latency
-HEVC · 10-bit · HDR (BT.2020 PQ) · 4:2:0
-end-to-end 14.2 ms p50 · 19.8 p95 · capture→displayed
-= host 3.1 + network 6.7 + decode 2.1 + display 2.3   · presents 119
-os present +16.7 excluded (display pipeline minimum)
+rtt 0.6 ms
 audio buffer 28 ms · a/v +4 ms
 lost 3 (2.4%) · skipped 1 · FEC 12
+present: mailbox · vrr yes
 ```
 
-iOS · tvOS (headline and `display` both floor-shaved, so they still add up — the raw
-end-to-end here is 30.7 ms, the 16.7 ms floor of a 120 Hz screen included). macOS lays the
-same lines out, but with raw numbers and no `os present` line:
+**Compact** is `fps · end-to-end ms · Mb/s`. **Normal** is the first two lines, the resolved audio
+format on a lossless session, and `lost` when frames are lost. **Detailed** is everything.
 
-```
-1920×1080@120  120 fps  24.3 Mb/s
-end-to-end 14.0 ms p50 · 19.6 p95 · capture→on-glass
-= host 3.1 + network 6.7 + decode 2.1 + display 2.1
-os present +16.7 excluded (display pipeline minimum)
-lost 3 (2.4%)
-```
+- **The headline.** `end-to-end` is measured directly from capture to the point named after the
+  arrow. `p50` is the typical frame; `p95` is the slow frames. It stops where your device can see:
+  `capture→on-glass` or `capture→displayed` on a device that stamps the screen,
+  `capture→decoded` for a second in which no frame reported reaching the screen, and
+  `capture→received` on a device whose decoder shows the picture by itself (an LG TV, and the
+  Apple clients' fallback presenter). A shorter chain is smaller because it measures less.
+- **The equation.** The stages tile the headline: each starts where the previous one ends.
+  - `host` — capture to sent: the host's own share, reported for every frame.
+  - `network` — sent to received: the flight across the network, plus reassembly on your device.
+    Against a host that does not report its share, `host+network` stands in for both.
+  - `decode` — received to decoded, on your device.
+  - `display` — decoded to on screen. Where the driver reports true on-glass timing it splits into
+    `pace` (Punktfunk getting the frame to the screen) and `latch` (the screen taking it). A large
+    `latch` is the refresh cycle, not the stream.
+  - `presented N` — frames that reached the screen this second. Far below `fps` means frames are
+    being dropped on your device; an `fps` shortfall with `presented` keeping up is upstream.
 
-- **Line 1 — the stream.** Resolution@refresh, frames received per second, and the
-  received video bitrate (goodput — FEC overhead not counted). Linux/Windows follow the
-  measured rate with `target N Mb/s` — what the host's encoder is currently *allowed* to
-  produce — so a quiet desktop under a large grant (measured far below target) reads
-  differently from an encoder pinned at its cap (measured hugging the target). `(auto)`
-  means the [Automatic bitrate](/docs/client-settings#bitrate) controller owns the target
-  and moves it with network conditions; no target at all means an older host that doesn't
-  report one. Then the decode path, an [HDR](/docs/hdr) tag (`HDR`, or `HDR→SDR` when a PQ
-  stream is tone-mapped onto an SDR screen), and — when you asked for
-  [full chroma](/docs/client-settings) — the resolved chroma: `4:4:4` when the host
-  granted it, `4:4:4→4:2:0` when it couldn't. The decode path is exactly one of
-  `native-vulkan`, `native-d3d11va` (Windows), `native-vaapi` (Linux) and `software`, or
-  `pyrowave` on a [PyroWave](/docs/pyrowave) session — the same names
-  [`PUNKTFUNK_DECODER`](/docs/configuration#client-side-native-clients) takes and the same
-  ones the client's machine-readable `stats:` line carries, so what you pin is what you
-  read back, and a script that parses the line stays honest. Android puts its decoder and
-  the negotiated codec, bit depth, colour and chroma on rows of their own underneath; the
-  Apple clients don't report a codec at all.
-  If the session resolved to a [settings profile](/docs/profiles-and-links), its name closes this
-  line. On **Android** a `⚠ panel NN Hz` warning joins it whenever the device's panel is refreshing
-  *below* the stream's rate — the tell for a phone or TV governor that ignored the requested mode,
-  which otherwise reads as inexplicable judder plus a refresh of extra latency.
-- **Line 2 — the headline.** `end-to-end` (`e2e` on Linux/Windows) is the *directly
-  measured* time from host capture to the endpoint named at the end of the line —
-  `capture→on-glass` or `capture→displayed`. On Linux/Windows the endpoint is the moment
-  the frame is genuinely **visible** wherever the GPU driver can report it (most can);
-  where it can't, the measurement stops at the instant the frame is handed to the display
-  and so reads slightly optimistic. `p50` = the typical frame (median), `p95` = the slow
-  outliers. This is the one number that summarizes your stream.
-- **Line 3 — where the time goes.** The first four stages **tile the end-to-end interval** —
-  each starts where the previous one ends, so they add up to the headline. The two extra
-  terms under them are not extra time: one is excluded from the total, the other sits inside a
-  stage that's already counted.
-  - `host` — capture → sent: the host's own share (capture read, encode, error
-    coding, the paced send), reported by the host itself once per frame.
-  - `network` (`net` on Linux/Windows) — sent → received: the network flight plus
-    reassembly on your device.
-  - `decode` — received → decoded, on your device.
-  - `display` — decoded → displayed: waiting for the right screen refresh, rendering,
-    and vsync. On Linux/Windows it splits into `(pace + latch)` when your driver reports
-    true on-glass timing: **pace** is Punktfunk's own work — getting the decoded frame
-    submitted — and **latch** is the wait for the display to take it. A large `latch` is
-    the screen's refresh cycle, not the stream; a large `pace` is us. (`pace` is also the
-    fair number to compare against an iPhone or iPad, whose figure already has its
-    equivalent of `latch` removed.)
-  - `os present` *(iOS, tvOS and Android)* — the depth of the OS present pipeline, which is
-    excluded from both the headline and `display` and printed here so you can add it
-    back. On Android it is the measured time SurfaceFlinger took to latch and scan out each
-    frame, so it moves with your panel's rate and with whatever low-latency mode the vendor
-    applied; on Apple it is measured from the display link's own lead.
-  - `client queue` *(Apple only)* — how long a received frame waited before the decoder
-    pulled it. It's the front part of `decode`, not time on top of it. Hidden below 2 ms;
-    a value that persists is a standing receive backlog on the client.
-  - `presents N` *(Android only)* — the frames confirmed on glass this second. Well below `fps`
-    means the presenter is dropping or serializing frames; an `fps` shortfall with `presents`
-    keeping up is upstream of the client.
-  - `display X (pace A + latch B)` *(Android, only when the floor couldn't be measured)* — with
-    the floor excluded, Android's `display` term is already just `pace` (the wait the presenter
-    deliberately holds a frame for its target refresh) and `latch` is what the `os present` line
-    reports. On the rare window where no latch sample pairs up, nothing is excluded and `display`
-    reverts to the raw figure with both halves shown.
-
-  Against an **older host** that doesn't report its share yet, the first two terms
-  merge into a single `host+network` number (`host+net` on Linux/Windows) — same total,
-  one split fewer. On Linux/Windows, Detailed adds one further line — `host: queue … ·
-  encode … · xfer … · pace …` — splitting the host's own share into its stages, when the
-  host reports them.
-
-  Linux/Windows Detailed also carries a **`present:`** line naming how frames are reaching
-  your screen: the display mode in use (`mailbox`, `fifo`, `fifo-latest-ready`, …), `vrr yes`/`vrr no` once the
-  client has *measured* whether your screen is following the stream's cadence (it is
-  reported only when measured — no guess from what the display claims), and, when the
-  [presentation setting](/docs/client-settings#video) is *Smoothness*, the word
-  `smoothing`. Counters join it only when they're doing something — `qdrop`/`qdry` mean
-  the smoothing buffer overflowed or ran dry (a jittery link), and `gated`/`forced`
-  belong to the pacing that keeps frames from stacking up behind the display.
-
-  (Stage values are per-stage medians, so they sum only *approximately* to the
-  headline median — percentiles aren't perfectly additive. The headline is measured
-  directly, never computed as a sum.)
-- **Line 4 — reliability** (only shown when something is nonzero). `lost` = frames the
-  network dropped beyond FEC's ability to recover — every client reports it. `skipped`
-  (frames your client chose not to display because a newer one had already arrived) and
-  `FEC` (packet shards the error correction recovered this second — loss you *didn't*
-  feel) are reported by the **Android client only**; the other clients show `lost` alone.
-- **The audio line** — Detailed only, on Linux · Windows · Steam Deck · Android, and shown
-  once sound is actually playing. `audio buffer` is how much decoded audio is queued ahead
-  of your speakers; `a/v` is where that *puts* it relative to the picture — **positive means
-  audio is playing behind the picture**, negative means ahead of it. The client steers the
-  buffer to drive `a/v` toward zero, but never below the depth your link's jitter needs, so
-  on a rough connection you may see the buffer hold and a small `a/v` remain: that is the
-  client choosing an unbroken stream over perfect lip-sync, and it is the honest reading
-  rather than a hidden compromise. The `a/v` term is omitted when it is zero — aligned, or
-  not yet measured (it needs a frame on screen to compare against, and a few seconds to
-  settle). The Apple clients do not report it yet.
-
-All values refresh once per second over the last second of frames.
+  The stages are medians, so they sum only roughly to the headline, which is measured on its own.
+- **`host:`** splits the host's share into queue, encode, the error coding and send wait (`xfer`),
+  and the paced send.
+- **`os present +X excluded`** (iOS, tvOS, Android) — the depth of the operating system's own present
+  pipeline, which no app can pace under. It is left out of the headline and of `display`, and shown
+  here so you can add it back before comparing with a Mac, Linux or Windows client.
+- **`rtt`** — the connection's round trip. `network` should sit near half of it plus the time to
+  send one frame; far above means the clocks disagree.
+- **`clock offset suspect`** — frames came out with an impossible negative latency, so the clock
+  correction between host and client is wrong and the headline cannot be trusted.
+- **`decode … (1 sample, inside display — not additive)`** — on the Vulkan Video decoder the decode
+  runs on the GPU while the frame is being presented, so it is shown apart from the equation.
+- **Counters.** `lost` counts frames the network lost beyond error correction, `skipped` frames your
+  device chose not to show (`⚠ N overflow` when the decoder fell behind), and `FEC` the pieces error
+  correction rebuilt: loss you did not see.
+- **Audio.** `audio buffer` is decoded audio queued ahead of your speakers; `a/v` is where that
+  places it against the picture — positive means audio plays behind the picture. The client steers
+  towards zero without dropping below the depth your link's jitter needs.
+- **Device lines.** Some lines only one platform can measure: `present:` names how frames reach the
+  screen on Linux and Windows (`mailbox`, `fifo`, …, `vrr yes/no` once measured, queue counters when
+  they move); `integrity:` reports decode damage on the hardware decoders; `judder` and `coalesced`
+  report presentation cadence on Android; `link latency` and `client queue` report Apple's display
+  link and receive backlog; an LG TV shows its CPU and memory use.
 
 ### Clocks, and the `(same-host clock)` tag
 
-`end-to-end` and `host+network` span two machines, so they need the two clocks to
-agree: at connect, the client runs an NTP-style handshake with the host and corrects
-for the measured clock offset. If that handshake wasn't possible, the overlay appends
-**`(same-host clock)`** — the numbers are then only trustworthy when client and host
-run on the same machine. `decode` and `display` are single-machine measurements and
-are always exact.
+`end-to-end` and `host+network` span two machines. At connect, the client measures the offset between
+its clock and the host's and corrects for it. When that was not possible, the headline adds
+**`(same-host clock)`**: the figures are then only right when client and host are the same machine.
 
 ### What each platform can measure
 
-Not every platform exposes a true "displayed" instant, so the point the headline stops at
-differs by client — and the clients that have a choice name it on the line rather than
-pretending:
-
 | client | headline | why |
 |---|---|---|
-| Windows, Linux | `capture→on-glass` | present instant available (measured right after the Vulkan swapchain present); published raw |
-| macOS (Metal presenter) | `capture→on-glass` | present instant available (the system's on-glass time for the flip); published raw |
-| iOS/tvOS (Metal presenter) | `capture→on-glass` | present instant available, but the OS present floor is **excluded** from the number and printed separately as `os present +X.X excluded` |
-| Android | `capture→displayed` | MediaCodec's per-frame render callback reports SurfaceFlinger's render timestamp, and the OS present floor measured from it is **excluded** from the number and printed separately as `os present +X.X excluded`; on the rare window where no callback is delivered (the platform may drop them under load) the HUD falls back to `capture→decoded` |
-| macOS/iOS fallback presenter | `capture→received` | the system video layer hides decode and present timing entirely |
-
-A shorter chain means the number is **smaller because it measures less** — check the
-endpoint before comparing two devices, and add the excluded `os present` floor back to an
-iOS, tvOS or Android client's headline before holding it next to a macOS, Linux or Windows
-one.
+| Windows, Linux | `capture→on-glass` | the present instant is available; published raw |
+| macOS | `capture→on-glass` | the system's on-glass time for the flip; published raw |
+| iOS, tvOS | `capture→on-glass` | available, with the OS present floor left out |
+| Android | `capture→displayed` | the platform's render timestamp, with the OS present floor left out |
+| LG TV (webOS) | `capture→received` | the TV's decoder presents on its own |
+| macOS/iOS fallback presenter | `capture→received` | the system video layer hides decode and present timing |
 
 ## Comparing with Moonlight / Sunshine
 
-Moonlight's overlay and Punktfunk's measure different slices of the pipeline, and the
-single biggest difference is:
+The Standard view is the comparison: each of its lines has a Moonlight line beside it (see the table
+above).
 
-> **Moonlight has no end-to-end number.** Its overlay shows separate client-side
-> segments (decode time, queue delay, render time) and — on Sunshine hosts — a
-> host-side number. Nothing in Moonlight measures capture-to-glass, and nothing
-> measures the network flight of video frames. Punktfunk's `end-to-end` line has **no
-> Moonlight counterpart** — never compare it against any single Moonlight line.
-
-To compare fairly, reconstruct an approximate end-to-end from Moonlight's lines:
+The Advanced headline has **no Moonlight counterpart**. Moonlight's overlay shows separate client
+segments and, on a Sunshine host, the host's share; nothing in it measures capture to screen, or the
+network flight of a frame. To hold an Advanced headline against Moonlight, rebuild an approximation:
 
 ```
 Moonlight ≈ host processing latency (avg)
@@ -257,62 +173,40 @@ Moonlight ≈ host processing latency (avg)
           + average rendering time
 ```
 
-…and compare *that* against Punktfunk's `end-to-end`. (It's still approximate:
-Moonlight's segments are averages over a slightly different window, and the ½·RTT term
-stands in for a one-way frame flight that Moonlight doesn't measure.)
+It is still approximate: Moonlight's figures are averages, the Advanced figures are medians, and
+half a round trip stands in for a one-way flight Moonlight does not measure.
 
-### Line-by-line matrix
+## Scripts and the desktop's stdout
 
-| Moonlight overlay line | What it actually measures | Punktfunk equivalent | Comparable? |
-|---|---|---|---|
-| `Video stream: WxH FPS` | Received **plus inferred-lost** frames/s (host-rate estimate from frame sequence gaps) | `fps` (line 1) | ≈ equal when loss is near zero; Punktfunk counts received frames only |
-| `Incoming frame rate from network` | Frames reassembled from the network per second | `fps` (line 1) | **Yes — direct** |
-| `Decoding frame rate` (desktop only) | Frames leaving the decoder per second | not shown separately (equals `fps` unless the decoder is falling behind) | — |
-| `Rendering frame rate` (desktop only) | Frames actually presented per second | `fps` minus `skipped` (Android only) | Approximately |
-| `Host processing latency min/max/avg` (Sunshine hosts) | Host capture → just-before-send, reported by Sunshine per frame | `host` (line 3) — the host reports capture→fully-sent per frame the same way | **Yes — direct** (Punktfunk's includes the paced send itself, Sunshine's stops just before it; avg vs p50) |
-| `Frames dropped by your network connection` | Frame-sequence gaps ÷ total frames | `lost` (line 4) | **Yes — direct** |
-| `Frames dropped due to network jitter` | Decoded frames the *client's pacer* chose to drop ÷ decoded frames | `skipped` (line 4, Android only) | Approximately (both are client-side pacing decisions, despite Moonlight's name) |
-| `Average network latency` | The **control connection's round-trip time** (ENet RTT + variance) — not video frame latency | `network` (line 3) is the closest concept, but it's the *actual one-way frame path* (flight + reassembly), not an RTT | **No direct comparison.** Roughly, Punktfunk's `network` ≈ ½ × an idle RTT plus serialization time of the frame |
-| `Average decoding time` | Mean time from decoder enqueue to picture out | `decode` (p50) | Yes (mean vs median; both include decoder queueing) |
-| `Average frame queue delay` *(desktop only)* | Mean time a decoded frame waits for its vsync slot | inside `display` | Sum the two Moonlight lines → |
-| `Average rendering time (incl. V-sync latency)` *(desktop only)* | Mean duration of the present call | inside `display` | …and compare against Punktfunk's `display` |
-| *(no equivalent)* | — | `end-to-end` — true capture→glass, clock-skew-corrected across machines | **Punktfunk only** |
-| *(no equivalent)* | — | `FEC` recovered shards (loss absorbed invisibly; Android only) | Punktfunk only |
-
-Other differences worth knowing when squinting at both overlays side by side:
-
-- **Averages vs percentiles.** Moonlight's time values are means; Punktfunk shows
-  medians (p50) with a p95 for the headline. Under jitter, a mean sits above the
-  median — Moonlight's numbers read slightly "worse" than an equivalent p50.
-- **Windows.** Both refresh about once per second; Moonlight over a ~1–2 s sliding
-  window, Punktfunk over the last full second.
-- **Host frame rate.** Moonlight's headline FPS estimates what the *host* produced
-  (received + lost). Punktfunk shows what your client actually received, and reports
-  loss separately.
-- **On Android, Moonlight's numbers stop at the decoder.** The two lines above that cover
-  presentation are desktop-only: Moonlight's Android overlay measures nothing after the
-  decoder produces the picture, so no part of the wait for the screen appears anywhere in
-  it — and the popular Android forks measure the same slice. Its `Average decoding time` is
-  therefore comparable to Punktfunk's `decode`, and to nothing else; on Android there is no
-  Moonlight number that includes what your screen contributes. That asymmetry is why
-  Punktfunk excludes the `os present` floor on Android too, and why adding that floor back
-  is the right move when you want the whole truth rather than a like-for-like comparison.
+The desktop session prints two lines once per second while the overlay is on: `stats:` carries the
+Advanced Detailed text with lines joined by ` | `, whichever view is on screen, and `stats-json:`
+carries every figure as JSON. Parse the JSON; the text is for people reading a log.
 
 ## Recording a capture for a bug report
 
-The overlay only ever shows the last second. To capture a whole run, use the host's own recorder —
-the **Performance** page in the [web console](/docs/web-console):
+The overlay only ever shows the last second. To capture a whole run, use the host's recorder — the
+**Performance** page in the [web console](/docs/web-console):
 
 1. Press **Start capture**. Sampling happens at the host's existing aggregation boundary (about
    every 1–2 s), so arming it costs the stream nothing.
 2. Reproduce the problem. The live graphs fill in as it runs.
 3. Press **Stop & save**. The recording appears in the list below, and survives a host restart.
 
-A recording carries per-stage p50/p99 pipeline latency, new frames/s versus re-encoded holds/s
-(source starvation), the attempted wire bitrate against the target, and frame/packet/send drops plus
-FEC recoveries. Its header names the **encoder backend and the GPU** that produced it — without
-those, a stage split can't be read at all.
+The latency graph stacks the host's stages in milliseconds against a dashed line at one frame for the
+stream's rate, with the host's whole share drawn over the stack. A stage near the line is using most
+of its frame. The stages depend on how the host encodes:
 
-**Download** saves it as a `.json` file you can attach to a report; **Delete** removes it. On disk
-they live on the host in `~/.config/punktfunk/captures/` (`%ProgramData%\punktfunk\captures\` on
-Windows) until you delete them.
+| Path | Stages |
+|---|---|
+| Linux native | queue, capture, submit, encode, send |
+| Windows | driver (the display driver's capture and encode, as one span), copy, send |
+| GameStream (Moonlight clients) | capture, encode, packetize, send, send spread |
+
+The other graphs show new against repeated frames per second next to the stream's rate, the video
+bitrate next to the encoder's target, frame and send drops, and the round trip to the client. A
+counter the host cannot see is left out. The header names the **encoder backend and the GPU**:
+without them a stage split can't be read.
+
+**Download** saves a recording as a `.json` file you can attach to a report; **Delete** removes it.
+On disk they live on the host in `~/.config/punktfunk/captures/` (`%ProgramData%\punktfunk\captures\`
+on Windows) until you delete them.
