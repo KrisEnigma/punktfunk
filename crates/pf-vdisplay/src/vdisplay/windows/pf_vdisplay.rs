@@ -1226,6 +1226,22 @@ pub fn force_driver_cycle() -> Result<()> {
     }
 }
 
+/// [`force_driver_cycle`] for a session still building its pipeline. Refused while another
+/// session holds a virtual monitor, since the reload blanks every one; the caller's own
+/// retry-hold lease is the one reference allowed.
+pub fn force_driver_cycle_if_sole() -> Result<()> {
+    let refs: u32 = super::manager::snapshot()
+        .iter()
+        .filter(|s| s.state == "active")
+        .map(|s| s.sessions)
+        .sum();
+    anyhow::ensure!(
+        refs <= 1,
+        "driver cycle skipped: another session holds a virtual monitor"
+    );
+    force_driver_cycle()
+}
+
 /// Wait for a control interface that answers; reload if `reload` and the devnode looks hostless
 /// or wedged. Returns the handle with its handshake reply (so the manager's open can keep both)
 /// and whether a reload ran.
