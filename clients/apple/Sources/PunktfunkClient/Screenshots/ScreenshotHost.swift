@@ -7,10 +7,8 @@
 //
 // Capture per platform:
 //   • iOS / tvOS simulator → `xcrun simctl io booted screenshot` (native pixels = exact size).
-//   • macOS → `screencapture -l<windowID>` of the borderless capture window (the configurator
-//     prints `PF_SHOT_WINDOW=<id>`), or the no-permission self-capture fallback
-//     (PUNKTFUNK_SHOT_SELFCAPTURE=<dir> → cacheDisplay; renders the real hierarchy but, like all
-//     non-window-server capture, omits material blur).
+//   • macOS → the app captures its own windows through the window server
+//     (PUNKTFUNK_SHOT_SELFCAPTURE=<dir>, see MacSelfCapture): no Screen Recording grant.
 //
 // Every screen prints `PF_SHOT_READY scene=<name>` to stdout once it has settled, so the driver
 // can wait for layout instead of guessing with a fixed sleep.
@@ -109,13 +107,13 @@ struct ScreenshotHostView: View {
 }
 
 #if os(macOS)
-/// Sizes the hosting window to the mac canvas, strips the title bar, and prints the CGWindowID
-/// for `screencapture -l`.
+/// Puts the hosting window on the mac canvas and hands its rect to `MacSelfCapture`.
 ///
-/// A display whose mode IS the canvas (1440×900 pt at 2×, a Retina panel or a virtual display)
-/// takes the window full screen: square corners, no titlebar strip, and exactly the App Store
-/// pixels. The window id and the display's rect print once full screen has settled. Anywhere
-/// else the window floats at the canvas size, with the rounded corners a floating window has.
+/// On a 2× display the canvas (1440×900 pt) is exactly the App Store pixels. A scene is the app's
+/// own titled window, its frame on the canvas just below the menu bar, so the display needs that
+/// much room under it. A `macFullScreen` scene drops the chrome, as the full-screen stream does,
+/// and may sit under the menu bar: the capture takes only this app's windows. Without a 2×
+/// display the window floats at 1×.
 private struct MacShotWindowConfigurator: NSViewRepresentable {
     let scene: ShotScene
 
@@ -129,50 +127,34 @@ private struct MacShotWindowConfigurator: NSViewRepresentable {
             // colorScheme. App-wide, so the Settings window and sheets a scene opens match.
             NSApp.appearance = NSAppearance(named: scene.colorScheme == .dark ? .darkAqua : .aqua)
             let size = ShotDevice.mac.points(scene.orientation)
-            window.styleMask = [.titled, .fullSizeContentView]
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.isMovable = false
-            for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                window.standardWindowButton(button)?.isHidden = true
+            let name = scene.name
+            let area = NSScreen.screens.lazy
+                .filter { $0.backingScaleFactor == ShotDevice.mac.scale }
+                .map { scene.macFullScreen ? $0.frame : $0.visibleFrame }
+                .first { $0.width >= size.width && $0.height >= size.height }
+            if scene.macFullScreen { window.styleMask = [.borderless] }
+            if let area {
+                let top = area.maxY.rounded(.down)
+                window.setFrame(NSRect(x: area.minX, y: top - size.height,
+                                       width: size.width, height: size.height), display: true)
+            } else {
+                window.setFrame(NSRect(origin: .zero, size: size), display: true)
+                window.center()
             }
-            window.setContentSize(size)
-            let canvas = NSScreen.screens.first {
-                $0.frame.size == size && $0.backingScaleFactor == ShotDevice.mac.scale
-            }
-            if let canvas { window.setFrameOrigin(canvas.frame.origin) } else { window.center() }
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            let name = scene.name
-            guard let canvas else { return Self.announce(window, name, size, rect: nil) }
-            let rect = Self.globalRect(canvas)
-            // After SwiftUI has dressed the window, which can mark it `.fullScreenNone`: a toggle
-            // made earlier, or with that bit still set, is refused.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                window.styleMask.insert(.resizable)
-                window.collectionBehavior.remove(.fullScreenNone)
-                window.collectionBehavior.insert(.fullScreenPrimary)
-                NotificationCenter.default.addObserver(
-                    forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main
-                ) { _ in
-                    MainActor.assumeIsolated { Self.announce(window, name, size, rect: rect) }
-                }
-                window.toggleFullScreen(nil)
-            }
+            MacSelfCapture.canvas = Self.globalRect(window.frame)
+            Self.announce(window, name, size)
         }
     }
 
-    /// The display in the top-left global space `screencapture -R` takes. Full screen moves the
-    /// toolbar into a window of its own, so the driver captures the display, not one window.
-    private static func globalRect(_ screen: NSScreen) -> String? {
-        let key = NSDeviceDescriptionKey("NSScreenNumber")
-        guard let id = screen.deviceDescription[key] as? CGDirectDisplayID else { return nil }
-        let b = CGDisplayBounds(id)
-        return "\(Int(b.minX)),\(Int(b.minY)),\(Int(b.width)),\(Int(b.height))"
+    /// `frame` in the top-left global space that window captures take.
+    private static func globalRect(_ frame: NSRect) -> CGRect {
+        let top = (NSScreen.screens.first?.frame.height ?? 0) - frame.maxY
+        return CGRect(x: frame.minX, y: top, width: frame.width, height: frame.height)
     }
 
-    private static func announce(_ window: NSWindow, _ name: String, _ size: CGSize, rect: String?) {
-        if let rect { print("PF_SHOT_RECT=\(rect)") }
+    private static func announce(_ window: NSWindow, _ name: String, _ size: CGSize) {
         print("PF_SHOT_WINDOW=\(window.windowNumber) scene=\(name) "
             + "size=\(Int(size.width))x\(Int(size.height))pt")
         fflush(stdout)
@@ -182,28 +164,60 @@ private struct MacShotWindowConfigurator: NSViewRepresentable {
     final class Coordinator { var configured = false }
 }
 
-/// No-permission fallback: capture the window's view tree via cacheDisplay. Renders the real
-/// hierarchy (NavigationStack/Form/cards — unlike ImageRenderer) but omits material blur, which
-/// only the window server (screencapture) composites. Used when PUNKTFUNK_SHOT_SELFCAPTURE is set.
+/// PUNKTFUNK_SHOT_SELFCAPTURE=<dir>: once the scene is ready the app captures its own windows
+/// through the window server and exits. A process may always read its own windows, so there is
+/// no Screen Recording grant, and materials come out as on screen. Only this process's windows go
+/// in, front to back over the canvas: sheets and the Settings window land in the shot, the menu
+/// bar, the desktop and other apps do not.
 enum MacSelfCapture {
+    /// The canvas in the top-left global space, set by the window configurator.
+    static var canvas: CGRect?
+
     static func captureIfRequested(scene: ShotScene) {
         guard let dir = ProcessInfo.processInfo.environment["PUNKTFUNK_SHOT_SELFCAPTURE"],
-              !dir.isEmpty,
-              let window = NSApp.windows.first(where: { $0.isVisible }),
-              let content = window.contentView else { return }
+              !dir.isEmpty else { return }
         let outDir = URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
         try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
-        guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { return }
-        content.cacheDisplay(in: content.bounds, to: rep)
         let url = outDir.appendingPathComponent("\(ShotDevice.mac.id)-\(scene.name).png")
-        if let dest = CGImageDestinationCreateWithURL(
-            url as CFURL, "public.png" as CFString, 1, nil), let cg = rep.cgImage {
-            CGImageDestinationAddImage(dest, cg, nil)
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let ids = windows.filter { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid }
+            .compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+        // The list holds raw window numbers in pointer slots; bridged NSNumbers yield no image.
+        var slots = ids.map { UnsafeRawPointer(bitPattern: UInt($0)) }
+        if let list = CFArrayCreate(nil, &slots, slots.count, nil),
+           let shot = CGImage(windowListFromArrayScreenBounds: canvas ?? .null,
+                              windowArray: list, imageOption: [.bestResolution]),
+           let flat = flatten(shot),
+           let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, flat, nil)
             CGImageDestinationFinalize(dest)
-            print("PF_SHOT_SAVED \(url.path) \(rep.pixelsWide)x\(rep.pixelsHigh)px")
+            print("PF_SHOT_SAVED \(url.path) \(flat.width)x\(flat.height)px")
+        } else {
+            print("PF_SHOT_CAPTURE_FAILED scene=\(scene.name) windows=\(ids.count)")
         }
         fflush(stdout)
         exit(0)
+    }
+
+    /// A window's round corners leave transparent pixels; fill them with the window background
+    /// they sit on, so the image is opaque.
+    private static func flatten(_ image: CGImage) -> CGImage? {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: image.width, height: image.height,
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return nil }
+        var fill = NSColor.black.cgColor
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
+            fill = NSColor.windowBackgroundColor.cgColor
+        }
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        ctx.setFillColor(fill)
+        ctx.fill(rect)
+        ctx.draw(image, in: rect)
+        return ctx.makeImage()
     }
 }
 #endif

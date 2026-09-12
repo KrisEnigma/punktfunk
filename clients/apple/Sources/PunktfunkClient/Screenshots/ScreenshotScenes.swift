@@ -13,6 +13,9 @@ struct ShotScene {
     let name: String
     let orientation: ShotOrientation
     let colorScheme: ColorScheme
+    /// macOS: the canvas without window chrome, as the app runs a session full screen. Every
+    /// other scene is the app's own titled window.
+    var macFullScreen = false
     let make: @MainActor () -> AnyView
 }
 
@@ -20,7 +23,8 @@ struct ShotScene {
 enum ShotScenes {
     static var all: [ShotScene] {
         var scenes: [ShotScene] = [
-            ShotScene(name: "01-stream", orientation: .landscape, colorScheme: .dark) {
+            ShotScene(name: "01-stream", orientation: .landscape, colorScheme: .dark,
+                      macFullScreen: true) {
                 AnyView(ShotStreamHero())
             },
             ShotScene(name: "02-hosts", orientation: .natural, colorScheme: .dark) {
@@ -585,7 +589,7 @@ private struct ShotMacSettingsWindow: View {
 
     var body: some View {
         ShotHome().task {
-            // After the capture window has gone full screen, so Settings joins that Space.
+            // Once the capture window has settled on the canvas.
             try? await Task.sleep(nanoseconds: 2_500_000_000)
             openSettings()
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -595,13 +599,12 @@ private struct ShotMacSettingsWindow: View {
 
     private func arrange() {
         let windows = NSApp.windows
-        guard let main = windows.first(where: { $0.styleMask.contains(.fullScreen) })
-                ?? NSApp.mainWindow,
+        let canvas = ShotDevice.mac.points(.natural)
+        guard let main = windows.first(where: { $0.frame.size == canvas }),
               let settings = windows.first(where: {
                   $0.identifier?.rawValue.contains("Settings") == true
               })
         else { return }
-        settings.collectionBehavior.insert(.fullScreenAuxiliary)
         settings.setFrameOrigin(NSPoint(
             x: main.frame.midX - settings.frame.width / 2,
             y: main.frame.midY - settings.frame.height / 2))
@@ -609,7 +612,7 @@ private struct ShotMacSettingsWindow: View {
            let action = item.action {
             NSApp.sendAction(action, to: item.target, from: item)
         }
-        // Opening Settings from a full-screen Space leaves the app inactive: grey controls.
+        // An inactive app draws grey controls.
         NSApp.activate(ignoringOtherApps: true)
         settings.makeKeyAndOrderFront(nil)
         if let sheet {
@@ -623,10 +626,6 @@ private struct ShotMacSettingsWindow: View {
 // MARK: - Pair (PIN ceremony)
 
 private struct ShotPair: View {
-    #if os(macOS)
-    @State private var sheetShown = false
-    #endif
-
     /// The PIN as the host's web console shows it, and a device name that doesn't depend on what
     /// the capture simulator happens to be called.
     private var sheet: some View {
@@ -653,14 +652,9 @@ private struct ShotPair: View {
         // tvOS pushes the ceremony as a full screen (HomeView's `navigationDestination`).
         NavigationStack { sheet }
         #else
-        // macOS: the window-modal sheet the app presents, raised once the window is full screen
-        // (a window with a sheet up refuses to go full screen). The display capture takes it in.
-        ShotHome()
-            .sheet(isPresented: $sheetShown) { sheet }
-            .task {
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
-                sheetShown = true
-            }
+        // macOS: the window-modal sheet the app presents. It is a window of its own, which the
+        // driver's capture of the window's rect takes in.
+        ShotHome().sheet(isPresented: .constant(true)) { sheet }
         #endif
     }
 }

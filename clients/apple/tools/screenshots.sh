@@ -4,13 +4,13 @@
 # Launches the app in "shot mode" (PUNKTFUNK_SHOT_SCENE=<name> → one mock-populated screen,
 # full-bleed; see Sources/PunktfunkClient/Screenshots/) once per scene per device, and lets the OS
 # capture the REAL rendered UI:
-#   • macOS  → `screencapture` of the app's borderless window.
+#   • macOS  → the app captures its own windows through the window server, then exits.
 #   • iOS/iPadOS/tvOS → a booted Simulator + `xcrun simctl io booted screenshot` (native pixels =
 #                       the exact App Store size for that device).
 #
 # The captured pixels are exactly App Store Connect's required sizes:
-#   mac        2880×1800   (full screen on a 1440×900 @2x display — a 1× monitor needs a HiDPI
-#                           virtual display; elsewhere a floating window, 1440×900 at 1×)
+#   mac        2880×1800   (a 2× display with room for the 1440×900 window below its menu bar;
+#                           a 1× monitor needs a HiDPI virtual display)
 #   iphone-6.9 1320×2868   (portrait)  /  2868×1320 (the landscape hero)
 #   ipad-13    2064×2752   (portrait)
 #   appletv    1920×1080
@@ -22,8 +22,7 @@
 # landscape iPad hero, rotate the Simulator by hand (⌘←) and re-run just that scene.
 #
 # Requirements:
-#   • macOS target: full Xcode + a one-time Screen Recording grant for your terminal
-#     (System Settings → Privacy & Security → Screen Recording).
+#   • macOS target: full Xcode. No Screen Recording grant: the app only reads its own windows.
 #   • iOS/iPadOS/tvOS targets: full Xcode (xcodebuild + Simulators), not just Command Line Tools.
 #
 # Usage:
@@ -81,37 +80,17 @@ shoot_macos() {
 
   for scene in "${SCENES[@]}"; do
     local logf; logf="$(mktemp)"
-    PUNKTFUNK_SHOT_SCENE="$scene" "$bin" >"$logf" 2>&1 &
-    local pid=$!
-    # Wait for the window to exist and the scene to settle.
-    local win=""
-    for _ in $(seq 1 50); do
-      win="$(grep -o 'PF_SHOT_WINDOW=[0-9]*' "$logf" | head -1 | cut -d= -f2 || true)"
-      [ -n "$win" ] && grep -q PF_SHOT_READY "$logf" && break
-      sleep 0.2
-    done
-    if [ -z "$win" ]; then
-      kill -9 "$pid" 2>/dev/null || true
-      warn "macOS/$scene: app never reported a window — skipping"; cat "$logf" >&2; continue
-    fi
-    # The previous capture's recording dot lingers in the display's corner for a few seconds.
-    sleep "$SETTLE"
-    # Anyone using this Mac can take focus mid-settle, and an inactive app draws grey controls.
-    osascript -e "tell application \"System Events\" to set frontmost of \
-(first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
-    sleep 1
-    # A full-screen canvas display prints its rect. Capture that, not the window: full screen
-    # moves the toolbar into its own window and hangs a hidden titlebar above the display.
-    local rect; rect="$(grep -o 'PF_SHOT_RECT=[0-9,-]*' "$logf" | head -1 | cut -d= -f2 || true)"
-    local how=(-o -l"$win"); [ -n "$rect" ] && how=(-R"$rect")
-    local dest="$OUT/mac-$scene.png"
-    if screencapture -x "${how[@]}" "$dest" 2>/dev/null && [ -s "$dest" ]; then
+    # The app captures its own windows once the scene has settled, then exits (MacSelfCapture).
+    PUNKTFUNK_SHOT_SCENE="$scene" PUNKTFUNK_SHOT_SELFCAPTURE="$OUT" \
+      PUNKTFUNK_SHOT_DELAY="${PUNKTFUNK_SHOT_DELAY:-$((SETTLE * 1000))}" "$bin" >"$logf" 2>&1 &
+    local pid=$! dest="$OUT/mac-$scene.png"
+    for _ in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+    kill -9 "$pid" 2>/dev/null || true
+    if grep -q PF_SHOT_SAVED "$logf"; then
       log "macOS/$scene → $dest ($(pixels "$dest"))"
     else
-      warn "macOS/$scene: screencapture failed — grant your terminal Screen Recording permission
-       (System Settings → Privacy & Security → Screen Recording), then re-run."
+      warn "macOS/$scene: the app saved no capture — skipping"; cat "$logf" >&2
     fi
-    kill -9 "$pid" 2>/dev/null || true
     rm -f "$logf"
   done
 }
