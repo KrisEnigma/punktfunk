@@ -2136,6 +2136,7 @@ mod tests {
             2,
             96_000,
             pcm::BITS_24,
+            punktfunk_core::audio::AudioLayout::Legacy,
         )
         .expect("the PCM arm builds no codec and cannot fail");
         let mut out = Vec::new();
@@ -2174,8 +2175,14 @@ mod tests {
         let n = enc
             .encode_float(&silence, &mut packet)
             .expect("encode one 5 ms stereo frame");
-        let mut dec = AudioDec::new(punktfunk_core::quic::AUDIO_CODEC_OPUS, 2, 48_000, 16)
-            .expect("opus decoder");
+        let mut dec = AudioDec::new(
+            punktfunk_core::quic::AUDIO_CODEC_OPUS,
+            2,
+            48_000,
+            16,
+            punktfunk_core::audio::AudioLayout::Legacy,
+        )
+        .expect("opus decoder");
         // Pump scratch: 120 ms — the biggest frame the Opus plane can carry.
         let mut out = vec![0f32; 120 * 48 * 2];
         assert_eq!(dec.decode(&packet[..n], &mut out), Some(240 * 2));
