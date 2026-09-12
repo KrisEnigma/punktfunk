@@ -42,6 +42,9 @@ pub mod crypto;
 pub mod discovery;
 pub mod error;
 pub mod fec;
+// The stats overlay every client draws: window, snapshot, formatter. The ABI exports it from `abi`.
+/// cbindgen:ignore
+pub mod hud;
 pub mod input;
 pub mod packet;
 pub mod phase;

@@ -3787,6 +3787,8 @@ dependencies = [
  "rcgen",
  "reed-solomon-simd",
  "rustls",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
  "socket2",
  "spake2",
