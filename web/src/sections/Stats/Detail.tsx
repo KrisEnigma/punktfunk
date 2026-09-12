@@ -7,7 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { Loadable } from "@/lib/query";
 import { m } from "@/paraglide/messages";
-import { HealthChart, LatencyChart, ThroughputChart } from "./charts";
+import {
+	HealthChart,
+	hasRtt,
+	LatencyChart,
+	RttChart,
+	ThroughputChart,
+} from "./charts";
 import { ChartBlock } from "./helpers";
 
 /** Container: the full graph set for the selected recording — fetched by id. */
@@ -26,6 +32,7 @@ export const DetailCard: FC<{
 }> = ({ detail, onClose }) => {
 	const cap = detail.data;
 	const samples = cap?.samples ?? [];
+	const fps = cap?.meta.fps ?? 0;
 	return (
 		<Card>
 			<CardHeader>
@@ -68,18 +75,28 @@ export const DetailCard: FC<{
 						</p>
 					) : (
 						<div className="space-y-8">
+							{cap?.meta.truncated && (
+								<p className="text-xs text-muted-foreground">
+									{m.stats_truncated_note()}
+								</p>
+							)}
 							<ChartBlock
 								title={m.stats_latency_title()}
 								desc={m.stats_latency_desc()}
 							>
-								<LatencyChart samples={samples} toggle />
+								<LatencyChart samples={samples} fps={fps} toggle />
 							</ChartBlock>
 							<ChartBlock title={m.stats_throughput_title()}>
-								<ThroughputChart samples={samples} />
+								<ThroughputChart samples={samples} fps={fps} />
 							</ChartBlock>
 							<ChartBlock title={m.stats_health_title()}>
-								<HealthChart samples={samples} kind={cap?.meta.kind} />
+								<HealthChart samples={samples} />
 							</ChartBlock>
+							{hasRtt(samples) && (
+								<ChartBlock title={m.stats_rtt_title()}>
+									<RttChart samples={samples} />
+								</ChartBlock>
+							)}
 						</div>
 					)}
 				</QueryState>

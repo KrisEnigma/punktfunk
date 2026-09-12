@@ -145,6 +145,7 @@ export const RecordingsCard: FC<{
 									<TableHead>{m.stats_col_kind()}</TableHead>
 									<TableHead>{m.stats_col_resolution()}</TableHead>
 									<TableHead>{m.stats_col_codec()}</TableHead>
+									<TableHead>{m.stats_col_encoder()}</TableHead>
 									<TableHead className="text-right">
 										{m.stats_col_duration()}
 									</TableHead>
@@ -177,6 +178,14 @@ export const RecordingsCard: FC<{
 										</TableCell>
 										<TableCell className="uppercase text-muted-foreground">
 											{r.codec}
+										</TableCell>
+										{/* The stage names and their meaning follow the backend: `driver-*`
+										    records the Windows driver's stages. */}
+										<TableCell
+											className="max-w-48 truncate text-muted-foreground"
+											title={r.gpu || undefined}
+										>
+											{r.encoder_backend || "—"}
 										</TableCell>
 										<TableCell className="text-right tabular-nums">
 											{fmtDuration(r.duration_ms)}
