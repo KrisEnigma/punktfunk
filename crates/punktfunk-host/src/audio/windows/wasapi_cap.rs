@@ -1,7 +1,8 @@
 //! WASAPI loopback capture of the desktop mix (Windows analogue of the PipeWire sink-monitor).
 //! Interleaved f32 PCM at the opened engine rate — never above it; see
 //! [`WasapiLoopbackCapturer::opened_rate`] — in the requested layout (stereo / 5.1 / 7.1,
-//! `dwChannelMask` FL FR FC LFE RL RR SL SR). Shared-mode autoconvert does SRC and up/downmix.
+//! `dwChannelMask` FL FR FC LFE RL RR SL SR). Shared-mode autoconvert does SRC and up/downmix;
+//! a silent sink is reshaped to the session's layout so apps render surround into it.
 //! WASAPI objects are COM-apartment-bound and `!Send`, so they live on a dedicated thread;
 //! the struct holds only the channel, stop flag, and join handle.
 //!
@@ -294,10 +295,11 @@ fn capture_thread(
             }
         }
     }
-    // Restore both parked defaults (no-op if never parked, or if the operator moved them).
-    // Recording restore keeps the parked mic session-scoped; see `audio_control`.
+    // Restore both parked defaults (no-op if never parked, or if the operator moved them), then
+    // the sink's speaker layout. Recording restore keeps the parked mic session-scoped.
     audio_control::restore_default_playback();
     audio_control::restore_default_recording();
+    audio_control::restore_endpoint_channels();
     Ok(())
 }
 
@@ -363,6 +365,13 @@ fn wait_endpoint_change(
     }
 }
 
+/// Silent on the host with a working loopback: the name rule, or the minted Speakers by id
+/// ("Punktfunk Speakers" fails the name rule).
+fn silent_loopback(name: &str, id: &str) -> bool {
+    wiring_plan::silent_sink(&name.to_lowercase())
+        || super::minted::minted_ids().speakers_render.as_deref() == Some(id)
+}
+
 /// Current default render endpoint (`None` on enumeration failure — a miss must not kill capture).
 fn default_render(en: &DeviceEnumerator) -> Option<(Device, String)> {
     let d = en.get_default_device(&Direction::Render).ok()?;
@@ -394,14 +403,12 @@ fn capture_once(
     // not once per process: an attempt while Steam was absent re-arms when the driver INFs
     // appear. Those files are invisible to the endpoint-set fingerprint, so nothing else retries.
     if assert_plan && !audio_control::host_audio_requested() {
-        // Name-match plus minted-id: "Punktfunk Speakers" is silent but the name rule refuses
-        // "Speakers", so without the id check a minted session re-attempts a Steam-pair install
-        // it does not need.
+        // Without the minted-id half of [`silent_loopback`], a minted session re-attempts a
+        // Steam-pair install it does not need.
         let have_silent = |w: &wiring_plan::Wiring| {
-            w.loopback_render.as_ref().is_some_and(|(n, id)| {
-                wiring_plan::silent_sink(&n.to_lowercase())
-                    || super::minted::minted_ids().speakers_render.as_deref() == Some(id.as_str())
-            })
+            w.loopback_render
+                .as_ref()
+                .is_some_and(|(n, id)| silent_loopback(n, id))
         };
         static TRIED_WITH_INFS: Mutex<Option<bool>> = Mutex::new(None);
         let should_try = !have_silent(&plan.wiring) && {
@@ -473,11 +480,40 @@ fn capture_once(
     };
 
     let mut audio_client = device.get_iaudioclient().context("IAudioClient")?;
+    let mut engine = audio_client.get_mixformat().ok();
+    // Apps render at the endpoint's channel count; autoconvert then only upmixes that. A silent
+    // sink takes the session's layout until capture ends; any other endpoint is the operator's.
+    if let Some(have) = engine
+        .as_ref()
+        .map(|f| f.get_nchannels())
+        .filter(|&have| u32::from(have) != channels)
+    {
+        if silent_loopback(&dev_name, &dev_id) {
+            let hz = engine
+                .as_ref()
+                .map_or(SAMPLE_RATE, |f| f.get_samplespersec());
+            match audio_control::reshape_endpoint(&dev_id, have, channels as u16, hz) {
+                Ok(()) => {
+                    tracing::info!(device = %dev_name, from = have, to = channels,
+                        "desktop-audio sink set to the session's speaker layout");
+                    // Re-read so the open and its log see the new layout.
+                    audio_client = device.get_iaudioclient().context("IAudioClient")?;
+                    engine = audio_client.get_mixformat().ok();
+                }
+                Err(e) => tracing::warn!(device = %dev_name, error = %format!("{e:#}"),
+                    engine_ch = have, requested = channels,
+                    "desktop-audio sink kept its speaker layout — apps keep rendering that count"),
+            }
+        } else if u32::from(have) < channels {
+            tracing::info!(device = %dev_name, engine_ch = have, requested = channels,
+                "captured endpoint has fewer channels than the session — apps render at its \
+                 count; set its speaker configuration in Windows' sound settings for surround");
+        }
+    }
     // Mix format is authoritative in shared mode. `AUTOCONVERTPCM` succeeds on an upward
     // request and returns interpolated samples — never pad; open at the engine rate.
     // Floor is [`SAMPLE_RATE`], not the engine: libopus takes 8/12/16/24/48 kHz only, so a
     // 44.1 kHz endpoint still opens at 48 kHz. `rate_hz > hz.max(SAMPLE_RATE)` is both rules.
-    let engine = audio_client.get_mixformat().ok();
     let engine_hz = engine.as_ref().map(|f| f.get_samplespersec());
     let open_hz = match engine_hz {
         Some(hz) if hz > 0 && rate_hz > hz.max(SAMPLE_RATE) => {

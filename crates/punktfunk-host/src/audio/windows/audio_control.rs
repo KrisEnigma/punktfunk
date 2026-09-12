@@ -615,6 +615,35 @@ pub(crate) fn restore_default_recording() {
     }
 }
 
+/// Endpoint reshaped for the capture's life: `(id, channels before, rate_hz)`. The first
+/// reshape wins. Memory only: after a crash, the next capture's reshape corrects the count.
+static RESHAPED: Mutex<Option<(String, u16, u32)>> = Mutex::new(None);
+
+/// Give a render endpoint `channels` until [`restore_endpoint_channels`]. `from` is its count now.
+pub(crate) fn reshape_endpoint(id: &str, from: u16, channels: u16, rate_hz: u32) -> Result<()> {
+    set_endpoint_channels(id, channels, rate_hz)?;
+    RESHAPED
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| (id.to_string(), from, rate_hz));
+    Ok(())
+}
+
+/// Inverse of [`reshape_endpoint`]. No-op if nothing was reshaped. Capture exit path.
+pub(crate) fn restore_endpoint_channels() {
+    let Some((id, channels, rate_hz)) = RESHAPED.lock().unwrap().take() else {
+        return;
+    };
+    match set_endpoint_channels(&id, channels, rate_hz) {
+        Ok(()) => tracing::info!(
+            channels,
+            "desktop-audio sink speaker layout restored after streaming"
+        ),
+        Err(e) => tracing::warn!(error = %format!("{e:#}"),
+            "restore the desktop-audio sink speaker layout after streaming"),
+    }
+}
+
 /// Open by endpoint id. Goes through [`super::pad_endpoint::open_wasapi_device`]
 /// so every caller shares one resolution path (see that helper).
 pub(crate) fn open_endpoint(ep: &Endpoint) -> Result<wasapi::Device> {
@@ -622,11 +651,10 @@ pub(crate) fn open_endpoint(ep: &Endpoint) -> Result<wasapi::Device> {
         .map_err(|e| anyhow!("open endpoint {:?}: {e:#}", ep.0))
 }
 
-// Undocumented IPolicyConfig: default-endpoint and endpoint-visibility writes.
+// Undocumented IPolicyConfig: default-endpoint, endpoint-visibility and device-format writes.
 
-/// `IPolicyConfig` vtable. Only `SetDefaultEndpoint` and `SetEndpointVisibility`
-/// are called; the 10 methods between `Release` and them are placeholders so the
-/// slot offsets stay correct.
+/// `IPolicyConfig` vtable. The placeholder arrays hold the methods between the called
+/// ones so the slot offsets stay correct.
 #[repr(C)]
 struct IPolicyConfigVtbl {
     query_interface: unsafe extern "system" fn(
@@ -636,7 +664,18 @@ struct IPolicyConfigVtbl {
     ) -> windows::core::HRESULT,
     add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
     release: unsafe extern "system" fn(*mut c_void) -> u32,
-    _reserved: [*const c_void; 10],
+    /// GetMixFormat, GetDeviceFormat, ResetDeviceFormat.
+    _reserved_a: [*const c_void; 3],
+    /// `(id, endpoint WAVEFORMATEX*, mix WAVEFORMATEX*)`. `c_void`: `wasapi` builds the formats
+    /// against its own `windows` version.
+    set_device_format: unsafe extern "system" fn(
+        *mut c_void,
+        windows::core::PCWSTR,
+        *const c_void,
+        *const c_void,
+    ) -> windows::core::HRESULT,
+    /// Get/SetProcessingPeriod, Get/SetShareMode, Get/SetPropertyValue.
+    _reserved_b: [*const c_void; 6],
     set_default_endpoint: unsafe extern "system" fn(
         *mut c_void,
         windows::core::PCWSTR,
@@ -655,20 +694,25 @@ struct IPolicyConfigVtbl {
 const _: () = {
     use std::mem::{offset_of, size_of};
     type P = *const c_void;
-    // 3 IUnknown slots + 10 reserved = `set_default_endpoint` is slot 13 (0-based),
-    // `set_endpoint_visibility` the slot after.
+    // 3 IUnknown slots, then GetMixFormat..ResetDeviceFormat: `set_device_format` is slot 6
+    // (0-based), `set_default_endpoint` 13, `set_endpoint_visibility` 14.
     assert!(offset_of!(IPolicyConfigVtbl, query_interface) == 0);
     assert!(offset_of!(IPolicyConfigVtbl, add_ref) == size_of::<P>());
     assert!(offset_of!(IPolicyConfigVtbl, release) == 2 * size_of::<P>());
-    assert!(offset_of!(IPolicyConfigVtbl, _reserved) == 3 * size_of::<P>());
+    assert!(offset_of!(IPolicyConfigVtbl, _reserved_a) == 3 * size_of::<P>());
+    assert!(offset_of!(IPolicyConfigVtbl, set_device_format) == 6 * size_of::<P>());
+    assert!(offset_of!(IPolicyConfigVtbl, _reserved_b) == 7 * size_of::<P>());
     assert!(offset_of!(IPolicyConfigVtbl, set_default_endpoint) == 13 * size_of::<P>());
     assert!(offset_of!(IPolicyConfigVtbl, set_endpoint_visibility) == 14 * size_of::<P>());
     assert!(size_of::<IPolicyConfigVtbl>() == 15 * size_of::<P>());
 };
 
-/// Set `device_id` as default for eConsole/eMultimedia/eCommunications via
-/// `IPolicyConfig::SetDefaultEndpoint`. Errs if any role fails.
-pub(crate) fn set_default_endpoint(device_id: &str) -> Result<()> {
+/// Run `f` with a live `IPolicyConfig` pointer and its vtable, and a NUL-terminated
+/// UTF-16 `device_id`. The pointer is Released after `f` returns.
+fn with_policy_config<R>(
+    device_id: &str,
+    f: impl FnOnce(*mut c_void, &IPolicyConfigVtbl, windows::core::PCWSTR) -> R,
+) -> Result<R> {
     use windows::core::{IUnknown, Interface, GUID, PCWSTR};
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 
@@ -678,11 +722,9 @@ pub(crate) fn set_default_endpoint(device_id: &str) -> Result<()> {
 
     let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
 
-    // SAFETY: CoCreateInstance with a valid CLSID returns an owned, refcounted IUnknown. We QI it for
-    // IPolicyConfig; on success (HRESULT ok + non-null pointer) we invoke its SetDefaultEndpoint slot
-    // through the documented vtable layout (3 IUnknown + 10 placeholder methods precede it) with a
-    // NUL-terminated UTF-16 id and an in-range ERole (0..=2), then Release the QI'd pointer. Every
-    // pointer is checked non-null before deref; `unk` is Released by its Drop on scope exit.
+    // SAFETY: CoCreateInstance returns an owned IUnknown, Released by its Drop. The QI'd pointer
+    // is checked non-null; its first word is the vtable whose layout the asserts above pin. It is
+    // Released exactly once, after `f`. `wide` outlives `f`.
     unsafe {
         let unk: IUnknown = CoCreateInstance(&CLSID_POLICY_CONFIG, None, CLSCTX_ALL)
             .map_err(|e| anyhow!("CoCreateInstance(PolicyConfig): {e}"))?;
@@ -693,19 +735,29 @@ pub(crate) fn set_default_endpoint(device_id: &str) -> Result<()> {
         if raw.is_null() {
             bail!("IPolicyConfig QueryInterface returned null");
         }
-        let vtbl = *(raw as *const *const IPolicyConfigVtbl);
+        let vtbl = &**(raw as *const *const IPolicyConfigVtbl);
+        let out = f(raw, vtbl, PCWSTR(wide.as_ptr()));
+        (vtbl.release)(raw);
+        Ok(out)
+    }
+}
+
+/// Set `device_id` as default for eConsole/eMultimedia/eCommunications via
+/// `IPolicyConfig::SetDefaultEndpoint`. Errs if any role fails.
+pub(crate) fn set_default_endpoint(device_id: &str) -> Result<()> {
+    with_policy_config(device_id, |raw, vtbl, id| {
         let mut result = Ok(());
         for role in 0u32..=2 {
-            let hr = ((*vtbl).set_default_endpoint)(raw, PCWSTR(wide.as_ptr()), role);
+            // SAFETY: live IPolicyConfig from `with_policy_config`; in-range ERole.
+            let hr = unsafe { (vtbl.set_default_endpoint)(raw, id, role) };
             if hr.is_err() {
                 result = hr
                     .ok()
                     .map_err(|e| anyhow!("SetDefaultEndpoint(role {role}): {e}"));
             }
         }
-        ((*vtbl).release)(raw);
         result
-    }
+    })?
 }
 
 /// Show or hide an endpoint via `IPolicyConfig::SetEndpointVisibility`. Hidden
@@ -714,31 +766,61 @@ pub(crate) fn set_default_endpoint(device_id: &str) -> Result<()> {
 /// a PnP reinstall. Pad-endpoint provider hides the idle DualSense speaker so
 /// libScePad titles do not take the haptics path against an unserviced endpoint.
 pub(crate) fn set_endpoint_visibility(device_id: &str, visible: bool) -> Result<()> {
-    use windows::core::{IUnknown, Interface, GUID, PCWSTR};
-    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
-
-    const CLSID_POLICY_CONFIG: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
-    const IID_IPOLICY_CONFIG: GUID = GUID::from_u128(0xf8679f50_850a_41cf_9c72_430f290290c8);
-
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-
-    // SAFETY: same contract as `set_default_endpoint` — owned IUnknown from CoCreateInstance,
-    // QI'd pointer checked non-null, the call goes through the assertion-pinned vtable slot with
-    // a NUL-terminated UTF-16 id and an INT bool, and the QI'd pointer is Released before return.
-    unsafe {
-        let unk: IUnknown = CoCreateInstance(&CLSID_POLICY_CONFIG, None, CLSCTX_ALL)
-            .map_err(|e| anyhow!("CoCreateInstance(PolicyConfig): {e}"))?;
-        let mut raw: *mut c_void = std::ptr::null_mut();
-        unk.query(&IID_IPOLICY_CONFIG, &mut raw)
-            .ok()
-            .map_err(|e| anyhow!("QueryInterface(IPolicyConfig): {e}"))?;
-        if raw.is_null() {
-            bail!("IPolicyConfig QueryInterface returned null");
-        }
-        let vtbl = *(raw as *const *const IPolicyConfigVtbl);
-        let hr = ((*vtbl).set_endpoint_visibility)(raw, PCWSTR(wide.as_ptr()), visible as i32);
-        ((*vtbl).release)(raw);
+    with_policy_config(device_id, |raw, vtbl, id| {
+        // SAFETY: live IPolicyConfig from `with_policy_config`; INT bool.
+        let hr = unsafe { (vtbl.set_endpoint_visibility)(raw, id, visible as i32) };
         hr.ok()
             .map_err(|e| anyhow!("SetEndpointVisibility({visible}): {e}"))
-    }
+    })?
+}
+
+/// Set a render endpoint's speaker layout via `IPolicyConfig::SetDeviceFormat`, the write
+/// behind Windows' speaker setup. Tries device formats in Sunshine's order, first accepted
+/// wins. The zeroed mix format lets the engine derive its own from the device format.
+fn set_endpoint_channels(device_id: &str, channels: u16, rate_hz: u32) -> Result<()> {
+    use wasapi::{SampleType, WaveFormat};
+    let mask = punktfunk_core::audio::wasapi_channel_mask(channels as u8);
+    // 5.1 drivers split between back (0x3F) and side (0x60F) surrounds.
+    let masks: &[u32] = if channels == 6 {
+        &[mask, 0x60F]
+    } else {
+        &[mask]
+    };
+    // (store bits, valid bits, type): 24-in-32, 24, 16, f32, 32.
+    let samples = [
+        (32, 24, SampleType::Int),
+        (24, 24, SampleType::Int),
+        (16, 16, SampleType::Int),
+        (32, 32, SampleType::Float),
+        (32, 32, SampleType::Int),
+    ];
+    // WAVEFORMATEXTENSIBLE is 40 bytes, packed.
+    let mix = [0u8; 40];
+    with_policy_config(device_id, |raw, vtbl, id| {
+        let mut last = None;
+        for &m in masks {
+            for (store, valid, ty) in &samples {
+                let wave = WaveFormat::new(
+                    *store,
+                    *valid,
+                    ty,
+                    rate_hz as usize,
+                    channels.into(),
+                    Some(m),
+                );
+                let fmt = std::ptr::from_ref(wave.as_waveformatex_ref()).cast();
+                // SAFETY: live IPolicyConfig from `with_policy_config`; `fmt` points at `wave` (a
+                // full WAVEFORMATEXTENSIBLE, cbSize 22), `mix` at 40 bytes; both outlive the call.
+                let hr = unsafe { (vtbl.set_device_format)(raw, id, fmt, mix.as_ptr().cast()) };
+                match hr.ok() {
+                    Ok(()) => return Ok(()),
+                    Err(e) => last = Some(e),
+                }
+            }
+        }
+        Err(anyhow!(
+            "SetDeviceFormat({channels} ch, {rate_hz} Hz): {}",
+            last.unwrap()
+        ))
+    })?
 }
