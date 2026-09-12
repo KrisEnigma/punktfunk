@@ -571,7 +571,20 @@ impl NativeD3d11Decoder {
         let status_id = self.status_id;
         match &mut self.planner {
             Planner::H264(planner) => {
-                let plan = planner.plan_au(au).map_err(|e| anyhow!("plan: {e}"))?;
+                let plan = match planner.plan_au(au) {
+                    Ok(plan) => plan,
+                    // Nothing to feed until the IDR and its parameter sets land — a
+                    // decoder built mid-GOP sees slices first. Idle, not a refusal.
+                    Err(
+                        e @ (pf_dxvadec::PlanError::AwaitingIdr
+                        | pf_dxvadec::PlanError::NoActiveParamSet { .. }),
+                    ) => {
+                        self.want_recovery = true;
+                        tracing::debug!(error = %e, "native D3D11VA idle until the next IDR");
+                        return Ok(None);
+                    }
+                    Err(e) => bail!("plan: {e}"),
+                };
                 let concealed = plan.warnings.iter().any(pf_dxvadec::is_integrity_warning);
                 let session = ensure_session(
                     &mut self.session,
@@ -619,6 +632,15 @@ impl NativeD3d11Decoder {
                     // nothing. Mapping to `Err` would beg the host for a keyframe.
                     Err(pf_dxvadec::PlanErrorH265::RaslSkipped { poc }) => {
                         tracing::debug!(poc, "RASL picture skipped after an open-GOP join");
+                        return Ok(None);
+                    }
+                    // Same idle wait as the H.264 arm.
+                    Err(
+                        e @ (pf_dxvadec::PlanErrorH265::AwaitingIdr
+                        | pf_dxvadec::PlanErrorH265::NoActiveParamSet { .. }),
+                    ) => {
+                        self.want_recovery = true;
+                        tracing::debug!(error = %e, "native D3D11VA idle until the next IDR");
                         return Ok(None);
                     }
                     Err(e) => bail!("plan: {e}"),
@@ -944,6 +966,19 @@ fn colour_of(colour: pf_dxvadec::ColourDescription) -> ColorDesc {
         matrix: colour.matrix_coefficients,
         full_range: colour.video_full_range,
     }
+}
+
+/// Does this adapter expose any HEVC decode profile? Asked before the codec caps go
+/// on the wire; no decoder is built here.
+pub(crate) fn adapter_decodes_hevc(luid: Option<[u8; 8]>) -> bool {
+    let Ok((device, _)) = create_device(luid) else {
+        return false;
+    };
+    let Ok(video) = device.cast::<ID3D11VideoDevice>() else {
+        return false;
+    };
+    profile_supported(&video, pf_dxvadec::config::HEVC_VLD_MAIN).is_ok()
+        || profile_supported(&video, pf_dxvadec::config::HEVC_VLD_MAIN10).is_ok()
 }
 
 /// Does the adapter expose this decode profile for this surface format?

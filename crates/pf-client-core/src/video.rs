@@ -999,6 +999,14 @@ pub fn decodable_codecs_for(vk: Option<&VulkanDecodeDevice>, decoder_pref: &str)
         );
         bits &= !punktfunk_core::quic::CODEC_HEVC;
     }
+    // HEVC has no software rung, so the promise needs a hardware decoder: Vulkan
+    // `DECODE_H265` or a DXVA HEVC profile. Advertised blind, the host builds an HEVC
+    // session the client tears down and re-dials without — every launch.
+    #[cfg(windows)]
+    if bits & punktfunk_core::quic::CODEC_HEVC != 0 && !hevc_hardware_decodable(vk) {
+        tracing::info!("HEVC not advertised: this adapter exposes no HEVC decode profile");
+        bits &= !punktfunk_core::quic::CODEC_HEVC;
+    }
     #[cfg(all(any(target_os = "linux", windows), feature = "pyrowave"))]
     if vk.map(|v| v.pyrowave_decode).unwrap_or(false) {
         return bits | punktfunk_core::quic::CODEC_PYROWAVE;
@@ -1006,6 +1014,17 @@ pub fn decodable_codecs_for(vk: Option<&VulkanDecodeDevice>, decoder_pref: &str)
     #[cfg(not(all(any(target_os = "linux", windows), feature = "pyrowave")))]
     let _ = vk;
     bits
+}
+
+/// Can this adapter decode HEVC in hardware? Vulkan `DECODE_H265`, else a DXVA HEVC
+/// profile on the presenter's adapter. Device facts only, never a decoder existing.
+#[cfg(windows)]
+fn hevc_hardware_decodable(vk: Option<&VulkanDecodeDevice>) -> bool {
+    let Some(v) = vk else {
+        return false;
+    };
+    (v.video_decode && v.decode_video_caps & VIDEO_CODEC_OP_DECODE_H265 != 0)
+        || (v.d3d11_import && crate::video_d3d11_native::adapter_decodes_hevc(v.adapter_luid))
 }
 
 /// Log what `PUNKTFUNK_AU_FAULT` will do, including when the answer is nothing.
@@ -1634,7 +1653,15 @@ impl Decoder {
                 self.vaapi_fails += 1;
                 self.want_keyframe = true;
                 let first = *self.first_fail.get_or_insert_with(std::time::Instant::now);
-                if self.vaapi_fails >= VAAPI_DEMOTE_AFTER && first.elapsed() >= HW_DEMOTE_MIN_STREAK
+                // A device that cannot host the codec refuses every AU the same way;
+                // waiting out the streak only costs the opening seconds.
+                let device_fact = e.chain().any(|c| {
+                    c.downcast_ref::<pf_vkdecode::VkDecodeError>()
+                        .is_some_and(pf_vkdecode::VkDecodeError::is_device_fact)
+                });
+                if device_fact
+                    || (self.vaapi_fails >= VAAPI_DEMOTE_AFTER
+                        && first.elapsed() >= HW_DEMOTE_MIN_STREAK)
                 {
                     // A never-delivered native rung is a decoder the session never
                     // had; it must not cost the rung below. `entered_rungs` keeps
@@ -1647,7 +1674,7 @@ impl Decoder {
                                 self.stream,
                             ) {
                                 Ok(d) => {
-                                    tracing::warn!(error = %e, fails = self.vaapi_fails,
+                                    tracing::warn!(error = %format!("{e:#}"), fails = self.vaapi_fails,
                                         from = which, decoder = d.name(),
                                         "hardware decode failing repeatedly — demoting to \
                                          native VAAPI");
@@ -1670,7 +1697,7 @@ impl Decoder {
                                 self.d3d11_hdr10,
                             ) {
                                 Ok(d) => {
-                                    tracing::warn!(error = %e, fails = self.vaapi_fails,
+                                    tracing::warn!(error = %format!("{e:#}"), fails = self.vaapi_fails,
                                         from = which, decoder = d.name(),
                                         "hardware decode failing repeatedly — demoting to \
                                          native D3D11VA");
@@ -1699,7 +1726,7 @@ impl Decoder {
                                     native_codec(self.wire_codec).expect("the gate admitted it");
                                 match NativeVulkanDecoder::new(&v, codec, self.stream) {
                                     Ok(n) => {
-                                        tracing::warn!(error = %e, fails = self.vaapi_fails,
+                                        tracing::warn!(error = %format!("{e:#}"), fails = self.vaapi_fails,
                                             from = which,
                                             "hardware decode failing repeatedly — demoting to \
                                              native Vulkan Video");
@@ -1713,7 +1740,7 @@ impl Decoder {
                             }
                         }
                     }
-                    tracing::warn!(error = %e, fails = self.vaapi_fails,
+                    tracing::warn!(error = %format!("{e:#}"), fails = self.vaapi_fails,
                         "{which} decode failing repeatedly — demoting to software");
                     // Ladder bottom. H.264/AV1 always builds; HEVC `?` carries
                     // `NoSoftwareRung` to the pump, which reconnects without HEVC.

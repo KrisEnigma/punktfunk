@@ -609,7 +609,7 @@ pub(super) fn audio_thread(
                 // (capturer parked below; video continues) rather than pacing a wire that
                 // cannot take it. Logged once: this arm breaks.
                 super::link::DatagramSend::Unavailable => {
-                    tracing::warn!(
+                    tracing::info!(
                         "the datagram path is unavailable — ending the audio plane for this \
                          session (video continues)"
                     );

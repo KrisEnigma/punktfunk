@@ -792,13 +792,24 @@ impl NativeVulkanDecoder {
                 // carrying them would make the next AU look freshly damaged.
                 let _ = self.dec.take_warnings();
                 let verdicts = self.settle_statuses();
+                // Not fed: idle until the IDR, not a refusal. The IDR request rides
+                // the concealment path so the host resends parameter sets.
+                if e.awaits_idr() {
+                    if verdicts.total() > 0 {
+                        self.health.note(false, false, verdicts.total());
+                    }
+                    self.want_recovery = true;
+                    tracing::debug!(error = %e, "native decode idle until the next IDR");
+                    return Ok(None);
+                }
                 self.health.note(false, true, verdicts.total());
                 tracing::warn!(
                     error = %e,
                     driver_failed = verdicts.driver_failed,
                     "native decode refused the access unit"
                 );
-                return Err(anyhow!("decode: {e}"));
+                // Typed, so the ladder can read a device fact off the chain.
+                return Err(anyhow::Error::new(e).context("decode"));
             }
         };
         let warnings = self.dec.take_warnings();

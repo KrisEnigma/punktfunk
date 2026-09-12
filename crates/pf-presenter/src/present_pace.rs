@@ -136,36 +136,40 @@ impl<T> FrameStore<T> {
 
 /// Panel latch grid: last on-glass instant plus the learned period, for slot targeting.
 ///
-/// Period is the shared [`punktfunk_core::phase::PanelGrid`], not a local cap at the
-/// mode refresh. Presents below panel rate land at k×period; the min of a run resists
-/// that inflation, and the grid's eight-observation widen streak still discovers a
-/// genuinely slower panel. Same grid the host-facing `LatchGrid` publish reads, so
-/// the phase-lock report and the local scheduler cannot disagree.
+/// Period is the shared [`punktfunk_core::phase::PanelGrid`], fed the median of each
+/// [`GRID_OBSERVE_EVERY`] spacings, snapped onto the mode period when it lies within
+/// [`grid_snap_ns`] of it. Present-wait stamps carry milliseconds of wake jitter; the
+/// min of a run reads that as a faster panel and every slot it predicts is phantom.
+/// A stream below panel rate lands at k×period and stays as measured: any multiple
+/// is a real latch. Same grid the host-facing `LatchGrid` publish reads, so the
+/// phase-lock report and the local scheduler cannot disagree.
 pub(crate) struct LatchClock {
     anchor_ns: u64,
     /// Previous stamp, kept across calls. The run loop drains one present-wait sample
     /// per pass; spacings only within a batch (`windows(2)`) observe nothing.
     last_ns: u64,
-    /// Narrowest spacing since the last grid handoff, and how many have accumulated.
-    /// Fed as the min of a run: presents at k×period below panel rate; that min is
-    /// the best estimate of the true grid step.
-    pending_min_ns: u64,
-    pending_count: u32,
+    /// Spacings since the last grid handoff.
+    pending: Vec<u64>,
     grid: punktfunk_core::phase::PanelGrid,
     fallback_period_ns: u64,
 }
 
 /// Spacings per [`PanelGrid`](punktfunk_core::phase::PanelGrid) handoff. 16 ≈ a
 /// mode change within a second at 16+ fps.
-const GRID_OBSERVE_EVERY: u32 = 16;
+const GRID_OBSERVE_EVERY: usize = 16;
+
+/// 10 % of the mode period, at least 1 ms: a median of 16 jittered spacings sits well
+/// inside; a wrong mode claim (120 for a 60 Hz panel) sits well outside.
+fn grid_snap_ns(period_ns: u64) -> u64 {
+    (period_ns / 10).max(1_000_000)
+}
 
 impl LatchClock {
     pub(crate) fn new(refresh_hz: u32) -> LatchClock {
         LatchClock {
             anchor_ns: 0,
             last_ns: 0,
-            pending_min_ns: 0,
-            pending_count: 0,
+            pending: Vec::with_capacity(GRID_OBSERVE_EVERY),
             grid: punktfunk_core::phase::PanelGrid::seeded(refresh_hz as i32),
             fallback_period_ns: 1_000_000_000 / u64::from(refresh_hz.max(1)),
         }
@@ -179,16 +183,18 @@ impl LatchClock {
                 let d = s - self.last_ns;
                 // < 1 ms apart = a queued pair, not a grid step.
                 if d > 1_000_000 {
-                    self.pending_min_ns = if self.pending_min_ns == 0 {
-                        d
-                    } else {
-                        self.pending_min_ns.min(d)
-                    };
-                    self.pending_count += 1;
-                    if self.pending_count >= GRID_OBSERVE_EVERY {
-                        self.grid.observe(self.pending_min_ns as i64);
-                        self.pending_min_ns = 0;
-                        self.pending_count = 0;
+                    self.pending.push(d);
+                    if self.pending.len() >= GRID_OBSERVE_EVERY {
+                        self.pending.sort_unstable();
+                        let median = self.pending[self.pending.len() / 2];
+                        let mode = self.fallback_period_ns;
+                        let spacing = if median.abs_diff(mode) <= grid_snap_ns(mode) {
+                            mode
+                        } else {
+                            median
+                        };
+                        self.grid.observe(spacing as i64);
+                        self.pending.clear();
                     }
                 }
             }
@@ -603,7 +609,38 @@ mod tests {
         assert_eq!(s.take(|_| true), Some(5));
     }
 
-    /// Learns min positive spacing, anchors on the newest stamp, extrapolates.
+    /// Wake jitter on the stamps must not read as a faster panel: the batch median
+    /// snaps onto the mode grid. One queued-late pair in a batch cannot take it over.
+    #[test]
+    fn latch_clock_holds_the_mode_grid_through_jitter() {
+        const P: u64 = 16_666_666;
+        let mut c = LatchClock::new(60);
+        let mut t = 1_000_000_000u64;
+        for i in 0..(GRID_OBSERVE_EVERY * 8) {
+            // ±1.5 ms of wake jitter, the kind a waiter thread stamps on Windows.
+            let jitter: i64 = if i % 2 == 0 { 1_500_000 } else { -1_500_000 };
+            t += (P as i64 + jitter) as u64;
+            if i % GRID_OBSERVE_EVERY == 3 {
+                // Two presents retiring together, 2.2 ms apart.
+                c.note_batch(&[t, t + 2_200_000]);
+                t += 2_200_000;
+            } else {
+                c.note_batch(&[t]);
+            }
+        }
+        assert_eq!(c.period_ns(), P, "jitter is not a faster panel");
+
+        // A stream below panel rate stays as measured — any multiple is a real latch.
+        let mut half = LatchClock::new(60);
+        let mut t = 1_000_000_000u64;
+        for _ in 0..(GRID_OBSERVE_EVERY * 9) {
+            t += 2 * P;
+            half.note_batch(&[t]);
+        }
+        assert_eq!(half.period_ns(), 2 * P);
+    }
+
+    /// Learns the batch median, anchors on the newest stamp, extrapolates.
     /// Sub-ms pairs (queued double-present) never become the period.
     #[test]
     fn latch_clock_learns_and_extrapolates() {

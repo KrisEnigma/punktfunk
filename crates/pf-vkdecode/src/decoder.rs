@@ -294,6 +294,28 @@ impl std::fmt::Display for VkDecodeError {
     }
 }
 
+impl VkDecodeError {
+    /// The device cannot host this codec at all: every AU refuses the same way, so a
+    /// failure streak only delays the rung below.
+    pub fn is_device_fact(&self) -> bool {
+        matches!(self, VkDecodeError::Caps(_))
+    }
+
+    /// Nothing was fed: the planner waits for an IDR, or for the parameter sets a
+    /// decoder built mid-GOP has not seen. Idle, not a refusal.
+    pub fn awaits_idr(&self) -> bool {
+        matches!(
+            self,
+            VkDecodeError::Plan(PlanError::AwaitingIdr | PlanError::NoActiveParamSet { .. })
+                | VkDecodeError::PlanH265(
+                    pf_bitstream::h265::PlanError::AwaitingIdr
+                        | pf_bitstream::h265::PlanError::NoActiveParamSet { .. }
+                )
+                | VkDecodeError::AwaitingKeyAv1
+        )
+    }
+}
+
 impl std::error::Error for VkDecodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -620,11 +642,18 @@ impl VkH264Decoder {
         // Queue family must actually run H.264 decode. Caps would answer for
         // the hardware even if the extension was never enabled (`device.rs`).
         dev.require_codec_op(vk::VideoCodecOperationFlagsKHR::DECODE_H264, "H.264 decode")?;
+        // The picture-pool arrangement is a device fact, not the stream's: ask with
+        // the profile every host encodes, so an unusable device refuses the rung
+        // before its first AU. A stream in another profile re-queries at its SPS.
+        // SAFETY: live device (the `wrap` contract above).
+        let raw =
+            unsafe { query_h264_caps(&dev, H264_PROFILE_HIGH) }.map_err(VkDecodeError::from)?;
+        let caps = Some((H264_PROFILE_HIGH, derive_caps(&raw)?));
         Ok(Self {
             dev,
             lock,
             planner: H264Planner::new(),
-            caps: None,
+            caps,
             state: None,
             pending: BTreeMap::new(),
             ready: VecDeque::new(),
@@ -1488,6 +1517,9 @@ impl Drop for VkH264Decoder {
         }
     }
 }
+
+/// `STD_VIDEO_H264_PROFILE_IDC_HIGH`: the profile every punktfunk host encodes.
+const H264_PROFILE_HIGH: hh::StdVideoH264ProfileIdc = 100;
 
 /// Map `profile_idc` to the Std code point. Identity for the four
 /// Vulkan-representable profiles; reject otherwise.
