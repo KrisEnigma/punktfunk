@@ -76,6 +76,7 @@ import io.unom.punktfunk.console.SkiaConsoleShell
 import io.unom.punktfunk.models.LibraryReturn
 import io.unom.punktfunk.models.Tab
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -103,6 +104,16 @@ fun App(forceGamepadUi: Boolean = false) {
     // deliberate press and must not start a stream on its own.
     var touchAutoStream by remember { mutableStateOf(false) }
 
+    // A stream's capture hides the pad it claims (a Sony pad's forced USB claim, the paused SC2
+    // menu capture) until the stream screen is disposed, after its fade-out. Held from a console
+    // launch until [PAD_RETURN_MS] past the session, so that gap keeps the console up.
+    var padHeldByStream by remember { mutableStateOf(false) }
+    LaunchedEffect(session, padHeldByStream) {
+        if (session != null || !padHeldByStream) return@LaunchedEffect
+        delay(PAD_RETURN_MS)
+        padHeldByStream = false
+    }
+
     // Console (gamepad) mode mirrors the Apple client: the setting AND (its mode says Always OR a
     // pad is attached OR this is a TV OR the dev force flag). Flips live as controllers
     // connect/disconnect — unless the mode is Always, where it simply stays.
@@ -116,7 +127,8 @@ fun App(forceGamepadUi: Boolean = false) {
     // ([SkiaConsole.healthy], observable) would front a SurfaceView nothing ever paints — a gray
     // screen with a working pad probe, which is worse than the touch UI it replaced.
     val gamepadUi = skiaConsole && SkiaConsole.healthy && gamepadUiActive(
-        settings.gamepadUiEnabled, settings.gamepadUiMode, controllerConnected, tv, forceGamepadUi,
+        settings.gamepadUiEnabled, settings.gamepadUiMode, controllerConnected || padHeldByStream, tv,
+        forceGamepadUi,
     )
 
     // The runtime grant both shells need before the network works, asked above them: the console
@@ -288,7 +300,7 @@ fun App(forceGamepadUi: Boolean = false) {
             gamepadUi -> SkiaConsoleShell(
                 settings = settings,
                 onSettingsChange = { settings = it; settingsStore.save(it) },
-                onConnected = { session = it },
+                onConnected = { padHeldByStream = true; session = it },
                 deepLink = pendingLink,
                 onDeepLinkHandled = { activity?.pendingDeepLink = null },
                 reopenLibrary = reopenLibrary,
@@ -335,6 +347,12 @@ fun App(forceGamepadUi: Boolean = false) {
     }
     }
 }
+
+/**
+ * How long the console outlives a hidden pad after a stream: the fade-out, a USB re-enumeration
+ * and a BLE SC2 re-capture. A pad unplugged mid-stream keeps the console this much longer.
+ */
+private const val PAD_RETURN_MS = 3_000L
 
 /** What the console toasts when a session ends; null for a clean end. */
 private fun abnormalEndMessage(reason: SessionEndReason): String? = when (reason) {
