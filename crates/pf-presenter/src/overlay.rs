@@ -40,7 +40,8 @@ pub struct FrameCtx<'a> {
     /// Overlay chrome is physical pixels; multiply every metric by this. The
     /// run loop (`overlay_scale`) clamps it finite and > 0.
     pub scale: f32,
-    pub stats: Option<&'a str>,
+    /// Stats overlay lines, painted by role. `None` = overlay off.
+    pub stats: Option<&'a [HudLine]>,
     pub hint: Option<&'a str>,
     /// Access chip. `None` for a full-control permanent session.
     pub access: Option<&'a str>,
@@ -75,6 +76,7 @@ pub struct OverlayFrame {
 // console keep the `pf_presenter::overlay::…` path.
 pub use pf_client_core::console::{OverlayAction, PointerButton, PointerInput, SessionPhase};
 pub use pf_client_core::ring::{RingCommand, RingFacts, RingInput};
+pub use punktfunk_core::hud::{HudLine, Role};
 
 /// Console-UI side. The session binary passes `Option<Box<dyn Overlay>>`;
 /// `None` is the Skia-free build.
