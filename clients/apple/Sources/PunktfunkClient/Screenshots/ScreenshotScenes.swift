@@ -652,24 +652,58 @@ private struct ShotTrust: View {
 /// The marketing hero: a stand-in streamed frame with the real glass HUD chip on top.
 /// StreamView can't render here (it needs a live punktfunk/1 connection), so the frame is
 /// synthetic — set `PUNKTFUNK_SHOT_HERO=/path/to/frame.png` to drop in a real captured frame.
+/// The frame fills the display; the HUD stays inside the safe area.
 private struct ShotStreamHero: View {
+    @Environment(\.displayScale) private var scale
+
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            ShotDesktopFrame()
-            ShotHUD()
+        GeometryReader { geo in
+            // The whole display in pixels: the safe-area frame plus its insets, at backing scale.
+            let insets = geo.safeAreaInsets
+            ShotHUD(
+                width: Int(((geo.size.width + insets.leading + insets.trailing) * scale).rounded()),
+                height: Int(((geo.size.height + insets.top + insets.bottom) * scale).rounded()))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
-        .background(Color.black)
+        .background { ShotDesktopFrame() }
+        .background(Color.black.ignoresSafeArea())
     }
 }
 
 /// A faithful copy of StreamHUDView's overlay (which needs a live PunktfunkConnection for the
-/// mode line) with representative numbers, reusing the app's real `.glassBackground`.
+/// mode line), reusing the app's real `.glassBackground`. The mode line is the capturing
+/// display's own pixel size and max refresh rate.
 private struct ShotHUD: View {
+    let width: Int
+    let height: Int
+
+    /// 812.4 Mb/s at 5120×1440@240: the bitrate scales with pixel rate at this density.
+    private static let bitsPerPixelFrame = 0.459
+
+    /// The display's max refresh rate. `PUNKTFUNK_SHOT_FPS` overrides it: a Simulator reports
+    /// 60 even for a 120 Hz device.
+    private var fps: Int {
+        if let fps = ProcessInfo.processInfo.environment["PUNKTFUNK_SHOT_FPS"].flatMap(Int.init) {
+            return fps
+        }
+        #if os(macOS)
+        return NSScreen.main?.maximumFramesPerSecond ?? 60
+        #else
+        return UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.maximumFramesPerSecond }.first ?? 60
+        #endif
+    }
+
+    private var modeLine: String {
+        let mbps = Double(width * height * fps) * Self.bitsPerPixelFrame / 1_000_000
+        return "\(width)×\(height)@\(fps)  \(fps) fps  " + String(format: "%.1f Mb/s", mbps)
+    }
+
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
             HStack(spacing: 6) {
                 Circle().fill(Color.accentColor).frame(width: 7, height: 7)
-                Text("5120×1440@240  240 fps  812.4 Mb/s")
+                Text(modeLine)
                     .font(.system(.caption, design: .monospaced))
             }
             Text("end-to-end 2.9 ms p50 · 3.8 p95 · capture→on-glass")
@@ -693,14 +727,19 @@ private struct ShotHUD: View {
 }
 
 /// A synthetic "streamed frame" — a synthwave scene that reads as game content without shipping
-/// any real art. Replaced wholesale when `PUNKTFUNK_SHOT_HERO` points at a real PNG.
+/// any real art. Replaced wholesale when `PUNKTFUNK_SHOT_HERO` points at a real PNG. Fills the
+/// whole display, safe area included, like the real stream.
 private struct ShotDesktopFrame: View {
     var body: some View {
-        if let image = Self.overrideImage {
-            image.resizable().scaledToFill()
-        } else {
-            synthetic
+        Group {
+            if let image = Self.overrideImage {
+                // Fill without growing the layout: the clear view sets the size, the image crops.
+                Color.clear.overlay { image.resizable().scaledToFill() }.clipped()
+            } else {
+                synthetic
+            }
         }
+        .ignoresSafeArea()
     }
 
     private var synthetic: some View {
@@ -770,7 +809,6 @@ private struct ShotDesktopFrame: View {
             .glassBackground(Capsule())
             .padding(18)
         }
-        .ignoresSafeArea()
     }
 
     /// `PUNKTFUNK_SHOT_HERO=/abs/path.png` → use a real captured frame as the hero background.

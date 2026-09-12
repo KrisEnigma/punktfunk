@@ -31,6 +31,7 @@
 #   tools/screenshots.sh ios ipad tvos  # specific platforms
 #   OUT=~/Desktop/shots tools/screenshots.sh all
 #   PUNKTFUNK_SHOT_HERO=~/frame.png tools/screenshots.sh ios   # real captured frame for the hero
+#   PUNKTFUNK_SHOT_FPS=120 tools/screenshots.sh ios ipad       # HUD refresh; Simulators report 60
 #
 # Keep SCENES in sync with ShotScenes.all.
 
@@ -171,6 +172,8 @@ shoot_sim() {
     local envs=("SIMCTL_CHILD_PUNKTFUNK_SHOT_SCENE=$scene")
     [ -n "${PUNKTFUNK_SHOT_HERO:-}" ] \
       && envs+=("SIMCTL_CHILD_PUNKTFUNK_SHOT_HERO=$PUNKTFUNK_SHOT_HERO")
+    [ -n "${PUNKTFUNK_SHOT_FPS:-}" ] \
+      && envs+=("SIMCTL_CHILD_PUNKTFUNK_SHOT_FPS=$PUNKTFUNK_SHOT_FPS")
     env "${envs[@]}" xcrun simctl launch "$udid" "$BUNDLE_ID" >/dev/null
     sleep "$SETTLE"
     local dest="$OUT/$prefix-$scene.png"
