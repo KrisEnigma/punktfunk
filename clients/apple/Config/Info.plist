@@ -20,9 +20,8 @@
 		<string>_punktfunk._udp</string>
 	</array>
 	<!-- CoreBluetooth: the Steam Controller 2 as-is passthrough (Sc2BleLink) reads an OS-paired
-	     SC2's custom Valve GATT service. Both keys so older iOS releases (which read the
-	     Peripheral key) get a string too. Shared by
-	     all three app targets — harmless on tvOS, where the capture code is #if-gated out. -->
+	     SC2's custom Valve GATT service, on all three app targets. Both keys so older iOS
+	     releases (which read the Peripheral key) get a string too. -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Bluetooth lets Punktfunk read your Steam Controller and pass it through to the streaming PC.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>

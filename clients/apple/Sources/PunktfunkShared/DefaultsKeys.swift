@@ -49,14 +49,13 @@ public enum DefaultsKey {
     public static let gamepadForwarding = "punktfunk.gamepadForwarding"
     /// Steam Controller 2 as-is passthrough: capture of a real SC2 → the host's virtual
     /// 28DE:1302, which the host's Steam drives directly. Two transports — CoreBluetooth against
-    /// a paired pad's vendor GATT service (iOS and macOS), and raw USB HID against a wired pad or
-    /// a Puck dongle (macOS only, `Sc2UsbLink`; IOKit HID is not available to apps on iOS).
+    /// a paired pad's vendor GATT service (every platform), and raw USB HID against a wired pad
+    /// or a Puck dongle (macOS only, `Sc2UsbLink`; apps elsewhere get no IOKit HID).
     /// This client's own key, NOT a shared one: nothing writes an unprefixed `sc2_capture`, and
     /// Android files the same decision under `android.sc2_capture`. Same gate as its
     /// `settings.sc2Capture` though, read at
     /// connect beside `gamepadForwarding`: both must be on for `SessionModel` to build an
-    /// `Sc2Capture`. iOS/macOS only (tvOS has neither capture path; the code is `#if`-gated
-    /// out there). On iOS it is ALSO read app-lifetime, by `GamepadManager`: the same pad
+    /// `Sc2Capture`. On iOS it is ALSO read app-lifetime, by `GamepadManager`: the same pad
     /// navigates the gamepad UI through `Sc2MenuPad` (`gamepadUIEnabled` gates that half).
     ///
     /// ⚠ The DEFAULT deliberately differs from Android's, which is ON: engaging this on Apple

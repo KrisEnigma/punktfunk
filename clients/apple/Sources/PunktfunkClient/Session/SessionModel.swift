@@ -312,14 +312,12 @@ final class SessionModel: ObservableObject {
     /// after `motionHintSeconds` like the motion hint it stacks with, and dropped EARLY on a
     /// release edge so the badge can never outlive the passthrough it announces. The badge is
     /// the capture's ONLY UI surface: the raw BLE device never enters GameController, so the
-    /// Controllers page cannot list it. Never true on tvOS (no `Sc2Capture` there).
+    /// Controllers page cannot list it.
     @Published private(set) var sc2CapturedHint = false
-    #if os(iOS) || os(macOS)
     /// Drops `sc2CapturedHint` — same contract as `motionHintTimer` (restart on a new claim,
-    /// cancel on teardown rather than firing into a torn-down model). Gated with the capture
-    /// itself: only `noteSc2Phase` and the disconnect teardown touch it.
+    /// cancel on teardown rather than firing into a torn-down model). Only `noteSc2Phase` and
+    /// the disconnect teardown touch it.
     private var sc2HintTimer: Task<Void, Never>?
-    #endif
     /// The touch model is passthrough, but this host drops contacts (no `HOST_CAP2_TOUCH`): the
     /// stream view runs the trackpad model instead, and this says so once, for
     /// `motionHintSeconds`, in the same bottom-centre slot. Otherwise the setting is silently
@@ -370,10 +368,8 @@ final class SessionModel: ObservableObject {
     func setRingOpen(_ open: Bool) {
         gamepadCapture?.ringOpen = open
         virtualPad?.masked = open
-        #if os(iOS) || os(macOS)
         // A captured SC2 never enters GamepadCapture, so it hands the ring its pad itself.
         sc2Capture?.ringOpen = open
-        #endif
         #if os(tvOS)
         remotePointer?.ringOpen = open
         #endif
@@ -412,13 +408,11 @@ final class SessionModel: ObservableObject {
         virtualPadShown = true
     }
     private var gamepadFeedback: GamepadFeedback?
-    #if os(iOS) || os(macOS)
     /// The live session's Steam Controller 2 as-is passthrough (`settings.sc2Capture` &&
     /// `settings.gamepadForwarding`) — built beside GamepadCapture/GamepadFeedback in
     /// `beginStreaming`, torn down in `disconnect` in the Android order (unhook the hidRaw
     /// sink → feedback stops → capture stops, which also frees its wire index).
     private var sc2Capture: Sc2Capture?
-    #endif
     #if !os(tvOS)
     /// The live session's clipboard bridge (design/clipboard-and-file-transfer.md §5) — created
     /// by `beginStreaming` when the per-host toggle is on and the host advertises
@@ -869,7 +863,6 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    #if os(iOS) || os(macOS)
     /// The SC2 passthrough's claim/release edges (`Sc2Capture.onPhaseChange`, delivered on
     /// main). A claim shows the badge briefly — motion-hint style; a release drops it at
     /// once, because a badge still saying "passing through" over a released slot would be
@@ -888,7 +881,6 @@ final class SessionModel: ObservableObject {
             sc2CapturedHint = false
         }
     }
-    #endif
 
     /// Push the EFFECTIVE mute — the user's choice OR the background keep-alive's privacy mute —
     /// onto the audio engine. The two reasons are composed here and nowhere else: whichever one
@@ -1039,7 +1031,6 @@ final class SessionModel: ObservableObject {
         // connection is still up); the feedback drain joins off-main like audio.
         gamepadCapture?.stop()
         gamepadCapture = nil
-        #if os(iOS) || os(macOS)
         // Android's teardown order: unhook the hidRaw sink first (no raw replay onto a dying
         // capture), then the capture — its stop sends gamepadRemove and frees the wire index
         // while the connection is still up. The feedback drain joins off-main below.
@@ -1054,7 +1045,6 @@ final class SessionModel: ObservableObject {
         sc2HintTimer?.cancel()
         sc2HintTimer = nil
         sc2CapturedHint = false
-        #endif
         #if os(tvOS)
         remotePointer?.stop() // releases any held click while the connection is still up
         remotePointer = nil
@@ -1303,7 +1293,6 @@ final class SessionModel: ObservableObject {
         let feedback = GamepadFeedback(connection: conn, manager: .shared)
         feedback.start()
         gamepadFeedback = feedback
-        #if os(iOS) || os(macOS)
         // Steam Controller 2 as-is passthrough (opt-in): capture an OS-paired SC2's vendor GATT
         // service and forward its raw reports — the host mirrors a real 28DE:1302 that its
         // Steam drives directly, and Steam's rumble/settings writes come back through the
@@ -1330,7 +1319,6 @@ final class SessionModel: ObservableObject {
             sc2.start()
             sc2Capture = sc2
         }
-        #endif
         #if !os(tvOS)
         // Shared clipboard: opt-in per host AND host-advertised (older hosts / operator-disabled
         // hosts never see a ClipControl) AND granted to this device (per-client access §5 —
