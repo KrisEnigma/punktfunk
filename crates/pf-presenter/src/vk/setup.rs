@@ -198,8 +198,9 @@ impl Presenter {
             );
         }
         // D3D11 shared-texture import, optional like dmabuf. Extensions are not
-        // enough: the driver must report multiplanar NV12 as IMPORTABLE. Creating
-        // an unsupported external image is UB (`VK_ERROR_DEVICE_LOST` on first submit).
+        // enough: the driver must report the ring's BGRA8 (and, for PQ pass-through,
+        // RGB10A2) as IMPORTABLE. Creating an unsupported external image is UB
+        // (`VK_ERROR_DEVICE_LOST` on first submit).
         #[cfg(windows)]
         let (import_bgra8, import_rgb10) = crate::d3d11::import_supported(&instance, pdev);
         #[cfg(windows)]
@@ -452,6 +453,7 @@ impl Presenter {
         #[cfg(windows)]
         let hw_win = win_capable.then(|| HwCtxWin {
             ext_mem_win32: ash::khr::external_memory_win32::Device::new(&instance, &device),
+            imports: crate::d3d11::ImportCache::default(),
         });
         let csc = CscPass::new(&device, vk::Format::R8G8B8A8_UNORM)?;
         // Starts SDR like `csc`; an HDR session rebuilds it at 10-bit via `set_hdr_mode`.
@@ -607,6 +609,8 @@ impl Presenter {
             video_export,
             overlay_pipe,
             retired_hw: None,
+            last_import_us: 0,
+            last_submit_us: 0,
             queue_lock,
             format,
             hdr10_format,

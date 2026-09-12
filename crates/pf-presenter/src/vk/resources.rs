@@ -11,8 +11,6 @@ impl Retired {
         match self {
             #[cfg(target_os = "linux")]
             Retired::Dmabuf(f) => f.destroy(device),
-            #[cfg(windows)]
-            Retired::D3d11(f) => f.destroy(device),
             // Image and plane views belong to the decoder's pools — nothing
             // of ours to destroy. Drop sends the release token; the caller
             // reaches here only after the sampling fence (GPU reads done).

@@ -43,7 +43,7 @@ pub struct DecodedFrame {
 
 /// Re-export so the presenter names every frame type through `video::`.
 #[cfg(windows)]
-pub use crate::video_d3d11::D3d11Frame;
+pub use crate::video_d3d11::{D3d11Frame, SlotHandle};
 
 pub enum DecodedImage {
     /// Tightly-packed 8-bit I420 for the presenter's planar CSC upload.
