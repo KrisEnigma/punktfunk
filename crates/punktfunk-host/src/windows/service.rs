@@ -1411,8 +1411,25 @@ pub(crate) fn run_netsh(args: &[String]) -> bool {
     run_quiet("netsh", &borrowed)
 }
 
+/// The mgmt port `serve` binds: host.env's last `PUNKTFUNK_MGMT_BIND`, else 47990. A blank or
+/// bad value keeps 47990; the host treats blank as unset and refuses to start on a bad one.
+fn mgmt_port(host_env: &str) -> u16 {
+    host_env
+        .lines()
+        .rev()
+        .filter_map(|l| l.trim().split_once('='))
+        .find(|(k, _)| k.trim() == "PUNKTFUNK_MGMT_BIND")
+        .and_then(|(_, v)| {
+            v.trim()
+                .trim_matches('"')
+                .parse::<std::net::SocketAddr>()
+                .ok()
+        })
+        .map_or(crate::mgmt::DEFAULT_PORT, |a| a.port())
+}
+
 /// Inbound streaming + mgmt rules. Best-effort; never fails the install. Scoped by
-/// [`firewall_profile_arg`] and this executable ([`fw_add_rule_args`]). TCP 47990 is
+/// [`firewall_profile_arg`] and this executable ([`fw_add_rule_args`]). The mgmt port is
 /// deliberate: `serve` binds mgmt/library to all interfaces; off-loopback
 /// `mgmt::require_auth` is read-only to a paired client cert, so opening it adds no admin surface.
 fn add_firewall_rules(allow_public: bool) {
@@ -1429,10 +1446,12 @@ fn add_firewall_rules(allow_public: bool) {
             None
         }
     };
-    // 47990 = mgmt/library (LAN read-only, paired-cert). GameStream 47984/47989/48010,
-    // 47998-48010; native 9777; mDNS 5353.
+    // Mgmt/library on host.env's port (LAN read-only, paired-cert). The setup writes the move
+    // before `service install`. GameStream 47984/47989/48010, 47998-48010; native 9777; mDNS 5353.
+    let mgmt = mgmt_port(&std::fs::read_to_string(host_env_path()).unwrap_or_default());
+    let tcp = format!("47984,47989,48010,{mgmt}");
     let rules = [
-        ("TCP", "TCP", "47984,47989,48010,47990"),
+        ("TCP", "TCP", tcp.as_str()),
         ("UDP", "UDP", "47998-48010,9777,5353"),
     ];
     for (suffix, proto, ports) in rules {
@@ -1766,5 +1785,19 @@ mod firewall_tests {
         let args = fw_add_rule_args("Punktfunk TCP", "TCP", Some("47990"), None, "profile=any");
         assert!(!args.iter().any(|a| a.starts_with("program=")));
         assert!(args.contains(&"localport=47990".to_string()));
+    }
+
+    /// A host moved off Sunshine's 47990 opens the port it binds; clients learn it in-band.
+    #[test]
+    fn the_mgmt_rule_follows_the_host_env_bind() {
+        assert_eq!(mgmt_port(""), 47990);
+        assert_eq!(mgmt_port("PUNKTFUNK_MGMT_BIND=0.0.0.0:47991\r\n"), 47991);
+        assert_eq!(mgmt_port("# PUNKTFUNK_MGMT_BIND=0.0.0.0:48123\n"), 47990);
+        assert_eq!(
+            mgmt_port("PUNKTFUNK_MGMT_BIND=0.0.0.0:47991\nPUNKTFUNK_MGMT_BIND=\n"),
+            47990
+        );
+        assert_eq!(mgmt_port("PUNKTFUNK_MGMT_BIND=\"[::]:48123\"\n"), 48123);
+        assert_eq!(mgmt_port("PUNKTFUNK_MGMT_BIND=nonsense\n"), 47990);
     }
 }
