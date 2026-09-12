@@ -593,6 +593,14 @@ impl UsbIpResponse {
         }
     }
 
+    /// RET_UNLINK for a URB cancelled before it completed: `-ECONNRESET`, as `usbip-host` sends.
+    pub fn usbip_ret_unlink_reset(header: &UsbIpHeaderBasic) -> Self {
+        Self::UsbIpRetUnlink {
+            header: header.clone(),
+            status: -104i32 as u32, // -ECONNRESET
+        }
+    }
+
     /// Constructs a failed OP_REP_IMPORT response.
     pub fn usbip_ret_unlink_fail(header: &UsbIpHeaderBasic) -> Self {
         Self::UsbIpRetUnlink {
