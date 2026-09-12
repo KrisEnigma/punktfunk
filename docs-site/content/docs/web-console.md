@@ -142,9 +142,9 @@ Nine destinations in the sidebar (a **More** tab on a phone holds the last five)
   title with its own art and launch command. See [Your game library](/docs/game-library).
 - **Performance** — arm a capture, run a session, stop it, and read the recording back as
   per-stage latency, throughput and health graphs.
-- **Logs** — the host's recent log stream *and your plugins'*: follow it live, filter by level or
-  producer, search it, and download or share it for a bug report. Plugin lines are tagged
-  `plugin:<name>` and the **Host / Plugins** switch isolates either side.
+- **Troubleshooting** — the host's health checks above its live log stream, your plugins' lines and
+  the logs your clients sent: follow it live, filter by level or source, search it. **Export all**
+  saves everything as one file for a bug report — see [Reporting an Issue](/docs/report-an-issue).
 - **Pairing** — arm a PIN, approve or deny devices waiting for approval, and unpair a device. A
   second PIN box for [Moonlight/GameStream](/docs/moonlight) clients appears only when this host
   runs the GameStream plane.
