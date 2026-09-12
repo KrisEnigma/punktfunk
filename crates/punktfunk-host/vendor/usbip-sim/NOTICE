@@ -13,10 +13,14 @@ Modifications by the punktfunk project:
   - Replaced the `rusb::Direction` re-export and `rusb::Version` conversions with
     local definitions.
   - Dropped the in-crate test modules (kept the library surface only).
-  - Paced interrupt/bulk IN endpoint transfers by bInterval in `device.rs`
-    `handle_urb` (so a simulated interrupt-IN mimics a real device's
-    NAK-until-bInterval behaviour rather than free-running over the loopback
-    link); added the tokio `time` feature for it.
+  - Paced interrupt/bulk IN endpoint transfers by bInterval (so a simulated
+    interrupt-IN mimics a real device's NAK-until-bInterval behaviour rather
+    than free-running over the loopback link); added the tokio `time` feature
+    for it. Each paced IN URB waits in its own task and one writer sends every
+    reply, so control and OUT transfers never queue behind another endpoint's
+    poll. `CMD_UNLINK` cancels a waiting poll with `-ECONNRESET`
+    (`UsbIpResponse::usbip_ret_unlink_reset`); added the tokio `macros` feature
+    for the handler's `select!`.
   - Added **alternate settings** (`UsbAltSetting`, `UsbDevice::with_alt_settings`).
     Upstream emits one interface descriptor per interface with
     `bAlternateSetting` hardcoded to 0, which cannot express a USB Audio Class

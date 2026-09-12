@@ -10,7 +10,7 @@
 //! only pre-pooling, device-per-processor), and the immediate context is `SetMultithreadProtected`
 //! (it has no internal locking of its own).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::{
@@ -170,9 +170,18 @@ const DEVICE_POOL_CAP: usize = 4;
 /// Minted on EVERY successful `Direct3DDevice::init` (see `Direct3DDevice::epoch`).
 static DEVICE_EPOCH: AtomicU32 = AtomicU32::new(0);
 
+/// HRESULT of the latest failed `Direct3DDevice::init`, `0` once one succeeds. A device that will
+/// not create is why no swap-chain takes, so `SET_ENCODE` reports this code.
+static LAST_INIT_ERROR: AtomicI32 = AtomicI32::new(0);
+
+/// See [`LAST_INIT_ERROR`].
+pub fn last_init_error() -> Option<i32> {
+    Some(LAST_INIT_ERROR.load(Ordering::Relaxed)).filter(|&hr| hr != 0)
+}
+
 /// Get-or-create the pooled D3D device for `luid`. Re-creates when the entry is gone, was flagged
 /// removed by a worker, or reports removal at checkout; the old `Arc` drops once its last
-/// processor releases it.
+/// processor releases it. Every create sets or clears [`last_init_error`].
 pub fn pooled_device(luid: LUID) -> Option<Arc<Direct3DDevice>> {
     let key = (i64::from(luid.HighPart) << 32) | i64::from(luid.LowPart);
     let mut pool = DEVICE_POOL.lock().ok()?;
@@ -195,6 +204,7 @@ pub fn pooled_device(luid: LUID) -> Option<Arc<Direct3DDevice>> {
     }
     match Direct3DDevice::init(luid) {
         Ok(d) => {
+            LAST_INIT_ERROR.store(0, Ordering::Relaxed);
             let a = Arc::new(d);
             if pool.len() >= DEVICE_POOL_CAP {
                 pool.remove(0);
@@ -203,6 +213,7 @@ pub fn pooled_device(luid: LUID) -> Option<Arc<Direct3DDevice>> {
             Some(a)
         }
         Err(e) => {
+            LAST_INIT_ERROR.store(e.code().0, Ordering::Relaxed);
             dbglog!("[pf-vd] pooled Direct3DDevice::init failed: {e:?}");
             None
         }

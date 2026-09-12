@@ -21,18 +21,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) const TARGET_SOCKBUF: usize = 32 * 1024 * 1024;
 
 /// Best-effort grow of `SO_SNDBUF`/`SO_RCVBUF` to [`TARGET_SOCKBUF`]. Failure is
-/// not fatal; a grant far below the request means the OS cap is too low, so warn.
+/// not fatal; a grant far below the request means the OS cap is too low, so warn
+/// with both sizes: send and receive are capped by separate limits.
 pub fn grow_socket_buffers(socket: &UdpSocket) {
     let sock = socket2::SockRef::from(socket);
     let _ = sock.set_send_buffer_size(TARGET_SOCKBUF);
     let _ = sock.set_recv_buffer_size(TARGET_SOCKBUF);
-    let granted = sock
-        .send_buffer_size()
-        .unwrap_or(0)
-        .min(sock.recv_buffer_size().unwrap_or(0));
-    if granted < TARGET_SOCKBUF / 4 {
+    let send = sock.send_buffer_size().unwrap_or(0);
+    let recv = sock.recv_buffer_size().unwrap_or(0);
+    if send.min(recv) < TARGET_SOCKBUF / 4 {
         tracing::warn!(
-            granted_kb = granted / 1024,
+            send_kb = send / 1024,
+            recv_kb = recv / 1024,
             "UDP socket buffer capped well below target — high-resolution streaming may drop \
              frames; raise net.core.wmem_max / net.core.rmem_max (Linux) for clean 4K/5K"
         );

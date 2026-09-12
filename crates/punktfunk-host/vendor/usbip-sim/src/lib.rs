@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use usbip_protocol::UsbIpCommand;
 
@@ -164,9 +165,41 @@ pub(crate) fn clamp_reply(mut resp: Vec<u8>, requested: u32, out: bool) -> Vec<u
     resp
 }
 
+/// Paced IN URBs still waiting out their interval, keyed by seqnum.
+type InFlight = Arc<Mutex<HashMap<u32, tokio::task::AbortHandle>>>;
+
+/// Serve one USB/IP connection. Interrupt and bulk IN URBs wait out `bInterval` in their own
+/// tasks (punktfunk modification), so a control transfer never queues behind another
+/// endpoint's poll. A reply may overtake an earlier SUBMIT: `vhci_hcd` matches by seqnum.
 pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
-    mut socket: &mut T,
+    socket: &mut T,
     server: Arc<UsbIpServer>,
+) -> Result<()> {
+    let (mut rd, mut wr) = tokio::io::split(socket);
+    let (tx, mut rx) = mpsc::unbounded_channel::<UsbIpResponse>();
+    let in_flight = InFlight::default();
+    // One writer keeps each reply whole on the wire.
+    let writer = async move {
+        while let Some(res) = rx.recv().await {
+            res.write_to_socket(&mut wr).await?;
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let result = tokio::select! {
+        r = serve(&mut rd, server, &tx, &in_flight) => r,
+        r = writer => r,
+    };
+    for (_, task) in in_flight.lock().unwrap().drain() {
+        task.abort();
+    }
+    result
+}
+
+async fn serve<R: AsyncReadExt + Unpin>(
+    mut socket: &mut R,
+    server: Arc<UsbIpServer>,
+    tx: &mpsc::UnboundedSender<UsbIpResponse>,
+    in_flight: &InFlight,
 ) -> Result<()> {
     let mut current_import_device_id: Option<String> = None;
     loop {
@@ -200,9 +233,7 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                 let devices = server.available_devices.read().await;
 
                 // OP_REP_DEVLIST
-                UsbIpResponse::op_rep_devlist(&devices)
-                    .write_to_socket(socket)
-                    .await?;
+                send(tx, UsbIpResponse::op_rep_devlist(&devices))?;
                 trace!("Sent OP_REP_DEVLIST");
             }
             UsbIpCommand::OpReqImport { busid, .. } => {
@@ -232,7 +263,7 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                 } else {
                     UsbIpResponse::op_rep_import_fail()
                 };
-                res.write_to_socket(socket).await?;
+                send(tx, res)?;
                 trace!("Sent OP_REP_IMPORT");
             }
             UsbIpCommand::UsbIpCmdSubmit {
@@ -268,7 +299,7 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                         &iso_packet_descriptor,
                     )
                     .await;
-                    res.write_to_socket(socket).await?;
+                    send(tx, res)?;
                     trace!("Sent USBIP_RET_SUBMIT (iso)");
                     continue;
                 }
@@ -277,6 +308,40 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                     None => {
                         warn!("Endpoint {real_ep:02x?} not found");
                         UsbIpResponse::usbip_ret_submit_fail(&header)
+                    }
+                    // Interrupt/bulk IN waits out bInterval off this loop (see `handler`).
+                    Some((ep, Some(intf)))
+                        if !out
+                            && matches!(
+                                ep.transfer_type(),
+                                Some(EndpointAttributes::Interrupt | EndpointAttributes::Bulk)
+                            ) =>
+                    {
+                        let period = device.service_interval(ep);
+                        let setup = SetupPacket::parse(&setup);
+                        let (intf, tx, in_flight_task) =
+                            (intf.clone(), tx.clone(), in_flight.clone());
+                        let seqnum = header.seqnum;
+                        let mut waiting = in_flight.lock().unwrap();
+                        let task = tokio::spawn(async move {
+                            tokio::time::sleep(period).await;
+                            let resp = intf.handler.lock().unwrap().handle_urb(
+                                &intf,
+                                ep,
+                                transfer_buffer_length,
+                                setup,
+                                &[],
+                            );
+                            let res =
+                                submit_reply(&header, real_ep, resp, transfer_buffer_length, None);
+                            // Send under the lock: CMD_UNLINK either cancels this URB or queues after it.
+                            let mut waiting = in_flight_task.lock().unwrap();
+                            if waiting.remove(&seqnum).is_some() {
+                                let _ = tx.send(res);
+                            }
+                        });
+                        waiting.insert(seqnum, task.abort_handle());
+                        continue;
                     }
                     Some((ep, intf)) => {
                         trace!("->Endpoint {ep:02x?}");
@@ -291,47 +356,11 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                                 &data,
                             )
                             .await;
-
-                        match resp {
-                            Ok(resp) => {
-                                let over = resp.len() > transfer_buffer_length as usize;
-                                let resp = clamp_reply(resp, transfer_buffer_length, out);
-                                if over {
-                                    warn!(
-                                        "handler returned more than the {transfer_buffer_length}-byte \
-                                         request on ep {real_ep:02x?} — truncated; an over-long reply \
-                                         tears down the whole usbip connection"
-                                    );
-                                }
-                                if out {
-                                    trace!("<-Wrote {}", data.len());
-                                    // Acknowledge the bytes we took, not the (empty) reply:
-                                    // `actual_length` is what `write()` on the device node
-                                    // returns to the process that wrote it. (punktfunk fix —
-                                    // upstream said 0 here, and winebus read that as failure.)
-                                    UsbIpResponse::usbip_ret_submit_out_success(
-                                        &header,
-                                        data.len() as u32,
-                                    )
-                                } else {
-                                    trace!("<-Resp {resp:02x?}");
-                                    UsbIpResponse::usbip_ret_submit_success(
-                                        &header,
-                                        0,
-                                        0,
-                                        resp,
-                                        vec![],
-                                    )
-                                }
-                            }
-                            Err(err) => {
-                                warn!("Error handling URB: {err}");
-                                UsbIpResponse::usbip_ret_submit_fail(&header)
-                            }
-                        }
+                        let accepted = out.then_some(data.len() as u32);
+                        submit_reply(&header, real_ep, resp, transfer_buffer_length, accepted)
                     }
                 };
-                res.write_to_socket(socket).await?;
+                send(tx, res)?;
                 trace!("Sent USBIP_RET_SUBMIT");
             }
             UsbIpCommand::UsbIpCmdUnlink {
@@ -342,10 +371,64 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
 
                 header.command = USBIP_RET_UNLINK.into();
 
-                let res = UsbIpResponse::usbip_ret_unlink_success(&header);
-                res.write_to_socket(socket).await?;
+                // A poll still waiting out its interval is cancelled (-ECONNRESET). Any other URB
+                // was already answered, and that RET_SUBMIT is queued ahead of this reply.
+                let mut waiting = in_flight.lock().unwrap();
+                let res = match waiting.remove(&unlink_seqnum) {
+                    Some(task) => {
+                        task.abort();
+                        UsbIpResponse::usbip_ret_unlink_reset(&header)
+                    }
+                    None => UsbIpResponse::usbip_ret_unlink_success(&header),
+                };
+                send(tx, res)?;
                 trace!("Sent USBIP_RET_UNLINK");
             }
+        }
+    }
+}
+
+/// Queue a reply for the writer. Fails once the writer is gone, which ends the connection.
+fn send(tx: &mpsc::UnboundedSender<UsbIpResponse>, res: UsbIpResponse) -> Result<()> {
+    tx.send(res)
+        .map_err(|_| std::io::Error::from(ErrorKind::BrokenPipe))
+}
+
+/// RET_SUBMIT for a non-isochronous URB. `accepted` is `Some(bytes taken)` on OUT, `None` on IN.
+fn submit_reply(
+    header: &usbip_protocol::UsbIpHeaderBasic,
+    real_ep: u32,
+    resp: Result<Vec<u8>>,
+    requested: u32,
+    accepted: Option<u32>,
+) -> UsbIpResponse {
+    match resp {
+        Ok(resp) => {
+            let over = resp.len() > requested as usize;
+            let resp = clamp_reply(resp, requested, accepted.is_some());
+            if over {
+                warn!(
+                    "handler returned more than the {requested}-byte request on ep \
+                     {real_ep:02x?} — truncated; an over-long reply tears down the whole usbip \
+                     connection"
+                );
+            }
+            match accepted {
+                // OUT `actual_length` counts the bytes taken: `write()` on the device node
+                // returns it, and winebus reads 0 as failure.
+                Some(n) => {
+                    trace!("<-Wrote {n}");
+                    UsbIpResponse::usbip_ret_submit_out_success(header, n)
+                }
+                None => {
+                    trace!("<-Resp {resp:02x?}");
+                    UsbIpResponse::usbip_ret_submit_success(header, 0, 0, resp, vec![])
+                }
+            }
+        }
+        Err(err) => {
+            warn!("Error handling URB: {err}");
+            UsbIpResponse::usbip_ret_submit_fail(header)
         }
     }
 }
@@ -376,6 +459,128 @@ pub async fn server(addr: SocketAddr, server: Arc<UsbIpServer>) {
 }
 
 // (Host-mode constructors and in-crate tests removed in the vendored copy — see NOTICE.)
+
+/// A control transfer must not queue behind another endpoint's paced interrupt-IN poll, and an
+/// unlinked poll must never answer: `vhci_hcd` drops the device on a RET_SUBMIT it gave back.
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use crate::usbip_protocol::{UsbIpHeaderBasic, USBIP_CMD_SUBMIT, USBIP_CMD_UNLINK};
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct Probe;
+    impl UsbInterfaceHandler for Probe {
+        fn get_class_specific_descriptor(&self) -> Vec<u8> {
+            Vec::new()
+        }
+        fn handle_urb(
+            &mut self,
+            _interface: &UsbInterface,
+            ep: UsbEndpoint,
+            _transfer_buffer_length: u32,
+            _setup: SetupPacket,
+            _req: &[u8],
+        ) -> Result<Vec<u8>> {
+            Ok(vec![if ep.is_ep0() { 0xC0 } else { 0x1E }])
+        }
+        fn as_any(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    fn header(command: u16, seqnum: u32, direction: u32, ep: u32) -> UsbIpHeaderBasic {
+        UsbIpHeaderBasic {
+            command: command.into(),
+            seqnum,
+            devid: 0,
+            direction,
+            ep,
+        }
+    }
+
+    /// An 8-byte IN SUBMIT; on ep0 it is GET_REPORT(feature) to interface 0.
+    fn submit(seqnum: u32, ep: u32) -> Vec<u8> {
+        UsbIpCommand::UsbIpCmdSubmit {
+            header: header(USBIP_CMD_SUBMIT, seqnum, 1, ep),
+            transfer_flags: 0,
+            transfer_buffer_length: 8,
+            start_frame: 0,
+            number_of_packets: 0,
+            interval: 0,
+            setup: [0xA1, 0x01, 0x00, 0x03, 0x00, 0x00, 0x08, 0x00],
+            data: Vec::new(),
+            iso_packet_descriptor: Vec::new(),
+        }
+        .to_bytes()
+    }
+
+    /// `(command, seqnum, status, payload)` of the next reply.
+    async fn reply(host: &mut tokio::io::DuplexStream) -> (u32, u32, i32, Vec<u8>) {
+        let mut head = [0u8; 48];
+        host.read_exact(&mut head).await.unwrap();
+        let be = |i: usize| u32::from_be_bytes(head[i..i + 4].try_into().unwrap());
+        let (command, seqnum, status) = (be(0), be(4), be(20) as i32);
+        let len = if command == USBIP_RET_SUBMIT as u32 {
+            be(24)
+        } else {
+            0
+        };
+        let mut payload = vec![0u8; len as usize];
+        host.read_exact(&mut payload).await.unwrap();
+        (command, seqnum, status, payload)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_control_transfer_overtakes_a_paced_poll() {
+        let poll = UsbEndpoint {
+            address: 0x81,
+            attributes: EndpointAttributes::Interrupt as u8,
+            max_packet_size: 8,
+            interval: 32,
+        };
+        let handler_box: Box<dyn UsbInterfaceHandler + Send> = Box::new(Probe);
+        let mut dev = UsbDevice::new(0).with_interface(
+            0x03,
+            0x00,
+            0x00,
+            None,
+            vec![poll],
+            Arc::new(Mutex::new(handler_box)),
+        );
+        dev.speed = UsbSpeed::Full as u32; // bInterval 32 = 32 ms
+        let server = Arc::new(UsbIpServer::new_simulated(vec![dev]));
+        let (mut host, mut sim) = tokio::io::duplex(4096);
+        tokio::spawn(async move { handler(&mut sim, server).await });
+
+        let mut busid = [0u8; 32];
+        busid[..5].copy_from_slice(b"0-0-0");
+        let import = UsbIpCommand::OpReqImport { status: 0, busid };
+        host.write_all(&import.to_bytes()).await.unwrap();
+        host.read_exact(&mut [0u8; 320]).await.unwrap();
+
+        host.write_all(&submit(1, 1)).await.unwrap(); // interrupt IN, due in 32 ms
+        host.write_all(&submit(2, 0)).await.unwrap(); // control IN
+        let start = tokio::time::Instant::now();
+        assert_eq!(reply(&mut host).await, (3, 2, 0, vec![0xC0]));
+        assert_eq!(
+            start.elapsed(),
+            Duration::ZERO,
+            "control waited behind the poll"
+        );
+        assert_eq!(reply(&mut host).await, (3, 1, 0, vec![0x1E]));
+
+        host.write_all(&submit(3, 1)).await.unwrap();
+        let unlink = UsbIpCommand::UsbIpCmdUnlink {
+            header: header(USBIP_CMD_UNLINK, 4, 0, 1),
+            unlink_seqnum: 3,
+        };
+        host.write_all(&unlink.to_bytes()).await.unwrap();
+        assert_eq!(reply(&mut host).await, (4, 4, -104, vec![]));
+        let late = tokio::time::timeout(Duration::from_millis(100), host.read_u8()).await;
+        assert!(late.is_err(), "the unlinked poll answered anyway");
+    }
+}
 
 /// Covers only the punktfunk reply-shaping addition; see [`clamp_reply`] for why the kernel treats
 /// an over-long reply as fatal to the connection rather than to the URB.
