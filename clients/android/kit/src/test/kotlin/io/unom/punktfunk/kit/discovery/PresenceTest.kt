@@ -18,9 +18,9 @@ class PresenceTest {
         DiscoveredHost(key = "id", name = "Desk", host = host, port = 9777, fingerprint = fp)
 
     @Test
-    fun the_live_address_is_asked_first_and_the_saved_one_still_asked() {
+    fun the_saved_address_is_asked_first_and_the_live_one_still_asked() {
         assertEquals(
-            listOf(HostAddr("192.168.1.20", 9777), HostAddr("192.168.1.9", 9777)),
+            listOf(HostAddr("192.168.1.9", 9777), HostAddr("192.168.1.20", 9777)),
             Presence.candidates(desk, advert("192.168.1.20")),
         )
         assertEquals(listOf(HostAddr("192.168.1.9", 9777)), Presence.candidates(desk, advert("192.168.1.9")))
@@ -34,7 +34,15 @@ class PresenceTest {
         assertEquals(HostAddr("192.168.1.9", 9777), up["desk"])
     }
 
-    /** A cold boot on a new lease: the advert wins, and the sweep says where. */
+    /** A Tailscale address answers from the LAN too, so the LAN advert must not replace it. */
+    @Test
+    fun a_saved_address_that_answers_beats_the_advert() {
+        val routed = desk.copy(address = "100.64.0.7")
+        val up = Presence.sweep(listOf(routed), liveFor = { advert("192.168.1.9") }) { _, _ -> fp }
+        assertEquals(HostAddr("100.64.0.7", 9777), up["desk"])
+    }
+
+    /** A cold boot on a new lease: the saved address is dead, the advert answers there. */
     @Test
     fun a_host_on_a_new_lease_is_reported_at_the_address_that_answered() {
         val up = Presence.sweep(listOf(desk), liveFor = { advert("192.168.1.20") }) { addr, _ -> fp.takeIf { addr == "192.168.1.20" } }

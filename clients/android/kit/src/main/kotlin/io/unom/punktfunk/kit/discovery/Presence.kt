@@ -12,11 +12,11 @@ data class HostAddr(val address: String, val port: Int)
  * share it, so both answer the same way. Presence is the QUIC probe alone: an mDNS advert is a
  * cache entry a suspending host sends no goodbye for.
  *
- * Each host is asked at every address it could be at — the live advert's first (a cold boot can
- * land on a new lease), then the saved one — and the sweep reports WHICH answered, so the caller
- * can re-point the record at it. A live address that stops routing (the device moved from Wi-Fi
- * to Ethernet and the browse still holds what it resolved there) used to be the only one tried,
- * and read as a dead host.
+ * Each host is asked at its saved address first, then at the live advert's, and the sweep
+ * reports WHICH answered, so the caller can re-point the record at it. A saved address that
+ * answers is never replaced: a routed one (Tailscale, VPN) answers on the LAN too, and the advert
+ * would swap it for one that stops working off the home network. The advert still finds a host
+ * that came back on a new lease.
  */
 object Presence {
     /** The probe's budget per address. A LAN host answers in milliseconds. */
@@ -26,11 +26,11 @@ object Presence {
         Thread(r, "pf-presence").apply { isDaemon = true }
     }
 
-    /** The addresses to ask, in order: the live advert's, then the saved one if it differs. */
+    /** The addresses to ask, in order: the saved one, then the live advert's if it differs. */
     fun candidates(saved: KnownHost, live: DiscoveredHost?): List<HostAddr> {
         val stored = HostAddr(saved.address, saved.port)
         val advertised = live?.let { HostAddr(it.host, it.port) }
-        return if (advertised == null || advertised == stored) listOf(stored) else listOf(advertised, stored)
+        return if (advertised == null || advertised == stored) listOf(stored) else listOf(stored, advertised)
     }
 
     /**

@@ -120,21 +120,31 @@ final class HostStore: ObservableObject {
     ///
     /// A live advert is NOT that answer. An mDNS browse result is a cache entry with a 75-minute
     /// PTR TTL, and a host that suspends sends no goodbye, so a sleeping machine keeps advertising
-    /// to every client for up to an hour — which is exactly how a Wake-on-LAN gate written as "not
-    /// advertising" came to never fire for the host it was meant to wake. So the advert only says
-    /// WHERE to look (and re-keys the saved address when the host moved DHCP lease); a bounded
-    /// QUIC handshake says whether THIS host is there.
+    /// to every client for up to an hour. So a bounded QUIC handshake says whether THIS host is
+    /// there, and the advert only says where else to look.
+    ///
+    /// The saved address is asked first and never replaced while it answers: a routed one
+    /// (Tailscale) answers on the LAN too, and the advert would swap it for one that stops working
+    /// off the home network. Only when it is silent does an advert elsewhere get asked, and the
+    /// saved address follow it — a host back on a new DHCP lease.
     ///
     /// The pin decides, not the answer alone: whoever inherits a sleeping host's lease completes
     /// a handshake at its address too. A host saved by address carries no pin to compare, so any
     /// answer is the one it names.
     func isReachable(_ host: StoredHost, discovery: HostDiscovery) async -> Bool {
-        if let live = discovery.hosts.first(where: { host.matches($0) }) {
-            updateAddress(host.id, address: live.host, port: live.port)
-        }
         let target = hosts.first { $0.id == host.id } ?? host
-        let (address, port, pin) = (target.address, target.port, target.pinnedSHA256)
-        return await Task.detached(priority: .utility) {
+        let pin = target.pinnedSHA256
+        if await Self.answers(target.address, target.port, pin: pin) { return true }
+        guard let live = discovery.hosts.first(where: { host.matches($0) }),
+              live.host != target.address || live.port != target.port,
+              await Self.answers(live.host, live.port, pin: pin) else { return false }
+        updateAddress(host.id, address: live.host, port: live.port)
+        return true
+    }
+
+    /// Did the host pinned to `pin` (any host, when `nil`) answer a probe at this address?
+    private static func answers(_ address: String, _ port: UInt16, pin: Data?) async -> Bool {
+        await Task.detached(priority: .utility) {
             guard let answered = PunktfunkConnection.probeIdentity(host: address, port: port) else {
                 return false
             }
