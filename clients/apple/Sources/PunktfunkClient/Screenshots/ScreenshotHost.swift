@@ -77,11 +77,12 @@ struct ScreenshotHostView: View {
             .environment(\.colorScheme, scene.colorScheme)
             .environment(\.gamepadMetrics, gamepadMetrics)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // Black fills the display, but the SCENE keeps its safe area. Ignoring it wholesale
-            // here pushed the stream hero's HUD under the Dynamic Island (the resolution/bitrate
-            // line was unreadable in every 6.9" capture); scenes that genuinely want full bleed —
-            // the streamed frame itself — ignore it themselves.
+            // The scene keeps its safe area, so the HUD clears the Dynamic Island; the streamed
+            // frame ignores it itself. Black matches the dark iOS/macOS window. tvOS keeps the
+            // system backdrop, which is what the real app sits on.
+            #if !os(tvOS)
             .background(Color.black.ignoresSafeArea())
+            #endif
             #if os(macOS)
             .background(MacShotWindowConfigurator(scene: scene))
             #elseif os(iOS)
