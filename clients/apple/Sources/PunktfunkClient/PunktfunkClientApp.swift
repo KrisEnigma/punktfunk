@@ -3,6 +3,8 @@
 
 #if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
 #endif
 import PunktfunkKit
 import SwiftUI
@@ -11,6 +13,8 @@ import SwiftUI
 struct PunktfunkClientApp: App {
     #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #elseif os(iOS)
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     #endif
 
     init() {
@@ -87,6 +91,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+}
+#elseif os(iOS)
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// An attached monitor's scene goes to `ExternalDisplaySceneDelegate`, so a stream can fill it
+    /// instead of the letterboxed mirror. Every other scene stays SwiftUI's.
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting session: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let config = UISceneConfiguration(name: nil, sessionRole: session.role)
+        if session.role == .windowExternalDisplayNonInteractive {
+            config.delegateClass = ExternalDisplaySceneDelegate.self
+        }
+        return config
     }
 }
 #endif

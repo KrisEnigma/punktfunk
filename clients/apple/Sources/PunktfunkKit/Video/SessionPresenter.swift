@@ -221,9 +221,12 @@ final class SessionPresenter {
     private var surfaceLayer: CALayer?
     #endif
     private var connection: PunktfunkConnection?
-    /// Re-runs this session's `start` with its own arguments — the wedged-presenter cure
-    /// (see `rebuildPresentation`). Set by `start`, cleared by `stop`. Main-thread only.
-    private var restart: (() -> Void)?
+    /// Re-runs this session's `start` with its own arguments on the given base layer — the
+    /// wedged-presenter cure (`rebuildPresentation`) and the move between screens (`move(to:)`).
+    /// Set by `start`, cleared by `stop`. Main-thread only.
+    private var restart: ((AVSampleBufferDisplayLayer) -> Void)?
+    /// The base layer the running session presents into. Main-thread only.
+    private var baseLayer: AVSampleBufferDisplayLayer?
     /// The last `layout` call, replayed after a rebuild so the new sublayer has a frame
     /// before its first present. Main-thread only.
     private var lastLayout: (bounds: CGRect, contentsScale: CGFloat)?
@@ -259,9 +262,10 @@ final class SessionPresenter {
     ) {
         stop()
         self.connection = connection
-        restart = { [weak self] in
+        self.baseLayer = baseLayer
+        restart = { [weak self] layer in
             self?.start(
-                connection: connection, baseLayer: baseLayer, endToEndMeter: endToEndMeter,
+                connection: connection, baseLayer: layer, endToEndMeter: endToEndMeter,
                 decodeMeter: decodeMeter, displayMeter: displayMeter,
                 presentFloorMeter: presentFloorMeter, makeDisplayLink: makeDisplayLink,
                 onFrame: onFrame, onSessionEnd: onSessionEnd, onDecodedSize: onDecodedSize)
@@ -511,17 +515,27 @@ final class SessionPresenter {
     }
     #endif
 
+    /// Rebuild the presentation on `layer`, keeping the connection: the picture moving between
+    /// the phone and an attached monitor. The fresh display link binds to the screen `layer` is
+    /// on. Costs one IDR; the caller re-runs `layout` for the new geometry. No-op before a session
+    /// starts or when already on `layer`. Main thread.
+    func move(to layer: AVSampleBufferDisplayLayer) {
+        guard let restart, layer !== baseLayer else { return }
+        let size = contentSize
+        restart(layer)
+        contentSize = size // the view drops the new pipeline's repeat of this size
+    }
+
     /// The pipeline's `onPresentWedged` cure, hopped to MAIN: rebuild the presentation the way
     /// a reconnect does — fresh pipeline, presenter and CAMetalLayer — on the SAME connection.
     /// The old pipeline stops (its `token` silences its `onSessionEnd`), the new pump asks the
     /// host for an IDR because it starts without a format, and the replayed layout gives the
-    /// new sublayer its frame before the first vend. Field 2026-09-01 (iPad Pro / iOS 27):
-    /// a relink alone presented one frame and froze again; only this cured it. ~1 s of
-    /// freeze plus one IDR, against a session that otherwise never moves again.
+    /// new sublayer its frame before the first vend. A relink alone does not unwedge it. The
+    /// cost is ~1 s of freeze plus one IDR, against a session that otherwise never moves again.
     private func rebuildPresentation() {
-        guard let restart else { return }
+        guard let restart, let baseLayer else { return }
         presentLog.error("presenter wedged — rebuilding pipeline, presenter and layer")
-        restart()
+        restart(baseLayer)
         if let lastLayout { layout(in: lastLayout.bounds, contentsScale: lastLayout.contentsScale) }
     }
 
@@ -530,6 +544,7 @@ final class SessionPresenter {
     /// Idempotent.
     func stop() {
         restart = nil
+        baseLayer = nil
         contentSize = nil // a new session re-derives it from its first frame
         pump?.stop()
         pump = nil

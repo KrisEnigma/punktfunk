@@ -524,12 +524,13 @@ final class SessionModel: ObservableObject {
         settings = effective
         statsVerbosity = StatsVerbosity(rawValue: effective.statsVerbosity) ?? .normal
         SessionSettings.begin(effective)
-        let mode = RenderScale.apply(
-            baseWidth: effective.width, baseHeight: effective.height,
-            scale: effective.renderScale,
-            maxDimension: RenderScale.maxDimension(codec: effective.codec))
-        let (width, height) = (mode.width, mode.height)
-        let hz = UInt32(clamping: effective.refreshHz)
+        #if os(iOS)
+        // An attached monitor shows the picture (StreamViewController), so its size and rate win.
+        let mode = ExternalDisplay.streamMode(effective) ?? effective.streamMode
+        #else
+        let mode = effective.streamMode
+        #endif
+        let (width, height, hz) = (mode.width, mode.height, mode.hz)
         let compositor = PunktfunkConnection.Compositor(
             rawValue: UInt32(clamping: effective.compositor)) ?? .auto
         var bitrateKbps = UInt32(clamping: effective.bitrateKbps)
