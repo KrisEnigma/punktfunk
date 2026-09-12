@@ -698,6 +698,8 @@ struct AudioFormat {
     channels: u8,
     /// Frame length in µs. Concealment cap is a duration; this turns it into a frame count.
     frame_us: u32,
+    /// Surround coupling, verbatim off Welcome ([`crate::audio::AudioLayout`] wire id).
+    layout: u8,
 }
 
 #[cfg(feature = "quic")]
@@ -720,6 +722,7 @@ impl AudioFormat {
             } else {
                 c.audio_frame_us as u32
             },
+            layout: c.audio_layout,
         }
     }
 
@@ -851,7 +854,11 @@ impl AudioPcmState {
         let channels = fmt.channels;
         let ch = channels as usize;
         if self.decoder.is_none() {
-            let layout = crate::audio::layout_for(channels, false);
+            // A coupling this build does not know would pair channels wrongly, not loudly.
+            let Some(layout) = crate::audio::AudioLayout::from_wire(fmt.layout) else {
+                return Err(PunktfunkStatus::Unsupported);
+            };
+            let layout = crate::audio::layout_for(channels, layout);
             // Negotiated rate, not a constant. libopus rejects 96 kHz; fail here, not silently.
             match opus::MSDecoder::new(fmt.rate_hz, layout.streams, layout.coupled, layout.mapping)
             {
@@ -2466,6 +2473,8 @@ unsafe fn connect_ex_impl(
             // Unvalidated on purpose: a bad rate is the host's to decline, not a failed connect.
             audio_rate_hz,
             audio_bits,
+            // No C-side ask yet; every embedder decodes whatever coupling the host answers.
+            crate::audio::AudioLayout::Legacy,
             video_codecs,
             preferred_codec,
             // No display-HDR-volume in the C ABI; host EDID defaults stand.
@@ -5698,6 +5707,7 @@ mod tests {
         bits: crate::audio::pcm::BITS_16,
         channels: 2,
         frame_us: crate::audio::FRAME_MS * 1000,
+        layout: 0,
     };
 
     /// Lossless session at 48 kHz / 24-bit.
@@ -5707,6 +5717,7 @@ mod tests {
         bits: crate::audio::pcm::BITS_24,
         channels: 2,
         frame_us: crate::audio::pcm::FRAME_US_LADDER[0],
+        layout: 0,
     };
 
     /// Concealment run a 5 ms session owes: ten frames (50 ms cap).

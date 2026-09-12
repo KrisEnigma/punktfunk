@@ -323,6 +323,11 @@ pub struct NativeClient {
     /// (4 988 662 ns). Size rings from this; time from
     /// [`crate::audio::pcm::frame_duration_ns`]. Advancing a clock by this invents 2.3 ms/s.
     pub audio_frame_us: u16,
+    /// Surround coupling the host encodes, a [`crate::audio::AudioLayout`] wire id kept
+    /// verbatim. Build the Opus decoder from `AudioLayout::from_wire(self.audio_layout)`, never
+    /// from the request, and refuse audio on `None` rather than pair channels wrongly. `0` for
+    /// an older host.
+    pub audio_layout: u8,
     /// Host-resolved video codec. Build the decoder from THIS; do not assume HEVC.
     pub codec: u8,
 }
@@ -528,6 +533,7 @@ impl NativeClient {
             // "cheapest lossless rung" under `advertised_client_caps`.
             0,
             0,
+            crate::audio::AudioLayout::Legacy,
             video_codecs,
             preferred_codec,
             display_hdr,
@@ -567,6 +573,9 @@ impl NativeClient {
         audio_channels: u8,
         audio_rate_hz: u32,
         audio_bits: u8,
+        // Surround coupling to ask for ([`crate::audio::AudioLayout`]). The host answers in
+        // [`NativeClient::audio_layout`]; `Legacy` keeps the Hello byte-identical.
+        audio_layout: crate::audio::AudioLayout,
         video_codecs: u8,
         preferred_codec: u8,
         display_hdr: Option<HdrMeta>,
@@ -684,6 +693,7 @@ impl NativeClient {
                     audio_channels,
                     audio_rate_hz,
                     audio_bits,
+                    audio_layout,
                     video_codecs,
                     preferred_codec,
                     display_hdr,
@@ -825,6 +835,7 @@ impl NativeClient {
             audio_sample_rate_hz: negotiated.audio_rate_hz,
             audio_bits: negotiated.audio_bits,
             audio_frame_us: negotiated.audio_frame_us,
+            audio_layout: negotiated.audio_layout,
             codec: negotiated.codec,
         })
     }

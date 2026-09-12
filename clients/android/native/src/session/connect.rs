@@ -486,6 +486,8 @@ fn connect(req: ConnectRequest) -> jlong {
         // actually happened, and `crate::audio` opens the device from those, never from these.
         audio_rate_hz,
         audio_bits,
+        // Legacy coupling: libopus here decodes either, and nothing on Android needs the other.
+        punktfunk_core::audio::AudioLayout::Legacy,
         // Codecs this device decodes (`VideoDecoders.decodableCodecBits`): H.264 + HEVC always,
         // AV1 on a real `video/av01` decoder, PyroWave on a GPU that passes the probe — the one
         // bit here naming no MediaCodec, since it decodes as Vulkan compute in `crate::pyro`.

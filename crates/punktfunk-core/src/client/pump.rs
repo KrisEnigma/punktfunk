@@ -104,6 +104,7 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         crate::audio::plan_audio_budget(
             negotiated.bitrate_kbps,
             negotiated.audio_channels,
+            crate::audio::AudioLayout::from_wire(negotiated.audio_layout).unwrap_or_default(),
             crate::audio::AudioTier::default(),
             host_caps & crate::quic::HOST_CAP_AUDIO_RED != 0,
         )
