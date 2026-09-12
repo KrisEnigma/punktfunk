@@ -684,6 +684,25 @@ fn open_decoder(
     built
 }
 
+/// [`crate::video::amd_vulkan_hdr_driver_notice`] for this session, AMD only. The driver
+/// version is logged either way: without it a triage log cannot tell old drivers apart.
+#[cfg(windows)]
+fn amd_vulkan_hdr_notice(
+    decoder: &Decoder,
+    vulkan: Option<&crate::video::VulkanDecodeDevice>,
+    connector: &NativeClient,
+) -> Option<String> {
+    const VENDOR_AMD: u32 = 0x1002;
+    let vk = vulkan.filter(|v| v.vendor_id == VENDOR_AMD)?;
+    let driver = crate::video_d3d11::adapter_driver_version(vk.adapter_luid?);
+    tracing::info!(?driver, "AMD display driver");
+    crate::video::amd_vulkan_hdr_driver_notice(
+        driver,
+        decoder.on_native_vulkan(),
+        connector.color.transfer == punktfunk_core::quic::ColorInfo::TRC_PQ,
+    )
+}
+
 struct PlaneThreads {
     audio_thread: Option<std::thread::JoinHandle<()>>,
     pad_audio_thread: Option<std::thread::JoinHandle<()>>,
@@ -927,6 +946,11 @@ fn pump(
             return;
         }
     };
+    // An old AMD driver can paint Vulkan-decoded HDR green: say so once, switch nothing.
+    #[cfg(windows)]
+    if let Some(msg) = amd_vulkan_hdr_notice(&decoder, params.vulkan.as_ref(), &connector) {
+        let _ = ev_tx.send_blocking(SessionEvent::Notice(msg));
+    }
     let force_software = params.force_software.clone();
     // Session-constant stats facts. `target_kbps` itself is read live per window —
     // an Automatic session's ABR moves it.

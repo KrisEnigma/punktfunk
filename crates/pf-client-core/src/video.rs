@@ -919,6 +919,42 @@ pub fn hdr_presentable(vk: Option<&VulkanDecodeDevice>) -> bool {
     }
 }
 
+/// First AMD Windows driver seen rendering a PQ stream from the Vulkan rung correctly
+/// (Adrenalin 25.9.1, driver store 32.0.21025). An older driver can paint it green;
+/// D3D11VA on the same driver is unaffected. Fields as [`umd_version_parts`] splits them.
+pub const AMD_VULKAN_HDR_DRIVER_FLOOR: [u16; 4] = [32, 0, 21025, 0];
+
+/// DXGI's packed user-mode driver version (`CheckInterfaceSupport`) as the four
+/// Device Manager fields: `32.0.21025.10016` becomes `[32, 0, 21025, 10016]`.
+pub fn umd_version_parts(raw: i64) -> [u16; 4] {
+    let v = raw as u64;
+    [
+        (v >> 48) as u16,
+        (v >> 32) as u16,
+        (v >> 16) as u16,
+        v as u16,
+    ]
+}
+
+/// Toast for an HDR session on the Vulkan rung whose AMD driver predates
+/// [`AMD_VULKAN_HDR_DRIVER_FLOOR`]; `None` otherwise, including an unknown driver.
+/// A warning only: D3D11VA costs frames, and a driver update fixes the Vulkan path.
+pub fn amd_vulkan_hdr_driver_notice(
+    driver: Option<[u16; 4]>,
+    native_vulkan: bool,
+    pq: bool,
+) -> Option<String> {
+    let v = driver?;
+    if !native_vulkan || !pq || v >= AMD_VULKAN_HDR_DRIVER_FLOOR {
+        return None;
+    }
+    Some(format!(
+        "This AMD graphics driver ({}.{}.{}.{}) can show HDR as a green picture. Update it to \
+         AMD Software 25.9.1 or newer, or switch the decoder to Direct3D 11 in Settings.",
+        v[0], v[1], v[2], v[3]
+    ))
+}
+
 /// Desktop `video_caps` from the user switches, testable without a GPU.
 /// Callers AND `want_444` with [`hevc_444_hardware_decodable`] and `hdr_enabled`
 /// with [`hdr_presentable`]. `MULTI_SLICE` is unconditional here; Amlogic
@@ -1047,6 +1083,11 @@ fn log_rung(backend: &Backend, wire: u8) {
 }
 
 impl Decoder {
+    /// The active rung is native Vulkan. It can still demote later.
+    pub fn on_native_vulkan(&self) -> bool {
+        matches!(self.backend, Backend::NativeVulkan(_))
+    }
+
     /// Build the decode ladder. `wire` is the Welcome `quic::CODEC_*`; `pref` is
     /// Settings (`hardware` reads as auto); `vk` is the presenter's device.
     /// `PUNKTFUNK_DECODER` wins, then the setting; both default to auto.
@@ -1691,6 +1732,40 @@ impl Decoder {
 mod tests {
     use super::*;
     use punktfunk_core::quic::{CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_PYROWAVE};
+
+    /// DXGI packs the four Device Manager fields high to low, 16 bits each.
+    #[test]
+    fn umd_version_splits_into_device_manager_fields() {
+        let raw = (32i64 << 48) | (21025i64 << 16) | 10016;
+        assert_eq!(umd_version_parts(raw), [32, 0, 21025, 10016]);
+    }
+
+    /// Only an HDR session on the Vulkan rung with a driver below the floor warns.
+    #[test]
+    fn an_old_amd_driver_warns_only_for_vulkan_hdr() {
+        let old = Some([32, 0, 12011, 4002]);
+        let msg = amd_vulkan_hdr_driver_notice(old, true, true).expect("old driver, Vulkan, HDR");
+        assert!(msg.contains("32.0.12011.4002"), "{msg}");
+        assert!(msg.contains("25.9.1"), "{msg}");
+        assert_eq!(
+            amd_vulkan_hdr_driver_notice(old, false, true),
+            None,
+            "D3D11VA"
+        );
+        assert_eq!(amd_vulkan_hdr_driver_notice(old, true, false), None, "SDR");
+        assert_eq!(
+            amd_vulkan_hdr_driver_notice(None, true, true),
+            None,
+            "unknown driver"
+        );
+        let floor = Some(AMD_VULKAN_HDR_DRIVER_FLOOR);
+        assert_eq!(amd_vulkan_hdr_driver_notice(floor, true, true), None);
+        assert!(amd_vulkan_hdr_driver_notice(Some([32, 0, 21024, 65535]), true, true).is_some());
+        assert_eq!(
+            amd_vulkan_hdr_driver_notice(Some([32, 0, 31041, 1004]), true, true),
+            None
+        );
+    }
 
     /// Advertising 4:4:4 on a device that cannot decode it costs HEVC: there is
     /// no CPU HEVC, and the host grants 4:4:4 on HEVC only.
