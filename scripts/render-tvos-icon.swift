@@ -112,8 +112,9 @@ func place(_ ctx: CGContext, _ art: CGImage, _ w: Int, _ h: Int, fraction: Doubl
     ctx.draw(art, in: CGRect(x: (Double(w) - s) / 2, y: (Double(h) - s) / 2, width: s, height: s))
 }
 
-// icon.json group order: blob (front), dark circle, light circle (back-most art).
-let layers = [("Front", matte([0])), ("Circle2", matte([1])), ("Circle1", matte([2]))]
+// icon.json group order: lens, right circle, left circle. The lens is the circles' overlap, so it
+// shares the right circle's layer and the two never drift apart in the focus parallax.
+let layers = [("Front", matte([0, 1])), ("Circle1", matte([2]))]
 
 // App icon stacks: art at 92% of canvas height (tvOS crops edges in the focus effect).
 for (stack, sizes) in [
