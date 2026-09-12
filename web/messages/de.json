@@ -504,6 +504,8 @@
 	"stats_stage_copy": "Kopie",
 	"stats_stage_send": "Senden",
 	"stats_stage_send_spread": "Sende-Streuung",
+	"stats_stage_pool": "Pool",
+	"stats_stage_ipc": "Weitergabe",
 	"store_title": "Plugins",
 	"store_subtitle": "Durchstöbere den Plugin-Katalog, installiere und entferne Plugins und lege fest, welchen Katalogen dieser Host vertraut.",
 	"store_tab_browse": "Entdecken",

@@ -512,6 +512,8 @@
 	"stats_stage_copy": "Copy",
 	"stats_stage_send": "Send",
 	"stats_stage_send_spread": "Send spread",
+	"stats_stage_pool": "Pool",
+	"stats_stage_ipc": "Hand-off",
 	"store_title": "Plugins",
 	"store_subtitle": "Browse the plugin catalog, install and remove plugins, and choose which catalogs this host trusts.",
 	"store_tab_browse": "Browse",

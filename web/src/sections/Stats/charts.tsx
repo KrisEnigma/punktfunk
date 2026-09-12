@@ -53,6 +53,8 @@ const STAGE_COLORS: Record<string, string> = {
 	copy: "#1fb6a8",
 	send: "#f25c8a",
 	send_spread: "#9b6cf3",
+	pool: "#64748b",
+	ipc: "#22a2f2",
 };
 const PALETTE = [
 	"#6c5bf3",
@@ -73,6 +75,8 @@ const STAGE_LABELS: Record<string, () => string> = {
 	copy: m.stats_stage_copy,
 	send: m.stats_stage_send,
 	send_spread: m.stats_stage_send_spread,
+	pool: m.stats_stage_pool,
+	ipc: m.stats_stage_ipc,
 };
 
 /** A stage as the console names it; a name this build does not know shows as recorded. */
