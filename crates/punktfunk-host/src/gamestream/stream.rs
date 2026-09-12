@@ -1140,6 +1140,10 @@ fn stream_body(
     // Windows driver: the per-tick present → arrival lump and the pool's drops.
     let mut v_driver: Vec<u32> = Vec::new();
     let mut driver_path = false;
+    // The driver's own split of that lump, once it stamps its slots.
+    let (mut v_pool, mut v_denc, mut v_ipc): (Vec<u32>, Vec<u32>, Vec<u32>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut driver_split = false;
     let mut last_driver_dropped: u64 = 0;
     let (mut v_cap, mut v_enc, mut v_pkt, mut v_send): (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -1475,8 +1479,16 @@ fn stream_body(
             v_send.push(enqueue_us as u32);
             if owed.is_some() {
                 driver_path = true;
-                if let Some(age) = enc.telemetry().and_then(|t| t.present_to_arrival) {
-                    v_driver.push(age.as_micros().min(u128::from(u32::MAX)) as u32);
+                let us = |d: Duration| d.as_micros().min(u128::from(u32::MAX)) as u32;
+                let t = enc.telemetry();
+                match t.as_ref().and_then(|t| t.driver_split) {
+                    Some(s) => {
+                        driver_split = true;
+                        v_pool.extend(s.pool.map(us));
+                        v_denc.push(us(s.encode));
+                        v_ipc.push(us(s.ipc));
+                    }
+                    None => v_driver.extend(t.and_then(|t| t.present_to_arrival).map(us)),
                 }
             }
         }
@@ -1533,8 +1545,17 @@ fn stream_body(
                     p99_us: percentile(v, 0.99) as f32,
                 };
                 // On the driver, `capture` is host bookkeeping and `encode` the wait for the
-                // driver's next AU: its own lump replaces both.
-                let stages = if driver_path {
+                // driver's next AU: its own stamps replace both, or its lump when it has none.
+                let stages = if driver_split {
+                    vec![
+                        stage("pool", &mut v_pool),
+                        stage("encode", &mut v_denc),
+                        stage("ipc", &mut v_ipc),
+                        stage("copy", &mut v_pkt),
+                        stage("send", &mut v_send),
+                        stage("send_spread", &mut v_spread),
+                    ]
+                } else if driver_path {
                     vec![
                         stage("driver", &mut v_driver),
                         stage("copy", &mut v_pkt),
@@ -1574,6 +1595,10 @@ fn stream_body(
             last_driver_dropped = driver_dropped;
             v_driver.clear();
             driver_path = false;
+            v_pool.clear();
+            v_denc.clear();
+            v_ipc.clear();
+            driver_split = false;
             // Wire never exceeds the live budget. A refused in-place retarget disables
             // adaptation: raising FEC with a frozen encoder rate would overshoot.
             if adapt_supported && gs_adapt_enabled() {

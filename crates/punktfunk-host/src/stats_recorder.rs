@@ -23,8 +23,9 @@ const MAX_SAMPLES: usize = 5400;
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct StageTiming {
     /// Pipeline order, named per path. Linux native: `queue capture submit encode send`.
-    /// Windows driver: `driver copy send`. GameStream: `capture encode packetize send
-    /// send_spread`, or `driver copy send send_spread` on the Windows driver.
+    /// Windows driver: `pool encode ipc copy send`, or `driver copy send` from a driver that
+    /// does not stamp its slots. GameStream: `capture encode packetize send send_spread`, with
+    /// the same two driver sets on Windows.
     pub name: String,
     pub p50_us: f32,
     pub p99_us: f32,

@@ -379,6 +379,7 @@ mod tests {
             dropped_total: 0,
             drain_heartbeat: Some(last_au),
             present_to_arrival: None,
+            driver_split: None,
             state: 0,
             backend: "nvenc",
         })

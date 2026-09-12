@@ -29,6 +29,10 @@ pub(super) struct FrameMsg {
     pub(super) was_measured: bool,
     /// The Windows driver encoded this AU: `encode_us` is its present → arrival lump.
     pub(super) driver: bool,
+    /// The driver stamped its slot, so `queue_us` is its pool wait, `encode_us` its encode and
+    /// `ipc_us` the hand-off from publish to the host's take.
+    pub(super) split: bool,
+    pub(super) ipc_us: u32,
 }
 
 /// Whole AU, or one slice-boundary chunk of a streamed AU (seal/pace while the encoder still runs).
@@ -54,6 +58,8 @@ pub(super) struct ChunkMsg {
     pub(super) repeat: bool,
     pub(super) was_measured: bool,
     pub(super) driver: bool,
+    pub(super) split: bool,
+    pub(super) ipc_us: u32,
 }
 
 /// Open streamed AU: incremental sealer plus pace aggregation across per-chunk flushes.
@@ -167,6 +173,8 @@ fn handle_chunk(
             repeat: c.repeat,
             was_measured: c.was_measured,
             driver: c.driver,
+            split: c.split,
+            ipc_us: c.ipc_us,
         },
         PaceStat {
             spread_us: s.spread_us.saturating_add(stat.spread_us),
@@ -248,6 +256,10 @@ pub(super) fn send_loop(
     // Capture → fully sent per AU, and the driver path's present → arrival lump.
     let (mut host_v, mut driver_v): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
     let mut driver_path = false;
+    // The driver's own split of that lump, once it stamps its slots.
+    let (mut pool_v, mut denc_v, mut ipc_v): (Vec<u32>, Vec<u32>, Vec<u32>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut driver_split = false;
     let mut last_driver_dropped = stats.driver_dropped.load(Ordering::Relaxed);
     let (mut cap_v, mut submit_v, mut wait_v, mut queue_v): (
         Vec<u32>,
@@ -339,6 +351,8 @@ pub(super) fn send_loop(
                                 let t = punktfunk_core::quic::HostTiming {
                                     pts_ns: msg.capture_ns,
                                     host_us,
+                                    // On the driver: queue = its pool wait, encode = its encode,
+                                    // and the client's residual is hand-off + copy + seal.
                                     stages: Some(punktfunk_core::quic::HostStages {
                                         queue_us: msg.queue_us,
                                         encode_us: msg.encode_us,
@@ -371,10 +385,20 @@ pub(super) fn send_loop(
                                 host_v.push(host_us);
                             }
                             if msg.was_measured {
-                                // The driver path's own stages are its lump, the copy, the send.
+                                // The driver path's stages: its split when stamped, else its
+                                // lump; then the copy and the send. A zero pool is unmeasured.
                                 if msg.driver {
                                     driver_path = true;
-                                    driver_v.push(msg.encode_us);
+                                    if msg.split {
+                                        driver_split = true;
+                                        if msg.queue_us > 0 {
+                                            pool_v.push(msg.queue_us);
+                                        }
+                                        denc_v.push(msg.encode_us);
+                                        ipc_v.push(msg.ipc_us);
+                                    } else {
+                                        driver_v.push(msg.encode_us);
+                                    }
                                 } else {
                                     cap_v.push(msg.cap_us);
                                     submit_v.push(msg.submit_us);
@@ -476,7 +500,15 @@ pub(super) fn send_loop(
                     p50_us: percentile(v, 0.50) as f32,
                     p99_us: percentile(v, 0.99) as f32,
                 };
-                let stages = if driver_path {
+                let stages = if driver_split {
+                    vec![
+                        stage("pool", &mut pool_v),
+                        stage("encode", &mut denc_v),
+                        stage("ipc", &mut ipc_v),
+                        stage("copy", &mut wait_v),
+                        stage("send", &mut pace_us),
+                    ]
+                } else if driver_path {
                     vec![
                         stage("driver", &mut driver_v),
                         stage("copy", &mut wait_v),
@@ -524,6 +556,10 @@ pub(super) fn send_loop(
             host_v.clear();
             driver_v.clear();
             driver_path = false;
+            pool_v.clear();
+            denc_v.clear();
+            ipc_v.clear();
+            driver_split = false;
             last_perf = std::time::Instant::now();
             last_bytes = s.bytes_sent;
             last_send_dropped = s.packets_send_dropped;

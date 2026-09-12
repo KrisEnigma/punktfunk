@@ -146,8 +146,8 @@ pub struct Drive<'a> {
     wire_seq: u32,
     /// Publish-token sequence, per session thread.
     publish_seq: u32,
-    /// `(slot, qpc, source_seq)` of every frame whose AU is owed, in submit order.
-    inflight: VecDeque<(usize, u64, u64)>,
+    /// `(slot, qpc, source_seq, qpc_submit)` of every frame whose AU is owed, in submit order.
+    inflight: VecDeque<(usize, u64, u64, u64)>,
     /// A partially drained AU must finish through `poll_chunk`.
     mid_au: bool,
     /// The AU in progress could not be placed; its remaining chunks are dropped too.
@@ -306,6 +306,7 @@ impl Drive<'_> {
             block_if_armed(self.block_after, self.encoded);
         }
         let index = self.wire_seq.wrapping_add(self.inflight.len() as u32);
+        let submitted = qpc_now();
         if let Err(e) = self.enc.submit_indexed(&frame, index) {
             dbglog!("[pf-vd] encode: submit failed: {e:#}");
             self.pool.release(slot);
@@ -321,7 +322,7 @@ impl Drive<'_> {
         }
         self.submit_failures = 0;
         self.report.submits += 1;
-        self.inflight.push_back((slot, qpc, seq));
+        self.inflight.push_back((slot, qpc, seq, submitted));
         true
     }
 
@@ -507,7 +508,7 @@ impl Drive<'_> {
     /// One chunk of the oldest in-flight AU: published, or dropped with the rest of its AU. A
     /// detached thread returning from its wedge touches neither the pool nor the section.
     fn on_chunk(&mut self, chunk: AuChunk) {
-        let Some(&(slot, qpc, seq)) = self.inflight.front() else {
+        let Some(&(slot, qpc, seq, submitted)) = self.inflight.front() else {
             return;
         };
         if !self.live.load(Ordering::Acquire) {
@@ -519,7 +520,7 @@ impl Drive<'_> {
             self.au_published = false;
         }
         if !self.dropping_au {
-            if self.publish(&chunk, qpc, seq) {
+            if self.publish(&chunk, qpc, seq, submitted) {
                 self.au_published = true;
             } else {
                 self.dropping_au = true;
@@ -548,8 +549,9 @@ impl Drive<'_> {
     }
 
     /// Heap bytes, slot record, `latest`, event — in that order. `false` when no placement
-    /// came free within [`SLOT_WAIT`].
-    fn publish(&mut self, chunk: &AuChunk, qpc: u64, seq: u64) -> bool {
+    /// came free within [`SLOT_WAIT`]. The record carries the frame's present, submit and
+    /// publish QPC, which is how the host splits its age.
+    fn publish(&mut self, chunk: &AuChunk, qpc: u64, seq: u64, submitted: u64) -> bool {
         let section = &self.session.section;
         let len = chunk.data.len() as u32;
         let deadline = Instant::now() + SLOT_WAIT;
@@ -576,6 +578,7 @@ impl Drive<'_> {
         ]
         .into_iter()
         .fold(0, |acc, (on, bit)| if on { acc | bit } else { acc });
+        let now = qpc_now();
         section.publish_slot(
             slot,
             &AuSlot {
@@ -586,10 +589,11 @@ impl Drive<'_> {
                 qpc_pts: qpc,
                 flags,
                 state: au::PUBLISHED,
+                qpc_submit: submitted,
+                qpc_published: now,
             },
         );
         self.publish_seq = self.publish_seq.wrapping_add(1);
-        let now = qpc_now();
         section.store_u64(offset_of!(AuHeader, last_au_qpc), now);
         self.report.note_publish(qpc, now);
         section.publish_latest(FrameToken {

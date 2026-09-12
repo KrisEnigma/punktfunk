@@ -52,6 +52,16 @@ impl Activity {
     }
 }
 
+/// Present → host arrival as the driver measured it: the wait in its pool (`None` for a frame
+/// with no present stamp, a keyframe re-encode of the stash), the encode, and the hand-off from
+/// the publish to the host's take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DriverSplit {
+    pub pool: Option<Duration>,
+    pub encode: Duration,
+    pub ipc: Duration,
+}
+
 /// What the driver's encoder says about itself over the AU section — the whole view a host that
 /// owns no pixels has of the display's frame path, and the operator surface's numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +83,9 @@ pub struct EncoderTelemetry {
     /// The newest access unit's OS present stamp (`qpc_pts`) against the moment the host took it.
     /// It grows when frames arrive late rather than not at all.
     pub present_to_arrival: Option<Duration>,
+    /// The driver's own split of that span for the newest access unit, from the stamps on its
+    /// slot. `None` from a driver that does not stamp, and before the first access unit.
+    pub driver_split: Option<DriverSplit>,
     /// The driver's encoder state word (`pf_driver_proto::encode::ENCODER_*`).
     pub state: u32,
     /// The backend the driver opened, for the status surface.
@@ -426,6 +439,7 @@ mod tests {
             dropped_total: 1_200,
             drain_heartbeat: Some(now),
             present_to_arrival: None,
+            driver_split: None,
             state: 0,
             backend: "nvenc",
         };
