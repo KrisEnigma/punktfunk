@@ -252,8 +252,9 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
         plan.push(
             "Checking Windows",
             vec![WinAction::Refuse(format!(
-                "The Punktfunk host needs Windows 11 22H2 (build {MIN_HOST_BUILD}) or newer — this \
-                 PC reports build {}, where the virtual display can't start. Nothing was installed.",
+                "The Punktfunk host needs {} — this PC reports build {}, where the virtual \
+                 display can't start. Nothing was installed.",
+                crate::platform::floor("windows"),
                 facts.os_build
             ))],
         );

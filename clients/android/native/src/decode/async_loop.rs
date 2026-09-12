@@ -240,10 +240,11 @@ pub(super) fn run_async(
     };
     stats.set_presenter_active(presenter.is_some() || asc.is_some());
     // The vsync clock, started LAZILY on the first decoded frame (see `vsync.rs`); its ticks ride
-    // the same event channel. The ASC backend derives its present clock from the real transaction
-    // latches instead, so it needs no choreographer.
+    // the same event channel. Both presenters need it: the SurfaceView one for its timelines, the
+    // ASC one for the panel period (its phase comes from present fences) and the fence poll on
+    // every tick.
     let mut vsync: Option<VsyncClock> = None;
-    let mut vsync_tx = presenter.is_some().then(|| ev_tx.clone());
+    let mut vsync_tx = (presenter.is_some() || asc.is_some()).then(|| ev_tx.clone());
     let ctx = Ctx {
         codec,
         client: client.clone(),
@@ -478,7 +479,7 @@ fn bring_up(
             continue;
         }
         log::info!(
-            "decode: decoder started (async) at {}x{} through {}",
+            "decode: decoder started (async) at {}x{} through {} (rung {rung})",
             mode.width,
             mode.height,
             // `asc.as_ref().and(backend)`, not `backend`: an ASC rung whose backend failed to
@@ -694,6 +695,9 @@ impl State {
         if pass.vsync_tick {
             if let Some(p) = self.presenter.as_mut() {
                 p.on_vsync();
+            }
+            if let Some(a) = self.asc.as_mut() {
+                a.poll_fences(ctx.offset(), &ctx.stats, &ctx.video_e2e);
             }
         }
         ctx.stats.note_skipped_overflow(pass.aus_dropped); // parked-AU overflow: skips, flagged as such
@@ -986,8 +990,8 @@ impl State {
 
     /// The backends' decision point, run EVERY pass — frame arrivals, vsync ticks and the 5 ms
     /// housekeeping wake all land here, which is what reopens the glass budget on time even when
-    /// the choreographer clock is absent. The ASC backend's clock is the real transaction latches,
-    /// so it consults no choreographer.
+    /// the choreographer clock is absent. The ASC backend phases on its own present fences and
+    /// takes only the panel period from the choreographer.
     fn pump(&mut self, ctx: &Ctx, clock: Option<&VsyncShared>) {
         if let Some(p) = self.presenter.as_mut() {
             let now = now_monotonic_ns();
@@ -1001,7 +1005,8 @@ impl State {
         }
         if let Some(a) = self.asc.as_mut() {
             if let Some(tx) = ctx.present_tx.as_ref() {
-                if a.pump(now_monotonic_ns(), &ctx.stats, tx) {
+                let panel = clock.map_or(0, VsyncShared::panel_period_ns);
+                if a.pump(now_monotonic_ns(), panel, &ctx.stats, tx) {
                     self.rendered += 1;
                 }
             }

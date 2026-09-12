@@ -12,10 +12,9 @@ import {
 	useGetSessionSettings,
 	useSetSessionSettings,
 } from "@/api/gen/session/session";
+import { usePlatform } from "@/api/platform";
 import { QueryState } from "@/components/query-state";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -37,18 +36,11 @@ export const SessionGameCard: FC = () => {
 	const q = useGetSessionSettings();
 	const save = useSetSessionSettings();
 	const server = q.data?.settings;
-	// Which axes this build acts on. An EMPTY list means the build enforces nothing — the contract
-	// says so outright ("Empty on a platform with no launch path (macOS), so the console can say so
-	// instead of offering a switch that does nothing"), and this card's own comment promises the
-	// controls are "shown disabled rather than hidden".
-	//
-	// The old `enforced.length === 0 || …` read empty as "enforces EVERYTHING", so on exactly the
-	// platform the flag exists for, every control stayed live: clicking one PUT the setting and
-	// toasted success for an axis the host would never act on. Absent (an older host that never
-	// sent the field) still means "assume it acts" — that is the compatible reading, and it is a
-	// different case from present-and-empty.
-	const enforced = q.data?.enforced;
-	const acts = (field: string) => !enforced || enforced.includes(field);
+	// A platform gate is never transient, so an axis this build does not act on is not
+	// rendered at all — disabled-with-a-reason is for busy and live-session only
+	// (design/web-console-overhaul.md §2.1).
+	const { acts, actsAny } = usePlatform();
+	const enforces = (field: string) => acts("session", field);
 
 	// The grace field is free text while being typed, so it gets a local buffer; the other two axes
 	// are discrete and go straight to the host.
@@ -73,18 +65,18 @@ export const SessionGameCard: FC = () => {
 	const busy = save.isPending;
 	const error = save.error instanceof ApiError ? save.error.message : undefined;
 
+	if (!actsAny("session")) return null;
+
 	return (
-		<Card>
-			<CardHeader>
-				<CardTitle>{m.session_game_title()}</CardTitle>
-			</CardHeader>
-			<CardContent className="space-y-4">
-				<p className="max-w-prose text-sm text-muted-foreground">
-					{m.session_game_help()}
-				</p>
-				<QueryState isLoading={q.isLoading} error={q.error} refetch={q.refetch}>
-					{server && (
-						<div className="space-y-6">
+		<section className="space-y-4">
+			<h3 className="text-sm font-medium">{m.session_game_title()}</h3>
+			<p className="max-w-prose text-sm text-muted-foreground">
+				{m.session_game_help()}
+			</p>
+			<QueryState isLoading={q.isLoading} error={q.error} refetch={q.refetch}>
+				{server && (
+					<div className="space-y-6">
+						{enforces("session_on_game_exit") && (
 							<Field
 								label={m.session_game_on_exit()}
 								help={m.session_game_on_exit_help()}
@@ -93,21 +85,23 @@ export const SessionGameCard: FC = () => {
 								<div className="flex flex-wrap gap-2">
 									<Choice
 										selected={server.session_on_game_exit === true}
-										disabled={busy || !acts("session_on_game_exit")}
+										disabled={busy}
 										onClick={() => apply({ session_on_game_exit: true })}
 									>
 										{m.session_game_on_exit_end()}
 									</Choice>
 									<Choice
 										selected={server.session_on_game_exit === false}
-										disabled={busy || !acts("session_on_game_exit")}
+										disabled={busy}
 										onClick={() => apply({ session_on_game_exit: false })}
 									>
 										{m.session_game_on_exit_keep()}
 									</Choice>
 								</div>
 							</Field>
+						)}
 
+						{enforces("game_on_session_end") && (
 							<Field
 								label={m.session_game_end_game()}
 								help={m.session_game_end_game_help()}
@@ -118,7 +112,7 @@ export const SessionGameCard: FC = () => {
 										<Choice
 											key={p}
 											selected={(server.game_on_session_end ?? "keep") === p}
-											disabled={busy || !acts("game_on_session_end")}
+											disabled={busy}
 											onClick={() => apply({ game_on_session_end: p })}
 										>
 											{END_POLICY_LABEL[p]()}
@@ -139,11 +133,13 @@ export const SessionGameCard: FC = () => {
 									{m.session_game_nested_note()}
 								</p>
 							</Field>
+						)}
 
-							{/* Its own axis rather than a fourth end-policy: that one asks what a
+						{/* Its own axis rather than a fourth end-policy: that one asks what a
 							    session owes its game, this one asks what a new launch owes the last
 							    one — and wanting a game to survive a disconnect says nothing about
 							    wanting it kept when you deliberately pick something else. */}
+						{enforces("game_on_new_launch") && (
 							<Field
 								label={m.session_game_new_launch()}
 								help={m.session_game_new_launch_help()}
@@ -154,7 +150,7 @@ export const SessionGameCard: FC = () => {
 										<Choice
 											key={p}
 											selected={(server.game_on_new_launch ?? "keep") === p}
-											disabled={busy || !acts("game_on_new_launch")}
+											disabled={busy}
 											onClick={() => apply({ game_on_new_launch: p })}
 										>
 											{NEW_LAUNCH_LABEL[p]()}
@@ -167,8 +163,10 @@ export const SessionGameCard: FC = () => {
 									</p>
 								)}
 							</Field>
+						)}
 
-							{(server.game_on_session_end ?? "keep") === "always" && (
+						{enforces("disconnect_grace_seconds") &&
+							(server.game_on_session_end ?? "keep") === "always" && (
 								<Field
 									label={m.session_game_grace()}
 									help={m.session_game_grace_help()}
@@ -189,7 +187,7 @@ export const SessionGameCard: FC = () => {
 											max={86400}
 											className="w-28"
 											value={grace}
-											disabled={busy || !acts("disconnect_grace_seconds")}
+											disabled={busy}
 											onChange={(e) => setGrace(e.target.value)}
 											onBlur={() => {
 												const n = Number(grace);
@@ -213,18 +211,11 @@ export const SessionGameCard: FC = () => {
 								</Field>
 							)}
 
-							{/* Present-and-empty is the "this build acts on none of it" signal; ABSENT
-							    is an older host that never sent the field, where claiming inertness
-							    would be a guess. Same distinction `acts()` makes above. */}
-							{enforced?.length === 0 && (
-								<Badge variant="outline">{m.session_game_inert()}</Badge>
-							)}
-							{error && <p className="text-sm text-destructive">{error}</p>}
-						</div>
-					)}
-				</QueryState>
-			</CardContent>
-		</Card>
+						{error && <p className="text-sm text-destructive">{error}</p>}
+					</div>
+				)}
+			</QueryState>
+		</section>
 	);
 };
 

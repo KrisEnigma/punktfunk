@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
-import { Download, Eye, Trash2 } from "lucide-react";
+import { Download, Eye, HistoryIcon, Trash2 } from "lucide-react";
 import type { FC } from "react";
 import type { CaptureMeta } from "@/api/gen/model/captureMeta";
 import {
@@ -13,7 +13,7 @@ import { useDialogs } from "@/components/dialogs";
 import { QueryState } from "@/components/query-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
 	Table,
 	TableBody,
@@ -117,7 +117,12 @@ export const RecordingsCard: FC<{
 	return (
 		<Card>
 			<CardHeader>
-				<h2 className="text-lg font-medium">{m.stats_recordings_title()}</h2>
+				<CardTitle>
+					<h2 className="flex items-center gap-2">
+						<HistoryIcon className="size-4" />
+						{m.stats_recordings_title()}
+					</h2>
+				</CardTitle>
 			</CardHeader>
 			<QueryState
 				isLoading={recordings.isLoading}

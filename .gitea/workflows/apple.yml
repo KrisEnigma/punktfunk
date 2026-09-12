@@ -129,7 +129,11 @@ on:
       testflight:
         description: "Upload the iOS/macOS/tvOS builds to TestFlight (true/false)"
         required: false
-        default: "true"
+        default: "false"
+      dmg:
+        description: "Notarize the macOS DMG and publish it to the registry's canary/ path (true/false)"
+        required: false
+        default: "false"
 
 # Shared compile cache: sccache -> RustFS S3 (storage.unom.io — the mini resolves it via
 # the router, i.e. the hairpin path whose TLS always validated). Covers every cargo/rustc
@@ -239,8 +243,8 @@ jobs:
       - name: Build PunktfunkCore.xcframework (mac + iOS + tvOS slices)
         # iOS and tvOS slices on purpose: the two scheme builds below need them. A rebuild replaces
         # the whole xcframework and drops any slice not asked for, so this must stay in step with
-        # them.
-        run: BUILD_IOS=1 BUILD_TVOS=1 bash scripts/build-xcframework.sh
+        # them. The bundle is parked per commit, so distribute and screenshots copy it instead.
+        run: sh scripts/ci/mac-xcframework.sh
 
       - name: Build (PunktfunkKit + PunktfunkClient app shell)
         working-directory: clients/apple
@@ -390,15 +394,9 @@ jobs:
           echo "disk after prune:"; df -h /System/Volumes/Data | tail -1
 
       - name: Build PunktfunkCore.xcframework (mac + iOS + tvOS)
-        # tvOS is a tier-3 target (nightly -Zbuild-std): slow on the first build, then cached on
-        # the self-hosted runner. Built on canary too so the tvOS archive/upload below runs on the
-        # same track as iOS/macOS (the nightly toolchain is installed unconditionally above).
-        #
-        # This repeats the `swift` job's mac-slice build, and that is the intended trade: the two
-        # jobs share the runner's sccache and DerivedData, so the overlap is cheap, whereas passing
-        # an xcframework between jobs would mean uploading/downloading it through Gitea's artifact
-        # backend (the one that already forces upload-artifact@v3) on every run.
-        run: BUILD_IOS=1 BUILD_TVOS=1 bash scripts/build-xcframework.sh
+        # The `swift` job parked this commit's bundle on the runner, so this copies it in. Built on
+        # canary too, so the tvOS archive/upload below runs on the same track as iOS/macOS.
+        run: sh scripts/ci/mac-xcframework.sh
 
       - name: Stage App Store Connect API key
         env:
@@ -408,9 +406,10 @@ jobs:
           chmod 600 "$RUNNER_TEMP/asc.p8"
 
       - name: macOS — archive, codesign Developer ID, notarize, DMG
-        # Stable releases only — the notarized DMG is a Gatekeeper/direct-download artifact, not
-        # relevant to TestFlight testers (the canary channel). Skipped on canary main pushes.
-        if: startsWith(gitea.ref, 'refs/tags/v')
+        # Stable releases, and a dispatch that asks for it. Skipped on canary main pushes: the
+        # notarized DMG is a Gatekeeper/direct-download artifact, not relevant to TestFlight
+        # testers (the canary channel).
+        if: startsWith(gitea.ref, 'refs/tags/v') || inputs.dmg == 'true'
         run: |
           # Archive UNSIGNED, then codesign with the Developer ID Application identity from the
           # login keychain. Unsigned archive sidesteps Xcode's keychain-access-groups
@@ -486,6 +485,30 @@ jobs:
           . scripts/ci/gitea-release.sh
           RID=$(ensure_release "$GITHUB_REF_NAME" "$GITHUB_REF_NAME" auto)
           upsert_asset "$RID" "$DMG" "Punktfunk-$VERSION.dmg"
+
+      - name: Publish the DMG to the generic registry
+        # The download page hands out one fixed URL per file; a release attachment has none.
+        # A tag fills the immutable versioned path (a re-run's 409 is a no-op) and latest/; a
+        # dispatch fills canary/ only. Aliases delete-then-reupload, as in windows-client.yml.
+        if: startsWith(gitea.ref, 'refs/tags/v') || inputs.dmg == 'true'
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          BASE="https://git.unom.io/api/packages/unom/generic/punktfunk-client-macos"
+          put() {
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --user "enricobuehler:$REGISTRY_TOKEN" --upload-file "$1" "$2")
+            case "$code" in
+              2*|409) echo "published ($code): $2" ;;
+              *) echo "upload failed (HTTP $code): $2"; exit 1 ;;
+            esac
+          }
+          case "$GITHUB_REF" in
+            refs/tags/v*) put "$DMG" "$BASE/$VERSION/Punktfunk-$VERSION.dmg"; ALIAS=latest ;;
+            # A branch build carries the NEXT minor as its version — that path is the release's.
+            *) ALIAS=canary ;;
+          esac
+          curl -sS -o /dev/null --user "enricobuehler:$REGISTRY_TOKEN" -X DELETE "$BASE/$ALIAS/Punktfunk.dmg" || true
+          put "$DMG" "$BASE/$ALIAS/Punktfunk.dmg"
 
       - name: macOS App Store — archive + upload to TestFlight
         if: gitea.event_name != 'workflow_dispatch' || inputs.testflight == 'true'
@@ -765,7 +788,9 @@ jobs:
   # `clients/apple/tools/screenshots.sh macos`.
   screenshots:
     needs: swift
-    if: gitea.event_name != 'pull_request'
+    # Release tags and manual runs only: the App Store takes screenshots per release, and each
+    # capture holds the only Mac slot for ~16 min.
+    if: startsWith(gitea.ref, 'refs/tags/v') || gitea.event_name == 'workflow_dispatch'
     runs-on: macos-arm64
     timeout-minutes: 90
     steps:
@@ -823,7 +848,7 @@ jobs:
           fi
 
       - name: Build PunktfunkCore.xcframework (mac + iOS + tvOS slices)
-        run: BUILD_IOS=1 BUILD_TVOS=1 bash scripts/build-xcframework.sh
+        run: sh scripts/ci/mac-xcframework.sh
 
       - name: Capture screenshots (iPhone 6.9" + iPad 13" + Apple TV; auto-creates the Simulators)
         working-directory: clients/apple

@@ -56,6 +56,7 @@ import io.unom.punktfunk.ConnectModal
 import io.unom.punktfunk.ConnectPhase
 import androidx.compose.runtime.CompositionLocalProvider
 import io.unom.punktfunk.GamepadInk
+import io.unom.punktfunk.OsdScaled
 import io.unom.punktfunk.GamepadPalette
 import coil.ImageLoader
 import coil.test.FakeImageLoaderEngine
@@ -448,24 +449,25 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
         // decodeP50, hostP50, netP50, lost, skipped, fec, frames, dispValid, displayP50,
         // e2eDispP50, e2eDispP95, paceP50, latchP50, presents, presenterActive, feedP50, codecP50,
         // skippedOverflow, audioBufferMs, audioAvOffsetMs, audioCodec, audioRateHz, audioBits].
+        // OsdScaled as in StreamScreen, so the tv- shots carry the TV overlay scale.
         // 10/9/16/1 = a 10-bit BT.2020 PQ (HDR) 4:2:0 feed so the DETAILED HUD renders its
         // video-feed line; the display stage is valid (dispValid 1) so the headline is the
         // directly-measured capture→displayed pair, less the excluded OS present floor (the 0.3
         // latch p50) — 1.5/2.3 shown from 1.8/2.6 raw — and the Phase-2 stage terms
         // (host 0.6 + network 0.3 + decode 0.4 + display 0.2) tile the shaved headline, with the
         // `os present +0.3 excluded` line naming what came off; the decoder label shows the ranked
-        // low-latency decoder. Light per-window loss
-        // (lost 2 · skipped 1 · FEC 5 of 238) so the reliability line (NORMAL/DETAILED) and the
-        // compact loss flag both render.
-        StatsOverlay(
+        // low-latency decoder. Light per-window loss (lost 2 · skipped 1 · FEC 5 of 238) so the
+        // counter line (`lost` alone at NORMAL, all three at DETAILED) and the compact loss flag
+        // both render.
+        OsdScaled { StatsOverlay(
             doubleArrayOf(
                 238.0, 921.4, 1.3, 2.1, 1.0, 1.0, 5120.0, 1440.0, 240.0, 2.0,
                 10.0, 9.0, 16.0, 1.0, 0.9, 0.4, 0.6, 0.3,
                 2.0, 1.0, 5.0, 238.0,
                 1.0, 0.5, 1.8, 2.6,
-                // Timeline-presenter split: pace + latch tile the display term; presents ≈ fps.
+                // Presenter samples: the 0.3 latch p50 is the excluded OS floor; presents ≈ fps.
                 0.2, 0.3, 236.0, 1.0,
-                // The decode term's own split (feed + codec = 0.4), and no overflow — the one
+                // feed + codec = 0.4 (logged, no longer drawn), and no overflow — the one
                 // `skipped` above is benign newest-wins pacing, not a decoder falling behind.
                 0.1, 0.3, 0.0,
                 // The audio plane: a 28 ms ring placed 4 ms behind the picture — a converged sync
@@ -481,7 +483,7 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
             decoderLabel = "c2.qti.hevc.decoder · low-latency",
             codecLabel = "HEVC",
             modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
-        )
+        ) }
     }
 }
 

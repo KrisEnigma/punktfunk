@@ -368,6 +368,17 @@ public enum ProfileSelection: Hashable, Sendable {
     }
 }
 
+extension EffectiveSettings {
+    /// The mode a session asks the host for: the configured size at the render scale, capped at
+    /// the codec's per-axis limit, at the configured refresh.
+    public var streamMode: (width: UInt32, height: UInt32, hz: UInt32) {
+        let mode = RenderScale.apply(
+            baseWidth: width, baseHeight: height, scale: renderScale,
+            maxDimension: RenderScale.maxDimension(codec: codec))
+        return (mode.width, mode.height, UInt32(clamping: refreshHz))
+    }
+}
+
 // MARK: - The live session's resolution
 
 /// What a session-scoped reader should read instead of `UserDefaults`.

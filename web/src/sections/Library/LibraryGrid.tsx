@@ -17,6 +17,7 @@ import type { Loadable } from "@/lib/query";
 import { m } from "@/paraglide/messages";
 import { GameCard } from "./GameCard";
 import { customId } from "./helpers";
+import { useSourceNames } from "./Sources";
 
 /**
  * Container: the library OVERVIEW — owns the listing query and per-card delete.
@@ -68,6 +69,7 @@ export const LibraryGridSection: FC<{
 	};
 
 	const setHidden = useSetLibraryEntryHidden();
+	const nameOf = useSourceNames();
 
 	// Same error discipline as delete: the host can refuse (it cannot persist the settings file),
 	// and swallowing that would leave the card looking unchanged with no explanation.
@@ -94,6 +96,7 @@ export const LibraryGridSection: FC<{
 			onToggleHidden={onToggleHidden}
 			// Keyed by ENTRY id, not custom id — hiding addresses any store's entry, not just ours.
 			hidingId={setHidden.isPending ? (setHidden.variables?.id ?? null) : null}
+			nameOf={nameOf}
 		/>
 	);
 };
@@ -108,7 +111,17 @@ export const LibraryGrid: FC<{
 	onToggleHidden: (entry: OperatorGameEntry) => void;
 	/** Entry id of the card whose hide/un-hide is in flight, or null. */
 	hidingId: string | null;
-}> = ({ library, onEdit, onDelete, deletingId, onToggleHidden, hidingId }) => {
+	/** A source's display name by id, for the store and owner badges. */
+	nameOf?: (id: string) => string | undefined;
+}> = ({
+	library,
+	onEdit,
+	onDelete,
+	deletingId,
+	onToggleHidden,
+	hidingId,
+	nameOf,
+}) => {
 	const all = library.data ?? [];
 	// Launcher entries (design D4) open the launcher itself — Steam Big Picture, Heroic — rather than
 	// a title. They launch and lease exactly like games; grouping them into their own rail is purely
@@ -124,6 +137,7 @@ export const LibraryGrid: FC<{
 			deleting={deletingId === customId(game)}
 			onToggleHidden={() => onToggleHidden(game)}
 			hiding={hidingId === game.id}
+			nameOf={nameOf}
 		/>
 	);
 	return (

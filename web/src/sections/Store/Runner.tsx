@@ -1,5 +1,5 @@
 import { toast } from "@unom/ui/toast";
-import { Play, Power, PowerOff } from "lucide-react";
+import { Container, Play, Power, PowerOff } from "lucide-react";
 import type { FC } from "react";
 import {
 	type RuntimeStatus,
@@ -75,8 +75,11 @@ export const RunnerCard: FC<{
 }> = ({ status, busy, onToggle }) => (
 	<Card>
 		<CardHeader className="pb-3">
-			<CardTitle className="flex items-center justify-between gap-3 text-base">
-				<span>{m.store_runner_title()}</span>
+			<CardTitle className="flex items-center justify-between gap-3">
+				<span className="flex items-center gap-2">
+					<Container className="size-4" />
+					{m.store_runner_title()}
+				</span>
 				{!status.installed ? (
 					<Badge variant="outline">{m.store_runner_state_missing()}</Badge>
 				) : status.running ? (

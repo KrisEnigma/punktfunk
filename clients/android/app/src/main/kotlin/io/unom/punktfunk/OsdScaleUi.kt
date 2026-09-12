@@ -9,16 +9,16 @@ import androidx.compose.ui.unit.Density
 
 /**
  * How much larger than this screen's normal UI the streaming chrome — the stats HUD and the
- * quick-action ring — draws on a TV. `dp` normalises pixel density, not viewing distance, and a
- * living-room set is roughly 3x further away than a phone; the chrome need not grow 3x, though,
- * because it is read in glances and the ring is a stick target rather than dense text. 1.75 clears
- * the 10-foot legibility floor without walling off the game.
+ * quick-action ring — draws on a TV. The TV density bucket already carries most of the viewing
+ * distance: a 1080p set is 960×540 dp, so a 55-inch panel at 3 m and a phone at 35 cm subtend
+ * nearly the same angle per dp. 1.25 sits a notch above that parity, and the detailed HUD's widest
+ * line still fits the 960 dp width.
  *
  * Physical screen size is deliberately not an input: `DisplayMetrics.xdpi` is invented on many TV
  * boxes, so a screen-inch rule would mis-size the very case this exists for. Android only — the
  * Apple TV client sizes its own chrome (`StreamHUDView`'s tvOS padding and inset).
  */
-const val TV_OSD_SCALE = 1.75f
+const val TV_OSD_SCALE = 1.25f
 
 /** The overlay multiplier for this device. 1 anywhere held or sat in front of. */
 fun osdScale(context: android.content.Context): Float =

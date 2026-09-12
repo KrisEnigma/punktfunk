@@ -1,10 +1,11 @@
-//! xdg ScreenCast / RemoteDesktop control plane: ashpd handshake on a dedicated
-//! tokio runtime, cursor-mode ladder, and GNOME's BT.2100 colour-mode probe.
+//! xdg ScreenCast / RemoteDesktop control plane: ashpd handshake on the shared
+//! portal runtime, cursor-mode ladder, and GNOME's BT.2100 colour-mode probe.
 //!
 //! Nothing here is per-frame. The handshake runs once; the thread then parks until
-//! `PortalSession`'s `Drop` (parent module) fires `quit_rx`. ashpd's `Session` has
-//! no `Drop` — releasing the zbus connection is what ends the compositor's cast.
-//! Drop the runtime before signalling done so that session is actually gone.
+//! `PortalSession`'s `Drop` (parent module) fires `quit_rx`, closes the portal
+//! session and signals done. ashpd's `Session` has no `Drop`, and the zbus
+//! connection is process-global (`crate::portal_rt`), so only `Session.Close`
+//! ends the compositor's cast.
 //!
 //! HDR offer is scoped to `PUNKTFUNK_CAPTURE_MONITOR` when set; unpinned it is
 //! "any head in BT.2100". See `design/per-monitor-portal-capture.md`. The probe
@@ -174,8 +175,30 @@ async fn choose_cursor_mode(
     }
 }
 
-/// Handshake then park on `quit_rx`. ashpd `Session` has no `Drop`; holding
-/// the zbus connection is what keeps the compositor's cast alive.
+/// Session.Close is the only teardown now that the zbus connection outlives the
+/// thread. Bounded so a wedged portal cannot hang a session switch.
+const CAST_CLOSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Close a portal session within [`CAST_CLOSE_BUDGET`]. A failure is logged, not
+/// fatal: the capturer is already going away.
+async fn close_session(
+    close: impl std::future::Future<Output = std::result::Result<(), ashpd::Error>>,
+) {
+    match tokio::time::timeout(CAST_CLOSE_BUDGET, close).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(
+            error = %e,
+            "closing the portal session failed — the next cast may find the portal busy"
+        ),
+        Err(_) => tracing::warn!(
+            budget_s = CAST_CLOSE_BUDGET.as_secs(),
+            "the portal did not answer Session.Close in time — it is probably already wedged"
+        ),
+    }
+}
+
+/// Handshake, park on `quit_rx`, then `Session.Close`. ashpd `Session` has no
+/// `Drop` and the connection is process-global, so nothing else ends the cast.
 pub(super) fn portal_thread(
     setup_tx: std::sync::mpsc::Sender<Result<(OwnedFd, u32), String>>,
     quit_rx: tokio::sync::oneshot::Receiver<()>,
@@ -185,17 +208,13 @@ pub(super) fn portal_thread(
     use ashpd::desktop::PersistMode;
     use ashpd::enumflags2::BitFlags;
 
-    // Multi-thread: zbus's background reader must stay pumped across
-    // create_session → select_sources → start, or the portal returns
-    // "Invalid session". A current-thread runtime starves it.
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-    {
+    // Shared, never dropped (`crate::portal_rt`): a per-session runtime took
+    // ashpd's process-global D-Bus connection down with it, and every later
+    // handshake in the process hung.
+    let rt = match crate::portal_rt::portal_runtime() {
         Ok(rt) => rt,
         Err(e) => {
-            let _ = setup_tx.send(Err(format!("build tokio runtime: {e}")));
+            let _ = setup_tx.send(Err(e));
             return;
         }
     };
@@ -247,10 +266,11 @@ pub(super) fn portal_thread(
                 .send(Ok((fd, node_id)))
                 .map_err(|_| anyhow!("capturer dropped before setup completed"))?;
 
-            // Hold `proxy` + `session` (the zbus connection). ashpd `Session` has
-            // no `Drop`; the compositor ends the cast when that connection drops.
+            // Hold `proxy` + `session` until told to quit. The zbus connection is
+            // process-global, so only the Close below ends the compositor's cast.
             let _keep_alive = (&proxy, &session);
             let _ = quit_rx.await;
+            close_session(session.close()).await;
             Ok(())
         }
         .await;
@@ -259,17 +279,13 @@ pub(super) fn portal_thread(
             let _ = err_tx.send(Err(format!("{e:#}")));
         }
     });
-    // Drop the runtime before the caller signals done: the two workers finishing
-    // is what releases the zbus connection, so the compositor session is gone
-    // (`PortalSession::drop`).
-    drop(rt);
 }
 
 /// RemoteDesktop+ScreenCast on one session (KWin/GNOME). Sources are selected on
 /// a RemoteDesktop session so a single `start` grant — the `kde-authorized`
 /// headless bypass, same as libei — covers capture. ScreenCast has no such
 /// bypass; a standalone path would show a dialog. Same fd + node id, same
-/// `quit_rx` park as [`portal_thread`].
+/// `quit_rx` park and Close as [`portal_thread`].
 pub(super) fn portal_thread_remote_desktop(
     setup_tx: std::sync::mpsc::Sender<Result<(OwnedFd, u32), String>>,
     quit_rx: tokio::sync::oneshot::Receiver<()>,
@@ -280,14 +296,11 @@ pub(super) fn portal_thread_remote_desktop(
     use ashpd::desktop::PersistMode;
     use ashpd::enumflags2::BitFlags;
 
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-    {
+    // Shared runtime, as in `portal_thread`.
+    let rt = match crate::portal_rt::portal_runtime() {
         Ok(rt) => rt,
         Err(e) => {
-            let _ = setup_tx.send(Err(format!("build tokio runtime: {e}")));
+            let _ = setup_tx.send(Err(e));
             return;
         }
     };
@@ -354,9 +367,10 @@ pub(super) fn portal_thread_remote_desktop(
                 .send(Ok((fd, node_id)))
                 .map_err(|_| anyhow!("capturer dropped before setup completed"))?;
 
-            // Same as `portal_thread`: hold the zbus connection until `quit_rx`.
+            // Same as `portal_thread`: park, then Close is what ends the session.
             let _keep_alive = (&remote, &screencast, &session);
             let _ = quit_rx.await;
+            close_session(session.close()).await;
             Ok(())
         }
         .await;
@@ -365,8 +379,6 @@ pub(super) fn portal_thread_remote_desktop(
             let _ = err_tx.send(Err(format!("{e:#}")));
         }
     });
-    // See `portal_thread`: drop the runtime before the caller's completion signal.
-    drop(rt);
 }
 
 #[cfg(test)]

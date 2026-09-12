@@ -48,6 +48,10 @@ fn chooser_cmd() -> String {
 /// wlroots/Sway virtual-display driver. Each [`create`](VirtualDisplay::create) adds one
 /// headless output; a portal thread owns the cast.
 pub struct WlrootsDisplay {
+    /// Whose display this is. Set by `set_client_identity` before `create`, so the
+    /// per-device topology (`design/web-console-overhaul.md` §6.1) can be resolved here.
+    client_fp: Option<[u8; 32]>,
+
     /// Out-of-band cursor request: prefer portal `CursorMode::Metadata` (`SPA_META_Cursor`
     /// for the channel + blend). Off: prefer `Embedded` (compositor paints the pointer).
     ///
@@ -79,6 +83,7 @@ impl Drop for WlrootsDisplay {
 impl WlrootsDisplay {
     pub fn new() -> Result<Self> {
         Ok(WlrootsDisplay {
+            client_fp: None,
             hw_cursor: false,
             last_cursor_mode: None,
             pending_restore: None,
@@ -93,7 +98,7 @@ impl WlrootsDisplay {
     /// stay lit through the portal handshake (same as `extend`).
     fn apply_topology(&mut self, ours: &str) {
         use crate::policy::Topology;
-        match crate::effective_topology() {
+        match crate::effective_topology(self.client_fp) {
             Topology::Extend | Topology::Auto => {}
             Topology::Primary => warn_primary_is_not_expressible(),
             Topology::Exclusive => {
@@ -120,6 +125,12 @@ pub fn is_available() -> bool {
 }
 
 impl VirtualDisplay for WlrootsDisplay {
+    /// The trait calls this before every `create`, which is what lets the per-device
+    /// topology be resolved from inside it (§6.1).
+    fn set_client_identity(&mut self, fingerprint: Option<[u8; 32]>) {
+        self.client_fp = fingerprint;
+    }
+
     fn name(&self) -> &'static str {
         "wlroots"
     }
@@ -777,9 +788,9 @@ fn portal_thread(
     use ashpd::enumflags2::BitFlags;
 
     // Multi-thread: zbus's reader must run across create_session → select_sources →
-    // start. Shared, never dropped ([`crate::portal_rt`]): a per-cast runtime kills
+    // start. Shared, never dropped ([`pf_capture::portal_rt`]): a per-cast runtime kills
     // ashpd's process-global cached connection and every later handshake hangs.
-    let rt = match crate::portal_rt::portal_runtime() {
+    let rt = match pf_capture::portal_rt::portal_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             let _ = setup_tx.send(Err(e));

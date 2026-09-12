@@ -50,6 +50,8 @@ libc = "0.2"
 # runtime; the gamescope restore worker + portal handshakes use tokio too.
 ashpd = { version = "0.13", features = ["screencast", "remote_desktop"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+# The shared, never-dropped portal runtime (`pf_capture::portal_rt`).
+pf-capture = { path = "../pf-capture" }
 futures-util = "0.3"
 # KWin virtual-output creation via the privileged `zkde_screencast_unstable_v1` protocol (vendored in
 # `protocols/`); the generated interface tables reference `wayland-backend`.

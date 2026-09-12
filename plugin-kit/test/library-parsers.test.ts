@@ -399,6 +399,8 @@ describe("openReadOnly", () => {
 		}
 	};
 
+	// The first bun:sqlite open in this file loads the native module, and on a starved CI runner
+	// that alone passes bun's 5 s default.
 	test("opens a real database and returns its rows", () => {
 		withDb((file) => {
 			const db = openReadOnly(file);
@@ -408,7 +410,7 @@ describe("openReadOnly", () => {
 			).toEqual([{ id: 1, name: "Ubisoft Connect" }]);
 			db?.close();
 		});
-	});
+	}, 30_000);
 
 	// A path with a space is the realistic URI-encoding case (Flatpak roots, "Program Files").
 	test("opens a path that needs URI escaping", () => {

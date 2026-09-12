@@ -362,7 +362,11 @@ impl<'a> Tui<'a> {
                     (true, true) => 1,
                     _ => 2,
                 };
-                let options = ["Host only", "Host and client", "Client only"];
+                let options = [
+                    "The PC I stream from (host)",
+                    "Both (host + client)",
+                    "The device I play on (client)",
+                ];
                 if let Some(pick) = self.choose(why, &options, current) {
                     screen.set_components(pick != 2, pick != 0);
                 }

@@ -248,7 +248,9 @@ async fn h_launch(
             .map(|s| (s.owner_fp, (s.width, s.height, s.fps)));
         // Native default: `separate` → reject. A second Moonlight client then gets 503
         // instead of wedging the shared monitor's capture.
-        let conflict = crate::vdisplay::admission::effective_conflict();
+        // GameStream has no per-device overlay to apply: its peer identity is the
+        // pairing cert, not the native fingerprint the overlay is keyed by.
+        let conflict = crate::vdisplay::admission::effective_conflict(None);
         match gamestream_admission(live, req_fp, conflict) {
             GsDecision::Serve => {}
             GsDecision::Join((w, h, f)) => {

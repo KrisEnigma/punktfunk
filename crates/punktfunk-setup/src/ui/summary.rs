@@ -215,7 +215,7 @@ impl Screen {
 
     pub fn label(field: Field) -> &'static str {
         match field {
-            Field::Components => "Components",
+            Field::Components => "This machine is",
             Field::Channel => "Channel",
             Field::Group => "Full controller support",
             Field::Gamestream => "Third-party clients",
@@ -232,11 +232,12 @@ impl Screen {
         let c = &self.choices;
         let yn = |on: bool| if on { "yes" } else { "no " };
         match field {
-            Field::Components => format!(
-                "Host {} · Client {}",
-                tick(c.components.host),
-                tick(c.components.client)
-            ),
+            // The download page's words, so the terminal reads like the page that sent you here.
+            Field::Components => match (c.components.host, c.components.client) {
+                (true, true) => "the host, plus the client app".into(),
+                (false, true) => "the device I play on (client)".into(),
+                _ => "the PC I stream from (host)".into(),
+            },
             Field::Channel => match c.switch_from {
                 Some(from) => format!("{} → {}", from.as_str(), c.channel.as_str()),
                 None => c.channel.as_str().to_string(),
@@ -267,7 +268,7 @@ impl Screen {
     /// Editor prompt: the sh installer's text, verbatim.
     pub fn why(field: Field) -> &'static str {
         match field {
-            Field::Components => "The host streams this box. The client watches another one.",
+            Field::Components => "Host: the PC you stream from. Client: the device you play on. One PC can be both.",
             Field::Channel => "canary is the latest main build; stable is the released one.",
             Field::Group => "Joins the punktfunk group for paddles, trackpads and gyro. It grants usbip attach, so only on a machine you trust.",
             Field::Gamestream => "Serve Moonlight, Artemis, or another third-party client. Punktfunk's own apps don't need this.",
@@ -305,14 +306,6 @@ impl Screen {
             .collect();
         out.push(format!("  {}", actions.join(" · ")));
         out
-    }
-}
-
-fn tick(on: bool) -> &'static str {
-    if on {
-        "✓"
-    } else {
-        "✗"
     }
 }
 

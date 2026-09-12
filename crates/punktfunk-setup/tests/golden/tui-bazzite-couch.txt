@@ -4,7 +4,7 @@
 │
 │  ▸ Install now with these settings
 │  ──────────────────────────────────────────────────────────
-│    Components               Host ✓ · Client ✗
+│    This machine is          the PC I stream from (host)
 │    Channel                  stable
 │    Full controller support  yes — Bazzite — virtual Steam Deck pad
 │    Third-party clients      no  — punktfunk's own apps don't need it

@@ -46,6 +46,10 @@ pub(crate) use splash::run as splash_run;
 /// `routing::operator_gamescope` once; it is never republished here.
 #[derive(Default)]
 pub struct GamescopeDisplay {
+    /// Whose display this is. Set by `set_client_identity` before `create`, so the
+    /// per-device topology (`design/web-console-overhaul.md` §6.1) can be resolved here.
+    client_fp: Option<[u8; 32]>,
+
     /// Bare-spawn command. Not the process-global `PUNKTFUNK_GAMESCOPE_APP`.
     cmd: Option<String>,
     /// Set before `create`. Gamescope cannot enable HDR live, so this is part of the reuse key.
@@ -393,6 +397,12 @@ impl GamescopeDisplay {
 }
 
 impl VirtualDisplay for GamescopeDisplay {
+    /// The trait calls this before every `create`, which is what lets the per-device
+    /// topology be resolved from inside it (§6.1).
+    fn set_client_identity(&mut self, fingerprint: Option<[u8; 32]>) {
+        self.client_fp = fingerprint;
+    }
+
     fn name(&self) -> &'static str {
         "gamescope"
     }
@@ -459,7 +469,8 @@ impl VirtualDisplay for GamescopeDisplay {
             None => (None, None), // no resolver on this path: bare spawn, the ladder default
         };
         // Sampled once so managed hold, exclusive session-free, and spawn darken cannot disagree.
-        let exclusive = crate::effective_topology() == crate::policy::Topology::Exclusive;
+        let exclusive =
+            crate::effective_topology(self.client_fp) == crate::policy::Topology::Exclusive;
         if let Some(client) = session_env {
             let out = create_managed_session(&client, mode, self.hdr)?;
             // Idling autologin leaves the CRTC configured. The hold cannot ride `pending_restore`:

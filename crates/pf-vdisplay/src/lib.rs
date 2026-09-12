@@ -531,12 +531,18 @@ pub fn resolve_topology(t: policy::Topology) -> policy::Topology {
     }
 }
 
-/// Topology applied at create. Precedence: configured console policy, else
-/// legacy `PUNKTFUNK_{KWIN,MUTTER}_VIRTUAL_PRIMARY` (`1`→exclusive, `0`→extend),
-/// else [`resolve_topology`] of `Auto`. Always concrete.
-pub fn effective_topology() -> policy::Topology {
-    if let Some(e) = policy::prefs().configured_effective() {
-        return resolve_topology(e.topology);
+/// Topology applied at create, for the client this display is being created for.
+///
+/// Precedence: configured console policy — that client's overlay over the host's
+/// (`design/web-console-overhaul.md` §6.1) — else legacy
+/// `PUNKTFUNK_{KWIN,MUTTER}_VIRTUAL_PRIMARY` (`1`→exclusive, `0`→extend), else
+/// [`resolve_topology`] of `Auto`. Always concrete.
+///
+/// `None` for a client is the host policy, which is also what an unidentified session
+/// (shared identity, GameStream) gets.
+pub fn effective_topology(client: Option<[u8; 32]>) -> policy::Topology {
+    if let Some(p) = policy::prefs().configured() {
+        return resolve_topology(p.effective_for(policy::fp_hex(client).as_deref()).topology);
     }
     // Legacy env if present, else Auto. [`ENV_LOCK`]: this runs inside `create`,
     // concurrent with another session's `apply_session_env`; racing `getenv` is
@@ -671,12 +677,6 @@ mod portal_cursor;
 /// tests are the only place a malformed line is visible.
 #[path = "vdisplay/linux/portal_picker.rs"]
 mod portal_picker;
-
-/// Never-dropped tokio runtime for portal handshakes. Outlives ashpd's
-/// process-global cached D-Bus connection; only Linux backends speak to it.
-#[cfg(target_os = "linux")]
-#[path = "vdisplay/linux/portal_rt.rs"]
-mod portal_rt;
 
 #[cfg(target_os = "linux")]
 #[path = "vdisplay/linux/hyprland.rs"]

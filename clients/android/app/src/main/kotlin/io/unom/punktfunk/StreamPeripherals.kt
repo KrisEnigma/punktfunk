@@ -98,10 +98,13 @@ internal class StreamPeripherals(
         // row calls it a live cycle — the stored default is what the next stream starts from.
         router.onStatsChord = { ui.statsVerbosity = ui.statsVerbosity.next() }
         // `Select+A` opens the ring at the screen centre; while it is up the pad belongs to it.
+        val openRing = { ring.openAt(Offset(containerSize().width / 2f, containerSize().height / 2f)) }
         router.onRingChord = {
             haptics.confirm()
-            ring.openAt(Offset(containerSize().width / 2f, containerSize().height / 2f))
+            openRing()
         }
+        // Ctrl+Alt+Shift+O, the cross-client chord, opens the same ring from a keyboard.
+        activity?.openRing = openRing
         router.onRingNav = { ring.nav(it) }
         // Both of the ring's claims on its input, taken and dropped on the same edge: the pad
         // through the router, everything key-shaped through the activity. A TV remote is neither a
@@ -361,6 +364,7 @@ internal class StreamPeripherals(
         router.onRingNav = null
         ring.onOpenChange = null
         activity?.ringKeys = null // a session torn down with the ring up must not keep the keys
+        activity?.openRing = null
         router.onMotionUnreachable = null // same: no notice raised by a slot closing at teardown
         router.release() // flush every slot (nothing sticks host-side) + drop the hot-plug listener
         activity?.gamepadRouter = null

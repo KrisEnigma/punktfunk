@@ -2,7 +2,7 @@
   "name": "punktfunk-docs",
   "private": true,
   "type": "module",
-  "description": "Punktfunk documentation site — Fumadocs on TanStack Start (Vite + Nitro/bun)",
+  "description": "Punktfunk documentation site \u2014 Fumadocs on TanStack Start (Vite + Nitro/bun)",
   "scripts": {
     "dev": "vite dev --port 3001",
     "build": "vite build",
@@ -19,6 +19,7 @@
     "@unom/ui": "^0.10.0",
     "fumadocs-core": "^16.15.4",
     "fumadocs-ui": "^16.15.4",
+    "next": "^16.3.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
@@ -35,5 +36,20 @@
     "typescript": "^7",
     "vite": "^8",
     "vite-tsconfig-paths": "^6"
+  },
+  "overrides": {
+    "@ai-sdk/provider-utils": "^4.0.33",
+    "baseline-browser-mapping": "^2.11.1",
+    "brace-expansion": "^5.0.9",
+    "browserslist": "^4.28.7",
+    "dompurify": "^3.4.13",
+    "fast-uri": "^3.1.7",
+    "immutable": "^4.3.9",
+    "js-yaml": "^4.3.2",
+    "nanoid": "^3.3.18",
+    "postcss": "^8.5.25",
+    "sharp": "^0.35.4",
+    "tar": "^7.5.21",
+    "undici": "^7.29.0"
   }
 }

@@ -1,6 +1,9 @@
 package io.unom.punktfunk.kit
 
+import android.view.KeyEvent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -39,5 +42,32 @@ class KeymapTest {
         assertEquals(0, Keymap.evdevToVk(1)) // KEY_ESC — layout-invariant, keycode path
         assertEquals(0, Keymap.evdevToVk(59)) // KEY_F1
         assertEquals(0, Keymap.evdevToVk(304)) // BTN_SOUTH — gamepad, never a typing key
+    }
+
+    /** Korean and JIS IME keys leave as the VKs the hosts map, under Android's odd names. */
+    @Test
+    fun imeKeysReachTheWire() {
+        assertEquals(0x15, Keymap.toVk(KeyEvent.KEYCODE_KANA)) // 한/영
+        assertEquals(0x19, Keymap.toVk(KeyEvent.KEYCODE_EISU)) // 한자
+        assertEquals(0x1C, Keymap.toVk(KeyEvent.KEYCODE_HENKAN))
+        assertEquals(0x1D, Keymap.toVk(KeyEvent.KEYCODE_MUHENKAN))
+        assertEquals(0xF2, Keymap.toVk(KeyEvent.KEYCODE_KATAKANA_HIRAGANA))
+        assertEquals(0xF3, Keymap.toVk(KeyEvent.KEYCODE_ZENKAKU_HANKAKU))
+        assertEquals(0xC1, Keymap.toVk(KeyEvent.KEYCODE_RO)) // JIS ろ, ABNT2 /?
+        assertEquals(0xC2, Keymap.toVk(KeyEvent.KEYCODE_NUMPAD_COMMA))
+        assertEquals(0xE1, Keymap.toVk(KeyEvent.KEYCODE_YEN))
+        assertEquals(0, Keymap.toVk(KeyEvent.KEYCODE_LANGUAGE_SWITCH)) // Android keeps it
+    }
+
+    /** Alt+` is Alt+Tab: the grave goes out as Tab from its Alt-held press to its release. */
+    @Test
+    fun altGraveStaysTabUntilReleased() {
+        var tab = Keymap.altTabAlias(down = true, repeat = false, altOnly = true, wasTab = false)
+        assertTrue(tab)
+        tab = Keymap.altTabAlias(down = true, repeat = true, altOnly = false, wasTab = tab)
+        assertTrue("Alt let go mid-repeat", tab)
+        tab = Keymap.altTabAlias(down = false, repeat = false, altOnly = false, wasTab = tab)
+        assertTrue("the release matches the press", tab)
+        assertFalse("a plain grave", Keymap.altTabAlias(down = true, repeat = false, altOnly = false, wasTab = tab))
     }
 }

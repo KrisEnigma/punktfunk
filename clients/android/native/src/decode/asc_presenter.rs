@@ -45,11 +45,12 @@ const READER_MAX_IMAGES: i32 = 8;
 const FALLBACK_PERIOD_NS: i64 = 8_333_333;
 
 /// Apply-ahead beyond the learned lead: the binder hop plus SurfaceFlinger's wakeup→latch gap.
-/// Starts small and widens [`APPLY_MARGIN_STEP_NS`] per slot miss to [`APPLY_MARGIN_MAX_NS`] — the
-/// desktop gate's constants.
-const APPLY_MARGIN_NS: i64 = 500_000;
+/// Starts at zero (measured as enough on the A024), widens [`APPLY_MARGIN_STEP_NS`] per slot miss
+/// to [`APPLY_MARGIN_MAX_NS`], and narrows one step per [`MARGIN_DECAY_PRESENTS`] clean presents.
+const APPLY_MARGIN_NS: i64 = 0;
 const APPLY_MARGIN_STEP_NS: i64 = 500_000;
 const APPLY_MARGIN_MAX_NS: i64 = 2_500_000;
+const MARGIN_DECAY_PRESENTS: u32 = 120;
 
 /// A completion that never arrives force-opens the budget after this long (the gate's backstop).
 const STALE_REOPEN_NS: i64 = 100_000_000;
@@ -136,9 +137,18 @@ pub(super) struct AscBackend {
     /// under smooth. 0 is the collision the sysprop A/B reproduces.
     max_ahead: i64,
     apply_margin_ns: i64,
+    /// Presents since the last slot miss; [`MARGIN_DECAY_PRESENTS`] of them narrow the margin.
+    clean_presents: u32,
     /// `debug.punktfunk.asc_pacing` = 0: as-soon-as-possible targets, two pending — the pre-overhaul
     /// behaviour, for the on-glass A/B.
     pacing: bool,
+    /// `debug.punktfunk.asc_hold_chain` = 0 under `latency`: a hold never follows a hold — the
+    /// frame shares the held frame's slot and SurfaceFlinger keeps the newer. Default 1: the
+    /// depth-one elastic queue, which on an exact-rate source holds every frame after the first
+    /// burst (A024: 71 of 120 a second, one period of latency). The on-glass A/B.
+    hold_chain: bool,
+    /// The last assigned slot was a hold.
+    last_held: bool,
     /// A present fence has been read at least once this session.
     fence_live: bool,
     last_latch_ns: i64,
@@ -166,6 +176,8 @@ pub(super) struct AscBackend {
     released: u64,
     skipped: u64,
     displays: u64,
+    /// Completions that carried no latch time: the transaction never reached glass as a frame.
+    unlatched: u64,
     forced: u64,
     held: u64,
     slot_miss: u64,
@@ -248,13 +260,14 @@ impl AscBackend {
             ),
         };
         let pacing = sysprop(c"debug.punktfunk.asc_pacing").is_none_or(|v| v != "0");
+        let hold_chain = sysprop(c"debug.punktfunk.asc_hold_chain").is_none_or(|v| v != "0");
         #[cfg(debug_assertions)]
         let jitter_us = sysprop(c"debug.punktfunk.asc_jitter_us")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0)
             .min(50_000);
         log::info!(
-            "asc: backend up — {}, reader usage {} ({}x{} @ {} Hz src, panel seed {} Hz, dataspace {:#x}, pacing {})",
+            "asc: backend up — {}, reader usage {} ({}x{} @ {} Hz src, panel seed {} Hz, dataspace {:#x}, pacing {}, hold chain {})",
             match priority {
                 PresentPriority::Latency => "latency (newest-wins)".to_string(),
                 PresentPriority::Smooth { buffer } => format!("smooth (buffer {buffer})"),
@@ -266,6 +279,7 @@ impl AscBackend {
             panel_hz,
             dataspace,
             if pacing { "on" } else { "OFF (sysprop)" },
+            if hold_chain { "on" } else { "OFF (sysprop)" },
         );
         Some(AscBackend {
             reader,
@@ -279,13 +293,14 @@ impl AscBackend {
             fifo: VecDeque::new(),
             presented: VecDeque::new(),
             awaiting: VecDeque::new(),
-            // A source at or above the panel rate may teach the grid a slower panel; a slower
-            // source presents on every Nth vsync and must not.
-            clock: SlotClock::seeded(panel_hz, source_hz as i64 >= i64::from(panel_hz.max(1))),
+            clock: SlotClock::seeded(panel_hz),
             last_slot: None,
             max_ahead,
             apply_margin_ns: APPLY_MARGIN_NS,
+            clean_presents: 0,
             pacing,
+            hold_chain,
+            last_held: false,
             fence_live: false,
             last_latch_ns: 0,
             last_present_ns: 0,
@@ -303,6 +318,7 @@ impl AscBackend {
             released: 0,
             skipped: 0,
             displays: 0,
+            unlatched: 0,
             forced: 0,
             held: 0,
             slot_miss: 0,
@@ -390,10 +406,18 @@ impl AscBackend {
         let reachable = self
             .clock
             .slot_after(earliest + self.clock.lead_ns() + self.apply_margin_ns);
-        let slot = pace_slot(reachable, self.last_slot, self.max_ahead);
-        if slot > reachable {
+        let mut slot = pace_slot(reachable, self.last_slot, self.max_ahead);
+        let mut held = slot > reachable;
+        if held && self.last_held && !self.hold_chain && self.fifo_capacity == 0 {
+            // A hold never follows a hold: share the held frame's slot, SurfaceFlinger keeps the
+            // newer, the stale held frame drops (`coalesced` counts it).
+            slot = self.last_slot.unwrap_or(reachable);
+            held = false;
+        }
+        if held {
             self.held += 1;
         }
+        self.last_held = held;
         self.last_slot = Some(slot);
         (
             self.clock.present_ns(slot) - self.clock.period_ns() / 2,
@@ -402,13 +426,20 @@ impl AscBackend {
     }
 
     /// Drain the reader into the held set (newest-wins candidate, or the smoothing FIFO), then
-    /// present the due frame if the budget is open. Returns `true` when a frame was applied.
+    /// present the due frame if the budget is open. `panel_period_ns` is the choreographer's
+    /// panel period (0 = none yet): the compositor's own statement of the grid, which a source
+    /// below the panel rate can never bias the way present spacings can. Returns `true` when a
+    /// frame was applied.
     pub(super) fn pump(
         &mut self,
         now_mono: i64,
+        panel_period_ns: i64,
         stats: &crate::stats::VideoStats,
         ev_tx: &mpsc::Sender<DecodeEvent>,
     ) -> bool {
+        if panel_period_ns > 0 {
+            self.clock.set_period(panel_period_ns);
+        }
         self.drain_reader();
         // The budget: one undisplayed transaction until the slots are live (then two — distinct
         // targets cannot collide, and SurfaceFlinger holds the second), force-opened when a
@@ -583,6 +614,9 @@ impl AscBackend {
         video_e2e: &AtomicU64,
     ) {
         self.inflight = self.inflight.saturating_sub(1);
+        if pc.latch_ns == 0 {
+            self.unlatched += 1;
+        }
         if pc.latch_ns > 0 {
             // Two transactions latched in one commit share the latch instant: SurfaceFlinger showed
             // only the newer. The present-interval histogram sees the same pair as a 0-slot spacing.
@@ -636,8 +670,9 @@ impl AscBackend {
 
     /// Read every present fence that has signalled, oldest first; a pending one stops the scan
     /// (order is what the intervals measure). One that outlives its patience never signals and
-    /// is recorded off its latch instead.
-    fn poll_fences(
+    /// is recorded off its latch instead. Runs on every completion and on every vsync tick, so
+    /// the last frame before a pause is scored off its fence, not off its latch 200 ms later.
+    pub(super) fn poll_fences(
         &mut self,
         clock_offset: i64,
         stats: &crate::stats::VideoStats,
@@ -686,10 +721,12 @@ impl AscBackend {
             }
             self.last_present_ns = present_ns;
         }
-        let latch_ns = (present_ns - a.release_mono).clamp(0, 10_000_000_000);
-        let displayed_real = a.release_real + latch_ns as i128;
+        // Apply → on glass: what the HUD and the log line call `latch`, which is SurfaceFlinger's
+        // whole share and not its latch instant.
+        let on_glass_ns = (present_ns - a.release_mono).clamp(0, 10_000_000_000);
+        let displayed_real = a.release_real + on_glass_ns as i128;
         let e2e_ns = displayed_real + clock_offset as i128 - a.pts_us as i128 * 1000;
-        let latch_use = (latch_ns / 1000) as u64;
+        let latch_use = (on_glass_ns / 1000) as u64;
         let display_use = ((displayed_real - a.decoded_real).max(0) / 1000) as u64;
         self.latch_us.push(latch_use);
         self.displays += 1;
@@ -722,8 +759,15 @@ impl AscBackend {
             // SurfaceFlinger woke before the apply landed, or the uid's frame-rate override
             // skipped that vsync: the next frame must not aim at the slot this one took.
             self.slot_miss += 1;
+            self.clean_presents = 0;
             self.apply_margin_ns =
                 (self.apply_margin_ns + APPLY_MARGIN_STEP_NS).min(APPLY_MARGIN_MAX_NS);
+        } else {
+            self.clean_presents += 1;
+            if self.clean_presents >= MARGIN_DECAY_PRESENTS {
+                self.clean_presents = 0;
+                self.apply_margin_ns = (self.apply_margin_ns - APPLY_MARGIN_STEP_NS).max(0);
+            }
         }
         if self.last_slot.is_none_or(|l| observed > l) {
             self.last_slot = Some(observed);
@@ -755,7 +799,7 @@ impl AscBackend {
             "asc released={} displays={} inflight={} qDepth={} paceMs p50={:.2} max={:.2} \
              latchMs p50={:.2} max={:.2} e2eMs p50={:.2} max={:.2} panelMs={:.2} leadMs={:.2} \
              marginUs={} held={} slotMiss={} coalesced={} n0={} n1={} n2={} n3+={} judder={}‰ \
-             mode={} phaseErrMs p50={:.2} max={:.2} forced={} fence={}{}",
+             mode={} phaseErrMs p50={:.2} max={:.2} forced={} unlatched={} fence={}{}",
             self.released,
             self.displays,
             self.inflight,
@@ -781,11 +825,13 @@ impl AscBackend {
             err_p50,
             err_max,
             self.forced,
+            self.unlatched,
             u8::from(self.fence_live),
             cadence,
         );
         self.released = 0;
         self.displays = 0;
+        self.unlatched = 0;
         self.held = 0;
         self.slot_miss = 0;
         self.coalesced = 0;

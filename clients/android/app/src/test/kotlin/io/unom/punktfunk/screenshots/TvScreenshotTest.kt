@@ -1,5 +1,6 @@
 package io.unom.punktfunk.screenshots
 
+import android.content.pm.PackageManager
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onRoot
@@ -8,6 +9,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
@@ -29,6 +31,8 @@ class TvScreenshotTest {
 
     private fun shootRoot(name: String, content: @androidx.compose.runtime.Composable () -> Unit) {
         compose.mainClock.autoAdvance = false
+        // The television qualifier leaves leanback off, so isTvDevice would answer phone.
+        shadowOf(compose.activity.packageManager).setSystemFeature(PackageManager.FEATURE_LEANBACK, true)
         compose.setContent { ShotTheme(content) }
         compose.mainClock.advanceTimeBy(800)
         compose.onRoot().captureRoboImage("$out/tv-$name.png")

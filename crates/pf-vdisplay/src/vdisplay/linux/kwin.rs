@@ -123,7 +123,9 @@ impl KwinDisplay {
     ) -> Vec<(String, String)> {
         use crate::kwin_output_mgmt::TopologyKind;
         use crate::policy::Topology;
-        let topology = crate::effective_topology();
+        // Per device: `set_client_identity` runs before `create`, so this display knows
+        // whose it is and can honour that device's own topology (§6.1).
+        let topology = crate::effective_topology(self.client_fp);
         let kind = match topology {
             Topology::Exclusive => TopologyKind::Exclusive,
             Topology::Primary => TopologyKind::Primary,

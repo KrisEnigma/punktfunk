@@ -10,7 +10,7 @@
 //! `pf-vdisplay-identity.json`). GNOME cannot rematch a virtual monitor, so
 //! [`ScaleMap`] stores scale under the same [`identity_key`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -308,9 +308,14 @@ pub(crate) fn resolve_slot_bounded(
     max_id: u32,
 ) -> Option<u32> {
     use crate::policy::Identity;
+    // Per device: "remember display settings" is a property of the device whose
+    // settings are being remembered (§6.1).
     let id_policy = crate::policy::prefs()
-        .configured_effective()
-        .map(|e| e.identity)
+        .configured()
+        .map(|p| {
+            p.effective_for(crate::policy::fp_hex(fp).as_deref())
+                .identity
+        })
         .unwrap_or(default);
     let per_client_mode = match id_policy {
         Identity::Shared => return None,
@@ -321,11 +326,47 @@ pub(crate) fn resolve_slot_bounded(
     // Sample live ids before the map lock. Their sources take the manager/pool
     // lock, and this map is reached from backend `create`. Map lock stays a leaf.
     let live = live_slot_ids();
-    global().lock().unwrap().resolve_bounded(
+    let slot = global().lock().unwrap().resolve_bounded(
         &identity_key(fp, mode, per_client_mode),
         &live,
         max_id,
-    )
+    );
+    if let Some(slot) = slot {
+        remember_slot_owner(slot, fp);
+    }
+    slot
+}
+
+/// Which device owns each identity slot, as hex.
+///
+/// The display registry knows a display's slot but never its client: `acquire` is reached
+/// from a backend `create` with no session in scope, and teardown runs on the linger thread
+/// long after. This map is the one place both are known at once, so it is what lets a kept
+/// display resolve its owner's per-device policy (`design/web-console-overhaul.md` §6.1).
+///
+/// Bounded by the slot table (1..=MAX_ID), so it cannot grow. An entry is overwritten when
+/// the slot is reassigned, which is exactly when the owner changed.
+static SLOT_OWNER: Mutex<BTreeMap<u32, String>> = Mutex::new(BTreeMap::new());
+
+fn remember_slot_owner(slot: u32, fp: [u8; 32]) {
+    let hex: String = fp.iter().map(|b| format!("{b:02x}")).collect();
+    SLOT_OWNER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(slot, hex);
+}
+
+/// The device that owns this identity slot, if one has been resolved for it.
+///
+/// `None` means shared or anonymous — that device follows the host policy, which is the
+/// right answer rather than a missing one.
+pub(crate) fn slot_owner(slot: Option<u32>) -> Option<String> {
+    let slot = slot?;
+    SLOT_OWNER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&slot)
+        .cloned()
 }
 
 /// Resolves against the full identity range used by non-Windows backends.

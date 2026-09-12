@@ -778,6 +778,10 @@ public final class Stage2Pipeline {
             // stage-1 pump follows, in one tested place. Loss itself goes through the gate, where
             // an RFI anchor heals it without an IDR.
             var pump = AUPumpState()
+            // VideoToolbox reads the RPS itself, so a lost reference must be concealed in the
+            // bitstream before submit (see HevcConcealer). Thread-confined; one per session.
+            let concealer: HevcConcealer? = connection.videoCodec == .hevc ? HevcConcealer() : nil
+            var wasUnrecoverable = false
             // 4:4:4 backstop: a run of decode/create failures in a 4:4:4 session means this device can't
             // decode 4:4:4 at the negotiated resolution (the HW probe clears the common case but not a
             // resolution-ceiling miss). End cleanly instead of looping on a black screen.
@@ -813,7 +817,8 @@ public final class Stage2Pipeline {
                     if let meta = try? connection.nextHdrMeta(timeoutMs: 0) {
                         presenter.setHdrMeta(meta)
                     }
-                    guard let au = try connection.nextAU(timeoutMs: 100) else { return true }
+                    guard let received = try connection.nextAU(timeoutMs: 100) else { return true }
+                    var au = received // the concealer may swap its bytes below
                     // A forward frame-index gap fires a throttled RFI (a clean P-frame, no IDR)
                     // and arms the freeze, credited with the gap width so the reassembler's
                     // ~120 ms-later framesDropped climb for the same loss cannot re-freeze a
@@ -822,10 +827,32 @@ public final class Stage2Pipeline {
                     let gapWidth = connection.noteFrameIndexGapWidth(au.frameIndex)
                     if gapWidth > 0 { reanchorGate.arm(expectingDrops: UInt64(gapWidth)) }
                     onFrame?(au)
+                    if pump.isStraggler(frameIndex: au.frameIndex) { return true }
+                    var concealed = AUPumpState.Concealment.none
+                    if let concealer {
+                        switch concealer.conceal(au.data) {
+                        case .intact:
+                            concealed = .decodable
+                        case .rewritten(let data):
+                            concealed = .decodable
+                            au = au.replacing(data: data)
+                            pumpLog.notice(
+                                "video: frame \(au.frameIndex, privacy: .public) names a lost reference — moved to a present picture until the re-anchor"
+                            )
+                        case .unrecoverable:
+                            concealed = .unrecoverable
+                        }
+                        if concealed == .unrecoverable, !wasUnrecoverable {
+                            pumpLog.warning(
+                                "video: frame \(au.frameIndex, privacy: .public) names a lost reference with nothing to stand in — withholding until an IDR"
+                            )
+                        }
+                        wasUnrecoverable = concealed == .unrecoverable
+                    }
                     let step = pump.note(
                         frameIndex: au.frameIndex,
                         idrFormat: connection.videoCodec.formatDescription(fromKeyframe: au.data),
-                        lossAhead: gapWidth > 0, flags: au.flags)
+                        lossAhead: gapWidth > 0, flags: au.flags, concealed: concealed)
                     if step.straggler { return true }
                     if let size = step.newSize { onDecodedSize?(size.width, size.height) }
                     if step.startedFormatWait {

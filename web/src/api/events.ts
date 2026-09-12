@@ -38,6 +38,9 @@ import { getGetUpdateStatusQueryKey } from "@/api/gen/update/update";
 import { boostPluginPolling, PLUGINS_KEY } from "@/api/plugins";
 import { storeKeys } from "@/api/store";
 import { m } from "@/paraglide/messages";
+import { type ActivityEntry, mergeActivity } from "./activity-ring";
+
+export type { ActivityEntry } from "./activity-ring";
 
 /** Which query keys a given event kind invalidates. Unknown kinds are ignored on purpose.
  * (The generated key helpers return `readonly` tuples, which is what React Query wants.) */
@@ -130,25 +133,22 @@ function resyncAll(qc: QueryClient): void {
 // an audit trail, and a page load starts fresh from whatever the ring replays.
 // ---------------------------------------------------------------------------------------------
 
-/** One thing that happened, as the feed renders it. */
-export interface ActivityEntry {
-	/** The host's monotonic sequence number — stable, and a good React key. */
-	seq: number;
-	/** Unix ms, from the host's clock (never the browser's). */
-	ts_ms: number;
-	kind: string;
-	/** The event payload, shape depending on `kind` (see the EventKind schema). */
-	data: Record<string, unknown>;
-}
-
-const ACTIVITY_MAX = 200;
 let activity: ActivityEntry[] = [];
 const activityListeners = new Set<() => void>();
 
-function pushActivity(entry: ActivityEntry): void {
-	// Guard against a replayed frame after a reconnect (`Last-Event-ID` can re-deliver the cursor).
-	if (activity.some((e) => e.seq === entry.seq)) return;
-	activity = [entry, ...activity].slice(0, ACTIVITY_MAX);
+/**
+ * True once this page load's replay has been applied, or its deadline passed. Before that the
+ * feed is not empty, it is unknown — so a card rendered from it waits instead of mounting empty
+ * and filling a moment later. Mounted together with its rows, the card animates the same way on
+ * every path (reload, navigation, a slow status query); mounted early, it depended on timing.
+ */
+let activityReady = false;
+
+/** Fold frames into the ring and notify once — or not at all when none of them was new. */
+function commitActivity(batch: ActivityEntry[]): void {
+	const next = mergeActivity(activity, batch);
+	if (next === activity) return;
+	activity = next;
 	for (const l of activityListeners) l();
 }
 
@@ -166,6 +166,18 @@ export function useActivity(): ActivityEntry[] {
 }
 
 const EMPTY_ACTIVITY: ActivityEntry[] = [];
+
+/** Whether the feed holds what it is going to hold yet — see `activityReady`. */
+export function useActivityReady(): boolean {
+	return useSyncExternalStore(
+		(cb) => {
+			activityListeners.add(cb);
+			return () => activityListeners.delete(cb);
+		},
+		() => activityReady,
+		() => false,
+	);
+}
 
 /** Every kind we act on. A kind the host adds later simply has no listener — never a mis-handle. */
 const KINDS = [
@@ -215,23 +227,84 @@ const CLOSE_GRACE_MS = 10_000;
 /** False until the host's `live` marker: frames before it are ring replay, not news. */
 let live = false;
 
+// A connection replays the host's whole ring before `live`: 161 frames in 43 ms on a real host, 114
+// of them `library.changed`. Handled one at a time, all of it ran in a single 600 ms task — every
+// frame rendered the feed and evicted a row whose exit animation never got a frame, so the card
+// grew to 157 rows, and every frame invalidated its queries, so /library was fetched 109 times on
+// one reload. The replay is held instead and applied ONCE: one render, each query invalidated once.
+let replayed: ActivityEntry[] = [];
+const replayedKeys = new Map<string, readonly unknown[]>();
+let replayedResync = false;
+let replayedBoost = false;
+let replayTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** An older host sends no `live` marker: past this, apply what arrived rather than hold it. */
+const REPLAY_DEADLINE_MS = 3_000;
+
+function startReplay(): void {
+	live = false;
+	replayed = [];
+	replayedKeys.clear();
+	replayedResync = false;
+	replayedBoost = false;
+	if (replayTimer) clearTimeout(replayTimer);
+	replayTimer = setTimeout(finishReplay, REPLAY_DEADLINE_MS);
+}
+
+/** Note what a replayed frame WOULD have done, deduplicated, instead of doing it now. */
+function holdReplayed(kind: string, entry: ActivityEntry | null): void {
+	if (entry) replayed.push(entry);
+	for (const key of keysFor(kind)) replayedKeys.set(JSON.stringify(key), key);
+	if (kind === "plugins.changed" || kind === "store.changed")
+		replayedBoost = true;
+	if (kind === "host.started") replayedResync = true;
+}
+
+/** Apply the held replay in one pass and go live. Safe to call twice: the second has nothing. */
+function finishReplay(): void {
+	if (replayTimer) {
+		clearTimeout(replayTimer);
+		replayTimer = null;
+	}
+	live = true;
+	commitActivity(replayed);
+	replayed = [];
+	if (!activityReady) {
+		activityReady = true;
+		for (const l of activityListeners) l();
+	}
+	if (client) {
+		// A restart in the replay makes every snapshot stale; the individual keys are a subset.
+		if (replayedResync) resyncAll(client);
+		else for (const key of replayedKeys.values()) invalidate(client, key);
+		if (replayedBoost) boostPluginPolling();
+	}
+	replayedKeys.clear();
+	replayedResync = false;
+	replayedBoost = false;
+}
+
 function attach(): void {
 	if (source) return;
 	source = new EventSource("/api/v1/events");
+	// A stream that never opens still settles the feed, so the card is not held back forever.
+	if (!replayTimer) replayTimer = setTimeout(finishReplay, REPLAY_DEADLINE_MS);
 	// Every (re)connect replays first; `open` fires before any frame, on auto-reconnect too.
-	source.addEventListener("open", () => {
-		live = false;
-	});
-	source.addEventListener("live", () => {
-		live = true;
-	});
+	source.addEventListener("open", startReplay);
+	source.addEventListener("live", finishReplay);
 	for (const kind of KINDS) {
 		source.addEventListener(kind, (ev) => {
+			const entry = parseEntry(kind, ev);
+			if (!live) {
+				holdReplayed(kind, entry);
+				return;
+			}
 			// Record it first: the feed should show an event even for a kind we invalidate nothing for.
-			const entry = recordActivity(kind, ev);
+			if (entry) commitActivity([entry]);
 			// A knock needs someone to act on it, and it can land on any page — so it is the one
-			// event that interrupts rather than waiting to be noticed on the Pairing page.
-			if (kind === "pairing.pending" && live) announceKnock(entry);
+			// event that interrupts rather than waiting to be noticed on the Pairing page. Replayed
+			// knocks never reach here: they are history the pending list already shows.
+			if (kind === "pairing.pending") announceKnock(entry);
 			if (!client) return;
 			// The installed set changed — but the runner is probably still restarting, so keep
 			// checking for a while rather than trusting this one refetch (see boostPluginPolling).
@@ -249,10 +322,10 @@ function attach(): void {
 }
 
 /**
- * Parse one SSE frame into the activity ring, and hand back what it parsed so a caller can read
- * the payload without parsing the same frame twice. A malformed frame is dropped, never thrown.
+ * Parse one SSE frame into an activity entry, or null for a malformed one — dropped, never thrown.
+ * Parsing and recording are separate because a replayed frame is held, not recorded, until `live`.
  */
-function recordActivity(kind: string, ev: Event): ActivityEntry | null {
+function parseEntry(kind: string, ev: Event): ActivityEntry | null {
 	const raw = (ev as MessageEvent<string>).data;
 	if (typeof raw !== "string") return null;
 	try {
@@ -260,9 +333,7 @@ function recordActivity(kind: string, ev: Event): ActivityEntry | null {
 		const seq = typeof data.seq === "number" ? data.seq : Number.NaN;
 		const ts = typeof data.ts_ms === "number" ? data.ts_ms : Number.NaN;
 		if (!Number.isFinite(seq) || !Number.isFinite(ts)) return null;
-		const entry: ActivityEntry = { seq, ts_ms: ts, kind, data };
-		pushActivity(entry);
-		return entry;
+		return { seq, ts_ms: ts, kind, data };
 	} catch {
 		// A frame we cannot parse is not worth breaking the stream over.
 		return null;

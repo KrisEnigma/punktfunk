@@ -14,11 +14,14 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "@unom/ui/dialog";
-import type { ComponentProps } from "react";
+import { motion } from "motion/react";
+import { Children, type ComponentProps, isValidElement } from "react";
+import { ROW, ROW_GAP, Stagger } from "@/components/stagger";
 import { cn } from "@/lib/utils";
 
 const DialogContent = ({
 	className,
+	children,
 	...props
 }: ComponentProps<typeof DialogSurface>) => (
 	<DialogPortal>
@@ -30,7 +33,21 @@ const DialogContent = ({
 				className,
 			)}
 			{...props}
-		/>
+		>
+			{/* Here once rather than in each of the thirteen dialogs. `root`, because a dialog renders
+			    through a portal — outside every page cascade, nothing above it drives `from → enter`.
+			    `contents` keeps each section a flex item of the surface, so its gap still spaces them. */}
+			<Stagger root gap={ROW_GAP} className="contents">
+				{Children.toArray(children).map((child, i) => (
+					<motion.div
+						key={isValidElement(child) ? (child.key ?? i) : i}
+						variants={ROW}
+					>
+						{child}
+					</motion.div>
+				))}
+			</Stagger>
+		</DialogSurface>
 	</DialogPortal>
 );
 DialogContent.displayName = "DialogContent";

@@ -180,6 +180,14 @@ public final class StreamViewController: StreamViewControllerBase {
     /// renegotiates the host mode (1:1, no presenter resample). iOS only (iPhone naturally no-ops
     /// its fixed full-screen scene; tvOS drives display modes via AVDisplayManager instead).
     private var matchFollower: MatchWindowFollower?
+    /// The picture's surface on an attached monitor (see `ExternalDisplay`), and whether the
+    /// stream presents there now. Input and the HUD stay on the phone either way.
+    private lazy var externalVideo: ExternalVideoView = {
+        let view = ExternalVideoView()
+        view.onLayout = { [weak self] in self?.layoutMetalLayer() }
+        return view
+    }()
+    private var onExternal = false
     // MARK: Escape-drop re-lock
     //
     // iPadOS releases the pointer lock BY ITSELF when the user presses Escape — the platform's
@@ -643,6 +651,9 @@ public final class StreamViewController: StreamViewControllerBase {
                 codec: SessionSettings.current.codec))
         follower.onResizeTarget = onResizeTarget
         matchFollower = follower
+        // A monitor attached before the session starts shows the picture from the first frame.
+        onExternal = ExternalDisplay.shared.screen != nil
+        if onExternal { ExternalDisplay.shared.show(externalVideo) }
         #endif
 
         // Presenter choice + lifecycle live in SessionPresenter (shared with macOS): stage-2
@@ -654,7 +665,7 @@ public final class StreamViewController: StreamViewControllerBase {
         let overlayDecodedSize = onDecodedSize
         presenter.start(
             connection: connection,
-            baseLayer: streamView.displayLayer,
+            baseLayer: videoLayer,
             endToEndMeter: endToEndMeter,
             decodeMeter: decodeMeter,
             displayMeter: displayMeter,
@@ -722,6 +733,12 @@ public final class StreamViewController: StreamViewControllerBase {
                   self.view.window?.windowScene?.activationState == .foregroundActive else { return }
             self.streamView.setSoftKeyboardVisible(true)
         })
+        // A monitor plugged in or pulled mid-session takes the picture or hands it back.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: ExternalDisplay.didChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.routeVideo()
+        })
 
         if captureEnabled {
             setCaptured(true) // entering a session is the deliberate "capture me" moment
@@ -765,6 +782,10 @@ public final class StreamViewController: StreamViewControllerBase {
         streamView.onScroll = nil
         streamView.currentHostMode = nil
         matchFollower = nil
+        if onExternal {
+            ExternalDisplay.shared.hide(externalVideo) // the monitor mirrors the phone again
+            onExternal = false
+        }
         #endif
         #if os(tvOS)
         // Return the TV to the user's preferred mode — the home screen must not stay in the
@@ -782,8 +803,9 @@ public final class StreamViewController: StreamViewControllerBase {
         layoutMetalLayer()
         #if os(iOS)
         // Match-window (C3): feed the follower the view's physical-pixel size (points × scale).
+        // Not while a monitor shows the picture: its mode comes from `requestSurfaceMode`.
         let b = streamView.bounds
-        if b.width > 0, b.height > 0 {
+        if b.width > 0, b.height > 0, !onExternal {
             let scale = renderScale
             matchFollower?.noteSize(
                 widthPx: Int((b.width * scale).rounded()),
@@ -852,10 +874,25 @@ public final class StreamViewController: StreamViewControllerBase {
         return s > 0 ? s : UIScreen.main.scale
     }
 
-    /// Aspect-fit the stage-2 metal sublayer to the view at the canonical render scale
-    /// (see SessionPresenter.layout).
+    /// Aspect-fit the stage-2 metal sublayer to the surface showing the picture — this view, or
+    /// an attached monitor — at that surface's render scale (see SessionPresenter.layout).
     private func layoutMetalLayer() {
+        #if os(iOS)
+        if onExternal {
+            let scale = externalVideo.traitCollection.displayScale
+            presenter.layout(in: externalVideo.bounds, contentsScale: scale > 0 ? scale : 1)
+            return
+        }
+        #endif
         presenter.layout(in: streamView.bounds, contentsScale: renderScale)
+    }
+
+    /// The display layer the picture presents into: the monitor's while one shows it.
+    private var videoLayer: AVSampleBufferDisplayLayer {
+        #if os(iOS)
+        if onExternal { return externalVideo.displayLayer }
+        #endif
+        return streamView.displayLayer
     }
 
     /// A new decoded size landed (a scene/mode resize's new IDR, or the first frame): push it to the
@@ -877,6 +914,36 @@ public final class StreamViewController: StreamViewControllerBase {
     }
 
     #if os(iOS)
+    /// Follow a monitor plugged in or pulled mid-session: move the picture onto it or back to the
+    /// phone, then ask the host for the mode that fits. Main thread.
+    private func routeVideo() {
+        guard connection != nil else { return }
+        let external = ExternalDisplay.shared.screen != nil
+        guard external != onExternal else { return }
+        onExternal = external
+        if external {
+            ExternalDisplay.shared.show(externalVideo)
+        } else {
+            ExternalDisplay.shared.hide(externalVideo)
+        }
+        presenter.move(to: videoLayer)
+        layoutMetalLayer()
+        requestSurfaceMode()
+    }
+
+    /// Ask the host for the mode that fits where the picture is: the monitor's pixels at its top
+    /// refresh, or the session's own mode back on the phone. Skipped when it already streams that.
+    private func requestSurfaceMode() {
+        guard let connection else { return }
+        let settings = SessionSettings.current
+        let target = (onExternal ? ExternalDisplay.streamMode(settings) : nil) ?? settings.streamMode
+        let live = connection.currentMode()
+        guard live.width != target.width || live.height != target.height
+            || live.refreshHz != target.hz
+        else { return }
+        connection.requestMode(width: target.width, height: target.height, refreshHz: target.hz)
+    }
+
     /// `fromClick` marks a click-driven engage (the released-state pointer click that re-captures):
     /// that click's press/release are suppressed toward the host — it's the local engage gesture,
     /// not a host click — exactly as macOS's `engageCapture(fromClick:)` does. Keyboard-driven
@@ -957,13 +1024,23 @@ public final class StreamViewController: StreamViewControllerBase {
         }
     }
 
-    /// Ask the system for the lock back after it dropped one we still want (see the Escape-drop
-    /// note on the state above). Bounded to a short burst; idempotent within it. Main queue.
+    /// SpringBoard grants the lock only to a frontmost scene that fills its screen. A windowed
+    /// scene — including the one its title-strip double-click leaves behind — is refused outright.
+    private var sceneCanHoldPointerLock: Bool {
+        guard let window = view.window, let scene = window.windowScene,
+              scene.activationState == .foregroundActive
+        else { return false }
+        return window.bounds.size == scene.screen.bounds.size
+    }
+
+    /// Ask for the lock back after a drop we didn't want (see the Escape-drop note on the state
+    /// above), only while the scene can hold it. Bounded to a short burst; idempotent within it.
+    /// Main queue.
     private func requestPointerRelock() {
-        // Only a frontmost scene can hold the lock at all. Anywhere else the drop is the system
-        // saying we don't qualify, not the Esc key — re-asking would be noise, and the qualifying
-        // states (foreground, appearance, reparent) each re-resolve on their own already.
-        guard view.window?.windowScene?.activationState == .foregroundActive else {
+        // Anywhere else the drop is SpringBoard saying we don't qualify, not the Esc key. Asking
+        // would hide the cursor and mute motion for a lock that isn't coming; the qualifying
+        // states (foreground, appearance, reparent, full screen again) re-resolve on their own.
+        guard sceneCanHoldPointerLock else {
             pointerRelockPending = false
             return
         }
@@ -1049,10 +1126,9 @@ public final class StreamViewController: StreamViewControllerBase {
         pointerRelockQuietAttempt += 1
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            // Still wanted, still ours to want, and still not held — otherwise the tail is moot.
+            // Still wanted, still grantable, and still not held — otherwise the tail is moot.
             guard self.wantsPointerLock, self.pointerLockWasEngaged,
-                self.pointerLockEngaged() != true,
-                self.view.window?.windowScene?.activationState == .foregroundActive
+                self.pointerLockEngaged() != true, self.sceneCanHoldPointerLock
             else { return }
             self.pointerLockForcedOff = true
             self.setNeedsUpdateOfPrefersPointerLocked()

@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { X } from "lucide-react";
+import { Pencil, Plus, X } from "lucide-react";
 import { type FC, type FormEvent, useState } from "react";
 import {
 	getGetLibraryQueryKey,
@@ -236,7 +236,12 @@ export const GameForm: FC<{
 	return (
 		<Card className="max-w-xl">
 			<CardHeader className="flex-row items-center justify-between space-y-0">
-				<CardTitle>
+				<CardTitle className="flex items-center gap-2">
+					{mode === "edit" ? (
+						<Pencil className="size-4" />
+					) : (
+						<Plus className="size-4" />
+					)}
 					{mode === "edit" ? m.library_edit_title() : m.library_add_title()}
 				</CardTitle>
 				<Button

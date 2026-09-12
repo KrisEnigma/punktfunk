@@ -1,18 +1,27 @@
 import Section from "@unom/ui/section";
-import { MonitorPlay, RefreshCw, Video, Volume2, ZapOff } from "lucide-react";
+import {
+	KeyRound,
+	MonitorPlay,
+	RefreshCw,
+	Smartphone,
+	Video,
+	Volume2,
+	ZapOff,
+} from "lucide-react";
 import type { FC, ReactNode } from "react";
 import type { ActiveGame } from "@/api/gen/model/activeGame";
 import type { AudioWiring } from "@/api/gen/model/audioWiring";
 import type { GameEntry } from "@/api/gen/model/gameEntry";
 import type { RuntimeStatus } from "@/api/gen/model/runtimeStatus";
 import { QueryState } from "@/components/query-state";
+import { Stagger } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { fmtNumber } from "@/lib/format";
 import type { Loadable } from "@/lib/query";
 import { m } from "@/paraglide/messages";
-import { ActivityCard } from "./Activity";
+import { ActivityCard } from "@/sections/Activity";
 import { RunningGames } from "./RunningGames";
 
 export const DashboardView: FC<{
@@ -50,8 +59,9 @@ export const DashboardView: FC<{
 					error={status.error}
 					refetch={status.refetch}
 				>
+					{/* A Stagger, not a div: these cards mount once /status answers, after the page animated. */}
 					{s && (
-						<div className="flex flex-col gap-card">
+						<Stagger className="flex flex-col gap-card">
 							<div className="grid gap-card sm:grid-cols-2 lg:grid-cols-4">
 								<StatCard
 									icon={<Video className="size-4" />}
@@ -69,7 +79,8 @@ export const DashboardView: FC<{
 								    one of whose clients was in fact paired. */}
 								<Card>
 									<CardContent className="flex flex-1 items-center justify-between">
-										<span className="text-sm text-muted-foreground">
+										<span className="flex items-center gap-2 text-sm text-muted-foreground">
+											<Smartphone className="size-4" />
 											{m.status_paired_count()}
 										</span>
 										<span className="text-2xl font-semibold tabular-nums">
@@ -79,7 +90,8 @@ export const DashboardView: FC<{
 								</Card>
 								<Card>
 									<CardContent className="flex flex-1 items-center justify-between">
-										<span className="text-sm text-muted-foreground">
+										<span className="flex items-center gap-2 text-sm text-muted-foreground">
+											<KeyRound className="size-4" />
 											{m.status_pin_pending()}
 										</span>
 										{/* The whole value used to be "●" or "—": no text, no state, colour
@@ -230,7 +242,7 @@ export const DashboardView: FC<{
 
 							{/* Below the session card: the past, under the present. */}
 							<ActivityCard />
-						</div>
+						</Stagger>
 					)}
 				</QueryState>
 			</div>

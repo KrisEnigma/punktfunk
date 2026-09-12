@@ -111,6 +111,10 @@ fn output_owner_pid(name: &str) -> Option<u32> {
 /// One named headless output per [`create`](VirtualDisplay::create). Stateless
 /// besides the fields below.
 pub struct HyprlandDisplay {
+    /// Whose display this is. Set by `set_client_identity` before `create`, so the
+    /// per-device topology (`design/web-console-overhaul.md` §6.1) can be resolved here.
+    client_fp: Option<[u8; 32]>,
+
     /// Out-of-band cursor request. On: prefer portal `CursorMode::Metadata`.
     /// Off: prefer `Embedded` (compositor paints the pointer). Both are only a
     /// preference — [`crate::portal_cursor`] settles against what xdph advertises;
@@ -157,6 +161,7 @@ impl Drop for HyprlandDisplay {
 impl HyprlandDisplay {
     pub fn new() -> Result<Self> {
         Ok(HyprlandDisplay {
+            client_fp: None,
             hw_cursor: false,
             last_cursor_mode: None,
             pending_restore: None,
@@ -199,7 +204,7 @@ impl HyprlandDisplay {
     /// through the portal handshake — that is also `extend`.
     fn apply_topology(&mut self, ours: &str) {
         use crate::policy::Topology;
-        match crate::effective_topology() {
+        match crate::effective_topology(self.client_fp) {
             Topology::Extend | Topology::Auto => {}
             Topology::Primary => warn_primary_is_not_expressible(),
             Topology::Exclusive => {
@@ -264,6 +269,12 @@ pub fn probe() -> Result<()> {
 }
 
 impl VirtualDisplay for HyprlandDisplay {
+    /// The trait calls this before every `create`, which is what lets the per-device
+    /// topology be resolved from inside it (§6.1).
+    fn set_client_identity(&mut self, fingerprint: Option<[u8; 32]>) {
+        self.client_fp = fingerprint;
+    }
+
     fn name(&self) -> &'static str {
         "hyprland"
     }
@@ -1669,8 +1680,8 @@ fn portal_thread(
     // Shared, never-dropped runtime — not per-cast. ashpd caches its D-Bus
     // connection process-globally; a per-cast runtime takes that connection's
     // background reader down with it, leaving later handshakes awaiting a
-    // reply nothing is alive to read. See [`crate::portal_rt`].
-    let rt = match crate::portal_rt::portal_runtime() {
+    // reply nothing is alive to read. See [`pf_capture::portal_rt`].
+    let rt = match pf_capture::portal_rt::portal_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             let _ = setup_tx.send(Err(e));

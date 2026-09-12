@@ -9,6 +9,8 @@
 # header gets PUNKTFUNK_FEATURE_QUIC pre-defined — Swift sees punktfunk_connect & co. unconditionally.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# CI points CARGO_TARGET_DIR at a dir that outlives the job (scripts/ci/mac-cargo-target.sh).
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 TARGETS_MAC=(aarch64-apple-darwin x86_64-apple-darwin)
 BUILD_IOS="${BUILD_IOS:-0}" # BUILD_IOS=1 adds iOS device + simulator slices (rustup targets aarch64-apple-ios{,-sim})
@@ -93,8 +95,8 @@ trap 'rm -rf "$STAGE"' EXIT
 # Universal macOS static lib.
 mkdir -p "$STAGE/macos"
 lipo -create \
-    target/aarch64-apple-darwin/release/libpunktfunk_core.a \
-    target/x86_64-apple-darwin/release/libpunktfunk_core.a \
+    "$TARGET_DIR"/aarch64-apple-darwin/release/libpunktfunk_core.a \
+    "$TARGET_DIR"/x86_64-apple-darwin/release/libpunktfunk_core.a \
     -output "$STAGE/macos/libpunktfunk_core.a"
 
 # Headers dir: the generated C header (with the quic API force-enabled) + a modulemap so
@@ -116,19 +118,19 @@ if [[ "$BUILD_IOS" == "1" ]]; then
     # Universal simulator lib (arm64 Macs run arm64 sims, but generic builds link x86_64 too).
     mkdir -p "$STAGE/iossim"
     lipo -create \
-        target/aarch64-apple-ios-sim/release/libpunktfunk_core.a \
-        target/x86_64-apple-ios/release/libpunktfunk_core.a \
+        "$TARGET_DIR"/aarch64-apple-ios-sim/release/libpunktfunk_core.a \
+        "$TARGET_DIR"/x86_64-apple-ios/release/libpunktfunk_core.a \
         -output "$STAGE/iossim/libpunktfunk_core.a"
-    ARGS+=(-library target/aarch64-apple-ios/release/libpunktfunk_core.a -headers "$STAGE/include")
+    ARGS+=(-library "$TARGET_DIR"/aarch64-apple-ios/release/libpunktfunk_core.a -headers "$STAGE/include")
     ARGS+=(-library "$STAGE/iossim/libpunktfunk_core.a" -headers "$STAGE/include")
 fi
 if [[ "$BUILD_TVOS" == "1" ]]; then
     mkdir -p "$STAGE/tvossim"
     lipo -create \
-        target/aarch64-apple-tvos-sim/release/libpunktfunk_core.a \
-        target/x86_64-apple-tvos/release/libpunktfunk_core.a \
+        "$TARGET_DIR"/aarch64-apple-tvos-sim/release/libpunktfunk_core.a \
+        "$TARGET_DIR"/x86_64-apple-tvos/release/libpunktfunk_core.a \
         -output "$STAGE/tvossim/libpunktfunk_core.a"
-    ARGS+=(-library target/aarch64-apple-tvos/release/libpunktfunk_core.a -headers "$STAGE/include")
+    ARGS+=(-library "$TARGET_DIR"/aarch64-apple-tvos/release/libpunktfunk_core.a -headers "$STAGE/include")
     ARGS+=(-library "$STAGE/tvossim/libpunktfunk_core.a" -headers "$STAGE/include")
 fi
 
@@ -139,7 +141,7 @@ for obj in "$STAGE"/macos/libpunktfunk_core.a; do
     bad=$(otool -l "$obj" 2>/dev/null | awk '/minos/ {print $2}' | sort -uV | awk -F. '$1 > 14' | head -1)
     if [[ -n "$bad" ]]; then
         echo "ERROR: $obj contains objects built for macOS $bad (> 14.0)." >&2
-        echo "Stale cache — rm -rf target/{aarch64,x86_64}-apple-darwin and rebuild." >&2
+        echo "Stale cache — rm -rf $TARGET_DIR/{aarch64,x86_64}-apple-darwin and rebuild." >&2
         exit 1
     fi
 done

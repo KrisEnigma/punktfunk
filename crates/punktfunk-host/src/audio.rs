@@ -11,7 +11,7 @@ use anyhow::Result;
 
 /// Opus / GameStream rate.
 pub const SAMPLE_RATE: u32 = 48_000;
-/// Stereo — default, and the native plane's only layout. GameStream surround is per open.
+/// Default for a backend that leaves `channels()` alone. Either plane opens 5.1 or 7.1 on request; capture clamps to 2, 6 or 8.
 pub const CHANNELS: usize = 2;
 
 /// Cap for `PUNKTFUNK_AUDIO_GAIN` (×8 = +18 dB). Past this the soft knee squashes

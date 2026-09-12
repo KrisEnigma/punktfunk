@@ -176,6 +176,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // The panel's LIVE refresh rate, re-read each poll — the HUD flags a session whose panel sits
     // below the stream rate (an OEM governor that ignored both the mode pin and the surface hint).
     var panelHz by remember { mutableStateOf(0f) }
+    var panelModeHz by remember { mutableStateOf(0f) }
     val statsOn = ui.statsVerbosity != StatsVerbosity.OFF
     // Touch model is fixed per session (re-keys the gesture handler below if it ever changes).
     // Passthrough needs a host that injects touch; without the bit every contact would vanish, so
@@ -247,6 +248,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     val lowLatencyMode = initialSettings.lowLatencyMode
     // A screen with fingers on it — the start banner may only name the three-finger stats tap on a
     // device that can perform it. A TV box has no touchscreen at all, and its remote is not one.
+    val keyboard = remember { !isTv && hasPhysicalKeyboard() }
     val hasTouch = remember {
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
     }
@@ -259,7 +261,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             while (true) {
                 delay(1000)
                 stats = NativeBridge.nativeVideoStats(handle)
-                panelHz = runCatching { context.display }.getOrNull()?.refreshRate ?: 0f
+                val display = runCatching { context.display }.getOrNull()
+                panelHz = display?.refreshRate ?: 0f
+                panelModeHz = display?.mode?.refreshRate ?: 0f
                 // The decoder is fixed for the session; fetch its label once it's resolved.
                 if (decoderLabel.isEmpty()) decoderLabel = NativeBridge.nativeVideoDecoderLabel(handle)
             }
@@ -681,7 +685,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                     OsdScaled {
                         StatsOverlay(
                             it, ui.statsVerbosity, decoderLabel, codecLabel, session.profileName,
-                            panelHz, placement,
+                            panelHz, panelModeHz, placement,
                         )
                     }
                 }
@@ -746,13 +750,15 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                             if (ui.micRunning) add("Select + Y mic")
                             add("Select + X stats")
                         } else {
-                            // No pad: Back opens the dial (gesture, key, or a TV remote's button — all
-                            // land on the same BackHandler). Leaving is a slot inside it, not this.
+                            // No pad: Back opens the dial (the gesture, or a TV remote's button; a
+                            // mouse's Back goes to the host). Leaving is a slot inside it, not this.
                             add(
                                 if (gestures) "Back or a two-finger twist opens quick actions"
                                 else "Back opens quick actions"
                             )
                             if (gestures) add("three-finger tap for stats")
+                            // Android keeps Alt+Tab; the alias is only learnable from here.
+                            if (keyboard && !KeyCaptureService.running) add("Alt+` for Alt+Tab")
                         }
                     }.joinToString(" · "),
                     alpha = bannerAlpha,
@@ -773,6 +779,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                         v.setOnCapturedPointerListener { _, ev ->
                             (ctx as? MainActivity)?.mouseForwarder?.onCapturedPointer(ev) ?: false
                         }
+                        v.preIme = { ev -> (ctx as? MainActivity)?.streamKey(ev) == true }
                     }
                 },
             )
@@ -1202,12 +1209,20 @@ internal class KeyCaptureView(context: Context) : View(context) {
         }
     }
 
+    /** The stream's own key handling, run before the device IME sees a hardware key. */
+    var preIme: ((KeyEvent) -> Boolean)? = null
+
     /**
+     * Hardware keys reach the IME before any view, and a Korean IME answers 한/영 and 한자 itself
+     * — so while the keyboard is not summoned the stream claims them first. Summoned, the IME is
+     * in the loop on purpose (it composes for the text path) and keeps its first look.
+     *
      * BACK while the summoned keyboard is up: the IME consumes it pre-IME to dismiss itself, so
      * [setImeVisible] never hears about it — sync the gate here or a stale `imeShown` leaves the
      * editable connection live and physical typing re-pops the keyboard.
      */
     override fun onKeyPreIme(keyCode: Int, event: KeyEvent): Boolean {
+        if (!imeShown && preIme?.invoke(event) == true) return true
         if (keyCode == KeyEvent.KEYCODE_BACK && imeShown && event.action == KeyEvent.ACTION_UP) {
             imeShown = false
             (context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)

@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
+import { Gpu } from "lucide-react";
 import type { FC } from "react";
 import {
 	getListGpusQueryKey,
@@ -103,7 +104,10 @@ export const GpuCard: FC<{
 		<Card>
 			<CardHeader>
 				<CardTitle className="flex items-center justify-between gap-4">
-					<span>{m.host_gpus()}</span>
+					<span className="flex items-center gap-2">
+						<Gpu className="size-4" />
+						{m.host_gpus()}
+					</span>
 					{s && s.gpus.length > 0 && (
 						<Button
 							size="sm"

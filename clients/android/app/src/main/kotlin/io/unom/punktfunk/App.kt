@@ -54,7 +54,14 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import android.Manifest
+import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import io.unom.punktfunk.kit.discovery.HostDiscovery
 import io.unom.punktfunk.kit.link.DeepLinkResult
 import io.unom.punktfunk.kit.link.DeepLinks
 import io.unom.punktfunk.kit.link.HostResolution
@@ -111,6 +118,51 @@ fun App(forceGamepadUi: Boolean = false) {
     val gamepadUi = skiaConsole && SkiaConsole.healthy && gamepadUiActive(
         settings.gamepadUiEnabled, settings.gamepadUiMode, controllerConnected, tv, forceGamepadUi,
     )
+
+    // The runtime grant both shells need before the network works, asked above them: the console
+    // shell fronts a phone the moment a pad is attached, and an ask that lived only in the touch
+    // screen never ran there. Android 17 blocks the browse, the probes and the dial without
+    // ACCESS_LOCAL_NETWORK; NEARBY_WIFI_DEVICES (API 33+) is the multicast hedge some OEMs want.
+    var lnpGranted by remember { mutableStateOf(hasLocalNetworkPermission(context)) }
+    val discovery = remember { HostDiscovery.shared(context) }
+    val localNetLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        lnpGranted = granted
+        // A browse started before the grant has dead sockets. The touch grid shows a denial as
+        // its banner; the console has only a notice.
+        if (granted) {
+            discovery.restart()
+        } else if (gamepadUi) {
+            SkiaConsole.notice(
+                "Punktfunk can't find or reach hosts without local network access. " +
+                    "Allow it in Android's app settings.",
+            )
+        }
+    }
+    val nearbyLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { _ -> /* a hint only; the browse runs either way */ }
+    LaunchedEffect(Unit) {
+        if (!lnpGranted) {
+            localNetLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNearbyPermission(context)) {
+            // On 37+ the two share a group, so the grant above already covers this one.
+            nearbyLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+    }
+    // A grant made in system settings neither kills nor notifies the app; the return does.
+    DisposableEffect(Unit) {
+        val lifecycle = activity?.lifecycle ?: return@DisposableEffect onDispose {}
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && !lnpGranted && hasLocalNetworkPermission(context)) {
+                lnpGranted = true
+                discovery.restart()
+            }
+        }
+        lifecycle.addObserver(obs)
+        onDispose { lifecycle.removeObserver(obs) }
+    }
 
     // System bars have ONE owner: this effect. The stream and the console shell both want the
     // whole panel (bars hidden, a swipe shows them transiently); the touch shell wants them back.
@@ -267,6 +319,10 @@ fun App(forceGamepadUi: Boolean = false) {
                         // "Browse library…" in a card's overflow — the touch route to the shelf
                         // the console shell reaches with Y.
                         onOpenLibrary = { kh, pinId -> touchLibrary = kh to pinId },
+                        lnpGranted = lnpGranted,
+                        onAskLocalNetwork = {
+                            localNetLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+                        },
                     )
                     Tab.Settings -> SettingsScreen(
                         initial = settings,

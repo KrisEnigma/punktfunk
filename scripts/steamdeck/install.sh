@@ -140,7 +140,7 @@ command -v bun >/dev/null 2>&1 || command -v ~/.bun/bin/bun >/dev/null 2>&1 || \
 ok "build deps ready"
 
 # --- 2. build host (+ web) -------------------------------------------------
-log "Building punktfunk-host (release) — first build is slow (~10-15 min)"
+log "Building punktfunk-host (release) — first build is slow (~15 min)"
 # nvenc,vulkan-encode matches the packaged builds (deb/arch/rpm): the direct-SDK NVENC backend
 # plus the raw Vulkan Video HEVC/AV1 one (real RFI loss recovery). SteamOS also runs on NVIDIA
 # desktops, where a host without nvenc advertises HEVC and then dies at encoder open. Both entry

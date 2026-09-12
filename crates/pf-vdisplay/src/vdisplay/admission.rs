@@ -85,7 +85,10 @@ pub fn decide(
     }
 }
 
-/// Console `mode_conflict`, default `Separate` when unconfigured.
+/// Console `mode_conflict` for THIS client, default `Separate` when unconfigured.
+///
+/// Per device (`design/web-console-overhaul.md` §6.1): the TV wants to take over,
+/// the tablet wants its own screen, and one host policy cannot serve both.
 ///
 /// On Windows this still maps `separate` (including the unconfigured
 /// default) to `reject` unless `PUNKTFUNK_WIN_SEPARATE=1`. Each identity
@@ -93,10 +96,10 @@ pub fn decide(
 /// not a correctness guard (`design/windows-parallel-virtual-displays.md`).
 /// `join` / `steal` stay explicit opt-ins. Linux is real `separate`.
 /// Shared by the native and GameStream admission paths.
-pub fn effective_conflict() -> ModeConflict {
+pub fn effective_conflict(fp: Option<[u8; 32]>) -> ModeConflict {
     let conflict = policy::prefs()
-        .configured_effective()
-        .map(|e| e.mode_conflict)
+        .configured()
+        .map(|p| p.effective_for(policy::fp_hex(fp).as_deref()).mode_conflict)
         .unwrap_or(ModeConflict::Separate);
     #[cfg(windows)]
     if matches!(conflict, ModeConflict::Separate)
@@ -120,7 +123,7 @@ pub fn admit(req_identity: Option<[u8; 32]>) -> Admission {
     let (decision, any_live) = {
         let live = table().lock().unwrap();
         (
-            decide(effective_conflict(), req_identity, &live),
+            decide(effective_conflict(req_identity), req_identity, &live),
             live.iter().any(|s| !same_client(s.identity, req_identity)),
         )
     };

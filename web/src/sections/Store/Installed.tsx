@@ -1,10 +1,16 @@
-import { ArrowUpCircle, Ban, Circle, Trash2 } from "lucide-react";
+import { ArrowUpCircle, Ban, Circle, Package, Trash2 } from "lucide-react";
 import type { FC } from "react";
 import { type InstalledPlugin, useInstalledPlugins } from "@/api/store";
 import { QueryState } from "@/components/query-state";
+import { ROW, ROW_GAP, staggerProps } from "@/components/stagger";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
+import {
+	MotionTableBody,
+	MotionTableRow,
+	Table,
+	TableCell,
+} from "@/components/ui/table";
 import type { Loadable } from "@/lib/query";
 import { m } from "@/paraglide/messages";
 import { RunnerCardSection } from "./Runner";
@@ -78,7 +84,10 @@ export const InstalledList: FC<{
 			<CardContent flush>
 				{/* The bulk action sits with the list it acts on, the way Sources' "Refresh all" does. */}
 				<CardHeader className="flex-row items-center justify-between gap-3 space-y-0">
-					<CardTitle>{m.store_installed_title()}</CardTitle>
+					<CardTitle className="flex items-center gap-2">
+						<Package className="size-4" />
+						{m.store_installed_title()}
+					</CardTitle>
 					{updateCount > 0 && (
 						<Button size="sm" disabled={batchRunning} onClick={onUpdateAll}>
 							<ArrowUpCircle className="size-4" />
@@ -98,9 +107,13 @@ export const InstalledList: FC<{
 						</p>
 					) : (
 						<Table>
-							<TableBody>
+							<MotionTableBody {...staggerProps(ROW_GAP)}>
 								{rows.map((p) => (
-									<TableRow key={p.pkg} className="align-top">
+									<MotionTableRow
+										key={p.pkg}
+										variants={ROW}
+										className="align-top"
+									>
 										<TableCell className="py-4">
 											<div className="font-medium">{p.title ?? p.pkg}</div>
 											<div className="font-mono text-xs text-muted-foreground">
@@ -161,9 +174,9 @@ export const InstalledList: FC<{
 												</Button>
 											</div>
 										</TableCell>
-									</TableRow>
+									</MotionTableRow>
 								))}
-							</TableBody>
+							</MotionTableBody>
 						</Table>
 					)}
 				</QueryState>

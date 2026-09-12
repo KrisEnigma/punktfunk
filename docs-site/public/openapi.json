@@ -710,6 +710,170 @@
         }
       }
     },
+    "/api/v1/display/clients/{fingerprint}": {
+      "get": {
+        "tags": [
+          "display"
+        ],
+        "summary": "Read one device's overlay",
+        "description": "Absent fields follow the host policy; an unknown device answers with an empty\noverlay rather than 404 — \"follows host\" is a real answer, not a missing one.",
+        "operationId": "getDisplayClient",
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "description": "Pairing fingerprint (hex)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The device's overlay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientOverlay"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "display"
+        ],
+        "summary": "Save one device's overlay",
+        "description": "The WHOLE overlay: a field absent from the body stops being pinned and the\ndevice follows the host again. An overlay that pins nothing is dropped, which\nis the same as `DELETE`.",
+        "operationId": "setDisplayClient",
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "description": "Pairing fingerprint (hex)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClientOverlay"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Overlay stored; the new settings state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisplaySettingsState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty fingerprint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Overlay could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "display"
+        ],
+        "summary": "Make one device follow the host again",
+        "operationId": "deleteDisplayClient",
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "description": "Pairing fingerprint (hex)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Overlay cleared; the new settings state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisplaySettingsState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Overlay could not be cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/display/layout": {
       "put": {
         "tags": [
@@ -1546,6 +1710,38 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HostInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/host/theme": {
+      "get": {
+        "tags": [
+          "host"
+        ],
+        "summary": "Host desktop theme",
+        "description": "The mode and accent colour of the desktop this host runs on, for a console that follows it.\nEvery field is nullable: \"no answer\" is a real state, and the console renders it as\n\"none detected\" rather than guessing.",
+        "operationId": "getHostTheme",
+        "responses": {
+          "200": {
+            "description": "The desktop's mode and accent, as far as this host can see",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostTheme"
                 }
               }
             }
@@ -5624,6 +5820,84 @@
           }
         }
       },
+      "ClientOverlay": {
+        "type": "object",
+        "description": "One paired device's deviations from the host policy\n(`design/web-console-overhaul.md` §6.1).\n\nEvery field is optional and absent means **follow the host**. That is the\nwhole point: a copied policy would silently stop following host changes,\nwhile an overlay only pins what the operator actually chose for this\ndevice. The TV wants take-over and keep-forever; the tablet wants its own\nscreen and no linger — one host policy cannot serve both.\n\n`max_displays` and `layout` are deliberately absent: they are properties of\nthe host's desktop, not of a device connecting to it.",
+        "properties": {
+          "capture_monitor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Mirror this connector for this device only. Absent follows the host,\nwhich is also the only way back to a virtual screen — a device cannot\nopt OUT of a host-wide pin. Nobody has asked to; the reverse direction\nis what the field exists for."
+          },
+          "game_session": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GameSession"
+              }
+            ]
+          },
+          "identity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Identity"
+              }
+            ]
+          },
+          "keep_alive": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/KeepAlive"
+              }
+            ]
+          },
+          "max_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Largest mode this device is granted, `WIDTHxHEIGHT@HZ`. A phone asking for 4K120\non a weak host degrades every other session; the operator caps it once and the\nclient is told the smaller mode rather than silently given one."
+          },
+          "mode_conflict": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModeConflict"
+              }
+            ]
+          },
+          "scale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Scale this device's screen is created at, when the desktop has not already\nremembered one for it (`display-management.md` §5.4). Mutter mints a fresh EDID\nserial per session, so its own `monitors.xml` never rematches — without this the\noperator re-sets the scale on every connect."
+          },
+          "topology": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Topology"
+              }
+            ]
+          }
+        }
+      },
       "ClientRef": {
         "type": "object",
         "required": [
@@ -5995,6 +6269,16 @@
             ],
             "description": "Stream this physical connector (`DP-1`, `HDMI-A-2`) instead of a\nvirtual display; `None` is the virtual path. Host-wide, orthogonal\nto `preset`. `PUNKTFUNK_CAPTURE_MONITOR` overrides it so `host.env`\ncan pin without a console write undoing it."
           },
+          "clients": {
+            "type": "object",
+            "description": "Per-device deviations, keyed by pairing fingerprint — what identity\nslots, admission and the device list already key on (never an address:\na dual-boot box keeps its fingerprint and changes its IP).\n\nWritten only through `/display/clients/{fp}`; the host-wide PUT refuses\na `clients` key outright, so a stale console cannot round-trip the\nwhole map back over a change it never saw.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ClientOverlay"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "ddc_power_off": {
             "type": "boolean",
             "description": "Windows: DDC/CI panel off (VCP 0xD6) before Exclusive isolate, on at\nrestore. Cuts standby auto-input-scan / DP link churn on a dark\nphysical. Best-effort; no DDC/CI → skip. Orthogonal to `preset`; default off."
@@ -6012,6 +6296,13 @@
           },
           "keep_alive": {
             "$ref": "#/components/schemas/KeepAlive"
+          },
+          "keep_monitors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Connectors that stay lit while streaming, even under `exclusive`\n(`design/web-console-overhaul.md` §5.5).\n\nThe shared-desktop case the all-or-nothing topology axis cannot express: the\ncouch TV streams on the sole screen while the desk monitor stays usable. Only\nmeaningful under `exclusive` — nothing else turns a monitor off."
           },
           "layout": {
             "$ref": "#/components/schemas/Layout"
@@ -6052,9 +6343,28 @@
           "effective",
           "presets",
           "custom_presets",
-          "enforced"
+          "enforced",
+          "client_enforced",
+          "clients"
         ],
         "properties": {
+          "client_enforced": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Overlay fields this build acts on PER DEVICE. A strict subset of\n`enforced`: an axis can be host-wide and not yet per-device, and the\nconsole must not offer a device control the host would store and ignore\n(`design/web-console-overhaul.md` D1)."
+          },
+          "clients": {
+            "type": "object",
+            "description": "Stored per-device overlays, so one fetch paints the device rows.\nREAD-ONLY here — writes go to `/display/clients/{fingerprint}`, and the\nPUT below refuses a body carrying this key.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ClientOverlay"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "configured": {
             "type": "boolean",
             "description": "True once `display-settings.json` exists."
@@ -7373,6 +7683,34 @@
           "version": {
             "type": "string",
             "description": "`punktfunk-host` crate version."
+          }
+        }
+      },
+      "HostTheme": {
+        "type": "object",
+        "description": "The desktop's appearance, as far as this host can see it.",
+        "properties": {
+          "accent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`#rrggbb`, or `null` when the desktop has no accent to report."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`light` | `dark`, or `null` when the desktop expresses no preference."
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the answer came from, for the console's \"Follow host — Windows\" line.\n`null` when nothing answered.",
+            "example": "gnome"
           }
         }
       },

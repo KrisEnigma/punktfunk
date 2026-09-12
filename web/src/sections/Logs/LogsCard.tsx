@@ -4,6 +4,7 @@ import {
 	Download,
 	Pause,
 	Play,
+	ScrollText,
 	Share2,
 	Trash2,
 } from "lucide-react";
@@ -15,9 +16,10 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { DocsLink } from "@/components/docs-link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
@@ -168,7 +170,12 @@ export const LogsCard: FC<{
 			<CardContent className="flex flex-col gap-3">
 				{/* The page heading says "Troubleshooting" now, so this card names itself — otherwise
 				    the log stream is the only section on the page with no label. */}
-				<h2 className="text-lg font-medium">{m.logs_title()}</h2>
+				<CardTitle>
+					<h2 className="flex items-center gap-2">
+						<ScrollText className="size-4" />
+						{m.logs_title()}
+					</h2>
+				</CardTitle>
 
 				<div className="flex flex-wrap items-center gap-2">
 					<span className="text-xs text-muted-foreground">
@@ -304,13 +311,19 @@ export const LogsCard: FC<{
 								</div>
 							) : (
 								<p className="text-muted-foreground">
-									{isLoading
-										? m.common_loading()
-										: nothingSelected
-											? m.logs_sources_none()
-											: onlyPlugins
-												? m.logs_empty_plugins()
-												: m.logs_empty()}
+									{isLoading ? (
+										m.common_loading()
+									) : nothingSelected ? (
+										m.logs_sources_none()
+									) : onlyPlugins ? (
+										// A silent runner says why in its own log; the docs name it.
+										<>
+											{m.logs_empty_plugins()}{" "}
+											<DocsLink path="plugins#troubleshooting" />
+										</>
+									) : (
+										m.logs_empty()
+									)}
 								</p>
 							)}
 						</div>

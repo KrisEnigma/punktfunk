@@ -142,19 +142,20 @@ export const MoonlightPairing: FC<{
 	const pending = pairing.data?.pin_pending ?? false;
 	const ceremonies = pairing.data?.pending ?? [];
 	return (
-		<QueryState
-			isLoading={pairing.isLoading}
-			error={pairing.error}
-			refetch={pairing.refetch}
-		>
-			<Card>
-				<CardHeader>
-					<CardTitle className="flex items-center gap-2">
-						<KeyRound className="size-4" />
-						{m.pairing_moonlight_title()}
-					</CardTitle>
-				</CardHeader>
-				<CardContent>
+		<Card>
+			<CardHeader>
+				<CardTitle className="flex items-center gap-2">
+					<KeyRound className="size-4" />
+					{m.pairing_moonlight_title()}
+				</CardTitle>
+			</CardHeader>
+			<CardContent>
+				{/* The card is in the page's cascade from the first frame; only its body waits. */}
+				<QueryState
+					isLoading={pairing.isLoading}
+					error={pairing.error}
+					refetch={pairing.refetch}
+				>
 					{!pending ? (
 						<p className="text-sm text-muted-foreground">{m.pairing_idle()}</p>
 					) : (
@@ -264,8 +265,8 @@ export const MoonlightPairing: FC<{
 							)}
 						</form>
 					)}
-				</CardContent>
-			</Card>
-		</QueryState>
+				</QueryState>
+			</CardContent>
+		</Card>
 	);
 };

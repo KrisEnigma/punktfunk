@@ -2,6 +2,7 @@ package io.unom.punktfunk
 
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.hardware.display.DisplayManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.util.Log
@@ -60,6 +61,26 @@ internal class StreamWindow(
             wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "punktfunk:stream-hp")
                 ?.let(::add)
         }.onEach { it.setReferenceCounted(false) }
+    }
+
+    private val displayManager =
+        context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+
+    /**
+     * One `pf.display` line per panel change for the stream's lifetime. `mode=` is the panel's
+     * active mode, `render=` what this app is allowed: `mode=120 render=60` is a per-uid
+     * frame-rate override, `mode=60` a real mode switch. The native presenter cannot tell the two
+     * apart — its period reads 16.6 ms either way — and neither shows in `pf.present`.
+     */
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) = logPanel("changed")
+    }
+
+    private fun logPanel(why: String) {
+        val d = activity?.display ?: return
+        Log.i("pf.display", "panel $why mode=${d.mode.refreshRate} render=${d.refreshRate}")
     }
 
     private var priorSoftInput = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_UNSPECIFIED
@@ -154,10 +175,13 @@ internal class StreamWindow(
         if (Build.VERSION.SDK_INT >= 35 && streamHz > 0) {
             composeView.requestedFrameRate = streamHz.toFloat()
         }
+        displayManager?.registerDisplayListener(displayListener, null)
+        logPanel("pinned")
     }
 
     /** Put every prior value back, in the order the stream took them. */
     fun detach() {
+        displayManager?.unregisterDisplayListener(displayListener)
         activity?.setConsoleHighRefreshRate(true) // back to the console UI's max refresh
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             composeView.requestUnbufferedDispatch(0) // back to ordinary batched dispatch

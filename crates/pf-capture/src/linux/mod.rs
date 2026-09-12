@@ -142,7 +142,7 @@ pub struct PortalCapturer {
     /// the next pipeline builds.
     join: Option<thread::JoinHandle<()>>,
     /// Virtual output; its `Drop` releases the compositor output. `None` on
-    /// the portal path (session ends with the zbus connection).
+    /// the portal path (the portal thread closes its session).
     _keepalive: Option<Box<dyn Send>>,
     /// Portal-thread teardown. `None` on the virtual-output path. Its `Drop`
     /// ends the compositor's screencast.
@@ -152,14 +152,14 @@ pub struct PortalCapturer {
     _gs_cursor: Option<xfixes_cursor::XFixesCursorSource>,
 }
 
-/// Portal-thread teardown. Firing `quit` un-parks the thread so the tokio
-/// runtime and zbus connection drop. Ashpd's `Session` has no `Drop`;
-/// dropping that connection is what ends the compositor's ScreenCast.
+/// Portal-thread teardown. Firing `quit` un-parks the thread, which closes
+/// the portal session. Ashpd's `Session` has no `Drop` and the zbus connection
+/// is process-global, so `Session.Close` is what ends the compositor's cast.
 struct PortalSession {
     /// `Option` so `Drop` can take it. Dropping the sender without a send
     /// resolves the receiver with `Err`; the thread treats both the same.
     quit: Option<tokio::sync::oneshot::Sender<()>>,
-    /// Fired after the runtime drops, so `Drop` can bound its wait instead
+    /// Fired after the session is closed, so `Drop` can bound its wait instead
     /// of `join()` behind a wedged D-Bus round-trip.
     done: Receiver<()>,
     join: Option<thread::JoinHandle<()>>,
@@ -169,14 +169,14 @@ impl Drop for PortalSession {
     fn drop(&mut self) {
         // Bounded wait: the thread may be in a D-Bus round-trip against a
         // wedged portal; an unbounded `join()` hangs the host. On timeout
-        // detach — the thread owns only its runtime + connection.
+        // detach — the thread finishes its Close on its own.
         drop(self.quit.take()); // send-or-drop: both resolve the receiver
         let joinable = match self.done.recv_timeout(Duration::from_millis(750)) {
             Ok(()) => true,
             Err(_) => {
                 tracing::warn!(
-                    "portal thread did not unwind within 750ms — detaching it (the compositor's \
-                     ScreenCast session may linger until the host exits)"
+                    "portal thread did not close its session within 750ms — detaching it (the \
+                     compositor's cast lingers until the Close lands or the host exits)"
                 );
                 false
             }
@@ -212,9 +212,8 @@ impl PortalCapturer {
                 } else {
                     portal_thread(setup_tx, quit_rx, want_metadata_cursor)
                 }
-                // After the runtime drops inside the fn, so `Drop`'s
-                // `recv_timeout` means the zbus connection is gone. Covers
-                // early returns (runtime failed to build).
+                // After the fn closed its portal session, so `Drop`'s
+                // `recv_timeout` means the cast is gone. Covers early returns.
                 let _ = done_tx.send(());
             })
             .context("spawn portal thread")?;

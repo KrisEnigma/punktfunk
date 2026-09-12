@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { ChartColumn, X } from "lucide-react";
 import type { FC } from "react";
 import type { Capture } from "@/api/gen/model/capture";
 import { useStatsRecordingGet } from "@/api/gen/stats/stats";
@@ -30,7 +30,8 @@ export const DetailCard: FC<{
 		<Card>
 			<CardHeader>
 				<CardTitle className="flex items-center justify-between gap-3">
-					<span>
+					<span className="flex items-center gap-2">
+						<ChartColumn className="size-4" />
 						{m.stats_detail_title()}
 						{cap && (
 							// Encoder + GPU ride along with the mode: the stage split below can't be
