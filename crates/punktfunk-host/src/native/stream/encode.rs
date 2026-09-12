@@ -100,7 +100,12 @@ impl StreamState {
     pub(super) fn capture_tick(&mut self) -> Result<Option<Tick>> {
         let measure = self.perf || self.stats.is_armed();
         let t_cap = std::time::Instant::now();
-        self.capturer.observe_encoder(self.enc.telemetry());
+        let telemetry = self.enc.telemetry();
+        if let Some(t) = &telemetry {
+            self.driver_dropped
+                .store(t.dropped_total, Ordering::Relaxed);
+        }
+        self.capturer.observe_encoder(telemetry);
         let cap_result = self.capturer.try_latest();
         let cap_us = if measure {
             t_cap.elapsed().as_micros() as u32
@@ -437,7 +442,12 @@ impl StreamState {
             let last = c.last;
             let (cap_ns, sub_ns, deadline) = *self.inflight.front().expect("inflight non-empty");
             let wait_total_us = t_wait.elapsed().as_micros() as u32;
-            let encode_us = (now_ns().saturating_sub(sub_ns) / 1000) as u32;
+            // On the driver the host submits nothing: the honest per-AU span is the driver's
+            // present → arrival lump, and the tick's queue age means nothing.
+            let (encode_us, queue_us) = match st.owed {
+                true => (driver_arrival_us(&*self.enc).unwrap_or(0), 0),
+                false => ((now_ns().saturating_sub(sub_ns) / 1000) as u32, st.queue_us),
+            };
             // The driver stamps each AU with its own present time; the tick's clock
             // would give every AU of a burst the same one.
             let capture_ns = if st.owed && c.pts_ns > 0 {
@@ -454,12 +464,13 @@ impl StreamState {
                 frame_index: self.au_seq,
                 deadline,
                 encode_us,
-                queue_us: st.queue_us,
+                queue_us,
                 cap_us: st.cap_us,
                 submit_us: st.submit_us,
                 wait_us: if st.measure { wait_total_us } else { 0 },
                 repeat: st.repeat,
                 was_measured: st.measure,
+                driver: st.owed,
             };
             if self.frame_tx.send(SendMsg::Chunk(msg)).is_err() {
                 return Polled::SendGone;
@@ -514,7 +525,11 @@ impl StreamState {
             au.chunk_aligned,
         );
         self.send_hdr_meta(au.keyframe, resend_meta);
-        let encode_us = (now_ns().saturating_sub(sub_ns) / 1000) as u32;
+        // As in the chunked arm: the driver's lump, not a host submit that never happened.
+        let (encode_us, queue_us) = match st.owed {
+            true => (driver_arrival_us(&*self.enc).unwrap_or(0), 0),
+            false => ((now_ns().saturating_sub(sub_ns) / 1000) as u32, st.queue_us),
+        };
         // As in the chunked arm: the driver's per-AU present time over the tick's clock.
         let capture_ns = if st.owed && au.pts_ns > 0 {
             au.pts_ns
@@ -528,12 +543,13 @@ impl StreamState {
             frame_index: self.au_seq,
             deadline,
             encode_us,
-            queue_us: st.queue_us,
+            queue_us,
             cap_us: st.cap_us,
             submit_us: st.submit_us,
             wait_us,
             repeat: st.repeat,
             was_measured: st.measure,
+            driver: st.owed,
         };
         self.bringup.mark("first_au");
         if self.frame_tx.send(SendMsg::Frame(msg)).is_err() {
@@ -759,6 +775,7 @@ impl StreamState {
                 wait_us: 0,
                 repeat: false,
                 was_measured: false,
+                driver: false,
             };
             if self.frame_tx.send(SendMsg::Frame(msg)).is_err() {
                 break;
@@ -767,6 +784,13 @@ impl StreamState {
             self.sent += 1;
         }
     }
+}
+
+/// The driver's per-AU present → host-arrival age, µs: pool wait, convert, encode and publish in
+/// one lump. `None` off the driver, and before its first AU.
+fn driver_arrival_us(enc: &dyn crate::encode::Encoder) -> Option<u32> {
+    let age = enc.telemetry()?.present_to_arrival?;
+    Some(age.as_micros().min(u128::from(u32::MAX)) as u32)
 }
 
 /// This tick's stage timings, stamped onto every AU it produces.
