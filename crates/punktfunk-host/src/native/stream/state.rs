@@ -85,6 +85,8 @@ pub(super) struct StreamState {
     pub(super) st_submit: Vec<u32>,
     pub(super) st_wait: Vec<u32>,
     pub(super) st_queue: Vec<u32>,
+    /// The Windows driver's pool drops, handed to the send thread's recorder sample.
+    pub(super) driver_dropped: Arc<AtomicU64>,
     pub(super) cur_depth: usize,
     pub(super) behind_score: u32,
     pub(super) last_fec: u8,
@@ -698,6 +700,7 @@ impl StreamState {
         let send_spread_send = Arc::clone(&send_spread_us);
         let wire_rekeys = Arc::new(AtomicU32::new(0));
         let wire_rekeys_send = Arc::clone(&wire_rekeys);
+        let driver_dropped = Arc::new(AtomicU64::new(0));
         let send_stats = SendStats {
             rec: stats.clone(),
             mode: live_mode.clone(),
@@ -706,6 +709,7 @@ impl StreamState {
             bitrate_kbps: live_bitrate.clone(),
             bringup: bringup.clone(),
             wire_sock,
+            driver_dropped: driver_dropped.clone(),
         };
         let send_thread = std::thread::Builder::new()
             .name("punktfunk-send".into())
@@ -864,6 +868,7 @@ impl StreamState {
             st_submit: Vec::new(),
             st_wait: Vec::new(),
             st_queue: Vec::new(),
+            driver_dropped,
             cur_depth: 1,
             behind_score: 0,
             last_fec: fec_target.load(Ordering::Relaxed),

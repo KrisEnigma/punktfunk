@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use utoipa::ToSchema;
@@ -22,7 +22,9 @@ const MAX_SAMPLES: usize = 5400;
 /// One stage's p50/p99 in an aggregation window (microseconds).
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct StageTiming {
-    /// `"capture" | "submit" | "encode" | "packetize" | "send"` (path-dependent).
+    /// Pipeline order, named per path. Linux native: `queue capture submit encode send`.
+    /// Windows driver: `driver copy send`. GameStream: `capture encode packetize send
+    /// send_spread`, or `driver copy send send_spread` on the Windows driver.
     pub name: String,
     pub p50_us: f32,
     pub p99_us: f32,
@@ -44,14 +46,34 @@ pub struct StatsSample {
     /// datagram-aligned zero-pad). Not goodput; socket send drops do not reduce it.
     pub mbps: f32,
     pub bitrate_kbps: u32,
-    /// Frames dropped this window (delta, not cumulative).
-    pub frames_dropped: u32,
-    /// Packets dropped this window (receiver / reassembler, when known).
-    pub packets_dropped: u32,
-    /// Host send-buffer overflow / EAGAIN this window (delta).
-    pub send_dropped: u32,
-    /// FEC shards recovered this window (delta).
-    pub fec_recovered: u32,
+    /// Counters are deltas for this window. `None` = this path cannot see it, never a zero it
+    /// did not measure. Frames the host dropped: the driver's pool, or GameStream's queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = u32, required = false)]
+    pub frames_dropped: Option<u32>,
+    /// Receiver-side loss. Only a client measures it; recordings older than this field hold 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = u32, required = false)]
+    pub packets_dropped: Option<u32>,
+    /// Host send-buffer overflow / EAGAIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = u32, required = false)]
+    pub send_dropped: Option<u32>,
+    /// FEC shards the receiver recovered. Only a client measures it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = u32, required = false)]
+    pub fec_recovered: Option<u32>,
+    /// Capture → fully sent, p50/p99 µs: the span a client's `host` term reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = f32, required = false)]
+    pub host_p50_us: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = f32, required = false)]
+    pub host_p99_us: Option<f32>,
+    /// Smoothed QUIC round trip to the client, µs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = u32, required = false)]
+    pub rtt_us: Option<u32>,
 }
 
 /// Filename stem plus negotiated mode/codec/client. On-disk head;
@@ -80,6 +102,9 @@ pub struct CaptureMeta {
     /// GPU name from `pf_gpu::active()`, or `""`.
     #[serde(default)]
     pub gpu: String,
+    /// The sample cap was hit: samples past it were dropped and the start kept.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Wire and on-disk shape: summary plus sample time-series.
@@ -136,6 +161,8 @@ pub struct StatsRecorder {
     /// cannot kill a healthy stream.
     live: Mutex<Option<Live>>,
     next_sid: AtomicU32,
+    /// Bumped per fresh capture, so a loop that outlives a capture registers again.
+    generation: AtomicU64,
 }
 
 /// `~/.config/punktfunk/captures/`, via the same config-dir helper as `cert.pem`.
@@ -199,7 +226,14 @@ impl StatsRecorder {
             armed: AtomicBool::new(false),
             live: Mutex::new(None),
             next_sid: AtomicU32::new(0),
+            generation: AtomicU64::new(0),
         })
+    }
+
+    /// Which capture is live. A loop caches `(generation, sid)` and calls
+    /// [`Self::register_session`] again when this moves: the header is per capture.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// Per-frame `Relaxed` load: whether this frame should measure.
@@ -218,6 +252,7 @@ impl StatsRecorder {
                 samples: Vec::new(),
                 truncated: false,
             });
+            self.generation.fetch_add(1, Ordering::Relaxed);
             // Publish after `live` exists so a frame that sees `armed` can always push.
             self.armed.store(true, Ordering::Relaxed);
         }
@@ -416,6 +451,7 @@ fn meta_of(live: &Live) -> CaptureMeta {
         sample_count: live.samples.len() as u32,
         encoder_backend,
         gpu,
+        truncated: live.truncated,
     }
 }
 
@@ -446,11 +482,61 @@ mod tests {
             repeat_fps: 0.0,
             mbps: 25.0,
             bitrate_kbps: 20_000,
-            frames_dropped: 0,
-            packets_dropped: 0,
-            send_dropped: 0,
-            fec_recovered: 0,
+            frames_dropped: None,
+            packets_dropped: None,
+            send_dropped: Some(0),
+            fec_recovered: None,
+            host_p50_us: Some(3_000.0),
+            host_p99_us: Some(5_000.0),
+            rtt_us: None,
         }
+    }
+
+    /// A loop outlives captures: the second capture of one stream must seed its own header,
+    /// not save `0x0@0` with an empty path.
+    #[test]
+    fn a_second_capture_seeds_its_own_header() {
+        let dir = temp_dir();
+        let rec = StatsRecorder::new(dir.clone());
+        let mut sid: Option<(u64, u32)> = None;
+        let mut tick = |rec: &StatsRecorder| {
+            let capture_gen = rec.generation();
+            let id = match sid {
+                Some((g, id)) if g == capture_gen => id,
+                _ => {
+                    let id = rec.register_session("native", 1920, 1080, 120, "hevc", "ab12");
+                    sid = Some((capture_gen, id));
+                    id
+                }
+            };
+            rec.push_sample(id, sample());
+        };
+        rec.start();
+        tick(&rec);
+        let first = rec.stop().unwrap().unwrap();
+        rec.start();
+        tick(&rec);
+        let second = rec.stop().unwrap().unwrap();
+        assert_eq!((first.kind.as_str(), first.width), ("native", 1920));
+        assert_eq!((second.kind.as_str(), second.width), ("native", 1920));
+        assert!(!second.truncated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Absent counters stay absent on disk; a recording written before them still loads.
+    #[test]
+    fn unmeasured_counters_are_absent_not_zero() {
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert!(
+            !json.contains("fec_recovered") && !json.contains("rtt_us"),
+            "{json}"
+        );
+        assert!(json.contains("\"send_dropped\":0"));
+        let old = r#"{"t_ms":0,"session_id":0,"stages":[],"fps":60,"repeat_fps":0,"mbps":1,
+            "bitrate_kbps":1,"frames_dropped":0,"packets_dropped":0,"send_dropped":0,
+            "fec_recovered":0}"#;
+        let s: StatsSample = serde_json::from_str(old).unwrap();
+        assert_eq!((s.fec_recovered, s.host_p50_us), (Some(0), None));
     }
 
     #[test]

@@ -5554,6 +5554,10 @@
             "format": "int64",
             "minimum": 0
           },
+          "truncated": {
+            "type": "boolean",
+            "description": "The sample cap was hit: samples past it were dropped and the start kept."
+          },
           "width": {
             "type": "integer",
             "format": "int32",
@@ -9385,7 +9389,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "`\"capture\" | \"submit\" | \"encode\" | \"packetize\" | \"send\"` (path-dependent)."
+            "description": "Pipeline order, named per path. Linux native: `queue capture submit encode send`.\nWindows driver: `driver copy send`. GameStream: `capture encode packetize send\nsend_spread`, or `driver copy send send_spread` on the Windows driver."
           },
           "p50_us": {
             "type": "number",
@@ -9415,11 +9419,7 @@
           "fps",
           "repeat_fps",
           "mbps",
-          "bitrate_kbps",
-          "frames_dropped",
-          "packets_dropped",
-          "send_dropped",
-          "fec_recovered"
+          "bitrate_kbps"
         ],
         "properties": {
           "bitrate_kbps": {
@@ -9430,7 +9430,7 @@
           "fec_recovered": {
             "type": "integer",
             "format": "int32",
-            "description": "FEC shards recovered this window (delta).",
+            "description": "FEC shards the receiver recovered. Only a client measures it.",
             "minimum": 0
           },
           "fps": {
@@ -9441,8 +9441,17 @@
           "frames_dropped": {
             "type": "integer",
             "format": "int32",
-            "description": "Frames dropped this window (delta, not cumulative).",
+            "description": "Counters are deltas for this window. `None` = this path cannot see it, never a zero it\ndid not measure. Frames the host dropped: the driver's pool, or GameStream's queue.",
             "minimum": 0
+          },
+          "host_p50_us": {
+            "type": "number",
+            "format": "float",
+            "description": "Capture → fully sent, p50/p99 µs: the span a client's `host` term reports."
+          },
+          "host_p99_us": {
+            "type": "number",
+            "format": "float"
           },
           "mbps": {
             "type": "number",
@@ -9452,7 +9461,7 @@
           "packets_dropped": {
             "type": "integer",
             "format": "int32",
-            "description": "Packets dropped this window (receiver / reassembler, when known).",
+            "description": "Receiver-side loss. Only a client measures it; recordings older than this field hold 0.",
             "minimum": 0
           },
           "repeat_fps": {
@@ -9460,10 +9469,16 @@
             "format": "float",
             "description": "Re-encoded holds/s — source starvation, not new frames."
           },
+          "rtt_us": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Smoothed QUIC round trip to the client, µs.",
+            "minimum": 0
+          },
           "send_dropped": {
             "type": "integer",
             "format": "int32",
-            "description": "Host send-buffer overflow / EAGAIN this window (delta).",
+            "description": "Host send-buffer overflow / EAGAIN.",
             "minimum": 0
           },
           "session_id": {
