@@ -88,9 +88,9 @@ microphone mute; the in-stream hint over the video doesn't, to stay one readable
   **カタカナ/ひらがな**, **半角/全角**, **ろ** and **¥** keys, and the ABNT2 **/?** and keypad
   **.** keys included. **Ctrl+Space** reaches the host from Android 13 on; Android 12 and older
   use it to switch their own layout. The system Back button opens the dial; a mouse's Back button
-  goes to the host — also when Android's own mouse settings have remapped it to Back, in which
-  case Android hands the app a Back key and the dial would otherwise open. With a mouse attached,
-  that injected Back is the mouse's; the Back gesture still opens the dial.
+  goes to the host — also on builds like One UI 8 that map it to Back themselves, where Android
+  hands the app a Back key and the dial would otherwise open. With a mouse attached, that Back
+  is the mouse's; the Back gesture still opens the dial.
 - **Apple TV** has no keyboard path, and a short press of the Siri Remote's Back button deliberately
   does nothing — so a controller's B button can't end your session by accident. To leave, **hold
   Back for about a second and let go**. During a session the remote's touch surface drives the host

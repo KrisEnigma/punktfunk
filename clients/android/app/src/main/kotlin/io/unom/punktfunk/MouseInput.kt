@@ -31,10 +31,10 @@ fun InputDevice.isExternalDevice(): Boolean =
  * external non-pad Back belongs to the host. On a TV the remote's Back is the way in, so only a
  * mouse with no D-pad claims it — an air-mouse remote keeps its Back.
  *
- * A side button the system's mouse settings remap to Back never reaches us as a button: Android
- * injects a Back key from its virtual keyboard instead, stamped like the nav bar's. The Back
- * gesture takes the newer dispatch path and is no key at all, so with a mouse attached an
- * [injected] Back is the mouse's.
+ * A side button the system maps to Back (One UI 8 does, with no setting) never reaches us as a
+ * button: Android injects a Back key from a virtual device of its own, stamped like the nav
+ * bar's. The Back gesture takes the newer dispatch path and is no key at all, so with a mouse
+ * attached a Back from no external device is the mouse's.
  */
 fun isMouseSideKey(
     tv: Boolean,
@@ -43,12 +43,10 @@ fun isMouseSideKey(
     fallback: Boolean,
     mouse: Boolean,
     dpad: Boolean,
-    injected: Boolean = false,
     mousePresent: Boolean = false,
 ): Boolean = when {
     fallback || pad -> false
-    injected -> mousePresent && !tv
-    !external -> false
+    !external -> mousePresent && !tv
     !tv -> true
     else -> mouse && !dpad
 }
