@@ -379,6 +379,7 @@ impl VirtualDisplay for HyprlandDisplay {
             // `wl_output.name`, which the injector matches.
             output_name: Some(name),
             seat: None,
+            pid: None,
         })
     }
 }

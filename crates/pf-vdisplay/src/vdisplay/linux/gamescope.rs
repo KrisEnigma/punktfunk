@@ -502,6 +502,7 @@ impl VirtualDisplay for GamescopeDisplay {
                 expect_exact_dims: false,
                 output_name: None, // EIS seat, not a wlr virtual pointer to aim by name
                 seat: None,
+                pid: None,
             });
         }
         check_gamescope_version(); // diagnostic only — warns on known-deadlock-prone versions
@@ -572,6 +573,7 @@ impl VirtualDisplay for GamescopeDisplay {
             self.pending_restore = Some(Box::new(crate::panel_dpms::release_stream_darken));
         }
         self.spawned_nested_launch = true;
+        let pid = proc.child.id();
         let mut out = VirtualOutput::owned(
             node_id,
             Some((mode.width, mode.height, mode.refresh_hz)),
@@ -580,6 +582,7 @@ impl VirtualDisplay for GamescopeDisplay {
         // From the same log `wait_for_node` just read. `None` only if gamescope changed the line;
         // every discovery then falls back to unscoped, which is what it did before seats.
         out.seat = wayland_name_from_log(&log);
+        out.pid = Some(pid);
         tracing::info!(
             node_id,
             seat = out.seat.as_deref().unwrap_or("-"),
@@ -673,6 +676,7 @@ fn create_managed_session(client: &str, mode: Mode, hdr: bool) -> Result<Virtual
             expect_exact_dims: false,
             output_name: None, // EIS seat, not a wlr virtual pointer to aim by name
             seat: None,
+            pid: None,
         });
     }
     // Desktop Steam also holds the instance; SESSION_UNIT's own Steam is exempt via cgroup.
@@ -758,6 +762,7 @@ fn managed_output(node_id: u32, mode: Mode) -> VirtualOutput {
         expect_exact_dims: false,
         output_name: None, // EIS seat, not a wlr virtual pointer to aim by name
         seat: None,
+        pid: None,
     }
 }
 

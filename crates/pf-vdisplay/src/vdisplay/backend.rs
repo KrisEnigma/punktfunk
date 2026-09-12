@@ -108,6 +108,10 @@ pub struct VirtualOutput {
     /// seat that owns them. Kept across reuse. `None` for every other backend.
     #[cfg(target_os = "linux")]
     pub seat: Option<String>,
+    /// The compositor process we spawned for this display (gamescope bare spawn). The display
+    /// dies with it, so a kept one is reused only while it lives. `None` for every other backend.
+    #[cfg(target_os = "linux")]
+    pub pid: Option<u32>,
 }
 
 /// PipeWire node, optional remote fd, and the RAII that closes ScreenCast.
@@ -140,6 +144,8 @@ impl VirtualOutput {
             output_name: None,
             #[cfg(target_os = "linux")]
             seat: None,
+            #[cfg(target_os = "linux")]
+            pid: None,
         }
     }
 }

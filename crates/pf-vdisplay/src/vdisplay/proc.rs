@@ -208,6 +208,20 @@ pub(crate) fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// Whether `pid` is running: in `/proc` and not a zombie. An exited child keeps its `/proc`
+/// entry until reaped, so presence alone reads a crashed one as alive.
+#[cfg(target_os = "linux")]
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // `comm` is parenthesized and may hold `)`: the state letter follows the last one.
+    let state = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.trim_start().chars().next());
+    state.is_some_and(|s| !matches!(s, 'Z' | 'X' | 'x'))
+}
+
 /// The longest `/proc/<pid>/comm` the kernel will report: `TASK_COMM_LEN` is 16 *including* the
 /// NUL, so a name of exactly this many bytes may be a truncation of a longer one.
 #[cfg(target_os = "linux")]
@@ -506,6 +520,31 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "the call waited on the grandchild's EOF (took {:?})",
             started.elapsed()
+        );
+    }
+
+    /// A kept gamescope's `Child` stays unreaped until the pool drops it, so a crashed one is a
+    /// zombie. It must read as dead, or keep-alive hands the corpse to the next client.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_unreaped_child_is_not_alive() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        assert!(pid_alive(pid), "a running child must read as alive");
+        child.kill().expect("kill");
+        // No `wait` yet: the zombie is the case under test. SIGKILL lands asynchronously.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pid_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(POLL);
+        }
+        let zombie_alive = pid_alive(pid);
+        let _ = child.wait();
+        assert!(
+            !zombie_alive,
+            "an exited, unreaped child still reads as alive"
         );
     }
 
