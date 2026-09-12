@@ -26,7 +26,8 @@ runner and the tray read it from `mgmt-endpoint`, which the host rewrites on eve
 the other host instead — Sunshine and its forks derive every port from one base setting.) Two
 caveats: a host you added to a client **by IP address** assumes the default port, so re-add it from
 discovery; and if you run a firewall, the `punktfunk-native` profile opens the default port, so allow
-the new one too ([Ports & firewall](/docs/ports)).
+the new one too ([Ports & firewall](/docs/ports)). On Windows, `punktfunk-host service install`
+re-creates the host's rule for the port in `host.env`.
 
 **On Windows** there's a second overlap: Punktfunk's default display topology is *exclusive* — while
 streaming it switches the other displays off so its virtual one is the whole desktop, and re-asserts
