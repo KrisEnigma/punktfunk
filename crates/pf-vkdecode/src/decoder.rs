@@ -294,6 +294,28 @@ impl std::fmt::Display for VkDecodeError {
     }
 }
 
+impl VkDecodeError {
+    /// The device cannot host this codec at all: every AU refuses the same way, so a
+    /// failure streak only delays the rung below.
+    pub fn is_device_fact(&self) -> bool {
+        matches!(self, VkDecodeError::Caps(_))
+    }
+
+    /// Nothing was fed: the planner waits for an IDR, or for the parameter sets a
+    /// decoder built mid-GOP has not seen. Idle, not a refusal.
+    pub fn awaits_idr(&self) -> bool {
+        matches!(
+            self,
+            VkDecodeError::Plan(PlanError::AwaitingIdr | PlanError::NoActiveParamSet { .. })
+                | VkDecodeError::PlanH265(
+                    pf_bitstream::h265::PlanError::AwaitingIdr
+                        | pf_bitstream::h265::PlanError::NoActiveParamSet { .. }
+                )
+                | VkDecodeError::AwaitingKeyAv1
+        )
+    }
+}
+
 impl std::error::Error for VkDecodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
