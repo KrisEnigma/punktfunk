@@ -104,11 +104,17 @@ pub fn set_encode(owner: u32, req: &SetEncodeRequest) -> Result<SetEncodeReply, 
             pool.reclaim();
         }
     }
+    // A render device that will not create is why no swap-chain took: send its HRESULT.
+    let no_device = |stage: &'static str| {
+        let fail =
+            crate::direct_3d_device::last_init_error().map_or((-5, stage), |hr| (hr, "d3d11"));
+        fail_reply(wire::SET_ENCODE_NO_DEVICE, fail)
+    };
     let Some(luid) = wait_render_luid(&monitor) else {
-        return Ok(fail_reply(wire::SET_ENCODE_NO_DEVICE, (-5, "noswap")));
+        return Ok(no_device("noswap"));
     };
     let Some(device) = crate::direct_3d_device::pooled_device(luid) else {
-        return Ok(fail_reply(wire::SET_ENCODE_NO_DEVICE, (-5, "device")));
+        return Ok(no_device("device"));
     };
     let generation = monitor.next_encode_generation();
     let session = Arc::new(EncodeSession::new(*req, section, generation));
