@@ -75,6 +75,7 @@ pub struct SlotHandle(HANDLE);
 // SAFETY: an NT handle is a process-wide kernel reference with no thread affinity; the only
 // operation on it is one `CloseHandle` from `Drop`.
 unsafe impl Send for SlotHandle {}
+// SAFETY: `raw` reads a plain value; nothing mutates the handle before the single close.
 unsafe impl Sync for SlotHandle {}
 
 impl SlotHandle {
