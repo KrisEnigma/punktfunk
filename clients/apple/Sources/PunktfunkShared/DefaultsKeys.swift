@@ -276,6 +276,9 @@ public enum DefaultsKey {
     /// Which corner the statistics overlay sits in — a `HUDPlacement` raw value
     /// ("topLeading"/"topTrailing"/"bottomLeading"/"bottomTrailing"). Default top-trailing.
     public static let hudPlacement = "punktfunk.hudPlacement"
+    /// The stats overlay's vocabulary: false (default) shows the figures Moonlight's overlay also
+    /// shows, true the Advanced capture-to-glass view. Device-wide; a profile never carries it.
+    public static let advancedStats = "punktfunk.advancedStats"
     /// iOS/iPadOS/macOS: switch the host list, settings and game library to a controller-friendly
     /// layout (the console launcher, gamepad-navigable settings, a coverflow-style library).
     /// On by default; WHEN it takes over is `gamepadUIMode`. See `GamepadUIEnvironment.isActive`.
@@ -336,6 +339,9 @@ extension Notification.Name {
     public static let punktfunkReleaseCapture = Notification.Name("io.unom.punktfunk.release-capture")
     /// The quick-action ring's Keyboard slot: summon the stream view's soft keyboard (iOS).
     public static let punktfunkShowSoftKeyboard = Notification.Name("io.unom.punktfunk.show-soft-keyboard")
+    /// The live stats tier moved (`userInfo["tier"]`, a `StatsVerbosity` raw value). Posted by
+    /// `StatsVerbosity.cycle`; the session view follows it without touching the stored default.
+    public static let punktfunkStatsCycled = Notification.Name("io.unom.punktfunk.stats-cycled")
 
     /// Posted by the session view when the quick-action ring opens (`object` is a Bool `NSNumber`).
     /// The Mac's stream layer releases a captured mouse for as long as it is up and takes capture

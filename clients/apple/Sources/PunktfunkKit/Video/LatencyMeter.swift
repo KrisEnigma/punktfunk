@@ -1,32 +1,23 @@
-// Per-frame latency-stage sampler for the live HUD: records one interval per frame (an end
-// instant minus a start instant, both CLOCK_REALTIME ns) and drains percentiles on demand.
+// Per-frame latency sampler: records one interval per frame (an end instant minus a start
+// instant, both CLOCK_REALTIME ns) and drains percentiles on demand.
 // NSLock rather than an actor — the writers are the non-async pump/decode/present paths (same
 // pattern as the app's FrameMeter).
 
 import Foundation
 
-/// Samples one **latency stage** per frame and reports percentiles. One instance per stage of the
-/// unified stats model (design/stats-unification.md):
+/// Samples one latency interval per frame and reports percentiles. The stats overlay's figures
+/// live in the core; this serves the app's own readers: capture→on-glass for the A/V sync loop,
+/// the client-queue wait, and the stage-1 pump.
 ///
-/// - `host+network` = capture→received: `record(ptsNs:offsetNs:)` at AU receipt.
-/// - `decode` = received→decoded and `display` = decoded→displayed: client-local single-clock
-///   stages — `record(ptsNs:atNs:offsetNs:)` with the start instant as `ptsNs` and `offsetNs: 0`.
-/// - `end-to-end` = capture→displayed, measured directly (never summed from the stages):
-///   `record(ptsNs:atNs:offsetNs:)` at present.
-///
-/// For the host-anchored intervals (capture→…) the sample is `end + offset - pts_ns`, where
-/// `pts_ns` is the host's capture wall clock (the AU's pts) and the LIVE **clock-skew
-/// offset** (`PunktfunkConnection.clockOffsetNs`, host minus client, mid-stream re-synced —
-/// read it per record, never cached) makes the difference valid
-/// across machines. `offsetNs == 0` means an old host that didn't answer the skew handshake (or
-/// genuinely synced clocks) — the number is then only meaningful same-host, and the HUD tags the
-/// end-to-end line `(same-host clock)`.
+/// For a host-anchored interval (capture→…) the sample is `end + offset - pts_ns`, where `pts_ns`
+/// is the host's capture wall clock (the AU's pts) and the LIVE **clock-skew offset**
+/// (`PunktfunkConnection.clockOffsetNs`, host minus client, mid-stream re-synced — read it per
+/// record, never cached) makes the difference valid across machines. A client-local interval
+/// passes its start stamp as `ptsNs` and `offsetNs: 0`.
 public final class LatencyMeter: @unchecked Sendable {
     private let lock = NSLock()
     private var samplesUs: [Int64] = []
     private var skewCorrected = false
-    /// Samples `record` refused as impossible since the last `drainTrimmed` (see the guard).
-    private var trimmed = 0
     /// The most recent sample and the instant it ended, for `latestSample(asOfNs:maxAgeMs:)` —
     /// a LEVEL, not a window, so `drain` deliberately leaves both alone.
     private var latestNs: Int64 = 0
@@ -51,20 +42,9 @@ public final class LatencyMeter: @unchecked Sendable {
     /// `CLOCK_REALTIME`.
     public func record(ptsNs: UInt64, atNs: Int64, offsetNs: Int64) {
         let latNs = atNs &+ offsetNs &- Int64(bitPattern: ptsNs)
-        // Drop absurd values (a clock step, a wildly wrong offset, garbage pts, or a stage whose
-        // start stamp is missing/after its end) — samples are clamped to (0, 10 s). COUNTED, not
-        // silent: a cluster of non-positive samples is the signature of a wrong clock offset
-        // (client-local stages can't go negative), and a meter that quietly trims the impossible
-        // half of a shifted distribution presents the surviving tail as a plausible small number
-        // — field 2026-08-13: "e2e 0–3 ms p50 / 23 ms p95" on a session whose true hostnet was
-        // ~18 ms. `drainTrimmed` surfaces the count so the window can be MARKED suspect instead
-        // of looking healthy.
-        guard latNs > 0, latNs < 10_000_000_000 else {
-            lock.lock()
-            trimmed += 1
-            lock.unlock()
-            return
-        }
+        // Samples outside (0, 10 s) are a clock step, a wrong offset or a missing start stamp. The
+        // overlay's clock-suspect warning is the core's; here they are only dropped.
+        guard latNs > 0, latNs < 10_000_000_000 else { return }
         lock.lock()
         samplesUs.append(latNs / 1000)
         latestNs = latNs
@@ -113,27 +93,14 @@ public final class LatencyMeter: @unchecked Sendable {
         public let skewCorrected: Bool
     }
 
-    /// Take-and-reset the count of impossible samples `record` refused (see its guard). Drained
-    /// SEPARATELY from `drain()` on purpose: with a badly wrong offset EVERY sample of a window
-    /// can be non-positive, `drain()` then returns `nil` — and a count folded into `Stats` would
-    /// vanish with it, hiding the very windows that scream loudest. This survives an empty window.
-    public func drainTrimmed() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        let n = trimmed
-        trimmed = 0
-        return n
-    }
-
-    /// Forget everything, level included. A meter outlives the session that fed it (the HUD holds
-    /// it), and a pump can still deliver a frame after `disconnect`, so a new session would
-    /// otherwise publish the previous one's percentiles in its first window.
+    /// Forget everything, level included. A meter outlives the session that fed it, and a pump can
+    /// still deliver a frame after `disconnect`, so a new session would otherwise read the previous
+    /// one's samples in its first window.
     public func reset() {
         lock.lock()
         defer { lock.unlock() }
         samplesUs.removeAll(keepingCapacity: true)
         skewCorrected = false
-        trimmed = 0
         latestNs = 0
         latestAtNs = 0
     }

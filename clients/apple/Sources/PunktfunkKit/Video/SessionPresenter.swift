@@ -252,9 +252,6 @@ final class SessionPresenter {
         connection: PunktfunkConnection,
         baseLayer: AVSampleBufferDisplayLayer,
         endToEndMeter: LatencyMeter?,
-        decodeMeter: LatencyMeter? = nil,
-        displayMeter: LatencyMeter? = nil,
-        presentFloorMeter: LatencyMeter? = nil,
         makeDisplayLink: @escaping (AnyObject, Selector) -> CADisplayLink,
         onFrame: (@Sendable (AccessUnit) -> Void)?,
         onSessionEnd: (@Sendable () -> Void)?,
@@ -266,8 +263,7 @@ final class SessionPresenter {
         restart = { [weak self] layer in
             self?.start(
                 connection: connection, baseLayer: layer, endToEndMeter: endToEndMeter,
-                decodeMeter: decodeMeter, displayMeter: displayMeter,
-                presentFloorMeter: presentFloorMeter, makeDisplayLink: makeDisplayLink,
+                makeDisplayLink: makeDisplayLink,
                 onFrame: onFrame, onSessionEnd: onSessionEnd, onDecodedSize: onDecodedSize)
         }
 
@@ -305,9 +301,7 @@ final class SessionPresenter {
         #endif
         if choice != .stage1,
            let pipeline = Stage2Pipeline(
-               endToEndMeter: endToEndMeter, decodeMeter: decodeMeter,
-               displayMeter: displayMeter,
-               presentFloorMeter: presentFloorMeter,
+               endToEndMeter: endToEndMeter,
                displayLayer: pacing == .decoded ? baseLayer : nil,
                pacing: pacing,
                gateDepth: Self.gateDepth(

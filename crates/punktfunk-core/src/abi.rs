@@ -681,6 +681,8 @@ pub struct PunktfunkConnection {
     last_clip: std::sync::Mutex<Option<Vec<u8>>>,
     /// Last cursor RGBA. Pointer valid until the next cursor-shape call.
     last_cursor_shape: std::sync::Mutex<Option<crate::quic::CursorShape>>,
+    /// Stats overlay window as last drained; `hud_text` formats it at any tier.
+    hud_snap: std::sync::Mutex<crate::hud::StatsSnapshot>,
 }
 
 /// Handshake-resolved audio format. Codec + rate together distinguish 48 kHz
@@ -2508,6 +2510,7 @@ unsafe fn connect_ex_impl(
                     audio_pcm: std::sync::Mutex::new(AudioPcmState::default()),
                     last_clip: std::sync::Mutex::new(None),
                     last_cursor_shape: std::sync::Mutex::new(None),
+                    hud_snap: std::sync::Mutex::new(crate::hud::StatsSnapshot::default()),
                 }))
             }
             Err(e) => {
@@ -4916,6 +4919,223 @@ pub unsafe extern "C" fn punktfunk_connection_frames_dropped(
     })
 }
 
+/// Facts only the embedder knows, for [`punktfunk_connection_hud_text`]. Zero-init, set
+/// `struct_size = sizeof(PunktfunkHudFacts)`, then the fields you mean. Append only; bump ABI.
+#[cfg(feature = "quic")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PunktfunkHudFacts {
+    /// `sizeof(PunktfunkHudFacts)` as this caller was compiled.
+    pub struct_size: u32,
+    /// The displayed stamps are true on-glass instants.
+    pub on_glass: bool,
+    /// Take the measured OS present floor off end-to-end and display (iOS, tvOS).
+    pub shave_os_floor: bool,
+    /// Decoded audio queued ahead of the speaker, ms, for an embedder that plays audio itself.
+    /// `0` keeps the core's reading.
+    pub audio_buffer_ms: u32,
+    /// Where that buffer puts audio against the picture, ms; positive = audio behind.
+    pub av_offset_ms: i32,
+    /// NUL-terminated settings-profile name, or null.
+    pub profile: *const c_char,
+    /// Embedder-only Advanced Detailed lines, `<role>\t<text>\n` each, or null.
+    pub extras: *const c_char,
+}
+
+#[cfg(all(feature = "quic", target_pointer_width = "64"))]
+const _: () = assert!(core::mem::size_of::<PunktfunkHudFacts>() == 32);
+
+/// [`punktfunk_connection_hud_text`]'s facts applied to a drained window.
+///
+/// # Safety
+/// `facts` is null or points to at least its declared `struct_size` bytes, and its strings are
+/// NUL-terminated or null.
+#[cfg(feature = "quic")]
+unsafe fn hud_with_facts(
+    mut s: crate::hud::StatsSnapshot,
+    facts: *const PunktfunkHudFacts,
+) -> Result<crate::hud::StatsSnapshot, PunktfunkStatus> {
+    if facts.is_null() {
+        return Ok(s);
+    }
+    // SAFETY: `addr_of!` does not form a `&`; a shorter layout is rejected before the full read.
+    let declared = unsafe { std::ptr::addr_of!((*facts).struct_size).read_unaligned() } as usize;
+    if declared < std::mem::size_of::<PunktfunkHudFacts>() {
+        return Err(PunktfunkStatus::InvalidArg);
+    }
+    // SAFETY: non-null, and `struct_size` covers this type.
+    let f = unsafe { facts.read_unaligned() };
+    s.on_glass = f.on_glass;
+    s.shave_os_floor = f.shave_os_floor;
+    if f.audio_buffer_ms > 0 {
+        s.audio_buffer_ms = f.audio_buffer_ms;
+        s.av_offset_ms = f.av_offset_ms;
+    }
+    // SAFETY: caller strings, NUL-terminated or null, borrowed for this call.
+    let profile = unsafe { opt_cstr(f.profile) }.map_err(|()| PunktfunkStatus::InvalidArg)?;
+    s.profile = profile.filter(|p| !p.is_empty()).map(str::to_owned);
+    // SAFETY: as above.
+    let extras = unsafe { opt_cstr(f.extras) }.map_err(|()| PunktfunkStatus::InvalidArg)?;
+    s.extras
+        .extend(extras.unwrap_or_default().lines().filter_map(|line| {
+            let (code, text) = line.split_once('\t')?;
+            Some(crate::hud::Extra {
+                text: text.to_owned(),
+                tier: crate::hud::StatsVerbosity::Detailed,
+                advanced_only: true,
+                role: crate::hud::Role::from_code(code.parse().ok()?),
+            })
+        }));
+    Ok(s)
+}
+
+/// Stats overlay: one frame left the decoder. `pts_ns` is its capture stamp; `received_ns` (the
+/// AU's reassembly stamp) and `decoded_ns` are client `CLOCK_REALTIME`. A zero `received_ns`
+/// counts the frame without a decode sample.
+///
+/// # Safety
+/// `c` is a valid connection handle.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_hud_decoded(
+    c: *const PunktfunkConnection,
+    pts_ns: u64,
+    received_ns: u64,
+    decoded_ns: u64,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        let hud = c.inner.hud();
+        hud.note_decoded(pts_ns, decoded_ns);
+        if received_ns > 0 && decoded_ns >= received_ns {
+            hud.note_decode_us((decoded_ns - received_ns) / 1000, false);
+        }
+        PunktfunkStatus::Ok
+    })
+}
+
+/// Stats overlay: one frame reached the screen at `displayed_ns`, client `CLOCK_REALTIME`.
+///
+/// # Safety
+/// `c` is a valid connection handle.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_hud_displayed(
+    c: *const PunktfunkConnection,
+    pts_ns: u64,
+    decoded_ns: u64,
+    displayed_ns: u64,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        c.inner
+            .hud()
+            .note_displayed(pts_ns, decoded_ns, 0, displayed_ns);
+        PunktfunkStatus::Ok
+    })
+}
+
+/// Stats overlay: one sample of the OS present pipeline's depth, ns: how far ahead of glass the
+/// compositor takes a frame. Shaved off the shown figures when the facts ask for it.
+///
+/// # Safety
+/// `c` is a valid connection handle.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_hud_os_floor(
+    c: *const PunktfunkConnection,
+    floor_ns: u64,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        c.inner.hud().note_os_floor_us(floor_ns / 1000);
+        PunktfunkStatus::Ok
+    })
+}
+
+/// Close the stats overlay's window, about once a second. [`punktfunk_connection_hud_text`]
+/// formats what this kept as often as the tier changes.
+///
+/// # Safety
+/// `c` is a valid connection handle.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_hud_drain(
+    c: *const PunktfunkConnection,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        *lock_recover(&c.hud_snap) = c.inner.hud_snapshot();
+        PunktfunkStatus::Ok
+    })
+}
+
+/// The last drained window as overlay lines, `<role>\t<text>\n` each (role 0 primary, 1 detail,
+/// 2 muted, 3 warning), NUL-terminated into `out`. `tier` is 0 off to 3 detailed; `advanced`
+/// picks the Advanced vocabulary; `facts` may be null. When `cap` is too small nothing is
+/// written and the status is `InvalidArg`; `*needed` (when non-null) always holds the size.
+///
+/// # Safety
+/// `c` is a valid connection handle; `out` is writable for `cap` bytes; `facts` is null or
+/// valid per [`PunktfunkHudFacts`]; `needed` is null or writable.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_hud_text(
+    c: *const PunktfunkConnection,
+    tier: u32,
+    advanced: bool,
+    facts: *const PunktfunkHudFacts,
+    out: *mut c_char,
+    cap: usize,
+    needed: *mut usize,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        let snap = lock_recover(&c.hud_snap).clone();
+        // SAFETY: the caller's `facts` contract, checked inside.
+        let snap = match unsafe { hud_with_facts(snap, facts) } {
+            Ok(s) => s,
+            Err(status) => return status,
+        };
+        let tier = crate::hud::StatsVerbosity::from_index(tier);
+        let text = crate::hud::encode_lines(&crate::hud::format(&snap, tier, advanced));
+        if !needed.is_null() {
+            // SAFETY: caller out-param, non-null on this path, written once.
+            unsafe { *needed = text.len() + 1 };
+        }
+        if out.is_null() || text.len() + 1 > cap {
+            return PunktfunkStatus::InvalidArg;
+        }
+        // SAFETY: `out` is non-null and holds `cap` >= text.len() + 1 bytes.
+        unsafe {
+            // `.cast()`: `c_char` is i8 on x86_64 and u8 on aarch64.
+            std::ptr::copy_nonoverlapping(text.as_ptr(), out.cast::<u8>(), text.len());
+            *out.add(text.len()) = 0;
+        }
+        PunktfunkStatus::Ok
+    })
+}
+
 /// Decode-stage latency in µs: AU leave [`next_au`] to decoded output. Include
 /// decoder-input backlog; exclude vsync wait. Feeds Automatic bitrate. Skip if
 /// [`punktfunk_connection_wants_decode_latency`] is false.
@@ -5415,8 +5635,8 @@ mod abi_version_tests {
     #[test]
     fn abi_version_is_pinned() {
         // Current ABI. A bump must update this pin.
-        assert_eq!(crate::ABI_VERSION, 29);
-        assert_eq!(super::punktfunk_abi_version(), 29);
+        assert_eq!(crate::ABI_VERSION, 30);
+        assert_eq!(super::punktfunk_abi_version(), 30);
     }
 
     #[test]
@@ -5516,6 +5736,64 @@ mod log_sink_tests {
 #[cfg(all(test, feature = "quic"))]
 mod tests {
     use super::*;
+
+    /// The facts land on the snapshot; a short `struct_size` is a status, not a read.
+    #[cfg(feature = "quic")]
+    #[test]
+    fn hud_facts_apply_to_a_drained_window() {
+        let profile = std::ffi::CString::new("Work").unwrap();
+        let extras =
+            std::ffi::CString::new("2\tlink latency ask 1.00\nno tab\n3\tclock\n").unwrap();
+        // SAFETY: an all-zero struct is a valid value (null pointers, zero scalars).
+        let mut f: PunktfunkHudFacts = unsafe { std::mem::zeroed() };
+        f.struct_size = std::mem::size_of::<PunktfunkHudFacts>() as u32;
+        f.on_glass = true;
+        f.shave_os_floor = true;
+        f.audio_buffer_ms = 28;
+        f.av_offset_ms = -3;
+        f.profile = profile.as_ptr();
+        f.extras = extras.as_ptr();
+        // SAFETY: `f` and its strings outlive the call.
+        let s = unsafe { hud_with_facts(Default::default(), &f) }.unwrap();
+        assert!(s.on_glass && s.shave_os_floor);
+        assert_eq!((s.audio_buffer_ms, s.av_offset_ms), (28, -3));
+        assert_eq!(s.profile.as_deref(), Some("Work"));
+        assert_eq!(s.extras.len(), 2);
+        assert_eq!(s.extras[1].role, crate::hud::Role::Warn);
+        assert!(s.extras.iter().all(|e| e.advanced_only));
+        f.struct_size = 8;
+        // SAFETY: as above; the short size is the documented rejected case.
+        let short = unsafe { hud_with_facts(Default::default(), &f) };
+        assert_eq!(short.unwrap_err(), PunktfunkStatus::InvalidArg);
+        // SAFETY: null facts are the documented no-op.
+        assert!(unsafe { hud_with_facts(Default::default(), std::ptr::null()) }.is_ok());
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn hud_calls_report_a_null_connection() {
+        let null = std::ptr::null();
+        let mut buf = [0 as std::os::raw::c_char; 8];
+        // SAFETY: null handles are the documented reported-not-UB case.
+        let statuses = unsafe {
+            [
+                punktfunk_connection_hud_decoded(null, 1, 1, 2),
+                punktfunk_connection_hud_displayed(null, 1, 2, 3),
+                punktfunk_connection_hud_os_floor(null, 1),
+                punktfunk_connection_hud_drain(null),
+                punktfunk_connection_hud_text(
+                    null,
+                    3,
+                    true,
+                    std::ptr::null(),
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    std::ptr::null_mut(),
+                ),
+            ]
+        };
+        assert!(statuses.iter().all(|s| *s == PunktfunkStatus::NullPointer));
+    }
 
     /// Size-prefix guard: null/undersized is a status, not a read.
     #[test]
