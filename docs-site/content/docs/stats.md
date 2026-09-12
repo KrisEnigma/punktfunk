@@ -199,8 +199,10 @@ of its frame. The stages depend on how the host encodes:
 | Path | Stages |
 |---|---|
 | Linux native | queue, capture, submit, encode, send |
-| Windows | driver (the display driver's capture and encode, as one span), copy, send |
-| GameStream (Moonlight clients) | capture, encode, packetize, send, send spread |
+| Windows | pool (in the display driver, from the frame's present until its encode starts), encode, hand-off (driver to host), copy, send |
+| GameStream (Moonlight clients) | capture, encode, packetize, send, send spread; on Windows, the Windows stages plus send spread |
+
+An older Windows recording shows one **driver** span in place of pool, encode and hand-off.
 
 The other graphs show new against repeated frames per second next to the stream's rate, the video
 bitrate next to the encoder's target, frame and send drops, and the round trip to the client. A
