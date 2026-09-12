@@ -652,7 +652,8 @@ private struct ShotTrust: View {
 /// The marketing hero: a stand-in streamed frame with the real glass HUD chip on top.
 /// StreamView can't render here (it needs a live punktfunk/1 connection), so the frame is
 /// synthetic — set `PUNKTFUNK_SHOT_HERO=/path/to/frame.png` to drop in a real captured frame.
-/// The frame fills the display; the HUD stays inside the safe area.
+/// The frame fills the display; the HUD stays inside the safe area. The status bar and home
+/// indicator hide, as they do for a live session.
 private struct ShotStreamHero: View {
     @Environment(\.displayScale) private var scale
 
@@ -667,6 +668,10 @@ private struct ShotStreamHero: View {
         }
         .background { ShotDesktopFrame() }
         .background(Color.black.ignoresSafeArea())
+        #if os(iOS)
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+        #endif
     }
 }
 
