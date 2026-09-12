@@ -75,7 +75,27 @@ data class KnownHost(
      * way a dangling pin simply disappears — never an error, never a blocked launch.
      */
     val gameProfiles: Map<String, String> = emptyMap(),
+    /**
+     * Addresses this host was moved away from automatically, newest first, at most
+     * [PREV_ADDRESSES_MAX]. A host lives at more than one — its LAN lease at home, a Tailscale
+     * address anywhere — so when [address] goes silent the presence sweep asks these too.
+     * Mirrors the Rust `KnownHost.prev_addrs` and the Apple client's `StoredHost.previousAddresses`.
+     */
+    val prevAddresses: List<String> = emptyList(),
 ) {
+    /** This record re-pointed at [to]:[toPort], remembering the address it leaves. */
+    fun movedTo(to: String, toPort: Int): KnownHost = copy(
+        address = to,
+        port = toPort,
+        prevAddresses = (listOf(address) + prevAddresses).filter { it != to }.distinct()
+            .take(PREV_ADDRESSES_MAX),
+    )
+
+    companion object {
+        /** How many left-behind addresses a host keeps. */
+        const val PREV_ADDRESSES_MAX = 3
+    }
+
     /**
      * Where this host's management API actually is: the port learned from its advert, else 47990.
      * The twin of the Apple client's `StoredHost.effectiveMgmtPort` and the Rust
@@ -201,16 +221,17 @@ class KnownHostStore(context: Context) {
 
     /**
      * Re-point a pinned host at the address it just answered a probe from, matched by
-     * fingerprint — the record's identity, which a new DHCP lease does not change. Every dial,
-     * library fetch and wake reads the saved address, so a host that moved was unreachable from
-     * all of them until re-paired. Unpinned records are left alone: the address is all that
-     * names them. No-op, and no write, when unchanged. Returns whether anything moved.
+     * fingerprint — the record's identity, which neither a new DHCP lease nor a VPN changes.
+     * Every dial, library fetch and wake reads the saved address. The one it leaves is kept in
+     * [KnownHost.prevAddresses], so the sweep can find the host there again. Unpinned records
+     * are left alone: the address is all that names them. No-op, and no write, when unchanged.
+     * Returns whether anything moved.
      */
     fun learnAddress(fpHex: String, address: String, port: Int): Boolean {
         if (fpHex.isEmpty() || address.isBlank() || port !in 1..65535) return false
         val h = getByFp(fpHex) ?: return false
         if (h.address == address && h.port == port) return false
-        save(h.copy(address = address, port = port))
+        save(h.movedTo(address, port))
         return true
     }
 
@@ -278,6 +299,7 @@ class KnownHostStore(context: Context) {
             profileId = j.optString("profile", "").ifEmpty { null },
             pinnedProfileIds = stringList(j.optJSONArray("pins")),
             gameProfiles = stringMap(j.optJSONObject("game_profiles")),
+            prevAddresses = stringList(j.optJSONArray("prev_addrs")),
         )
     }.getOrNull()
 
@@ -363,6 +385,7 @@ class KnownHostStore(context: Context) {
             .put("profile", host.profileId ?: "")
             .put("pins", JSONArray(host.pinnedProfileIds))
             .put("game_profiles", JSONObject(host.gameProfiles))
+            .put("prev_addrs", JSONArray(host.prevAddresses))
             .toString()
 
         private fun stringList(a: JSONArray?): List<String> {

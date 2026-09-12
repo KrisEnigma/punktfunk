@@ -123,23 +123,44 @@ final class HostStore: ObservableObject {
     /// to every client for up to an hour. So a bounded QUIC handshake says whether THIS host is
     /// there, and the advert only says where else to look.
     ///
-    /// The saved address is asked first and never replaced while it answers: a routed one
-    /// (Tailscale) answers on the LAN too, and the advert would swap it for one that stops working
-    /// off the home network. Only when it is silent does an advert elsewhere get asked, and the
-    /// saved address follow it — a host back on a new DHCP lease.
+    /// A host lives at more than one address — its LAN lease at home, a Tailscale address
+    /// anywhere. The saved one is asked first and kept while it answers. Only when it is silent
+    /// are the live advert's and the addresses it left asked, together, and the first that
+    /// answers (in that order) becomes the saved address: the LAN takes over with the VPN off,
+    /// and Tailscale takes back over on mobile data.
     ///
     /// The pin decides, not the answer alone: whoever inherits a sleeping host's lease completes
-    /// a handshake at its address too. A host saved by address carries no pin to compare, so any
-    /// answer is the one it names.
+    /// a handshake at its address too. A host saved by address carries no pin to compare, so it
+    /// is asked there only, and any answer is the one it names.
     func isReachable(_ host: StoredHost, discovery: HostDiscovery) async -> Bool {
         let target = hosts.first { $0.id == host.id } ?? host
         let pin = target.pinnedSHA256
         if await Self.answers(target.address, target.port, pin: pin) { return true }
-        guard let live = discovery.hosts.first(where: { host.matches($0) }),
-              live.host != target.address || live.port != target.port,
-              await Self.answers(live.host, live.port, pin: pin) else { return false }
-        updateAddress(host.id, address: live.host, port: live.port)
+        guard pin != nil else { return false }
+        var others: [(address: String, port: UInt16)] = []
+        if let live = discovery.hosts.first(where: { host.matches($0) }) {
+            others.append((address: live.host, port: live.port))
+        }
+        others += (target.previousAddresses ?? []).map { (address: $0, port: target.port) }
+        others.removeAll { $0.address == target.address && $0.port == target.port }
+        guard let at = await Self.firstAnswering(others, pin: pin) else { return false }
+        updateAddress(host.id, address: at.address, port: at.port)
         return true
+    }
+
+    /// The first of `candidates`, in order, that the host answers at — all asked at once.
+    private static func firstAnswering(
+        _ candidates: [(address: String, port: UInt16)], pin: Data?
+    ) async -> (address: String, port: UInt16)? {
+        let answered = await withTaskGroup(of: (Int, Bool).self) { group in
+            for (i, c) in candidates.enumerated() {
+                group.addTask { (i, await Self.answers(c.address, c.port, pin: pin)) }
+            }
+            var hits = Set<Int>()
+            for await (i, hit) in group where hit { hits.insert(i) }
+            return hits
+        }
+        return candidates.indices.first(where: answered.contains).map { candidates[$0] }
     }
 
     /// Did the host pinned to `pin` (any host, when `nil`) answer a probe at this address?
@@ -193,14 +214,15 @@ final class HostStore: ObservableObject {
         hosts[i].macAddresses = macs
     }
 
-    /// Follow this host to the address its live advert claims — a saved host is matched by
-    /// fingerprint, so it survives a DHCP move, but every dial and probe still used the address
-    /// it was saved at. Same no-op-when-unchanged contract as `updateMacs`.
+    /// Re-point this host at the address it just answered at, keeping the one it leaves in
+    /// `previousAddresses` so the sweep can find it there again. Same no-op-when-unchanged
+    /// contract as `updateMacs`.
     func updateAddress(_ hostID: UUID, address: String, port: UInt16) {
         guard let i = hosts.firstIndex(where: { $0.id == hostID }),
               hosts[i].address != address || hosts[i].port != port else { return }
-        hosts[i].address = address
-        hosts[i].port = port
+        var host = hosts[i]
+        host.move(to: address, port: port)
+        hosts[i] = host
     }
 
     /// Learn/refresh this host's OS-identity chain from its live advert — same contract as

@@ -29,6 +29,7 @@ class HostAddressLearnTest {
         assertTrue(store.learnAddress(fp.uppercase(), "192.168.1.20", 9777))
         val moved = store.byId(saved.id)!!
         assertEquals("192.168.1.20", moved.address)
+        assertEquals(listOf("192.168.1.9"), moved.prevAddresses)
         assertEquals(listOf("aa:bb:cc:dd:ee:ff"), moved.mac)
         assertEquals(47991, moved.mgmtPort)
         assertEquals(1, store.all().size)
@@ -36,5 +37,17 @@ class HostAddressLearnTest {
         assertFalse(store.learnAddress(fp, "192.168.1.20", 9777))
         store.trust("192.168.1.30", 9777, "Sofa", "", paired = false)
         assertFalse(store.learnAddress("", "192.168.1.31", 9777))
+    }
+
+    /** The addresses a host left are kept, newest first, without repeats, three at most. */
+    @Test
+    fun a_moved_host_remembers_the_addresses_it_left() {
+        val store = KnownHostStore(context)
+        val saved = store.trust("100.64.0.7", 9777, "Desk", fp, paired = true)
+        store.learnAddress(fp, "192.168.1.9", 9777)
+        store.learnAddress(fp, "100.64.0.7", 9777)
+        assertEquals(listOf("192.168.1.9"), store.byId(saved.id)!!.prevAddresses)
+        for (a in listOf("10.0.0.1", "10.0.0.2", "10.0.0.3")) store.learnAddress(fp, a, 9777)
+        assertEquals(listOf("10.0.0.2", "10.0.0.1", "100.64.0.7"), store.byId(saved.id)!!.prevAddresses)
     }
 }

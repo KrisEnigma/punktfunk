@@ -50,6 +50,30 @@ class PresenceTest {
         assertNull(Presence.sweep(listOf(desk), liveFor = { null }) { _, _ -> null }["desk"])
     }
 
+    /** VPN off at home, then mobile data: the LAN is gone, and an address it left answers. */
+    @Test
+    fun a_host_is_found_again_at_an_address_it_left() {
+        val moved = desk.copy(prevAddresses = listOf("100.64.0.7"))
+        assertEquals(
+            listOf(HostAddr("192.168.1.9", 9777), HostAddr("192.168.1.20", 9777), HostAddr("100.64.0.7", 9777)),
+            Presence.candidates(moved, advert("192.168.1.20")),
+        )
+        val up = Presence.sweep(listOf(moved), liveFor = { null }) { addr, _ -> fp.takeIf { addr == "100.64.0.7" } }
+        assertEquals(HostAddr("100.64.0.7", 9777), up["desk"])
+        // Both answer while the saved one is silent: the advert comes first.
+        val home = Presence.sweep(listOf(moved), liveFor = { advert("192.168.1.20") }) { addr, _ ->
+            fp.takeIf { addr != "192.168.1.9" }
+        }
+        assertEquals(HostAddr("192.168.1.20", 9777), home["desk"])
+    }
+
+    /** An unpinned record is named by its address; an answer anywhere else is a stranger's. */
+    @Test
+    fun a_host_saved_by_address_is_asked_only_there() {
+        val typed = KnownHost("192.168.1.9", 9777, "Desk", "", paired = false, id = "typed", prevAddresses = listOf("10.0.0.5"))
+        assertEquals(listOf(HostAddr("192.168.1.9", 9777)), Presence.candidates(typed, advert("192.168.1.20")))
+    }
+
     /**
      * A stranger holding the saved address completes the handshake, so the sweep must ask WHO
      * answered: counting it lights the pip and, since wake reads `!online`, keeps the wake

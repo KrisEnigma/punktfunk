@@ -26,7 +26,7 @@ final class SharedFoundationTests: XCTestCase {
             mgmtPort: 47990, macAddresses: ["aa:bb:cc:dd:ee:ff"], clipboardSync: true,
             profileID: "a1b2c3d4e5f6", pinnedProfileIDs: ["0f0f0f0f0f0f"],
             addedAt: Date(timeIntervalSince1970: 1_600_000_000),
-            osChain: "linux/fedora/bazzite")
+            osChain: "linux/fedora/bazzite", previousAddresses: ["100.64.0.7"])
 
         let data = try JSONEncoder().encode(host)
         let decoded = try JSONDecoder().decode(StoredHost.self, from: data)
@@ -54,10 +54,22 @@ final class SharedFoundationTests: XCTestCase {
         XCTAssertNil(decoded.pinnedProfileIDs)
         XCTAssertNil(decoded.addedAt)
         XCTAssertNil(decoded.osChain)
+        XCTAssertNil(decoded.previousAddresses)
         // Resolvers fall back cleanly.
         XCTAssertEqual(decoded.effectiveMgmtPort, punktfunkDefaultMgmtPort)
         XCTAssertEqual(decoded.wakeMacs, [])
         XCTAssertEqual(decoded.displayName, "Old")
+    }
+
+    /// The addresses a host left are kept, newest first, without repeats, three at most.
+    func testAMovedHostRemembersTheAddressesItLeft() {
+        var host = StoredHost(name: "Desk", address: "100.64.0.7")
+        host.move(to: "192.168.1.9", port: 9777)
+        host.move(to: "100.64.0.7", port: 9777)
+        XCTAssertEqual(host.previousAddresses, ["192.168.1.9"])
+        for a in ["10.0.0.1", "10.0.0.2", "10.0.0.3"] { host.move(to: a, port: 9777) }
+        XCTAssertEqual(host.previousAddresses, ["10.0.0.2", "10.0.0.1", "100.64.0.7"])
+        XCTAssertEqual(host.address, "10.0.0.3")
     }
 
     func testStoredHostDisplayNameFallsBackToAddress() {

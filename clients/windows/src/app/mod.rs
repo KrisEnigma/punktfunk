@@ -568,22 +568,15 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
                             std::thread::sleep(Duration::from_secs(12));
                             continue;
                         }
-                        // `probe_reachable_many`, not a probe per host: it fans out the same
-                        // way AND asks who answered, so a stranger on a sleeping host's lease
-                        // cannot light its pip and shut the wake gate against it.
+                        // `probe_known`, not a probe per host: it fans out, asks who answered
+                        // (so a stranger on a sleeping host's lease cannot light its pip), and
+                        // re-points a host found at an address it left.
                         let hosts: Vec<_> = KnownHosts::load()
                             .hosts
                             .into_iter()
                             .filter(|h| !h.addr.is_empty())
                             .collect();
-                        let targets = hosts
-                            .iter()
-                            .map(|h| (h.addr.clone(), h.port, h.fp_hex.clone()))
-                            .collect();
-                        let online = crate::trust::probe_reachable_many(
-                            targets,
-                            Duration::from_millis(2500),
-                        );
+                        let online = crate::trust::probe_known(&hosts, Duration::from_millis(2500));
                         let map: HashMap<String, bool> =
                             hosts.into_iter().map(|h| h.fp_hex).zip(online).collect();
                         set_probed.call(map);

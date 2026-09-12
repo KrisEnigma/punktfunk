@@ -1051,35 +1051,25 @@ impl SimpleComponent for HostsPage {
 
         // Periodic reachability sweep — the ONLY thing presence is made of, since an advert
         // outlives the machine it describes. Each cycle probes every saved host off the main
-        // thread (bounded, trust-agnostic QUIC handshake — the display-side companion to
-        // dial-first) and feeds results back as `Probed`; the first sweep runs immediately, then
-        // every `PROBE_INTERVAL`.
+        // thread (bounded QUIC handshake, then the addresses a silent host left) and feeds results
+        // back as `Probed`; the first sweep runs immediately, then every `PROBE_INTERVAL`.
         {
             let sender = sender.clone();
             glib::spawn_future_local(async move {
                 loop {
-                    let entries: Vec<(String, String, u16, String)> = KnownHosts::load()
+                    let hosts: Vec<KnownHost> = KnownHosts::load()
                         .hosts
-                        .iter()
+                        .into_iter()
                         .filter(|h| !h.addr.is_empty())
-                        .map(|h| (saved_key(h), h.addr.clone(), h.port, h.fp_hex.clone()))
                         .collect();
-                    if !entries.is_empty() {
+                    if !hosts.is_empty() {
                         let (tx, rx) = async_channel::bounded(1);
                         std::thread::Builder::new()
                             .name("punktfunk-probe".into())
                             .spawn(move || {
-                                let targets = entries
-                                    .iter()
-                                    .map(|(_, a, p, fp)| (a.clone(), *p, fp.clone()))
-                                    .collect();
-                                let results =
-                                    crate::trust::probe_reachable_many(targets, PROBE_TIMEOUT);
-                                let map: HashMap<String, bool> = entries
-                                    .into_iter()
-                                    .map(|(k, _, _, _)| k)
-                                    .zip(results)
-                                    .collect();
+                                let results = crate::trust::probe_known(&hosts, PROBE_TIMEOUT);
+                                let map: HashMap<String, bool> =
+                                    hosts.iter().map(saved_key).zip(results).collect();
                                 let _ = tx.send_blocking(map);
                             })
                             .expect("spawn probe thread");

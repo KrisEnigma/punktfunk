@@ -898,22 +898,39 @@ impl ServiceState {
     /// One parallel reachability pass over every row. Advertising ones are NOT online by
     /// definition — an advert is a cache entry with a 75-minute TTL that a suspending host sends
     /// no goodbye for, so skipping them left a sleeping machine reading Online (and, since the
-    /// wake item is gated on `!online`, unwakeable). Runs on its own thread; at most one in flight.
+    /// wake item is gated on `!online`, unwakeable). A saved host found at an address it left
+    /// moves back there. Runs on its own thread; at most one in flight.
     fn sweep(&self, rows: &[HostRow]) {
         if self.probe_inflight.swap(true, Ordering::SeqCst) {
             return;
         }
-        let targets: Vec<(String, (String, u16, String))> = rows
+        let known = trust::KnownHosts::load();
+        let (keys, hosts): (Vec<String>, Vec<trust::KnownHost>) = rows
             .iter()
-            .map(|r| (r.key.clone(), (r.addr.clone(), r.port, r.fp_hex.clone())))
-            .collect();
+            .map(|r| {
+                // A discovered-only row has no addresses to fall back on.
+                let prev_addrs = known
+                    .hosts
+                    .iter()
+                    .find(|h| r.saved && !r.fp_hex.is_empty() && h.fp_hex == r.fp_hex)
+                    .map(|h| h.prev_addrs.clone())
+                    .unwrap_or_default();
+                let host = trust::KnownHost {
+                    addr: r.addr.clone(),
+                    port: r.port,
+                    fp_hex: r.fp_hex.clone(),
+                    prev_addrs,
+                    ..Default::default()
+                };
+                (r.key.clone(), host)
+            })
+            .unzip();
         let probed = self.probed.clone();
         let inflight = self.probe_inflight.clone();
         std::thread::Builder::new()
             .name("punktfunk-probe".into())
             .spawn(move || {
-                let (keys, addrs): (Vec<_>, Vec<_>) = targets.into_iter().unzip();
-                let results = trust::probe_reachable_many(addrs, Duration::from_millis(900));
+                let results = trust::probe_known(&hosts, Duration::from_millis(900));
                 let mut map = probed.lock().unwrap();
                 for (key, ok) in keys.into_iter().zip(results) {
                     map.insert(key, ok);

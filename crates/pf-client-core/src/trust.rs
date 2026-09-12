@@ -289,7 +289,15 @@ pub struct KnownHost {
     /// No lookup here is keyed by it — `fp_hex` / `addr:port` stay the keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Addresses this host was moved away from automatically, newest first, at most
+    /// [`PREV_ADDRS_MAX`]. A host lives at more than one — its LAN lease at home, a
+    /// Tailscale address anywhere — so when `addr` goes silent `probe_known` asks these too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prev_addrs: Vec<String>,
 }
+
+/// How many left-behind addresses a host keeps.
+pub const PREV_ADDRS_MAX: usize = 3;
 
 impl Default for KnownHost {
     /// Blank record with a fresh stable id — construction sites use
@@ -311,6 +319,7 @@ impl Default for KnownHost {
             pinned_profiles: Vec::new(),
             game_profiles: BTreeMap::new(),
             id: Some(crate::profiles::new_record_uuid()),
+            prev_addrs: Vec::new(),
         }
     }
 }
@@ -320,6 +329,22 @@ impl KnownHost {
     /// [`crate::library::DEFAULT_MGMT_PORT`] — that constant is the fallback, not the answer.
     pub fn effective_mgmt_port(&self) -> u16 {
         self.mgmt_port.unwrap_or(crate::library::DEFAULT_MGMT_PORT)
+    }
+
+    /// Re-point at `addr:port`, remembering the address it leaves. `false`, and nothing
+    /// changed, when already there.
+    pub fn move_to(&mut self, addr: &str, port: u16) -> bool {
+        if self.addr == addr && self.port == port {
+            return false;
+        }
+        let old = std::mem::replace(&mut self.addr, addr.to_string());
+        self.prev_addrs.retain(|a| a != addr && *a != old);
+        if old != addr {
+            self.prev_addrs.insert(0, old);
+        }
+        self.prev_addrs.truncate(PREV_ADDRS_MAX);
+        self.port = port;
+        true
     }
 
     /// Pins that still exist, in card order, no duplicates. Dangling ids disappear —
@@ -698,9 +723,9 @@ pub fn learn_from_advert(
     }
 }
 
-/// Rewrite a saved host's address/port after a new DHCP lease, matched by fingerprint.
-/// No-op, and no disk write, when unchanged. Wake-and-wait uses this so later connects
-/// dial the live address.
+/// Re-point a saved host at the address it now answers at, matched by fingerprint, keeping
+/// the one it leaves in `prev_addrs`. No-op, and no disk write, when unchanged. Wake-and-wait,
+/// the hosts list and `probe_known` use this so later connects dial the live address.
 pub fn rekey_addr(fp_hex: &str, addr: &str, port: u16) {
     if fp_hex.is_empty() {
         return;
@@ -709,12 +734,9 @@ pub fn rekey_addr(fp_hex: &str, addr: &str, port: u16) {
     let Some(h) = known.hosts.iter_mut().find(|h| h.fp_hex == fp_hex) else {
         return;
     };
-    if h.addr == addr && h.port == port {
-        return;
+    if h.move_to(addr, port) {
+        let _ = known.save();
     }
-    h.addr = addr.to_string();
-    h.port = port;
-    let _ = known.save();
 }
 
 /// Stamp now as this host's last successful connect. No-op if the fingerprint is not stored.
@@ -897,6 +919,64 @@ fn answered_as_self(want: &str, answered: Option<[u8; 32]>) -> bool {
         None => false,
         Some(fp) => want.is_empty() || hex(&fp).eq_ignore_ascii_case(want),
     }
+}
+
+/// Probe every saved host where it could be, in parallel: its address, then — only when
+/// that is silent — the addresses it left (`prev_addrs`), all at once. A pinned host that
+/// answers at one of those moves back there, so Tailscale takes over again once the LAN is
+/// gone. A host saved by address alone is asked there only. Result index matches `hosts`:
+/// `true` = online.
+#[cfg(not(target_family = "wasm"))]
+pub fn probe_known(hosts: &[KnownHost], timeout: std::time::Duration) -> Vec<bool> {
+    let found: Vec<Option<String>> = std::thread::scope(|s| {
+        let handles: Vec<_> = hosts
+            .iter()
+            .map(|h| s.spawn(move || where_answers(h, timeout)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|j| j.join().ok().flatten())
+            .collect()
+    });
+    for (h, at) in hosts.iter().zip(&found) {
+        if let Some(a) = at.as_deref().filter(|a| *a != h.addr) {
+            rekey_addr(&h.fp_hex, a, h.port);
+        }
+    }
+    found.iter().map(Option::is_some).collect()
+}
+
+/// Where `h` answers as itself: its address, else the first of the addresses it left.
+#[cfg(not(target_family = "wasm"))]
+fn where_answers(h: &KnownHost, timeout: std::time::Duration) -> Option<String> {
+    let asks = |addr: &str| {
+        answered_as_self(
+            &h.fp_hex,
+            NativeClient::probe_identity(addr, h.port, timeout),
+        )
+    };
+    if asks(&h.addr) {
+        return Some(h.addr.clone());
+    }
+    if h.fp_hex.is_empty() {
+        return None;
+    }
+    let asks = &asks;
+    let hits: Vec<bool> = std::thread::scope(|s| {
+        let handles: Vec<_> = h
+            .prev_addrs
+            .iter()
+            .map(|a| s.spawn(move || asks(a.as_str())))
+            .collect();
+        handles
+            .into_iter()
+            .map(|j| j.join().unwrap_or(false))
+            .collect()
+    });
+    h.prev_addrs
+        .iter()
+        .zip(hits)
+        .find_map(|(a, hit)| hit.then(|| a.clone()))
 }
 
 /// On-stream stats overlay tier (design/stats-unification.md). Each tier is a strict
@@ -1822,6 +1902,7 @@ mod tests {
                 pinned_profiles: vec!["bbbbbbbbbbbb".into()],
                 game_profiles: [("halo".to_string(), "cccccccccccc".to_string())].into(),
                 id: Some("11111111-2222-4333-8444-555555555555".into()),
+                prev_addrs: vec![],
             }],
         };
         // What `persist_host` builds: a trust decision, nothing else.
@@ -1967,6 +2048,7 @@ mod tests {
                 pinned_profiles: vec!["bbbbbbbbbbbb".into()],
                 game_profiles: [("halo".to_string(), "cccccccccccc".to_string())].into(),
                 id: Some("11111111-2222-4333-8444-555555555555".into()),
+                prev_addrs: vec![],
             }],
         };
         // The other OS on that box: same address, a certificate the client has never seen.
@@ -2031,6 +2113,25 @@ mod tests {
             h.id.as_deref(),
             Some("11111111-2222-4333-8444-555555555555")
         );
+    }
+
+    /// The addresses a host left are kept, newest first, without repeats, three at most.
+    #[test]
+    fn move_to_remembers_the_addresses_a_host_left() {
+        let mut h = KnownHost {
+            addr: "100.64.0.7".into(),
+            fp_hex: fp('a'),
+            ..Default::default()
+        };
+        assert!(h.move_to("192.168.1.9", 9777));
+        assert!(!h.move_to("192.168.1.9", 9777));
+        assert!(h.move_to("100.64.0.7", 9777));
+        assert_eq!(h.prev_addrs, ["192.168.1.9"]);
+        for a in ["10.0.0.1", "10.0.0.2", "10.0.0.3"] {
+            h.move_to(a, 9777);
+        }
+        assert_eq!(h.prev_addrs, ["10.0.0.2", "10.0.0.1", "100.64.0.7"]);
+        assert_eq!(h.addr, "10.0.0.3");
     }
 
     /// Superseding is scoped to the decision's `addr:port`. An fp-less save retires nothing.

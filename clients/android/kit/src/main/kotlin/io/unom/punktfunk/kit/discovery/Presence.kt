@@ -12,11 +12,11 @@ data class HostAddr(val address: String, val port: Int)
  * share it, so both answer the same way. Presence is the QUIC probe alone: an mDNS advert is a
  * cache entry a suspending host sends no goodbye for.
  *
- * Each host is asked at its saved address first, then at the live advert's, and the sweep
- * reports WHICH answered, so the caller can re-point the record at it. A saved address that
- * answers is never replaced: a routed one (Tailscale, VPN) answers on the LAN too, and the advert
- * would swap it for one that stops working off the home network. The advert still finds a host
- * that came back on a new lease.
+ * A host lives at more than one address — its LAN lease at home, a Tailscale address anywhere.
+ * Each is asked at its saved address first; only when that is silent, at the live advert's and
+ * the addresses it left ([KnownHost.prevAddresses]). The sweep reports WHICH answered, so the
+ * caller re-points the record there: a Tailscale address survives coming home, the LAN one takes
+ * over when the VPN is off, and Tailscale takes back over on mobile data.
  */
 object Presence {
     /** The probe's budget per address. A LAN host answers in milliseconds. */
@@ -26,11 +26,15 @@ object Presence {
         Thread(r, "pf-presence").apply { isDaemon = true }
     }
 
-    /** The addresses to ask, in order: the saved one, then the live advert's if it differs. */
+    /**
+     * The addresses to ask, in order: the saved one, the live advert's, then the ones it left.
+     * A host saved by address alone is named by it, so it is asked there only.
+     */
     fun candidates(saved: KnownHost, live: DiscoveredHost?): List<HostAddr> {
         val stored = HostAddr(saved.address, saved.port)
-        val advertised = live?.let { HostAddr(it.host, it.port) }
-        return if (advertised == null || advertised == stored) listOf(stored) else listOf(stored, advertised)
+        if (saved.fpHex.isEmpty()) return listOf(stored)
+        val advertised = listOfNotNull(live?.let { HostAddr(it.host, it.port) })
+        return (listOf(stored) + advertised + saved.prevAddresses.map { HostAddr(it, saved.port) }).distinct()
     }
 
     /**
@@ -51,8 +55,9 @@ object Presence {
 
     /**
      * Probe every host in [saved] and return the address each one answered AT AND AS ITSELF,
-     * keyed by record id. Hosts run in parallel, so a sweep costs one probe budget, not one per
-     * sleeping host. Blocking — call off the main thread.
+     * keyed by record id. Hosts run in parallel, and a host's fallbacks are asked together once
+     * its saved address is silent, so a sweep costs at most two probe budgets, not one per
+     * address. Blocking — call off the main thread.
      */
     fun sweep(
         saved: List<KnownHost>,
@@ -62,9 +67,12 @@ object Presence {
         if (saved.isEmpty()) return emptyMap()
         val tasks = saved.map { kh ->
             Callable {
-                candidates(kh, liveFor(kh))
-                    .firstOrNull { isSelf(kh, probe(it.address, it.port)) }
-                    ?.let { kh.id to it }
+                val all = candidates(kh, liveFor(kh))
+                val answers = { a: HostAddr -> isSelf(kh, probe(a.address, a.port)) }
+                val at = all.first().takeIf(answers)
+                    ?: pool.invokeAll(all.drop(1).map { a -> Callable { a.takeIf(answers) } })
+                        .firstNotNullOfOrNull { runCatching { it.get() }.getOrNull() }
+                at?.let { kh.id to it }
             }
         }
         return pool.invokeAll(tasks).mapNotNull { runCatching { it.get() }.getOrNull() }.toMap()
