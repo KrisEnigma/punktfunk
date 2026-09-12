@@ -67,19 +67,28 @@ internal fun StatsOverlay(
      */
     profileName: String? = null,
     /**
-     * The panel's live refresh rate (0 = unknown). Shown as a warning on the first line whenever
-     * it sits below the stream rate — the "an OEM governor ignored the mode pin" tell, which
-     * otherwise reads as inexplicable judder and an extra refresh of latency.
+     * The rate this app is allowed to render at (`display.refreshRate`, 0 = unknown) and the
+     * panel's active mode (`display.mode.refreshRate`). The first below the second is Android's
+     * per-uid cap (the game default frame rate), named as such on the first line. A panel below
+     * the stream rate with both equal is the display idled down under that same cap (the A024
+     * shape: mode and render both read 60) or a real mode switch, so the line names the next move.
      */
     panelHz: Float = 0f,
+    panelModeHz: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
     if (verbosity == StatsVerbosity.OFF || s.size < 10) return
     val w = s[6].toInt()
     val h = s[7].toInt()
     val hz = s[8].toInt()
+    val capped = panelHz > 0f && panelModeHz > 0f && panelHz + 1f < panelModeHz
     val panelBelowStream = panelHz > 0f && hz > 0 && panelHz + 1f < hz.toFloat()
-    val panelTag = if (panelBelowStream) "   ⚠ panel ${panelHz.roundToInt()} Hz" else ""
+    val panelTag = when {
+        capped -> "   ⚠ app capped ${panelHz.roundToInt()} Hz by the system"
+        panelBelowStream ->
+            "   ⚠ panel ${panelHz.roundToInt()} Hz, not $hz · check the game frame-rate limit"
+        else -> ""
+    }
     val latValid = s[4] != 0.0
     val skew = s[5] != 0.0
     val lost = s[9].toLong()

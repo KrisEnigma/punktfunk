@@ -176,6 +176,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // The panel's LIVE refresh rate, re-read each poll — the HUD flags a session whose panel sits
     // below the stream rate (an OEM governor that ignored both the mode pin and the surface hint).
     var panelHz by remember { mutableStateOf(0f) }
+    var panelModeHz by remember { mutableStateOf(0f) }
     val statsOn = ui.statsVerbosity != StatsVerbosity.OFF
     // Touch model is fixed per session (re-keys the gesture handler below if it ever changes).
     // Passthrough needs a host that injects touch; without the bit every contact would vanish, so
@@ -260,7 +261,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             while (true) {
                 delay(1000)
                 stats = NativeBridge.nativeVideoStats(handle)
-                panelHz = runCatching { context.display }.getOrNull()?.refreshRate ?: 0f
+                val display = runCatching { context.display }.getOrNull()
+                panelHz = display?.refreshRate ?: 0f
+                panelModeHz = display?.mode?.refreshRate ?: 0f
                 // The decoder is fixed for the session; fetch its label once it's resolved.
                 if (decoderLabel.isEmpty()) decoderLabel = NativeBridge.nativeVideoDecoderLabel(handle)
             }
@@ -682,7 +685,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                     OsdScaled {
                         StatsOverlay(
                             it, ui.statsVerbosity, decoderLabel, codecLabel, session.profileName,
-                            panelHz, placement,
+                            panelHz, panelModeHz, placement,
                         )
                     }
                 }

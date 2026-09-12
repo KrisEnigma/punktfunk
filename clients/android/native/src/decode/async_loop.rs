@@ -479,7 +479,7 @@ fn bring_up(
             continue;
         }
         log::info!(
-            "decode: decoder started (async) at {}x{} through {}",
+            "decode: decoder started (async) at {}x{} through {} (rung {rung})",
             mode.width,
             mode.height,
             // `asc.as_ref().and(backend)`, not `backend`: an ASC rung whose backend failed to
@@ -695,6 +695,9 @@ impl State {
         if pass.vsync_tick {
             if let Some(p) = self.presenter.as_mut() {
                 p.on_vsync();
+            }
+            if let Some(a) = self.asc.as_mut() {
+                a.poll_fences(ctx.offset(), &ctx.stats, &ctx.video_e2e);
             }
         }
         ctx.stats.note_skipped_overflow(pass.aus_dropped); // parked-AU overflow: skips, flagged as such
