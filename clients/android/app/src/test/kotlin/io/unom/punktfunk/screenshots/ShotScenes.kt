@@ -441,9 +441,10 @@ internal fun PairDialog() {
  * The live stats HUD (the real StatsOverlay) at the given [verbosity] tier, over a real captured
  * frame when `PUNKTFUNK_SHOT_HERO` names a PNG, else a synthetic gradient. The mode line is this
  * canvas's own pixel size and refresh rate, as a stream sized to the display would report.
+ * [loss] false zeroes the lost, skipped and FEC counters, so a store shot has no counter line.
  */
 @Composable
-internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
+internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED, loss: Boolean = true) {
     val config = LocalConfiguration.current
     val density = LocalDensity.current.density
     val w = (config.screenWidthDp * density).roundToInt()
@@ -452,9 +453,15 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
     // 921.4 Mb/s at 5120×1440@240: the bitrate scales with pixel rate.
     val mbps = w.toDouble() * h * hz * (921.4 / (5120.0 * 1440 * 240))
     val fps = hz * 238.0 / 240.0
+    val (lost, skipped, fec) = if (loss) Triple(2.0, 1.0, 5.0) else Triple(0.0, 0.0, 0.0)
     val hero = remember {
         System.getenv("PUNKTFUNK_SHOT_HERO")?.takeIf { it.isNotEmpty() }
-            ?.let { BitmapFactory.decodeFile(it) }?.asImageBitmap()
+            ?.let {
+                BitmapFactory.decodeFile(
+                    it,
+                    BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 },
+                )
+            }?.asImageBitmap()
     }
     Box(
         Modifier
@@ -482,9 +489,9 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED) {
         // both render.
         OsdScaled { StatsOverlay(
             doubleArrayOf(
-                fps, mbps, 1.3, 2.1, 1.0, 1.0, w.toDouble(), h.toDouble(), hz.toDouble(), 2.0,
+                fps, mbps, 1.3, 2.1, 1.0, 1.0, w.toDouble(), h.toDouble(), hz.toDouble(), lost,
                 10.0, 9.0, 16.0, 1.0, 0.9, 0.4, 0.6, 0.3,
-                2.0, 1.0, 5.0, fps,
+                lost, skipped, fec, fps,
                 1.0, 0.5, 1.8, 2.6,
                 // Presenter samples: the 0.3 latch p50 is the excluded OS floor; presents ≈ fps.
                 0.2, 0.3, hz * 236.0 / 240.0, 1.0,
