@@ -13,7 +13,8 @@ class MouseSideKeyTest {
         fallback: Boolean = false,
         mouse: Boolean = true,
         dpad: Boolean = false,
-    ) = isMouseSideKey(tv, external, pad, fallback, mouse, dpad)
+        mousePresent: Boolean = false,
+    ) = isMouseSideKey(tv, external, pad, fallback, mouse, dpad, mousePresent)
 
     @Test
     fun offTvEveryExternalBackIsTheHosts() {
@@ -27,6 +28,17 @@ class MouseSideKeyTest {
         assertFalse("nav bar or gesture Back", claim(external = false))
         assertFalse("a pad's Select-as-Back", claim(pad = true))
         assertFalse("the framework's fallback duplicate", claim(fallback = true))
+    }
+
+    /** A side button the system maps to Back arrives as a Back from one of its own devices. */
+    @Test
+    fun anInternalBackIsTheMousesWhileOneIsAttached() {
+        val virtual = { present: Boolean, tv: Boolean ->
+            claim(tv = tv, external = false, mouse = false, dpad = true, mousePresent = present)
+        }
+        assertTrue("mouse attached", virtual(true, false))
+        assertFalse("no mouse: the nav bar's Back", virtual(false, false))
+        assertFalse("a TV keeps its Back", virtual(true, true))
     }
 
     @Test
