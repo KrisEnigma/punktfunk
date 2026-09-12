@@ -16,7 +16,7 @@ short; the version-bump commit retitles it. Older sections stay as they are.
 
 ## v0.36.0
 
-138 commits since v0.35.0. Wire stays 2. C ABI stays 28. Driver protocol stays 8.
+225 commits since v0.35.0. Wire stays 2. **C ABI 29**, additive. Driver protocol stays 8.
 Deep dive: `git log v0.35.0..v0.36.0`
 
 ### Versions
@@ -24,7 +24,7 @@ Deep dive: `git log v0.35.0..v0.36.0`
 | | v0.35.0 | v0.36.0 | Notes |
 |---|---|---|---|
 | Wire protocol | 2 | **2** | unchanged |
-| C ABI | 28 | **28** | unchanged |
+| C ABI | 28 | **29** | Additive: `punktfunk_h265_concealer_{new,conceal,release,free}`, `PunktfunkConcealment` |
 | Rust edition | 2024 | **2024** | unchanged |
 | MSRV (`rust-version`) | 1.85 | **1.85** | unchanged |
 | Workspace crate dirs | 32 | **32** | unchanged |
@@ -32,17 +32,22 @@ Deep dive: `git log v0.35.0..v0.36.0`
 | Windows virtual-gamepad channel | 3 | **3** | unchanged |
 | Plugin index schema | 1 | **1** | unchanged |
 | Host event schema | 1 | **1** | unchanged |
-| `api/openapi.json` | 0.35.0 | **0.36.0** | Additive: `HostInfo.fingerprint`; pending device `source`, `until_disconnect`; `until_disconnect` on arm, approve and access bodies; approve may answer 409 |
+| `api/openapi.json` | 0.35.0 | **0.36.0** | Additive: `/api/v1/display/clients/{fingerprint}`, `/api/v1/host/theme`; display `clients`, `client_enforced`, `keep_monitors`; `HostInfo.fingerprint`; pending `source`, `until_disconnect`; approve may answer 409 |
 | gamescope patch level (`+pfhdrN`) | 10 | **10** | unchanged |
 | `@punktfunk/host` (SDK) | 0.2.0 | **0.2.0** | unchanged |
 | `@punktfunk/plugin-kit` | 0.4.6 | **0.4.6** | unchanged |
 
 ### Breaking
 
+- **C ABI 29.** Additive: the HEVC reference concealer. An embedder that checks
+  `punktfunk_abi_version()` must rebuild against the new header.
 - **Approve refuses a knock from the internet.** Loopback, RFC 1918, link-local, ULA and
   100.64/10 are LAN; anything else, or an unreadable source, is WAN. Approve answers 409 for a
   WAN knock, and an unbound PIN window never answers one. Arm a window bound to the device's
   fingerprint instead.
+- **Per-device display overlays.** The host-wide display PUT refuses a body carrying `clients`.
+  Write one device's overlay through `/api/v1/display/clients/{fingerprint}`, and render only
+  the fields `enforced` and `client_enforced` name.
 - **First contact takes a QUIC Retry.** The host validates a source address before the handshake,
   so a client pays one round trip on first connect. A custom QUIC stack must accept Retry.
 - **Loss flag retired.** Clients report only the loss parity repaired; the host reads unrepaired
@@ -58,7 +63,10 @@ Deep dive: `git log v0.35.0..v0.36.0`
 - Linux setup writes a typed password to `~/.config/punktfunk/web-password` (0600); `web-init.sh`
   generates one only when that file is absent.
 - `punktfunk-omarchy mode dedicated|mirror|--status`.
-- `debug.punktfunk.asc_pacing=0` (Android sysprop) restores the old ASurfaceControl pacing.
+- Input wire: the IME keys (Hangul, Hanja, Convert, NonConvert, JIS DBE `0xF2`/`0xF3`) and the
+  JIS/ABNT2 extras on the ABNT and AX labels. An older host drops them.
+- Android sysprops: `debug.punktfunk.asc_pacing=0` restores the old ASurfaceControl pacing;
+  `debug.punktfunk.asc_hold_chain=0` stops a hold following a hold under `latency`.
 - The Linux plugin runner's per-user off switch is `systemctl --user mask`, not `disable`.
 
 ---
