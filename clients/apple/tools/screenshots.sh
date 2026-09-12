@@ -4,12 +4,13 @@
 # Launches the app in "shot mode" (PUNKTFUNK_SHOT_SCENE=<name> → one mock-populated screen,
 # full-bleed; see Sources/PunktfunkClient/Screenshots/) once per scene per device, and lets the OS
 # capture the REAL rendered UI:
-#   • macOS  → `screencapture` of the app's borderless window.
+#   • macOS  → the app captures its own windows through the window server, then exits.
 #   • iOS/iPadOS/tvOS → a booted Simulator + `xcrun simctl io booted screenshot` (native pixels =
 #                       the exact App Store size for that device).
 #
 # The captured pixels are exactly App Store Connect's required sizes:
-#   mac        2880×1800   (a 1× display yields 1440×900 — also accepted)
+#   mac        2880×1800   (a 2× display with room for the 1440×900 window below its menu bar;
+#                           a 1× monitor needs a HiDPI virtual display)
 #   iphone-6.9 1320×2868   (portrait)  /  2868×1320 (the landscape hero)
 #   ipad-13    2064×2752   (portrait)
 #   appletv    1920×1080
@@ -21,8 +22,7 @@
 # landscape iPad hero, rotate the Simulator by hand (⌘←) and re-run just that scene.
 #
 # Requirements:
-#   • macOS target: just the Swift toolchain (`swift build`) + a one-time Screen Recording grant
-#     for your terminal (System Settings → Privacy & Security → Screen Recording).
+#   • macOS target: full Xcode. No Screen Recording grant: the app only reads its own windows.
 #   • iOS/iPadOS/tvOS targets: full Xcode (xcodebuild + Simulators), not just Command Line Tools.
 #
 # Usage:
@@ -67,35 +67,30 @@ shoot_macos() {
   # DEBUG build, deliberately: the whole shot harness lives behind `#if DEBUG`
   # (ScreenshotHost/ScreenshotScenes), so a release binary launches as the NORMAL app, never
   # prints PF_SHOT_WINDOW, and every scene "never reported a window". Debug renders the same
-  # pixels — SwiftUI has no release-only visuals.
-  log "macOS — building (swift build)…"
-  swift build >/dev/null
-  local bin=".build/debug/PunktfunkClient"
+  # pixels — SwiftUI has no release-only visuals. xcodebuild, not `swift build`: SwiftPM copies
+  # asset catalogs uncompiled, which blanks every OS mark and launcher icon.
+  require_xcode
+  log "macOS — building (xcodebuild PunktfunkClient)…"
+  local dd="${PF_SHOT_DERIVED_DATA:-$APPLE_DIR/.build/shots-macos}"
+  xcodebuild -project Punktfunk.xcodeproj -scheme PunktfunkClient -configuration Debug \
+    -destination platform=macOS -derivedDataPath "$dd" CODE_SIGNING_ALLOWED=NO build >/dev/null \
+    || die "macOS: xcodebuild failed"
+  local bin="$dd/Build/Products/Debug/PunktfunkClient"
   [ -x "$bin" ] || die "build produced no $bin"
 
   for scene in "${SCENES[@]}"; do
     local logf; logf="$(mktemp)"
-    PUNKTFUNK_SHOT_SCENE="$scene" "$bin" >"$logf" 2>&1 &
-    local pid=$!
-    # Wait for the window to exist and the scene to settle.
-    local win=""
-    for _ in $(seq 1 50); do
-      win="$(grep -o 'PF_SHOT_WINDOW=[0-9]*' "$logf" | head -1 | cut -d= -f2 || true)"
-      [ -n "$win" ] && grep -q PF_SHOT_READY "$logf" && break
-      sleep 0.2
-    done
-    if [ -z "$win" ]; then
-      kill -9 "$pid" 2>/dev/null || true
-      warn "macOS/$scene: app never reported a window — skipping"; cat "$logf" >&2; continue
-    fi
-    local dest="$OUT/mac-$scene.png"
-    if screencapture -x -o -l"$win" "$dest" 2>/dev/null && [ -s "$dest" ]; then
+    # The app captures its own windows once the scene has settled, then exits (MacSelfCapture).
+    PUNKTFUNK_SHOT_SCENE="$scene" PUNKTFUNK_SHOT_SELFCAPTURE="$OUT" \
+      PUNKTFUNK_SHOT_DELAY="${PUNKTFUNK_SHOT_DELAY:-$((SETTLE * 1000))}" "$bin" >"$logf" 2>&1 &
+    local pid=$! dest="$OUT/mac-$scene.png"
+    for _ in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+    kill -9 "$pid" 2>/dev/null || true
+    if grep -q PF_SHOT_SAVED "$logf"; then
       log "macOS/$scene → $dest ($(pixels "$dest"))"
     else
-      warn "macOS/$scene: screencapture failed — grant your terminal Screen Recording permission
-       (System Settings → Privacy & Security → Screen Recording), then re-run."
+      warn "macOS/$scene: the app saved no capture — skipping"; cat "$logf" >&2
     fi
-    kill -9 "$pid" 2>/dev/null || true
     rm -f "$logf"
   done
 }
