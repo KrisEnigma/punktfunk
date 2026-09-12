@@ -552,9 +552,10 @@ fn connect(req: ConnectRequest) -> jlong {
         None,
     ) {
         Ok(client) => {
+            let client = Arc::new(client);
             let handle = SessionHandle {
-                client: Arc::new(client),
-                stats: Arc::new(crate::stats::VideoStats::new()),
+                stats: Arc::new(crate::stats::VideoStats::new(client.hud_shared())),
+                client,
                 video: Mutex::new(None),
                 drain: Mutex::new(None),
                 #[cfg(target_os = "android")]

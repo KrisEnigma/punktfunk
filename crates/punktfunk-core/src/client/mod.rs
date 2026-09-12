@@ -1084,6 +1084,11 @@ impl NativeClient {
         &self.hud
     }
 
+    /// The window as an owned handle, for a thread that must not keep the connector alive.
+    pub fn hud_shared(&self) -> Arc<crate::hud::Stats> {
+        self.hud.clone()
+    }
+
     /// Smoothed QUIC round trip, µs. `0` until the worker's first sample.
     pub fn rtt_us(&self) -> u32 {
         self.rtt_us.load(Ordering::Relaxed)

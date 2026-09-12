@@ -120,9 +120,6 @@ mod imp {
         let (entry, instance, surface) = PyroDevice::open_surface(window)?;
         let dev = PyroDevice::new(entry, instance, surface)?;
         stats.set_decoder(&decoder_label(&dev.vkd.device_name), false);
-        // The ASurfaceControl timeline presenter is the MediaCodec path's; this lane paces
-        // on the swapchain instead, so the HUD must not offer its display split.
-        stats.set_presenter_active(false);
         let smooth = opts.present_priority == 1;
         let mut present = Present::new(&dev, smooth)?;
 
@@ -204,13 +201,6 @@ mod imp {
             } else {
                 now_realtime_ns()
             };
-            if stats.enabled() {
-                let skew = clock_offset.load(Ordering::Relaxed);
-                let lat_ns = received_ns + skew as i128 - frame.pts_ns as i128;
-                let lat_us =
-                    (lat_ns > 0 && lat_ns < 10_000_000_000).then_some((lat_ns / 1000) as u64);
-                stats.note_received(frame.data.len(), lat_us, skew != 0);
-            }
 
             let aligned = frame.flags & punktfunk_core::packet::USER_FLAG_CHUNK_ALIGNED != 0;
             let decoded = match decoder.decode_frame(&frame.data, aligned, frame.complete) {
@@ -248,7 +238,11 @@ mod imp {
             }
             if stats.enabled() {
                 let clamp = |v: i128| (v > 0 && v < 10_000_000_000).then_some((v / 1000) as u64);
-                stats.note_decoded(clamp(e2e_ns), clamp(presented_ns - received_ns));
+                stats.note_decoded(
+                    frame.pts_ns,
+                    presented_ns,
+                    clamp(presented_ns - received_ns),
+                );
             }
         }
 

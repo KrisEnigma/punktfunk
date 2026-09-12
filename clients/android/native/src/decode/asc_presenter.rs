@@ -434,7 +434,6 @@ impl AscBackend {
         &mut self,
         now_mono: i64,
         panel_period_ns: i64,
-        stats: &crate::stats::VideoStats,
         ev_tx: &mpsc::Sender<DecodeEvent>,
     ) -> bool {
         if panel_period_ns > 0 {
@@ -496,7 +495,6 @@ impl AscBackend {
         let release_real = now_realtime_ns();
         let pace_us = ((release_real - frame.decoded_real).max(0) / 1000) as u64;
         self.pace_us.push(pace_us);
-        stats.note_release(pace_us);
         self.presented.push_back(Presented {
             seq,
             image: frame.image,
@@ -727,18 +725,19 @@ impl AscBackend {
         let displayed_real = a.release_real + on_glass_ns as i128;
         let e2e_ns = displayed_real + clock_offset as i128 - a.pts_us as i128 * 1000;
         let latch_use = (on_glass_ns / 1000) as u64;
-        let display_use = ((displayed_real - a.decoded_real).max(0) / 1000) as u64;
         self.latch_us.push(latch_use);
         self.displays += 1;
         if e2e_ns > 0 && e2e_ns < 10_000_000_000 {
-            let e2e_use = (e2e_ns / 1000) as u64;
-            self.e2e_us.push(e2e_use);
+            self.e2e_us.push((e2e_ns / 1000) as u64);
             // Publish glass-to-glass RAW for the audio plane to align against.
             video_e2e.store(e2e_ns as u64, Ordering::Relaxed);
-            stats.note_displayed(Some(e2e_use), Some(display_use), Some(latch_use));
-        } else {
-            stats.note_displayed(None, Some(display_use), Some(latch_use));
         }
+        stats.note_displayed(
+            a.pts_us * 1000,
+            a.decoded_real,
+            a.release_real,
+            displayed_real,
+        );
     }
 
     /// A real vsync for a frame the scheduler aimed at `assigned`: phase the clock, score the slot

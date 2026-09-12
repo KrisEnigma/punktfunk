@@ -34,7 +34,7 @@ class SettingsFieldsTest {
         hdrEnabled = false, tenBitSdr = true, compositor = 2, gamepad = 3, gamepadForwarding = false,
         systemButtons = "host", guideGesture = "off", audioChannels = 6, audioFormat = AUDIO_FORMAT_LOSSLESS_96,
         codec = "av1", micEnabled = true, echoCancel = false, keepHostAudio = true,
-        statsVerbosity = StatsVerbosity.DETAILED, touchMode = TouchMode.TOUCH, gamepadUiEnabled = false,
+        statsVerbosity = StatsVerbosity.DETAILED, advancedStats = true, touchMode = TouchMode.TOUCH, gamepadUiEnabled = false,
         reduceUiResolution = true, gamepadUiMode = GAMEPAD_UI_ALWAYS, uiPalette = "ember",
         lowLatencyMode = false, presentPriority = "smooth", smoothBuffer = 2, autoWakeEnabled = false,
         backgroundKeepAlive = true, backgroundTimeoutMinutes = 30,
