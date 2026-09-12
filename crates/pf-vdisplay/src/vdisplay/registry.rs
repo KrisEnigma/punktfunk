@@ -295,6 +295,17 @@ mod pool {
         pub(super) hdr: bool,
     }
 
+    /// Gamescope is the only virtual output that offers HDR. Its teardown ends the compositor
+    /// a failed offer latched against, so the next spawn tries HDR again.
+    impl Drop for Entry {
+        fn drop(&mut self) {
+            #[cfg(target_os = "linux")]
+            if self.backend == "gamescope" {
+                pf_capture::clear_virtual_output_hdr_latch();
+            }
+        }
+    }
+
     pub(super) type Restore = Box<dyn FnOnce() + Send>;
 
     /// Kept generations of `backend` sharing `isolation`: what a sole-instance acquire must
@@ -585,6 +596,17 @@ mod pool {
             keys.sort();
             keys.dedup();
             assign_group_ids(known, next, &keys);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn tearing_down_gamescope_rearms_its_hdr_but_not_the_portal_latch() {
+            use pf_capture::{hdr_capture_failed, note_hdr_capture_failed, HdrSource};
+            note_hdr_capture_failed(HdrSource::VirtualOutput);
+            note_hdr_capture_failed(HdrSource::PortalMonitor);
+            drop(test_entry("gamescope", 1, None));
+            assert!(!hdr_capture_failed(HdrSource::VirtualOutput));
+            assert!(hdr_capture_failed(HdrSource::PortalMonitor));
         }
 
         #[test]

@@ -519,7 +519,8 @@ pub enum HdrSource {
 
 /// Per-source latch: `want_hdr` failed to negotiate the 10-bit PQ offer.
 /// Later sessions fall back to SDR instead of re-running the 10 s timeout.
-/// Sticky until host restart.
+/// `PortalMonitor` sticks until host restart. `VirtualOutput` lasts until a
+/// gamescope display is torn down ([`clear_virtual_output_hdr_latch`]).
 #[cfg(target_os = "linux")]
 static HDR_CAPTURE_FAILED: [std::sync::atomic::AtomicBool; 2] = [
     std::sync::atomic::AtomicBool::new(false),
@@ -541,8 +542,9 @@ pub fn hdr_capture_failed(source: HdrSource) -> bool {
     HDR_CAPTURE_FAILED[source.slot()].load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Latches SDR for `source`. Public so pf-vdisplay's teardown test can arm it.
 #[cfg(target_os = "linux")]
-pub(crate) fn note_hdr_capture_failed(source: HdrSource) {
+pub fn note_hdr_capture_failed(source: HdrSource) {
     if !HDR_CAPTURE_FAILED[source.slot()].swap(true, std::sync::atomic::Ordering::Relaxed) {
         match source {
             HdrSource::PortalMonitor => tracing::warn!(
@@ -552,11 +554,19 @@ pub(crate) fn note_hdr_capture_failed(source: HdrSource) {
             ),
             HdrSource::VirtualOutput => tracing::warn!(
                 "HDR capture negotiation failed on the virtual output — this host will offer SDR \
-                 for that source for the rest of the process lifetime (is the spawned gamescope \
-                 the punktfunk build? see packaging/gamescope)"
+                 for gamescope until that display is torn down (is the spawned gamescope the \
+                 punktfunk build? see packaging/gamescope)"
             ),
         }
     }
+}
+
+/// Re-arms gamescope HDR: each spawn is a new compositor. The registry calls this when a
+/// gamescope display is torn down. The portal latch has no such event and stays.
+#[cfg(target_os = "linux")]
+pub fn clear_virtual_output_hdr_latch() {
+    HDR_CAPTURE_FAILED[HdrSource::VirtualOutput.slot()]
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 #[cfg(target_os = "windows")]
 pub fn capturer_supports_444(encoder_ingests_rgb_444: bool) -> bool {

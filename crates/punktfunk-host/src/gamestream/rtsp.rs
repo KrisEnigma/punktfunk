@@ -680,10 +680,9 @@ fn stream_config(map: &HashMap<String, String>) -> Option<StreamConfig> {
         );
         hdr = false;
     }
-    // Process-wide HDR-capture latch, per source. Probe only says BT.2100
-    // now; a failed `want_hdr` negotiation permanently offers SDR. Without
-    // this we'd label PQ while encoding SDR. Not folded into
-    // `host_hdr_capable` (that's the static serverinfo bit).
+    // HDR-capture latch, per source: after a failed `want_hdr` negotiation the
+    // capturer offers SDR (portal: until restart, gamescope: until its display
+    // is torn down). Without this we'd label PQ while encoding SDR.
     #[cfg(target_os = "linux")]
     let hdr_source = if portal_source {
         pf_capture::HdrSource::PortalMonitor
@@ -695,8 +694,8 @@ fn stream_config(map: &HashMap<String, String>) -> Option<StreamConfig> {
         tracing::warn!(
             ?hdr_source,
             "client requested HDR and the host is HDR-capable, but an earlier HDR capture \
-             negotiation on this source failed — the capturer offers SDR only for the rest of the \
-             process lifetime, so streaming 8-bit SDR (restart the host to retry HDR)"
+             negotiation on this source failed — streaming 8-bit SDR (the portal retries after a \
+             host restart, gamescope once its failed display is torn down)"
         );
         hdr = false;
     }
