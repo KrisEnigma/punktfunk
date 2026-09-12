@@ -12,25 +12,33 @@
 use super::*;
 
 impl IddPushCapturer {
-    /// Age of a driver QPC stamp in µs (QPC is system-wide). 0 if the stamp is ahead.
-    pub(super) fn qpc_age_us(stamp: u64) -> u64 {
+    /// QPC ticks per second, read once. `0` when the call failed; every span then reads 0.
+    fn qpc_freq() -> u64 {
         static FREQ: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-        let freq = *FREQ.get_or_init(|| {
+        *FREQ.get_or_init(|| {
             let mut f = 0i64;
-            // SAFETY: plain FFI; `f` is a valid local out-param. Frequency is fixed at boot;
-            // 0 means the call failed — guarded below.
+            // SAFETY: plain FFI; `f` is a valid local out-param. Frequency is fixed at boot.
             let _ = unsafe { QueryPerformanceFrequency(&mut f) };
             f.max(0) as u64
-        });
-        if freq == 0 {
-            return 0;
+        })
+    }
+
+    /// A span of QPC ticks in µs (QPC is system-wide, so two driver stamps subtract).
+    pub(super) fn qpc_ticks_us(ticks: u64) -> u64 {
+        match Self::qpc_freq() {
+            0 => 0,
+            freq => ticks.saturating_mul(1_000_000) / freq,
         }
+    }
+
+    /// Age of a driver QPC stamp in µs. 0 if the stamp is ahead.
+    pub(super) fn qpc_age_us(stamp: u64) -> u64 {
         let mut now = 0i64;
         // SAFETY: plain FFI; `now` is a valid local out-param.
         if unsafe { QueryPerformanceCounter(&mut now) }.is_err() {
             return 0;
         }
-        (now as u64).saturating_sub(stamp).saturating_mul(1_000_000) / freq
+        Self::qpc_ticks_us((now as u64).saturating_sub(stamp))
     }
 
     /// One tick: pollers, recovery, then the driver's frame cadence. A delivery carries no

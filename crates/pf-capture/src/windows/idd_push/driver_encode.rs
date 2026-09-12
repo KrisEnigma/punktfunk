@@ -333,10 +333,26 @@ pub fn open_driver_encoder(
         last_wire_seq: 0,
         last_source_seq: 0,
         last_arrival: None,
+        last_split: None,
         dump: AuDump::create(endpoint.target_id),
         opened_at: Instant::now(),
         backend: backend_name(reply.backend_opened),
     }))
+}
+
+/// The driver's stamps on one slot as a split. `None` from a driver that wrote none (a zero
+/// submit) or stamps out of order. A present stamp of `0`, or one past the submit (a head that
+/// names the vblank the frame is for), leaves the pool wait unmeasured rather than negative.
+fn driver_split(t: &Taken) -> Option<pf_frame::health::DriverSplit> {
+    if t.qpc_submit == 0 || t.qpc_published < t.qpc_submit {
+        return None;
+    }
+    let span = |ticks: u64| Duration::from_micros(IddPushCapturer::qpc_ticks_us(ticks));
+    Some(pf_frame::health::DriverSplit {
+        pool: (t.qpc_pts != 0 && t.qpc_submit >= t.qpc_pts).then(|| span(t.qpc_submit - t.qpc_pts)),
+        encode: span(t.qpc_published - t.qpc_submit),
+        ipc: Duration::from_micros(IddPushCapturer::qpc_age_us(t.qpc_published)),
+    })
 }
 
 /// The stream loop's [`Encoder`] for a driver-encoded session. Nothing is submitted: the
@@ -360,6 +376,8 @@ pub struct EncoderProxy {
     last_source_seq: u32,
     /// Age of the last taken chunk's `qpc_pts` when the host took it — present→arrival.
     last_arrival: Option<Duration>,
+    /// The driver's own split of that span, when its slot carried the stamps.
+    last_split: Option<pf_frame::health::DriverSplit>,
     /// Bitstream capture while `PUNKTFUNK_IDD_DIAG` is on; dropped on the first write error.
     dump: Option<AuDump>,
     /// Stands in for `last_au_qpc` until the first publish, so a never-producing encoder is
@@ -427,6 +445,7 @@ impl EncoderProxy {
         self.last_source_seq = t.source_seq;
         self.last_arrival =
             (t.qpc_pts != 0).then(|| Duration::from_micros(IddPushCapturer::qpc_age_us(t.qpc_pts)));
+        self.last_split = driver_split(&t);
         let chunk = AuChunk {
             data: t.data,
             pts_ns: pts_from_qpc(t.qpc_pts),
@@ -583,6 +602,7 @@ impl Encoder for EncoderProxy {
             dropped_total: h.dropped_total,
             drain_heartbeat: stamp(h.drain_heartbeat_qpc),
             present_to_arrival: self.last_arrival,
+            driver_split: self.last_split,
             state: h.encoder_state,
             backend: self.backend,
         })
