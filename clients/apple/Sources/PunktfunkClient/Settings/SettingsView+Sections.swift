@@ -301,7 +301,7 @@ extension SettingsView {
                 Slider(value: bitrateSlider, in: 0...1) {
                     Text("Bitrate")
                 }
-                Text(SpeedTestSheet.mbpsLabel(kbps: effective.bitrateKbps))
+                Text(SpeedTestView.mbpsLabel(kbps: effective.bitrateKbps))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 76, alignment: .trailing)
@@ -475,6 +475,7 @@ extension SettingsView {
                 }
                 #if !os(tvOS)
                 Link("What each number means", destination: Self.statsDocsURL)
+                    .foregroundStyle(Color.brand) // a Link takes the system accent, not the tint
                 #endif
             }
         }

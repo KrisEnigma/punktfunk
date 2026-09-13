@@ -85,6 +85,9 @@ enum ShotScenes {
                 AnyView(ShotGalleryView(
                     title: "Library states", variants: ShotMock.libraryStateVariants))
             },
+            ShotScene(name: "14e-gallery-speed-test", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(title: "Speed test", variants: ShotMock.speedTestVariants))
+            },
             ShotScene(name: "15-library-touch", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotLibraryTouch())
             },
@@ -98,6 +101,15 @@ enum ShotScenes {
         scenes += [
             ShotScene(name: "06-gamepad-home", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadHome())
+            },
+            // The Library tab with its host filter (iOS) and the Mac's Library row.
+            ShotScene(name: "15f-library-filter", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotLibraryFilter())
+            },
+            // The host page as sections beside a sidebar: the iPad's sheet, the Mac's window.
+            ShotScene(name: "16f-host-sections", orientation: .natural, colorScheme: .dark) {
+                AnyView(HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, handOff: { _ in }))
             },
             ShotScene(name: "07-gamepad-settings", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadSettings())
@@ -138,11 +150,46 @@ enum ShotScenes {
             },
         ]
         #endif
+        #if os(macOS)
+        // The Mac's host window, as a card's ⓘ opens it, some of its sections, and the Library's
+        // Customize popover.
+        scenes += [
+            ShotScene(name: "16b-host-window", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(hostID: ShotMock.battlestationID, store: ShotMock.pageStore))
+            },
+            ShotScene(name: "16e-host-window-presets", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .presets))
+            },
+            ShotScene(name: "15e-customize-mac", orientation: .natural, colorScheme: .dark) {
+                // On material, as the popover draws it: a list fill shows up as a dark slab.
+                AnyView(LibrarySectionsPanel(shotLayout: "").frame(width: 320, height: 250)
+                    .background(.regularMaterial, in: .rect(cornerRadius: 12)))
+            },
+            ShotScene(name: "16c-host-window-connection", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
+                    section: .connection))
+            },
+            ShotScene(name: "16d-host-window-speed-test", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
+                    section: .speedTest))
+            },
+        ]
+        #endif
         #if os(iOS)
         // The Library tab with every section filled: Desktops, Recently Played, Favorites,
         // Launchers and Games.
         scenes.append(ShotScene(name: "15b-library-sections", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotLibrarySections())
+        })
+        scenes.append(ShotScene(name: "15c-title-details", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTitleDetails())
+        })
+        // One section switched off and one moved, as Customize shows them.
+        scenes.append(ShotScene(name: "15d-library-customize", orientation: .natural, colorScheme: .dark) {
+            AnyView(LibrarySectionsPanel(shotLayout: "desktops,favorites,recent,-launchers,games"))
         })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {

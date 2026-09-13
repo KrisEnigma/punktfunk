@@ -86,8 +86,8 @@ stream — plus a door into the client's own gamepad UI for everything else.
   host to actually come back before dialling, so a stream survives a resume from sleep. Nothing to
   enable — it's a no-op until the client has learned that host's MAC address, and the packet only
   lands if the host machine is armed to wake in its BIOS and its network card.
-- **Pinned cards** — a host with pinned [settings profiles](/docs/client-settings) shows them
-  nested underneath it as `▸ <Profile name>`. Tapping one streams that host with that profile
+- **Pinned cards** — a host with pinned [settings presets](/docs/client-settings) shows them
+  nested underneath it as `▸ <Preset name>`. Tapping one streams that host with that preset
   applied — "4K on the TV" and "battery saver" presets, one tap each. Pins are made in the
   Punktfunk app (or any other client) and shared across all of them; the panel shows them, it
   doesn't create them.
