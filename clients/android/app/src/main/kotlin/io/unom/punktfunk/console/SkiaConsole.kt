@@ -670,10 +670,10 @@ object SkiaConsole {
     private fun launch(a: JSONObject) {
         val app = appContext ?: return
         val fp = a.optString("fp_hex")
-        // The record by its pin first, and dialled where IT says: the row was built before the
-        // last sweep, which may have followed the host to a new address.
-        val kh = knownHostStore.getByFp(fp)
-            ?: knownHostStore.get(a.optString("addr"), a.optInt("port"))
+        // The record the row's pin names — never the other OS saved at the same address — and
+        // dialled where IT says: the last sweep may have followed the host to a new address. An
+        // unpinned row is the placeholder at its address.
+        val kh = knownHostStore.resolve(fp, a.optString("addr"), a.optInt("port"))
         val addr = kh?.address ?: a.optString("addr")
         val port = kh?.port ?: a.optInt("port")
         val launchId = a.optString("launch").takeIf { a.has("launch") && !a.isNull("launch") && it.isNotEmpty() }
@@ -794,9 +794,13 @@ object SkiaConsole {
         return knownHostStore.all().firstOrNull { ConsoleJson.rowKey(it.fpHex, it.address, it.port) == primary }
     }
 
+    /**
+     * A manual entry has no pin yet: it renames the placeholder at its address or adds one. A
+     * record pinned there is another identity — the other OS of a dual-boot box — and keeps its name.
+     */
     private fun saveHost(c: JSONObject) {
         val addr = c.optString("addr"); val port = c.optInt("port"); val name = c.optString("name")
-        val existing = knownHostStore.get(addr, port)
+        val existing = knownHostStore.placeholderAt(addr, port)
         if (existing != null) {
             if (name.isNotEmpty()) knownHostStore.save(existing.copy(name = name))
         } else {
@@ -945,13 +949,17 @@ object SkiaConsole {
             NativeBridge.nativeConsoleSetPair(handle, ConsoleJson.pairFailed("Identity not ready yet — try again in a moment"))
             return
         }
-        val hostName = knownHostStore.get(addr, port)?.name
-            ?: discovered.firstOrNull { it.host == addr && it.port == port }?.name ?: addr
         NativeBridge.nativeConsoleSetPair(handle, ConsoleJson.pairBusy())
         ioPool.execute {
             val fp = runCatching { NativeBridge.nativePair(addr, port, id.certPem, id.privateKeyPem, pin, name) }.getOrDefault("")
             main.post {
                 if (fp.isNotEmpty()) {
+                    // Named once the ceremony says who answered: the address may carry both OS
+                    // installs of a dual-boot box, and the first record there is not this one.
+                    val hostName = knownHostStore.resolve(fp, addr, port)?.name
+                        ?: discovered.firstOrNull { it.fingerprint.equals(fp, true) }?.name
+                        ?: discovered.firstOrNull { it.fingerprint == null && it.host == addr && it.port == port }?.name
+                        ?: addr
                     knownHostStore.trust(addr, port, hostName, fp, paired = true)
                     pushHosts(); pushKnownHosts()
                     NativeBridge.nativeConsoleSetPair(handle, ConsoleJson.pairPaired(fp))
@@ -1005,8 +1013,7 @@ object SkiaConsole {
         val app = appContext ?: return
         val addr = c.optString("addr"); val mgmt = c.optInt("mgmt"); val fp = c.optString("fp_hex")
         val id = identity
-        val kh = knownHostStore.all().firstOrNull { it.fpHex.equals(fp, true) && fp.isNotEmpty() }
-            ?: knownHostStore.get(addr, mgmt)
+        val kh = knownHostStore.getByFp(fp)
         if (refreshOnly) {
             if (id == null) return
             ioPool.execute {

@@ -1128,7 +1128,7 @@ impl SpeedTestTarget {
         // Resolved exactly the way a connect resolves it: the one-off pick this test was
         // started with (a pinned card carries one), else the host's binding.
         let bound = trust::KnownHosts::load()
-            .find_by_addr(&req.addr, req.port)
+            .resolve(req.fp_hex.as_deref(), &req.addr, req.port)
             .and_then(|h| h.profile_id.clone());
         let reference = match req.profile.as_deref() {
             Some("") => return SpeedTestTarget::Global,

@@ -131,7 +131,7 @@ pub(crate) fn speed_page(props: &SpeedProps, cx: &mut RenderCx) -> Element {
             // it: the one-off this test was started with, else the host's binding.
             let target = ctx.shared.target.lock().unwrap().clone();
             let bound = KnownHosts::load()
-                .find_by_addr(&target.addr, target.port)
+                .resolve(target.fp_hex.as_deref(), &target.addr, target.port)
                 .and_then(|h| h.profile_id.clone());
             let profile = match target.profile.as_deref() {
                 Some("") => None,

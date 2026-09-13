@@ -9,7 +9,7 @@
 
 use crate::deeplink::{DeepLink, HostResolution, Route};
 use crate::profiles::{ProfilesFile, Resolution, StreamProfile};
-use crate::trust::{effective_settings, KnownHost, KnownHosts, Settings};
+use crate::trust::{KnownHost, KnownHosts, Settings};
 use serde::{Deserialize, Serialize};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -71,26 +71,21 @@ pub struct ConnectPlan {
 
 impl ConnectPlan {
     /// Card-click plan. `one_off_profile`: `Some("")` forces the global defaults on a
-    /// bound host; `None` honors the binding. Loads stores; use [`ConnectPlan::resolve`]
-    /// when the caller already holds them.
+    /// bound host; `None` honors the binding. Loads the catalog and settings; use
+    /// [`ConnectPlan::resolve`] when the caller already holds them. The binding is
+    /// `host`'s own: its address may also name the other OS of a dual-boot box.
     pub fn for_host(
         host: &KnownHost,
         launch: Option<&str>,
         one_off_profile: Option<&str>,
     ) -> ConnectPlan {
-        let (settings, profile) =
-            effective_settings(&host.addr, host.port, one_off_profile, launch);
-        ConnectPlan {
-            host: HostTarget::from(host),
-            launch: launch.map(str::to_string),
-            profile,
-            profile_override: one_off_profile.map(str::to_string),
-            wake: settings.auto_wake && !host.mac.is_empty(),
-            settings,
-            connect_timeout_secs: None,
-            tofu: false,
-            clipboard: host.clipboard_sync,
-        }
+        Self::resolve(
+            host,
+            launch,
+            one_off_profile,
+            &ProfilesFile::load(),
+            &Settings::load(),
+        )
     }
 
     /// Plan for a host the front-end already holds as values, not a stored [`KnownHost`].
@@ -104,10 +99,11 @@ impl ConnectPlan {
         one_off_profile: Option<String>,
     ) -> ConnectPlan {
         let known = KnownHosts::load();
-        // First connect off an advert: no record. Default = no binding, no clipboard.
+        // First connect off an advert: no record. Default = no binding, no clipboard. A
+        // pin names only its own record, never the other OS saved at this address.
         let fallback = KnownHost::default();
         let stored = known
-            .find_by_addr(&host.addr, host.port)
+            .resolve(host.fp_hex.as_deref(), &host.addr, host.port)
             .unwrap_or(&fallback);
         let mut plan = ConnectPlan::resolve(
             stored,

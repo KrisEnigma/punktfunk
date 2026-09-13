@@ -475,6 +475,36 @@ impl KnownHosts {
         self.index_by_addr(addr, port).map(|i| &self.hosts[i])
     }
 
+    /// Index of the unpinned placeholder saved at `addr:port`. A record pinned there is an
+    /// identity the address does not name on its own: both OS installs of a dual-boot box
+    /// answer at one lease.
+    pub fn placeholder_at(&self, addr: &str, port: u16) -> Option<usize> {
+        self.hosts
+            .iter()
+            .position(|h| h.fp_hex.is_empty() && h.addr == addr && h.port == port)
+    }
+
+    /// Index of the record a dial is about. With a pin: the record pinned to it, else the
+    /// placeholder at `addr:port` waiting for one — never a record pinned to another
+    /// fingerprint, which at a shared address is the other OS of a dual-boot box, with its
+    /// own name, binding and clipboard. `Some("")` is a card saved without a pin: its
+    /// placeholder only. `None` is a bare typed address: whatever it answers with
+    /// ([`KnownHosts::index_by_addr`]).
+    pub fn resolve_index(&self, fp_hex: Option<&str>, addr: &str, port: u16) -> Option<usize> {
+        let Some(fp_hex) = fp_hex else {
+            return self.index_by_addr(addr, port);
+        };
+        (!fp_hex.is_empty())
+            .then(|| self.hosts.iter().position(|h| h.fp_hex == fp_hex))
+            .flatten()
+            .or_else(|| self.placeholder_at(addr, port))
+    }
+
+    pub fn resolve(&self, fp_hex: Option<&str>, addr: &str, port: u16) -> Option<&KnownHost> {
+        self.resolve_index(fp_hex, addr, port)
+            .map(|i| &self.hosts[i])
+    }
+
     /// Drop the record pinned to `fp_hex`. An empty fingerprint removes NOTHING: `retain`
     /// on `!= ""` would delete every not-yet-paired host at once, which is how one Forget
     /// used to take the whole set. Placeholders go through [`KnownHosts::remove_card`].
@@ -661,18 +691,16 @@ pub fn forget_placeholder(addr: &str, port: u16) {
     }
 }
 
-/// Record an advert should land on: fingerprint match if any, else the address. Fingerprint
-/// first — "either" would teach a stale namesake that merely sat earlier in the file.
+/// Record an advert should land on: the one its caller matched, by pin, or the placeholder
+/// at its address. The address alone would teach the other OS of a dual-boot box this
+/// one's OS mark and MAC.
 fn learn_target<'a>(
     known: &'a mut KnownHosts,
     fp_hex: &str,
     addr: &str,
     port: u16,
 ) -> Option<&'a mut KnownHost> {
-    let i = (!fp_hex.is_empty())
-        .then(|| known.hosts.iter().position(|h| h.fp_hex == fp_hex))
-        .flatten()
-        .or_else(|| known.index_by_addr(addr, port))?;
+    let i = known.resolve_index(Some(fp_hex), addr, port)?;
     known.hosts.get_mut(i)
 }
 
@@ -1509,9 +1537,11 @@ impl Settings {
 ///
 /// `one_off` is Connect-with / `--profile` / `profile=`; `Some("")` forces globals
 /// on a bound host and never rebinds. Unknown one-off → defaults (not a binding).
-/// `launch` is the library title id, `None` for the desktop. Lookup is `addr:port`,
-/// same as the per-host clipboard decision.
+/// `launch` is the library title id, `None` for the desktop. The host is the record
+/// [`KnownHosts::resolve`] names for the pin being dialled, as for the per-host clipboard:
+/// a dual-boot box's address also names the other OS, with its own binding.
 pub fn effective_settings(
+    fp_hex: Option<&str>,
     addr: &str,
     port: u16,
     one_off: Option<&str>,
@@ -1520,7 +1550,7 @@ pub fn effective_settings(
     let base = Settings::load();
     let catalog = ProfilesFile::load();
     let known = KnownHosts::load();
-    let host = known.find_by_addr(addr, port);
+    let host = known.resolve(fp_hex, addr, port);
     let bound = host.and_then(|h| h.profile_id.clone());
     let per_game = launch
         .and_then(|game| host.and_then(|h| h.profile_for_game(game)))
@@ -2285,12 +2315,52 @@ mod tests {
         learn_target(&mut k, &live, "127.0.0.1", 9777).unwrap().os = "windows".into();
         assert_eq!(k.find_by_fp(&live).unwrap().os, "windows");
         assert_eq!(k.find_by_fp(&dead).unwrap().os, "");
-        // No fingerprint → the address's own answer.
-        learn_target(&mut k, "", "127.0.0.1", 9777).unwrap().os = "linux".into();
-        assert_eq!(k.find_by_fp(&live).unwrap().os, "linux");
-        assert_eq!(k.find_by_fp(&dead).unwrap().os, "");
+        // A pin nobody holds is not its neighbour's; no pin names only a placeholder.
+        assert!(learn_target(&mut k, &fp('e'), "127.0.0.1", 9777).is_none());
+        assert!(learn_target(&mut k, "", "127.0.0.1", 9777).is_none());
         // Unknown host: write nothing.
         assert!(learn_target(&mut k, &fp('e'), "10.0.0.9", 9777).is_none());
+    }
+
+    /// Both OS installs of a dual-boot box at one address: a pin resolves its own record or
+    /// the placeholder waiting for it, never the sibling. Only a bare address falls back.
+    #[test]
+    fn a_pin_resolves_its_own_record_never_the_sibling() {
+        let (windows, linux) = (fp('a'), fp('b'));
+        let mut k = KnownHosts {
+            hosts: vec![KnownHost {
+                name: "Desk (Windows)".into(),
+                addr: "192.168.1.9".into(),
+                port: 9777,
+                fp_hex: windows.clone(),
+                paired: true,
+                ..Default::default()
+            }],
+        };
+        assert!(k.resolve(Some(&linux), "192.168.1.9", 9777).is_none());
+        assert!(k.resolve(Some(""), "192.168.1.9", 9777).is_none());
+        assert!(k.placeholder_at("192.168.1.9", 9777).is_none());
+        assert_eq!(
+            k.resolve(None, "192.168.1.9", 9777).unwrap().fp_hex,
+            windows
+        );
+        // A moved lease is still the same pin.
+        let moved = k.resolve(Some(&windows), "192.168.1.20", 9777);
+        assert_eq!(moved.unwrap().name, "Desk (Windows)");
+
+        k.hosts.push(KnownHost {
+            name: "Desk (Linux)".into(),
+            addr: "192.168.1.9".into(),
+            port: 9777,
+            ..Default::default()
+        });
+        assert_eq!(k.placeholder_at("192.168.1.9", 9777), Some(1));
+        let waiting = k.resolve(Some(&linux), "192.168.1.9", 9777);
+        assert_eq!(waiting.unwrap().name, "Desk (Linux)");
+        // An advert from the second OS teaches its placeholder, not the Windows record.
+        learn_target(&mut k, "", "192.168.1.9", 9777).unwrap().os = "linux/arch/cachyos".into();
+        assert_eq!(k.hosts[0].os, "");
+        assert_eq!(k.hosts[1].os, "linux/arch/cachyos");
     }
 
     /// An advert writes what it carries, leaves omitted fields, and reports no change

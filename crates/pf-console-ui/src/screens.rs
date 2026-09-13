@@ -129,7 +129,8 @@ impl Outbox {
 
 /// A saved host's `punktfunk://` link from the store (fingerprint + stable id a
 /// screen does not hold). `launch` makes a game's link. `None` if the host has
-/// left the store since the menu opened.
+/// left the store since the menu opened. The row's pin names the record; an unpinned
+/// row is the placeholder at its address, never a host pinned there.
 pub(crate) fn saved_host_link(
     store: &dyn crate::store::SettingsStore,
     fp_hex: &str,
@@ -139,10 +140,7 @@ pub(crate) fn saved_host_link(
     launch: Option<&str>,
 ) -> Option<String> {
     let known = store.known_hosts();
-    let host = (!fp_hex.is_empty())
-        .then(|| known.find_by_fp(fp_hex))
-        .flatten()
-        .or_else(|| known.find_by_addr(addr, port))?;
+    let host = known.resolve(Some(fp_hex), addr, port)?;
     Some(pf_client_core::deeplink::DeepLink::for_host(host, launch, profile).to_url())
 }
 

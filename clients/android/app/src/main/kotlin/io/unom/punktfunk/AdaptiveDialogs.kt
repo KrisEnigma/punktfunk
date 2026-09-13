@@ -114,7 +114,7 @@ fun TrustNewHostPrompt(
     }
 }
 
-/** The pinned fingerprint no longer matches — force re-pairing (never a silent re-trust). */
+/** A typed address refused the pin saved for it — pair by PIN, never a silent re-trust. */
 @Composable
 fun FingerprintChangedPrompt(
     pt: PendingTrust,
@@ -122,17 +122,17 @@ fun FingerprintChangedPrompt(
     onDismiss: () -> Unit,
 ) {
     PunktfunkDialog(
-        title = "Host identity changed",
+        title = "A different host answered",
         onDismiss = onDismiss,
         actions = listOf(
-            DialogAction("Re-pair", primary = true, onClick = onRepair),
+            DialogAction("Pair", primary = true, onClick = onRepair),
             DialogAction("Cancel", onClick = onDismiss),
         ),
     ) {
         PromptText(
-            "The pinned fingerprint for ${pt.host} no longer matches what it now advertises. " +
-                "This can mean a host reinstall — or an impostor. Re-pair with the host's PIN to " +
-                "continue.",
+            "${pt.host} didn't present the identity saved for it. It may be another operating " +
+                "system on the same PC, a reinstall, or an impostor. Pair with the host's PIN to " +
+                "add it.",
         )
     }
 }
