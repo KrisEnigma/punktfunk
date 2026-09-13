@@ -4431,21 +4431,21 @@ mod tests {
         // Full stream, and the client's view with the pre-wave P frames lost (and the
         // restart's frame): decoded side by side, the close must match the full decode.
         if let Ok(home) = std::env::var("HOME") {
-            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
+            let full: Vec<&[u8]> = aus.iter().map(|a| a.data.as_slice()).collect();
             let p = format!("{home}/vkenc-wave-smoke.{ext}");
-            let _ = std::fs::write(&p, &full);
-            let dropped: Vec<u8> = aus
+            let _ = crate::smoke_pattern::write_capture(&p, &full);
+            let dropped: Vec<&[u8]> = aus
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i == 0 || (*i >= WAVE_START && *i != start2 - 1))
-                .flat_map(|(_, a)| a.data.iter().copied())
+                .map(|(_, a)| a.data.as_slice())
                 .collect();
             let p2 = format!("{home}/vkenc-wave-smoke-dropped.{ext}");
-            let _ = std::fs::write(&p2, &dropped);
+            let _ = crate::smoke_pattern::write_capture(&p2, &dropped);
             eprintln!(
                 "run_wave_smoke: wrote {p} ({} bytes, {} AUs) and {p2} (frames 1..{} dropped; \
                  the close at {close} must decode identical to the full stream)",
-                full.len(),
+                full.iter().map(|a| a.len()).sum::<usize>(),
                 aus.len(),
                 WAVE_START,
             );

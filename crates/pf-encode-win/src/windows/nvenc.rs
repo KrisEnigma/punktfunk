@@ -2930,10 +2930,25 @@ mod tests {
         } else {
             (Codec::H265, "h265")
         };
+        // `PF_WAVE_ANCHOR=1`: answer each loss with an RFI anchor instead of a wave (leave
+        // `PUNKTFUNK_NVENC_IR_ALWAYS` unset); the anchor P must decode exact at once.
+        let anchor = std::env::var("PF_WAVE_ANCHOR").is_ok_and(|v| v == "1");
+        // `PF_WAVE_LAG=<n>` (anchors only): the ask trails its loss by n frames, 2 by
+        // default. The n - 1 frames between decode concealed, as over a real round trip.
+        let lag: usize = std::env::var("PF_WAVE_LAG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
         assert!(
-            std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1"),
-            "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave"
+            lag >= 1 && (lag == 2 || anchor),
+            "PF_WAVE_LAG=1.. with PF_WAVE_ANCHOR=1"
         );
+        assert_ne!(
+            anchor,
+            std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1"),
+            "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave; PF_WAVE_ANCHOR=1 wants anchors"
+        );
+        assert!(!(anchor && (spoil || idr)), "PF_WAVE_ANCHOR runs alone");
         let mut parts = shape.split(':');
         let (w, h) = parts
             .next()
@@ -3016,30 +3031,38 @@ mod tests {
             );
             let cycle = enc.wave_cycle() as usize;
             assert!(cycle >= 2, "the wave is on");
-            // Wave k starts at 3 + k * period; its lost frame is two before that. A spoiled
-            // wave is followed by the queued one, so its period holds two cycles.
+            // Wave k starts at lag + 1 + k * period; its lost frame is `lag` before that. A
+            // spoiled wave is followed by the queued one, so its period holds two cycles.
             assert!(
                 cycle > 3 || !spoil,
                 "the spoiling loss lands inside the sweep"
             );
             let period = if spoil { 2 * cycle + gap } else { cycle + gap };
-            let last = 3 + waves * period;
+            let base = lag + 1;
+            let last = base + waves * period;
             let mut lost = Vec::new();
             let mut starts = Vec::new();
             let mut closes = Vec::new();
             let mut idrs = Vec::new();
+            let mut anchors = Vec::new();
             let mut aus = Vec::new();
             for i in 0..=last {
-                let offset = (i >= 3 && (i - 3) / period < waves).then(|| (i - 3) % period);
+                let offset =
+                    (i >= base && (i - base) / period < waves).then(|| (i - base) % period);
                 match offset {
                     Some(0) => {
-                        let l = (i - 2) as i64;
-                        assert!(enc.invalidate_ref_frames(l, l), "the always-wave answers");
-                        assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
-                        lost.push(i - 2);
-                        starts.push(i);
-                        if !spoil && !idr {
-                            closes.push(i + cycle - 1);
+                        let l = (i - lag) as i64;
+                        assert!(enc.invalidate_ref_frames(l, l), "the ask is answered");
+                        lost.push(i - lag);
+                        if anchor {
+                            assert!(enc.pending_anchor && enc.wave.is_none(), "an anchor");
+                            anchors.push(i);
+                        } else {
+                            assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
+                            starts.push(i);
+                            if !spoil && !idr {
+                                closes.push(i + cycle - 1);
+                            }
                         }
                     }
                     Some(2) if idr => {
@@ -3094,17 +3117,23 @@ mod tests {
                     closes.contains(&i),
                     "AU {i}: the close bit on every unspoiled close"
                 );
+                assert_eq!(
+                    au.recovery_anchor,
+                    anchors.contains(&i),
+                    "AU {i}: anchors where asked"
+                );
             }
-            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
-            let view: Vec<u8> = aus
+            let full: Vec<&[u8]> = aus.iter().map(|a| a.data.as_slice()).collect();
+            let view: Vec<&[u8]> = aus
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| !lost.contains(i))
-                .flat_map(|(_, a)| a.data.iter().copied())
+                .map(|(_, a)| a.data.as_slice())
                 .collect();
             let dir = std::env::var("PUNKTFUNK_SMOKE_DIR").unwrap_or_else(|_| ".".into());
-            std::fs::write(format!("{dir}/nvenc-wave.{ext}"), &full).expect("write");
-            std::fs::write(format!("{dir}/nvenc-wave-dropS.{ext}"), &view).expect("write");
+            let capture = crate::smoke_pattern::write_capture;
+            capture(&format!("{dir}/nvenc-wave.{ext}"), &full).expect("write");
+            capture(&format!("{dir}/nvenc-wave-dropS.{ext}"), &view).expect("write");
             let csv = |v: &[usize]| {
                 v.iter()
                     .map(|n| n.to_string())

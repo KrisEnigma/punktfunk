@@ -729,6 +729,108 @@ fn field_aus(stream: &[u8], idx_path: &std::path::Path) -> Vec<std::ops::Range<u
         .collect()
 }
 
+/// The AV1 twin of the H.265 field hasher below: decode a capture that carries its `.idx`
+/// sidecar (a `PUNKTFUNK_DUMP_VIDEO` dump, or a wave smoke's `write_capture`) and write one
+/// SHA-256 per shown frame to `<stream>.pfhash`. A unit that fails prints, counts and writes
+/// `-`, so a one-frame-per-unit capture keeps line N on unit N.
+///
+/// - `PF_VKD_FIELD_STREAM=/path/capture.obu` — the capture (required, `.idx` beside it).
+#[test]
+#[ignore = "field triage: set PF_VKD_FIELD_STREAM=/path/capture.obu (needs a Vulkan Video AV1 decode device)"]
+fn field_av1_stream_writes_frame_hashes() {
+    let stream_path = std::env::var("PF_VKD_FIELD_STREAM")
+        .expect("PF_VKD_FIELD_STREAM must point at an AV1 capture with its .idx sidecar");
+    let stream = std::fs::read(&stream_path).expect("read the capture");
+    let idx_path = std::path::PathBuf::from(format!("{stream_path}.idx"));
+    assert!(
+        idx_path.exists(),
+        "an AV1 capture needs its .idx sidecar: {}",
+        idx_path.display()
+    );
+    let units = field_aus(&stream, &idx_path);
+    assert!(!units.is_empty(), "no units in the capture");
+
+    // Geometry and depth from the first unit that plans.
+    let mut planner = pf_bitstream::av1::Av1Planner::new();
+    let picture = units
+        .iter()
+        .find_map(|r| planner.plan_au(&stream[r.clone()]).ok()?.into_iter().next())
+        .expect("no unit in the capture plans")
+        .picture;
+    let format = match picture.bit_depth {
+        8 => pf_vkdecode::NV12,
+        10 => pf_vkdecode::P010,
+        other => panic!("unsupported field bit depth: {other}"),
+    };
+    let display = (picture.render_width, picture.render_height);
+
+    // One codec at a time; `set_var` under the lock.
+    let _gpu = common::gpu_lock();
+    arm_test_readback(&_gpu);
+    let setup = common::bring_up(&common::Request {
+        codec: common::AV1,
+        graphics: common::Graphics::Required,
+        report_families: true,
+    });
+    let handles = setup.handles();
+
+    let mut unit_errors = 0usize;
+    let hashes = {
+        // SAFETY: as in `av1_parity_run_against`.
+        let mut decoder = unsafe { VkAv1Decoder::new(&handles, Box::new(NoopQueueLock)) }
+            .expect("wrap the device");
+        decoder
+            .probe_stream_support(picture.chroma_format_idc, picture.bit_depth, false)
+            .unwrap_or_else(|e| panic!("the box must host this AV1 shape — {e:?}"));
+        // SAFETY: as in `av1_parity_run_against`.
+        let readback = unsafe {
+            Readback::new(
+                &setup.instance,
+                setup.pd,
+                &setup.device,
+                setup.graphics_qf,
+                display,
+                format,
+            )
+        };
+        let mut hashes: Vec<String> = Vec::new();
+        for (index, range) in units.iter().enumerate() {
+            match decoder.decode(&stream[range.clone()]) {
+                Ok(mut next) => {
+                    while let Some(frame) = next {
+                        let planes = consume_frame(&mut decoder, &readback, &frame, hashes.len());
+                        hashes.push(sha256_hex(&planes));
+                        next = decoder.take_ready();
+                    }
+                }
+                Err(e) => {
+                    unit_errors += 1;
+                    hashes.push("-".into());
+                    eprintln!("unit {index}: decode failed ({e}) — continuing");
+                }
+            }
+        }
+        decoder.flush();
+        while let Some(frame) = decoder.take_ready() {
+            let planes = consume_frame(&mut decoder, &readback, &frame, hashes.len());
+            hashes.push(sha256_hex(&planes));
+        }
+        // SAFETY: every readback was fence-waited inside `read_nv12`; nothing else
+        // references its handles.
+        unsafe { readback.destroy() };
+        hashes
+    };
+    // SAFETY: decoder Drop drained the queue; readback handles are gone.
+    unsafe { setup.destroy() };
+
+    let out = format!("{stream_path}.pfhash");
+    std::fs::write(&out, hashes.join("\n") + "\n").expect("write the hash file");
+    eprintln!(
+        "AV1 (field capture): {} frames hashed → {out} ({unit_errors} unit errors)",
+        hashes.len()
+    );
+}
+
 /// Decode a `PUNKTFUNK_DUMP_VIDEO` H.265 capture and write one SHA-256 per
 /// display-order frame to `<stream>.pfhash`. `scripts/vkdecode-field-parity.sh`
 /// diffs that against ffmpeg and names the first divergent frame.
