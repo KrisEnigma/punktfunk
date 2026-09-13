@@ -244,6 +244,7 @@ pub fn run(target: Option<&str>) -> u8 {
                     // binding. A pinned card's one-off preset id wins over that binding, and a
                     // dangling id falls back to the defaults instead of blocking the connect.
                     let (settings, preset) = trust::effective_settings(
+                        Some(&fp_hex),
                         &addr,
                         port,
                         preset.as_deref(),
@@ -312,9 +313,10 @@ pub fn run(target: Option<&str>) -> u8 {
 }
 
 /// A console row key → its index in the known-hosts store. The key is the pinned
-/// fingerprint when there is one, else `addr:port` (see the row builder), and a pinned
-/// CARD's key carries the preset id past a NUL — the console strips that before it
-/// sends a command, so nothing here has to.
+/// fingerprint when there is one, else `addr:port` (see the row builder) — which names
+/// the placeholder there, never a record pinned at that address. A pinned CARD's key
+/// carries the preset id past a NUL — the console strips that before it sends a
+/// command, so nothing here has to.
 fn index_for_key(known: &trust::KnownHosts, key: &str) -> Option<usize> {
     known
         .hosts
@@ -322,7 +324,7 @@ fn index_for_key(known: &trust::KnownHosts, key: &str) -> Option<usize> {
         .position(|h| !h.fp_hex.is_empty() && h.fp_hex == key)
         .or_else(|| {
             let (addr, port) = key.rsplit_once(':')?;
-            known.index_by_addr(addr, port.parse().ok()?)
+            known.placeholder_at(addr, port.parse().ok()?)
         })
 }
 
@@ -521,7 +523,12 @@ impl ServiceState {
                 let known = trust::KnownHosts::load();
                 let macs = known
                     .find_by_fp(&fp_hex)
-                    .or_else(|| known.hosts.iter().find(|h| h.addr == addr))
+                    .or_else(|| {
+                        known
+                            .hosts
+                            .iter()
+                            .find(|h| h.fp_hex.is_empty() && h.addr == addr)
+                    })
                     .map(|h| h.mac.clone())
                     .unwrap_or_default();
                 spawn_fetch(
@@ -675,12 +682,15 @@ impl ServiceState {
                 pin,
                 device_name,
             } => {
-                // Prefer what the list already calls this host (advert or store).
-                let name = self
+                // What the list calls each identity at this address (advert or store), picked
+                // once the ceremony says which one answered: both OS installs of a dual-boot
+                // box sit here, and the first row is not necessarily this one.
+                let named: Vec<(String, String)> = self
                     .rows()
                     .into_iter()
-                    .find(|r| r.addr == addr && r.port == port)
-                    .map_or_else(|| addr.clone(), |r| r.name);
+                    .filter(|r| r.addr == addr && r.port == port)
+                    .map(|r| (r.fp_hex, r.name))
+                    .collect();
                 self.console.set_pair(PairPhase::Busy);
                 let console = self.console.clone();
                 let identity = self.identity.clone();
@@ -690,6 +700,11 @@ impl ServiceState {
                         match trust::pair_with_host(&addr, port, &identity, &pin, &device_name) {
                             Ok(fp) => {
                                 let fp_hex = trust::hex(&fp);
+                                let name = named
+                                    .iter()
+                                    .find(|(f, _)| *f == fp_hex)
+                                    .or_else(|| named.iter().find(|(f, _)| f.is_empty()))
+                                    .map_or_else(|| addr.clone(), |(_, n)| n.clone());
                                 if let Err(e) =
                                     trust::persist_host(&name, &addr, port, &fp_hex, true)
                                 {
@@ -708,10 +723,11 @@ impl ServiceState {
             }
             ConsoleCmd::SaveHost { name, addr, port } => {
                 let mut known = trust::KnownHosts::load();
-                // Manual entries have no fingerprint yet, so `upsert` (fp-keyed) would
-                // collide two of them — key manual saves by address instead.
+                // A manual entry has no pin yet: it renames the placeholder at its address or
+                // adds one. A record pinned there is another identity — the other OS of a
+                // dual-boot box — and keeps its name.
                 if let Some(h) = known
-                    .index_by_addr(&addr, port)
+                    .placeholder_at(&addr, port)
                     .and_then(|i| known.hosts.get_mut(i))
                 {
                     if !name.is_empty() {
@@ -784,14 +800,8 @@ impl ServiceState {
                     return;
                 };
                 let known = trust::KnownHosts::load();
-                let macs = known
-                    .hosts
-                    .iter()
-                    .find(|h| {
-                        h.fp_hex == row.fp_hex && !row.fp_hex.is_empty()
-                            || (h.addr == row.addr && h.port == row.port)
-                    })
-                    .map(|h| h.mac.clone())
+                let macs = index_for_key(&known, &row.key)
+                    .map(|i| known.hosts[i].mac.clone())
                     .unwrap_or_default();
                 if macs.is_empty() {
                     self.console.set_pair(PairPhase::Idle); // no-op; keep state sane

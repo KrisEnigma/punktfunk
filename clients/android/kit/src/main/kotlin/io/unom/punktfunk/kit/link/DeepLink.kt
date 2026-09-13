@@ -181,14 +181,20 @@ object DeepLinks {
             0 -> Unit
             else -> return HostResolution.Ambiguous
         }
-        // `addr[:port]` literal, then the `host=` recovery parameter — both matched the way every
-        // other per-host lookup matches. The literal is only considered when the reference COULD be
-        // an address: a stale record id must fall through to `host=` (or to a refusal), never be
-        // offered as a box to dial.
+        // `addr[:port]` literal, then the `host=` recovery parameter. At that address the link's `fp`
+        // picks its record — a dual-boot box answers there with two pins — else only a placeholder
+        // stands in. The literal is only considered when the reference COULD be an address: a stale
+        // record id must fall through to `host=` (or to a refusal), never be offered as a box to dial.
         val literal = if (looksLikeAddress(link.hostRef)) parseAddrPort(link.hostRef) else null
         for ((addr, port) in listOfNotNull(literal, link.host)) {
-            hosts.firstOrNull { it.address == addr && it.port == port }
-                ?.let { return HostResolution.Confirm(it) }
+            val at = hosts.filter { it.address == addr && it.port == port }
+            val match = if (link.fp == null) {
+                at.firstOrNull()
+            } else {
+                at.firstOrNull { it.fpHex.equals(link.fp, ignoreCase = true) }
+                    ?: at.firstOrNull { it.fpHex.isEmpty() }
+            }
+            match?.let { return HostResolution.Confirm(it) }
         }
         val fallback = literal ?: link.host ?: return HostResolution.Unresolvable
         return HostResolution.Unknown(fallback.first, fallback.second, link.name, link.fp)

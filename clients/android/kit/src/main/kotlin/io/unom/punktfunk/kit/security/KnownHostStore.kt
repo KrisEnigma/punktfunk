@@ -128,12 +128,29 @@ class KnownHostStore(context: Context) {
      * The trusted record for [address]:[port], or `null` if this host has never been trusted.
      * A pinned record beats an unpinned placeholder saved at the same address. An address can
      * carry more than one identity — both OS installs of a dual-boot box answer at one lease —
-     * so a caller holding a fingerprint asks [getByFp] instead.
+     * so a caller holding a fingerprint or a card asks [resolve] instead.
      */
     fun get(address: String, port: Int): KnownHost? {
         val at = all().filter { it.address == address && it.port == port }
         return at.firstOrNull { it.fpHex.isNotEmpty() } ?: at.firstOrNull()
     }
+
+    /**
+     * The unpinned placeholder saved at [address]:[port], or `null`. A record pinned there is an
+     * identity the address does not name on its own: it may be the other OS of the same box.
+     */
+    fun placeholderAt(address: String, port: Int): KnownHost? =
+        all().firstOrNull { it.address == address && it.port == port && it.fpHex.isEmpty() }
+
+    /**
+     * The record a dial is about. With a pin: the record pinned to [fpHex], else the placeholder
+     * at [address]:[port] waiting for one — never a record pinned to another fingerprint, which
+     * at a shared address is the other OS of a dual-boot box. An empty [fpHex] is a card saved
+     * without a pin: its placeholder only. `null` is a bare typed address, and [get] answers.
+     * Mirrors the Rust `KnownHosts::resolve`.
+     */
+    fun resolve(fpHex: String?, address: String, port: Int): KnownHost? =
+        if (fpHex == null) get(address, port) else getByFp(fpHex) ?: placeholderAt(address, port)
 
     /**
      * The trusted record pinned to [fpHex], or `null`. An empty fingerprint is not a key: it
@@ -160,8 +177,9 @@ class KnownHostStore(context: Context) {
      * approval that upgrades a TOFU record to paired — it keeps its identity and everything the
      * user set on it: the stable [KnownHost.id] (so preset bindings, pinned cards and any
      * `punktfunk://` shortcut still point at it), the per-host clipboard decision, the binding,
-     * the pins and the learned MACs. Only the name, pin and paired flag are refreshed. Returns the
-     * stored record.
+     * the pins and the learned MACs. Only the pin and paired flag are refreshed, plus [name] on a
+     * placeholder taking its first pin: a pinned record keeps the name the user knows it by, even
+     * when a dial meant for another card at this address landed on it. Returns the stored record.
      *
      * The record is found by its PIN wherever it now answers, so re-pairing a host that moved
      * lease re-points the one record instead of forking a second with the same fingerprint;
@@ -171,10 +189,14 @@ class KnownHostStore(context: Context) {
      * would otherwise overwrite the first one's record.
      */
     fun trust(address: String, port: Int, name: String, fpHex: String, paired: Boolean): KnownHost {
-        val existing = getByFp(fpHex)
-            ?: all().firstOrNull { it.address == address && it.port == port && it.fpHex.isEmpty() }
-        val host = existing?.copy(address = address, port = port, name = name, fpHex = fpHex, paired = paired)
-            ?: KnownHost(address, port, name, fpHex, paired)
+        val existing = getByFp(fpHex) ?: placeholderAt(address, port)
+        val host = existing?.copy(
+            address = address,
+            port = port,
+            name = if (existing.fpHex.isEmpty()) name else existing.name,
+            fpHex = fpHex,
+            paired = paired,
+        ) ?: KnownHost(address, port, name, fpHex, paired)
         save(host)
         return host
     }

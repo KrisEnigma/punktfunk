@@ -102,12 +102,7 @@ fn page_host_label(req: &ConnectRequest) -> String {
 /// `None` only when the host has left the store while the page was open.
 fn game_link(req: &ConnectRequest, game_id: &str) -> Option<String> {
     let known = pf_client_core::trust::KnownHosts::load();
-    let host = req
-        .fp_hex
-        .as_deref()
-        .filter(|fp| !fp.is_empty())
-        .and_then(|fp| known.find_by_fp(fp))
-        .or_else(|| known.find_by_addr(&req.addr, req.port))?;
+    let host = known.resolve(req.fp_hex.as_deref(), &req.addr, req.port)?;
     Some(
         pf_client_core::deeplink::DeepLink::for_host(
             host,

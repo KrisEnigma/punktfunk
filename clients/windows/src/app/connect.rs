@@ -55,16 +55,12 @@ fn initiate_opts(
     // "Streaming to X") — stash it up front, not just on the pairing route.
     *ctx.shared.target.lock().unwrap() = target.clone();
     let known = KnownHosts::load();
-    let pin = target
-        .fp_hex
-        .as_ref()
-        .and_then(|fp| known.find_by_fp(fp).map(|_| fp.clone()))
-        .or_else(|| {
-            known
-                .find_by_addr(&target.addr, target.port)
-                .map(|k| k.fp_hex.clone())
-        })
-        .and_then(|fp| trust::parse_hex32(&fp));
+    // The target's pin names its record. A discovered second OS of a dual-boot box has none
+    // yet and pairs, instead of dialling the first one's pin; only a typed address takes
+    // whatever that address answers with.
+    let pin = known
+        .resolve(target.fp_hex.as_deref(), &target.addr, target.port)
+        .and_then(|k| trust::parse_hex32(&k.fp_hex));
 
     let opts = ConnectOpts {
         wake_on_fail,

@@ -300,10 +300,11 @@ mod session_main {
         // the last store read the compat path still owes. `addr` is moved into the struct
         // below, so read it first.
         let clipboard = clipboard_override.unwrap_or_else(|| {
-            // The record this address RESOLVES to, not "any record mentioning it": a retired
-            // duplicate must never be the one that hands a host the clipboard.
+            // The record this pin RESOLVES to, not "any record at its address": a retired
+            // duplicate, or the other OS of a dual-boot box, must never be the one that
+            // hands a host the clipboard.
             trust::KnownHosts::load()
-                .find_by_addr(&addr, port)
+                .resolve(Some(&trust::hex(&pin)), &addr, port)
                 .is_some_and(|h| h.clipboard_sync)
         });
         // The shell-persisted forwarded-controller pin (stable `vid:pid:name`), applied to
@@ -1023,6 +1024,8 @@ mod session_main {
         // `--connect`, an old Decky script) the session resolves for itself through the SAME
         // helper, so the two modes cannot drift.
         let spec = arg_value("--resolved-spec").map(std::path::PathBuf::from);
+        // `--fp` names its own record; only a bare address falls back to what it answers with.
+        let fp_arg = arg_value("--fp").map(|f| f.to_ascii_lowercase());
         let (settings, preset_name, clipboard_override) = match &spec {
             Some(path) => match pf_client_core::orchestrate::ResolvedSpec::read(path) {
                 Ok(s) => {
@@ -1037,6 +1040,7 @@ mod session_main {
             },
             None => {
                 let (settings, preset) = trust::effective_settings(
+                    fp_arg.as_deref(),
                     &addr,
                     port,
                     preset_arg().as_deref(),
@@ -1053,8 +1057,8 @@ mod session_main {
         // connects silently; an unknown host is REFUSED — there is no dialog here, and a
         // silent TOFU would defeat the pinning model. Pair via the desktop client.
         let known = trust::KnownHosts::load();
-        let known_host = known.find_by_addr(&addr, port);
-        let pin = arg_value("--fp")
+        let known_host = known.resolve(fp_arg.as_deref(), &addr, port);
+        let pin = fp_arg
             .as_deref()
             .and_then(trust::parse_hex32)
             .or_else(|| known_host.and_then(|h| trust::parse_hex32(&h.fp_hex)));

@@ -268,12 +268,7 @@ const MENU_COPY_LINK: &str = "Copy link";
 /// left the store while the page was open.
 fn game_link(target: &super::Target, game_id: &str) -> Option<String> {
     let known = crate::trust::KnownHosts::load();
-    let host = target
-        .fp_hex
-        .as_deref()
-        .filter(|fp| !fp.is_empty())
-        .and_then(|fp| known.find_by_fp(fp))
-        .or_else(|| known.find_by_addr(&target.addr, target.port))?;
+    let host = known.resolve(target.fp_hex.as_deref(), &target.addr, target.port)?;
     Some(
         pf_client_core::deeplink::DeepLink::for_host(
             host,

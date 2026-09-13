@@ -351,11 +351,9 @@ fun ConnectScreen(
         )
     }
 
-    // The actual dial (identity already ready). On a TOFU connect (pinHex null), pin the fingerprint
-    // the host presented (as an unpaired known host) so the next connect goes straight through and it
-    // appears in the saved-hosts list. [onFailure], when set, takes over a failed dial (the wake-wait
-    // fallback) instead of the error status line — discovery is already restarted when it runs, so
-    // the wait can observe the host reappear.
+    // The actual dial (identity already ready). A TOFU dial (pinHex null) pins what the host
+    // presented, as an unpaired known host. [onFailure] takes over an unreachable dial (the
+    // wake-wait fallback, discovery already restarted); [onMismatch] takes over a refused pin.
     fun doConnectDirect(
         targetHost: String,
         targetPort: Int,
@@ -364,6 +362,7 @@ fun ConnectScreen(
         preset: StreamPreset?,
         launch: String? = null,
         onFailure: (() -> Unit)? = null,
+        onMismatch: (() -> Unit)? = null,
     ) {
         val id = identity ?: run {
             status = "Identity not ready yet — try again in a moment"
@@ -387,7 +386,8 @@ fun ConnectScreen(
             attempt = null
             connecting = false
             if (handle != 0L) {
-                var record = knownHostStore.get(targetHost, targetPort)
+                // By this dial's pin: the address may also name the other OS of a dual-boot box.
+                var record = pinHex?.let { knownHostStore.resolve(it, targetHost, targetPort) }
                 if (pinHex == null) { // TOFU: pin what we observed (unpaired)
                     val fp = NativeBridge.nativeHostFingerprint(handle)
                     if (fp.isNotEmpty()) {
@@ -404,6 +404,9 @@ fun ConnectScreen(
                     // and setting `waker.waking` here land in one recompose, so the overlay slides
                     // Connecting → Waking without a blank frame.
                     onFailure()
+                } else if (onMismatch != null && token == "crypto") {
+                    // The saved pin was refused: another identity answers at this address.
+                    onMismatch()
                 } else {
                     // A typed host rejection (busy / versions differ / pairing required) means the
                     // host is awake — waking it would be nonsense; show the stated reason instead.
@@ -438,12 +441,15 @@ fun ConnectScreen(
         pinHex: String?,
         oneOffPreset: String?,
         launch: String? = null,
+        onMismatch: (() -> Unit)? = null,
     ) {
         if (identity == null) {
             status = "Identity not ready yet — try again in a moment"
             return
         }
-        val kh = knownHostStore.get(targetHost, targetPort)
+        // The record this dial's pin names. A TOFU dial is to a host not saved yet, so only a
+        // placeholder can be it — never the other OS of a dual-boot box at the same address.
+        val kh = knownHostStore.resolve(pinHex ?: "", targetHost, targetPort)
         // Latched here, not per dial attempt: a wake-and-redial must stream with the same preset
         // the user asked for, and the "applies from the next session" footers stay truthful.
         val preset = presetStore.resolveFor(kh, oneOffPreset)
@@ -458,7 +464,7 @@ fun ConnectScreen(
         if (settings.autoWakeEnabled && macs.isNotEmpty() && down) {
             // Fire-and-forget first packet (harmless if it's awake), then dial-first.
             scope.launch(Dispatchers.IO) { NativeBridge.nativeWakeOnLan(macs.joinToString(","), targetHost) }
-            doConnectDirect(targetHost, targetPort, name, pinHex, preset, launch, onFailure = {
+            doConnectDirect(targetHost, targetPort, name, pinHex, preset, launch, onMismatch = onMismatch, onFailure = {
                 waker.start(
                     hostName = name,
                     connectsAfter = true,
@@ -487,13 +493,13 @@ fun ConnectScreen(
                         }
                         doConnectDirect(
                             live?.host ?: targetHost, live?.port ?: targetPort, name, pinHex,
-                            preset, launch,
+                            preset, launch, onMismatch = onMismatch,
                         )
                     },
                 )
             })
         } else {
-            doConnectDirect(targetHost, targetPort, name, pinHex, preset, launch)
+            doConnectDirect(targetHost, targetPort, name, pinHex, preset, launch, onMismatch = onMismatch)
         }
     }
 
@@ -536,7 +542,7 @@ fun ConnectScreen(
                 // Approved — save the host as PAIRED, pinning the fingerprint it presented, so
                 // future connects are silent (exactly like after a PIN ceremony).
                 val fp = NativeBridge.nativeHostFingerprint(handle)
-                var record = knownHostStore.get(target.host, target.port)
+                var record = knownHostStore.resolve(fp, target.host, target.port)
                 if (fp.isNotEmpty()) {
                     record = knownHostStore.trust(target.host, target.port, target.name, fp, paired = true)
                     savedHosts = knownHostStore.all()
@@ -554,12 +560,10 @@ fun ConnectScreen(
         }
     }
 
-    // Decide pinned-reconnect vs fp-changed vs TOFU vs pairing before connecting. Trust state is
-    // keyed by the pinned fingerprint, falling back to address:port for a host typed in by hand,
-    // so a discovered and a manually-typed connection to the same host share one record.
-    // Trust-on-first-use is permitted ONLY when the host advertised pair=optional; a
-    // pair=required host, or a manual/unknown-policy host, must pair — either by no-PIN request
-    // access (approve in the console) or by the SPAKE2 PIN ceremony.
+    // Decide pinned-reconnect vs TOFU vs pairing before connecting. The record is the tapped card's,
+    // else the one the advertised pin names, else what a typed address answers with — never a record
+    // pinned to another fingerprint (both OS installs of a dual-boot box answer at one lease). TOFU
+    // only when the host advertised pair=optional; otherwise request access or the PIN ceremony.
     fun connect(
         targetHost: String,
         targetPort: Int,
@@ -571,6 +575,8 @@ fun ConnectScreen(
         oneOffPreset: String? = null,
         // A library id the host should boot straight into (`launch=` on a link).
         launch: String? = null,
+        // The saved card this dial came from: its record decides, not its address.
+        saved: KnownHost? = null,
     ) {
         // Every dial/pair path funnels through here — with local network access denied the connect
         // can only EPERM its way to a 10 s timeout, so ask instead of pretending to try.
@@ -579,23 +585,31 @@ fun ConnectScreen(
             return
         }
         val adv = dh?.fingerprint?.lowercase()
-        // The record this dial is about: the one carrying the advertised pin, else — only when
-        // nothing there is pinned — what the address answers with. Both OS installs of a
-        // dual-boot box answer at one lease, so a record pinned to another fingerprint is a
-        // different host, and its name and preset are not this one's.
-        val known = adv?.let { knownHostStore.getByFp(it) }
-            ?: knownHostStore.get(targetHost, targetPort)?.takeIf { adv == null || it.fpHex.isEmpty() }
+        val known = if (saved != null) {
+            knownHostStore.byId(saved.id)
+        } else {
+            knownHostStore.resolve(adv, targetHost, targetPort)
+        }
+        val typed = manualName?.trim()?.takeIf { it.isNotEmpty() }
         // Label precedence: a saved host keeps its (possibly user-renamed) name; else the discovered
         // mDNS name; else the name typed in the Add-host sheet; else the bare address.
-        val name = known?.name ?: dh?.name ?: manualName?.trim()?.takeIf { it.isNotEmpty() } ?: targetHost
+        val name = known?.name ?: dh?.name ?: typed ?: targetHost
         when {
-            // Known host whose advertised fp still matches the pin → silent pinned reconnect.
-            known != null && (adv == null || adv == known.fpHex) ->
-                doConnect(targetHost, targetPort, known.name, known.fpHex, oneOffPreset, launch)
-            // Known host whose fp changed → force re-pairing (no silent re-trust shortcut).
-            known != null -> pendingTrust = PendingTrust(
-                targetHost, targetPort, known.name, adv, PendingTrust.Kind.FP_CHANGED,
-                oneOffPreset, launch,
+            // A pinned record → silent pinned reconnect; `resolve` answers an advert only with the
+            // record carrying its pin. A typed address names no identity: if its saved pin is
+            // refused, another OS of the same machine may hold the lease, so pair that one by PIN.
+            known != null && known.fpHex.isNotEmpty() -> doConnect(
+                targetHost, targetPort, known.name, known.fpHex, oneOffPreset, launch,
+                onMismatch = if (saved == null && dh == null) {
+                    {
+                        pendingTrust = PendingTrust(
+                            targetHost, targetPort, typed ?: targetHost, null,
+                            PendingTrust.Kind.FP_CHANGED, oneOffPreset, launch,
+                        )
+                    }
+                } else {
+                    null
+                },
             )
             // Host explicitly advertised pair=optional → trust-on-first-use is permitted (offer it,
             // clearly labeled, alongside PIN pairing). Smart-cast: this branch ⇒ dh != null.
@@ -603,8 +617,8 @@ fun ConnectScreen(
                 targetHost, targetPort, name, dh.fingerprint, PendingTrust.Kind.TRUST_NEW,
                 oneOffPreset, launch,
             )
-            // pair=required, or a manual/unknown-policy host → offer the two ways in: a no-PIN
-            // "request access" (approve in the console) or the SPAKE2 PIN ceremony.
+            // pair=required, a manual/unknown-policy host, or a card saved without a pin → offer the
+            // two ways in: a no-PIN "request access" (approve in the console) or the PIN ceremony.
             else -> pendingTrust = PendingTrust(
                 targetHost, targetPort, name, adv, PendingTrust.Kind.REQUEST_ACCESS,
                 oneOffPreset, launch,
@@ -787,7 +801,7 @@ fun ConnectScreen(
                 }
                 connect(
                     resolved.host.address, resolved.host.port,
-                    oneOffPreset = presetRef, launch = link.launch,
+                    oneOffPreset = presetRef, launch = link.launch, saved = resolved.host,
                 )
             }
             // Unknown, or known only by address: the confirmation sheet, from which the normal
@@ -874,7 +888,7 @@ fun ConnectScreen(
         status = status,
         lnpGranted = lnpGranted,
         onAskLocalNetwork = { lnpPrompt = true },
-        onConnect = { kh, oneOff -> connect(kh.address, kh.port, oneOffPreset = oneOff) },
+        onConnect = { kh, oneOff -> connect(kh.address, kh.port, oneOffPreset = oneOff, saved = kh) },
         onConnectDiscovered = { dh -> connect(dh.host, dh.port, dh) },
         onForget = { kh -> forgetHost(kh) },
         onEdit = { kh -> editTarget = kh },
@@ -955,7 +969,7 @@ fun ConnectScreen(
             pendingLinkConnect = null
             connect(
                 plc.host.address, plc.host.port,
-                oneOffPreset = plc.preset, launch = plc.launch,
+                oneOffPreset = plc.preset, launch = plc.launch, saved = plc.host,
             )
         },
         onDismissLinkConnect = { pendingLinkConnect = null },

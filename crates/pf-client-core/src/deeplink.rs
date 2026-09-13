@@ -340,13 +340,23 @@ pub fn resolve_host(link: &DeepLink, known: &KnownHosts) -> HostResolution {
         0 => {}
         _ => return HostResolution::Ambiguous,
     }
-    // Literal `addr[:port]`, then `host=`, matched as addr+port. A stale record id must
-    // fall through to `host=` (or refusal), never be offered as a box to dial.
+    // Literal `addr[:port]`, then `host=`. At that address the link's `fp` picks its record —
+    // a dual-boot box answers there with two pins — else only a placeholder stands in. A
+    // stale record id must fall through to `host=` (or refusal), never be offered as a box.
     let literal = looks_like_address(&link.host_ref)
         .then(|| parse_addr_port(&link.host_ref))
         .flatten();
     for candidate in [literal.clone(), link.host.clone()].into_iter().flatten() {
-        if let Some(i) = known.index_by_addr(&candidate.0, candidate.1) {
+        let (addr, port) = (candidate.0.as_str(), candidate.1);
+        let found = match link.fp.as_deref() {
+            Some(fp) => known
+                .hosts
+                .iter()
+                .position(|h| h.addr == addr && h.port == port && h.fp_hex == fp)
+                .or_else(|| known.placeholder_at(addr, port)),
+            None => known.index_by_addr(addr, port),
+        };
+        if let Some(i) = found {
             return HostResolution::Confirm(i);
         }
     }
@@ -679,6 +689,51 @@ mod tests {
         ] {
             assert_eq!(r(guess), HostResolution::Confirm(0), "{guess}");
         }
+    }
+
+    /// Both OS installs of a dual-boot box at one address: a link's `fp` picks its own
+    /// record, and a pin nobody holds is a new host, never the neighbour.
+    #[test]
+    fn a_links_pin_picks_its_own_os_at_a_shared_address() {
+        let (windows, linux, third) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let known = KnownHosts {
+            hosts: vec![
+                host(
+                    "Desk (Windows)",
+                    "192.168.1.50",
+                    "11111111-2222-4333-8444-555555555555",
+                    &windows,
+                ),
+                host(
+                    "Desk (Linux)",
+                    "192.168.1.50",
+                    "66666666-7777-4888-8999-aaaaaaaaaaaa",
+                    &linux,
+                ),
+            ],
+        };
+        let r = |url: &str| resolve_host(&parse(url).unwrap(), &known);
+
+        let at = |fp: &str| format!("punktfunk://connect/192.168.1.50?fp={fp}");
+        assert_eq!(r(&at(&windows)), HostResolution::Confirm(0));
+        assert_eq!(r(&at(&linux)), HostResolution::Confirm(1));
+        assert_eq!(
+            r(&at(&third)),
+            HostResolution::Unknown {
+                addr: "192.168.1.50".into(),
+                port: DEFAULT_PORT,
+                name: None,
+                fp: Some(third.clone()),
+            }
+        );
+        // A stale id recovering through `host=` lands on the pin's own record too.
+        assert_eq!(
+            r(&format!(
+                "punktfunk://connect/00000000-0000-4000-8000-000000000000\
+                 ?host=192.168.1.50&fp={linux}"
+            )),
+            HostResolution::Confirm(1)
+        );
     }
 
     #[test]
