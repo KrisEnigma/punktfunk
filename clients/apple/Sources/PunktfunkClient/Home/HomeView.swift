@@ -52,6 +52,13 @@ struct HomeView: View {
     /// The host whose page is pushed.
     @State private var detailTarget: StoredHost.ID?
     #endif
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The host whose page is up as the iPad's sheet of sections.
+    @State private var sectionsHost: StoredHost?
+    /// An act that sheet handed back, run once the sheet is gone.
+    @State private var pendingHandOff: HostPageRequest?
+    #endif
     /// The start-screen pointer; the default host's card carries the accent bar.
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     /// The outcome of the last "Send Logs to Host" — drives its alert.
@@ -316,6 +323,14 @@ struct HomeView: View {
             SettingsView()
                 .settingsSheetSizing()
         }
+        // The iPad's host page, laid out like the Mac's host window.
+        .sheet(item: $sectionsHost, onDismiss: runHandOff) { host in
+            HostSectionsView(hostID: host.id, store: store) { request in
+                pendingHandOff = request
+                sectionsHost = nil
+            }
+            .settingsSheetSizing()
+        }
         #endif
         #endif
     }
@@ -385,14 +400,32 @@ struct HomeView: View {
                 runPower: { hostAction($0, on: host) }))
     }
 
-    /// The host page: pushed on touch, its own window on the Mac.
+    /// The host page: its own window on the Mac, a sheet of sections on the iPad, pushed on the
+    /// iPhone and Apple TV.
     private func showDetails(_ host: StoredHost) {
         #if os(macOS)
         openWindow(id: MacHostWindow.sceneID, value: host.id)
+        #elseif os(iOS)
+        if sizeClass == .regular { sectionsHost = host } else { detailTarget = host.id }
         #else
         detailTarget = host.id
         #endif
     }
+
+    #if os(iOS)
+    /// The iPad's host sheet closed on an act that belongs to the grid: run it now it is gone.
+    private func runHandOff() {
+        guard let request = pendingHandOff else { return }
+        pendingHandOff = nil
+        guard let host = store.hosts.first(where: { $0.id == request.hostID }) else { return }
+        switch request {
+        case .connect(_, let selection): connect(host, selection)
+        case .browse: libraryTarget = LibraryTarget(host: host)
+        case .wake: wake(host)
+        case .pair: if !model.isBusy { pairingTarget = host }
+        }
+    }
+    #endif
 
     /// A host action picked from a card's menu: explain an unavailable one, confirm a
     /// destructive one, run the rest.
@@ -538,14 +571,12 @@ struct HomeView: View {
     }
     #endif
 
-    /// macOS caps card width (a huge window shouldn't yield huge cards); on iOS the columns FILL
-    /// the width so the cards stay edge-aligned with the title and bars — sized touch-first: one
-    /// column on iPhone portrait, 3–4 generous cards on iPad.
+    /// The columns fill the width everywhere, so no window width leaves a gutter beside the cards:
+    /// adaptive packs as many as fit and widens them to close the gap, which keeps a card under
+    /// twice the minimum. Touch-first on iOS: one column on iPhone portrait, 3–4 on iPad.
     private var gridColumns: [GridItem] {
-        // Wider than before: the monogram card is a horizontal module (tile + address line), so
-        // it needs room for a monospaced "IP:port" without truncating.
         #if os(macOS)
-        [GridItem(.adaptive(minimum: 250, maximum: 320), spacing: 16)]
+        [GridItem(.adaptive(minimum: 250), spacing: 16)]
         #elseif os(tvOS)
         // Tracks CardMetrics' 10-foot sizes — at the 30pt name a 320pt column truncates
         // every hostname longer than ~10 characters.

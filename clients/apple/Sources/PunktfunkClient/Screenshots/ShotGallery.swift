@@ -368,6 +368,18 @@ struct ShotLibraryTouch: View {
     }
 }
 
+#if os(iOS) || os(macOS)
+/// The Library with its host filter over the mock hosts, on the mock catalog.
+struct ShotLibraryFilter: View {
+    var body: some View {
+        LibraryTabView(
+            store: ShotMock.pageStore, onLaunch: { _, _ in }, onConnectShelf: { _ in },
+            onConnectHost: { _ in }, showHosts: {},
+            shotPhase: .catalog(ShotMock.games, running: ["steam:starfall"]))
+    }
+}
+#endif
+
 #Preview("Host cards") {
     ShotGalleryView(title: "Host cards", variants: ShotMock.hostCardVariants)
         .preferredColorScheme(.dark)

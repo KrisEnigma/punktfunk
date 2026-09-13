@@ -475,6 +475,7 @@ extension SettingsView {
                 }
                 #if !os(tvOS)
                 Link("What each number means", destination: Self.statsDocsURL)
+                    .foregroundStyle(Color.brand) // a Link takes the system accent, not the tint
                 #endif
             }
         }
