@@ -1576,6 +1576,31 @@ mod tests {
         assert!(!bbb.is_empty());
     }
 
+    /// `PF_H265_DUMP=<capture>`: print each picture's active references, to read an
+    /// encoder's reference structure off a capture. Diagnostics only.
+    #[test]
+    #[ignore = "diagnostic: set PF_H265_DUMP to a capture"]
+    fn print_active_references_of_a_capture() {
+        let path = std::env::var("PF_H265_DUMP").expect("PF_H265_DUMP=<capture>");
+        let bytes = std::fs::read(&path).expect("read the capture");
+        let mut planner = H265Planner::new();
+        for (i, au) in split_into_aus(&bytes).iter().enumerate() {
+            let plan = planner.plan_au(au).expect("plan");
+            let refs: Vec<i32> = plan
+                .slices
+                .iter()
+                .flat_map(|s| s.ref_list0.iter().chain(&s.ref_list1))
+                .map(|r| r.pic_order_cnt)
+                .collect();
+            println!(
+                "{i}: poc {} refs {refs:?} clean {} warnings {}",
+                plan.picture.pic_order_cnt,
+                plan.picture.references_clean,
+                plan.warnings.len()
+            );
+        }
+    }
+
     /// [`PicturePlan::references_clean`] on real bitstreams: two lossless
     /// conformance clips must report every picture clean. A false mark would
     /// refuse every host recovery anchor.
