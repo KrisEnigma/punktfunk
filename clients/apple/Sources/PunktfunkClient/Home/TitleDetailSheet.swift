@@ -11,7 +11,6 @@ struct TitleDetailSheet: View {
     let artLoader: (any LibraryArtSource)?
     /// Play, Resume (the title is up on the host) or Connect (the desktop entry).
     var playLabel = "Play"
-    var isRunning = false
     /// nil hides the heart: favorites belong to the Library tab.
     var isFavorite: Bool?
     var onToggleFavorite: () -> Void = {}
@@ -63,7 +62,6 @@ struct TitleDetailSheet: View {
                         .font(.geist(13, relativeTo: .subheadline))
                         .foregroundStyle(.secondary)
                 }
-                if isRunning { RunningBadge(compact: false) }
             }
         }
     }

@@ -308,7 +308,7 @@ struct ShotTitleDetails: View {
     var body: some View {
         TitleDetailSheet(
             game: ShotMock.games.first { $0.id == "steam:starfall" } ?? ShotMock.games[0],
-            artLoader: ShotPosterArt.source, playLabel: "Resume", isRunning: true, isFavorite: true,
+            artLoader: ShotPosterArt.source, playLabel: "Resume", isFavorite: true,
             onPlay: {}, onCopyLink: {})
     }
 }

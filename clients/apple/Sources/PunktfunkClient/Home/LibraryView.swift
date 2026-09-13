@@ -686,7 +686,6 @@ struct LibraryView: View {
     private func detailSheet(_ game: GameEntry) -> some View {
         TitleDetailSheet(
             game: game, artLoader: artLoader, playLabel: playLabel(game),
-            isRunning: running[game.id] != nil,
             isFavorite: inTab ? favoriteIDs.contains(game.id) : nil,
             onToggleFavorite: { favorites.toggle(game.id, host: host.id.uuidString) },
             onPlay: launchAndRemember == nil ? nil : {
