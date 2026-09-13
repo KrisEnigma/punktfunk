@@ -3774,6 +3774,51 @@ mod parity {
         );
     }
 
+    /// `PF_VA_FIELD_STREAM=<capture>`: decode a capture through this rung and write one line
+    /// per access unit to `<capture>.pfhash`: the AU index and the SHA-256 of the frame it
+    /// delivered, `-` when it delivered none (a concealed AU is withheld). A lossy view aligns
+    /// against its lossless twin by AU index. `PF_VA_FIELD_CODEC=h264` for H.264, else HEVC.
+    #[test]
+    #[ignore = "field triage: set PF_VA_FIELD_STREAM (needs a libva runtime)"]
+    fn field_stream_writes_frame_hashes() {
+        let path = std::env::var("PF_VA_FIELD_STREAM").expect("PF_VA_FIELD_STREAM=<capture>");
+        let bytes = std::fs::read(&path).expect("read the capture");
+        let h264 = std::env::var("PF_VA_FIELD_CODEC").is_ok_and(|c| c == "h264");
+        let aus = if h264 {
+            split_h264_aus(&bytes)
+        } else {
+            split_h265_aus(&bytes)
+        };
+        let codec = if h264 {
+            pf_vaapi::Codec::H264
+        } else {
+            pf_vaapi::Codec::H265
+        };
+        let mut decoder =
+            NativeVaapiDecoder::new(codec, StreamFormat::SDR_420_8).expect("open the rung");
+        let mut readback = Readback::new(&decoder.display);
+        let mut lines = Vec::new();
+        for (index, au) in aus.iter().enumerate() {
+            match decoder.decode(au) {
+                Ok(Some(frame)) => {
+                    let what = format!("AU {index}");
+                    let bytes = read_frame(&decoder, &mut readback, &frame, &what);
+                    lines.push(format!("{index} {}", sha256_hex(&bytes)));
+                }
+                Ok(None) => lines.push(format!("{index} -")),
+                Err(e) => lines.push(format!("{index} refused {e:#}")),
+            }
+        }
+        for frame in decoder.flush() {
+            let bytes = read_frame(&decoder, &mut readback, &frame, "flush");
+            lines.push(format!("flush {}", sha256_hex(&bytes)));
+        }
+        readback.destroy_staging(&decoder.display);
+        let out = format!("{path}.pfhash");
+        std::fs::write(&out, lines.join("\n") + "\n").expect("write the hashes");
+        eprintln!("{} AUs hashed through this rung → {out}", aus.len());
+    }
+
     #[test]
     #[ignore = "needs a machine with a libva runtime and an HEVC Main VLD entry point"]
     fn h265_every_frame_hashes_bit_identical_to_libavcodec() {
