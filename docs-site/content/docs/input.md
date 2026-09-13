@@ -158,7 +158,7 @@ The [quick-action dial](#the-quick-action-dial) carries both buttons too — **G
 sends one tap on the host's pad; **Quick access menu** only reaches a host whose virtual controller
 is Steam-shaped.
 
-Both halves are [settings](/docs/client-settings#input), per profile like everything else:
+Both halves are [settings](/docs/client-settings#input), per preset like everything else:
 **Steam / guide button** (Automatic / Send to host / This device) and **Hold Select for guide**
 (Automatic / On / Off). Automatic picks the behavior above for each platform — the gesture stays off
 where the raw button already works, so games that use a *held* Select keep it.
@@ -241,7 +241,7 @@ Back; on Android, macOS, Linux and Windows **Ctrl+Alt+Shift+O** (**⌃⌥⇧O** 
 **Stream** menu's Quick Actions item); with a controller, **Select+A** (Select first) on every
 client, and the host never sees the two presses. A mouse's Back button goes to the host, not to
 the dial. What the six buttons hold is the **Quick actions** setting, and the
-editor is the dial itself — on every client but Apple TV, which takes whatever the profile carries.
+editor is the dial itself — on every client but Apple TV, which takes whatever the preset carries.
 
 While the dial is up the controller belongs to it and the host sees nothing. The **left stick
 aims**: the dial highlights whatever slot your thumb points at, and letting go returns to the

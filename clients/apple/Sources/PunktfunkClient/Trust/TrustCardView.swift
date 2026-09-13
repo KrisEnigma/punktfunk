@@ -26,6 +26,27 @@ struct TrustCardView: View {
     #endif
 
     var body: some View {
+        // A phone on its side can be shorter than the card: it scrolls then, rather than
+        // truncating the fingerprint.
+        ViewThatFits(in: .vertical) {
+            content
+            ScrollView { content }
+        }
+        .padding(28)
+        .frame(maxWidth: 440)
+        // Floating trust card over the blurred stream — Liquid Glass on 26+, .regularMaterial
+        // fallback below. The inner fingerprint box stays .quaternary (content, not glass).
+        .glassBackground(RoundedRectangle(cornerRadius: 18))
+        #if os(iOS) || os(macOS) || os(tvOS)
+        .background {
+            TrustControllerInput(onTrust: onTrust, onCancel: onCancel, onPairInstead: onPairInstead)
+        }
+        #endif
+        // Off a phone's edges in portrait.
+        .padding(16)
+    }
+
+    private var content: some View {
         VStack(spacing: 14) {
             Image(systemName: "lock.shield")
                 .font(.system(size: 36, weight: .light))
@@ -40,6 +61,9 @@ struct TrustCardView: View {
                 .multilineTextAlignment(.center)
             Text(Self.format(fingerprint: fingerprint))
                 .font(.system(.callout, design: .monospaced))
+                // Always two lines of four groups: a narrow phone shrinks them instead.
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
                 #if !os(tvOS)
                 .textSelection(.enabled)
                 #endif
@@ -91,16 +115,6 @@ struct TrustCardView: View {
             }
             #endif
         }
-        .padding(28)
-        .frame(maxWidth: 440)
-        // Floating trust card over the blurred stream — Liquid Glass on 26+, .regularMaterial
-        // fallback below. The inner fingerprint box stays .quaternary (content, not glass).
-        .glassBackground(RoundedRectangle(cornerRadius: 18))
-        #if os(iOS) || os(macOS) || os(tvOS)
-        .background {
-            TrustControllerInput(onTrust: onTrust, onCancel: onCancel, onPairInstead: onPairInstead)
-        }
-        #endif
     }
 
     /// 64 hex chars → four groups per line, two lines — easy to eyeball against the log.

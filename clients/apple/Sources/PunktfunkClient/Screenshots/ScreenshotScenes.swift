@@ -85,6 +85,9 @@ enum ShotScenes {
                 AnyView(ShotGalleryView(
                     title: "Library states", variants: ShotMock.libraryStateVariants))
             },
+            ShotScene(name: "14e-gallery-speed-test", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(title: "Speed test", variants: ShotMock.speedTestVariants))
+            },
             ShotScene(name: "15-library-touch", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotLibraryTouch())
             },
@@ -98,6 +101,15 @@ enum ShotScenes {
         scenes += [
             ShotScene(name: "06-gamepad-home", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadHome())
+            },
+            // The Library tab with its host filter (iOS) and the Mac's Library row.
+            ShotScene(name: "15f-library-filter", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotLibraryFilter())
+            },
+            // The host page as sections beside a sidebar: the iPad's sheet, the Mac's window.
+            ShotScene(name: "16f-host-sections", orientation: .natural, colorScheme: .dark) {
+                AnyView(HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, handOff: { _ in }))
             },
             ShotScene(name: "07-gamepad-settings", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadSettings())
@@ -158,6 +170,11 @@ enum ShotScenes {
                 AnyView(MacHostWindow(
                     hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
                     section: .connection))
+            },
+            ShotScene(name: "16d-host-window-speed-test", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
+                    section: .speedTest))
             },
         ]
         #endif

@@ -207,14 +207,13 @@ struct ContentView: View {
     // macOS builds never reveal. Keep new modifiers on whichever half is shorter.
     var body: some View {
         driven
-            // Fresh pair=required / unknown host: offer the two ways in. An action sheet (not an
-            // alert) so it never collides with the wait alert below. "Request Access" is the
-            // no-PIN delegated-approval path; "Pair with PIN…" runs the SPAKE2 ceremony. The
-            // follow-on presentation is deferred a tick so this dialog is fully dismissed first.
-            .confirmationDialog(
+            // Fresh pair=required / unknown host: the two ways in. An alert, since iOS 26 draws a
+            // confirmation dialog as a narrow popover that squeezes this message. "Request Access"
+            // is the no-PIN approval path, "Pair with PIN…" the SPAKE2 ceremony. The follow-on
+            // presentation waits a tick so this alert is fully dismissed first.
+            .alert(
                 "Pairing required",
                 isPresented: approvalChoicePresented,
-                titleVisibility: .visible,
                 presenting: approvalChoice
             ) { req in
                 Button("Request Access") {
@@ -571,9 +570,6 @@ struct ContentView: View {
             PairSheet(host: host) { fingerprint in handlePaired(host, fingerprint: fingerprint) }
             #endif
         }
-        .sheet(item: $speedTestTarget) { host in
-            SpeedTestSheet(host: host)
-        }
         // The library is a full-screen presentation, not a sheet: on iPad a sheet is a centered page
         // card, but the gamepad coverflow is meant to be an immersive, full-bleed screen (and the
         // launcher behind it stops consuming the controller — see GamepadHomeView's `isActive`).
@@ -756,8 +752,6 @@ struct ContentView: View {
             if let host = saved(id) { wakeOnly(host) }
         case .pair(let id):
             if let host = saved(id), !model.isBusy { pairingTarget = host }
-        case .speedTest(let id):
-            if let host = saved(id), !model.isBusy { speedTestTarget = host }
         }
     }
     #endif
@@ -1037,20 +1031,10 @@ struct ContentView: View {
                 #endif
             } else {
                 #if os(iOS)
-                TabView(selection: $touchTab) {
-                    touchHome
-                        .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
-                        .tag(TouchTab.hosts)
-                    LibraryTabView(
-                        store: store, onLaunch: launchTitle, onConnectShelf: connectFromShelf,
-                        onConnectHost: { connect($0, preset: .inherit, fromLibrary: true) },
-                        showHosts: { touchTab = .hosts })
-                        .tabItem { Label("Library", systemImage: "square.grid.2x2") }
-                        .tag(TouchTab.library)
-                }
-                // On appear too: `returnToLibrary` writes the shelf while the stream is still up.
-                .onAppear(perform: showShelfInTab)
-                .onChange(of: libraryTarget) { _, _ in showShelfInTab() }
+                touchTabs
+                    // On appear too: `returnToLibrary` writes the shelf while the stream is still up.
+                    .onAppear(perform: showShelfInTab)
+                    .onChange(of: libraryTarget) { _, _ in showShelfInTab() }
                 #else
                 touchHome
                 #endif
@@ -1070,6 +1054,38 @@ struct ContentView: View {
             connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
             onPaired: handlePaired, onLaunchTitle: launchTitle,
             onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
+    }
+    #endif
+
+    #if os(iOS)
+    /// Hosts and Library. On iPadOS 18 the tab bar turns into a sidebar at a tap, as iPad apps do;
+    /// iOS 17 keeps the plain tab bar.
+    @ViewBuilder private var touchTabs: some View {
+        if #available(iOS 18, *) {
+            TabView(selection: $touchTab) {
+                Tab("Hosts", systemImage: "desktopcomputer", value: TouchTab.hosts) { touchHome }
+                Tab("Library", systemImage: "square.grid.2x2", value: TouchTab.library) {
+                    libraryTab
+                }
+            }
+            .tabViewStyle(.sidebarAdaptable)
+        } else {
+            TabView(selection: $touchTab) {
+                touchHome
+                    .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
+                    .tag(TouchTab.hosts)
+                libraryTab
+                    .tabItem { Label("Library", systemImage: "square.grid.2x2") }
+                    .tag(TouchTab.library)
+            }
+        }
+    }
+
+    private var libraryTab: some View {
+        LibraryTabView(
+            store: store, onLaunch: launchTitle, onConnectShelf: connectFromShelf,
+            onConnectHost: { connect($0, preset: .inherit, fromLibrary: true) },
+            showHosts: { touchTab = .hosts })
     }
     #endif
 
