@@ -800,7 +800,8 @@ struct LibraryView: View {
         #else
         let minW: CGFloat = 130
         #endif
-        return [GridItem(.adaptive(minimum: minW), spacing: 18)]
+        // Top-aligned like the shelves: a two-line title must not lift its poster above the row.
+        return [GridItem(.adaptive(minimum: minW), spacing: 18, alignment: .top)]
     }
 
     private func errorState(_ text: String) -> some View {
