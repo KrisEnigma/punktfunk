@@ -46,7 +46,7 @@ data class StreamNote(
  * one nothing outside the app could stop.
  *
  * The minutes are clamped, not trusted: the picker offers 1/5/10/30, but the value is a plain
- * number in a settings document a console or a profile can write, and a zero would end the session
+ * number in a settings document a console or a preset can write, and a zero would end the session
  * the instant it was backgrounded.
  */
 fun keepAliveSpanMs(settings: Settings, isTv: Boolean): Long? {

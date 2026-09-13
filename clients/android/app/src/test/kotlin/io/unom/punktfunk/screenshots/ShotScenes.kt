@@ -94,8 +94,8 @@ import io.unom.punktfunk.HudLine
 import io.unom.punktfunk.StatsOverlay
 import io.unom.punktfunk.StatsVerbosity
 import io.unom.punktfunk.StreamStartBanner
-import io.unom.punktfunk.ProfileEditorFields
-import io.unom.punktfunk.ProfileStore
+import io.unom.punktfunk.PresetEditorFields
+import io.unom.punktfunk.PresetStore
 import io.unom.punktfunk.SettingsOverlay
 import io.unom.punktfunk.SpeedTestPrompt
 import io.unom.punktfunk.SpeedTestPhase
@@ -103,7 +103,7 @@ import io.unom.punktfunk.SpeedTestTarget
 import io.unom.punktfunk.components.HostCard
 import io.unom.punktfunk.components.HostMenuItem
 import io.unom.punktfunk.components.SectionLabel
-import io.unom.punktfunk.newProfile
+import io.unom.punktfunk.newPreset
 import io.unom.punktfunk.models.HostStatus
 
 // The CI screenshot scenes: the REAL app composables, fed embedded mock state, under the forced
@@ -165,7 +165,7 @@ private data class MockHost(
     val name: String,
     val address: String,
     val status: HostStatus,
-    val profile: String? = null,
+    val preset: String? = null,
     val pin: String? = null,
     val accent: Color? = null,
     val online: Boolean = false,
@@ -179,7 +179,7 @@ private val SAVED = listOf(
     MockHost("Office", "192.168.1.50:9777", HostStatus.TOFU),
     MockHost(
         "Living Room PC", "192.168.1.42:9777", HostStatus.PAIRED,
-        profile = "Game", pin = "Work", accent = Color(0xFFFF8A4C), online = true,
+        preset = "Game", pin = "Work", accent = Color(0xFFFF8A4C), online = true,
     ),
 )
 private val DISCOVERED = listOf(
@@ -222,8 +222,8 @@ internal fun HostsScene() {
                     HostCard(
                         h.name, h.address, h.status, online = h.online, enabled = true,
                         onConnect = {}, onForget = {}, onEdit = {},
-                        // The bound profile is a quiet chip: the card says what a tap will do.
-                        profileLabel = h.profile,
+                        // The bound preset is a quiet chip: the card says what a tap will do.
+                        presetLabel = h.preset,
                         accent = h.accent,
                         menuItems = listOf(
                             HostMenuItem("Connect with: Default settings", startsSection = true) {},
@@ -231,7 +231,7 @@ internal fun HostsScene() {
                         ),
                         // One card in this section has a chip, so every card reserves its space —
                         // the shot is here to catch a row that steps.
-                        reserveProfileSlot = true,
+                        reservePresetSlot = true,
                     )
                 }
                 if (h.pin != null) {
@@ -239,9 +239,9 @@ internal fun HostsScene() {
                         HostCard(
                             h.name, h.address, h.status, online = h.online, enabled = true,
                             onConnect = {}, onForget = null,
-                            profileLabel = h.pin, profileProminent = true, accent = h.accent,
+                            presetLabel = h.pin, presetProminent = true, accent = h.accent,
                             menuItems = listOf(HostMenuItem("Unpin card", startsSection = true) {}),
-                            reserveProfileSlot = true,
+                            reservePresetSlot = true,
                         )
                     }
                 }
@@ -302,22 +302,22 @@ internal fun SettingsCategoryScene(category: SettingsCategory) {
 }
 
 /**
- * The same settings surface in a PROFILE's scope: the scope chips with "Game" selected, only
- * profileable rows, every row showing the effective value, and the overridden ones carrying their
+ * The same settings surface in a PRESET's scope: the scope chips with "Game" selected, only
+ * presetable rows, every row showing the effective value, and the overridden ones carrying their
  * marker and reset. One settings UI, two layers — this shot is what proves it stayed one.
  */
 @Composable
-internal fun SettingsProfileScene() {
-    val store = ProfileStore(LocalContext.current)
-    val profile = remember {
-        val p = newProfile("Game").copy(
+internal fun SettingsPresetScene() {
+    val store = PresetStore(LocalContext.current)
+    val preset = remember {
+        val p = newPreset("Game").copy(
             accent = "#FF8A4C",
-            // A representative mix: a resolution and refresh the profile pins, and a codec — the
+            // A representative mix: a resolution and refresh the preset pins, and a codec — the
             // rest of the page keeps following the defaults, visibly unmarked.
             overrides = SettingsOverlay(width = 3840, height = 2160, hz = 120, codec = "h264"),
         )
         store.save(p)
-        store.save(newProfile("Work"))
+        store.save(newPreset("Work"))
         p
     }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -326,13 +326,13 @@ internal fun SettingsProfileScene() {
             onChange = {},
             onBack = {},
             initialCategory = SettingsCategory.Display,
-            initialProfileId = profile.id,
+            initialPresetId = preset.id,
         )
     }
 }
 
 /**
- * The speed test's result, in its most interesting shape: a host bound to a profile that INHERITS
+ * The speed test's result, in its most interesting shape: a host bound to a preset that INHERITS
  * bitrate, so both layers are defensible and both buttons are offered. The note under the numbers
  * is what stops "Apply" from being a write in an unknown direction.
  */
@@ -340,7 +340,7 @@ internal fun SettingsProfileScene() {
 internal fun SpeedTestScene() {
     SpeedTestPrompt(
         hostName = "Living Room PC",
-        target = SpeedTestTarget.Ask(newProfile("Game")),
+        target = SpeedTestTarget.Ask(newPreset("Game")),
         phase = SpeedTestPhase.Done(throughputKbps = 412_000, lossPct = 0.3, recommendedKbps = 288_400),
         onApply = {},
         onDismiss = {},
@@ -348,17 +348,17 @@ internal fun SpeedTestScene() {
 }
 
 /**
- * Creating a profile. Small, but it is the first thing a user meets when they reach for this
+ * Creating a preset. Small, but it is the first thing a user meets when they reach for this
  * feature — and dialogs only get a shot each because a layout slip inside one is invisible from
  * every other scene (this one shipped with the field and its caption touching).
  */
 @Composable
-internal fun NewProfileScene() {
+internal fun NewPresetScene() {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("New profile", style = MaterialTheme.typography.headlineSmall)
+            Text("New preset", style = MaterialTheme.typography.headlineSmall)
             // The dialog's own body, not a rebuild of it — the layout under test is the real one.
-            ProfileEditorFields(
+            PresetEditorFields(
                 name = "Travel",
                 accent = "#60A5FA",
                 duplicate = false,
@@ -367,7 +367,7 @@ internal fun NewProfileScene() {
                 onAccentChange = {},
             )
             Text("Duplicate name", style = MaterialTheme.typography.headlineSmall)
-            ProfileEditorFields(
+            PresetEditorFields(
                 name = "Game",
                 accent = "#FF8A4C",
                 duplicate = true,

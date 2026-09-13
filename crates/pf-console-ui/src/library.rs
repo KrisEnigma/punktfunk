@@ -709,6 +709,9 @@ pub struct LibraryGame {
     pub year: Option<u16>,
     #[serde(default)]
     pub genres: Vec<String>,
+    /// Host play stats, for the Recent and Most played sorts.
+    #[serde(default)]
+    pub stats: Option<pf_client_core::library::GameStats>,
     /// Already up on the host — pick resumes. From `/api/v1/status` via [`LibraryShared::set_running`].
     ///
     /// Host state, not catalog state: not on `GameEntry`, not persisted. A disk shelf cannot
@@ -742,6 +745,12 @@ impl pf_client_core::collate::Collatable for LibraryGame {
     }
     fn is_launcher(&self) -> bool {
         self.launcher
+    }
+    fn last_played_ms(&self) -> u64 {
+        self.stats.map_or(0, |s| s.last_played_unix_ms)
+    }
+    fn play_time_ms(&self) -> u64 {
+        self.stats.map_or(0, |s| s.play_time_ms)
     }
 }
 
@@ -1069,6 +1078,7 @@ fn desktop_tile() -> LibraryGame {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     }
 }
@@ -1468,6 +1478,7 @@ mod tests {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1505,6 +1516,7 @@ mod tests {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1575,6 +1587,7 @@ mod tests {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         }]);
         assert_eq!(shared.status_gen(), 0);
@@ -1613,6 +1626,7 @@ mod tests {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         };
         let shared = LibraryShared::default();
@@ -1655,6 +1669,7 @@ mod tests {
                     developer: None,
                     year: None,
                     genres: Vec::new(),
+                    stats: None,
                     running: false,
                 })
                 .collect(),
@@ -1691,6 +1706,7 @@ mod tests {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: true,
         }]);
         assert_eq!(shared.snapshot().games[0].id, DESKTOP_ID);
@@ -1723,6 +1739,7 @@ mod tests {
                     developer: None,
                     year: None,
                     genres: Vec::new(),
+                    stats: None,
                     running: false,
                 })
                 .collect(),

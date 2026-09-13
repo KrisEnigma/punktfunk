@@ -70,6 +70,30 @@ enum ShotScenes {
             ShotScene(name: "13b-launch-hold-flight", orientation: .landscape, colorScheme: .dark) {
                 AnyView(ShotLaunchHold(flight: true))
             },
+            // Variant galleries: every state of one component on one sheet (ShotGallery.swift).
+            ShotScene(name: "14-gallery-host-cards", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(title: "Host cards", variants: ShotMock.hostCardVariants))
+            },
+            ShotScene(name: "14c-gallery-host-page", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(title: "Host page", variants: ShotMock.hostPageVariants))
+            },
+            ShotScene(name: "14b-gallery-library-tiles", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(
+                    title: "Library tiles", variants: ShotMock.libraryTileVariants, minWidth: 150))
+            },
+            ShotScene(name: "14d-gallery-library-states", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(
+                    title: "Library states", variants: ShotMock.libraryStateVariants))
+            },
+            ShotScene(name: "14e-gallery-speed-test", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(title: "Speed test", variants: ShotMock.speedTestVariants))
+            },
+            ShotScene(name: "15-library-touch", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotLibraryTouch())
+            },
+            ShotScene(name: "16-host-page", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotHostPage())
+            },
         ]
         #if os(iOS) || os(macOS)
         // The gamepad-mode console screens (no tvOS — native focus engine there). Dev-only shots
@@ -77,6 +101,15 @@ enum ShotScenes {
         scenes += [
             ShotScene(name: "06-gamepad-home", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadHome())
+            },
+            // The Library tab with its host filter (iOS) and the Mac's Library row.
+            ShotScene(name: "15f-library-filter", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotLibraryFilter())
+            },
+            // The host page as sections beside a sidebar: the iPad's sheet, the Mac's window.
+            ShotScene(name: "16f-host-sections", orientation: .natural, colorScheme: .dark) {
+                AnyView(HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, handOff: { _ in }))
             },
             ShotScene(name: "07-gamepad-settings", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadSettings())
@@ -117,6 +150,48 @@ enum ShotScenes {
             },
         ]
         #endif
+        #if os(macOS)
+        // The Mac's host window, as a card's ⓘ opens it, some of its sections, and the Library's
+        // Customize popover.
+        scenes += [
+            ShotScene(name: "16b-host-window", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(hostID: ShotMock.battlestationID, store: ShotMock.pageStore))
+            },
+            ShotScene(name: "16e-host-window-presets", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .presets))
+            },
+            ShotScene(name: "15e-customize-mac", orientation: .natural, colorScheme: .dark) {
+                // On material, as the popover draws it: a list fill shows up as a dark slab.
+                AnyView(LibrarySectionsPanel(shotLayout: "").frame(width: 320, height: 250)
+                    .background(.regularMaterial, in: .rect(cornerRadius: 12)))
+            },
+            ShotScene(name: "16c-host-window-connection", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
+                    section: .connection))
+            },
+            ShotScene(name: "16d-host-window-speed-test", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
+                    section: .speedTest))
+            },
+        ]
+        #endif
+        #if os(iOS)
+        // The Library tab with every section filled: Desktops, Recently Played, Favorites,
+        // Launchers and Games.
+        scenes.append(ShotScene(name: "15b-library-sections", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotLibrarySections())
+        })
+        scenes.append(ShotScene(name: "15c-title-details", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTitleDetails())
+        })
+        // One section switched off and one moved, as Customize shows them.
+        scenes.append(ShotScene(name: "15d-library-customize", orientation: .natural, colorScheme: .dark) {
+            AnyView(LibrarySectionsPanel(shotLayout: "desktops,favorites,recent,-launchers,games"))
+        })
+        #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
         })
@@ -137,8 +212,11 @@ enum ShotMock {
     static let editingID = UUID(uuidString: "5B0D1E00-0000-4000-8000-000000000005")!
     static let bedroomID = UUID(uuidString: "5B0D1E00-0000-4000-8000-000000000006")!
 
-    static let hdrProfileID = "a71c4e0d9f22"
-    static let couchProfileID = "3e88b107c4da"
+    static let hdrPresetID = "a71c4e0d9f22"
+    static let couchPresetID = "3e88b107c4da"
+    static let hdrPreset = StreamPreset(name: "4K HDR", id: hdrPresetID, accent: "#8B7BF7")
+    static let couchPreset = StreamPreset(
+        name: "Couch 1080p", id: couchPresetID, accent: "#4FD1A5")
 
     /// The catalog the host cards read their chips and pinned cards from. Seeded once, on the
     /// first store build — `PresetStore` is a singleton, and in shot mode its write-back is
@@ -146,10 +224,7 @@ enum ShotMock {
     static func installPresets() {
         guard !presetsInstalled else { return }
         presetsInstalled = true
-        PresetStore.shared.debugSet([
-            StreamPreset(name: "4K HDR", id: hdrProfileID, accent: "#8B7BF7"),
-            StreamPreset(name: "Couch 1080p", id: couchProfileID, accent: "#4FD1A5"),
-        ])
+        PresetStore.shared.debugSet([hdrPreset, couchPreset])
     }
 
     private static var presetsInstalled = false
@@ -168,7 +243,7 @@ enum ShotMock {
             StoredHost(
                 id: battlestationID, name: "Battlestation", address: "192.168.1.20", port: 9777,
                 pinnedSHA256: fingerprint, lastConnected: Date().addingTimeInterval(-420),
-                macAddresses: ["a4:b1:c2:d3:e4:f5"], profileID: hdrProfileID,
+                macAddresses: ["a4:b1:c2:d3:e4:f5"], presetID: hdrPresetID,
                 osChain: "windows/11"),
             StoredHost(
                 id: livingRoomID, name: "Living Room PC", address: "192.168.1.41", port: 9777,
@@ -177,7 +252,7 @@ enum ShotMock {
             StoredHost(
                 id: officeID, name: "Office NUC", address: "192.168.1.33", port: 9777,
                 pinnedSHA256: hostFingerprint(4), lastConnected: Date().addingTimeInterval(-259_200),
-                profileID: couchProfileID, osChain: "linux/ubuntu"),
+                presetID: couchPresetID, osChain: "linux/ubuntu"),
             StoredHost(
                 id: workshopID, name: "Workshop", address: "10.0.0.7", port: 9777,
                 pinnedSHA256: hostFingerprint(2), macAddresses: ["de:ad:be:ef:00:07"],
@@ -248,17 +323,26 @@ enum ShotMock {
     /// (drawn at capture time), so the shot stays offline; the Steam launcher entry stays artless
     /// by design and renders its brand mark.
     static let games: [GameEntry] = {
+        // Relative to the capture, so the Recently Played captions read the same every run.
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        let hour: UInt64 = 3_600_000
         let json = """
         [
           {"id": "custom:aurora", "store": "custom", "title": "Aurora Drift",
            "platform": "PS3", "release_year": 2009, "developer": "Nine Lanterns",
-           "genres": ["Racing"], "art": {"portrait": "shot://art/aurora"}},
+           "genres": ["Racing"], "art": {"portrait": "shot://art/aurora"},
+           "stats": {"last_played_unix_ms": \(now - 50 * hour), "play_time_ms": 9000000,
+                     "last_run_ms": 1800000, "launch_count": 6}},
           {"id": "steam:starfall", "store": "steam", "title": "Starfall Vale",
            "platform": "PC", "release_year": 2024, "developer": "Meridian Foundry",
            "genres": ["Action", "Adventure"],
-           "art": {"portrait": "shot://art/starfall"}},
+           "art": {"portrait": "shot://art/starfall"},
+           "stats": {"last_played_unix_ms": \(now - 2 * hour), "play_time_ms": 50400000,
+                     "last_run_ms": 5400000, "launch_count": 31}},
           {"id": "heroic:neon", "store": "heroic", "title": "Neon Circuit",
-           "platform": "PC", "art": {"portrait": "shot://art/neon"}},
+           "platform": "PC", "art": {"portrait": "shot://art/neon"},
+           "stats": {"last_played_unix_ms": \(now - 21 * 24 * hour), "play_time_ms": 2100000,
+                     "last_run_ms": 2100000, "launch_count": 2}},
           {"id": "gog:ember", "store": "gog", "title": "Ember Peaks",
            "art": {"portrait": "shot://art/ember"}},
           {"id": "steam:launcher", "store": "steam", "title": "Steam", "art": {},

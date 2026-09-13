@@ -9,7 +9,7 @@
 //
 // UP is the gesture because the carousel is horizontal — left/right are spoken for and up is free —
 // and because the desktop console and the Android console already do exactly this, so the three are
-// learned once. A pinned profile card offers only Unpin: it is a shortcut, not a second host, and
+// learned once. A pinned preset card offers only Unpin: it is a shortcut, not a second host, and
 // offering to remove the host from it would blur precisely the distinction a pin exists to draw.
 //
 // Vocabulary note: this screen says "Forget pairing" and "Remove host" where the desktop console
@@ -29,12 +29,12 @@ import SwiftUI
 struct HostOptionsTarget: Identifiable {
     let host: StoredHost
     /// Non-nil ⇒ a pinned preset card rather than the host's own tile.
-    var profile: StreamPreset?
+    var preset: StreamPreset?
 
     /// Keyed on the CARD, not the host: a host and each of its pinned cards open different menus,
     /// and sharing an id would let one stand in for another mid-transition (the same rule
     /// `GamepadScreen.library` follows).
-    var id: String { "\(host.id.uuidString)-\(profile?.id ?? "")" }
+    var id: String { "\(host.id.uuidString)-\(preset?.id ?? "")" }
 }
 
 struct GamepadHostOptionsView: View {
@@ -391,7 +391,7 @@ struct GamepadHostOptionsView: View {
             performClose()
         case .copyLink:
             LinkClipboard.copy(
-                DeepLink.forHost(host, profile: pinnedPreset?.id).urlString)
+                DeepLink.forHost(host, preset: pinnedPreset?.id).urlString)
             // No toast machinery on this surface — the row says so itself, which is the same
             // acknowledgement in the place the user is already looking.
             withAnimation(.smooth(duration: 0.2)) { copied = true }

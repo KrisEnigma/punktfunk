@@ -84,7 +84,7 @@ import kotlinx.coroutines.withContext
 
 /**
  * The immersive stream. Everything it reads about the session comes from [session] — the settings
- * the connect actually resolved (globals, or a profile's overrides on top of them) and the HOST's
+ * the connect actually resolved (globals, or a preset's overrides on top of them) and the HOST's
  * clipboard decision — rather than from a fresh `SettingsStore` load, which could disagree with
  * the connect that produced this handle.
  */
@@ -257,7 +257,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                     NativeBridge.nativeVideoStatsLines(
                         handle, ui.statsVerbosity.ordinal, initialSettings.advancedStats,
                         display?.refreshRate ?: 0f, display?.mode?.refreshRate ?: 0f,
-                        session.profileName,
+                        session.presetName,
                     ),
                 )
             }

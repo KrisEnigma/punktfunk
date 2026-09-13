@@ -45,11 +45,11 @@ fn host_action_label(a: &pf_client_core::host_actions::ActionInfo) -> String {
 /// Apple client's add/edit sheet. A menu item per field read as clutter and buried the ones
 /// that matter.
 const MENU_EDIT: &str = "Edit\u{2026}";
-/// The per-profile families nest in submenus. Submenu LEAVES are what the shared click
+/// The per-preset families nest in submenus. Submenu LEAVES are what the shared click
 /// callback reports (the backend wires clicks recursively and hands back the leaf text):
-/// "Connect with"'s leaves are the bare profile names + [`SUB_WITH_DEFAULT`]; "Pin tiles"'s
+/// "Connect with"'s leaves are the bare preset names + [`SUB_WITH_DEFAULT`]; "Pin tiles"'s
 /// leaves keep a verb prefix, which is what tells the two families apart in the callback.
-/// (A profile literally named like a fixed entry, e.g. "Connect", is shadowed by it — the
+/// (A preset literally named like a fixed entry, e.g. "Connect", is shadowed by it — the
 /// same last-wins rule the scope dropdown documents.)
 const SUB_WITH: &str = "Connect with";
 const SUB_WITH_DEFAULT: &str = "Default settings";
@@ -137,7 +137,7 @@ pub(crate) struct HostsProps {
     /// the pointer enter/exit handlers bypass the reconciler flush, like the flyout clicks above.
     pub(crate) hover: Option<String>,
     /// Bumped when a menu action changes what the page should SHOW without changing any
-    /// state it already reads — pinning/unpinning a profile tile, which rewrites the
+    /// state it already reads — pinning/unpinning a preset tile, which rewrites the
     /// known-hosts store behind the tiles (the hosts-page mirror of `settings_rev`).
     pub(crate) hosts_rev: u64,
     pub(crate) set_forget: AsyncSetState<Option<HostRef>>,
@@ -249,20 +249,20 @@ fn status_row(online: Option<bool>, badge: Option<(&str, Pill)>) -> Element {
     status_row_with(online, badge, None)
 }
 
-/// [`status_row`] plus the profile: what a plain click on THIS tile will use — its own
-/// profile on a pinned tile, the host's binding on the primary one. A binding whose profile
+/// [`status_row`] plus the preset: what a plain click on THIS tile will use — its own
+/// preset on a pinned tile, the host's binding on the primary one. A binding whose preset
 /// was deleted shows nothing and resolves as the defaults, which is what will happen on
 /// connect (design §6).
 ///
 /// The row is METADATA, not a badge shelf — three chips side by side read as noise. Paired
 /// is the normal resting state of a saved host, so it earns NO chip at all; a chip appears
 /// only where it carries a decision ("Trusted" = TOFU without pairing, "PIN"/"Open" on a
-/// discovered host). The profile is a small dot in the profile's own colour plus its name
+/// discovered host). The preset is a small dot in the preset's own colour plus its name
 /// in plain caption text — recognisable at a glance without competing with the host name.
 fn status_row_with(
     online: Option<bool>,
     badge: Option<(&str, Pill)>,
-    profile: Option<(&str, Option<String>)>,
+    preset: Option<(&str, Option<String>)>,
 ) -> Element {
     let mut items: Vec<Element> = Vec::new();
     // No OS mark here any more: it moved up into the avatar, where it is the tile's leading
@@ -288,8 +288,8 @@ fn status_row_with(
                 .into(),
         );
     }
-    if let Some((name, accent)) = profile {
-        // The profile's own colour where it has one, a neutral disc where it doesn't — the
+    if let Some((name, accent)) = preset {
+        // The preset's own colour where it has one, a neutral disc where it doesn't — the
         // palette stays opt-in, and an unparsable value falls back rather than being trusted.
         let colour = accent
             .as_deref()
@@ -389,22 +389,22 @@ fn edit_editor(
             se.call(None);
         }
     };
-    // The profile binding: what a plain click on this tile will use. It commits on change
+    // The preset binding: what a plain click on this tile will use. It commits on change
     // rather than at Save — it is a picker with no draft ref, and the rest of the sheet's
     // fields are text boxes that genuinely need one.
-    let profile_picker = {
-        let catalog = pf_client_core::profiles::ProfilesFile::load();
+    let preset_picker = {
+        let catalog = pf_client_core::presets::PresetsFile::load();
         let known = KnownHosts::load();
         let stored = who
             .index(&known)
-            .and_then(|i| known.hosts[i].profile_id.clone());
+            .and_then(|i| known.hosts[i].preset_id.clone());
         let mut names = vec!["Default settings".to_string()];
         let mut ids: Vec<String> = vec![String::new()];
-        for p in &catalog.profiles {
+        for p in &catalog.presets {
             names.push(p.name.clone());
             ids.push(p.id.clone());
         }
-        // A binding whose profile is gone reads as Default settings — the same "dangling
+        // A binding whose preset is gone reads as Default settings — the same "dangling
         // resolves as none" rule the connect path follows — and is cleaned up on the next pick.
         let current = stored
             .as_ref()
@@ -412,7 +412,7 @@ fn edit_editor(
             .unwrap_or(0);
         let who = who.clone();
         ComboBox::new(names)
-            .header("Profile")
+            .header("Preset")
             .selected_index(current as i32)
             .on_selection_changed(move |i: i32| {
                 let Some(id) = ids.get(i.max(0) as usize) else {
@@ -421,7 +421,7 @@ fn edit_editor(
                 let mut known = KnownHosts::load();
                 let target = who.index(&known);
                 if let Some(h) = target.and_then(|i| known.hosts.get_mut(i)) {
-                    h.profile_id = (!id.is_empty()).then(|| id.clone());
+                    h.preset_id = (!id.is_empty()).then(|| id.clone());
                     let _ = known.save();
                 }
             })
@@ -472,7 +472,7 @@ fn edit_editor(
                 mac_draft,
             ),
             vstack((
-                profile_picker,
+                preset_picker,
                 text_block(
                     "The settings a plain click on this host uses. \u{201c}Connect with\u{201d} \
                      in the tile\u{2019}s menu overrides it for one session without changing it.",
@@ -545,7 +545,7 @@ fn edit_editor(
 }
 
 /// A saved host's plain dial: its fingerprint is already pinned, so this is the silent connect
-/// a tile's click makes. `profile: None` honours the host's own binding.
+/// a tile's click makes. `preset: None` honours the host's own binding.
 ///
 /// Free rather than inline in the tile loop so the shell's start screen can build one before
 /// any tile exists.
@@ -558,7 +558,7 @@ pub(crate) fn saved_target(k: &pf_client_core::trust::KnownHost) -> Target {
         pair_optional: false,
         mac: k.mac.clone(),
         mgmt_port: k.mgmt_port,
-        profile: None,
+        preset: None,
         launch: None,
     }
 }
@@ -753,9 +753,9 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
         body.push(section("SAVED HOSTS"));
         let mut tiles: Vec<Element> = Vec::new();
         // One catalog read per render, shared by every tile's menu and chip.
-        let profiles: Vec<(String, String, Option<String>)> =
-            pf_client_core::profiles::ProfilesFile::load()
-                .profiles
+        let presets: Vec<(String, String, Option<String>)> =
+            pf_client_core::presets::PresetsFile::load()
+                .presets
                 .into_iter()
                 .map(|p| (p.id, p.name, p.accent))
                 .collect();
@@ -810,10 +810,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 let click_actions = host_actions.clone();
                 let (sf, sr) = (set_forget.clone(), set_rename.clone());
                 let who = HostRef::of(k);
-                let menu_profiles = profiles.clone();
-                let pinned_now = k.pinned_profiles.clone();
+                let menu_presets = presets.clone();
+                let pinned_now = k.pinned_presets.clone();
                 let (hosts_rev, set_hosts_rev) = (props.hosts_rev, props.set_hosts_rev.clone());
-                let (link_host, link_profile) = (k.clone(), None::<String>);
+                let (link_host, link_preset) = (k.clone(), None::<String>);
                 let shortcut_host = k.clone();
                 let record_id = k.id.clone();
                 let is_default = record_id.is_some() && settings_default == record_id;
@@ -825,14 +825,14 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                     .menu_flyout({
                         // Kept short deliberately, and in sections. It had grown into a list of
                         // everything, with the entries you actually reach for (connect, library,
-                        // speed) buried in list management. The per-profile families nest in
+                        // speed) buried in list management. The per-preset families nest in
                         // SUBMENUS — one "Connect with" and one "Pin tiles" — so the top level
                         // stays a fixed handful whatever the catalog grows to.
                         let mut items = vec![menu_item(MENU_CONNECT)];
                         // One-off connects: "Connect with" NEVER rebinds the host. Submenu
                         // leaves report their own text, so the leaf names stay bare.
-                        if !profiles.is_empty() {
-                            let mut leaves: Vec<MenuItemDef> = profiles
+                        if !presets.is_empty() {
+                            let mut leaves: Vec<MenuItemDef> = presets
                                 .iter()
                                 .map(|(_, name, _)| menu_item(name.clone()))
                                 .collect();
@@ -866,12 +866,12 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                         items.push(menu_separator());
                         items.push(menu_item(MENU_COPY_LINK));
                         items.push(menu_item(MENU_SHORTCUT));
-                        // Pin/unpin a profile's one-click tile, beside the other tile-shaped
+                        // Pin/unpin a preset's one-click tile, beside the other tile-shaped
                         // shortcuts. The verb prefixes stay on the leaves: "Connect with"'s
                         // leaves are bare names, and the shared click callback only gets the
                         // leaf text — the prefix is what keeps the two families apart.
-                        if !profiles.is_empty() {
-                            let leaves: Vec<MenuItemDef> = profiles
+                        if !presets.is_empty() {
+                            let leaves: Vec<MenuItemDef> = presets
                                 .iter()
                                 .map(|(id, name, _)| {
                                     let pinned = pinned_now.iter().any(|x| x == id);
@@ -959,7 +959,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                                     set_status.call(msg);
                                 });
                         }
-                        // The profile items are dynamic, so they are matched by prefix before
+                        // The preset items are dynamic, so they are matched by prefix before
                         // the fixed ones.
                         _ if item.starts_with(MENU_PIN) || item.starts_with(MENU_UNPIN) => {
                             let (on, name) = if let Some(n) = item.strip_prefix(MENU_PIN) {
@@ -967,7 +967,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                             } else {
                                 (false, item.trim_start_matches(MENU_UNPIN))
                             };
-                            let Some((id, ..)) = menu_profiles.iter().find(|(_, n, _)| n == name)
+                            let Some((id, ..)) = menu_presets.iter().find(|(_, n, _)| n == name)
                             else {
                                 return;
                             };
@@ -975,9 +975,9 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                             let mut known = KnownHosts::load();
                             let target = who.index(&known);
                             if let Some(h) = target.and_then(|i| known.hosts.get_mut(i)) {
-                                h.pinned_profiles.retain(|x| x != id);
+                                h.pinned_presets.retain(|x| x != id);
                                 if on {
-                                    h.pinned_profiles.push(id.clone());
+                                    h.pinned_presets.push(id.clone());
                                 }
                                 if let Err(e) = known.save() {
                                     tracing::warn!(error = %format!("{e:#}"), "saving a pin");
@@ -1004,7 +1004,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                             let url = pf_client_core::deeplink::DeepLink::for_host(
                                 &link_host,
                                 None,
-                                link_profile.as_deref(),
+                                link_preset.as_deref(),
                             )
                             .to_url();
                             pf_client_core::clipboard::set_text(&url);
@@ -1088,21 +1088,21 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                             svc.set_status.call(String::new());
                             set_hosts_rev.call(hosts_rev + 1);
                         }
-                        // "Connect with"'s submenu leaves: a bare profile name, or
+                        // "Connect with"'s submenu leaves: a bare preset name, or
                         // SUB_WITH_DEFAULT. `Some("")` — not `None` — so Default settings
                         // really does override a bound host for this one connect.
                         other => {
-                            let profile_id = if other == SUB_WITH_DEFAULT {
+                            let preset_id = if other == SUB_WITH_DEFAULT {
                                 Some(String::new())
                             } else {
-                                menu_profiles
+                                menu_presets
                                     .iter()
                                     .find(|(_, n, _)| n == other)
                                     .map(|(id, _, _)| id.clone())
                             };
-                            if let Some(id) = profile_id {
+                            if let Some(id) = preset_id {
                                 let mut target = target.clone();
-                                target.profile = Some(id);
+                                target.preset = Some(id);
                                 initiate(&svc.ctx, target, &svc.set_screen, &svc.set_status)
                             }
                         }
@@ -1120,11 +1120,11 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                     Some(online),
                     // Paired is the resting state — no chip; TOFU-only trust is worth one.
                     (!k.paired).then_some(("Trusted", Pill::Info)),
-                    // The dot carries the profile's own colour where it has one —
+                    // The dot carries the preset's own colour where it has one —
                     // that is what makes two bound hosts tell apart at a glance.
-                    k.profile_id
+                    k.preset_id
                         .as_ref()
-                        .and_then(|id| profiles.iter().find(|(pid, _, _)| pid == id))
+                        .and_then(|id| presets.iter().find(|(pid, _, _)| pid == id))
                         .map(|(_, name, accent)| (name.as_str(), accent.clone())),
                 ),
                 Some(menu),
@@ -1141,28 +1141,23 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 })),
             ));
 
-            // …then this host's pinned host+profile tiles, in the order they were pinned
-            // (design §5.2a). They share the host's live status because they read the same
-            // record, and a pin whose profile is gone simply doesn't render. Their menu is
-            // deliberately short: a pinned tile is a shortcut, not a second host, so it carries
-            // only what STARTS it (the library — this tile's connect with a title picked first,
-            // which is why the grid it opens launches with the tile's profile), the link that
-            // reproduces it, and the way to remove it. Everything that configures the machine —
-            // pair, speed test, wake, edit, forget, and pinning itself — stays on the primary
-            // tile's menu, the one place you decide it.
-            for id in &k.pinned_profiles {
-                let Some((id, name, accent)) = profiles.iter().find(|(pid, ..)| pid == id) else {
+            // …then this host's pinned host+preset tiles, in pin order (design §5.2a). They read
+            // the host's live record, and a pin whose preset is gone does not render. A pinned
+            // tile is a shortcut: its menu starts it (the library opens with its preset), copies
+            // its link or unpins it. Everything that configures the host stays on the primary.
+            for id in &k.pinned_presets {
+                let Some((id, name, accent)) = presets.iter().find(|(pid, ..)| pid == id) else {
                     continue;
                 };
                 let (ctx3, ss3, st3) = (ctx.clone(), set_screen.clone(), set_status.clone());
                 let mut pinned_target = pinned_base.clone();
-                pinned_target.profile = Some(id.clone());
+                pinned_target.preset = Some(id.clone());
                 let pinned_menu = {
                     let (svc, target) = (props.svc.clone(), pinned_target.clone());
                     let (unpin_who, pin_id) = (HostRef::of(k), id.clone());
                     let (hosts_rev, set_hosts_rev) = (props.hosts_rev, props.set_hosts_rev.clone());
                     let link_host = k.clone();
-                    let link_profile = id.clone();
+                    let link_preset = id.clone();
                     let unpin_label = format!("{MENU_UNPIN}{name}");
                     let unpin_item = unpin_label.clone();
                     button("")
@@ -1186,7 +1181,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                             MENU_LIBRARY => {
                                 // The shared target IS what the library page launches through, so
                                 // parking THIS tile's target here is what makes its grid launch
-                                // with the pinned profile.
+                                // with the pinned preset.
                                 *svc.ctx.shared.target.lock().unwrap() = target.clone();
                                 super::library::start_fetch(&svc.ctx, &svc.set_library);
                                 svc.set_screen.call(Screen::Library);
@@ -1195,7 +1190,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                                 let url = pf_client_core::deeplink::DeepLink::for_host(
                                     &link_host,
                                     None,
-                                    Some(link_profile.as_str()),
+                                    Some(link_preset.as_str()),
                                 )
                                 .to_url();
                                 pf_client_core::clipboard::set_text(&url);
@@ -1205,7 +1200,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                                 let mut known = KnownHosts::load();
                                 let target = unpin_who.index(&known);
                                 if let Some(h) = target.and_then(|i| known.hosts.get_mut(i)) {
-                                    h.pinned_profiles.retain(|x| x != &pin_id);
+                                    h.pinned_presets.retain(|x| x != &pin_id);
                                     if let Err(e) = known.save() {
                                         tracing::warn!(
                                             error = %format!("{e:#}"), "saving a pin"
@@ -1278,7 +1273,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 pair_optional: h.pair == "optional",
                 mac: h.mac.clone(),
                 mgmt_port: h.mgmt_port,
-                profile: None,
+                preset: None,
                 launch: None,
             };
             let (ctx2, ss, st) = (ctx.clone(), set_screen.clone(), set_status.clone());
@@ -1301,14 +1296,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
         body.push(tile_grid(tiles, cols, TILE_GAP));
     }
 
-    // Forget confirmation, armed while `forget` holds a pending host. ALWAYS MOUNTED with
-    // `is_open` doing the arming, and in a STABLE trailing layer rather than in `body`
-    // (whose child list shifts with discovery): unmounting — or positionally re-pairing —
-    // a ContentDialog trips the reactor backend's phantom-child bookkeeping (the handle
-    // dies before `remove_child` runs, the dialog stops being recognised as phantom, and a
-    // visual child that never existed gets RemoveAt()'d — E_BOUNDS panic; see the
-    // delete-profile dialog in settings.rs). Confirmed first, since it's destructive and
-    // re-establishing trust needs a fresh pairing.
+    // Forget confirmation: ALWAYS MOUNTED (`is_open` arms it) in a stable trailing layer, not
+    // in `body`, whose children shift with discovery. Unmounting or re-pairing a ContentDialog
+    // trips the reactor's phantom-child bookkeeping into an E_BOUNDS panic (as the delete-preset
+    // dialog in settings.rs shows). Confirmed first: undoing a forget needs a fresh pairing.
     let forget_confirm: Element = {
         let sf = set_forget.clone();
         let pending = forget.clone();
@@ -1392,7 +1383,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                     // A host that moved its mgmt port AND is never visible on mDNS still needs the
                     // host to announce the port in-band — see the note in `Target::mgmt_port`.
                     mgmt_port: None,
-                    profile: None,
+                    preset: None,
                     launch: None,
                 },
                 &ss,

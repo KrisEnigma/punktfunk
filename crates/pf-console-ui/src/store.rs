@@ -6,7 +6,7 @@
 //! (`pf_client_core::trust` JSON). Android is [`SnapshotStore`] — the host
 //! pushes a snapshot in and polls `saved_gen` out.
 //!
-//! Profiles are `(id, name)` in display order. The console lists and pins;
+//! Presets are `(id, name)` in display order. The console lists and pins;
 //! it does not create. Design: `design/client-settings-profiles.md`.
 
 use pf_client_core::trust::{KnownHosts, Settings};
@@ -18,7 +18,7 @@ pub trait SettingsStore: Send + Sync {
     /// Failures are the store's to log. The shell has already applied the change
     /// in memory and shows it as done.
     fn save(&self, settings: &Settings);
-    fn profiles(&self) -> Vec<(String, String)>;
+    fn presets(&self) -> Vec<(String, String)>;
     /// The store behind the carousel: copy-link reads a record's id from it, and the
     /// start-screen policy needs `paired` on every record, not only the drawn ones.
     fn known_hosts(&self) -> KnownHosts;
@@ -39,9 +39,9 @@ impl SettingsStore for FileSettingsStore {
         settings.save();
     }
 
-    fn profiles(&self) -> Vec<(String, String)> {
-        pf_client_core::profiles::ProfilesFile::load()
-            .profiles
+    fn presets(&self) -> Vec<(String, String)> {
+        pf_client_core::presets::PresetsFile::load()
+            .presets
             .into_iter()
             .map(|p| (p.id, p.name))
             .collect()
@@ -82,18 +82,18 @@ pub struct SnapshotStore {
 
 struct SnapshotInner {
     settings: Settings,
-    profiles: Vec<(String, String)>,
+    presets: Vec<(String, String)>,
     known_hosts: KnownHosts,
     /// Bumped on every `save`. The host compares against what it last persisted.
     saved_gen: u64,
 }
 
 impl SnapshotStore {
-    pub fn new(settings: Settings, profiles: Vec<(String, String)>) -> SnapshotStore {
+    pub fn new(settings: Settings, presets: Vec<(String, String)>) -> SnapshotStore {
         SnapshotStore {
             inner: std::sync::Mutex::new(SnapshotInner {
                 settings,
-                profiles,
+                presets,
                 known_hosts: KnownHosts::default(),
                 saved_gen: 0,
             }),
@@ -105,8 +105,8 @@ impl SnapshotStore {
         self.inner.lock().unwrap().settings = settings;
     }
 
-    pub fn set_profiles(&self, profiles: Vec<(String, String)>) {
-        self.inner.lock().unwrap().profiles = profiles;
+    pub fn set_presets(&self, presets: Vec<(String, String)>) {
+        self.inner.lock().unwrap().presets = presets;
     }
 
     pub fn set_known_hosts(&self, hosts: KnownHosts) {
@@ -136,8 +136,8 @@ impl SettingsStore for SnapshotStore {
         g.saved_gen += 1;
     }
 
-    fn profiles(&self) -> Vec<(String, String)> {
-        self.inner.lock().unwrap().profiles.clone()
+    fn presets(&self) -> Vec<(String, String)> {
+        self.inner.lock().unwrap().presets.clone()
     }
 
     fn known_hosts(&self) -> KnownHosts {
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(after.ui_palette, "mint");
         assert_eq!(generation, 1);
         assert_eq!(
-            store.profiles(),
+            store.presets(),
             vec![("p1".to_string(), "Work".to_string())]
         );
         store.set(Settings::default());

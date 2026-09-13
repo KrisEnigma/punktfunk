@@ -152,7 +152,7 @@ final class LibraryCollationTests: XCTestCase {
         XCTAssertEqual(LibrarySortKey(stored: "something-newer"), .hostOrder)
         XCTAssertEqual(LibrarySortKey(stored: ""), .hostOrder)
         XCTAssertEqual(LibrarySortKey(stored: nil), .hostOrder)
-        XCTAssertEqual(LibrarySortKey.all.map(\.stored), ["host", "title", "platform", "store"])
+        XCTAssertEqual(LibrarySortKey.all.map(\.stored), ["host", "title", "platform", "store", "recent", "playtime"])
 
         XCTAssertEqual(LibraryArrangement(stored: "grid"), .grid)
         XCTAssertEqual(LibraryArrangement(stored: "shelf"), .shelf)
@@ -245,7 +245,7 @@ final class LibraryCollationTests: XCTestCase {
     func testVectorsMatchTheSharedFile() throws {
         let data = try Data(contentsOf: Self.vectorFileURL)
         let file = try JSONDecoder().decode(VectorFile.self, from: data)
-        XCTAssertEqual(file.version, 1, "bump the reader when the file's version moves")
+        XCTAssertEqual(file.version, 2, "bump the reader when the file's version moves")
         let games = file.library
         // The library array is the host wire shape, so the real model decodes it — including
         // `platform`, which is the field this whole feature hangs on.

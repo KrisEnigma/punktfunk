@@ -3,8 +3,8 @@
 //! One row per setting, grouped by [`TABS`]. Left/right steps the focused value
 //! (clamped); A cycles wrapping; L1/R1 change section; B closes. Every change
 //! writes the store immediately so desktop shells round-trip the same file.
-//! Each tab remembers its cursor. Profiles is built from the catalog at render
-//! time — the console never creates or edits profiles.
+//! Each tab remembers its cursor. Presets is built from the catalog at render
+//! time — the console never creates or edits presets.
 //!
 //! Tab names match `clients/shared/console-vectors.json`. Platform split:
 //! [`row_on`]. Availability this frame: [`row_applies`].
@@ -26,10 +26,10 @@ use skia_safe::{Canvas, Rect};
 /// churn between frames, so an index would act on the wrong row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowId {
-    /// Index into [`SettingsScreen::profiles`]. Activate opens pin-to-hosts;
-    /// the console never edits a profile.
-    Profile(usize),
-    NoProfiles,
+    /// Index into [`SettingsScreen::presets`]. Activate opens pin-to-hosts;
+    /// the console never edits a preset.
+    Preset(usize),
+    NoPresets,
     Resolution,
     Refresh,
     RenderScale,
@@ -178,7 +178,7 @@ fn toggle_extra(
     Some(())
 }
 
-// Tab names match Apple/Android (`console-vectors.json`). Profiles is empty here:
+// Tab names match Apple/Android (`console-vectors.json`). Presets is empty here:
 // its rows come from the catalog. Device pickers stay on the desktop dialogs.
 const TABS: [(&str, &[RowId]); 7] = [
     (
@@ -264,11 +264,11 @@ const TABS: [(&str, &[RowId]); 7] = [
             RowId::Licenses,
         ],
     ),
-    ("Profiles", &[]),
+    ("Presets", &[]),
 ];
 
-/// Trailing Profiles tab — catalog-built, not [`TABS`] rows.
-const PROFILES_TAB: usize = TABS.len() - 1;
+/// Trailing Presets tab — catalog-built, not [`TABS`] rows.
+const PRESETS_TAB: usize = TABS.len() - 1;
 
 /// Strip length for the shell's raster walk. `cfg(test)`: a shipping build
 /// would warn it dead, and this crate treats warnings as errors.
@@ -366,7 +366,7 @@ const DECODERS: [(&str, &str); 4] = [
     ("software", "Software"),
 ];
 const AUDIO: [(u8, &str); 3] = [(2, "Stereo"), (6, "5.1"), (8, "7.1")];
-/// Shared `present_priority` key — one profile reads the same on every client.
+/// Shared `present_priority` key — one preset reads the same on every client.
 const PRESENT_PRIORITIES: [(&str, &str); 2] =
     [("latency", "Lowest latency"), ("smooth", "Smoothness")];
 /// Depth in frames. `0` = Automatic, which resolves to 2.
@@ -399,9 +399,9 @@ pub(crate) struct SettingsScreen {
     tab: usize,
     /// Per-tab cursor so a detour does not reset the one you left.
     tab_cursors: [usize; TABS.len()],
-    /// `(id, name)` loaded once. The console cannot create profiles, so this is
+    /// `(id, name)` loaded once. The console cannot create presets, so this is
     /// stable for the screen's lifetime.
-    profiles: Vec<(String, String)>,
+    presets: Vec<(String, String)>,
     /// D-pad focus on the strip. TV remotes have no shoulders and no Tab key.
     strip_focus: bool,
     /// Typed Mbps while Y has the bitrate field open. Y, not A, so A still cycles.
@@ -412,16 +412,16 @@ pub(crate) struct SettingsScreen {
 
 impl SettingsScreen {
     pub(crate) fn new(store: &dyn crate::store::SettingsStore) -> SettingsScreen {
-        Self::with_profiles(store.profiles())
+        Self::with_presets(store.presets())
     }
 
-    fn with_profiles(profiles: Vec<(String, String)>) -> SettingsScreen {
+    fn with_presets(presets: Vec<(String, String)>) -> SettingsScreen {
         SettingsScreen {
             list: MenuList::new(),
             strip: TabStrip::new(),
             tab: 0,
             tab_cursors: [0; TABS.len()],
-            profiles,
+            presets,
             strip_focus: false,
             custom_bitrate: None,
             keyboard: Keyboard::new(),
@@ -526,9 +526,9 @@ impl SettingsScreen {
         }
     }
 
-    /// Filtered by [`row_on`] / [`row_applies`]. Profiles comes from the catalog.
+    /// Filtered by [`row_on`] / [`row_applies`]. Presets comes from the catalog.
     fn row_ids(&self, ctx: &Ctx) -> Vec<RowId> {
-        if self.tab != PROFILES_TAB {
+        if self.tab != PRESETS_TAB {
             return TABS[self.tab]
                 .1
                 .iter()
@@ -536,10 +536,10 @@ impl SettingsScreen {
                 .filter(|id| row_on(*id, ctx.platform) && row_applies(*id, ctx))
                 .collect();
         }
-        if self.profiles.is_empty() {
-            vec![RowId::NoProfiles]
+        if self.presets.is_empty() {
+            vec![RowId::NoPresets]
         } else {
-            (0..self.profiles.len()).map(RowId::Profile).collect()
+            (0..self.presets.len()).map(RowId::Preset).collect()
         }
     }
 
@@ -574,7 +574,7 @@ impl SettingsScreen {
         }
         self.tab_cursors[self.tab] = self.list.cursor;
         self.tab = tab;
-        // Remembered cursor can outlive a shorter tab (Profiles catalog, smoothness buffer).
+        // Remembered cursor can outlive a shorter tab (Presets catalog, smoothness buffer).
         let len = self.row_ids(ctx).len();
         self.list
             .jump_to(self.tab_cursors[self.tab].min(len.saturating_sub(1)));
@@ -692,12 +692,12 @@ impl SettingsScreen {
         let Some(&focused) = ids.get(self.list.cursor) else {
             return pulse;
         };
-        // Profiles navigate; they must not hit the settings save path.
+        // Presets navigate; they must not hit the settings save path.
         match focused {
-            RowId::Profile(i) => {
+            RowId::Preset(i) => {
                 return match msg {
                     ListMsg::Activate => {
-                        let (id, name) = self.profiles[i].clone();
+                        let (id, name) = self.presets[i].clone();
                         fx.push(Screen::PinHosts(super::pin_hosts::PinHostsScreen::new(
                             id, name,
                         )));
@@ -707,7 +707,7 @@ impl SettingsScreen {
                     ListMsg::None => pulse,
                 };
             }
-            RowId::NoProfiles => {
+            RowId::NoPresets => {
                 return match msg {
                     ListMsg::Adjust(_) | ListMsg::Activate => Some(MenuPulse::Boundary),
                     ListMsg::None => pulse,
@@ -788,7 +788,7 @@ impl SettingsScreen {
         let row = row_spec(
             *self.row_ids(ctx).get(self.list.cursor)?,
             ctx,
-            &self.profiles,
+            &self.presets,
         );
         Some(match row.value {
             Some(value) => format!("{}, {}", row.label, value),
@@ -822,11 +822,11 @@ impl SettingsScreen {
         let ids = self.row_ids(ctx);
         let mut hints = vec![Hint::new(HintKey::Shoulders, "Section")];
         hints.extend(match ids.get(self.list.cursor) {
-            Some(RowId::Profile(_)) => vec![
+            Some(RowId::Preset(_)) => vec![
                 Hint::new(HintKey::Confirm, "Pin to hosts…"),
                 Hint::new(HintKey::Back, "Done"),
             ],
-            Some(RowId::NoProfiles) | None => vec![Hint::new(HintKey::Back, "Done")],
+            Some(RowId::NoPresets) | None => vec![Hint::new(HintKey::Back, "Done")],
             Some(RowId::Controllers | RowId::Licenses) => vec![
                 Hint::new(HintKey::Confirm, "Open"),
                 Hint::new(HintKey::Back, "Done"),
@@ -890,7 +890,7 @@ impl SettingsScreen {
         self.clamp_cursor(ids.len());
         let mut rows: Vec<RowSpec> = ids
             .iter()
-            .map(|id| row_spec(*id, ctx, &self.profiles))
+            .map(|id| row_spec(*id, ctx, &self.presets))
             .collect();
         // Field-open: the Bitrate row shows the typed digits and the caret.
         if let (Some(text), Some(i)) = (
@@ -1030,11 +1030,11 @@ fn start_in_value(ctx: &Ctx) -> String {
     }
 }
 
-pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec {
+pub fn row_spec(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec {
     // Pin count from live host rows, matching the carousel.
     match id {
-        RowId::Profile(i) => {
-            let (pid, name) = &profiles[i];
+        RowId::Preset(i) => {
+            let (pid, name) = &presets[i];
             let pins = ctx
                 .hosts
                 .iter()
@@ -1055,8 +1055,8 @@ pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec 
                 ..RowSpec::default()
             };
         }
-        RowId::NoProfiles => {
-            return RowSpec::action("No profiles yet", false);
+        RowId::NoPresets => {
+            return RowSpec::action("No presets yet", false);
         }
         RowId::Controllers => return RowSpec::action("Connected controllers", true),
         RowId::Licenses => return RowSpec::action("Open-source licences", true),
@@ -1333,8 +1333,8 @@ pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec 
             )
             .into(),
         ),
-        RowId::Profile(_)
-        | RowId::NoProfiles
+        RowId::Preset(_)
+        | RowId::NoPresets
         | RowId::Controllers
         | RowId::Licenses
         | RowId::QuickActions => {
@@ -1590,13 +1590,13 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         },
         RowId::Controllers => "Connected controllers, their grants and a rumble/haptics test.",
         RowId::Licenses => "The open-source licences this app ships under.",
-        RowId::Profile(_) => {
-            "Pin this profile to a host and it appears as its own card — one press \
-             connects with these settings. Profiles are created and edited in the \
+        RowId::Preset(_) => {
+            "Pin this preset to a host and it appears as its own card — one press \
+             connects with these settings. Presets are created and edited in the \
              Punktfunk desktop app."
         }
-        RowId::NoProfiles => {
-            "Profiles bundle stream settings for different uses (a low-latency one, a \
+        RowId::NoPresets => {
+            "Presets bundle stream settings for different uses (a low-latency one, a \
              quality one…). Create them in the Punktfunk desktop app, then pin them \
              here as one-press connect cards."
         }
@@ -1686,7 +1686,7 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             // Off-ladder must not snap to Automatic (index 0). Step to the neighbour
             // the thumb is heading for.
             // Only the rungs this platform may reach — see [`bitrate_rungs`]. A value stored
-            // above them (set on another client, or in a shared profile) still steps DOWN
+            // above them (set on another client, or in a shared preset) still steps DOWN
             // from where it is rather than being silently rewritten here.
             let rungs = &BITRATES[..bitrate_rungs(platform)];
             let stepped = match rungs.iter().position(|b| *b == s.bitrate_kbps) {
@@ -1871,8 +1871,8 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             })
         }
         // Navigation rows: handled in `apply_row` before the settings path.
-        RowId::Profile(_)
-        | RowId::NoProfiles
+        RowId::Preset(_)
+        | RowId::NoPresets
         | RowId::Controllers
         | RowId::Licenses
         | RowId::QuickActions => None,
@@ -1964,7 +1964,7 @@ pub(crate) mod tests {
         (Settings::default(), Vec::new())
     }
 
-    /// Throwaway config dir: the screens read the profile catalog and the known hosts
+    /// Throwaway config dir: the screens read the preset catalog and the known hosts
     /// straight off it, and a test must not see the developer's own. Settings go through
     /// `store::file_store`, which in tests is per-thread and in memory.
     ///
@@ -2046,7 +2046,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_press_on_a_pill_selects_that_tab() {
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         rendered(&mut s);
         assert_eq!(s.tab, 0);
         for target in [3, 1, TABS.len() - 1, 0] {
@@ -2063,7 +2063,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_pressed_tab_restores_that_tabs_cursor() {
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         rendered(&mut s);
         s.list.cursor = 2;
         let second = s.strip.pill(1).unwrap();
@@ -2084,7 +2084,7 @@ pub(crate) mod tests {
     #[test]
     fn a_press_on_a_row_focuses_and_cycles_it() {
         fake_home();
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         rendered(&mut s);
         let first = s.list.row_rect(0).expect("the list drew its rows");
         let (mut settings, pads) = ctx_parts();
@@ -2116,7 +2116,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_press_on_empty_space_is_not_consumed() {
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         rendered(&mut s);
         with_ctx(|ctx| {
             let mut fx = Outbox::default();
@@ -2378,7 +2378,7 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         s.tab = TABS
             .iter()
             .position(|(name, _)| *name == "Video")
@@ -2448,7 +2448,7 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         s.tab = TABS
             .iter()
             .position(|(name, _)| *name == "Video")
@@ -2573,7 +2573,7 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         let mut fx = Outbox::default();
         let ids = s.row_ids(&ctx);
         s.list.cursor = ids
@@ -2614,7 +2614,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn profile_rows_navigate_instead_of_editing() {
+    fn preset_rows_navigate_instead_of_editing() {
         let (mut settings, pads) = ctx_parts();
         let library = crate::library::LibraryShared::default();
         let mut pinned = crate::model::HostRow {
@@ -2633,15 +2633,15 @@ pub(crate) mod tests {
             last_used: None,
             os: String::new(),
             actions: Vec::new(),
-            pin: Some(crate::model::ProfileChip {
+            pin: Some(crate::model::PresetChip {
                 id: "p1".into(),
                 name: "Work".into(),
                 accent: None,
                 bitrate_kbps: None,
             }),
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         };
         let hosts = [pinned.clone(), {
             pinned.key = "aa".into();
@@ -2661,19 +2661,19 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = SettingsScreen::with_profiles(vec![
+        let mut s = SettingsScreen::with_presets(vec![
             ("p1".into(), "Work".into()),
             ("p2".into(), "Game".into()),
         ]);
-        s.tab = PROFILES_TAB;
+        s.tab = PRESETS_TAB;
         let ids = s.row_ids(&ctx);
-        assert_eq!(ids, vec![RowId::Profile(0), RowId::Profile(1)]);
+        assert_eq!(ids, vec![RowId::Preset(0), RowId::Preset(1)]);
 
-        let spec = row_spec(RowId::Profile(0), &ctx, &s.profiles);
+        let spec = row_spec(RowId::Preset(0), &ctx, &s.presets);
         assert_eq!(spec.header, None, "the tab pill names the section");
         assert_eq!(spec.label, "Work");
         assert_eq!(spec.value.as_deref(), Some("Pinned to 1 host"));
-        let spec = row_spec(RowId::Profile(1), &ctx, &s.profiles);
+        let spec = row_spec(RowId::Preset(1), &ctx, &s.presets);
         assert_eq!(spec.value.as_deref(), Some("Not pinned"));
 
         s.list.cursor = 0;
@@ -2681,8 +2681,8 @@ pub(crate) mod tests {
         s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
         assert!(
             matches!(fx.nav, Some(crate::screens::Nav::Push(b))
-                if matches!(*b, Screen::PinHosts(ref p) if p.profile_name() == "Work")),
-            "A on a profile row opens its pin screen"
+                if matches!(*b, Screen::PinHosts(ref p) if p.preset_name() == "Work")),
+            "A on a preset row opens its pin screen"
         );
 
         let mut fx = Outbox::default();
@@ -2712,11 +2712,11 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = SettingsScreen::with_profiles(Vec::new());
-        s.tab = PROFILES_TAB;
+        let mut s = SettingsScreen::with_presets(Vec::new());
+        s.tab = PRESETS_TAB;
         let ids = s.row_ids(&ctx);
-        assert_eq!(ids, vec![RowId::NoProfiles]);
-        let spec = row_spec(RowId::NoProfiles, &ctx, &s.profiles);
+        assert_eq!(ids, vec![RowId::NoPresets]);
+        let spec = row_spec(RowId::NoPresets, &ctx, &s.presets);
         assert!(!spec.enabled);
 
         s.list.cursor = ids.len() - 1;
@@ -2934,8 +2934,8 @@ pub(crate) mod tests {
         assert!(seen.contains(&RowId::ReduceMotion));
         assert!(seen.contains(&RowId::ReduceUiResolution));
         assert!(seen.contains(&RowId::AudioFormat));
-        assert!(TABS[PROFILES_TAB].1.is_empty());
-        assert_eq!(TABS[PROFILES_TAB].0, "Profiles");
+        assert!(TABS[PRESETS_TAB].1.is_empty());
+        assert_eq!(TABS[PRESETS_TAB].0, "Presets");
     }
 
     /// Only test that touches the process-wide `os_theme` slot. A sibling races
@@ -3050,7 +3050,7 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         let mut fx = Outbox::default();
         assert_eq!(s.tab, 0);
         s.list.cursor = 3; // Stream / Bitrate
@@ -3061,7 +3061,7 @@ pub(crate) mod tests {
         s.menu(MenuEvent::JumpBack, &mut ctx, &mut fx);
         assert_eq!((s.tab, s.list.cursor), (0, 3), "Stream kept its place");
         s.menu(MenuEvent::JumpBack, &mut ctx, &mut fx);
-        assert_eq!(s.tab, PROFILES_TAB);
+        assert_eq!(s.tab, PRESETS_TAB);
         assert_eq!(s.list.cursor, 0);
         s.menu(MenuEvent::JumpForward, &mut ctx, &mut fx);
         assert_eq!(s.tab, 0);
@@ -3086,7 +3086,7 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         let mut fx = Outbox::default();
         assert_eq!(s.list.cursor, 0);
         s.menu(MenuEvent::Move(MenuDir::Up), &mut ctx, &mut fx);
@@ -3096,7 +3096,7 @@ pub(crate) mod tests {
         assert!(s.strip_focus, "switching keeps the strip focused");
         s.menu(MenuEvent::Move(MenuDir::Left), &mut ctx, &mut fx);
         s.menu(MenuEvent::Move(MenuDir::Left), &mut ctx, &mut fx);
-        assert_eq!(s.tab, PROFILES_TAB, "the strip wraps like the shoulders do");
+        assert_eq!(s.tab, PRESETS_TAB, "the strip wraps like the shoulders do");
         s.menu(MenuEvent::Move(MenuDir::Down), &mut ctx, &mut fx);
         assert!(!s.strip_focus, "Down drops back into the list");
         s.menu(MenuEvent::Move(MenuDir::Down), &mut ctx, &mut fx);
@@ -3126,7 +3126,7 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = SettingsScreen::with_profiles(Vec::new());
+        let mut s = SettingsScreen::with_presets(Vec::new());
         s.tab = TABS
             .iter()
             .position(|(name, _)| *name == "Audio")

@@ -5,7 +5,7 @@ import io.unom.punktfunk.HostActions
 import io.unom.punktfunk.Settings
 import io.unom.punktfunk.SettingsFields
 import io.unom.punktfunk.StatsVerbosity
-import io.unom.punktfunk.StreamProfile
+import io.unom.punktfunk.StreamPreset
 import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.library.DEFAULT_MGMT_PORT
@@ -29,11 +29,11 @@ internal object ConsoleJson {
     fun rowKey(fpHex: String, address: String, port: Int): String =
         if (fpHex.isEmpty()) "$address:$port" else fpHex
 
-    private fun profileChip(p: StreamProfile): JSONObject = JSONObject()
+    private fun presetChip(p: StreamPreset): JSONObject = JSONObject()
         .put("id", p.id)
         .put("name", p.name)
         .put("accent", p.accent ?: JSONObject.NULL)
-        // Read by the speed test alone: a profile that PINS bitrate is the layer its host
+        // Read by the speed test alone: a preset that PINS bitrate is the layer its host
         // streams at, so the console must not offer to write the global default instead.
         .put("bitrate_kbps", p.overrides.bitrateKbps ?: JSONObject.NULL)
 
@@ -55,7 +55,7 @@ internal object ConsoleJson {
 
     /**
      * The home carousel: saved hosts (name order — Android records carry no last-used time),
-     * each followed by its pinned profile cards, then discovered-but-unsaved hosts. Mirrors
+     * each followed by its pinned preset cards, then discovered-but-unsaved hosts. Mirrors
      * `clients/session/src/console.rs::rows()` — the desktop service's ordering — so a
      * player who moves between a Deck and a phone finds the same carousel.
      */
@@ -63,7 +63,7 @@ internal object ConsoleJson {
         saved: List<KnownHost>,
         discovered: List<DiscoveredHost>,
         reachable: Set<String>,
-        profiles: List<StreamProfile>,
+        presets: List<StreamPreset>,
         /** What each paired host last said this device may do TO it, by fingerprint
          *  (`design/host-actions.md` §7). Absent = no rows, which is also what an older host
          *  and an ungranted device produce. */
@@ -103,24 +103,24 @@ internal object ConsoleJson {
                 .put("actions", actionRows(hostActions[h.fpHex]))
                 .put("pin", JSONObject.NULL)
                 .put(
-                    "bound_profile",
-                    h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
-                        ?.let(::profileChip) ?: JSONObject.NULL,
+                    "bound_preset",
+                    h.presetId?.let { id -> presets.firstOrNull { it.id == id } }
+                        ?.let(::presetChip) ?: JSONObject.NULL,
                 )
                 .put("running", running[h.fpHex].orEmpty())
                 // Ids, not chips: the bind screen only compares them. Pinned copies below
                 // inherit the map — a card is the same host's shelf.
-                .put("game_profiles", JSONObject(h.gameProfiles))
+                .put("game_presets", JSONObject(h.gamePresets))
             out.put(base)
-            // A pinned card shares the primary tile's live state; its key rides the profile id
+            // A pinned card shares the primary tile's live state; its key rides the preset id
             // behind a NUL (impossible in a fingerprint or `addr:port`) — Rust parity.
-            for (pid in h.pinnedProfileIds) {
-                val p = profiles.firstOrNull { it.id == pid } ?: continue
+            for (pid in h.pinnedPresetIds) {
+                val p = presets.firstOrNull { it.id == pid } ?: continue
                 out.put(
                     JSONObject(base.toString())
                         .put("key", "$key\u0000${p.id}")
-                        .put("pin", profileChip(p))
-                        .put("bound_profile", JSONObject.NULL),
+                        .put("pin", presetChip(p))
+                        .put("bound_preset", JSONObject.NULL),
                 )
             }
         }
@@ -148,7 +148,7 @@ internal object ConsoleJson {
                     .put("last_used", JSONObject.NULL)
                     .put("os", d.os)
                     .put("pin", JSONObject.NULL)
-                    .put("bound_profile", JSONObject.NULL)
+                    .put("bound_preset", JSONObject.NULL)
                     // Unsaved: no identity to ask what it is running with.
                     .put("running", ""),
             )
@@ -157,7 +157,7 @@ internal object ConsoleJson {
     }
 
     /** One `HostRow` for a console entry (`{"library": <HostRow>}`) — the shelf to open. */
-    fun hostRow(h: KnownHost, pin: StreamProfile?, profiles: List<StreamProfile>): JSONObject {
+    fun hostRow(h: KnownHost, pin: StreamPreset?, presets: List<StreamPreset>): JSONObject {
         val key = rowKey(h.fpHex, h.address, h.port)
         return JSONObject()
             .put("key", if (pin == null) key else "$key\u0000${pin.id}")
@@ -174,14 +174,14 @@ internal object ConsoleJson {
             .put("clipboard_sync", h.clipboardSync)
             .put("last_used", JSONObject.NULL)
             .put("os", h.os)
-            .put("pin", pin?.let(::profileChip) ?: JSONObject.NULL)
+            .put("pin", pin?.let(::presetChip) ?: JSONObject.NULL)
             .put(
-                "bound_profile",
+                "bound_preset",
                 if (pin != null) JSONObject.NULL
-                else h.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
-                    ?.let(::profileChip) ?: JSONObject.NULL,
+                else h.presetId?.let { id -> presets.firstOrNull { it.id == id } }
+                    ?.let(::presetChip) ?: JSONObject.NULL,
             )
-            .put("game_profiles", JSONObject(h.gameProfiles))
+            .put("game_presets", JSONObject(h.gamePresets))
     }
 
     /** `KnownHosts` (Rust) — only what the console needs to build a link: id, address, fp. */
@@ -199,16 +199,16 @@ internal object ConsoleJson {
                     .put("mac", JSONArray(h.mac))
                     .put("os", h.os)
                     .put("mgmt_port", h.mgmtPort ?: JSONObject.NULL)
-                    .put("profile_id", h.profileId ?: JSONObject.NULL)
-                    .put("pinned_profiles", JSONArray(h.pinnedProfileIds)),
+                    .put("preset_id", h.presetId ?: JSONObject.NULL)
+                    .put("pinned_presets", JSONArray(h.pinnedPresetIds)),
             )
         }
         return JSONObject().put("hosts", hosts).toString()
     }
 
-    fun profiles(profiles: List<StreamProfile>): String {
+    fun presets(presets: List<StreamPreset>): String {
         val out = JSONArray()
-        for (p in profiles) out.put(JSONArray().put(p.id).put(p.name))
+        for (p in presets) out.put(JSONArray().put(p.id).put(p.name))
         return out.toString()
     }
 

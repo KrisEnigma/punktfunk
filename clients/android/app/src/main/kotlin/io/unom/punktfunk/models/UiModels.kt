@@ -30,11 +30,11 @@ data class PendingTrust(
     val kind: Kind,
     /**
      * What the connect on the far side of this decision should carry — a `punktfunk://` link's
-     * one-off profile and library id. A link to an unknown host goes through the confirmation
+     * one-off preset and library id. A link to an unknown host goes through the confirmation
      * first, and the user's stated intent must survive that detour rather than being silently
      * dropped on the way to a plain desktop session.
      */
-    val profile: String? = null,
+    val preset: String? = null,
     val launch: String? = null,
 ) {
     enum class Kind { TRUST_NEW, FP_CHANGED, PAIR, REQUEST_ACCESS }
@@ -47,12 +47,12 @@ data class PendingTrust(
  * MainActivity is exported with a BROWSABLE `punktfunk://` filter, so any app or web page can emit
  * `punktfunk://connect/Gaming%20PC?launch=steam:570`; guessing a label must not be enough to start
  * a stream and boot a game. A link that names the record id (the shortcuts this app emits) still
- * connects on its own. [profile] and [launch] are the link's, carried across the detour exactly as
+ * connects on its own. [preset] and [launch] are the link's, carried across the detour exactly as
  * [PendingTrust] carries them.
  */
 data class PendingLinkConnect(
     val host: KnownHost,
-    val profile: String? = null,
+    val preset: String? = null,
     val launch: String? = null,
 )
 
@@ -70,10 +70,10 @@ data class ActiveSession(
     val settings: io.unom.punktfunk.Settings,
     val clipboardSync: Boolean,
     /**
-     * The settings profile this session resolved, if any — shown on the stats overlay's first line
-     * so "which profile am I on?" is answerable from inside the stream, as on the other clients.
+     * The settings preset this session resolved, if any — shown on the stats overlay's first line
+     * so "which preset am I on?" is answerable from inside the stream, as on the other clients.
      */
-    val profileName: String? = null,
+    val presetName: String? = null,
     /**
      * The stable id of the host being streamed, when it is a saved one — so a `punktfunk://` link
      * that arrives mid-stream can tell "this same host" (a no-op; the intent already focused us)
@@ -91,13 +91,13 @@ data class ActiveSession(
      */
     val launchedFromLibrary: Boolean = false,
     /**
-     * Which of [hostId]'s shelves that library launch came off: the pinned host+profile card's
-     * profile id (design §5.2a), or null for the host's own tile. Carried purely so the return
+     * Which of [hostId]'s shelves that library launch came off: the pinned host+preset card's
+     * preset id (design §5.2a), or null for the host's own tile. Carried purely so the return
      * trip above lands back on the SAME shelf — a player who launched from a pinned card is still
      * on that card when the game exits, and coming back to the host's default shelf would silently
      * change what the next title streams with.
      */
-    val libraryProfileId: String? = null,
+    val libraryPresetId: String? = null,
     /**
      * The launched title whose game is not up yet: the stream screen veils the picture with its
      * poster until the host reports the game running. Null for a desktop connect or a launcher tile.
@@ -120,11 +120,11 @@ data class LaunchHold(
 
 /**
  * The library shelf a finished game launch should return to: the saved host's id, and the pinned
- * profile card it was opened from (null = the host's own tile). One value rather than two parallel
- * ones, because a hostId that arrives without its profile is not "the same shelf" — it is the
+ * preset card it was opened from (null = the host's own tile). One value rather than two parallel
+ * ones, because a hostId that arrives without its preset is not "the same shelf" — it is the
  * default one wearing the same name.
  */
-data class LibraryReturn(val hostId: String, val profileId: String? = null)
+data class LibraryReturn(val hostId: String, val presetId: String? = null)
 
 /** Trust state of a host, shown as a colored pill on its card. */
 enum class HostStatus(val label: String) {

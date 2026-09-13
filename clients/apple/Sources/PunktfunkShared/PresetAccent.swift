@@ -1,9 +1,9 @@
-// A profile's chip colour (design/client-settings-profiles.md §5.1 "Change color"). The catalog
+// A preset's chip colour (design/client-settings-profiles.md §5.1 "Change color"). The catalog
 // stores `accent` as `#RRGGBB` — a plain string, so the Rust and Kotlin catalogs read the same
 // value — and this is the palette the Apple client offers for it.
 //
 // A fixed palette rather than a full colour well, for two reasons. The chip is small, tinted text
-// on a tinted capsule, so a colour picked freehand can land somewhere unreadable; and a profile's
+// on a tinted capsule, so a colour picked freehand can land somewhere unreadable; and a preset's
 // colour is an IDENTIFIER — "the orange one" — which works when there are eight of them and stops
 // working when there are sixteen million. Any `#RRGGBB` a newer client (or another platform)
 // writes still renders: the palette is what this client OFFERS, not what it accepts.

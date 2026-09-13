@@ -247,13 +247,16 @@ mod session_main {
         })
     }
 
-    /// `--profile <id|name>` — the settings profile this one session runs with, overriding the
-    /// host's own binding for this launch only (never rebinding it): the shells' "Connect
-    /// with ▸ X" and a `punktfunk://…&profile=` link both land here. Absent = honor the host's
-    /// binding; `--profile ""` (or a bare `--profile`) forces the global defaults, which is
-    /// how "Connect with ▸ Default settings" reaches a bound host.
-    fn profile_arg() -> Option<String> {
-        arg_flag("--profile").then(|| arg_value("--profile").unwrap_or_default())
+    /// `--preset <id|name>` — the preset this one session runs with, overriding the host's own
+    /// binding for this launch only (never rebinding it): the shells' "Connect with ▸ X" and a
+    /// `punktfunk://…&preset=` link both land here. Absent = honor the host's binding;
+    /// `--preset ""` (or a bare `--preset`) forces the global defaults, which is how "Connect
+    /// with ▸ Default settings" reaches a bound host. `--profile` is the pre-rename spelling.
+    fn preset_arg() -> Option<String> {
+        ["--preset", "--profile"]
+            .into_iter()
+            .find(|flag| arg_flag(flag))
+            .map(|flag| arg_value(flag).unwrap_or_default())
     }
 
     /// The connect budget: 15 s normally; `--connect-timeout SECS` overrides — the
@@ -273,14 +276,14 @@ mod session_main {
     /// contract).
     ///
     /// `settings` is what [`trust::effective_settings`] returned, never a raw
-    /// `Settings::load()`: both callers resolve the host's profile first, so the two
+    /// `Settings::load()`: both callers resolve the host's preset first, so the two
     /// construction sites cannot drift (they historically did — touching one and not the
-    /// other is a Windows-only build break). `profile` is that profile's name, for the
+    /// other is a Windows-only build break). `preset` is that preset's name, for the
     /// stats overlay's first line.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn session_params(
         settings: &trust::Settings,
-        profile: Option<String>,
+        preset: Option<String>,
         clipboard_override: Option<bool>,
         addr: String,
         port: u16,
@@ -473,10 +476,10 @@ mod session_main {
             identity,
             connect_timeout: connect_timeout(),
             force_software,
-            profile,
+            preset,
             // Presentation-tier, carried per launch rather than read once by the run loop:
             // the console streams many sessions through ONE loop, so this is the only way a
-            // tier the user picked between streams (or one a host's profile carries) reaches
+            // tier the user picked between streams (or one a host's preset carries) reaches
             // the overlay before the app is restarted. Single mode passes the same value its
             // presenter options already hold, so it changes nothing there.
             stats_verbosity: stats_tier(settings),
@@ -989,15 +992,15 @@ mod session_main {
         }
         let Some(target) = arg_value("--connect") else {
             eprintln!(
-                "usage: punktfunk-session --connect host[:port] [--fp HEX] [--launch id] [--profile REF] [--fullscreen]\n\
+                "usage: punktfunk-session --connect host[:port] [--fp HEX] [--launch id] [--preset REF] [--fullscreen]\n\
                  \x20      punktfunk-session --browse [host[:port]] [--mgmt PORT] [--fullscreen] [--json-status]\n\
                  \x20      punktfunk-session --pair - --connect host[:port] [--name LABEL]\n\
                  \n\
                  Streams from a paired punktfunk host in a Vulkan window. --browse opens the\n\
                  gamepad console instead: bare --browse is the host list (discovery, PIN\n\
                  pairing, settings, wake-on-LAN); with a target it opens that host's game\n\
-                 library. --profile picks a settings profile by id or name for this session\n\
-                 only (\"\" = the global defaults); without it the host's own profile applies.\n\
+                 library. --preset picks a preset by id or name for this session\n\
+                 only (\"\" = the global defaults); without it the host's own preset applies.\n\
                  --connect never dials a host it has no pinned fingerprint for —\n\
                  enrol with --pair (no display needed), in the console, or from the desktop\n\
                  client."
@@ -1016,15 +1019,15 @@ mod session_main {
         };
         // `--resolved-spec <path>`: the spawner already did the resolving, so this process
         // performs ZERO store reads (design/client-architecture-split.md §5) — no Settings
-        // load, no known-hosts lookup, no profile resolution. Without it (a hand-run
+        // load, no known-hosts lookup, no preset resolution. Without it (a hand-run
         // `--connect`, an old Decky script) the session resolves for itself through the SAME
         // helper, so the two modes cannot drift.
         let spec = arg_value("--resolved-spec").map(std::path::PathBuf::from);
-        let (settings, profile_name, clipboard_override) = match &spec {
+        let (settings, preset_name, clipboard_override) = match &spec {
             Some(path) => match pf_client_core::orchestrate::ResolvedSpec::read(path) {
                 Ok(s) => {
                     tracing::info!(path = %path.display(), "running from a resolved spec");
-                    (s.settings, s.profile, Some(s.clipboard))
+                    (s.settings, s.preset, Some(s.clipboard))
                 }
                 Err(e) => {
                     tracing::error!(error = %e, path = %path.display(), "reading the resolved spec");
@@ -1033,17 +1036,17 @@ mod session_main {
                 }
             },
             None => {
-                let (settings, profile) = trust::effective_settings(
+                let (settings, preset) = trust::effective_settings(
                     &addr,
                     port,
-                    profile_arg().as_deref(),
+                    preset_arg().as_deref(),
                     arg_value("--launch").as_deref(),
                 );
-                (settings, profile.map(|p| p.name), None)
+                (settings, preset.map(|p| p.name), None)
             }
         };
-        if let Some(name) = &profile_name {
-            tracing::info!(profile = %name, "streaming with a settings profile");
+        if let Some(name) = &preset_name {
+            tracing::info!(preset = %name, "streaming with a settings preset");
         }
 
         // Trust follows the GTK client's `--connect` rules: a stored (or `--fp`) pin
@@ -1117,7 +1120,7 @@ mod session_main {
             pf_presenter::run_session(opts, move |gamepad, native, force_software, vulkan| {
                 session_params(
                     &settings,
-                    profile_name,
+                    preset_name,
                     clipboard_override,
                     addr,
                     port,

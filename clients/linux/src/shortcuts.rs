@@ -1,5 +1,5 @@
 //! "Create shortcut…" — a desktop entry that boots straight into one host (optionally with a
-//! profile or a game), design/client-deep-links.md §5.
+//! preset or a game), design/client-deep-links.md §5.
 //!
 //! The shortcut is a **container for a URL**, not a second launch mechanism: it invokes the
 //! client with a positional `punktfunk://…`, which is the same door xdg-open and a browser
@@ -77,7 +77,7 @@ fn url_tag(url: &str) -> u32 {
 }
 
 /// A filename-safe slug: ASCII alphanumerics and `-`, everything else collapsed to one `-`,
-/// capped so a long host+profile pair can't produce a name the filesystem rejects.
+/// capped so a long host+preset pair can't produce a name the filesystem rejects.
 fn file_slug(label: &str) -> String {
     let mut out = String::new();
     for c in label.chars() {

@@ -4936,8 +4936,8 @@ pub struct PunktfunkHudFacts {
     pub audio_buffer_ms: u32,
     /// Where that buffer puts audio against the picture, ms; positive = audio behind.
     pub av_offset_ms: i32,
-    /// NUL-terminated settings-profile name, or null.
-    pub profile: *const c_char,
+    /// NUL-terminated preset name, or null.
+    pub preset: *const c_char,
     /// Embedder-only Advanced Detailed lines, `<role>\t<text>\n` each, or null.
     pub extras: *const c_char,
 }
@@ -4972,8 +4972,8 @@ unsafe fn hud_with_facts(
         s.av_offset_ms = f.av_offset_ms;
     }
     // SAFETY: caller strings, NUL-terminated or null, borrowed for this call.
-    let profile = unsafe { opt_cstr(f.profile) }.map_err(|()| PunktfunkStatus::InvalidArg)?;
-    s.profile = profile.filter(|p| !p.is_empty()).map(str::to_owned);
+    let preset = unsafe { opt_cstr(f.preset) }.map_err(|()| PunktfunkStatus::InvalidArg)?;
+    s.preset = preset.filter(|p| !p.is_empty()).map(str::to_owned);
     // SAFETY: as above.
     let extras = unsafe { opt_cstr(f.extras) }.map_err(|()| PunktfunkStatus::InvalidArg)?;
     s.extras
@@ -5741,7 +5741,7 @@ mod tests {
     #[cfg(feature = "quic")]
     #[test]
     fn hud_facts_apply_to_a_drained_window() {
-        let profile = std::ffi::CString::new("Work").unwrap();
+        let preset = std::ffi::CString::new("Work").unwrap();
         let extras =
             std::ffi::CString::new("2\tlink latency ask 1.00\nno tab\n3\tclock\n").unwrap();
         // SAFETY: an all-zero struct is a valid value (null pointers, zero scalars).
@@ -5751,13 +5751,13 @@ mod tests {
         f.shave_os_floor = true;
         f.audio_buffer_ms = 28;
         f.av_offset_ms = -3;
-        f.profile = profile.as_ptr();
+        f.preset = preset.as_ptr();
         f.extras = extras.as_ptr();
         // SAFETY: `f` and its strings outlive the call.
         let s = unsafe { hud_with_facts(Default::default(), &f) }.unwrap();
         assert!(s.on_glass && s.shave_os_floor);
         assert_eq!((s.audio_buffer_ms, s.av_offset_ms), (28, -3));
-        assert_eq!(s.profile.as_deref(), Some("Work"));
+        assert_eq!(s.preset.as_deref(), Some("Work"));
         assert_eq!(s.extras.len(), 2);
         assert_eq!(s.extras[1].role, crate::hud::Role::Warn);
         assert!(s.extras.iter().all(|e| e.advanced_only));
