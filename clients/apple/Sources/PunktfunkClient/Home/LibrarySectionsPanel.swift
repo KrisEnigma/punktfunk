@@ -29,7 +29,9 @@ struct LibrarySectionsPanel: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Customize Library")
                 .font(.headline)
+            // A Mac list paints its own fill, a dark slab on the popover's material.
             List { rows }
+                .scrollContentBackground(.hidden)
             Text(note)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -63,7 +65,14 @@ struct LibrarySectionsPanel: View {
         ForEach(layout.entries) { entry in
             HStack {
                 Toggle(isOn: isOn(entry.section)) {
-                    Label(entry.section.label, systemImage: entry.section.symbol)
+                    Label {
+                        Text(entry.section.label)
+                    } icon: {
+                        Image(systemName: entry.section.symbol)
+                            #if os(macOS)
+                            .frame(width: 18) // one icon width, so the names line up
+                            #endif
+                    }
                 }
                 #if os(macOS)
                 Spacer()
