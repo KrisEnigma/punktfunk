@@ -175,6 +175,12 @@ struct HomeView: View {
             .navigationDestination(item: $speedTestTarget) { host in
                 SpeedTestSheet(host: host)
             }
+            .navigationDestination(item: $editTarget) { host in
+                AddHostSheet(
+                    existing: host,
+                    suggestedMacs: discovery.hosts.first { host.matches($0) }?.macAddresses ?? [],
+                    onSave: { store.update($0) })
+            }
             .navigationDestination(item: $libraryTarget) { shelf in
                 LibraryView(
                     store: store, target: shelf, onLaunch: { onLaunchTitle(shelf, $0) },
