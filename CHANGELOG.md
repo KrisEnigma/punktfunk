@@ -16,7 +16,7 @@ short; the version-bump commit retitles it. Older sections stay as they are.
 
 ## v0.37.0
 
-151 commits since v0.36.0. Wire stays 2. **C ABI 30**, additive. **Driver protocol floor 9.**
+153 commits since v0.36.0. Wire stays 2. **C ABI 30**, additive. **Driver protocol floor 9.**
 Deep dive: `git log v0.36.0..v0.37.0`
 
 ### Versions
