@@ -96,6 +96,15 @@ impl Wave {
         })
     }
 
+    /// A loss reported mid-wave spoils the close when a lost frame sits at or past the
+    /// start frame: stripes swept before it still reference it. A loss before the start is
+    /// swept away by the close. `span_start` is the start frame's timestamp once submitted;
+    /// until then the start is `next_ts`, after every frame that could have been lost.
+    pub fn spoiled_by(self, span_start: Option<i64>, next_ts: i64, last_lost: i64) -> bool {
+        let start = span_start.filter(|_| self.index > 0).unwrap_or(next_ts);
+        last_lost >= start
+    }
+
     /// Row-based stripe for this frame: `(first_row, rows)`, one region per frame plus one
     /// row of overlap for the deblocking filter, clipped to the picture. `rows` is the
     /// picture height in the driver's row unit.
@@ -153,6 +162,25 @@ mod tests {
         assert_eq!(wave_cycle(1, 60, 256, None), 2);
         assert_eq!(wave_cycle(4, 60, 256, None), 4);
         assert_eq!(wave_cycle(16, 60, 256, None), 8);
+    }
+
+    /// A loss at or past the start frame spoils the close; one before it does not. Before
+    /// the start frame is submitted every already-sent frame is before the start.
+    #[test]
+    fn wave_spoiled_by_a_loss_inside_its_span_only() {
+        let pending = Wave::start(23);
+        assert!(!pending.spoiled_by(None, 120, 119));
+        assert!(
+            !pending.spoiled_by(Some(90), 120, 119),
+            "a stale span is not this wave"
+        );
+        let running = Wave {
+            cycle: 23,
+            index: 2,
+        };
+        assert!(!running.spoiled_by(Some(120), 122, 119));
+        assert!(running.spoiled_by(Some(120), 122, 120));
+        assert!(running.spoiled_by(Some(120), 122, 121));
     }
 
     /// Marks on the start and the close only, dirty until the close, stripes that walk the

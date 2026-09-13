@@ -926,22 +926,24 @@ impl NvencCudaEncoder {
         self.wave_queued = false;
     }
 
-    /// A real loss with no clean frame old enough left: a wave heals without an anchor.
-    /// The client re-armed at this loss, so a wave under way restarts to give it a fresh
-    /// start and close. Nonsense and a range past the head stay the caller's keyframe.
+    /// A real loss with no clean anchor: a wave heals without one. The client re-armed at
+    /// this loss, so a wave under way queues a fresh start and close behind it; its own
+    /// close still lifts unless a lost frame sits inside its sweep. Nonsense and a range
+    /// past the head stay the caller's keyframe.
     fn start_wave(&mut self, first: i64, last: i64) -> bool {
         let cycle = self.wave_cycle();
         if cycle == 0 || first < 0 || first > last || first >= self.frame_idx {
             return false;
         }
-        if self.wave.is_some() {
-            // The driver ignores a re-force mid-sweep (measured on the RTX box): let this
-            // one run out unmarked and queue a fresh wave behind it.
-            self.wave_spoiled = true;
+        if let Some(w) = self.wave {
+            // The driver ignores a re-force mid-sweep: this one runs out, the next queues.
+            let span_start = self.wave_span.map(|(start, _)| start);
+            self.wave_spoiled |= w.spoiled_by(span_start, self.frame_idx, last);
             self.wave_queued = true;
             tracing::debug!(
                 first,
                 last,
+                spoiled = self.wave_spoiled,
                 "nvenc RFI: loss mid-wave — wave queued behind it"
             );
             return true;
@@ -2213,6 +2215,12 @@ impl Encoder for NvencCudaEncoder {
         // distrust latch + driver loop.
         if self.encoder.is_null() || !self.rfi_supported || self.distrusted {
             return false;
+        }
+        // A sweep in flight answers every ask until it closes. The driver neither honours
+        // an invalidation mid-sweep nor keeps sweeping after one, and an anchor tagged
+        // there lifts the client onto damage that only the next IDR clears.
+        if self.wave.is_some() || super::nvenc_core::wave_always() {
+            return self.start_wave(first, last);
         }
         match plan_range_recovery(first, last, self.frame_idx, self.last_rfi_range) {
             // Covering range already invalidated — re-arm the anchor (it may itself have been
