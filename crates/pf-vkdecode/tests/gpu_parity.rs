@@ -731,8 +731,8 @@ fn field_aus(stream: &[u8], idx_path: &std::path::Path) -> Vec<std::ops::Range<u
 
 /// The AV1 twin of the H.265 field hasher below: decode a capture that carries its `.idx`
 /// sidecar (a `PUNKTFUNK_DUMP_VIDEO` dump, or a wave smoke's `write_capture`) and write one
-/// SHA-256 per shown frame to `<stream>.pfhash`. A unit that fails prints, counts and moves
-/// on; the decoder then skips to the next key frame, as the client lane does.
+/// SHA-256 per shown frame to `<stream>.pfhash`. A unit that fails prints, counts and writes
+/// `-`, so a one-frame-per-unit capture keeps line N on unit N.
 ///
 /// - `PF_VKD_FIELD_STREAM=/path/capture.obu` — the capture (required, `.idx` beside it).
 #[test]
@@ -805,6 +805,7 @@ fn field_av1_stream_writes_frame_hashes() {
                 }
                 Err(e) => {
                     unit_errors += 1;
+                    hashes.push("-".into());
                     eprintln!("unit {index}: decode failed ({e}) — continuing");
                 }
             }
