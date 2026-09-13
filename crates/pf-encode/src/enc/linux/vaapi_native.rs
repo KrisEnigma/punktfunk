@@ -262,6 +262,7 @@ impl Encoder for NativeVaapiEncoder {
             keyframe: pic.is_idr,
             recovery_anchor: pic.recovery_anchor,
             recovery_point: wave.is_some_and(Wave::marks) && !pic.is_idr,
+            recovery_close: wave.is_some_and(Wave::closes) && !pic.is_idr,
             chunk_aligned: false,
         });
         Ok(())

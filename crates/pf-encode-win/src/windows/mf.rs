@@ -617,6 +617,7 @@ fn process_output(shared: &Shared) -> Result<EncodedFrame> {
         keyframe,
         recovery_anchor: false,
         recovery_point: false,
+        recovery_close: false,
         chunk_aligned: false,
     })
 }

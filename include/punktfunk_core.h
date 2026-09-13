@@ -491,6 +491,12 @@
 // is enough. Coded P, so the decoder never sets `AV_FRAME_FLAG_KEY`.
 #define PUNKTFUNK_USER_FLAG_RECOVERY_ANCHOR 32
 
+// `user_flags` bit. The close of an intra-refresh wave, set beside
+// [`USER_FLAG_RECOVERY_POINT`]: the picture is fully swept on this AU. A client that
+// has seen the bit lifts on the first close after a start seen since its loss instead
+// of counting two marks, so a close whose wave began before the loss never lifts.
+#define USER_FLAG_RECOVERY_CLOSE 512
+
 // `user_flags` bit. Each `shard_payload`-sized window of the frame buffer
 // is a self-delimiting codec packet, zero-padded. Missing shards stay zero
 // and the codec skips those windows; even a complete frame must be consumed
@@ -1074,10 +1080,13 @@
 #define PUNKTFUNK_NO_OUTPUT_KEYFRAME_STREAK 3
 
 // Intra-refresh [`USER_FLAG_RECOVERY_POINT`]s since the latest loss before the freeze lifts
-// without an IDR. Two, not one: the first wave boundary after a loss is only half-healed
-// (stripes swept before the loss still reference the lost frame). Every arm resets the count.
+// without an IDR, on a host that marks both ends of a wave alike. Two, not one: the first
+// boundary after a loss may be the close of a wave that began before it. A host that sets
+// [`USER_FLAG_RECOVERY_CLOSE`] on the close needs no count: the first close after a start
+// seen since the arm lifts. Every arm resets the count.
 //
 // [`USER_FLAG_RECOVERY_POINT`]: crate::packet::USER_FLAG_RECOVERY_POINT
+// [`USER_FLAG_RECOVERY_CLOSE`]: crate::packet::USER_FLAG_RECOVERY_CLOSE
 #define PUNKTFUNK_REANCHOR_MARKS_TO_LIFT 2
 
 // `mode_conflict = reject` admission close. Distinct from a transport

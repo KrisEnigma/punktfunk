@@ -27,7 +27,7 @@ use super::nvenc_core::{
     resolve_slices, resolve_split_subframe, resolve_subframe, store_ceiling, subframe_env_forced,
     wave_rows, CeilingKey, LowLatencyConfig, NvStatusExt, RangePlan,
 };
-use crate::rfi::Wave;
+use crate::rfi::{Wave, WaveMark};
 // Shared with Linux's direct session. Do not fork this copy.
 use super::nvenc_core::{
     cached_split_verdict, store_split_verdict, ArbAction, SplitArbiter, SplitKey,
@@ -499,7 +499,7 @@ pub struct NvencD3d11Encoder {
         u64,
         bool,
         bool,
-        bool,
+        WaveMark,
     )>,
     /// Next submission's `inputTimeStamp`. [`Encoder::submit_indexed`] pins it to the
     /// wire index so RFI timestamps stay 1:1 across rebuilds.
@@ -1496,7 +1496,8 @@ impl NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
             });
         Ok(())
@@ -1696,7 +1697,7 @@ impl Encoder for NvencD3d11Encoder {
                 self.wave_queued = false;
             }
             let wave = self.wave;
-            let mark = wave.is_some_and(|w| w.marks() && !(w.closes() && self.wave_spoiled));
+            let mark = wave.map_or(WaveMark::None, |w| w.mark(self.wave_spoiled));
             if let Some(w) = wave {
                 let ts = pts as i64;
                 if w.index == 0 {
@@ -1999,7 +2000,8 @@ impl Encoder for NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
             }))
         }
@@ -2084,7 +2086,8 @@ impl Encoder for NvencD3d11Encoder {
                             pts_ns,
                             keyframe: idr_hint,
                             recovery_anchor: anchor,
-                            recovery_point: mark,
+                            recovery_point: mark.point(),
+                            recovery_close: mark.close(),
                             chunk_aligned: false,
                             first,
                             last: false,
@@ -2178,7 +2181,8 @@ impl Encoder for NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
                 first: !cs.opened,
                 last: true,
@@ -2899,6 +2903,11 @@ mod tests {
                     "AU {i}: marks on every start and close but the spoiled close {b_close}"
                 );
                 assert_eq!(au.recovery_anchor, i == anchor_p, "AU {i}: one anchor P");
+                assert_eq!(
+                    au.recovery_close,
+                    i == a_close || i == c_close,
+                    "AU {i}: the close bit on every unspoiled close"
+                );
             }
             let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
             let view = |lost: std::ops::Range<usize>| -> Vec<u8> {

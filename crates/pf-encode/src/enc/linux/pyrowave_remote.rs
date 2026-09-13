@@ -264,6 +264,7 @@ impl Link {
                     keyframe,
                     recovery_anchor: false,
                     recovery_point: false,
+                    recovery_close: false,
                     chunk_aligned,
                 })
             }

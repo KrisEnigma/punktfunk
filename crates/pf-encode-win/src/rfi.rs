@@ -61,6 +61,27 @@ pub fn pick_anchor(refs: &[(usize, i64)], loss_first: i64) -> Option<(usize, i64
     best
 }
 
+/// What a wave frame's AU tells the client. Both ends carry the recovery point; the close
+/// also carries the close bit, so a client that knows it lifts on a close after a start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveMark {
+    None,
+    Start,
+    Close,
+}
+
+impl WaveMark {
+    /// `EncodedFrame::recovery_point`: either end of the wave.
+    pub fn point(self) -> bool {
+        self != WaveMark::None
+    }
+
+    /// `EncodedFrame::recovery_close`: the close alone.
+    pub fn close(self) -> bool {
+        self == WaveMark::Close
+    }
+}
+
 /// An on-demand intra refresh wave in flight, the rung between an RFI anchor and the IDR:
 /// where no anchor survives, the picture heals over `cycle` frames with no bitrate spike.
 /// `index` is the frame about to be encoded. The start AU and the close AU carry
@@ -86,6 +107,18 @@ impl Wave {
     /// This frame's AU carries `recovery_point`: the start and the close.
     pub fn marks(self) -> bool {
         self.index == 0 || self.closes()
+    }
+
+    /// The mark this frame's AU carries. A `spoiled` wave (a loss inside its sweep) closes
+    /// unmarked: its close is not whole, and the wave queued behind it carries the lift.
+    pub fn mark(self, spoiled: bool) -> WaveMark {
+        if self.index == 0 {
+            WaveMark::Start
+        } else if self.closes() && !spoiled {
+            WaveMark::Close
+        } else {
+            WaveMark::None
+        }
     }
 
     /// Past the frame just encoded; `None` once the wave closed.

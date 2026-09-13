@@ -573,6 +573,7 @@ struct Frame {
     keyframe: bool,
     recovery_anchor: bool,
     recovery_point: bool,
+    recovery_close: bool,
     /// Deferred-requeue hold cloned at submit, dropped when the fence signals. Extends
     /// "producer must not rewrite" across the async GPU read; the host's clone dies at the
     /// next capture, which with a ring of 2 is before this slot finishes.
@@ -2886,6 +2887,7 @@ impl VulkanVideoEncoder {
         // close is part dirty, so it never becomes an RFI anchor: `slot_wire` stays -1.
         let wave = self.wave;
         self.frames[slot].recovery_point = wave.is_some_and(Wave::marks);
+        self.frames[slot].recovery_close = wave.is_some_and(Wave::closes);
         if is_idr {
             self.slot_wire.iter_mut().for_each(|s| *s = -1);
             self.slot_poc.iter_mut().for_each(|s| *s = -1);
@@ -3650,6 +3652,7 @@ impl VulkanVideoEncoder {
             keyframe: f.keyframe,
             recovery_anchor: f.recovery_anchor,
             recovery_point: f.recovery_point,
+            recovery_close: f.recovery_close,
             chunk_aligned: false,
         })
     }

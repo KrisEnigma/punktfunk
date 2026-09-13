@@ -33,7 +33,7 @@ use super::nvenc_status;
 use super::{max_forced_split_mode, resolve_split_mode};
 use super::{AuChunk, ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
 use anyhow::{anyhow, bail, Context, Result};
-use pf_encode_win::rfi::Wave;
+use pf_encode_win::rfi::{Wave, WaveMark};
 use pf_frame::{CapturedFrame, FramePayload};
 use pf_zerocopy::cuda::{self, InputSurface};
 use pf_zerocopy::vkslot::{SlotFormat, VkSlotBlend, VkSlotRef};
@@ -634,7 +634,7 @@ pub struct NvencCudaEncoder {
         u64,
         bool,
         bool,
-        bool,
+        WaveMark,
     )>,
     /// Next `inputTimeStamp`. [`Encoder::submit_indexed`] pins it to the wire index so RFI
     /// timestamps stay 1:1 across rebuilds. Self-increments for un-indexed callers.
@@ -1752,7 +1752,8 @@ impl NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
             });
         Ok(())
@@ -1999,7 +2000,7 @@ impl NvencCudaEncoder {
                 self.wave_queued = false;
             }
             let wave = self.wave;
-            let mark = wave.is_some_and(|w| w.marks() && !(w.closes() && self.wave_spoiled));
+            let mark = wave.map_or(WaveMark::None, |w| w.mark(self.wave_spoiled));
             if let Some(w) = wave {
                 let ts = pts as i64;
                 if w.index == 0 {
@@ -2324,7 +2325,8 @@ impl Encoder for NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
             }))
         }
@@ -2394,7 +2396,8 @@ impl Encoder for NvencCudaEncoder {
                             pts_ns,
                             keyframe: idr_hint,
                             recovery_anchor: anchor,
-                            recovery_point: mark,
+                            recovery_point: mark.point(),
+                            recovery_close: mark.close(),
                             chunk_aligned: false,
                             first,
                             last: false,
@@ -2486,7 +2489,8 @@ impl Encoder for NvencCudaEncoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
                 first: !cs.opened,
                 last: true,
