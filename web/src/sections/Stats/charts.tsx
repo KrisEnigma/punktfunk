@@ -543,3 +543,66 @@ export function RttChart({ samples }: { samples: StatsSample[] }) {
 		</ChartFrame>
 	);
 }
+
+/** Whether any sample carries the sealing split (native captures). */
+export function hasSendSplit(samples: StatsSample[]): boolean {
+	return samples.some(
+		(s) => s.fec_us != null || s.seal_us != null || s.sock_us != null,
+	);
+}
+
+const SEND_SPLIT = [
+	{ key: "fec_us", color: "#8b5cf6", label: () => m.stats_send_fec() },
+	{ key: "seal_us", color: "#f59e0b", label: () => m.stats_send_seal() },
+	{ key: "sock_us", color: "#10b981", label: () => m.stats_send_sock() },
+] as const;
+
+/** What sealing one frame costs, in µs: parity, encryption, the socket. Sub-millisecond by nature. */
+export function SendSplitChart({ samples }: { samples: StatsSample[] }) {
+	const rows = useMemo(
+		() =>
+			withSessionBreaks(
+				samples,
+				samples.map((s) => ({
+					t: tSeconds(s),
+					fec_us: s.fec_us ?? null,
+					seal_us: s.seal_us ?? null,
+					sock_us: s.sock_us ?? null,
+				})),
+			),
+		[samples],
+	);
+	return (
+		<ChartFrame>
+			<LineChart data={rows} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+				<CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+				<XAxis {...timeAxis} />
+				<YAxis
+					tick={axisTick}
+					stroke={gridStroke}
+					width={56}
+					unit=" µs"
+					domain={[0, (max: number) => Math.max(max, 10)]}
+					tickFormatter={(v: number) => fmtNumber(v)}
+				/>
+				<Tooltip
+					contentStyle={tooltipStyle}
+					formatter={(v) => dur(Number(v))}
+					labelFormatter={secondsLabel}
+				/>
+				<Legend wrapperStyle={legendStyle} />
+				{SEND_SPLIT.map((s) => (
+					<Line
+						key={s.key}
+						type="monotone"
+						dataKey={s.key}
+						name={s.label()}
+						stroke={s.color}
+						dot={false}
+						isAnimationActive={false}
+					/>
+				))}
+			</LineChart>
+		</ChartFrame>
+	);
+}

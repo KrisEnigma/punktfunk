@@ -75,6 +75,17 @@ pub struct StatsSample {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = u32, required = false)]
     pub rtt_us: Option<u32>,
+    /// Sealing one frame, mean µs over the window: FEC parity, AES-GCM, the socket sends.
+    /// Native only; timed while a capture runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = f32, required = false)]
+    pub fec_us: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = f32, required = false)]
+    pub seal_us: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = f32, required = false)]
+    pub sock_us: Option<f32>,
 }
 
 /// Filename stem plus negotiated mode/codec/client. On-disk head;
@@ -490,6 +501,9 @@ mod tests {
             host_p50_us: Some(3_000.0),
             host_p99_us: Some(5_000.0),
             rtt_us: None,
+            fec_us: None,
+            seal_us: None,
+            sock_us: None,
         }
     }
 

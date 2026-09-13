@@ -10,8 +10,10 @@ import { m } from "@/paraglide/messages";
 import {
 	HealthChart,
 	hasRtt,
+	hasSendSplit,
 	LatencyChart,
 	RttChart,
+	SendSplitChart,
 	ThroughputChart,
 } from "./charts";
 import { ChartBlock } from "./helpers";
@@ -25,7 +27,8 @@ export const DetailSection: FC<{ id: string; onClose: () => void }> = ({
 	return <DetailCard detail={detail} onClose={onClose} />;
 };
 
-/** Full graph set for one selected recording: latency (p99 toggle) + throughput + health. */
+/** One recording's graphs: latency (p99 toggle), throughput, health, and the round trip and
+ * sealing split when the recording carries them. */
 export const DetailCard: FC<{
 	detail: Loadable<Capture>;
 	onClose: () => void;
@@ -95,6 +98,11 @@ export const DetailCard: FC<{
 							{hasRtt(samples) && (
 								<ChartBlock title={m.stats_rtt_title()}>
 									<RttChart samples={samples} />
+								</ChartBlock>
+							)}
+							{hasSendSplit(samples) && (
+								<ChartBlock title={m.stats_send_title()}>
+									<SendSplitChart samples={samples} />
 								</ChartBlock>
 							)}
 						</div>

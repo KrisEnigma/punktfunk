@@ -1589,6 +1589,9 @@ fn stream_body(
                     host_p50_us: None,
                     host_p99_us: None,
                     rtt_us: None,
+                    fec_us: None,
+                    seal_us: None,
+                    sock_us: None,
                 };
                 stats.push_sample(session_id, sample);
             }

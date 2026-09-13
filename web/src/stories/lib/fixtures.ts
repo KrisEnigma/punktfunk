@@ -226,6 +226,9 @@ function buildSamples(n: number): StatsSample[] {
 			host_p50_us: host,
 			host_p99_us: Math.round(host * 1.7),
 			rtt_us: Math.round(900 + wobble * 150),
+			fec_us: 45 + wobble * 5,
+			seal_us: 140 + wobble * 12,
+			sock_us: 300 + wobble * 40,
 			stages,
 		});
 	}

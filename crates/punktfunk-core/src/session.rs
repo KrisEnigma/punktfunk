@@ -183,6 +183,14 @@ impl Session {
         self.seal_perf.as_mut().map(std::mem::take)
     }
 
+    /// Start or stop timing the send path. `PUNKTFUNK_PERF` starts it at construct; the host's
+    /// recorder starts it for as long as a capture runs.
+    pub fn set_seal_perf(&mut self, on: bool) {
+        if on != self.seal_perf.is_some() {
+            self.seal_perf = on.then(SealPerf::default);
+        }
+    }
+
     /// Fold externally-timed socket time into [`SealPerf::sock_ns`]. The paced video path
     /// times its own `send_sealed` chunks behind a `&self` borrow the session cannot
     /// self-time. No-op when perf is off.
