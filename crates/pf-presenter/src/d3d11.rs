@@ -22,12 +22,14 @@ pub const DEVICE_EXTENSIONS: [&std::ffi::CStr; 2] = [
     ash::khr::win32_keyed_mutex::NAME,
 ];
 
-/// Spec-required probe for the image `import` creates. An unsupported
+/// Spec-required probe for an image `import` could create. An unsupported
 /// external image is undefined.
 fn format_importable(
     instance: &ash::Instance,
     pdev: vk::PhysicalDevice,
     format: vk::Format,
+    usage: vk::ImageUsageFlags,
+    flags: vk::ImageCreateFlags,
 ) -> bool {
     let mut ext_info = vk::PhysicalDeviceExternalImageFormatInfo::default()
         .handle_type(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE);
@@ -35,7 +37,8 @@ fn format_importable(
         .format(format)
         .ty(vk::ImageType::TYPE_2D)
         .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::TRANSFER_SRC)
+        .usage(usage)
+        .flags(flags)
         .push_next(&mut ext_info);
     let mut ext_props = vk::ExternalImageFormatProperties::default();
     let mut props = vk::ImageFormatProperties2::default().push_next(&mut ext_props);
@@ -49,12 +52,59 @@ fn format_importable(
 }
 
 /// `(bgra8, rgb10)`: BGRA8 gates D3D11VA; RGB10A2 gates only PQ pass-through.
-/// Without RGB10, a PQ stream tone-maps to BGRA8 on the decoder.
+/// Without RGB10, a PQ stream tone-maps to BGRA8 on the decoder. The planar and
+/// fence answers are only logged: they are what a planar slot or a shared fence
+/// would need, and nothing imports either yet.
 pub fn import_supported(instance: &ash::Instance, pdev: vk::PhysicalDevice) -> (bool, bool) {
-    let bgra8 = format_importable(instance, pdev, vk::Format::B8G8R8A8_UNORM);
-    let rgb10 = format_importable(instance, pdev, vk::Format::A2B10G10R10_UNORM_PACK32);
-    tracing::info!(bgra8, rgb10, "D3D11 texture → Vulkan import support");
+    let copy = vk::ImageUsageFlags::TRANSFER_SRC;
+    let none = vk::ImageCreateFlags::empty();
+    let bgra8 = format_importable(instance, pdev, vk::Format::B8G8R8A8_UNORM, copy, none);
+    let rgb10 = format_importable(
+        instance,
+        pdev,
+        vk::Format::A2B10G10R10_UNORM_PACK32,
+        copy,
+        none,
+    );
+    // The CSC pass samples per-plane views, which a two-plane image allows only with
+    // MUTABLE_FORMAT.
+    let planar = |format| {
+        format_importable(
+            instance,
+            pdev,
+            format,
+            vk::ImageUsageFlags::SAMPLED,
+            vk::ImageCreateFlags::MUTABLE_FORMAT,
+        )
+    };
+    let nv12 = planar(vk::Format::G8_B8R8_2PLANE_420_UNORM);
+    let p010 = planar(vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16);
+    let fence = fence_importable(instance, pdev);
+    tracing::info!(
+        bgra8,
+        rgb10,
+        nv12,
+        p010,
+        fence,
+        "D3D11 texture → Vulkan import support"
+    );
     (bgra8, rgb10)
+}
+
+/// Whether a shared D3D11 fence imports here as a timeline semaphore.
+fn fence_importable(instance: &ash::Instance, pdev: vk::PhysicalDevice) -> bool {
+    let mut timeline =
+        vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+    let info = vk::PhysicalDeviceExternalSemaphoreInfo::default()
+        .handle_type(vk::ExternalSemaphoreHandleTypeFlags::D3D12_FENCE)
+        .push_next(&mut timeline);
+    let mut props = vk::ExternalSemaphoreProperties::default();
+    // SAFETY: `instance` is live and exposes the 1.1 core query; `info` and `props` are
+    // locals that outlive the call.
+    unsafe { instance.get_physical_device_external_semaphore_properties(pdev, &info, &mut props) };
+    props
+        .external_semaphore_features
+        .contains(vk::ExternalSemaphoreFeatureFlags::IMPORTABLE)
 }
 
 /// One imported slot, what a submit names. The cache owns the objects.
