@@ -968,8 +968,14 @@ impl NvencCudaEncoder {
     /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.
     /// AV1 never waves: NVENC codes every AV1 frame to load its entropy state from the
     /// last, so a sweep cannot heal a loss. AV1 answers with an anchor or an IDR.
+    /// Nor does any session outside the soak (`PUNKTFUNK_NVENC_IR_ALWAYS`): on an RTX 5070 Ti
+    /// under Linux, a sweep over content moving down 1 px a frame never heals, and no client
+    /// can tell that close from a whole one. A decline answers with an IDR.
     fn wave_cycle(&self) -> u32 {
-        if !crate::rfi::wave_enabled() || self.codec == Codec::Av1 {
+        if !crate::rfi::wave_enabled()
+            || self.codec == Codec::Av1
+            || !super::nvenc_core::wave_always()
+        {
             return 0;
         }
         crate::rfi::wave_cycle(
