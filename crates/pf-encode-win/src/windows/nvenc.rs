@@ -512,8 +512,9 @@ pub struct NvencD3d11Encoder {
     /// Intra refresh wave in flight: a declined RFI's answer instead of the IDR. The start
     /// frame carries `forceIntraRefreshWithFrameCnt`; the driver sweeps from there.
     wave: Option<Wave>,
-    /// Timestamps `[start, close)` of the latest wave: part-dirty pictures the driver would
-    /// otherwise serve as an RFI anchor. The close and everything after are clean.
+    /// Timestamps `[start, close)` of the latest wave. Nothing before the close is an RFI
+    /// anchor: the wave ran because no clean picture older than its loss survived, so every
+    /// earlier picture still in the DPB is damaged, and the span's own are part dirty.
     wave_span: Option<(i64, i64)>,
     /// A loss landed inside the wave in flight. The driver ignores a re-force mid-sweep, so
     /// the sweep runs on with damage behind it: its close carries no mark, and a fresh wave
@@ -818,10 +819,10 @@ impl NvencD3d11Encoder {
         true
     }
 
-    /// Whether the picture at `ts` is a part-dirty wave frame the driver must not anchor on.
+    /// Whether the picture at `ts` is one the driver must not anchor on: anything before the
+    /// latest wave's close.
     fn wave_dirty(&self, ts: i64) -> bool {
-        self.wave_span
-            .is_some_and(|(start, close)| ts >= start && ts < close)
+        self.wave_span.is_some_and(|(_, close)| ts < close)
     }
 
     /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.

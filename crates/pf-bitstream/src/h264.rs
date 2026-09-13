@@ -400,6 +400,8 @@ pub struct H264Planner {
     /// Ids the last [`DpbUpdate`] left alive; baseline for `removed`.
     /// Kept across failed AUs so interim evictions are still reported.
     reported_live: BTreeSet<PicId>,
+    /// The picture the last plan stored: the one a wave's close mark names.
+    last_stored: Option<PicId>,
     /// Set by [`Self::flush`]; planning resumes only at an IDR.
     awaiting_idr: bool,
     /// Resident pictures off a broken chain; backs [`PicturePlan::references_clean`].
@@ -541,6 +543,7 @@ impl H264Planner {
         previously_live.insert(stored);
         let removed = previously_live.difference(&live_after).copied().collect();
         self.reported_live = live_after;
+        self.last_stored = Some(stored);
 
         // After `finish_picture` so `stored` and `live_after` include this AU's
         // marking. A pre-marking write could survive an eviction. `concealed`
@@ -567,10 +570,16 @@ impl H264Planner {
         })
     }
 
-    /// An intra refresh wave finished on a picture the freeze gate accepted: forget the
-    /// unclean marks, which a chain through half-refreshed pictures cannot clear itself.
+    /// An intra refresh wave closed on the picture just planned and the freeze gate
+    /// accepted it: that picture is whole by overwrite, which its reference chain cannot
+    /// show. Only its mark goes; the half-swept pictures before it stay damaged, so a
+    /// later picture or a host anchor that still leans on one is held and the client
+    /// asks for the IDR. Every P this decoder meets names one active reference, the
+    /// picture before it, so a healthy stream reads clean from the close on.
     pub fn forgive_unclean(&mut self) {
-        self.clean.clear();
+        if let Some(id) = self.last_stored {
+            self.clean.forgive(id);
+        }
     }
 
     /// Drain the DPB and discard 8.2.1/8.2.5 state. Planning resumes only at

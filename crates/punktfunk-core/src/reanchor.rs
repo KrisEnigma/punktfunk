@@ -185,10 +185,14 @@ pub struct ReanchorGate {
     /// decode-order watermark on each move: a DPB flush can return pictures decoded *before*
     /// the loss, and wall-clock pairing cannot tell. Other clients ignore it.
     arms: u64,
-    /// The current lift came from an intra-refresh heal (wire marks or a local recovery
-    /// point). The wave heals content by overwrite, which a reference-chain ledger cannot
-    /// see, so damaged evidence is not held against frames until the next arm.
+    /// The latest lift came from an intra-refresh heal (wire marks or a local recovery
+    /// point). The wave heals the lifting picture by overwrite, which a reference-chain
+    /// ledger cannot see, so damaged evidence is not held against that frame or the one
+    /// after it; the client forgives the swept picture in between, and from then on a
+    /// damaged verdict is real again.
     mark_lift: bool,
+    /// Frames since the mark lift that still ride its suspension.
+    mark_lift_grace: u8,
     /// `frames_dropped` climb still expected from gap-armed losses. [`poll`](Self::poll)
     /// consumes this before treating a climb as a new loss ([`DROP_CREDIT_WINDOW`]).
     drop_credit: u64,
@@ -209,6 +213,7 @@ impl ReanchorGate {
             local_sei_since_arm: false,
             arms: 0,
             mark_lift: false,
+            mark_lift_grace: 0,
             drop_credit: 0,
             drop_credit_expiry: None,
         }
@@ -231,6 +236,7 @@ impl ReanchorGate {
         // from here on may be trusted.
         self.local_sei_since_arm = false;
         self.mark_lift = false;
+        self.mark_lift_grace = 0;
         self.deadline = Some(now + REANCHOR_FREEZE_MAX);
     }
 
@@ -262,6 +268,7 @@ impl ReanchorGate {
         self.marks = 0;
         // A wave heal: the reference chain stays marked damaged, so suspend that rule.
         self.mark_lift = true;
+        self.mark_lift_grace = 1;
         // Spent: the next heal needs its own SEI, or one wave would lift a later loss.
         self.local_sei_since_arm = false;
         true
@@ -297,7 +304,8 @@ impl ReanchorGate {
     /// window after its recovery frame). Without the arm nothing would ever ask for the IDR.
     /// A real IDR predicts from nothing, so its evidence is never damaged and it still lifts.
     /// A lift by [`USER_FLAG_RECOVERY_POINT`](crate::packet::USER_FLAG_RECOVERY_POINT) marks
-    /// suspends the rule until the next arm: the wave healed content the chain cannot show.
+    /// suspends the rule for that frame and the next: the wave healed the swept picture,
+    /// which the chain cannot show until the client forgives it.
     pub fn on_decoded_corroborated(
         &mut self,
         wire_flags: u32,
@@ -306,6 +314,7 @@ impl ReanchorGate {
         now: Instant,
     ) -> GateVerdict {
         self.no_output_streak = 0;
+        let grace = std::mem::take(&mut self.mark_lift_grace) > 0;
         let is_keyframe = decoder_keyframe || (wire_flags & FLAG_SOF as u32 != 0);
         // Refuted anchors are stripped here so `reanchor_after_frame` stays the pure wire rules.
         let has_anchor = wire_flags & USER_FLAG_RECOVERY_ANCHOR != 0 && evidence.honours_anchor();
@@ -328,8 +337,10 @@ impl ReanchorGate {
             self.awaiting = false;
             self.deadline = None;
             self.mark_lift = !is_keyframe && !has_anchor;
+            self.mark_lift_grace = u8::from(self.mark_lift);
         }
-        if evidence == AnchorEvidence::ReferencesDamaged && !self.mark_lift {
+        let suspended = (lift && self.mark_lift) || grace;
+        if evidence == AnchorEvidence::ReferencesDamaged && !suspended {
             if !self.awaiting {
                 self.arm(now);
             }
@@ -390,9 +401,9 @@ impl ReanchorGate {
         self.awaiting
     }
 
-    /// The current lift came from intra refresh marks, not an IDR or an anchor. A client with
-    /// a bitstream planner forgets its damaged-chain marks on the frame this turns true: the
-    /// wave healed content by overwrite, which the chain cannot show.
+    /// The latest lift came from intra refresh marks, not an IDR or an anchor. A client with
+    /// a bitstream planner forgives the swept picture on the frame this turns true: the wave
+    /// healed it by overwrite, which the chain cannot show.
     pub fn lifted_by_marks(&self) -> bool {
         !self.awaiting && self.mark_lift
     }
@@ -1070,6 +1081,33 @@ mod tests {
 
     /// A clean anchor lifts, then the encoder references the corrupt window again. The
     /// wire says nothing; the parser does.
+    /// After a mark lift the client forgives the swept picture, so a damaged verdict two
+    /// frames on is a picture that leans on a half-swept one: hold it and arm.
+    #[test]
+    fn the_mark_lift_suspension_ends_after_one_frame() {
+        let mut g = ReanchorGate::new(0);
+        let now = t0();
+        g.arm(now);
+        g.on_decoded_corroborated(USER_FLAG_RECOVERY_POINT, false, ReferencesDamaged, now);
+        assert_eq!(
+            g.on_decoded_corroborated(USER_FLAG_RECOVERY_POINT, false, ReferencesDamaged, now),
+            GateVerdict::Present,
+            "the close lifts whatever its chain says"
+        );
+        assert!(g.lifted_by_marks());
+        assert_eq!(
+            g.on_decoded_corroborated(0, false, ReferencesDamaged, now),
+            GateVerdict::Present,
+            "the frame after the close still rides the lift"
+        );
+        assert_eq!(
+            g.on_decoded_corroborated(0, false, ReferencesDamaged, now),
+            GateVerdict::Hold,
+            "two frames on, a damaged chain is real"
+        );
+        assert!(g.is_holding());
+    }
+
     #[test]
     fn a_damaged_frame_after_an_honoured_anchor_refreezes() {
         let mut g = ReanchorGate::new(0);

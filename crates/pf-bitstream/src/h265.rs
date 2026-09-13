@@ -407,6 +407,8 @@ pub struct H265Planner {
     /// Ids the last [`DpbUpdate`] left alive: baseline for `removed`. Kept
     /// across failed AUs so interim evictions are reported, never dropped.
     reported_live: BTreeSet<PicId>,
+    /// The picture the last plan stored: the one a wave's close mark names.
+    last_stored: Option<PicId>,
     /// Set by [`Self::flush`]: planning resumes only at an IRAP.
     awaiting_idr: bool,
     /// Resident pictures that came off a broken chain — the fact behind
@@ -430,6 +432,7 @@ impl Default for H265Planner {
             next_pic_id: 0,
             pending_outputs: Vec::new(),
             reported_live: BTreeSet::new(),
+            last_stored: None,
             awaiting_idr: false,
             clean: Default::default(),
         }
@@ -656,6 +659,7 @@ impl H265Planner {
         previously_live.insert(stored);
         let removed = previously_live.difference(&live_after).copied().collect();
         self.reported_live = live_after;
+        self.last_stored = Some(stored);
 
         // After `finish_picture` so `stored` is the real id and `live_after`
         // reflects C.3.4/8.3.2 marking. A pre-marking write could survive an
@@ -684,10 +688,16 @@ impl H265Planner {
         })
     }
 
-    /// An intra refresh wave finished on a picture the freeze gate accepted: forget the
-    /// unclean marks, which a chain through half-refreshed pictures cannot clear itself.
+    /// An intra refresh wave closed on the picture just planned and the freeze gate
+    /// accepted it: that picture is whole by overwrite, which its reference chain cannot
+    /// show. Only its mark goes; the half-swept pictures before it stay damaged, so a
+    /// later picture or a host anchor that still leans on one is held and the client
+    /// asks for the IDR. Every P this decoder meets names one active reference, the
+    /// picture before it, so a healthy stream reads clean from the close on.
     pub fn forgive_unclean(&mut self) {
-        self.clean.clear();
+        if let Some(id) = self.last_stored {
+            self.clean.forgive(id);
+        }
     }
 
     /// Drain the DPB: every still-buffered picture becomes display-ready and

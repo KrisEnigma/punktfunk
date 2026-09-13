@@ -58,10 +58,16 @@ impl CleanLedger {
         self.unclean.retain(|id| live.contains(id));
     }
 
-    /// Drop every mark. The DPB was drained (flush or stream discontinuity), or an intra
-    /// refresh wave healed the picture by overwrite, which no reference chain shows.
+    /// Drop every mark: the DPB was drained (flush or stream discontinuity).
     pub fn clear(&mut self) {
         self.unclean.clear();
+    }
+
+    /// Drop one picture's mark: an intra refresh wave healed it by overwrite, which no
+    /// reference chain shows. Every other resident mark stays, so a later picture that
+    /// still predicts from the half-swept ones reads damaged.
+    pub fn forgive(&mut self, id: u64) {
+        self.unclean.remove(&id);
     }
 
     /// Diagnostics and tests. The plan path uses [`Self::references_clean`].
@@ -145,6 +151,21 @@ mod tests {
         led.clear();
         assert_eq!(led.unclean_count(), 0);
         assert!(led.references_clean([1, 2]));
+    }
+
+    #[test]
+    fn forgiving_the_swept_picture_keeps_the_half_swept_ones_marked() {
+        let mut led = CleanLedger::new();
+        led.note_stored(1, true, true);
+        led.note_stored(2, false, false);
+        led.note_stored(3, false, false);
+        led.forgive(3);
+        assert!(led.references_clean([3]), "the close reads clean");
+        assert!(
+            !led.references_clean([2]),
+            "a mid-wave picture still reads damaged"
+        );
+        assert!(!led.references_clean([3, 1]));
     }
 
     #[test]
