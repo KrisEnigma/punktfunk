@@ -3,19 +3,16 @@ title: Virtual displays
 description: Control how Punktfunk creates, keeps alive, and arranges the virtual displays it streams — presets, keep-alive, exclusive vs. extend, and persistent per-client scaling.
 ---
 
-When a client connects, Punktfunk creates a **virtual display** at exactly that client's resolution
-and refresh, renders your desktop or game onto it, and streams it. This page covers the **policy**
-for that display: how long it survives a disconnect, whether it takes over your physical monitors,
-what happens when a second client connects, and how desktop environments remember per-client
-settings like scaling.
+When a client connects, Punktfunk creates a **virtual display** at that client's resolution and
+refresh, renders your desktop or game onto it, and streams it. This page is the **policy** for that
+display: how long it survives a disconnect, whether it takes over your physical monitors, what a
+second client gets, and how per-client settings like scaling persist.
 
 Set it in the **web console** (the **Virtual displays** page), or edit
 `~/.config/punktfunk/display-settings.json` (`%ProgramData%\punktfunk\display-settings.json` on
 Windows). A change applies to the **next** connection.
 
-> **You rarely need to touch this.** The default matches how Punktfunk has always worked; reach for
-> a preset when you want a specific experience.
->
+> **You rarely need to touch this** — reach for a preset when you want a specific experience.
 > Monitors that stayed dark, or a streamed screen showing only wallpaper? Go to
 > [Troubleshooting](#troubleshooting).
 
@@ -24,31 +21,27 @@ To stream a monitor the host **already has** instead, see
 
 ## Stream a real monitor instead
 
-> **Linux only.** A Windows host enumerates its monitors but has no backend that can capture one —
-> the Streamed screen card is read-only there.
+> **Linux only.** A Windows host enumerates its monitors but can't capture one — the Streamed
+> screen card is read-only there.
 
-Set **Virtual displays → Streamed screen** in the console to a listed monitor and Punktfunk streams
-that physical monitor instead of creating a virtual display; every client sees it at *its*
-resolution.
+Set **Virtual displays → Streamed screen** to a listed monitor and Punktfunk streams that physical
+monitor instead of creating a virtual display; every client sees it at *its* resolution.
 
 - The monitor is **never touched** — not resized, moved, disabled or restored. Keep-alive, topology
   and multi-monitor layout don't apply.
-- **The resolution is the monitor's**, not yours. A client asking for a different one is told no and
-  scales its own picture; mid-stream resize is off.
-- **Every client sees the same screen** — two clients are two viewers of one monitor.
+- **The resolution is the monitor's.** A client asking for a different one is told no and scales
+  its own picture; mid-stream resize is off.
+- **Every client sees the same screen.**
 - Naming a monitor this host **doesn't have, while it has others**, is a **hard error**: the session
-  fails with `no monitor named "DP-9" — this host has: HDMI-1`. The exception is a session with
-  **no physical heads at all** (nested or headless compositor): the pin is set aside with a log
-  warning, you get an ordinary virtual display, and the pin applies again on the next session with
-  real heads.
+  fails with `no monitor named "DP-9" — this host has: HDMI-1`. On a session with **no physical
+  heads** (nested or headless compositor) the pin is set aside with a log warning instead.
 - **Virtual screen (default)** in the same card puts you back on the normal path.
 
 Supported on **KDE/KWin**, **GNOME/Mutter**, **Sway/wlroots**, **Hyprland** and **gamescope Game
-Mode** — each through the compositor's own screen-recording API, so there is **no chooser dialog**
-(a background [service](/docs/running-as-a-service) has nobody to answer one). On gamescope only the
-head the session is driving is listed — mirroring attaches to the session's own composited stream,
-so the screen keeps showing what the person in front of it sees. A *nested* or headless gamescope
-has no head, so the picker is empty there.
+Mode** — through the compositor's own screen-recording API, so there is **no chooser dialog** (a
+background [service](/docs/running-as-a-service) has nobody to answer one). On gamescope only the
+head the session is driving is listed; a *nested* or headless gamescope has none, so the picker is
+empty there.
 
 ### Naming the monitor from the host
 
@@ -81,8 +74,8 @@ Check the whole path — mirror, capture, frames — without a client:
 punktfunk-host mirror-test --monitor HDMI-A-1 --seconds 20
 ```
 
-Compositor screen recording is **damage-driven**: an idle desktop produces almost no frames, so move
-the mouse on the host while it runs or a working mirror reads as a stall.
+Screen recording is **damage-driven**: an idle desktop produces almost no frames, so move the mouse
+on the host while it runs or a working mirror reads as a stall.
 
 ### Absolute input follows the pin
 
@@ -91,17 +84,11 @@ lands where you point on *that* screen. Heads are matched by position, not size.
 the pin at startup and whenever the console writes it — no restart; the log line is
 `capture monitor: …`.
 
-To check it with no client involved:
-
-```sh
-punktfunk-host anchor-test --monitor HDMI-A-1
-```
-
-It lists this host's heads, says whether the box has the same-size pair the matching exists for,
-walks the pointer through the centre and corners, and prints the region it mapped into. `--none`
-runs the same walk unanchored, as an A/B. The anchor rides the **libei** injector — the
-GNOME/Mutter backend. On KWin, Sway and Hyprland the host injects through a different protocol, and
-`anchor-test` stops and says so rather than reporting a green run that proves nothing.
+`punktfunk-host anchor-test --monitor HDMI-A-1` checks it with no client: it lists the heads, walks
+the pointer through the centre and corners, and prints the region it mapped into (`--none` runs the
+walk unanchored, as an A/B). The anchor rides the **libei** injector — on KWin, Sway and Hyprland
+the host injects through a different protocol, and `anchor-test` says so rather than reporting a
+green run that proves nothing.
 
 ## Pick a preset
 
@@ -147,15 +134,13 @@ this also keeps the **game itself running**.
 Default: **10 seconds**.
 
 **Hyprland lists the kept head; Sway does not.** On Hyprland the named output stays in the
-registry for the linger window, so the console and `ctl display` show live and lingered heads,
-and a matching reconnect recasts the same one. Sway still cannot: its capture arrives over a
-portal handle the host cannot re-open per attach, so those displays never enter the list and
-cannot linger, whatever a preset's lifetime says.
+registry for the linger window, so the console and `ctl display` show live and lingered heads.
+Sway's capture arrives over a portal handle the host can't re-open per attach, so those displays
+never enter the list and cannot linger, whatever a preset's lifetime says.
 
-**A reconnect always resumes the kept display** — even a second or two after dropping.
-**Deliberately quitting** (closing the client, not a network drop) tears the display down at once,
-skipping the linger. How quickly a *dropped* client is noticed is the QUIC idle timeout — 8 s by
-default, tunable with `PUNKTFUNK_IDLE_TIMEOUT_MS` (see
+**A reconnect always resumes the kept display**; **deliberately quitting** (closing the client, not
+a network drop) tears it down at once, skipping the linger. How quickly a *dropped* client is
+noticed is the QUIC idle timeout — 8 s, tunable with `PUNKTFUNK_IDLE_TIMEOUT_MS` (see
 [Legacy environment knobs](#legacy-environment-knobs)).
 
 > **Keep-alive + Exclusive keeps your physical monitors dark after you disconnect**, until the
@@ -200,15 +185,15 @@ whatever has focus then — clicking a physical monitor mid-launch can still pul
 
 - **Conflict handling** — a *different* client connects mid-stream asking for a different
   resolution: give it its own display (**separate**), take the box over (**steal**), share the
-  existing display at its current mode (**join**), or refuse it (**reject**). On **Windows** a
-  second client is **rejected** ("host busy") even under `separate` — two clients can't yet share
-  one virtual display's capture there. A same-client *reconnect* never conflicts — it resumes.
+  existing display (**join**), or refuse it (**reject**). On **Windows** a second client is
+  **rejected** even under `separate` — two clients can't yet share one virtual display's capture
+  there. A same-client *reconnect* never conflicts — it resumes.
 - **Identity** — whether each client gets a **stable display identity** so your desktop environment
   remembers its settings (see [Persistent scaling](#persistent-scaling)): one shared identity, one
   **per client**, or one **per client + resolution**.
 - **Layout / max displays** — several clients as monitors of one desktop: side by side (**auto**) or
   exactly where you arrange them in the console (**manual**, keyed to each client), up to **max
-  displays**. Arrange them on the **Virtual displays** page once two or more are streaming.
+  displays**.
 
 ### Dedicated game sessions
 
@@ -216,17 +201,15 @@ How a session that *launches a game from [your library](/docs/game-library)* is 
 hosts):
 
 - **Auto** (default) — the launch rides whatever session the box is in: the managed Steam session
-  on a Steam Deck / Bazzite couch box, a bare gamescope on a plain distro, or your live KDE / GNOME
-  / Sway desktop.
+  on a couch box, a bare gamescope, or your live desktop.
 - **Dedicated** — every library launch gets its **own headless gamescope at your exact resolution
   and refresh**, with just the game inside. Steam titles launch with the client hidden
-  (`steam -silent`); non-Steam titles start almost instantly (gamescope up in ~1 s). Combined with
-  **keep alive**, the game keeps running when you disconnect.
+  (`steam -silent`); non-Steam titles start almost instantly. Combined with **keep alive**, the
+  game keeps running when you disconnect.
 
-Dedicated needs `gamescope` installed; without it a launch falls back to **Auto**. This axis is
-independent of the preset. On a box already in Steam game mode, a dedicated Steam launch frees game
-mode's Steam first and restores it when the session ends. (GameStream / Moonlight launches follow
-the same routing.)
+Dedicated needs `gamescope` installed; without it a launch falls back to **Auto**. On a box already
+in Steam game mode, a dedicated Steam launch frees game mode's Steam first and restores it when the
+session ends. GameStream / Moonlight launches follow the same routing.
 
 ## Advanced Windows options
 
