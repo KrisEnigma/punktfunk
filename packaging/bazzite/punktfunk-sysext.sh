@@ -340,9 +340,22 @@ Updates:  sudo punktfunk-sysext update
 EOF
 }
 
+# A console left running after the merge serves the old build's asset names, which /usr no longer has.
+# SUDO_USER is the person who ran this. The in-console updater runs it from a root unit without one
+# and restarts both itself once the helper returns.
+restart_user_units() {
+  if [ -n "${SUDO_USER:-}" ] \
+     && systemctl --user -M "$SUDO_USER@" try-restart punktfunk-web.service punktfunk-host.service; then
+    echo "restarted punktfunk-web and punktfunk-host for $SUDO_USER."
+  else
+    echo "restart the console and host to pick up the new build:"
+    echo "    systemctl --user restart punktfunk-web punktfunk-host"
+  fi
+}
+
 cmd_update() {
   need_root
-  if [ "${1:-}" = --from-file ]; then do_install --from-file "${2:?}"; return; fi
+  if [ "${1:-}" = --from-file ]; then do_install --from-file "${2:?}"; restart_user_units; return; fi
   local cur l ver
   cur="$(installed_version)"
   fetch_manifest || exit 1
@@ -386,7 +399,7 @@ cmd_update() {
   echo "updating: ${cur:-<none>} -> $ver"
   # shellcheck disable=SC2086
   do_install $l
-  echo "restart the host to pick up the new binary:  systemctl --user restart punktfunk-host"
+  restart_user_units
 }
 
 cmd_status() {
