@@ -10,7 +10,7 @@ import org.json.JSONObject
  * is true when trust was established via the SPAKE2 PIN ceremony (vs trust-on-first-use).
  *
  * [id] is the record's **stable identity** — minted once, never changed, and the key this record is
- * stored under. Everything that needs to point AT a host (a settings-profile binding, a pinned
+ * stored under. Everything that needs to point AT a host (a settings-preset binding, a pinned
  * card, a `punktfunk://` link) points at the id, so renaming a host or moving it to a new address
  * doesn't strand those references. Mirrors the Apple client's `StoredHost.id` and the Rust
  * `KnownHost.id`; the shape is a lowercase UUID v4, one grammar on every platform.
@@ -47,7 +47,7 @@ data class KnownHost(
     /**
      * Sync text copied on this device to this host and back while streaming. **A property of the
      * host, not of the stream** (design/client-settings-profiles.md §3, tier H): it is a trust
-     * decision about that machine, so it is never in a settings profile and never global — the
+     * decision about that machine, so it is never in a settings preset and never global — the
      * work box and the couch box get their own answers. Only effective when the host advertises
      * the clipboard capability; the protocol is opt-in per session either way.
      *
@@ -57,24 +57,24 @@ data class KnownHost(
      */
     val clipboardSync: Boolean = false,
     /**
-     * The settings profile a plain tap on this host connects with — `null` (or an id whose profile
+     * The settings preset a plain tap on this host connects with — `null` (or an id whose preset
      * was deleted) means the global defaults, i.e. today's behaviour. A dangling id is never an
      * error and never blocks a connect.
      */
-    val profileId: String? = null,
+    val presetId: String? = null,
     /**
-     * Profiles pinned as their own cards for this host (design §5.2a). Presentation only: order is
-     * card order, and this is NOT the default binding ([profileId] is). Duplicates and profiles
+     * Presets pinned as their own cards for this host (design §5.2a). Presentation only: order is
+     * card order, and this is NOT the default binding ([presetId] is). Duplicates and presets
      * that no longer exist are dropped when the cards are rendered.
      */
-    val pinnedProfileIds: List<String> = emptyList(),
+    val pinnedPresetIds: List<String> = emptyList(),
     /**
-     * Library title id → profile id: what launching that title streams with. Beats [profileId],
+     * Library title id → preset id: what launching that title streams with. Beats [presetId],
      * which is what a title with no entry here inherits, and is itself beaten by a one-off pick.
-     * Mirrors the Rust `KnownHost.game_profiles`. A dangling id falls through to [profileId], the
+     * Mirrors the Rust `KnownHost.game_presets`. A dangling id falls through to [presetId], the
      * way a dangling pin simply disappears — never an error, never a blocked launch.
      */
-    val gameProfiles: Map<String, String> = emptyMap(),
+    val gamePresets: Map<String, String> = emptyMap(),
     /**
      * Addresses this host was moved away from automatically, newest first, at most
      * [PREV_ADDRESSES_MAX]. A host lives at more than one — its LAN lease at home, a Tailscale
@@ -128,12 +128,29 @@ class KnownHostStore(context: Context) {
      * The trusted record for [address]:[port], or `null` if this host has never been trusted.
      * A pinned record beats an unpinned placeholder saved at the same address. An address can
      * carry more than one identity — both OS installs of a dual-boot box answer at one lease —
-     * so a caller holding a fingerprint asks [getByFp] instead.
+     * so a caller holding a fingerprint or a card asks [resolve] instead.
      */
     fun get(address: String, port: Int): KnownHost? {
         val at = all().filter { it.address == address && it.port == port }
         return at.firstOrNull { it.fpHex.isNotEmpty() } ?: at.firstOrNull()
     }
+
+    /**
+     * The unpinned placeholder saved at [address]:[port], or `null`. A record pinned there is an
+     * identity the address does not name on its own: it may be the other OS of the same box.
+     */
+    fun placeholderAt(address: String, port: Int): KnownHost? =
+        all().firstOrNull { it.address == address && it.port == port && it.fpHex.isEmpty() }
+
+    /**
+     * The record a dial is about. With a pin: the record pinned to [fpHex], else the placeholder
+     * at [address]:[port] waiting for one — never a record pinned to another fingerprint, which
+     * at a shared address is the other OS of a dual-boot box. An empty [fpHex] is a card saved
+     * without a pin: its placeholder only. `null` is a bare typed address, and [get] answers.
+     * Mirrors the Rust `KnownHosts::resolve`.
+     */
+    fun resolve(fpHex: String?, address: String, port: Int): KnownHost? =
+        if (fpHex == null) get(address, port) else getByFp(fpHex) ?: placeholderAt(address, port)
 
     /**
      * The trusted record pinned to [fpHex], or `null`. An empty fingerprint is not a key: it
@@ -158,10 +175,11 @@ class KnownHostStore(context: Context) {
      *
      * When a record already exists there — a re-pair after the host's identity changed, an
      * approval that upgrades a TOFU record to paired — it keeps its identity and everything the
-     * user set on it: the stable [KnownHost.id] (so profile bindings, pinned cards and any
+     * user set on it: the stable [KnownHost.id] (so preset bindings, pinned cards and any
      * `punktfunk://` shortcut still point at it), the per-host clipboard decision, the binding,
-     * the pins and the learned MACs. Only the name, pin and paired flag are refreshed. Returns the
-     * stored record.
+     * the pins and the learned MACs. Only the pin and paired flag are refreshed, plus [name] on a
+     * placeholder taking its first pin: a pinned record keeps the name the user knows it by, even
+     * when a dial meant for another card at this address landed on it. Returns the stored record.
      *
      * The record is found by its PIN wherever it now answers, so re-pairing a host that moved
      * lease re-points the one record instead of forking a second with the same fingerprint;
@@ -171,10 +189,14 @@ class KnownHostStore(context: Context) {
      * would otherwise overwrite the first one's record.
      */
     fun trust(address: String, port: Int, name: String, fpHex: String, paired: Boolean): KnownHost {
-        val existing = getByFp(fpHex)
-            ?: all().firstOrNull { it.address == address && it.port == port && it.fpHex.isEmpty() }
-        val host = existing?.copy(address = address, port = port, name = name, fpHex = fpHex, paired = paired)
-            ?: KnownHost(address, port, name, fpHex, paired)
+        val existing = getByFp(fpHex) ?: placeholderAt(address, port)
+        val host = existing?.copy(
+            address = address,
+            port = port,
+            name = if (existing.fpHex.isEmpty()) name else existing.name,
+            fpHex = fpHex,
+            paired = paired,
+        ) ?: KnownHost(address, port, name, fpHex, paired)
         save(host)
         return host
     }
@@ -278,30 +300,7 @@ class KnownHostStore(context: Context) {
         }
     }
 
-    private fun parse(s: String): KnownHost? = runCatching {
-        val j = JSONObject(s)
-        KnownHost(
-            address = j.getString("addr"),
-            port = j.getInt("port"),
-            name = j.getString("name"),
-            fpHex = j.getString("fp"),
-            paired = j.optBoolean("paired", false),
-            mac = j.optString("mac", "").split(",").map { it.trim() }.filter { it.isNotEmpty() },
-            os = j.optString("os", ""),
-            // 0 (or absent) = never learned. `optInt` cannot express "missing", hence the sentinel
-            // rather than a bare default — a record written before this field existed must decode
-            // to null and fall back to 47990, not to port 0.
-            mgmtPort = j.optInt("mgmt", 0).takeIf { it > 0 },
-            // A record without an id can only be one this build wrote before the migration ran, or
-            // a hand-edited file; minting here keeps the parse total rather than dropping a host.
-            id = j.optString("id", "").ifEmpty { newRecordId() },
-            clipboardSync = j.optBoolean("clip", false),
-            profileId = j.optString("profile", "").ifEmpty { null },
-            pinnedProfileIds = stringList(j.optJSONArray("pins")),
-            gameProfiles = stringMap(j.optJSONObject("game_profiles")),
-            prevAddresses = stringList(j.optJSONArray("prev_addrs")),
-        )
-    }.getOrNull()
+    private fun parse(s: String): KnownHost? = decode(s)
 
     companion object {
         /** The prefs file holding the host records. */
@@ -320,7 +319,7 @@ class KnownHostStore(context: Context) {
         /** Schema marker inside the hosts file. Reserved — never a host record. */
         private const val K_SCHEMA = "__schema"
 
-        /** 1 = id-keyed records with per-host clipboard sync, profile binding and pins. */
+        /** 1 = id-keyed records with per-host clipboard sync, preset binding and pins. */
         private const val SCHEMA_VERSION = 1
 
         /** What [migrate] decided: entries to write, and (old) keys to drop. */
@@ -382,11 +381,47 @@ class KnownHostStore(context: Context) {
             .put("os", host.os)
             .put("mgmt", host.mgmtPort ?: 0)
             .put("clip", host.clipboardSync)
-            .put("profile", host.profileId ?: "")
-            .put("pins", JSONArray(host.pinnedProfileIds))
-            .put("game_profiles", JSONObject(host.gameProfiles))
+            .put("preset", host.presetId ?: "")
+            .put("pins", JSONArray(host.pinnedPresetIds))
+            .put("game_presets", JSONObject(host.gamePresets))
+            // The pre-rename keys too, so an older build of this app keeps the bindings.
+            .put("profile", host.presetId ?: "")
+            .put("game_profiles", JSONObject(host.gamePresets))
             .put("prev_addrs", JSONArray(host.prevAddresses))
             .toString()
+
+        /** One stored record, or null when it does not parse. */
+        internal fun decode(s: String): KnownHost? = runCatching {
+            val j = JSONObject(s)
+            KnownHost(
+                address = j.getString("addr"),
+                port = j.getInt("port"),
+                name = j.getString("name"),
+                fpHex = j.getString("fp"),
+                paired = j.optBoolean("paired", false),
+                mac = j.optString("mac", "").split(",").map { it.trim() }.filter { it.isNotEmpty() },
+                os = j.optString("os", ""),
+                // 0 (or absent) = never learned. `optInt` cannot express "missing", hence the sentinel
+                // rather than a bare default — a record written before this field existed must decode
+                // to null and fall back to 47990, not to port 0.
+                mgmtPort = j.optInt("mgmt", 0).takeIf { it > 0 },
+                // A record without an id can only be one this build wrote before the migration ran, or
+                // a hand-edited file; minting here keeps the parse total rather than dropping a host.
+                id = j.optString("id", "").ifEmpty { newRecordId() },
+                clipboardSync = j.optBoolean("clip", false),
+                // `profile` and `game_profiles` are the pre-rename keys, read when the new key is absent.
+                presetId = j.optString(newOrOld(j, "preset", "profile"), "").ifEmpty { null },
+                pinnedPresetIds = stringList(j.optJSONArray("pins")),
+                gamePresets = stringMap(
+                    j.optJSONObject(newOrOld(j, "game_presets", "game_profiles")),
+                ),
+                prevAddresses = stringList(j.optJSONArray("prev_addrs")),
+            )
+        }.getOrNull()
+
+        /** [new] when the record has it, else its pre-rename spelling [old]. */
+        private fun newOrOld(j: JSONObject, new: String, old: String): String =
+            if (j.has(new)) new else old
 
         private fun stringList(a: JSONArray?): List<String> {
             if (a == null) return emptyList()

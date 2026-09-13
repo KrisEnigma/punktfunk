@@ -3,7 +3,7 @@
 The Vulkan session binary: one stream per invocation in an SDL3 window, no UI toolkit. It is
 deliberately dumb — a renderer the front-ends call *into*. The GTK shell, the WinUI shell and the
 `punktfunk` CLI all spawn it through the same brain (`pf_client_core::orchestrate`), which resolves
-policy (profiles, settings, wake) and hands the result down, normally as a `--resolved-spec` file.
+policy (presets, settings, wake) and hands the result down, normally as a `--resolved-spec` file.
 It reads the shared stores only as the compat fallback for a bare hand-launched invocation.
 
 `src/main.rs`'s module docs own the shell↔session contract — the stdout JSON lines, the `stats:`

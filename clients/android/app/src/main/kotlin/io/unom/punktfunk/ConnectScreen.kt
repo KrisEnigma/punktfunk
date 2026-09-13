@@ -86,7 +86,7 @@ private class ConnectAttempt(val hostName: String) {
  * The connect screen — discovery, trust and the dial itself, under either interface.
  *
  * What is left in this file is the STATE and the engine: the mDNS browse and the permission that
- * gates it, the identity, the host and profile stores, the trust decision, the dial and its wake
+ * gates it, the identity, the host and preset stores, the trust decision, the dial and its wake
  * fallback, and the `punktfunk://` router. What was drawn from that state now lives beside it —
  * `buildHomeTiles` (the console carousel's contents), `ConnectGrid` (the touch home) and
  * `ConnectPrompts` (everything modal, plus the connect takeover). They hold no state of their own,
@@ -103,7 +103,7 @@ fun ConnectScreen(
     // Writes the global defaults back. Only the speed test uses it — that is the one action on this
     // screen that can land in the defaults layer (design/client-settings-profiles.md §5.3).
     onSettingsChange: (Settings) -> Unit = {},
-    // (host, pinned profile id) — a pinned host+profile card opens ITS shelf, and the id is the
+    // (host, pinned preset id) — a pinned host+preset card opens ITS shelf, and the id is the
     // one-off every launch off that shelf runs with (design §5.2a). Null = the host's own tile.
     // Raised by "Browse library…" in a card's overflow.
     onOpenLibrary: (KnownHost, String?) -> Unit = { _, _ -> },
@@ -173,11 +173,11 @@ fun ConnectScreen(
     val identityStore = remember { IdentityStore(context) }
     val knownHostStore = remember { KnownHostStore(context) }
     var savedHosts by remember { mutableStateOf(knownHostStore.all()) }
-    // The settings-profile catalog. Read here (not in the settings screen's copy) because this is
-    // where profiles are USED: to resolve what a tap connects with, to offer the one-offs, and to
+    // The settings-preset catalog. Read here (not in the settings screen's copy) because this is
+    // where presets are USED: to resolve what a tap connects with, to offer the one-offs, and to
     // render the pinned cards. Re-read on entry, since Settings may have changed it in between.
-    val profileStore = remember { ProfileStore(context) }
-    var profiles by remember { mutableStateOf(profileStore.all()) }
+    val presetStore = remember { PresetStore(context) }
+    var presets by remember { mutableStateOf(presetStore.all()) }
     // Wakes a sleeping saved host and waits for it to reappear on mDNS before dialing (its overlay
     // rides over both the touch and console home). Fire-and-forget WoL isn't enough — a cold boot can
     // take a minute-plus to advertise again.
@@ -321,10 +321,10 @@ fun ConnectScreen(
         targetPort: Int,
         pinHex: String,
         timeoutMs: Int,
-        profile: StreamProfile?,
+        preset: StreamPreset?,
         launch: String?,
     ): Long = connectToHost(
-        context, settings.effectiveFor(profile), id, targetHost, targetPort, pinHex,
+        context, settings.effectiveFor(preset), id, targetHost, targetPort, pinHex,
         launch = launch, timeoutMs = timeoutMs,
     )
 
@@ -332,7 +332,7 @@ fun ConnectScreen(
     // clipboard decision (a property of the record, not a global). A host we never saved — a
     // connect that failed to pin — gets the secure default: no clipboard until the user enables
     // it for that host (security-review 2026-08-31 M-8).
-    fun session(handle: Long, record: KnownHost?, profile: StreamProfile?): ActiveSession {
+    fun session(handle: Long, record: KnownHost?, preset: StreamPreset?): ActiveSession {
         // The session's own Welcome carries where this host serves its library. Save it now: this
         // is the only source that does not need an mDNS advert, so it is what makes a host that
         // moved off 47990 browsable over a VPN or when it was added by address. 0 = not
@@ -344,26 +344,25 @@ fun ConnectScreen(
         }
         return ActiveSession(
             handle,
-            settings.effectiveFor(profile),
+            settings.effectiveFor(preset),
             clipboardSync = record?.clipboardSync ?: false,
-            profileName = profile?.name,
+            presetName = preset?.name,
             hostId = record?.id,
         )
     }
 
-    // The actual dial (identity already ready). On a TOFU connect (pinHex null), pin the fingerprint
-    // the host presented (as an unpaired known host) so the next connect goes straight through and it
-    // appears in the saved-hosts list. [onFailure], when set, takes over a failed dial (the wake-wait
-    // fallback) instead of the error status line — discovery is already restarted when it runs, so
-    // the wait can observe the host reappear.
+    // The actual dial (identity already ready). A TOFU dial (pinHex null) pins what the host
+    // presented, as an unpaired known host. [onFailure] takes over an unreachable dial (the
+    // wake-wait fallback, discovery already restarted); [onMismatch] takes over a refused pin.
     fun doConnectDirect(
         targetHost: String,
         targetPort: Int,
         name: String,
         pinHex: String?,
-        profile: StreamProfile?,
+        preset: StreamPreset?,
         launch: String? = null,
         onFailure: (() -> Unit)? = null,
+        onMismatch: (() -> Unit)? = null,
     ) {
         val id = identity ?: run {
             status = "Identity not ready yet — try again in a moment"
@@ -377,7 +376,7 @@ fun ConnectScreen(
         discovery.removeListener(subscriber) // let the browse go; the stream session wants the radio
         scope.launch {
             val handle =
-                connectNative(id, targetHost, targetPort, pinHex ?: "", CONNECT_TIMEOUT_MS, profile, launch)
+                connectNative(id, targetHost, targetPort, pinHex ?: "", CONNECT_TIMEOUT_MS, preset, launch)
             // Cancelled mid-dial: the UI's already been returned (and discovery restarted) by
             // cancelConnect — drop the just-opened session silently rather than navigating into it.
             if (thisAttempt.cancelled.get()) {
@@ -387,14 +386,15 @@ fun ConnectScreen(
             attempt = null
             connecting = false
             if (handle != 0L) {
-                var record = knownHostStore.get(targetHost, targetPort)
+                // By this dial's pin: the address may also name the other OS of a dual-boot box.
+                var record = pinHex?.let { knownHostStore.resolve(it, targetHost, targetPort) }
                 if (pinHex == null) { // TOFU: pin what we observed (unpaired)
                     val fp = NativeBridge.nativeHostFingerprint(handle)
                     if (fp.isNotEmpty()) {
                         record = knownHostStore.trust(targetHost, targetPort, name, fp, paired = false)
                     }
                 }
-                onConnected(session(handle, record, profile))
+                onConnected(session(handle, record, preset))
             } else {
                 discovery.addListener(subscriber)
                 val token = NativeBridge.nativeTakeLastError()
@@ -404,6 +404,9 @@ fun ConnectScreen(
                     // and setting `waker.waking` here land in one recompose, so the overlay slides
                     // Connecting → Waking without a blank frame.
                     onFailure()
+                } else if (onMismatch != null && token == "crypto") {
+                    // The saved pin was refused: another identity answers at this address.
+                    onMismatch()
                 } else {
                     // A typed host rejection (busy / versions differ / pairing required) means the
                     // host is awake — waking it would be nonsense; show the stated reason instead.
@@ -436,17 +439,20 @@ fun ConnectScreen(
         targetPort: Int,
         name: String,
         pinHex: String?,
-        oneOffProfile: String?,
+        oneOffPreset: String?,
         launch: String? = null,
+        onMismatch: (() -> Unit)? = null,
     ) {
         if (identity == null) {
             status = "Identity not ready yet — try again in a moment"
             return
         }
-        val kh = knownHostStore.get(targetHost, targetPort)
-        // Latched here, not per dial attempt: a wake-and-redial must stream with the same profile
+        // The record this dial's pin names. A TOFU dial is to a host not saved yet, so only a
+        // placeholder can be it — never the other OS of a dual-boot box at the same address.
+        val kh = knownHostStore.resolve(pinHex ?: "", targetHost, targetPort)
+        // Latched here, not per dial attempt: a wake-and-redial must stream with the same preset
         // the user asked for, and the "applies from the next session" footers stay truthful.
-        val profile = profileStore.resolveFor(kh, oneOffProfile)
+        val preset = presetStore.resolveFor(kh, oneOffPreset)
         val macs = kh?.mac ?: emptyList()
         // "Up" = a live advert that is THIS host — matched by fingerprint first (so it survives a DHCP
         // address change on a cold boot), else by address:port. Returns the CURRENT advert so we can
@@ -458,7 +464,7 @@ fun ConnectScreen(
         if (settings.autoWakeEnabled && macs.isNotEmpty() && down) {
             // Fire-and-forget first packet (harmless if it's awake), then dial-first.
             scope.launch(Dispatchers.IO) { NativeBridge.nativeWakeOnLan(macs.joinToString(","), targetHost) }
-            doConnectDirect(targetHost, targetPort, name, pinHex, profile, launch, onFailure = {
+            doConnectDirect(targetHost, targetPort, name, pinHex, preset, launch, onMismatch = onMismatch, onFailure = {
                 waker.start(
                     hostName = name,
                     connectsAfter = true,
@@ -487,13 +493,13 @@ fun ConnectScreen(
                         }
                         doConnectDirect(
                             live?.host ?: targetHost, live?.port ?: targetPort, name, pinHex,
-                            profile, launch,
+                            preset, launch, onMismatch = onMismatch,
                         )
                     },
                 )
             })
         } else {
-            doConnectDirect(targetHost, targetPort, name, pinHex, profile, launch)
+            doConnectDirect(targetHost, targetPort, name, pinHex, preset, launch, onMismatch = onMismatch)
         }
     }
 
@@ -519,10 +525,10 @@ fun ConnectScreen(
             // we wait); a manually-typed host has none, so trust-on-first-use.
             val pinHex = target.advertisedFp ?: ""
             // A host being trusted for the first time can't have a binding yet, so this is always
-            // the plain defaults — a profile only ever enters via a later, deliberate choice.
+            // the plain defaults — a preset only ever enters via a later, deliberate choice.
             val handle = connectNative(
                 id, target.host, target.port, pinHex, REQUEST_ACCESS_TIMEOUT_MS,
-                profile = null, launch = target.launch,
+                preset = null, launch = target.launch,
             )
             // Cancelled while we were parked: tear the (possibly just-approved) session down and
             // don't touch UI a fresh action may now own.
@@ -536,12 +542,12 @@ fun ConnectScreen(
                 // Approved — save the host as PAIRED, pinning the fingerprint it presented, so
                 // future connects are silent (exactly like after a PIN ceremony).
                 val fp = NativeBridge.nativeHostFingerprint(handle)
-                var record = knownHostStore.get(target.host, target.port)
+                var record = knownHostStore.resolve(fp, target.host, target.port)
                 if (fp.isNotEmpty()) {
                     record = knownHostStore.trust(target.host, target.port, target.name, fp, paired = true)
                     savedHosts = knownHostStore.all()
                 }
-                onConnected(session(handle, record, profile = null))
+                onConnected(session(handle, record, preset = null))
             } else {
                 // Cause-specific: an operator denial, an approval timeout, and a request that
                 // never reached the host are different problems with different fixes.
@@ -554,12 +560,10 @@ fun ConnectScreen(
         }
     }
 
-    // Decide pinned-reconnect vs fp-changed vs TOFU vs pairing before connecting. Trust state is
-    // keyed by the pinned fingerprint, falling back to address:port for a host typed in by hand,
-    // so a discovered and a manually-typed connection to the same host share one record.
-    // Trust-on-first-use is permitted ONLY when the host advertised pair=optional; a
-    // pair=required host, or a manual/unknown-policy host, must pair — either by no-PIN request
-    // access (approve in the console) or by the SPAKE2 PIN ceremony.
+    // Decide pinned-reconnect vs TOFU vs pairing before connecting. The record is the tapped card's,
+    // else the one the advertised pin names, else what a typed address answers with — never a record
+    // pinned to another fingerprint (both OS installs of a dual-boot box answer at one lease). TOFU
+    // only when the host advertised pair=optional; otherwise request access or the PIN ceremony.
     fun connect(
         targetHost: String,
         targetPort: Int,
@@ -568,9 +572,11 @@ fun ConnectScreen(
         // A one-off "Connect with ▸" pick. `null` = follow the host's binding (a plain tap);
         // `""` = force the global defaults, which is a real choice on a bound host and must
         // therefore survive as a value rather than collapsing into "unset". NEVER rebinds.
-        oneOffProfile: String? = null,
+        oneOffPreset: String? = null,
         // A library id the host should boot straight into (`launch=` on a link).
         launch: String? = null,
+        // The saved card this dial came from: its record decides, not its address.
+        saved: KnownHost? = null,
     ) {
         // Every dial/pair path funnels through here — with local network access denied the connect
         // can only EPERM its way to a 10 s timeout, so ask instead of pretending to try.
@@ -579,40 +585,48 @@ fun ConnectScreen(
             return
         }
         val adv = dh?.fingerprint?.lowercase()
-        // The record this dial is about: the one carrying the advertised pin, else — only when
-        // nothing there is pinned — what the address answers with. Both OS installs of a
-        // dual-boot box answer at one lease, so a record pinned to another fingerprint is a
-        // different host, and its name and profile are not this one's.
-        val known = adv?.let { knownHostStore.getByFp(it) }
-            ?: knownHostStore.get(targetHost, targetPort)?.takeIf { adv == null || it.fpHex.isEmpty() }
+        val known = if (saved != null) {
+            knownHostStore.byId(saved.id)
+        } else {
+            knownHostStore.resolve(adv, targetHost, targetPort)
+        }
+        val typed = manualName?.trim()?.takeIf { it.isNotEmpty() }
         // Label precedence: a saved host keeps its (possibly user-renamed) name; else the discovered
         // mDNS name; else the name typed in the Add-host sheet; else the bare address.
-        val name = known?.name ?: dh?.name ?: manualName?.trim()?.takeIf { it.isNotEmpty() } ?: targetHost
+        val name = known?.name ?: dh?.name ?: typed ?: targetHost
         when {
-            // Known host whose advertised fp still matches the pin → silent pinned reconnect.
-            known != null && (adv == null || adv == known.fpHex) ->
-                doConnect(targetHost, targetPort, known.name, known.fpHex, oneOffProfile, launch)
-            // Known host whose fp changed → force re-pairing (no silent re-trust shortcut).
-            known != null -> pendingTrust = PendingTrust(
-                targetHost, targetPort, known.name, adv, PendingTrust.Kind.FP_CHANGED,
-                oneOffProfile, launch,
+            // A pinned record → silent pinned reconnect; `resolve` answers an advert only with the
+            // record carrying its pin. A typed address names no identity: if its saved pin is
+            // refused, another OS of the same machine may hold the lease, so pair that one by PIN.
+            known != null && known.fpHex.isNotEmpty() -> doConnect(
+                targetHost, targetPort, known.name, known.fpHex, oneOffPreset, launch,
+                onMismatch = if (saved == null && dh == null) {
+                    {
+                        pendingTrust = PendingTrust(
+                            targetHost, targetPort, typed ?: targetHost, null,
+                            PendingTrust.Kind.FP_CHANGED, oneOffPreset, launch,
+                        )
+                    }
+                } else {
+                    null
+                },
             )
             // Host explicitly advertised pair=optional → trust-on-first-use is permitted (offer it,
             // clearly labeled, alongside PIN pairing). Smart-cast: this branch ⇒ dh != null.
             dh?.pairingRequired == false -> pendingTrust = PendingTrust(
                 targetHost, targetPort, name, dh.fingerprint, PendingTrust.Kind.TRUST_NEW,
-                oneOffProfile, launch,
+                oneOffPreset, launch,
             )
-            // pair=required, or a manual/unknown-policy host → offer the two ways in: a no-PIN
-            // "request access" (approve in the console) or the SPAKE2 PIN ceremony.
+            // pair=required, a manual/unknown-policy host, or a card saved without a pin → offer the
+            // two ways in: a no-PIN "request access" (approve in the console) or the PIN ceremony.
             else -> pendingTrust = PendingTrust(
                 targetHost, targetPort, name, adv, PendingTrust.Kind.REQUEST_ACCESS,
-                oneOffProfile, launch,
+                oneOffPreset, launch,
             )
         }
     }
 
-    // A speed test in flight: which host+profile it is measuring, and how far it has got. The
+    // A speed test in flight: which host+preset it is measuring, and how far it has got. The
     // measurement is over a real connect, so it takes the same `connecting` gate every dial does.
     var speedTest by remember { mutableStateOf<HostCardEntry?>(null) }
     var speedTestPhase by remember { mutableStateOf<SpeedTestPhase>(SpeedTestPhase.Connecting) }
@@ -643,26 +657,26 @@ fun ConnectScreen(
         }
     }
 
-    // Toggle a host+profile pin. Presentation only: it never touches the profile itself and never
+    // Toggle a host+preset pin. Presentation only: it never touches the preset itself and never
     // changes the host's default binding.
-    fun togglePin(kh: KnownHost, profile: StreamProfile) {
-        val pins = if (profile.id in kh.pinnedProfileIds) {
-            kh.pinnedProfileIds - profile.id
+    fun togglePin(kh: KnownHost, preset: StreamPreset) {
+        val pins = if (preset.id in kh.pinnedPresetIds) {
+            kh.pinnedPresetIds - preset.id
         } else {
-            kh.pinnedProfileIds + profile.id
+            kh.pinnedPresetIds + preset.id
         }
-        knownHostStore.save(kh.copy(pinnedProfileIds = pins))
+        knownHostStore.save(kh.copy(pinnedPresetIds = pins))
         savedHosts = knownHostStore.all()
     }
 
     // "Copy link" — the self-emitted form every other client already hands out
     // (design/client-deep-links.md §4): the host's STABLE id first, with `host=` and `fp=` alongside,
     // so a link written today still lands on the right box after the host changes address or this
-    // client is reinstalled. A PINNED card copies its own profile with it, because that combination
-    // is the thing being copied; a host card copies no profile at all and so keeps honouring the
+    // client is reinstalled. A PINNED card copies its own preset with it, because that combination
+    // is the thing being copied; a host card copies no preset at all and so keeps honouring the
     // host's binding, exactly like a tap on it does.
-    fun copyLink(kh: KnownHost, pin: StreamProfile?) {
-        val url = DeepLinks.forHost(kh, profile = pin?.id).toUrl()
+    fun copyLink(kh: KnownHost, pin: StreamPreset?) {
+        val url = DeepLinks.forHost(kh, preset = pin?.id).toUrl()
         val copied = putLinkOnClipboard(context, url)
         val message = linkCopyMessage(copied) ?: return
         // A success dressed as an error banner is a small lie: the notice line for a copy, the
@@ -746,16 +760,16 @@ fun ConnectScreen(
             status = "Punktfunk on Android can't do “${link.route.word}” links yet."
             return@LaunchedEffect
         }
-        // A profile reference that can't be honoured refuses: a "Work" shortcut streaming with the
+        // A preset reference that can't be honoured refuses: a "Work" shortcut streaming with the
         // wrong settings is worse than an error naming what failed.
-        val profileRef = link.profile
-        if (profileRef != null) {
-            val (_, resolution) = profileStore.resolve(profileRef)
-            if (resolution != ProfileResolution.FOUND) {
-                status = if (resolution == ProfileResolution.AMBIGUOUS) {
-                    "More than one profile is called “$profileRef” — rename one and try again."
+        val presetRef = link.preset
+        if (presetRef != null) {
+            val (_, resolution) = presetStore.resolve(presetRef)
+            if (resolution != PresetResolution.FOUND) {
+                status = if (resolution == PresetResolution.AMBIGUOUS) {
+                    "More than one preset is called “$presetRef” — rename one and try again."
                 } else {
-                    "That link asks for a profile called “$profileRef”, which isn't on this device."
+                    "That link asks for a preset called “$presetRef”, which isn't on this device."
                 }
                 return@LaunchedEffect
             }
@@ -777,17 +791,17 @@ fun ConnectScreen(
                     // absolute): a link may not establish trust, so this is a confirmation.
                     pendingTrust = PendingTrust(
                         resolved.host.address, resolved.host.port, resolved.host.name,
-                        link.fp, PendingTrust.Kind.REQUEST_ACCESS, profileRef, link.launch,
+                        link.fp, PendingTrust.Kind.REQUEST_ACCESS, presetRef, link.launch,
                     )
                     return@LaunchedEffect
                 }
                 if (resolved is HostResolution.Confirm) {
-                    pendingLinkConnect = PendingLinkConnect(resolved.host, profileRef, link.launch)
+                    pendingLinkConnect = PendingLinkConnect(resolved.host, presetRef, link.launch)
                     return@LaunchedEffect
                 }
                 connect(
                     resolved.host.address, resolved.host.port,
-                    oneOffProfile = profileRef, launch = link.launch,
+                    oneOffPreset = presetRef, launch = link.launch, saved = resolved.host,
                 )
             }
             // Unknown, or known only by address: the confirmation sheet, from which the normal
@@ -798,7 +812,7 @@ fun ConnectScreen(
                 link.name ?: resolved.address,
                 resolved.fp,
                 PendingTrust.Kind.REQUEST_ACCESS,
-                profileRef,
+                presetRef,
                 link.launch,
             )
             HostResolution.Ambiguous ->
@@ -867,14 +881,14 @@ fun ConnectScreen(
         discovered = discovered,
         discoveredUnsaved = discoveredUnsaved,
         reachable = reachable,
-        profiles = profiles,
-        pinsFor = profileStore::pinsFor,
+        presets = presets,
+        pinsFor = presetStore::pinsFor,
         connecting = connecting,
         notice = notice,
         status = status,
         lnpGranted = lnpGranted,
         onAskLocalNetwork = { lnpPrompt = true },
-        onConnect = { kh, oneOff -> connect(kh.address, kh.port, oneOffProfile = oneOff) },
+        onConnect = { kh, oneOff -> connect(kh.address, kh.port, oneOffPreset = oneOff, saved = kh) },
         onConnectDiscovered = { dh -> connect(dh.host, dh.port, dh) },
         onForget = { kh -> forgetHost(kh) },
         onEdit = { kh -> editTarget = kh },
@@ -912,8 +926,8 @@ fun ConnectScreen(
     }
 
     // Which layer a measurement would land in. Resolved here, not in the prompt: it is a question
-    // for the profile store, and the Apply button and the caption above it must agree on the answer.
-    val speedTestTarget = speedTest?.let { SpeedTestTarget.resolve(it.host, it.pin?.id, profileStore) }
+    // for the preset store, and the Apply button and the caption above it must agree on the answer.
+    val speedTestTarget = speedTest?.let { SpeedTestTarget.resolve(it.host, it.pin?.id, presetStore) }
     // Prefill a not-yet-learned MAC from the host's live advert, mirroring Apple's
     // `discovery.hosts.first { host.matches($0) }?.macAddresses`.
     val editSuggestedMacs =
@@ -935,19 +949,19 @@ fun ConnectScreen(
     // ConnectPrompts.kt. It decides nothing: each action below lands right back in the engine above.
     ConnectPrompts(
         identity = identity,
-        profiles = profiles,
+        presets = presets,
         isOnline = { it.isOnline(reachable) },
         pendingTrust = pendingTrust,
         onPendingTrustChange = { pendingTrust = it },
         onTrustNew = { pt ->
             pendingTrust = null
-            doConnect(pt.host, pt.port, pt.name, null, pt.profile, pt.launch)
+            doConnect(pt.host, pt.port, pt.name, null, pt.preset, pt.launch)
         },
         onPaired = { pt, fp ->
             knownHostStore.trust(pt.host, pt.port, pt.name, fp, paired = true)
             savedHosts = knownHostStore.all()
             pendingTrust = null
-            doConnect(pt.host, pt.port, pt.name, fp, pt.profile, pt.launch)
+            doConnect(pt.host, pt.port, pt.name, fp, pt.preset, pt.launch)
         },
         onRequestAccess = { pt -> pendingTrust = null; requestAccess(pt) },
         pendingLinkConnect = pendingLinkConnect,
@@ -955,7 +969,7 @@ fun ConnectScreen(
             pendingLinkConnect = null
             connect(
                 plc.host.address, plc.host.port,
-                oneOffProfile = plc.profile, launch = plc.launch,
+                oneOffPreset = plc.preset, launch = plc.launch, saved = plc.host,
             )
         },
         onDismissLinkConnect = { pendingLinkConnect = null },
@@ -969,14 +983,14 @@ fun ConnectScreen(
         speedTest = speedTest,
         speedTestTarget = speedTestTarget,
         speedTestPhase = speedTestPhase,
-        onApplySpeedTest = { toProfile ->
+        onApplySpeedTest = { toPreset ->
             val done = speedTestPhase as? SpeedTestPhase.Done
             if (done != null && speedTestTarget != null) {
                 val where = applySpeedTestResult(
-                    done.recommendedKbps, speedTestTarget, toProfile, profileStore, settings,
+                    done.recommendedKbps, speedTestTarget, toPreset, presetStore, settings,
                     onSettingsChange,
                 )
-                profiles = profileStore.all()
+                presets = presetStore.all()
                 notice = "%.0f Mbit/s set in %s".format(done.recommendedMbps, where)
             }
             speedTest = null
@@ -1013,10 +1027,10 @@ fun ConnectScreen(
 
 /**
  * One entry in the saved-hosts grid: a host's own card ([pin] null), or one of its pinned
- * host+profile cards. Pins are additive presentation state on the host record — never duplicated
+ * host+preset cards. Pins are additive presentation state on the host record — never duplicated
  * host entries, which would fork pairing, trust and renames (design §5.2a).
  */
-internal data class HostCardEntry(val host: KnownHost, val pin: StreamProfile?) {
+internal data class HostCardEntry(val host: KnownHost, val pin: StreamPreset?) {
     val key: String get() = "card-${host.id}-${pin?.id ?: "primary"}"
 }
 

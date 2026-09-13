@@ -341,7 +341,7 @@ struct GamepadAddHostView: View {
             }
             if var host = editingHost {
                 // Mutate a COPY of the stored record rather than building a fresh one: everything
-                // this form does not show — the pinned fingerprint, WoL MACs, pinned profile
+                // this form does not show — the pinned fingerprint, WoL MACs, pinned preset
                 // cards, the default binding, `addedAt` — has to survive a rename.
                 draft.apply(to: &host)
                 onAdd(host)

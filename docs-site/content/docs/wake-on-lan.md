@@ -57,7 +57,7 @@ Two things can still stop it, neither visible from Punktfunk:
 **Auto-wake on connect** is a client setting, **on by default**, in Settings under **Session**
 ([Client settings](/docs/client-settings#behavior)); the TV and controller layouts list it among
 the general settings. A property of the device and the network, so *not* part of a
-[settings profile](/docs/profiles-and-links#what-a-profile-cant-change).
+[settings preset](/docs/presets-and-links#what-a-preset-cant-change).
 
 With auto-wake on, opening a saved host that is not advertising:
 

@@ -5,11 +5,11 @@
 //!
 //! ```text
 //! punktfunk://connect/<host-ref>[?fp=<64-hex>][&host=<addr[:port]>][&launch=<id>]
-//!                               [&profile=<ref>][&name=<label>]
+//!                               [&preset=<ref>][&name=<label>]
 //! ```
 //!
 //! A URL may only do what a click on an existing card could do, minus trust
-//! decisions: references (host record, settings profile, library id), never
+//! decisions: references (host record, settings preset, library id), never
 //! values (resolution, bitrate, codec). `pair` is not a route; pairing stays
 //! interactive. `pf://` parses as an alias so a typed or legacy link still
 //! works, but nothing emits or registers it — claiming a two-letter scheme on
@@ -21,7 +21,7 @@ use crate::trust::{KnownHost, KnownHosts};
 pub const MAX_URL_LEN: usize = 2048;
 pub const MAX_HOST_REF_LEN: usize = 128;
 pub const MAX_LAUNCH_LEN: usize = 128;
-pub const MAX_PROFILE_LEN: usize = 64;
+pub const MAX_PRESET_LEN: usize = 64;
 pub const MAX_NAME_LEN: usize = 64;
 
 /// Native control port; same default as every other client.
@@ -58,8 +58,8 @@ pub struct DeepLink {
     pub host: Option<(String, u16)>,
     /// Store-qualified library id (`steam:570`).
     pub launch: Option<String>,
-    /// Profile id or unique name; one-off, never rebinding.
-    pub profile: Option<String>,
+    /// Preset id or unique name; one-off, never rebinding.
+    pub preset: Option<String>,
     /// Label for the unknown-host confirmation sheet (external emitters).
     pub name: Option<String>,
 }
@@ -168,6 +168,7 @@ pub fn parse(url: &str) -> Result<DeepLink, ParseError> {
         host_ref,
         ..Default::default()
     };
+    let mut legacy_preset: Option<String> = None;
     for pair in query.split('&').filter(|s| !s.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = decode(key)?.to_ascii_lowercase();
@@ -197,11 +198,18 @@ pub fn parse(url: &str) -> Result<DeepLink, ParseError> {
                 }
                 link.launch = Some(value);
             }
-            "profile" if link.profile.is_none() => {
-                if value.chars().count() > MAX_PROFILE_LEN {
+            "preset" if link.preset.is_none() => {
+                if value.chars().count() > MAX_PRESET_LEN {
+                    return Err(ParseError::ParamTooLong("preset"));
+                }
+                link.preset = Some(value);
+            }
+            // The pre-rename spelling: `preset` wins wherever it sits.
+            "profile" if legacy_preset.is_none() => {
+                if value.chars().count() > MAX_PRESET_LEN {
                     return Err(ParseError::ParamTooLong("profile"));
                 }
-                link.profile = Some(value);
+                legacy_preset = Some(value);
             }
             "name" if link.name.is_none() => {
                 if value.chars().count() > MAX_NAME_LEN {
@@ -212,6 +220,7 @@ pub fn parse(url: &str) -> Result<DeepLink, ParseError> {
             _ => {}
         }
     }
+    link.preset = link.preset.or(legacy_preset);
     Ok(link)
 }
 
@@ -248,8 +257,10 @@ impl DeepLink {
         if let Some(launch) = &self.launch {
             push(&mut s, "launch", launch);
         }
-        if let Some(profile) = &self.profile {
-            push(&mut s, "profile", profile);
+        // `profile=` as well, for clients that predate `preset=`.
+        if let Some(preset) = &self.preset {
+            push(&mut s, "preset", preset);
+            push(&mut s, "profile", preset);
         }
         if let Some(name) = &self.name {
             push(&mut s, "name", name);
@@ -259,7 +270,7 @@ impl DeepLink {
 
     /// Id first (address-independent). Address and pin so a missing record degrades
     /// to a confirmation sheet, not an unresolvable click.
-    pub fn for_host(host: &KnownHost, launch: Option<&str>, profile: Option<&str>) -> DeepLink {
+    pub fn for_host(host: &KnownHost, launch: Option<&str>, preset: Option<&str>) -> DeepLink {
         DeepLink {
             route: Route::Connect,
             host_ref: host
@@ -269,7 +280,7 @@ impl DeepLink {
             fp: (!host.fp_hex.is_empty()).then(|| host.fp_hex.clone()),
             host: Some((host.addr.clone(), host.port)),
             launch: launch.map(str::to_string),
-            profile: profile.map(str::to_string),
+            preset: preset.map(str::to_string),
             name: None,
         }
     }
@@ -329,13 +340,23 @@ pub fn resolve_host(link: &DeepLink, known: &KnownHosts) -> HostResolution {
         0 => {}
         _ => return HostResolution::Ambiguous,
     }
-    // Literal `addr[:port]`, then `host=`, matched as addr+port. A stale record id must
-    // fall through to `host=` (or refusal), never be offered as a box to dial.
+    // Literal `addr[:port]`, then `host=`. At that address the link's `fp` picks its record —
+    // a dual-boot box answers there with two pins — else only a placeholder stands in. A
+    // stale record id must fall through to `host=` (or refusal), never be offered as a box.
     let literal = looks_like_address(&link.host_ref)
         .then(|| parse_addr_port(&link.host_ref))
         .flatten();
     for candidate in [literal.clone(), link.host.clone()].into_iter().flatten() {
-        if let Some(i) = known.index_by_addr(&candidate.0, candidate.1) {
+        let (addr, port) = (candidate.0.as_str(), candidate.1);
+        let found = match link.fp.as_deref() {
+            Some(fp) => known
+                .hosts
+                .iter()
+                .position(|h| h.addr == addr && h.port == port && h.fp_hex == fp)
+                .or_else(|| known.placeholder_at(addr, port)),
+            None => known.index_by_addr(addr, port),
+        };
+        if let Some(i) = found {
             return HostResolution::Confirm(i);
         }
     }
@@ -509,7 +530,7 @@ mod tests {
                     let opt = |k: &str| want.get(k).and_then(|v| v.as_str()).map(str::to_string);
                     assert_eq!(link.fp, opt("fp"), "{name} fp");
                     assert_eq!(link.launch, opt("launch"), "{name} launch");
-                    assert_eq!(link.profile, opt("profile"), "{name} profile");
+                    assert_eq!(link.preset, opt("preset"), "{name} preset");
                     assert_eq!(link.name, opt("name"), "{name} name");
                     let (addr, port) = match &link.host {
                         Some((a, p)) => (Some(a.clone()), Some(u64::from(*p))),
@@ -670,6 +691,51 @@ mod tests {
         }
     }
 
+    /// Both OS installs of a dual-boot box at one address: a link's `fp` picks its own
+    /// record, and a pin nobody holds is a new host, never the neighbour.
+    #[test]
+    fn a_links_pin_picks_its_own_os_at_a_shared_address() {
+        let (windows, linux, third) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let known = KnownHosts {
+            hosts: vec![
+                host(
+                    "Desk (Windows)",
+                    "192.168.1.50",
+                    "11111111-2222-4333-8444-555555555555",
+                    &windows,
+                ),
+                host(
+                    "Desk (Linux)",
+                    "192.168.1.50",
+                    "66666666-7777-4888-8999-aaaaaaaaaaaa",
+                    &linux,
+                ),
+            ],
+        };
+        let r = |url: &str| resolve_host(&parse(url).unwrap(), &known);
+
+        let at = |fp: &str| format!("punktfunk://connect/192.168.1.50?fp={fp}");
+        assert_eq!(r(&at(&windows)), HostResolution::Confirm(0));
+        assert_eq!(r(&at(&linux)), HostResolution::Confirm(1));
+        assert_eq!(
+            r(&at(&third)),
+            HostResolution::Unknown {
+                addr: "192.168.1.50".into(),
+                port: DEFAULT_PORT,
+                name: None,
+                fp: Some(third.clone()),
+            }
+        );
+        // A stale id recovering through `host=` lands on the pin's own record too.
+        assert_eq!(
+            r(&format!(
+                "punktfunk://connect/00000000-0000-4000-8000-000000000000\
+                 ?host=192.168.1.50&fp={linux}"
+            )),
+            HostResolution::Confirm(1)
+        );
+    }
+
     #[test]
     fn self_emitted_links_round_trip() {
         let fp = "c".repeat(64);
@@ -686,7 +752,7 @@ mod tests {
             url,
             "punktfunk://connect/11111111-2222-4333-8444-555555555555\
              ?fp=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\
-             &host=192.168.1.50:7777&launch=steam:570&profile=aaaaaaaaaaaa"
+             &host=192.168.1.50:7777&launch=steam:570&preset=aaaaaaaaaaaa&profile=aaaaaaaaaaaa"
         );
         assert_eq!(parse(&url).unwrap(), link);
 

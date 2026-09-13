@@ -263,22 +263,17 @@ const MENU_COPY_LINK: &str = "Copy link";
 /// Built from the STORE — the stable id and the fingerprint live there, not on the target —
 /// which is what makes a link taken here identical to one taken off the host tile.
 ///
-/// A library opened from a "Connect with" one-off carries that profile into the link, so a
+/// A library opened from a "Connect with" one-off carries that preset into the link, so a
 /// copied URL streams the way the shelf it came from does. `None` only when the host has
 /// left the store while the page was open.
 fn game_link(target: &super::Target, game_id: &str) -> Option<String> {
     let known = crate::trust::KnownHosts::load();
-    let host = target
-        .fp_hex
-        .as_deref()
-        .filter(|fp| !fp.is_empty())
-        .and_then(|fp| known.find_by_fp(fp))
-        .or_else(|| known.find_by_addr(&target.addr, target.port))?;
+    let host = known.resolve(target.fp_hex.as_deref(), &target.addr, target.port)?;
     Some(
         pf_client_core::deeplink::DeepLink::for_host(
             host,
             Some(game_id),
-            target.profile.as_deref().filter(|p| !p.is_empty()),
+            target.preset.as_deref().filter(|p| !p.is_empty()),
         )
         .to_url(),
     )

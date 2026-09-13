@@ -75,7 +75,7 @@ stating in the policy text anyway, because they are true and pre-empt questions:
 > und haben zu keinem Zeitpunkt Zugriff auf die Inhalte einer Sitzung.
 >
 > **Was auf dem Gerät bleibt.** Die App speichert lokal auf Ihrem Gerät: die von Ihnen
-> hinzugefügten oder im Netzwerk gefundenen Hosts, Ihre Einstellungen und Profile sowie einen
+> hinzugefügten oder im Netzwerk gefundenen Hosts, Ihre Einstellungen und Presets sowie einen
 > kryptografischen Schlüssel, mit dem sich Ihr Gerät gegenüber einem gekoppelten Host ausweist
 > (auf Apple-Geräten im Schlüsselbund). Diese Daten verlassen Ihr Gerät nicht und werden gelöscht,
 > wenn Sie die App entfernen.
@@ -118,7 +118,7 @@ stating in the policy text anyway, because they are true and pre-empt questions:
 > streaming, and we have no access to the contents of a session at any point.
 >
 > **What stays on your device.** The app stores locally on your device: the hosts you have added or
-> discovered on your network, your settings and profiles, and a cryptographic key your device uses
+> discovered on your network, your settings and presets, and a cryptographic key your device uses
 > to identify itself to a paired host (in the keychain, on Apple devices). This data does not leave
 > your device and is removed when you delete the app.
 >

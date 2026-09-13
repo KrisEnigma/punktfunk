@@ -9,7 +9,7 @@
 //! Evidence: the migration and known-hosts tests below;
 //! `design/client-settings-profiles.md`.
 
-use crate::profiles::{ProfilesFile, Resolution, StreamProfile};
+use crate::presets::{PresetsFile, Resolution, StreamPreset};
 use anyhow::{Context, Result};
 // The `quic` half of the store. wasm takes punktfunk-core WITHOUT `quic` — WebTransport is
 // the QUIC layer in a browser, so quinn never builds for that target — and these are the
@@ -32,9 +32,15 @@ use std::path::{Path, PathBuf};
 /// fall back so a parse error is not an unexplained reset. A bad file never
 /// blocks a stream.
 pub(crate) fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    load_json(path).unwrap_or_default()
+}
+
+/// [`load_json_or_default`] without the fallback: `None` for a missing, unreadable or
+/// unparsable file, with the same warnings.
+pub(crate) fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
@@ -42,11 +48,11 @@ pub(crate) fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(pat
                 "config file could not be read — every setting in it is being IGNORED \
                  (a UTF-16 file reads as invalid UTF-8 here; re-save it as UTF-8)"
             );
-            return T::default();
+            return None;
         }
     };
     match serde_json::from_str(raw.strip_prefix('\u{feff}').unwrap_or(&raw)) {
-        Ok(v) => v,
+        Ok(v) => Some(v),
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
@@ -54,7 +60,7 @@ pub(crate) fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(pat
                 "config file did not parse — falling back to defaults for it, and the \
                  settings in it are being IGNORED (fix or delete the file)"
             );
-            T::default()
+            None
         }
     }
 }
@@ -243,6 +249,7 @@ pub fn parse_hex32(s: &str) -> Option<[u8; 32]> {
 
 /// One trusted host: pinned cert fingerprint, how trust was granted, last-reached address.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct KnownHost {
     pub name: String,
     pub addr: String,
@@ -271,20 +278,20 @@ pub struct KnownHost {
     /// Per-host, not global. Default off; the host must also advertise `HOST_CAP_CLIPBOARD`.
     #[serde(default)]
     pub clipboard_sync: bool,
-    /// Default settings profile for a plain click (design/client-settings-profiles.md).
+    /// Default settings preset for a plain click (design/client-settings-profiles.md).
     /// `None` or a deleted id → global defaults; a dangling binding never blocks a connect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    /// Extra profile cards for this host; order = card order. Presentation only — not
-    /// the default (`profile_id`). Duplicates and dangling ids are dropped at resolve.
+    pub preset_id: Option<String>,
+    /// Extra preset cards for this host; order = card order. Presentation only — not
+    /// the default (`preset_id`). Duplicates and dangling ids are dropped at resolve.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pinned_profiles: Vec<String>,
-    /// Library title id → profile id: what a launch of that title streams with, beating
-    /// `profile_id`. Keyed here rather than in the catalog for the §4.1 reason the host
+    pub pinned_presets: Vec<String>,
+    /// Library title id → preset id: what a launch of that title streams with, beating
+    /// `preset_id`. Keyed here rather than in the catalog for the §4.1 reason the host
     /// binding is — the catalog owns no host keys, and a title id is only unique per host.
-    /// Dangling ids resolve to nothing, exactly like a dangling `profile_id`.
+    /// Dangling ids resolve to nothing, exactly like a dangling `preset_id`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub game_profiles: BTreeMap<String, String>,
+    pub game_presets: BTreeMap<String, String>,
     /// Stable record id, minted lazily, never rewritten. Survives rename and DHCP.
     /// No lookup here is keyed by it — `fp_hex` / `addr:port` stay the keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,6 +301,45 @@ pub struct KnownHost {
     /// Tailscale address anywhere — so when `addr` goes silent `probe_known` asks these too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prev_addrs: Vec<String>,
+}
+
+/// Pre-rename binding keys (`design/preset-rename.md`): read when the new key is absent,
+/// and written beside it so a client older than the rename keeps its bindings.
+const LEGACY_HOST_KEYS: [(&str, &str); 3] = [
+    ("preset_id", "profile_id"),
+    ("pinned_presets", "pinned_profiles"),
+    ("game_presets", "game_profiles"),
+];
+
+impl<'de> Deserialize<'de> for KnownHost {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut v = serde_json::Value::deserialize(d)?;
+        if let Some(host) = v.as_object_mut() {
+            for (new, old) in LEGACY_HOST_KEYS {
+                // The new key wins: only this client writes it, and always beside an equal
+                // old one, so a record carrying it was last saved here.
+                if let Some(legacy) = host.remove(old) {
+                    host.entry(new).or_insert(legacy);
+                }
+            }
+        }
+        KnownHost::deserialize(v).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for KnownHost {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut v = KnownHost::serialize(self, serde_json::value::Serializer)
+            .map_err(serde::ser::Error::custom)?;
+        if let Some(host) = v.as_object_mut() {
+            for (new, old) in LEGACY_HOST_KEYS {
+                if let Some(value) = host.get(new).cloned() {
+                    host.insert(old.into(), value);
+                }
+            }
+        }
+        v.serialize(s)
+    }
 }
 
 /// How many left-behind addresses a host keeps.
@@ -315,10 +361,10 @@ impl Default for KnownHost {
             os: String::new(),
             mgmt_port: None,
             clipboard_sync: false,
-            profile_id: None,
-            pinned_profiles: Vec::new(),
-            game_profiles: BTreeMap::new(),
-            id: Some(crate::profiles::new_record_uuid()),
+            preset_id: None,
+            pinned_presets: Vec::new(),
+            game_presets: BTreeMap::new(),
+            id: Some(crate::presets::new_record_uuid()),
             prev_addrs: Vec::new(),
         }
     }
@@ -349,9 +395,9 @@ impl KnownHost {
 
     /// Pins that still exist, in card order, no duplicates. Dangling ids disappear —
     /// a pin is presentation state, never an error.
-    pub fn resolved_pins<'a>(&self, catalog: &'a ProfilesFile) -> Vec<&'a StreamProfile> {
-        let mut out: Vec<&StreamProfile> = Vec::new();
-        for id in &self.pinned_profiles {
+    pub fn resolved_pins<'a>(&self, catalog: &'a PresetsFile) -> Vec<&'a StreamPreset> {
+        let mut out: Vec<&StreamPreset> = Vec::new();
+        for id in &self.pinned_presets {
             if out.iter().any(|p| p.id == *id) {
                 continue;
             }
@@ -363,21 +409,21 @@ impl KnownHost {
     }
 
     /// This title's binding, if it has one. Not resolved against the catalog here —
-    /// [`resolve_profile`] drops a dangling id, the same way it does for `profile_id`.
-    pub fn profile_for_game(&self, game_id: &str) -> Option<&str> {
-        self.game_profiles.get(game_id).map(String::as_str)
+    /// [`resolve_preset`] drops a dangling id, the same way it does for `preset_id`.
+    pub fn preset_for_game(&self, game_id: &str) -> Option<&str> {
+        self.game_presets.get(game_id).map(String::as_str)
     }
 
-    /// Bind (or with `None`, clear) a title's profile. Idempotent, and a clear removes
+    /// Bind (or with `None`, clear) a title's preset. Idempotent, and a clear removes
     /// the key rather than storing an empty one — the map is skipped when serialising,
-    /// so an unbound host keeps writing no `game_profiles` at all.
-    pub fn bind_game_profile(&mut self, game_id: &str, profile_id: Option<&str>) {
-        match profile_id {
+    /// so an unbound host keeps writing no `game_presets` at all.
+    pub fn bind_game_preset(&mut self, game_id: &str, preset_id: Option<&str>) {
+        match preset_id {
             Some(id) => drop(
-                self.game_profiles
+                self.game_presets
                     .insert(game_id.to_string(), id.to_string()),
             ),
-            None => drop(self.game_profiles.remove(game_id)),
+            None => drop(self.game_presets.remove(game_id)),
         }
     }
 }
@@ -419,7 +465,7 @@ impl KnownHosts {
         let mut minted = false;
         for h in &mut self.hosts {
             if h.id.as_deref().is_none_or(str::is_empty) {
-                h.id = Some(crate::profiles::new_record_uuid());
+                h.id = Some(crate::presets::new_record_uuid());
                 minted = true;
             }
         }
@@ -473,6 +519,36 @@ impl KnownHosts {
 
     pub fn find_by_addr(&self, addr: &str, port: u16) -> Option<&KnownHost> {
         self.index_by_addr(addr, port).map(|i| &self.hosts[i])
+    }
+
+    /// Index of the unpinned placeholder saved at `addr:port`. A record pinned there is an
+    /// identity the address does not name on its own: both OS installs of a dual-boot box
+    /// answer at one lease.
+    pub fn placeholder_at(&self, addr: &str, port: u16) -> Option<usize> {
+        self.hosts
+            .iter()
+            .position(|h| h.fp_hex.is_empty() && h.addr == addr && h.port == port)
+    }
+
+    /// Index of the record a dial is about. With a pin: the record pinned to it, else the
+    /// placeholder at `addr:port` waiting for one — never a record pinned to another
+    /// fingerprint, which at a shared address is the other OS of a dual-boot box, with its
+    /// own name, binding and clipboard. `Some("")` is a card saved without a pin: its
+    /// placeholder only. `None` is a bare typed address: whatever it answers with
+    /// ([`KnownHosts::index_by_addr`]).
+    pub fn resolve_index(&self, fp_hex: Option<&str>, addr: &str, port: u16) -> Option<usize> {
+        let Some(fp_hex) = fp_hex else {
+            return self.index_by_addr(addr, port);
+        };
+        (!fp_hex.is_empty())
+            .then(|| self.hosts.iter().position(|h| h.fp_hex == fp_hex))
+            .flatten()
+            .or_else(|| self.placeholder_at(addr, port))
+    }
+
+    pub fn resolve(&self, fp_hex: Option<&str>, addr: &str, port: u16) -> Option<&KnownHost> {
+        self.resolve_index(fp_hex, addr, port)
+            .map(|i| &self.hosts[i])
     }
 
     /// Drop the record pinned to `fp_hex`. An empty fingerprint removes NOTHING: `retain`
@@ -539,19 +615,19 @@ impl KnownHosts {
             if entry.mgmt_port.is_some() {
                 h.mgmt_port = entry.mgmt_port;
             }
-            // User-set fields a refresh never carries: clipboard, profile, pins,
+            // User-set fields a refresh never carries: clipboard, preset, pins,
             // per-game bindings, id. Only an upsert carrying a value moves one.
             if entry.clipboard_sync {
                 h.clipboard_sync = true;
             }
-            if entry.profile_id.is_some() {
-                h.profile_id = entry.profile_id;
+            if entry.preset_id.is_some() {
+                h.preset_id = entry.preset_id;
             }
-            if !entry.pinned_profiles.is_empty() {
-                h.pinned_profiles = entry.pinned_profiles;
+            if !entry.pinned_presets.is_empty() {
+                h.pinned_presets = entry.pinned_presets;
             }
-            if !entry.game_profiles.is_empty() {
-                h.game_profiles = entry.game_profiles;
+            if !entry.game_presets.is_empty() {
+                h.game_presets = entry.game_presets;
             }
             if h.id.as_deref().is_none_or(str::is_empty) {
                 h.id = entry.id;
@@ -569,7 +645,7 @@ impl KnownHosts {
     /// identity. Both OS installs of a dual-boot box answer at one lease with one MAC
     /// and a certificate each, so retiring by address takes the sibling the user
     /// paired. A re-keyed host leaves its old card behind for one Forget.
-    /// Box fields (MAC, OS, profile, pins, last_used) ride onto the survivor. Not
+    /// Box fields (MAC, OS, preset, pins, last_used) ride onto the survivor. Not
     /// carried: `paired`, `clipboard_sync` (cert decisions), and the stable id (a deep
     /// link must not silently retarget).
     ///
@@ -606,14 +682,14 @@ impl KnownHosts {
             if h.mgmt_port.is_none() {
                 h.mgmt_port = old.mgmt_port;
             }
-            if h.profile_id.is_none() {
-                h.profile_id = old.profile_id;
+            if h.preset_id.is_none() {
+                h.preset_id = old.preset_id;
             }
-            if h.pinned_profiles.is_empty() {
-                h.pinned_profiles = old.pinned_profiles;
+            if h.pinned_presets.is_empty() {
+                h.pinned_presets = old.pinned_presets;
             }
-            if h.game_profiles.is_empty() {
-                h.game_profiles = old.game_profiles;
+            if h.game_presets.is_empty() {
+                h.game_presets = old.game_presets;
             }
             if h.last_used.is_none() {
                 h.last_used = old.last_used;
@@ -661,18 +737,16 @@ pub fn forget_placeholder(addr: &str, port: u16) {
     }
 }
 
-/// Record an advert should land on: fingerprint match if any, else the address. Fingerprint
-/// first — "either" would teach a stale namesake that merely sat earlier in the file.
+/// Record an advert should land on: the one its caller matched, by pin, or the placeholder
+/// at its address. The address alone would teach the other OS of a dual-boot box this
+/// one's OS mark and MAC.
 fn learn_target<'a>(
     known: &'a mut KnownHosts,
     fp_hex: &str,
     addr: &str,
     port: u16,
 ) -> Option<&'a mut KnownHost> {
-    let i = (!fp_hex.is_empty())
-        .then(|| known.hosts.iter().position(|h| h.fp_hex == fp_hex))
-        .flatten()
-        .or_else(|| known.index_by_addr(addr, port))?;
+    let i = known.resolve_index(Some(fp_hex), addr, port)?;
     known.hosts.get_mut(i)
 }
 
@@ -1074,7 +1148,7 @@ pub enum PresentPriority {
 }
 
 impl PresentPriority {
-    /// Shared resolution rule — pure, so every embedder agrees on a foreign profile.
+    /// Shared resolution rule — pure, so every embedder agrees on a foreign preset.
     pub fn resolve(name: &str, buffer: u8) -> PresentPriority {
         if name == "smooth" {
             PresentPriority::Smooth {
@@ -1184,7 +1258,7 @@ pub struct Settings {
     #[serde(default)]
     pub adapter: String,
     /// Ask for 4:4:4 (`quic::VIDEO_CAP_444`). Default off: bandwidth and encode
-    /// headroom; per-profile because a desktop wants it and a game usually does not.
+    /// headroom; per-preset because a desktop wants it and a game usually does not.
     #[serde(default)]
     pub enable_444: bool,
     /// Advertise 10-bit + HDR10. Off means never send HDR. Default true: Linux stores
@@ -1231,13 +1305,13 @@ pub struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats_verbosity: Option<StatsVerbosity>,
     /// Overlay vocabulary: off = the Standard figures Moonlight also shows, on = the Advanced
-    /// capture→glass view. Device-wide; a profile never carries it.
+    /// capture→glass view. Device-wide; a preset never carries it.
     #[serde(default)]
     pub advanced_stats: bool,
     /// Enter fullscreen when a stream starts. `--fullscreen` (Gaming Mode) ignores this.
     pub fullscreen_on_stream: bool,
     /// Gamepad-UI backdrop palette (`"violet"` default). Presentation only — never
-    /// part of a settings profile. Unknown name → default (a newer client may have
+    /// part of a settings preset. Unknown name → default (a newer client may have
     /// shipped one this binary does not know).
     #[serde(default = "default_ui_palette")]
     pub ui_palette: String,
@@ -1503,64 +1577,66 @@ impl Settings {
 /// (design/client-settings-profiles.md):
 ///
 /// ```text
-/// effective = overlay(profile).apply(global)
-/// profile   = one-off override  ??  title binding  ??  host binding  ??  none
+/// effective = overlay(preset).apply(global)
+/// preset   = one-off override  ??  title binding  ??  host binding  ??  none
 /// ```
 ///
-/// `one_off` is Connect-with / `--profile` / `profile=`; `Some("")` forces globals
+/// `one_off` is Connect-with / `--preset` / `preset=`; `Some("")` forces globals
 /// on a bound host and never rebinds. Unknown one-off → defaults (not a binding).
-/// `launch` is the library title id, `None` for the desktop. Lookup is `addr:port`,
-/// same as the per-host clipboard decision.
+/// `launch` is the library title id, `None` for the desktop. The host is the record
+/// [`KnownHosts::resolve`] names for the pin being dialled, as for the per-host clipboard:
+/// a dual-boot box's address also names the other OS, with its own binding.
 pub fn effective_settings(
+    fp_hex: Option<&str>,
     addr: &str,
     port: u16,
     one_off: Option<&str>,
     launch: Option<&str>,
-) -> (Settings, Option<StreamProfile>) {
+) -> (Settings, Option<StreamPreset>) {
     let base = Settings::load();
-    let catalog = ProfilesFile::load();
+    let catalog = PresetsFile::load();
     let known = KnownHosts::load();
-    let host = known.find_by_addr(addr, port);
-    let bound = host.and_then(|h| h.profile_id.clone());
+    let host = known.resolve(fp_hex, addr, port);
+    let bound = host.and_then(|h| h.preset_id.clone());
     let per_game = launch
-        .and_then(|game| host.and_then(|h| h.profile_for_game(game)))
+        .and_then(|game| host.and_then(|h| h.preset_for_game(game)))
         .map(str::to_string);
 
-    match resolve_profile(&catalog, bound.as_deref(), per_game.as_deref(), one_off) {
+    match resolve_preset(&catalog, bound.as_deref(), per_game.as_deref(), one_off) {
         Some(p) => (p.overrides.apply(&base), Some(p)),
         None => (base, None),
     }
 }
 
-/// Profile half of [`effective_settings`], split so the precedence rules are testable
+/// Preset half of [`effective_settings`], split so the precedence rules are testable
 /// without touching the config directory: one-off ?? title ?? host ?? none.
 ///
 /// A title binding beats the host's default because it is the more specific answer to
 /// the same question — the host default is what a title with no opinion inherits. Public
 /// for the clients that keep their own document (webOS) and must launch with this order.
-pub fn resolve_profile(
-    catalog: &ProfilesFile,
+pub fn resolve_preset(
+    catalog: &PresetsFile,
     bound: Option<&str>,
     per_game: Option<&str>,
     one_off: Option<&str>,
-) -> Option<StreamProfile> {
+) -> Option<StreamPreset> {
     match one_off {
-        // `--profile ""` forces defaults on a bound host.
+        // `--preset ""` forces defaults on a bound host.
         Some("") => None,
         Some(reference) => match catalog.resolve(reference) {
             (Some(p), _) => Some(p.clone()),
             (_, res) => {
                 tracing::warn!(
-                    profile = %reference,
+                    preset = %reference,
                     ambiguous = res == Resolution::Ambiguous,
-                    "no such settings profile — streaming with the default settings"
+                    "no such settings preset — streaming with the default settings"
                 );
                 None
             }
         },
         // Bindings are ids, never names — a rename must not hijack one. A dangling id
         // falls through to the next-most-general answer, the way a dangling pin just
-        // disappears: the title's deleted profile leaves the host's default standing.
+        // disappears: the title's deleted preset leaves the host's default standing.
         None => {
             let find = |id: &str| catalog.find_by_id(id).cloned();
             per_game.and_then(find).or_else(|| bound.and_then(find))
@@ -1814,10 +1890,10 @@ mod tests {
         assert_eq!(back.hosts[0].os, "linux/fedora/bazzite");
     }
 
-    /// A pre-profiles store loads with no binding/pins and serializes without the new
+    /// A pre-presets store loads with no binding/pins and serializes without the new
     /// keys. Id is minted by `load()`, not by deserialization.
     #[test]
-    fn known_hosts_migration_is_a_no_op_on_a_pre_profiles_store() {
+    fn known_hosts_migration_is_a_no_op_on_a_pre_presets_store() {
         let old = r#"{"hosts":[{
             "name": "Gaming PC", "addr": "192.168.1.50", "port": 9777,
             "fp_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -1825,15 +1901,15 @@ mod tests {
         }]}"#;
         let mut k: KnownHosts = serde_json::from_str(old).unwrap();
         let h = &k.hosts[0];
-        assert_eq!(h.profile_id, None);
-        assert!(h.pinned_profiles.is_empty());
-        assert!(h.game_profiles.is_empty());
+        assert_eq!(h.preset_id, None);
+        assert!(h.pinned_presets.is_empty());
+        assert!(h.game_presets.is_empty());
         assert_eq!(h.id, None);
         assert!(h.clipboard_sync);
         let text = serde_json::to_string(&k).unwrap();
-        assert!(!text.contains("profile_id"));
-        assert!(!text.contains("pinned_profiles"));
-        assert!(!text.contains("game_profiles"));
+        assert!(!text.contains("preset_id"));
+        assert!(!text.contains("pinned_presets"));
+        assert!(!text.contains("game_presets"));
         assert!(!text.contains("\"id\""));
 
         // Second pass reports nothing to persist and leaves the minted id alone.
@@ -1846,6 +1922,40 @@ mod tests {
         k.hosts[0].id = Some(String::new());
         assert!(k.mint_missing_ids());
         assert_ne!(k.hosts[0].id.as_deref(), Some(""));
+    }
+
+    /// A record saved before the rename keeps its bindings, and serializing writes both
+    /// spellings, so a client older than the rename still reads them.
+    #[test]
+    fn a_pre_rename_host_record_keeps_its_bindings() {
+        let old = r#"{"hosts":[{
+            "name": "Desk", "addr": "192.168.1.50", "port": 9777, "fp_hex": "", "paired": true,
+            "profile_id": "aaaaaaaaaaaa", "pinned_profiles": ["bbbbbbbbbbbb"],
+            "game_profiles": {"halo": "cccccccccccc"}
+        }]}"#;
+        let k: KnownHosts = serde_json::from_str(old).unwrap();
+        let h = &k.hosts[0];
+        assert_eq!(h.preset_id.as_deref(), Some("aaaaaaaaaaaa"));
+        assert_eq!(h.pinned_presets, vec!["bbbbbbbbbbbb".to_string()]);
+        assert_eq!(h.preset_for_game("halo"), Some("cccccccccccc"));
+
+        let saved = serde_json::to_value(&k).unwrap();
+        let rec = &saved["hosts"][0];
+        for (new, old) in LEGACY_HOST_KEYS {
+            assert!(!rec[new].is_null(), "{new} is written");
+            assert_eq!(rec[new], rec[old], "{old} mirrors {new}");
+        }
+        let again: KnownHosts = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&again).unwrap(), saved);
+    }
+
+    /// Both spellings present: the new one wins, since only this client writes it.
+    #[test]
+    fn a_new_binding_key_wins_over_its_old_spelling() {
+        let both = r#"{"hosts":[{"name": "Desk", "addr": "10.0.0.2", "port": 9777,
+            "fp_hex": "", "paired": true, "preset_id": "111111111111", "profile_id": "222222222222"}]}"#;
+        let k: KnownHosts = serde_json::from_str(both).unwrap();
+        assert_eq!(k.hosts[0].preset_id.as_deref(), Some("111111111111"));
     }
 
     /// `upsert` preserves user-set fields a trust-decision payload does not carry.
@@ -1865,9 +1975,9 @@ mod tests {
                 // Not 47990: the default would make the keep-on-upsert assertions pass vacuously.
                 mgmt_port: Some(47991),
                 clipboard_sync: true,
-                profile_id: Some("aaaaaaaaaaaa".into()),
-                pinned_profiles: vec!["bbbbbbbbbbbb".into()],
-                game_profiles: [("halo".to_string(), "cccccccccccc".to_string())].into(),
+                preset_id: Some("aaaaaaaaaaaa".into()),
+                pinned_presets: vec!["bbbbbbbbbbbb".into()],
+                game_presets: [("halo".to_string(), "cccccccccccc".to_string())].into(),
                 id: Some("11111111-2222-4333-8444-555555555555".into()),
                 prev_addrs: vec![],
             }],
@@ -1891,9 +2001,9 @@ mod tests {
         // Reconnect must not reset mgmt port to None — the library would 404 on 47990.
         assert_eq!(h.mgmt_port, Some(47991));
         assert!(h.clipboard_sync);
-        assert_eq!(h.profile_id.as_deref(), Some("aaaaaaaaaaaa"));
-        assert_eq!(h.pinned_profiles, vec!["bbbbbbbbbbbb".to_string()]);
-        assert_eq!(h.profile_for_game("halo"), Some("cccccccccccc"));
+        assert_eq!(h.preset_id.as_deref(), Some("aaaaaaaaaaaa"));
+        assert_eq!(h.pinned_presets, vec!["bbbbbbbbbbbb".to_string()]);
+        assert_eq!(h.preset_for_game("halo"), Some("cccccccccccc"));
         assert_eq!(
             h.id.as_deref(),
             Some("11111111-2222-4333-8444-555555555555")
@@ -1902,22 +2012,22 @@ mod tests {
         // A carried value does move the binding (UI rebind path).
         k.upsert(KnownHost {
             fp_hex: fp.into(),
-            profile_id: Some("cccccccccccc".into()),
-            pinned_profiles: vec!["dddddddddddd".into()],
+            preset_id: Some("cccccccccccc".into()),
+            pinned_presets: vec!["dddddddddddd".into()],
             ..Default::default()
         });
-        assert_eq!(k.hosts[0].profile_id.as_deref(), Some("cccccccccccc"));
-        assert_eq!(k.hosts[0].pinned_profiles, vec!["dddddddddddd".to_string()]);
+        assert_eq!(k.hosts[0].preset_id.as_deref(), Some("cccccccccccc"));
+        assert_eq!(k.hosts[0].pinned_presets, vec!["dddddddddddd".to_string()]);
 
         // Same for the per-game map: only a payload that carries one replaces it.
-        k.hosts[0].bind_game_profile("halo", Some("dddddddddddd"));
+        k.hosts[0].bind_game_preset("halo", Some("dddddddddddd"));
         k.upsert(KnownHost {
             fp_hex: fp.into(),
             ..Default::default()
         });
-        assert_eq!(k.hosts[0].profile_for_game("halo"), Some("dddddddddddd"));
-        k.hosts[0].bind_game_profile("halo", None);
-        assert!(k.hosts[0].game_profiles.is_empty());
+        assert_eq!(k.hosts[0].preset_for_game("halo"), Some("dddddddddddd"));
+        k.hosts[0].bind_game_preset("halo", None);
+        assert!(k.hosts[0].game_presets.is_empty());
     }
 
     /// A store written before `mgmt_port` loads, resolves to 47990, then takes and
@@ -1995,7 +2105,7 @@ mod tests {
 
     /// Two identities at one address are two records. A dual-boot box answers on one
     /// lease with one MAC and a certificate per OS, so pairing the second OS must not
-    /// retire the first: it took the user's name, profiles and pins with it.
+    /// retire the first: it took the user's name, presets and pins with it.
     #[test]
     fn upsert_trusted_keeps_a_second_identity_at_one_address() {
         let (first, second) = (fp('c'), fp('a'));
@@ -2011,9 +2121,9 @@ mod tests {
                 os: "windows".into(),
                 mgmt_port: Some(47991),
                 clipboard_sync: true,
-                profile_id: Some("aaaaaaaaaaaa".into()),
-                pinned_profiles: vec!["bbbbbbbbbbbb".into()],
-                game_profiles: [("halo".to_string(), "cccccccccccc".to_string())].into(),
+                preset_id: Some("aaaaaaaaaaaa".into()),
+                pinned_presets: vec!["bbbbbbbbbbbb".into()],
+                game_presets: [("halo".to_string(), "cccccccccccc".to_string())].into(),
                 id: Some("11111111-2222-4333-8444-555555555555".into()),
                 prev_addrs: vec![],
             }],
@@ -2031,9 +2141,9 @@ mod tests {
         let kept = k.find_by_fp(&first).expect("the first OS keeps its record");
         assert_eq!(kept.name, "ENRICOS-DESKTOP (local)");
         assert_eq!(kept.mac, vec!["aa:bb:cc:dd:ee:ff".to_string()]);
-        assert_eq!(kept.profile_id.as_deref(), Some("aaaaaaaaaaaa"));
-        assert_eq!(kept.pinned_profiles, vec!["bbbbbbbbbbbb".to_string()]);
-        assert_eq!(kept.profile_for_game("halo"), Some("cccccccccccc"));
+        assert_eq!(kept.preset_id.as_deref(), Some("aaaaaaaaaaaa"));
+        assert_eq!(kept.pinned_presets, vec!["bbbbbbbbbbbb".to_string()]);
+        assert_eq!(kept.preset_for_game("halo"), Some("cccccccccccc"));
         assert!(kept.clipboard_sync);
         assert_eq!(
             kept.id.as_deref(),
@@ -2057,7 +2167,7 @@ mod tests {
                 fp_hex: same.clone(),
                 paired: true,
                 clipboard_sync: true,
-                profile_id: Some("aaaaaaaaaaaa".into()),
+                preset_id: Some("aaaaaaaaaaaa".into()),
                 id: Some("11111111-2222-4333-8444-555555555555".into()),
                 ..Default::default()
             }],
@@ -2075,7 +2185,7 @@ mod tests {
         assert_eq!(h.addr, "192.168.1.51");
         assert!(h.paired);
         assert!(h.clipboard_sync);
-        assert_eq!(h.profile_id.as_deref(), Some("aaaaaaaaaaaa"));
+        assert_eq!(h.preset_id.as_deref(), Some("aaaaaaaaaaaa"));
         assert_eq!(
             h.id.as_deref(),
             Some("11111111-2222-4333-8444-555555555555")
@@ -2285,12 +2395,52 @@ mod tests {
         learn_target(&mut k, &live, "127.0.0.1", 9777).unwrap().os = "windows".into();
         assert_eq!(k.find_by_fp(&live).unwrap().os, "windows");
         assert_eq!(k.find_by_fp(&dead).unwrap().os, "");
-        // No fingerprint → the address's own answer.
-        learn_target(&mut k, "", "127.0.0.1", 9777).unwrap().os = "linux".into();
-        assert_eq!(k.find_by_fp(&live).unwrap().os, "linux");
-        assert_eq!(k.find_by_fp(&dead).unwrap().os, "");
+        // A pin nobody holds is not its neighbour's; no pin names only a placeholder.
+        assert!(learn_target(&mut k, &fp('e'), "127.0.0.1", 9777).is_none());
+        assert!(learn_target(&mut k, "", "127.0.0.1", 9777).is_none());
         // Unknown host: write nothing.
         assert!(learn_target(&mut k, &fp('e'), "10.0.0.9", 9777).is_none());
+    }
+
+    /// Both OS installs of a dual-boot box at one address: a pin resolves its own record or
+    /// the placeholder waiting for it, never the sibling. Only a bare address falls back.
+    #[test]
+    fn a_pin_resolves_its_own_record_never_the_sibling() {
+        let (windows, linux) = (fp('a'), fp('b'));
+        let mut k = KnownHosts {
+            hosts: vec![KnownHost {
+                name: "Desk (Windows)".into(),
+                addr: "192.168.1.9".into(),
+                port: 9777,
+                fp_hex: windows.clone(),
+                paired: true,
+                ..Default::default()
+            }],
+        };
+        assert!(k.resolve(Some(&linux), "192.168.1.9", 9777).is_none());
+        assert!(k.resolve(Some(""), "192.168.1.9", 9777).is_none());
+        assert!(k.placeholder_at("192.168.1.9", 9777).is_none());
+        assert_eq!(
+            k.resolve(None, "192.168.1.9", 9777).unwrap().fp_hex,
+            windows
+        );
+        // A moved lease is still the same pin.
+        let moved = k.resolve(Some(&windows), "192.168.1.20", 9777);
+        assert_eq!(moved.unwrap().name, "Desk (Windows)");
+
+        k.hosts.push(KnownHost {
+            name: "Desk (Linux)".into(),
+            addr: "192.168.1.9".into(),
+            port: 9777,
+            ..Default::default()
+        });
+        assert_eq!(k.placeholder_at("192.168.1.9", 9777), Some(1));
+        let waiting = k.resolve(Some(&linux), "192.168.1.9", 9777);
+        assert_eq!(waiting.unwrap().name, "Desk (Linux)");
+        // An advert from the second OS teaches its placeholder, not the Windows record.
+        learn_target(&mut k, "", "192.168.1.9", 9777).unwrap().os = "linux/arch/cachyos".into();
+        assert_eq!(k.hosts[0].os, "");
+        assert_eq!(k.hosts[1].os, "linux/arch/cachyos");
     }
 
     /// An advert writes what it carries, leaves omitted fields, and reports no change
@@ -2319,24 +2469,24 @@ mod tests {
     /// Pins render in card order, deduplicated; dangling ids disappear, never error.
     #[test]
     fn resolved_pins_drop_duplicates_and_dangling_ids() {
-        use crate::profiles::{ProfilesFile, StreamProfile};
-        let catalog = ProfilesFile {
+        use crate::presets::{PresetsFile, StreamPreset};
+        let catalog = PresetsFile {
             version: 1,
-            profiles: vec![
-                StreamProfile {
+            presets: vec![
+                StreamPreset {
                     id: "aaaaaaaaaaaa".into(),
                     name: "Work".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
-                StreamProfile {
+                StreamPreset {
                     id: "bbbbbbbbbbbb".into(),
                     name: "Game".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
             ],
         };
         let h = KnownHost {
-            pinned_profiles: vec![
+            pinned_presets: vec![
                 "bbbbbbbbbbbb".into(),
                 "deleted00000".into(),
                 "bbbbbbbbbbbb".into(),
@@ -2354,39 +2504,39 @@ mod tests {
     }
 
     /// One-off beats binding; `""` forces defaults; unknown one-off falls back to
-    /// defaults, not the host's profile.
+    /// defaults, not the host's preset.
     #[test]
-    fn profile_resolution_precedence() {
-        use crate::profiles::{ProfilesFile, StreamProfile};
-        let catalog = ProfilesFile {
+    fn preset_resolution_precedence() {
+        use crate::presets::{PresetsFile, StreamPreset};
+        let catalog = PresetsFile {
             version: 1,
-            profiles: vec![
-                StreamProfile {
+            presets: vec![
+                StreamPreset {
                     id: "aaaaaaaaaaaa".into(),
                     name: "Game".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
-                StreamProfile {
+                StreamPreset {
                     id: "bbbbbbbbbbbb".into(),
                     name: "Work".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
-                StreamProfile {
+                StreamPreset {
                     id: "cccccccccccc".into(),
                     name: "work".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
             ],
         };
-        let name_of = |p: Option<StreamProfile>| p.map(|p| p.name);
+        let name_of = |p: Option<StreamPreset>| p.map(|p| p.name);
 
-        assert_eq!(resolve_profile(&catalog, None, None, None), None);
+        assert_eq!(resolve_preset(&catalog, None, None, None), None);
         assert_eq!(
-            name_of(resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None, None)),
+            name_of(resolve_preset(&catalog, Some("aaaaaaaaaaaa"), None, None)),
             Some("Game".into())
         );
         assert_eq!(
-            name_of(resolve_profile(
+            name_of(resolve_preset(
                 &catalog,
                 Some("aaaaaaaaaaaa"),
                 None,
@@ -2395,27 +2545,27 @@ mod tests {
             Some("Work".into())
         );
         assert_eq!(
-            name_of(resolve_profile(&catalog, None, None, Some("GAME"))),
+            name_of(resolve_preset(&catalog, None, None, Some("GAME"))),
             Some("Game".into())
         );
         assert_eq!(
-            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None, Some("")),
+            resolve_preset(&catalog, Some("aaaaaaaaaaaa"), None, Some("")),
             None
         );
         assert_eq!(
-            resolve_profile(&catalog, Some("deleted00000"), None, None),
+            resolve_preset(&catalog, Some("deleted00000"), None, None),
             None
         );
         assert_eq!(
-            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None, Some("nope")),
+            resolve_preset(&catalog, Some("aaaaaaaaaaaa"), None, Some("nope")),
             None
         );
         assert_eq!(
-            resolve_profile(&catalog, Some("aaaaaaaaaaaa"), None, Some("work")),
+            resolve_preset(&catalog, Some("aaaaaaaaaaaa"), None, Some("work")),
             None
         );
-        // Binding is by id only — a profile named like the bound id must not hijack it.
-        assert_eq!(resolve_profile(&catalog, Some("Game"), None, None), None);
+        // Binding is by id only — a preset named like the bound id must not hijack it.
+        assert_eq!(resolve_preset(&catalog, Some("Game"), None, None), None);
     }
 
     /// A title's binding sits between the one-off and the host's default: more specific
@@ -2423,48 +2573,48 @@ mod tests {
     /// to the host rather than to the defaults.
     #[test]
     fn a_title_binding_outranks_the_host_and_yields_to_a_one_off() {
-        use crate::profiles::{ProfilesFile, StreamProfile};
-        let catalog = ProfilesFile {
+        use crate::presets::{PresetsFile, StreamPreset};
+        let catalog = PresetsFile {
             version: 1,
-            profiles: vec![
-                StreamProfile {
+            presets: vec![
+                StreamPreset {
                     id: "aaaaaaaaaaaa".into(),
                     name: "Game".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
-                StreamProfile {
+                StreamPreset {
                     id: "bbbbbbbbbbbb".into(),
                     name: "Work".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
             ],
         };
-        let name_of = |p: Option<StreamProfile>| p.map(|p| p.name);
+        let name_of = |p: Option<StreamPreset>| p.map(|p| p.name);
         let (host, game) = (Some("aaaaaaaaaaaa"), Some("bbbbbbbbbbbb"));
 
         assert_eq!(
-            name_of(resolve_profile(&catalog, host, game, None)),
+            name_of(resolve_preset(&catalog, host, game, None)),
             Some("Work".into())
         );
         // No binding on the title: the host's default is what it inherits.
         assert_eq!(
-            name_of(resolve_profile(&catalog, host, None, None)),
+            name_of(resolve_preset(&catalog, host, None, None)),
             Some("Game".into())
         );
         // A pinned card's one-off still wins over both.
         assert_eq!(
-            name_of(resolve_profile(&catalog, host, game, Some("Game"))),
+            name_of(resolve_preset(&catalog, host, game, Some("Game"))),
             Some("Game".into())
         );
-        // `--profile ""` forces the globals past a title binding too.
-        assert_eq!(resolve_profile(&catalog, host, game, Some("")), None);
-        // Deleted title profile: the host's default stands, not the defaults.
+        // `--preset ""` forces the globals past a title binding too.
+        assert_eq!(resolve_preset(&catalog, host, game, Some("")), None);
+        // Deleted title preset: the host's default stands, not the defaults.
         assert_eq!(
-            name_of(resolve_profile(&catalog, host, Some("deleted00000"), None)),
+            name_of(resolve_preset(&catalog, host, Some("deleted00000"), None)),
             Some("Game".into())
         );
         assert_eq!(
-            resolve_profile(&catalog, None, Some("deleted00000"), None),
+            resolve_preset(&catalog, None, Some("deleted00000"), None),
             None
         );
     }

@@ -260,7 +260,7 @@ impl PairScreen {
                             launch: None,
                             title: self.host_name.clone(),
                             request_access: true,
-                            profile: None,
+                            preset: None,
                         });
                         fx.pop();
                     }
@@ -471,9 +471,9 @@ mod tests {
             os: String::new(),
             actions: Vec::new(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         }
     }
 

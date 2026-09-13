@@ -55,28 +55,28 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 /**
- * The scope switcher: the one new settings concept. Selecting a profile puts the WHOLE settings
- * surface into that profile's scope — there is one settings UI, never a second parallel editor
- * that drifts from it. "Default settings" is the base layer every profile inherits from.
+ * The scope switcher: the one new settings concept. Selecting a preset puts the WHOLE settings
+ * surface into that preset's scope — there is one settings UI, never a second parallel editor
+ * that drifts from it. "Default settings" is the base layer every preset inherits from.
  *
  * A chips row rather than a menu, because on touch the scopes are worth seeing at a glance and
- * there are rarely more than a handful. Managing a profile lives ON its chip: the selected one
+ * there are rarely more than a handful. Managing a preset lives ON its chip: the selected one
  * grows a chevron, and tapping it again opens Edit / Duplicate / Delete anchored under it. That
  * replaced a lone overflow button parked after the LAST chip — which meant scrolling past every
- * profile to reach an action that applied to one of them, with nothing on screen saying which.
+ * preset to reach an action that applied to one of them, with nothing on screen saying which.
  *
- * With no profiles at all the row is just "Default settings" and a "New profile" chip, which is
+ * With no presets at all the row is just "Default settings" and a "New preset" chip, which is
  * all the clutter a user who never wants this feature ever sees.
  */
 @Composable
-internal fun ProfileScopeChips(
-    profiles: List<StreamProfile>,
+internal fun PresetScopeChips(
+    presets: List<StreamPreset>,
     selectedId: String?,
     onSelect: (String?) -> Unit,
     onNew: () -> Unit,
-    onEdit: (StreamProfile) -> Unit,
-    onDuplicate: (StreamProfile) -> Unit,
-    onDelete: (StreamProfile) -> Unit,
+    onEdit: (StreamPreset) -> Unit,
+    onDuplicate: (StreamPreset) -> Unit,
+    onDelete: (StreamPreset) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Which chip's menu is open — one at a time, and it closes itself when the scope changes.
@@ -91,7 +91,7 @@ internal fun ProfileScopeChips(
             onClick = { onSelect(null) },
             label = { Text("Default settings") },
         )
-        profiles.forEach { p ->
+        presets.forEach { p ->
             val isSelected = selectedId == p.id
             Box {
                 FilterChip(
@@ -134,7 +134,7 @@ internal fun ProfileScopeChips(
         }
         AssistChip(
             onClick = onNew,
-            label = { Text("New profile") },
+            label = { Text("New preset") },
             leadingIcon = {
                 Icon(Icons.Filled.Add, contentDescription = null, Modifier.size(AssistChipDefaults.IconSize))
             },
@@ -143,18 +143,18 @@ internal fun ProfileScopeChips(
 }
 
 /**
- * Create or edit a profile: its name and its colour, decided together. They were two flows —
- * a name dialog at creation, "Change colour…" afterwards — which meant every profile started
+ * Create or edit a preset: its name and its colour, decided together. They were two flows —
+ * a name dialog at creation, "Change colour…" afterwards — which meant every preset started
  * colourless-looking until the user went hunting for a menu item, and the accent is exactly the
  * signal that has to be there from the first moment (it is all a bound host card's chip and a
  * pinned card's tint have to go on).
  *
  * Names must be unique case-insensitively: two "Work" chips in a menu are ambiguous, and a
- * `punktfunk://…?profile=Work` link would have to refuse rather than guess. [taken] is the live
+ * `punktfunk://…?preset=Work` link would have to refuse rather than guess. [taken] is the live
  * duplicate check, which lets an edit keep its own name (and change only its case).
  */
 @Composable
-internal fun ProfileEditorDialog(
+internal fun PresetEditorDialog(
     title: String,
     confirmLabel: String,
     initialName: String,
@@ -172,7 +172,7 @@ internal fun ProfileEditorDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            ProfileEditorFields(
+            PresetEditorFields(
                 name = name,
                 accent = accent,
                 duplicate = duplicate,
@@ -192,14 +192,14 @@ internal fun ProfileEditorDialog(
 }
 
 /**
- * The editor's body. Extracted from [ProfileEditorDialog] so the screenshot harness can render
+ * The editor's body. Extracted from [PresetEditorDialog] so the screenshot harness can render
  * exactly these — a focused text field inside a Dialog window never reaches idle under Robolectric,
  * so the dialog itself is uncapturable, and an eyeballed-only layout is how this shipped once with
  * the field and its caption touching.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun ProfileEditorFields(
+internal fun PresetEditorFields(
     name: String,
     accent: String?,
     duplicate: Boolean,
@@ -218,10 +218,10 @@ internal fun ProfileEditorFields(
         )
         Text(
             when {
-                duplicate -> "A profile called “${name.trim()}” already exists."
-                creating -> "A profile starts out inheriting every default setting. Whatever you " +
+                duplicate -> "A preset called “${name.trim()}” already exists."
+                creating -> "A preset starts out inheriting every default setting. Whatever you " +
                     "change while it's selected becomes an override."
-                else -> "The colour marks this profile on host cards, where its name doesn't fit."
+                else -> "The colour marks this preset on host cards, where its name doesn't fit."
             },
             style = MaterialTheme.typography.bodySmall,
             color = if (duplicate) {
@@ -237,7 +237,7 @@ internal fun ProfileEditorFields(
         )
         // A fixed 4×2 grid rather than a flow: eight colours wrapping to whatever fits the dialog
         // landed 6-then-2, which reads as a mistake. Two even rows read as a palette. The order is
-        // the hue sweep from PROFILE_ACCENTS, so it looks like a spectrum rather than a bag.
+        // the hue sweep from PRESET_ACCENTS, so it looks like a spectrum rather than a bag.
         //
         // Each row FILLS the width, its swatches sharing it equally, so the palette's edges line up
         // with the name field above it and every row is the same length. A fixed swatch size left
@@ -247,7 +247,7 @@ internal fun ProfileEditorFields(
             verticalArrangement = Arrangement.spacedBy(SWATCH_GAP),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            PROFILE_ACCENTS.chunked(SWATCHES_PER_ROW).forEach { row ->
+            PRESET_ACCENTS.chunked(SWATCHES_PER_ROW).forEach { row ->
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(SWATCH_GAP),
@@ -264,7 +264,7 @@ internal fun ProfileEditorFields(
             }
         }
         // "No colour" is a real choice, not only an initial state — the chip then falls back to the
-        // theme's own accent, which is what a profile made before colours existed shows. It sits
+        // theme's own accent, which is what a preset made before colours existed shows. It sits
         // apart from the grid and says so in words, rather than hiding as a ninth, colourless
         // circle that breaks the palette's rhythm.
         Row(
@@ -354,7 +354,7 @@ internal fun Swatch(
 }
 
 /**
- * The palette's geometry. [SWATCHES_PER_ROW] divides [PROFILE_ACCENTS] exactly — that is the whole
+ * The palette's geometry. [SWATCHES_PER_ROW] divides [PRESET_ACCENTS] exactly — that is the whole
  * reason the palette has ten colours — so both rows are full. [SWATCH_TOTAL] is only the fallback
  * footprint for a swatch outside the grid (the "no colour" one); in the grid a swatch takes an
  * equal share of the row instead.
@@ -365,13 +365,13 @@ private val RING_GAP = 5.dp
 private val SWATCH_GAP = 10.dp
 
 /**
- * Deleting a profile is not destructive to anything but the profile — a host bound to it falls
+ * Deleting a preset is not destructive to anything but the preset — a host bound to it falls
  * back to the default settings and a card pinned to it disappears, neither of which is an error.
  * The warning counts both so the consequence is stated rather than discovered.
  */
 @Composable
-internal fun DeleteProfileDialog(
-    profile: StreamProfile,
+internal fun DeletePresetDialog(
+    preset: StreamPreset,
     boundHosts: Int,
     pinnedCards: Int,
     onConfirm: () -> Unit,
@@ -379,7 +379,7 @@ internal fun DeleteProfileDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Delete “${profile.name}”?") },
+        title = { Text("Delete “${preset.name}”?") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val consequences = buildList {
@@ -392,7 +392,7 @@ internal fun DeleteProfileDialog(
                 }
                 Text(
                     if (consequences.isEmpty()) {
-                        "Nothing uses this profile."
+                        "Nothing uses this preset."
                     } else {
                         consequences.joinToString(", and ") + "."
                     },
@@ -413,28 +413,28 @@ internal fun DeleteProfileDialog(
 private fun plural(n: Int, one: String, many: String) = if (n == 1) one else many
 
 /**
- * The per-host half of profiles, inside the host's Edit sheet: which profile a plain tap uses
+ * The per-host half of presets, inside the host's Edit sheet: which preset a plain tap uses
  * (the binding — the one thing that IS sticky; "Connect with ▸" on a card never rebinds), and which
- * profiles get their own card in the host list.
+ * presets get their own card in the host list.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun HostProfileBinding(
-    profiles: List<StreamProfile>,
+internal fun HostPresetBinding(
+    presets: List<StreamPreset>,
     boundId: String?,
     onBind: (String?) -> Unit,
     pins: List<String>,
     onTogglePin: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val bound = profiles.firstOrNull { it.id == boundId }
+    val bound = presets.firstOrNull { it.id == boundId }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
             OutlinedTextField(
                 value = bound?.name ?: "Default settings",
                 onValueChange = {},
                 readOnly = true,
-                label = { Text("Profile") },
+                label = { Text("Preset") },
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
                 modifier = Modifier
                     .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
@@ -445,7 +445,7 @@ internal fun HostProfileBinding(
                     text = { Text("Default settings") },
                     onClick = { onBind(null); expanded = false },
                 )
-                profiles.forEach { p ->
+                presets.forEach { p ->
                     DropdownMenuItem(
                         text = { Text(p.name) },
                         onClick = { onBind(p.id); expanded = false },
@@ -464,12 +464,12 @@ internal fun HostProfileBinding(
             modifier = Modifier.padding(top = 8.dp),
         )
         Text(
-            "A pinned profile gets its own card beside this host — one tap instead of a menu. " +
-                "Pinning changes nothing about which profile is the default.",
+            "A pinned preset gets its own card beside this host — one tap instead of a menu. " +
+                "Pinning changes nothing about which preset is the default.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        profiles.forEach { p ->
+        presets.forEach { p ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -481,7 +481,7 @@ internal fun HostProfileBinding(
     }
 }
 
-/** The accent marker a profile's chip and its pinned cards wear. */
+/** The accent marker a preset's chip and its pinned cards wear. */
 @Composable
 internal fun AccentDot(color: Color, size: Int = 10) {
     Box(Modifier.size(size.dp).clip(CircleShape).background(color))

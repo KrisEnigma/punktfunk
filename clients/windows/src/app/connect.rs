@@ -55,16 +55,12 @@ fn initiate_opts(
     // "Streaming to X") — stash it up front, not just on the pairing route.
     *ctx.shared.target.lock().unwrap() = target.clone();
     let known = KnownHosts::load();
-    let pin = target
-        .fp_hex
-        .as_ref()
-        .and_then(|fp| known.find_by_fp(fp).map(|_| fp.clone()))
-        .or_else(|| {
-            known
-                .find_by_addr(&target.addr, target.port)
-                .map(|k| k.fp_hex.clone())
-        })
-        .and_then(|fp| trust::parse_hex32(&fp));
+    // The target's pin names its record. A discovered second OS of a dual-boot box has none
+    // yet and pairs, instead of dialling the first one's pin; only a typed address takes
+    // whatever that address answers with.
+    let pin = known
+        .resolve(target.fp_hex.as_deref(), &target.addr, target.port)
+        .and_then(|k| trust::parse_hex32(&k.fp_hex));
 
     let opts = ConnectOpts {
         wake_on_fail,
@@ -268,7 +264,7 @@ fn connect_spawn(
     let target = target.clone();
     // The closure owns `target`/`fp_hex`; the call itself borrows copies.
     let (addr, port, fp_arg) = (target.addr.clone(), target.port, fp_hex.clone());
-    let profile_arg = target.profile.clone();
+    let preset_arg = target.preset.clone();
     // The launch id: an explicit opts pick (the library's tap-to-play), else one riding
     // the target — a deep link's `launch=` that detoured through the PIN ceremony.
     let launch_arg = opts.launch.clone().or_else(|| target.launch.clone());
@@ -278,7 +274,7 @@ fn connect_spawn(
         &fp_arg,
         opts.connect_timeout.as_secs(),
         launch_arg.as_deref(),
-        profile_arg.as_deref(),
+        preset_arg.as_deref(),
         child,
         move |event| {
             use crate::spawn::SpawnEvent;

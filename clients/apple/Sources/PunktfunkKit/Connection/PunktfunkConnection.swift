@@ -1062,6 +1062,20 @@ public final class PunktfunkConnection: @unchecked Sendable {
         public let throughputKbps: UInt32
         /// Delivery loss `(hostBytes − recvBytes) / hostBytes`, percent (0 if unknown).
         public let lossPct: Float
+
+        public init(
+            done: Bool, recvBytes: UInt64, recvPackets: UInt32, hostBytes: UInt64,
+            hostPackets: UInt32, elapsedMs: UInt32, throughputKbps: UInt32, lossPct: Float
+        ) {
+            self.done = done
+            self.recvBytes = recvBytes
+            self.recvPackets = recvPackets
+            self.hostBytes = hostBytes
+            self.hostPackets = hostPackets
+            self.elapsedMs = elapsedMs
+            self.throughputKbps = throughputKbps
+            self.lossPct = lossPct
+        }
     }
 
     /// Start a bandwidth speed test: the host bursts filler over the data plane at
@@ -1200,13 +1214,13 @@ public final class PunktfunkConnection: @unchecked Sendable {
     }
 
     /// What only the app knows about the window being drawn: the floor policy, its own audio
-    /// ring, the profile, and Apple-only diagnostic lines (Advanced Detailed).
+    /// ring, the preset, and Apple-only diagnostic lines (Advanced Detailed).
     public struct HudFacts: Sendable {
         public var onGlass = true
         public var shaveOsFloor = false
         public var audioBufferMs: UInt32 = 0
         public var avOffsetMs: Int32 = 0
-        public var profile: String?
+        public var preset: String?
         public var extras: [HudLine] = []
         public init() {}
     }
@@ -1254,7 +1268,7 @@ public final class PunktfunkConnection: @unchecked Sendable {
         guard let h = handle, !closeRequested else { return [] }
         let index = UInt32(StatsVerbosity.allCases.firstIndex(of: tier) ?? 2)
         let extras = facts.extras.map { "\($0.role.rawValue)\t\($0.text)\n" }.joined()
-        return (facts.profile ?? "").withCString { profile in
+        return (facts.preset ?? "").withCString { preset in
             extras.withCString { extrasPtr in
                 var f = PunktfunkHudFacts()
                 f.struct_size = UInt32(MemoryLayout<PunktfunkHudFacts>.size)
@@ -1262,7 +1276,7 @@ public final class PunktfunkConnection: @unchecked Sendable {
                 f.shave_os_floor = facts.shaveOsFloor
                 f.audio_buffer_ms = facts.audioBufferMs
                 f.av_offset_ms = facts.avOffsetMs
-                f.profile = facts.profile == nil ? nil : profile
+                f.preset = facts.preset == nil ? nil : preset
                 f.extras = extrasPtr
                 var cap = 4096
                 while true {
@@ -1628,7 +1642,7 @@ public final class PunktfunkConnection: @unchecked Sendable {
     /// exactly as it always did, so it is safe to set unconditionally from the user's setting.
     public static let clientCapKeepHostAudio: UInt8 = UInt8(PUNKTFUNK_CLIENT_CAP_KEEP_HOST_AUDIO)
 
-    /// The `codec` SETTING (a `DefaultsKey.codec` / profile-overlay string) as a soft-preference
+    /// The `codec` SETTING (a `DefaultsKey.codec` / preset-overlay string) as a soft-preference
     /// byte; `0` = Automatic, i.e. the host decides. Lives here beside the bits so the settings
     /// string is mapped to the wire in exactly one place — a session and a speed test that
     /// disagreed on what "pyrowave" means would be a silent mismatch.

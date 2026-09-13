@@ -59,7 +59,7 @@ pub fn choices_summary(ui: &dyn Reporter, choices: &Choices) {
         (
             "Third-party clients (Moonlight, Artemis)",
             choices.gamestream,
-            &choices.gamestream_why,
+            &None,
         ),
         ("Shared clipboard", choices.clipboard, &None),
         (

@@ -35,6 +35,33 @@ public struct LaunchSpec: Codable, Hashable, Sendable {
     public var value: String
 }
 
+/// One title's play numbers as the host keeps them (`GameEntry.stats`).
+public struct GameStats: Codable, Hashable, Sendable {
+    /// Unix ms of the last launch.
+    public var lastPlayedUnixMs: UInt64
+    /// Every run added up, ms.
+    public var playTimeMs: UInt64
+    /// The run that started at `lastPlayedUnixMs`, ms. Still growing while it runs.
+    public var lastRunMs: UInt64
+    public var launchCount: UInt32
+
+    private enum CodingKeys: String, CodingKey {
+        case lastPlayedUnixMs = "last_played_unix_ms"
+        case playTimeMs = "play_time_ms"
+        case lastRunMs = "last_run_ms"
+        case launchCount = "launch_count"
+    }
+
+    /// A missing or mistyped number reads as zero: numbers are never worth an empty library.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lastPlayedUnixMs = (try? c.decodeIfPresent(UInt64.self, forKey: .lastPlayedUnixMs)) ?? 0
+        playTimeMs = (try? c.decodeIfPresent(UInt64.self, forKey: .playTimeMs)) ?? 0
+        lastRunMs = (try? c.decodeIfPresent(UInt64.self, forKey: .lastRunMs)) ?? 0
+        launchCount = (try? c.decodeIfPresent(UInt32.self, forKey: .launchCount)) ?? 0
+    }
+}
+
 /// One title in the unified library. `id` is store-qualified: `steam:<appid>` / `custom:<id>`.
 public struct GameEntry: Codable, Hashable, Identifiable, Sendable {
     public var id: String
@@ -66,10 +93,12 @@ public struct GameEntry: Codable, Hashable, Identifiable, Sendable {
     public var publisher: String?
     public var releaseYear: Int?
     public var genres: [String]?
+    /// Host play stats; `nil` until the host has launched the title once.
+    public var stats: GameStats?
 
     private enum CodingKeys: String, CodingKey {
         case id, store, title, art, launch, role, icon, platform
-        case developer, publisher, genres
+        case developer, publisher, genres, stats
         case releaseYear = "release_year"
     }
 

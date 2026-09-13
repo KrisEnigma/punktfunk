@@ -94,9 +94,9 @@ fn hosts() -> Vec<HostRow> {
         os: String::new(),
         actions: Vec::new(),
         pin: None,
-        bound_profile: None,
+        bound_preset: None,
         running: String::new(),
-        game_profiles: Default::default(),
+        game_presets: Default::default(),
     };
     vec![
         HostRow {
@@ -220,14 +220,14 @@ fn run_motion(s: &mut Shell) -> Vec<f64> {
     panic!("transition never settled");
 }
 
-/// Y on a pinned card must carry that profile into the library. Falling back to the
+/// Y on a pinned card must carry that preset into the library. Falling back to the
 /// host default would ignore the pin, which is why the card exists.
 #[test]
-fn a_pinned_cards_library_launches_with_its_profile() {
+fn a_pinned_cards_library_launches_with_its_preset() {
     let mut rows = hosts();
     let card = HostRow {
         key: "aa11\u{0}hdr".into(),
-        pin: Some(crate::model::ProfileChip {
+        pin: Some(crate::model::PresetChip {
             id: "hdr".into(),
             name: "HDR".into(),
             accent: None,
@@ -248,7 +248,7 @@ fn a_pinned_cards_library_launches_with_its_profile() {
         Some(Screen::Library(l)) => assert_eq!(
             l.title(),
             "Living Room PC \u{b7} HDR",
-            "the shelf names the profile it will launch with"
+            "the shelf names the preset it will launch with"
         ),
         _ => panic!("Y on a pinned card opens its library"),
     }
@@ -263,29 +263,28 @@ fn a_pinned_cards_library_launches_with_its_profile() {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     }]);
     // Past the desktop tile, which leads every shelf and launches nothing.
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
     s.handle_menu(MenuEvent::Confirm);
     match s.take_action() {
-        Some(OverlayAction::Launch {
-            launch, profile, ..
-        }) => {
+        Some(OverlayAction::Launch { launch, preset, .. }) => {
             assert_eq!(launch.as_deref(), Some("steam:570"));
             assert_eq!(
-                profile.as_deref(),
+                preset.as_deref(),
                 Some("hdr"),
-                "the launch carries the pinned card's profile"
+                "the launch carries the pinned card's preset"
             );
         }
         _ => panic!("A on a title raises a launch"),
     }
 }
 
-/// Primary tile: no one-off profile. The resolver sees `None` and uses the host binding.
+/// Primary tile: no one-off preset. The resolver sees `None` and uses the host binding.
 #[test]
-fn a_primary_tiles_library_leaves_the_profile_to_the_binding() {
+fn a_primary_tiles_library_leaves_the_preset_to_the_binding() {
     let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
     s.handle_menu(MenuEvent::Secondary); // paired+online host focused first
@@ -300,12 +299,13 @@ fn a_primary_tiles_library_leaves_the_profile_to_the_binding() {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     }]);
     s.handle_menu(MenuEvent::Confirm);
     assert!(matches!(
         s.take_action(),
-        Some(OverlayAction::Launch { profile: None, .. })
+        Some(OverlayAction::Launch { preset: None, .. })
     ));
 }
 
@@ -767,6 +767,7 @@ fn mixed_library(library: &LibraryShared) {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         }
     };
@@ -914,6 +915,7 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         },
         crate::library::LibraryGame {
@@ -926,6 +928,7 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         },
     ]);
@@ -1165,6 +1168,7 @@ fn dump_console_screens() {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         })
         .collect(),
@@ -1334,6 +1338,7 @@ fn platform_games() -> Vec<crate::library::LibraryGame> {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     })
     .collect()
@@ -1548,9 +1553,9 @@ fn store_hosts() -> Vec<HostRow> {
         os: os.into(),
         actions: Vec::new(),
         pin: None,
-        bound_profile: None,
+        bound_preset: None,
         running: String::new(),
-        game_profiles: Default::default(),
+        game_presets: Default::default(),
     };
     let mut hosts = vec![
         host("Living Room PC", "linux/fedora/bazzite", 21, true, true),
@@ -1631,6 +1636,7 @@ fn store_games() -> Vec<crate::library::LibraryGame> {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     };
     let mut games = vec![game("steam:launcher".into(), "Steam", true)];
@@ -2115,6 +2121,7 @@ mod launch_hold {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         }
     }
@@ -2135,7 +2142,7 @@ mod launch_hold {
             launch: Some(id.into()),
             title: "Deck".into(),
             request_access: false,
-            profile: None,
+            preset: None,
         }
     }
 
@@ -2291,9 +2298,9 @@ mod launch_hold {
     }
 }
 
-/// The console writes the GLOBAL bitrate and has no profile editor, so a measurement is only
-/// applicable when the tested host actually resolves bitrate from that layer. A profile that
-/// PINS one makes the answer read-only; a profile that inherits does not.
+/// The console writes the GLOBAL bitrate and has no preset editor, so a measurement is only
+/// applicable when the tested host actually resolves bitrate from that layer. A preset that
+/// PINS one makes the answer read-only; a preset that inherits does not.
 #[test]
 fn apply_is_offered_only_when_the_default_is_the_layer_that_wins() {
     let done = SpeedPhase::Done {
@@ -2302,7 +2309,7 @@ fn apply_is_offered_only_when_the_default_is_the_layer_that_wins() {
         recommended_kbps: 70_000,
     };
     let chip = |bitrate_kbps| {
-        Some(crate::model::ProfileChip {
+        Some(crate::model::PresetChip {
             id: "work".into(),
             name: "Work".into(),
             accent: None,
@@ -2316,7 +2323,7 @@ fn apply_is_offered_only_when_the_default_is_the_layer_that_wins() {
         (chip(Some(20_000)), None),
     ] {
         let mut rows = hosts();
-        rows[0].bound_profile = bound;
+        rows[0].bound_preset = bound;
         let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
         console.set_hosts(rows);
         console.set_speed(Some(SpeedStatus {

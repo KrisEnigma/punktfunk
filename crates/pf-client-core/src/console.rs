@@ -16,7 +16,7 @@ pub enum OverlayAction {
         title: String,
         /// A dangling id falls back through `trust::effective_settings`;
         /// it never blocks the connect.
-        profile: Option<String>,
+        preset: Option<String>,
         /// Pin the advertised fingerprint and park the connect until the
         /// operator approves this device. `false` is an ordinary paired connect.
         request_access: bool,

@@ -299,8 +299,8 @@ parity in answer to loss, the video rate comes down so the wire doesn't go up. (
 the GameStream/Moonlight plane, keep the historical meaning: the number programs the encoder, and
 overheads ride on top.) To find a good value:
 
-- **Native clients (Apple, Linux, Windows, Android):** use the built-in **speed test** (from a
-  host's menu). It measures your link, suggests a bitrate, and applies it.
+- **Native clients (Apple, Linux, Windows, Android):** use the built-in **speed test**, from a
+  host's menu, or its host page on Apple. It measures your link, suggests a bitrate, and applies it.
 - **Moonlight:** set the bitrate in Moonlight's settings. Start moderate and raise it.
 
 ## Multiple devices at once

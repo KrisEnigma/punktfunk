@@ -51,8 +51,8 @@ public enum GpSettingsTab: String, CaseIterable, Hashable, Sendable {
     case audio = "Audio"
     case controller = "Controller"
     case interface = "Interface"
-    case profiles = "Profiles"
-    /// Trailing, like Profiles: both are built from something other than the settings store, and
+    case presets = "Presets"
+    /// Trailing, like Presets: both are built from something other than the settings store, and
     /// About is where the strip ends because it is the one section that changes nothing.
     case about = "About"
 

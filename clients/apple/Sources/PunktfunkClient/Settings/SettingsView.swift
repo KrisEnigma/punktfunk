@@ -22,14 +22,14 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     // Which LAYER this surface is editing (SettingsView+Scope): the global defaults, or one
-    // profile's overrides. tvOS keeps defaults-only in v1 — controller-first surfaces honor
-    // profiles and render pinned cards, but don't edit them (design §5.4).
-    @ObservedObject var profiles = ProfileStore.shared
+    // preset's overrides. tvOS keeps defaults-only in v1 — controller-first surfaces honor
+    // presets and render pinned cards, but don't edit them (design §5.4).
+    @ObservedObject var presets = PresetStore.shared
     @State var scope: SettingsScope = .defaults
-    /// The profile editor (create / duplicate / edit), when it is open, and the profile a delete
+    /// The preset editor (create / duplicate / edit), when it is open, and the preset a delete
     /// is being confirmed for.
-    @State var profileDraft: ProfileDraft?
-    @State var profilePendingDelete: StreamProfile?
+    @State var presetDraft: PresetDraft?
+    @State var presetPendingDelete: StreamPreset?
     /// The menu's icons are rasterised per appearance (see `MenuIcon`), so the surface has to know
     /// which one it is drawing in.
     @Environment(\.colorScheme) var colorScheme
@@ -560,12 +560,10 @@ struct SettingsView: View {
                     TVSelectionRow(
                         title: "Show it",
                         options: SettingsOptions.gamepadUIModes, selection: $gamepadUIMode)
-                    // The Apple TV's ONLY route to the shared `ui_palette`. Everywhere else the
-                    // Background row lives on the gamepad settings screen, which is reached from
-                    // the gamepad launcher — and on tvOS that launcher needs an extended-profile
-                    // controller, so an Apple TV driven by the Siri Remote alone could not reach
-                    // the palettes at all. It belongs beside "Show it" because both describe the
-                    // same interface: this row is what that interface looks like once it is up.
+                    // The Apple TV's only route to the shared `ui_palette`: elsewhere the row lives
+                    // on the gamepad settings screen, whose launcher needs an extended-profile
+                    // controller, out of reach of a Siri Remote. It sits beside "Show it" since
+                    // both describe the interface this row sets the look of.
                     TVSelectionRow(
                         title: "Background",
                         options: GamepadPalette.all.map { (label: $0.name, tag: $0.id) },

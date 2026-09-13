@@ -47,7 +47,7 @@ import io.unom.punktfunk.models.HostStatus
  * (a dial in flight, the trust prompt, the host store). What this file DOES own is the arrangement
  * — which sections exist, in what order, and which actions a given card offers — and the two rules
  * that are easy to get wrong from the outside: a pinned card is a shortcut and so withholds the
- * host's destructive actions, and every card in a section reserves the profile chip's space as soon
+ * host's destructive actions, and every card in a section reserves the preset chip's space as soon
  * as one of them needs it.
  */
 @Composable
@@ -59,8 +59,8 @@ internal fun ConnectGrid(
     discoveredUnsaved: List<DiscoveredHost>,
     /** Saved hosts answering the QUIC probe, "address:port" — the routed half of "online". */
     reachable: Set<String>,
-    profiles: List<StreamProfile>,
-    pinsFor: (KnownHost) -> List<StreamProfile>,
+    presets: List<StreamPreset>,
+    pinsFor: (KnownHost) -> List<StreamPreset>,
     connecting: Boolean,
     /** A confirmation ("75 Mbit/s set in …"); [status] is the failure line. Never the same thing. */
     notice: String?,
@@ -69,8 +69,8 @@ internal fun ConnectGrid(
     /** Raise the local-network-permission prompt — the banner's "Allow…" and the wake guard. */
     onAskLocalNetwork: () -> Unit,
     /**
-     * Dial a saved host. The second argument is `connect`'s one-off profile reference: null follows
-     * the host's binding (a plain tap), a profile id forces that profile, and the empty string
+     * Dial a saved host. The second argument is `connect`'s one-off preset reference: null follows
+     * the host's binding (a plain tap), a preset id forces that preset, and the empty string
      * forces the global defaults — a real, different action on a bound host, which is why it has to
      * survive as a value rather than collapsing into "unset".
      */
@@ -86,14 +86,14 @@ internal fun ConnectGrid(
      *  (`design/host-actions.md` §7). Absent = no rows. */
     hostActions: Map<String, List<HostActions.Action>>,
     onHostAction: (KnownHost, HostActions.Action) -> Unit,
-    onCopyLink: (KnownHost, StreamProfile?) -> Unit,
-    onTogglePin: (KnownHost, StreamProfile) -> Unit,
+    onCopyLink: (KnownHost, StreamPreset?) -> Unit,
+    onTogglePin: (KnownHost, StreamPreset) -> Unit,
     /**
-     * Open this card's game library. The second argument is the shelf's pinned profile id, exactly
+     * Open this card's game library. The second argument is the shelf's pinned preset id, exactly
      * as [onConnect] takes the card's one-off: browsing IS this card's connect with a title picked
-     * first, so a pinned card's shelf launches with that card's profile.
+     * first, so a pinned card's shelf launches with that card's preset.
      */
-    onBrowseLibrary: (KnownHost, StreamProfile?) -> Unit,
+    onBrowseLibrary: (KnownHost, StreamPreset?) -> Unit,
     /** `Settings.defaultHost` — which card wears the checkmark. Null when none is written. */
     defaultHost: String?,
     /** Point the start-screen setting at this host, or clear it (`false`). */
@@ -101,13 +101,13 @@ internal fun ConnectGrid(
     onRescan: () -> Unit,
     onAddHost: () -> Unit,
 ) {
-    // The profile rows a card's overflow menu grows. With no profiles at all it stays empty — a
+    // The preset rows a card's overflow menu grows. With no presets at all it stays empty — a
     // user who never wants this feature sees no new clutter anywhere but the settings scope chips.
     // "Connect with" is a ONE-OFF on every card: it never rebinds the host, which is why rebinding
     // lives in the Edit sheet instead.
-    fun hostMenu(kh: KnownHost, pin: StreamProfile?): List<HostMenuItem> = buildList {
+    fun hostMenu(kh: KnownHost, pin: StreamPreset?): List<HostMenuItem> = buildList {
         // Browsing IS a connect-shaped action — this card's connect with a title picked first — so
-        // a PINNED card offers it too, and its shelf launches with that card's profile. Pairing is
+        // a PINNED card offers it too, and its shelf launches with that card's preset. Pairing is
         // the whole gate: the fetch authenticates with the pinned identity, so an unpaired card
         // could only ever be refused.
         if (kh.paired) {
@@ -127,7 +127,7 @@ internal fun ConnectGrid(
         // The host's own actions — sleep, restart, shut it down (`design/host-actions.md` §7),
         // the other half of the Wake-on-LAN round trip. Nothing is decided here: the list is
         // empty unless the host answered AND this device's access carries the grant, so no row
-        // appears that the host would refuse. A pinned card is a shortcut to one profile, not a
+        // appears that the host would refuse. A pinned card is a shortcut to one preset, not a
         // second host, so it offers none — same rule as "Send logs" above.
         if (pin == null) {
             hostActions[kh.fpHex].orEmpty().forEach { a ->
@@ -147,7 +147,7 @@ internal fun ConnectGrid(
                 },
             )
         }
-        if (profiles.isEmpty()) return@buildList
+        if (presets.isEmpty()) return@buildList
         if (pin != null) {
             add(HostMenuItem("Unpin card", startsSection = true) { onTogglePin(kh, pin) })
         }
@@ -158,12 +158,12 @@ internal fun ConnectGrid(
                 onConnect(kh, "")
             },
         )
-        profiles.forEach { p ->
+        presets.forEach { p ->
             add(HostMenuItem("Connect with: ${p.name}") { onConnect(kh, p.id) })
         }
         if (pin == null) {
-            profiles.forEachIndexed { i, p ->
-                val pinned = p.id in kh.pinnedProfileIds
+            presets.forEachIndexed { i, p ->
+                val pinned = p.id in kh.pinnedPresetIds
                 add(
                     HostMenuItem(
                         if (pinned) "Unpin card: ${p.name}" else "Pin as card: ${p.name}",
@@ -174,15 +174,15 @@ internal fun ConnectGrid(
         }
     }
 
-    // The saved-hosts grid: each host's own card, then one card per profile it has pinned, so a
+    // The saved-hosts grid: each host's own card, then one card per preset it has pinned, so a
     // pinned combination is a plain one-click connect instead of a trip through a menu.
     val savedCards = savedHosts.flatMap { kh ->
         listOf(HostCardEntry(kh, null)) + pinsFor(kh).map { HostCardEntry(kh, it) }
     }
     // Cards in one grid row must be the same height (the grid won't stretch them), so as soon as
-    // ANY saved card carries a profile chip, they all reserve its space. Nobody who doesn't use
-    // profiles ever sees the gap.
-    val anyProfileChip = savedCards.any { it.pin != null || it.host.profileId != null }
+    // ANY saved card carries a preset chip, they all reserve its space. Nobody who doesn't use
+    // presets ever sees the gap.
+    val anyPresetChip = savedCards.any { it.pin != null || it.host.presetId != null }
 
     Box(Modifier.fillMaxSize()) {
         LazyVerticalGrid(
@@ -211,7 +211,7 @@ internal fun ConnectGrid(
                 items(savedCards, key = { it.key }) { entry ->
                     val kh = entry.host
                     val pin = entry.pin
-                    val bound = kh.profileId?.let { id -> profiles.firstOrNull { it.id == id } }
+                    val bound = kh.presetId?.let { id -> presets.firstOrNull { it.id == id } }
                     HostCard(
                         name = kh.name,
                         address = "${kh.address}:${kh.port}",
@@ -221,7 +221,7 @@ internal fun ConnectGrid(
                         os = discovered.firstOrNull { kh.matches(it) && it.os.isNotEmpty() }?.os
                             ?: kh.os,
                         enabled = !connecting,
-                        // A pinned card connects with ITS profile; the host's own card follows the
+                        // A pinned card connects with ITS preset; the host's own card follows the
                         // binding, which is exactly what its chip says it will do.
                         onConnect = { onConnect(kh, pin?.id) },
                         // Edit / Forget / Wake live on the host's own card only: a pinned card is a
@@ -239,11 +239,11 @@ internal fun ConnectGrid(
                         } else {
                             null
                         },
-                        profileLabel = pin?.name ?: bound?.name,
-                        profileProminent = pin != null,
+                        presetLabel = pin?.name ?: bound?.name,
+                        presetProminent = pin != null,
                         accent = accentColor(pin?.accent ?: bound?.accent),
                         menuItems = hostMenu(kh, pin),
-                        reserveProfileSlot = anyProfileChip,
+                        reservePresetSlot = anyPresetChip,
                     )
                 }
             }

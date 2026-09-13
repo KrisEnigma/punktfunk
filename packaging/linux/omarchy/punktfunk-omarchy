@@ -97,22 +97,31 @@ lan_sources() {
   printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12 tailscale0
 }
 
-ufw_rule() {  # ufw_rule <profile> <source> — idempotent (ufw dedupes identical rules)
-  local profile="$1" src="$2"
+ufw_rule() {  # ufw_rule <source> <to-any spec…> — idempotent (ufw dedupes identical rules)
+  local src="$1"; shift
   if [[ "$src" == tailscale0 ]]; then
-    sudo ufw allow in on tailscale0 to any app "$profile" comment "$TAG" >/dev/null
+    sudo ufw allow in on tailscale0 to any "$@" comment "$TAG" >/dev/null
   else
-    sudo ufw allow from "$src" to any app "$profile" comment "$TAG" >/dev/null
+    sudo ufw allow from "$src" to any "$@" comment "$TAG" >/dev/null
   fi
 }
 
-ufw_unrule() {
-  local profile="$1" src="$2"
+ufw_unrule() {  # ufw_unrule <source> <to-any spec…>
+  local src="$1"; shift
   if [[ "$src" == tailscale0 ]]; then
-    sudo ufw --force delete allow in on tailscale0 to any app "$profile" >/dev/null 2>&1 || true
+    sudo ufw --force delete allow in on tailscale0 to any "$@" >/dev/null 2>&1 || true
   else
-    sudo ufw --force delete allow from "$src" to any app "$profile" >/dev/null 2>&1 || true
+    sudo ufw --force delete allow from "$src" to any "$@" >/dev/null 2>&1 || true
   fi
+}
+
+# The mgmt port host.env moves off 47990 (Sunshine's web UI), else nothing. The profile opens
+# 47990 only. Last line wins and a blank value is the default, as the host reads it.
+moved_mgmt_port() {  # moved_mgmt_port <host.env>
+  local bind port
+  bind=$(sed -n 's/^[[:space:]]*PUNKTFUNK_MGMT_BIND=//p' "$1" 2>/dev/null | tail -n1 | tr -d '"[:space:]') || true
+  port=${bind##*:}
+  [[ "$bind" == *:* && "$port" =~ ^[0-9]+$ && "$port" != 47990 ]] && printf '%s\n' "$port" || true
 }
 
 open_firewall() {
@@ -134,9 +143,15 @@ open_firewall() {
   fi
   local src
   for p in "${profiles[@]}"; do
-    while read -r src; do ufw_rule "$p" "$src"; done < <(lan_sources)
+    while read -r src; do ufw_rule "$src" app "$p"; done < <(lan_sources)
     ok "ufw: $p opened to local networks (tagged \"$TAG\")"
   done
+  local mgmt
+  mgmt=$(moved_mgmt_port "$HOST_ENV")
+  if [[ -n "$mgmt" ]]; then
+    while read -r src; do ufw_rule "$src" port "$mgmt" proto tcp; done < <(lan_sources)
+    ok "ufw: management API on $mgmt/tcp opened to local networks (tagged \"$TAG\")"
+  fi
   sudo ufw reload >/dev/null 2>&1 || true
 }
 
@@ -144,8 +159,13 @@ close_firewall() {
   have ufw || return 0
   local src
   for p in punktfunk-native punktfunk-web punktfunk-gamestream; do
-    while read -r src; do ufw_unrule "$p" "$src"; done < <(lan_sources)
+    while read -r src; do ufw_unrule "$src" app "$p"; done < <(lan_sources)
   done
+  local mgmt
+  mgmt=$(moved_mgmt_port "$HOST_ENV")
+  if [[ -n "$mgmt" ]]; then
+    while read -r src; do ufw_unrule "$src" port "$mgmt" proto tcp; done < <(lan_sources)
+  fi
   sudo ufw reload >/dev/null 2>&1 || true
   ok "ufw: punktfunk rules removed"
 }
@@ -624,8 +644,15 @@ check_conflicts() {
   fi
   punktfunk-host detect-conflicts 2>&1 | sed 's/^/  /'
   say ""
-  say "  Sunshine and punktfunk COEXIST on the native plane: 9777/47990/47992 are ours alone, so"
-  say "  the punktfunk client and the web console work with Sunshine running and untouched."
+  local mgmt
+  mgmt=$(moved_mgmt_port "$HOST_ENV")
+  if [[ -n "$mgmt" ]]; then
+    say "  Sunshine's web UI keeps TCP 47990; our management API is on $mgmt, so the punktfunk"
+    say "  client and the web console work with Sunshine running and untouched."
+  else
+    say "  Both want TCP 47990 (Sunshine's web UI, our management API), and whichever starts second"
+    say "  fails. Put PUNKTFUNK_MGMT_BIND=0.0.0.0:47991 in $HOST_ENV, then re-run this setup."
+  fi
   say "  They COLLIDE on the GameStream/Moonlight ports (47984/47989/48010, 47998-48010) — ours are"
   say "  off by default, so leave them off unless you are migrating."
   say "  To migrate: ${B}omarchy remove service sunshine${N}, then re-run this setup."

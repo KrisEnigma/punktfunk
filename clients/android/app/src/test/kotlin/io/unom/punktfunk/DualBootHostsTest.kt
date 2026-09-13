@@ -3,6 +3,7 @@ package io.unom.punktfunk
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
+import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.KnownHostStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -86,6 +87,37 @@ class DualBootHostsTest {
         assertNull(store.getByFp(""))
         val pinned = store.trust("192.168.1.9", 9777, "Desk", windows, paired = true)
         assertEquals("the placeholder is the record this pin was waiting for", placeholder.id, pinned.id)
+        assertEquals(1, store.all().size)
+    }
+
+    /**
+     * A dial resolves the record its pin names, or the placeholder waiting for one — never the
+     * other OS saved at the same address. Only a bare typed address falls back to the address.
+     */
+    @Test
+    fun a_pin_resolves_its_own_record_never_the_sibling() {
+        val store = KnownHostStore(context)
+        val first = store.trust("192.168.1.9", 9777, "Desk (Windows)", windows, paired = true)
+        assertNull(store.resolve(linux, "192.168.1.9", 9777))
+        assertNull(store.resolve("", "192.168.1.9", 9777))
+        assertEquals(first.id, store.resolve(null, "192.168.1.9", 9777)?.id)
+        assertEquals("a moved lease is the same pin", first.id, store.resolve(windows, "192.168.1.20", 9777)?.id)
+
+        val placeholder = KnownHost("192.168.1.9", 9777, "Desk (Linux)", "", paired = false)
+        store.save(placeholder)
+        assertEquals(placeholder.id, store.placeholderAt("192.168.1.9", 9777)?.id)
+        assertEquals(placeholder.id, store.resolve(linux, "192.168.1.9", 9777)?.id)
+        assertEquals(placeholder.id, store.resolve("", "192.168.1.9", 9777)?.id)
+    }
+
+    /** A pinned record keeps its name when a dial meant for another card at its address lands on it. */
+    @Test
+    fun trusting_a_pinned_record_keeps_its_name() {
+        val store = KnownHostStore(context)
+        val first = store.trust("192.168.1.9", 9777, "Desk (Windows)", windows, paired = false)
+        store.trust("192.168.1.9", 9777, "Desk (Linux)", windows, paired = true)
+        assertEquals("Desk (Windows)", store.byId(first.id)?.name)
+        assertEquals(true, store.byId(first.id)?.paired)
         assertEquals(1, store.all().size)
     }
 }

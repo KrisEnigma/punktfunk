@@ -19,14 +19,14 @@
   ok would add C:\Program Files\punktfunk to the machine PATH
 ==> Checking for Sunshine / Apollo / Vibeshine
   !! SunshineService is active on this box — both want TCP 47990 (its web UI, punktfunk's management API)
-  ok would set PUNKTFUNK_MGMT_BIND=0.0.0.0:47991 in %ProgramData%\punktfunk\host.env
+  ok PUNKTFUNK_MGMT_BIND=0.0.0.0:47991 — the service step writes it to host.env and opens the firewall for it
   ok Clients learn the port from discovery; the console and plugins read it from mgmt-endpoint. Details: https://docs.punktfunk.unom.io/docs/switching-from-sunshine
   ok Moonlight compatibility stays off — the other host owns those ports while it runs
 ==> Drivers (a hiccup warns and never aborts)
   + "C:\Program Files\punktfunk\punktfunk-host.exe" driver install --dir <staging>\pfvdisplay
   + "C:\Program Files\punktfunk\punktfunk-host.exe" driver install --gamepad --dir <staging>\gamepad
 ==> Service
-  + "C:\Program Files\punktfunk\punktfunk-host.exe" service install --gamestream=off --allow-public-network=off
+  + "C:\Program Files\punktfunk\punktfunk-host.exe" service install --gamestream=off --allow-public-network=off --mgmt-bind=0.0.0.0:47991
   + "C:\Program Files\punktfunk\punktfunk-host.exe" service start
 ==> Web console
   + "C:\Program Files\punktfunk\punktfunk-host.exe" web setup --app-dir "C:\Program Files\punktfunk" --password-file "<temp>\webpw.txt"

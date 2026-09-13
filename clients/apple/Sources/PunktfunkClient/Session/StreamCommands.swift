@@ -52,7 +52,7 @@ struct StreamCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Stream") {
-            // Through the shared cycle so it advances from the LIVE session's tier — a profile
+            // Through the shared cycle so it advances from the LIVE session's tier — a preset
             // that starts a session on Detailed must cycle to Off from here, not from whatever
             // the global default happens to be.
             Button("Cycle Statistics") { StatsVerbosity.cycle() }
@@ -66,12 +66,10 @@ struct StreamCommands: Commands {
             }
             .keyboardShortcut("q", modifiers: [.control, .option, .shift])
             .disabled(session?.isStreaming != true)
-            // Mic mute, local and instant (it gates capture on this device — the host is never
-            // asked). Per SESSION: it starts off every time, so this item is a live toggle, not a
-            // setting. Greyed when the session sends no microphone at all (Settings → mic off, or
-            // a profile that turns it off) rather than pretending there is something to mute.
-            // Captured, the combo is handled by InputCapture's chord path before menus see it;
-            // this item is the released-state path and the shortcut's documentation.
+            // Mic mute: local and instant, it gates capture on this device and never asks the host.
+            // Per session, so it starts off every time. Greyed when the session sends no microphone
+            // (mic off in Settings, or a preset that turns it off). Captured, InputCapture's chord
+            // path handles the combo first; this item is the released-state path and documents it.
             Button(session?.micMuted == true ? "Unmute Microphone" : "Mute Microphone") {
                 session?.toggleMicMute()
             }

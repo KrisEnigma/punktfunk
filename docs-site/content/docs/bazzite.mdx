@@ -31,7 +31,8 @@ That fetches the newest image — host, web console, tray, the plugin runner (st
 the game-library scanners are [plugins](/docs/plugins)) and the HDR `punktfunk-gamescope` build — and
 applies the udev/sysctl setup on the spot. From then on `sudo punktfunk-sysext update` (or the
 [console's update button](/docs/updating)) moves you to the newest build; `status` shows where you
-are. After an update restart the host: `systemctl --user restart punktfunk-web punktfunk-host`.
+are. The update restarts the console and host for you. Updating from 0.36 or older, restart them
+yourself once: `systemctl --user restart punktfunk-web punktfunk-host`.
 
 ## 2. Let it use your controllers
 
