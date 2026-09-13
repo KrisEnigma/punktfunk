@@ -500,18 +500,7 @@ mod tests {
     /// BGRX frame of horizontal bands scrolled down by `shift` rows, with a diagonal so no
     /// two rows are alike: the encoder must reach for rows above to predict it.
     fn scroll_frame(w: u32, h: u32, i: u32) -> CapturedFrame {
-        let shift = i * 6;
-        let mut buf = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h {
-            let band = ((y + h - shift % h) % h) as u8;
-            for x in 0..w {
-                let px = ((y * w + x) * 4) as usize;
-                buf[px] = band.wrapping_mul(3);
-                buf[px + 1] = band ^ (x as u8);
-                buf[px + 2] = 255 - band;
-                buf[px + 3] = 255;
-            }
-        }
+        let buf = pf_encode_win::smoke_pattern::scroll_pattern(w as usize, h as usize, i as usize);
         CapturedFrame {
             provenance: Default::default(),
             width: w,
@@ -536,6 +525,10 @@ mod tests {
         let mut enc = NativeVaapiEncoder::open(codec, w, h, 60, 4_000_000, 8, ChromaFormat::Yuv420)
             .expect("open");
         const WAVE_START: usize = 3;
+        // `PF_WAVE_RESTART=1`: two frames into the wave a frame inside its sweep is lost, so
+        // it restarts there with a fresh start mark; only the restarted close may lift.
+        let restart = std::env::var("PF_WAVE_RESTART").is_ok_and(|v| v == "1");
+        let start2 = if restart { WAVE_START + 2 } else { WAVE_START };
         let mut aus = Vec::new();
         let mut cycle = 0usize;
         let mut i = 0usize;
@@ -553,7 +546,15 @@ mod tests {
                     enc.session.as_ref().unwrap().wave_rows()
                 );
             }
-            let after_wave = WAVE_START + cycle; // the plain P after the close
+            if restart && i == start2 {
+                let lost = (i - 1) as i64;
+                assert!(
+                    enc.invalidate_ref_frames(lost, lost),
+                    "a loss inside the sweep"
+                );
+                assert_eq!(enc.wave.map(|w| w.index), Some(0), "the wave restarts");
+            }
+            let after_wave = start2 + cycle; // the plain P after the close
             let anchor_p = after_wave + 1;
             if cycle > 0 && i == anchor_p {
                 assert!(
@@ -569,7 +570,8 @@ mod tests {
             }
             i += 1;
         }
-        let after_wave = WAVE_START + cycle;
+        let close = start2 + cycle - 1;
+        let after_wave = close + 1;
         let anchor_p = after_wave + 1;
         assert!(enc.wave.is_none(), "the wave closed");
         assert!(aus[0].keyframe, "frame 0 is the IDR");
@@ -579,13 +581,13 @@ mod tests {
                 !au.keyframe,
                 "AU {i}: no IDR after frame 0 — the wave replaced it"
             );
-            let start = i == WAVE_START;
-            let close = i == WAVE_START + cycle - 1;
+            let start = i == WAVE_START || i == start2;
             assert_eq!(
                 au.recovery_point,
-                start || close,
-                "AU {i}: recovery_point marks exactly the wave start and close"
+                start || i == close,
+                "AU {i}: recovery_point marks every start and the close"
             );
+            assert_eq!(au.recovery_close, i == close, "AU {i}: the close bit");
             assert_eq!(
                 au.recovery_anchor,
                 i == anchor_p,
@@ -596,21 +598,21 @@ mod tests {
             let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
             let p = format!("{dir}/vaenc-wave-smoke.{ext}");
             std::fs::write(&p, &full).unwrap_or_else(|e| panic!("write {p}: {e}"));
+            // The client's view: the pre-wave P frames lost, and the restart's frame too.
             let dropped: Vec<u8> = aus
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| *i == 0 || *i >= WAVE_START)
+                .filter(|(i, _)| *i == 0 || (*i >= WAVE_START && *i != start2 - 1))
                 .flat_map(|(_, a)| a.data.iter().copied())
                 .collect();
             let p2 = format!("{dir}/vaenc-wave-smoke-dropped.{ext}");
             std::fs::write(&p2, &dropped).unwrap_or_else(|e| panic!("write {p2}: {e}"));
             eprintln!(
                 "run_wave_smoke: wrote {p} ({} bytes, {} AUs) and {p2} (frames 1..{} dropped; \
-                 the close at {} must decode identical to the full stream)",
+                 the close at {close} must decode identical to the full stream)",
                 full.len(),
                 aus.len(),
                 WAVE_START,
-                WAVE_START + cycle - 1
             );
         }
     }

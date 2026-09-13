@@ -2664,54 +2664,7 @@ mod tests {
         px
     }
 
-    /// BGRA rows scrolled down by `shift`, with a diagonal so no two rows match: the encoder
-    /// must reach for rows above, which is what a stripe's clean region has to refuse.
-    /// A texture that moves `dx` px right and `dy` px down per frame (negative = left/up):
-    /// the rows band by luma, the columns band the green so horizontal motion codes too.
-    /// `PF_WAVE_SCROLL=dx,dy` pins it; the default moves down, so motion vectors point up
-    /// into rows the sweep already refreshed. Down-pointing vectors are the hard case.
-    fn scroll_pattern(w: usize, h: usize, frame: usize) -> Vec<u8> {
-        let (dx, dy) = std::env::var("PF_WAVE_SCROLL")
-            .ok()
-            .and_then(|s| {
-                let (x, y) = s.split_once(',')?;
-                Some((x.trim().parse::<i64>().ok()?, y.trim().parse::<i64>().ok()?))
-            })
-            .unwrap_or((0, 6));
-        let (sx, sy) = (dx * frame as i64, dy * frame as i64);
-        // `PF_WAVE_NOISE=1` adds per-pixel noise that scrolls with the content, so the
-        // encoder is starved the way game content starves it and residual coding cannot
-        // paper over a prediction from a dirty row.
-        let noise = std::env::var("PF_WAVE_NOISE").is_ok_and(|v| v == "1");
-        let mut px = vec![0u8; w * h * 4];
-        for y in 0..h {
-            let cy = (y as i64 - sy).rem_euclid(h as i64);
-            let band = cy as u8;
-            for x in 0..w {
-                let cx = (x as i64 - sx).rem_euclid(w as i64);
-                let col = cx as u8;
-                let o = (y * w + x) * 4;
-                let n = if noise {
-                    // xorshift of the content coordinate: white noise, ±32 per channel.
-                    let mut v = (cx as u32).wrapping_mul(0x9E37_79B9)
-                        ^ (cy as u32).wrapping_mul(0x85EB_CA6B)
-                        ^ 0x5bd1_e995;
-                    v ^= v << 13;
-                    v ^= v >> 17;
-                    v ^= v << 5;
-                    (v & 63) as i16 - 32
-                } else {
-                    0
-                };
-                let c = |b: u8| (i16::from(b) + n).clamp(0, 255) as u8;
-                px[o] = c(band.wrapping_mul(3));
-                px[o + 1] = c(band ^ col);
-                px[o + 2] = c(255 - band);
-                px[o + 3] = 255;
-            }
-        }
-        px
-    }
+    use crate::smoke_pattern::scroll_pattern;
 
     /// The wave on NVENC, one HEVC stream: a loss with no anchor starts wave A (marks on
     /// its start and close, no IDR); a loss of the plain P after it anchors on the close; a
