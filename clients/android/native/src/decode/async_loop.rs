@@ -238,7 +238,6 @@ pub(super) fn run_async(
         );
         Some(Presenter::new(priority, mode.refresh_hz))
     };
-    stats.set_presenter_active(presenter.is_some() || asc.is_some());
     // The vsync clock, started LAZILY on the first decoded frame (see `vsync.rs`); its ticks ride
     // the same event channel. Both presenters need it: the SurfaceView one for its timelines, the
     // ASC one for the panel period (its phase comes from present fences) and the fence poll on
@@ -270,15 +269,7 @@ pub(super) fn run_async(
         std::thread::Builder::new()
             .name("pf-decode-feed".into())
             .spawn(move || {
-                feeder_loop(
-                    client,
-                    stats,
-                    measure_decode,
-                    in_flight,
-                    clock_offset,
-                    shutdown,
-                    ev_tx,
-                );
+                feeder_loop(client, stats, measure_decode, in_flight, shutdown, ev_tx);
             })
             .ok()
     };
@@ -882,7 +873,6 @@ impl State {
                     ctx.measure_decode,
                     &ctx.stats,
                     &mut g,
-                    clock_offset,
                     o.pts_us,
                     o.decoded_ns,
                 )
@@ -901,9 +891,6 @@ impl State {
                 let e2e_us =
                     (e2e_ns > 0 && e2e_ns < 10_000_000_000).then_some((e2e_ns / 1000) as u64);
                 m.note_decode(feed_us, codec_us, e2e_us);
-            }
-            if let Some(c) = codec_us {
-                ctx.stats.note_decode_split(feed_us, c);
             }
         }
     }
@@ -995,7 +982,7 @@ impl State {
     fn pump(&mut self, ctx: &Ctx, clock: Option<&VsyncShared>) {
         if let Some(p) = self.presenter.as_mut() {
             let now = now_monotonic_ns();
-            if p.pump(&ctx.codec, clock, &ctx.tracker, &ctx.meter, &ctx.stats, now) {
+            if p.pump(&ctx.codec, clock, &ctx.tracker, &ctx.meter, now) {
                 self.rendered += 1;
             }
             // The 1 Hz window flush doubles as the phase-lock report tick.
@@ -1006,7 +993,7 @@ impl State {
         if let Some(a) = self.asc.as_mut() {
             if let Some(tx) = ctx.present_tx.as_ref() {
                 let panel = clock.map_or(0, VsyncShared::panel_period_ns);
-                if a.pump(now_monotonic_ns(), panel, &ctx.stats, tx) {
+                if a.pump(now_monotonic_ns(), panel, tx) {
                     self.rendered += 1;
                 }
             }
@@ -1090,20 +1077,17 @@ fn report_arrival_phase(ctx: &Ctx, clock: &VsyncShared, stamps: &mut Vec<i128>) 
 }
 
 /// The `pf-decode-feed` thread: block on the connector for the next access unit so the async loop
-/// never has to. Records the `received` HUD stat (receipt point) — including the Phase-2 host/network
-/// split from any matching 0xCF host timings — then hands the AU to the loop via the event channel.
-/// Exits when `shutdown` is set, the session closes, or the loop's receiver is gone.
+/// never has to. Stamps receipt for the decode stage (the connector already noted it for the
+/// overlay), then hands the AU to the loop via the event channel. Exits when `shutdown` is set,
+/// the session closes, or the loop's receiver is gone.
 fn feeder_loop(
     client: Arc<NativeClient>,
     stats: Arc<crate::stats::VideoStats>,
     measure_decode: bool,
     in_flight: Arc<Mutex<VecDeque<(u64, i128)>>>,
-    clock_offset: Arc<AtomicI64>,
     shutdown: Arc<AtomicBool>,
     ev_tx: mpsc::Sender<DecodeEvent>,
 ) {
-    // Received AUs awaiting their 0xCF host timing (Phase-2 split), as (pts_ns, capture→received µs).
-    let mut pending_split: VecDeque<(u64, u64)> = VecDeque::new();
     // Last logged phase-lock ACK (the host's applied capture hold, from the 0xCF tail).
     let mut last_phase_ack: Option<i32> = None;
     while !shutdown.load(Ordering::Relaxed) {
@@ -1122,14 +1106,7 @@ fn feeder_loop(
                 // Park the receipt stamp whenever the `decode` stage is consumed: the HUD, or the
                 // ABR decode signal (`measure_decode`).
                 if (stats.enabled() || measure_decode) && frame.complete {
-                    let received_ns = note_received_frame(
-                        &client,
-                        &stats,
-                        &frame,
-                        clock_offset.load(Ordering::Relaxed),
-                        &mut pending_split,
-                        &mut last_phase_ack,
-                    );
+                    let received_ns = note_received_frame(&client, &frame, &mut last_phase_ack);
                     let mut g = in_flight
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);

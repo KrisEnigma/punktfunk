@@ -435,12 +435,10 @@ private final class DeadlineLinkDelegate: NSObject, CAMetalDisplayLinkDelegate {
     private let stats: PresentDebugStats?
     /// Phase-locked capture's grid feed — this link IS the latch grid presents pace against.
     private let phase: PhaseReporter?
-    /// The OS-floor sampler (design/apple-presentation-rebuild.md): every update's vend→glass
-    /// lead is recorded so its p50 becomes the "OS present floor" the HUD subtracts from the
-    /// shown display/e2e numbers. Self-adapting: ~1 refresh period is the goal, ~2 means the
-    /// compositor is running a frame ahead of us (what a 3-slot drawable pool bought it before
-    /// `startDeadlinePresenter` clamped stage-4 to 2). Tracks VRR rate changes.
-    private let floorMeter: LatencyMeter?
+    /// Every update's vend→glass lead goes to the overlay as an OS-floor sample; its p50 is the
+    /// floor iOS and tvOS take off the shown display and end-to-end. ~1 refresh is the goal; ~2
+    /// means the compositor runs a frame ahead of us. Tracks VRR rate changes.
+    private let hud: HudSink?
     /// The pool depth this session vends from (`startDeadlinePresenter` sets it on the layer).
     /// Carried only so the one-shot line below reports the two halves of the depth question
     /// together — a `preferredFrameLatency` of 1 against a 3-slot pool is the configuration that
@@ -457,14 +455,14 @@ private final class DeadlineLinkDelegate: NSObject, CAMetalDisplayLinkDelegate {
 
     init(
         stash: LatestBox<CAMetalDrawable>, renderSignal: DispatchSemaphore,
-        hint: FrameRateHint, stats: PresentDebugStats?, floorMeter: LatencyMeter?,
+        hint: FrameRateHint, stats: PresentDebugStats?, hud: HudSink?,
         phase: PhaseReporter?, drawableCount: Int, latencyAsk: Float
     ) {
         self.stash = stash
         self.renderSignal = renderSignal
         self.hint = hint
         self.stats = stats
-        self.floorMeter = floorMeter
+        self.hud = hud
         self.phase = phase
         self.drawableCount = drawableCount
         self.latencyAsk = latencyAsk
@@ -499,15 +497,8 @@ private final class DeadlineLinkDelegate: NSObject, CAMetalDisplayLinkDelegate {
         // The link's own pipeline depth, measured: how far ahead of glass this vend runs.
         let leadS = update.targetPresentationTimestamp - CACurrentMediaTime()
         stats?.vendLead(ms: leadS * 1000)
-        // Same measurement into the floor meter (as a LatencyMeter sample: end = now, start =
-        // now − lead) — its 1 s p50 is the OS present floor SessionModel shaves off.
-        if leadS > 0, let floorMeter {
-            var ts = timespec()
-            clock_gettime(CLOCK_REALTIME, &ts)
-            let nowNs = Int64(ts.tv_sec) * 1_000_000_000 + Int64(ts.tv_nsec)
-            floorMeter.record(
-                ptsNs: UInt64(nowNs - Int64(leadS * 1_000_000_000)), atNs: nowNs, offsetNs: 0)
-        }
+        // The same lead, as an OS-floor sample for the overlay.
+        if leadS > 0 { hud?.floor(ns: Int64(leadS * 1_000_000_000)) }
         // Phase-locked capture: this update's target present, converted into the arrival
         // stamps' CLOCK_REALTIME domain. Per-update cost is one clock read; the reporter
         // itself flushes ~1 Hz.
@@ -545,6 +536,21 @@ private final class DecodeReport: @unchecked Sendable {
     }
 }
 
+/// The stats overlay's stamp sink. The decode callback is built in `init`, before a connection
+/// exists, so it writes through this. `start` binds the connection on the main thread before the
+/// first AU, so the plain field is safe (set once, then read) — DecodeReport's shape.
+final class HudSink: @unchecked Sendable {
+    private weak var connection: PunktfunkConnection?
+    func bind(_ connection: PunktfunkConnection) { self.connection = connection }
+    func decoded(ptsNs: UInt64, receivedNs: Int64, decodedNs: Int64) {
+        connection?.hudDecoded(ptsNs: ptsNs, receivedNs: receivedNs, decodedNs: decodedNs)
+    }
+    func displayed(ptsNs: UInt64, decodedNs: Int64, atNs: Int64) {
+        connection?.hudDisplayed(ptsNs: ptsNs, decodedNs: decodedNs, displayedNs: atNs)
+    }
+    func floor(ns: Int64) { connection?.hudOsFloor(ns: ns) }
+}
+
 public final class Stage2Pipeline {
     private let ring: FrameStore<ReadyFrame>
     private let presenter: MetalVideoPresenter
@@ -565,12 +571,8 @@ public final class Stage2Pipeline {
     /// arithmetic in it at all — see the intent gate in `init`.
     private let cadence: CadenceClock?
     private let endToEndMeter: LatencyMeter?
-    private let decodeMeter: LatencyMeter?
-    private let displayMeter: LatencyMeter?
-    /// The measured OS present floor (deadline pacing only): each link update's vend→glass lead
-    /// is recorded here, and its p50 is what SessionModel subtracts from the shown display/e2e
-    /// numbers — the pipeline-depth cost no client controls (design/apple-presentation-rebuild.md).
-    private let presentFloorMeter: LatencyMeter?
+    /// The stats overlay's decode, display and OS-floor stamps; `start` binds the connection.
+    private let hud = HudSink()
     private let recovery = KeyframeRecovery()
     /// Feeds the core Automatic-bitrate controller's decode signal from the decode callback; `start`
     /// binds the live connection + arming flag (see DecodeReport).
@@ -618,19 +620,14 @@ public final class Stage2Pipeline {
     /// render thread. The owner rebuilds the presenter on a fresh layer. Set before `start`.
     public var onPresentWedged: (@Sendable () -> Void)?
 
-    /// Unified-stats meters (design/stats-unification.md): `endToEndMeter` records the headline
-    /// end-to-end (capture→on-glass, skew-corrected); `decodeMeter` the decode stage
-    /// (received→decoded); `displayMeter` the display stage (decoded→on-glass, the ring wait +
-    /// render + vsync — the tail stage-2 exists to shorten). All optional: metering never gates
-    /// the presenter choice. Returns nil if Metal can't be set up (headless / no GPU) — caller
+    /// `endToEndMeter` records capture→on-glass per presented frame for the A/V sync loop; the
+    /// overlay's stamps reach the core through the connection. Metering never gates the
+    /// presenter choice. Returns nil if Metal can't be set up (headless / no GPU) — caller
     /// falls back to the stage-1 presenter. `pacing` also selects the decoded video sink when its
     /// `displayLayer` is supplied. `gateDepth` bounds glass presents; `vsyncPaced` schedules macOS
     /// smoothness onto the ordinary display-link grid.
     public init?(
         endToEndMeter: LatencyMeter?,
-        decodeMeter: LatencyMeter? = nil,
-        displayMeter: LatencyMeter? = nil,
-        presentFloorMeter: LatencyMeter? = nil,
         displayLayer: AVSampleBufferDisplayLayer? = nil,
         pacing: PresentPacing = .arrival,
         gateDepth: Int = 1,
@@ -651,9 +648,6 @@ public final class Stage2Pipeline {
         self.vsyncPaced = vsyncPaced
         self.ring = FrameStore(policy: storePolicy)
         self.endToEndMeter = endToEndMeter
-        self.decodeMeter = decodeMeter
-        self.displayMeter = displayMeter
-        self.presentFloorMeter = presentFloorMeter
         self.decodedSink = decodedSink
         // The intent gate: source-timestamp playout is what `smooth` MEANS now, and `latency` is
         // defined as arrival-driven with no cushion — so the store policy, which is the intent's
@@ -669,6 +663,7 @@ public final class Stage2Pipeline {
         let renderSignal = renderSignal
         let gate = gate
         let decodeReport = decodeReport
+        let hud = hud
         let phaseReporter = phaseReporter
         let cadence = cadence
         let rateHint = frameRateHint
@@ -677,8 +672,8 @@ public final class Stage2Pipeline {
                 // Decode stage = received→decoded, both client CLOCK_REALTIME (offset 0 — no
                 // skew applies). Stamped at decode completion, so it covers every decoded frame,
                 // including ones the re-anchor gate withholds or the newest-wins ring drops.
-                decodeMeter?.record(
-                    ptsNs: UInt64(frame.receivedNs), atNs: frame.decodedNs, offsetNs: 0)
+                hud.decoded(
+                    ptsNs: frame.ptsNs, receivedNs: frame.receivedNs, decodedNs: frame.decodedNs)
                 // Same interval, reported to the core bitrate controller so Automatic caps at this
                 // device's real decode limit instead of the network link ceiling. Every decoded
                 // frame (not just presented ones), so a newest-wins drop can't hide the backlog.
@@ -734,6 +729,7 @@ public final class Stage2Pipeline {
         clockOffset = { connection.clockOffsetNs } // live (re-synced) — see the field doc
         recovery.bind(connection) // arm host-keyframe recovery for this session
         decodeReport.bind(connection) // arm the Automatic-bitrate decode signal for this session
+        hud.bind(connection) // the overlay's decode, display and floor stamps
         phaseReporter.bind(pacing == .decoded ? nil : connection)
         gate.reseed(framesDropped: connection.framesDropped()) // baseline the freeze to this session
         // A fresh session is a fresh source clock: re-anchor on its first frame rather than slew
@@ -768,7 +764,7 @@ public final class Stage2Pipeline {
                 connection: connection, token: token, pumpStopped: pumpStopped,
                 ring: ring, renderSignal: renderSignal,
                 device: presenter.metalDevice, queue: presenter.metalQueue,
-                decodeMeter: decodeMeter, cadence: cadence, rateHint: frameRateHint,
+                hud: hud, cadence: cadence, rateHint: frameRateHint,
                 onFrame: onFrame, onSessionEnd: onSessionEnd, onDecodedSize: onDecodedSize,
                 onHdrMeta: { [weak presenter] meta in presenter?.setHdrMeta(meta) })
         } else {
@@ -915,7 +911,7 @@ public final class Stage2Pipeline {
         // only the stop-flag poll for a session whose link stopped ticking.
         let ring = ring
         let endToEndMeter = endToEndMeter
-        let displayMeter = displayMeter
+        let hud = hud
         let clockOffset = clockOffset
         let renderSignal = renderSignal
         let renderStopped = renderStopped
@@ -1005,7 +1001,7 @@ public final class Stage2Pipeline {
                     endToEndMeter?.record(ptsNs: frame.ptsNs, atNs: atNs, offsetNs: clockOffset())
                     // Display stage = decoded → on-glass. Both instants are client CLOCK_REALTIME,
                     // so no skew offset applies.
-                    displayMeter?.record(ptsNs: UInt64(frame.decodedNs), atNs: atNs, offsetNs: 0)
+                    hud.displayed(ptsNs: frame.ptsNs, decodedNs: frame.decodedNs, atNs: atNs)
                     debugStats?.presented(atNs: presentedNs, issuedNs: issuedNs)
                 }
                 // One present tail, two decode sources: the VideoToolbox biplanar buffer or the
@@ -1060,7 +1056,7 @@ public final class Stage2Pipeline {
         let renderStopped = renderStopped
         let presenter = presenter
         let endToEndMeter = endToEndMeter
-        let displayMeter = displayMeter
+        let hud = hud
         let clockOffset = clockOffset
         let hint = frameRateHint
         let layer = presenter.layer
@@ -1115,7 +1111,6 @@ public final class Stage2Pipeline {
                 .flatMap(Float.init)
                 .flatMap { $0.isFinite ? min(max($0, 0), 4) : nil } ?? 1
 
-        let floorMeter = presentFloorMeter
         let phaseReporter = phaseReporter
         // The link starts LAZILY — the render thread triggers this after the FIRST decoded
         // frame's reconcileLayer. Started eagerly it vends into the layer's initial 0×0
@@ -1130,7 +1125,7 @@ public final class Stage2Pipeline {
             let linkThread = Thread {
                 let delegate = DeadlineLinkDelegate(
                     stash: stash, renderSignal: renderSignal, hint: hint, stats: debugStats,
-                    floorMeter: floorMeter, phase: phaseReporter,
+                    hud: hud, phase: phaseReporter,
                     drawableCount: drawableCount, latencyAsk: latencyAsk)
                 let link = CAMetalDisplayLink(metalLayer: layer)
                 link.preferredFrameLatency = latencyAsk // see the ladder note above
@@ -1257,7 +1252,7 @@ public final class Stage2Pipeline {
                     let atNs = presentedNs
                         ?? Stage2Pipeline.realtimeNs(forDisplayLinkTimestamp: CACurrentMediaTime())
                     endToEndMeter?.record(ptsNs: frame.ptsNs, atNs: atNs, offsetNs: clockOffset())
-                    displayMeter?.record(ptsNs: UInt64(frame.decodedNs), atNs: atNs, offsetNs: 0)
+                    hud.displayed(ptsNs: frame.ptsNs, decodedNs: frame.decodedNs, atNs: atNs)
                     debugStats?.presented(atNs: presentedNs, issuedNs: issuedNs)
                 }
                 let rendered: Bool
@@ -1303,7 +1298,7 @@ public final class Stage2Pipeline {
         if let stamp = decodedSink?.takeDisplayedStamp() {
             let atNs = Self.realtimeNs(forDisplayLinkTimestamp: displayedMediaTime)
             endToEndMeter?.record(ptsNs: stamp.ptsNs, atNs: atNs, offsetNs: clockOffset())
-            displayMeter?.record(ptsNs: UInt64(stamp.decodedNs), atNs: atNs, offsetNs: 0)
+            hud.displayed(ptsNs: stamp.ptsNs, decodedNs: stamp.decodedNs, atNs: atNs)
         }
         #endif
         if pacing != .decoded { renderSignal.signal() }
@@ -1392,7 +1387,7 @@ public final class Stage2Pipeline {
         connection: PunktfunkConnection, token: StopFlag, pumpStopped: DispatchSemaphore,
         ring: FrameStore<ReadyFrame>, renderSignal: DispatchSemaphore,
         device: MTLDevice, queue: MTLCommandQueue,
-        decodeMeter: LatencyMeter?, cadence: CadenceClock?, rateHint: FrameRateHint,
+        hud: HudSink, cadence: CadenceClock?, rateHint: FrameRateHint,
         onFrame: (@Sendable (AccessUnit) -> Void)?,
         onSessionEnd: (@Sendable () -> Void)?,
         onDecodedSize: (@Sendable (Int, Int) -> Void)?,
@@ -1456,8 +1451,8 @@ public final class Stage2Pipeline {
                             clock_gettime(CLOCK_REALTIME, &ts)
                             let decodedNs =
                                 Int64(ts.tv_sec) * 1_000_000_000 + Int64(ts.tv_nsec)
-                            decodeMeter?.record(
-                                ptsNs: UInt64(receivedNs), atNs: decodedNs, offsetNs: 0)
+                            hud.decoded(
+                                ptsNs: ptsNs, receivedNs: receivedNs, decodedNs: decodedNs)
                             // Same cadence sample as the VideoToolbox half: the wavelet decode's
                             // completion IS this frame's presentable instant.
                             ring.submit(

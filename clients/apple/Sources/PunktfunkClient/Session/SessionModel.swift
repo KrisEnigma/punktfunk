@@ -154,134 +154,9 @@ final class SessionModel: ObservableObject {
     /// global so a profile that overrides the tier actually gets it, without the cycle breaking.
     @Published var statsVerbosity: StatsVerbosity = .normal
     @Published var errorMessage: String?
-    @Published var fps = 0
-    @Published var mbps = 0.0
-    /// The unified latency stages (design/stats-unification.md), ms per 1 s window. `host+network`
-    /// = capture→received, skew-corrected across machines via the connect-time clock offset: the
-    /// stage-2 HUD shows its p50 in the equation line; the stage-1 fallback shows p50/p95 as its
-    /// `capture→received` headline. `hostNetworkValid` is false until the first sample drains (and
-    /// whenever no host frames arrived in the last interval). `hostNetworkSkewCorrected` = the host
-    /// answered the skew handshake (the number is cross-machine valid, not just same-host).
-    @Published var hostNetworkP50Ms = 0.0
-    @Published var hostNetworkP95Ms = 0.0
-    @Published var hostNetworkValid = false
-    @Published var hostNetworkSkewCorrected = false
-    /// Phase 2 of the same stage: `host+network` split into its two terms via the host's per-AU
-    /// 0xCF timing reports (host = capture→fully-sent as the host measured it, network = the
-    /// remainder), matched to receipts by pts in `latencySplit`. `splitValid` is false whenever
-    /// no timing matched in the window — an old host that never emits the plane, or heavy 0xCF
-    /// loss — and the HUD then falls back to the combined `host+network` term.
-    @Published var hostP50Ms = 0.0
-    @Published var networkP50Ms = 0.0
-    @Published var splitValid = false
-    /// End-to-end = capture→on-glass, measured directly per frame (never summed from the stages) —
-    /// the HUD headline. Only the stage-2 presenter can stamp it (it owns decode + a
-    /// CAMetalLayer/display-link present); stays invalid under stage-1, where the layer presents
-    /// internally with no per-frame callback.
-    @Published var endToEndP50Ms = 0.0
-    @Published var endToEndP95Ms = 0.0
-    @Published var endToEndValid = false
-    @Published var endToEndSkewCorrected = false
-    /// The client-local stage terms of the HUD's equation line (single clock, no skew; p50 only):
-    /// decode = received→decoded, display = decoded→on-glass (ring wait + render + vsync — the
-    /// term the stage-2 presenter exists to shorten).
-    @Published var decodeP50Ms = 0.0
-    @Published var decodeValid = false
-    @Published var displayP50Ms = 0.0
-    @Published var displayValid = false
-    /// Client-queue wait: core reassembly receipt → the pump's pull (`AccessUnit.pulledNs −
-    /// receivedNs`, ABI v9 receipt split — the 2026-07 two-pair investigation). ~0 on a healthy
-    /// stream; a persistent value is a client-side standing backlog that used to hide inside
-    /// "network". Shown in the detailed tier only when it says something (≥ ~2 ms).
-    @Published var clientQueueP50Ms = 0.0
-    @Published var clientQueueValid = false
-    /// The measured OS present floor (design/apple-presentation-rebuild.md): the deadline
-    /// engine's vend→glass pipeline depth — an OS property no client can pace under (~2 refresh
-    /// intervals composited; would read ~1 under direct-to-display). The HUD subtracts it from
-    /// the shown display/e2e so the numbers describe Punktfunk's own pipeline; raw values stay
-    /// in the detailed tier + the stats log. Invalid (0) on macOS arrival (sync-off ≈ no floor)
-    /// and under stage-1.
-    @Published var osFloorP50Ms = 0.0
-    @Published var osFloorValid = false
-    /// The deadline link's `preferredFrameLatency` ASK beside its property READBACK (see
-    /// `PresentLinkInfo` — it exists because tvOS has no reachable log). ⚠ The readback is NOT
-    /// a grant: it is a plain float property, so it echoes whatever was stored unless the
-    /// system clamps the setter. readback ≠ ask ⇒ a visible clamp (the one signal the API can
-    /// give); readback == ask proves nothing — `osFloorP50Ms` (the measured vend lead) is the
-    /// truth-teller (field 2026-08-13: readback 1.00 beside a 32.5 ms floor).
-    @Published var linkLatencyAskFrames: Float = 0
-    @Published var linkLatencyFrames: Float = 0
-    @Published var linkRangeMinHz: Float = 0
-    @Published var linkRangeMaxHz: Float = 0
-    @Published var linkDrawables = 0
-    @Published var linkInfoValid = false
-    /// Impossible samples the HOST-ANCHORED meters (host+network, end-to-end) refused this
-    /// second (`LatencyMeter.drainTrimmed`). Nonzero means the clock offset is lying and every
-    /// host-anchored p50/p95 this window is a TRUNCATED distribution — the HUD marks the window
-    /// suspect instead of letting a trimmed tail pose as a healthy small number (the field
-    /// "e2e 0–3 ms" reading, 2026-08-13). Client-local stages can't go negative, so they carry
-    /// no such term.
-    @Published var skewTrimPerS = 0
-    /// The AUDIO plane's latency, from the playback ring (`SessionAudio.Stats`): how much decoded
-    /// audio is queued ahead of the speaker, and where that PUTS it relative to the picture
-    /// (positive = audio behind). `audioValid` is false until playback runs.
-    ///
-    /// Both numbers, never just the depth — a deep ring on a jittery link is the adaptive floor
-    /// doing its job, and only the offset separates that from audio simply being held late. They
-    /// existed nowhere a surface could render them until now, which is why a field report of "the
-    /// audio delay seems way too high" was triaged all the way to a conclusion without them.
-    @Published var audioBufferMs = 0
-    @Published var audioAvOffsetMs = 0
-    @Published var audioValid = false
-    /// The audio format the host RESOLVED, for the HUD — `nil` on an ordinary Opus session, where
-    /// there is nothing to say and a line saying "48 kHz" would be noise.
-    ///
-    /// The resolved format, emphatically not the requested one. A UI that reads "96 kHz" because
-    /// the user picked 96 kHz, on a session the host declined, is the exact bug
-    /// design/hi-res-audio.md §4.3 names wearing a different hat — and it is the one place a user
-    /// would ever look to check that the bandwidth they are spending is buying anything.
-    @Published var audioFormatLabel: String?
-
-    /// A resolved sample rate as the kHz figure a listener recognises: `48`, `96`, and — since the
-    /// 44.1 kHz family was admitted — `44.1`, `88.2`, `176.4`.
-    ///
-    /// ⚠ This exists because `rateHz / 1000` is INTEGER division, and a HUD reading "44 kHz" on a
-    /// 44 100 Hz session would be the one surface whose whole job is naming what the host resolved,
-    /// naming it wrong.
-    ///
-    /// Built from integer parts rather than `String(format: "%.1f", …)` for the reason the Android
-    /// port records at its own copy of this: that formatter renders through the current locale and
-    /// would print "44,1 kHz" across most of Europe, a decimal comma facing a settings row that
-    /// says "44.1 kHz" — and this line exists precisely to be compared at a glance with what was
-    /// asked for. Interpolating `Int`s is locale-independent, and every rate the plane carries is a
-    /// whole number of hundreds of hertz, so the tenths digit is exact.
-    private static func kHzLabel(_ rateHz: UInt32) -> String {
-        let whole = rateHz / 1000
-        let tenths = (rateHz % 1000) / 100 // 44 100 → 1, 176 400 → 4; 0 for the 48 kHz family
-        return tenths == 0 ? "\(whole)" : "\(whole).\(tenths)"
-    }
-
-    /// The resolved speaker layout, spelled the way the settings row spells it. Named on this line
-    /// because the lossless plane is no longer stereo-only: what a surround lossless session costs
-    /// is three or four times the stereo figure, so "which layout did I actually get" is now part
-    /// of "is the bandwidth I am spending buying anything".
-    private static func layoutLabel(_ channels: UInt8) -> String {
-        switch channels {
-        case 6: return "5.1"
-        case 8: return "7.1"
-        default: return "stereo"
-        }
-    }
-
-    /// The floor-shaved values every HUD tier displays (raw − floor, never below 0). Identical
-    /// to the raw values whenever no floor is measured.
-    var displayAdjP50Ms: Double { max(0, displayP50Ms - (osFloorValid ? osFloorP50Ms : 0)) }
-    var endToEndAdjP50Ms: Double { max(0, endToEndP50Ms - (osFloorValid ? osFloorP50Ms : 0)) }
-    var endToEndAdjP95Ms: Double { max(0, endToEndP95Ms - (osFloorValid ? osFloorP50Ms : 0)) }
-    /// Unrecoverable network frame drops in the last window (FEC couldn't rebuild them) and their
-    /// share of frames offered, `lost/(received+lost)`. The HUD hides the line while zero.
-    @Published var lostFrames = 0
-    @Published var lostPct = 0.0
+    /// The stats overlay's lines for the live tier and vocabulary: formatted by the core each
+    /// second and on every tier change (`renderHud`).
+    @Published private(set) var hudLines: [PunktfunkConnection.HudLine] = []
     /// Mirrors StreamView's capture state (it owns the input capture; this drives the
     /// HUD's "click to capture" / "⌘⎋ releases" hint).
     @Published var mouseCaptured = false
@@ -335,27 +210,16 @@ final class SessionModel: ObservableObject {
     /// differently-sized frame. Ticked from the 1 Hz stats timer.
     private var resizeIndicator = ResizeIndicator()
 
+    /// Received AUs, for the once-a-second log gate: nothing is logged while no frame flows.
     let meter = FrameMeter()
-    /// Capture→received (the host+network stage), fed per AU at receipt by the stream view's
-    /// onFrame — under both presenters.
-    let latency = LatencyMeter()
-    /// The host/network split of that same stage: onFrame also records (pts, interval) receipts
-    /// here, and the 1 s stats tick drains the connection's 0xCF host timings into it — under
-    /// both presenters (the receipt path is presenter-independent).
-    let latencySplit = HostNetworkSplitter()
-    /// The stage-2 meters, passed to StreamView: end-to-end (capture→on-glass, stamped at
-    /// present), decode (received→decoded), display (decoded→on-glass).
+    /// Capture→on-glass, written per presented frame by the stage-2 presenter. The A/V sync loop
+    /// reads its latest sample; the overlay's own figures live in the core.
     let endToEnd = LatencyMeter()
-    let decodeStage = LatencyMeter()
-    let displayStage = LatencyMeter()
-    /// Client-queue sampler (see `clientQueueP50Ms`) — fed per AU by the stream view's onFrame,
-    /// drained by the same 1 s tick as the stage meters.
+    /// Receipt → pull wait (client queue), fed per AU by the stream view's onFrame. Apple-only,
+    /// so it reaches the overlay as an extra line.
     let clientQueue = LatencyMeter()
-    /// The OS present floor sampler (see `osFloorP50Ms`) — fed one sample per display-link
-    /// update by the deadline engine, drained by the same 1 s tick as the stage meters.
-    let presentFloor = LatencyMeter()
-    /// Cumulative reassembler-drop counter at the last stats drain (per-window `lost` delta).
-    private var lastFramesDropped: UInt64 = 0
+    /// Its p50 over the last window, for `hudFacts`.
+    private var queueP50Ms: Double?
     private var statsTimer: Timer?
     private var audio: SessionAudio?
     private var gamepadCapture: GamepadCapture?
@@ -529,20 +393,10 @@ final class SessionModel: ObservableObject {
             rawValue: UInt32(clamping: effective.compositor)) ?? .auto
         var bitrateKbps = UInt32(clamping: effective.bitrateKbps)
         let audioChannels = UInt8(clamping: effective.audioChannels)
-        // The audio format this session ASKS for — the user's choice, at every channel count.
-        //
-        // This used to be forced to Opus for 5.1/7.1, on the reasoning that a lossless surround
-        // frame does not fit one datagram. That was a statement about ONE frame length: the ladder
-        // is sized from `(rate, depth, channels, max_datagram)`, so a surround session negotiates a
-        // shorter frame rather than failing, and only the top of the rate ladder has no rung that
-        // fits. Deciding that here, from a rule this side cannot measure, meant a client guess
-        // standing in for the host's measurement — and guessing "no" costs a session that would
-        // have worked. The host's gate is the one place that knows the connection's real datagram
-        // size; asking and being declined is one `Welcome` field, and it is the honest shape.
-        //
-        // **The request is never the answer.** `resolvedAudioRateHz`/`resolvedAudioBits`/
-        // `isLosslessAudio` on the connection are what the host actually granted, SessionAudio
-        // opens the device from THOSE, and `audioFormatLabel` below reports THOSE.
+        // The format this session ASKS for, at every channel count: only the host's gate knows the
+        // datagram size, so a request it cannot fit comes back declined in `Welcome`. The request
+        // is never the answer — SessionAudio and the stats overlay read what the host granted
+        // (`resolvedAudioRateHz`, `resolvedAudioBits`, `isLosslessAudio`).
         let audioFormat = effective.audioFormatChoice
         let (audioRateHz, audioBits) = audioFormat.wire
         let hdrEnabled = effective.hdrEnabled
@@ -964,6 +818,7 @@ final class SessionModel: ObservableObject {
         statsVerbosity = tier
         settings.statsVerbosity = tier.rawValue
         SessionSettings.setStatsVerbosity(tier.rawValue)
+        renderHud()
     }
 
     /// The user confirmed the fingerprint: returns it for pinning and enters streaming.
@@ -1098,23 +953,10 @@ final class SessionModel: ObservableObject {
         launchedShelf = nil
         revealStream()
         phase = .idle
-        fps = 0
-        mbps = 0
-        hostNetworkValid = false
-        splitValid = false
-        endToEndValid = false
-        decodeValid = false
-        displayValid = false
-        clientQueueValid = false
-        osFloorValid = false
-        linkInfoValid = false
+        hudLines = []
         // Drop the previous session's grant too — the shared box outlives the session, and a new
         // link may never come up (a non-deadline rung has none at all).
         PresentLinkInfo.shared.clear()
-        audioValid = false
-        audioFormatLabel = nil
-        lostFrames = 0
-        lostPct = 0
         mouseCaptured = false
         resizing = false
         resizeIndicator = ResizeIndicator() // no stale target/timer into the next session
@@ -1258,13 +1100,6 @@ final class SessionModel: ObservableObject {
             // correctly declines to correct.
             videoLatency: endToEnd)
         self.audio = audio
-        // Only when the session is genuinely on the lossless plane — the HUD says nothing for an
-        // ordinary Opus one. Read from the connection's Welcome, so a request the host's gate
-        // declined shows the fallback it actually landed on rather than what was asked for.
-        audioFormatLabel = conn.isLosslessAudio
-            ? "lossless \(Self.kHzLabel(conn.resolvedAudioRateHz)) kHz / "
-                + "\(conn.resolvedAudioBits)-bit \(Self.layoutLabel(conn.resolvedAudioChannels))"
-            : nil
         // Gamepads: forward every controller GamepadManager selected — each on its own wire pad
         // index (a pin forwards only one, Automatic forwards all) — and render the host's feedback
         // back to the pad it's addressed to (rumble always; lightbar/player-LEDs/adaptive-triggers
@@ -1376,14 +1211,11 @@ final class SessionModel: ObservableObject {
     }
 
     private func startStatsTimer() {
-        lastFramesDropped = 0 // a fresh connection's cumulative drop counter starts at 0
-        latencySplit.reset() // no stale receipts/samples from a previous session
-        // The meters outlive the session: the HUD holds them, and the pump can deliver a frame
-        // after disconnect, so a new session's first window would otherwise publish the dead
-        // session's percentiles.
-        for meter in [latency, endToEnd, decodeStage, displayStage, clientQueue, presentFloor] {
-            meter.reset()
-        }
+        // The meters outlive the session: the pump can deliver a frame after disconnect, so a new
+        // session's first window would otherwise carry the dead session's samples.
+        endToEnd.reset()
+        clientQueue.reset()
+        queueP50Ms = nil
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
@@ -1395,164 +1227,67 @@ final class SessionModel: ObservableObject {
                 // Access chip + expiry warnings: the same tick that drives every other live
                 // readout also walks the countdown and picks up mid-session grant edits.
                 self.updateAccessState()
-                let (frames, bytes) = self.meter.drain()
-                self.fps = frames
-                self.mbps = Double(bytes) * 8 / 1_000_000
-                // Per-window `lost` = the delta of the connector's cumulative reassembler-drop
-                // counter (0 after close — treat a rewind as no loss rather than underflowing).
-                let dropped = self.connection?.framesDropped() ?? 0
-                let lost = dropped >= self.lastFramesDropped
-                    ? Int(dropped - self.lastFramesDropped) : 0
-                self.lastFramesDropped = dropped
-                self.lostFrames = lost
-                self.lostPct = lost > 0 ? Double(lost) / Double(frames + lost) * 100 : 0
-                if let lat = self.latency.drain() {
-                    self.hostNetworkP50Ms = lat.p50Ms
-                    self.hostNetworkP95Ms = lat.p95Ms
-                    self.hostNetworkSkewCorrected = lat.skewCorrected
-                    self.hostNetworkValid = true
-                } else {
-                    self.hostNetworkValid = false
-                }
-                // Phase 2: drain the window's per-AU host timings (0xCF) into the splitter —
-                // non-blocking, bounded (a 240 fps window is ~240 reports; the cap only guards
-                // a pathological burst). `try?` flattens (SE-0230); a throw (.closed during
-                // teardown) just ends the drain. An old host never emits any → splitValid stays
-                // false and the HUD keeps the combined host+network term.
-                if let conn = self.connection {
-                    var burst = 0
-                    while burst < 1024, let t = try? conn.nextHostTiming(timeoutMs: 0) {
-                        self.latencySplit.noteHostTiming(ptsNs: t.ptsNs, hostUs: t.hostUs)
-                        burst += 1
-                    }
-                }
-                if let s = self.latencySplit.drain() {
-                    self.hostP50Ms = s.hostP50Ms
-                    self.networkP50Ms = s.networkP50Ms
-                    self.splitValid = true
-                } else {
-                    self.splitValid = false
-                }
-                if let e = self.endToEnd.drain() {
-                    self.endToEndP50Ms = e.p50Ms
-                    self.endToEndP95Ms = e.p95Ms
-                    self.endToEndSkewCorrected = e.skewCorrected
-                    self.endToEndValid = true
-                } else {
-                    self.endToEndValid = false
-                }
-                // Drained even when the stats drains came back empty — with a badly wrong offset
-                // an entire window is refused and only this counter still tells the story.
-                self.skewTrimPerS =
-                    self.latency.drainTrimmed() + self.endToEnd.drainTrimmed()
-                if let d = self.decodeStage.drain() {
-                    self.decodeP50Ms = d.p50Ms
-                    self.decodeValid = true
-                } else {
-                    self.decodeValid = false
-                }
-                let displayWindow = self.displayStage.drain()
-                if let d = displayWindow {
-                    self.displayP50Ms = d.p50Ms
-                    self.displayValid = true
-                } else {
-                    self.displayValid = false
-                }
-                if let f = self.presentFloor.drain() {
-                    self.osFloorP50Ms = f.p50Ms
-                    self.osFloorValid = true
-                } else {
-                    self.osFloorValid = false
-                }
-                // The display link's latency ask + property readback (deadline rung only) — a
-                // LEVEL, not a window, so it is read rather than drained.
-                if let l = PresentLinkInfo.shared.snapshot() {
-                    self.linkLatencyAskFrames = l.ask
-                    self.linkLatencyFrames = l.latency
-                    self.linkRangeMinHz = l.rangeMin
-                    self.linkRangeMaxHz = l.rangeMax
-                    self.linkDrawables = l.drawables
-                    self.linkInfoValid = true
-                } else {
-                    self.linkInfoValid = false
-                }
-                if let q = self.clientQueue.drain() {
-                    self.clientQueueP50Ms = q.p50Ms
-                    self.clientQueueValid = true
-                } else {
-                    self.clientQueueValid = false
-                }
-                // The audio plane is a LEVEL, not a window: the ring's depth and the sync loop's
-                // smoothed offset are both current values, so they are read rather than drained.
-                if let a = self.audio?.stats {
-                    self.audioBufferMs = a.bufferMS
-                    self.audioAvOffsetMs = a.avOffsetMS
-                    self.audioValid = true
-                } else {
-                    self.audioValid = false
-                }
-                // Mirror the window to the unified log (see statsLog) — one line per second,
-                // stages in ms, only while frames actually flowed. `fps` counts RECEIVED AUs;
-                // `presents` counts frames that reached glass (the display meter's sample count)
-                // — a presents≪fps gap is the presenter dropping/serializing, an fps deficit is
-                // upstream (host capture/encode or the network).
+                guard let conn = self.connection else { return }
+                let (frames, _) = self.meter.drain()
+                // Host timings (0xCF) feed the core, which matches each to its frame. Bounded: a
+                // 240 fps window is ~240 reports; a throw (closed) just ends the drain.
+                var burst = 0
+                while burst < 1024, (try? conn.nextHostTiming(timeoutMs: 0)) != nil { burst += 1 }
+                conn.hudDrain()
+                self.queueP50Ms = self.clientQueue.drain()?.p50Ms
+                self.renderHud()
+                // The window in the unified log, once a second while frames flow: the Advanced
+                // Detailed text whatever the overlay shows (and stdout, see `statsToStdout`).
                 if frames > 0 {
-                    // The classic fields stay RAW (cross-session comparability with every log
-                    // captured before the 2026-07 floor policy); the appended trio carries the
-                    // measured OS present floor and the floor-shaved values the HUD displays.
-                    let line = String(
-                        // Swift Int is 64-bit → %lld, NOT %d (which is a 32-bit C int); macOS 26's
-                        // strict String(format:) validator rejects the %d/Int mismatch and drops
-                        // the whole line (a cascade error that also mis-blames the float args).
-                        //
-                        // ⚠ Every invalid-field fallback below MUST be a typed `-1.0` (or a
-                        // `Double(...)`-wrapped value), never a bare `-1`: in this variadic
-                        // `CVarArg` context the ternary does NOT unify to Double — the untyped
-                        // literal goes in as Int, and `%f` then reads Int64(-1)'s all-ones bit
-                        // pattern, which IS a quiet NaN. Field 2026-08-13 (tvOS, stage-1, the
-                        // first session ever to have invalid fields while frames flowed): every
-                        // fallback printed `nan`. Latent since the line was added.
-                        format: "fps=%lld presents=%lld e2e_p50=%.1f e2e_p95=%.1f hostnet_p50=%.1f "
-                            + "decode_p50=%.1f display_p50=%.1f lost=%lld "
-                            + "floor_p50=%.1f display_adj=%.1f e2e_adj=%.1f queue_p50=%.1f "
-                            // Appended LAST, so every existing parser of this line is unaffected.
-                            // In the log as well as on the HUD because the overlay is only up when
-                            // someone thought to turn it on, and the reports that need these
-                            // numbers arrive after the fact.
-                            + "audio_buffer=%lld audio_av_offset=%lld "
-                            // The deadline link's latency ask + property readback (both -1 on
-                            // non-deadline rungs) — appended so the PUNKTFUNK_FRAME_LATENCY
-                            // ladder is readable over the stdout channel with the HUD off,
-                            // which is the only honest way to run it on a tvOS device.
-                            + "link_ask=%.2f link_readback=%.2f "
-                            // Impossible samples the host-anchored meters refused this window:
-                            // nonzero ⇒ the clock offset is lying and e2e/hostnet above are
-                            // truncated distributions — disregard their p50/p95.
-                            + "skew_trim=%lld",
-                        frames,
-                        displayWindow?.count ?? 0,
-                        self.endToEndValid ? self.endToEndP50Ms : -1.0,
-                        self.endToEndValid ? self.endToEndP95Ms : -1.0,
-                        self.hostNetworkValid ? self.hostNetworkP50Ms : -1.0,
-                        self.decodeValid ? self.decodeP50Ms : -1.0,
-                        self.displayValid ? self.displayP50Ms : -1.0,
-                        lost,
-                        self.osFloorValid ? self.osFloorP50Ms : -1.0,
-                        self.displayValid ? self.displayAdjP50Ms : -1.0,
-                        self.endToEndValid ? self.endToEndAdjP50Ms : -1.0,
-                        self.clientQueueValid ? self.clientQueueP50Ms : -1.0,
-                        self.audioValid ? self.audioBufferMs : -1,
-                        self.audioValid ? self.audioAvOffsetMs : 0,
-                        self.linkInfoValid ? Double(self.linkLatencyAskFrames) : -1.0,
-                        self.linkInfoValid ? Double(self.linkLatencyFrames) : -1.0,
-                        self.skewTrimPerS)
-                    statsLog.info("\(line, privacy: .public)")
-                    if statsToStdout { print("pf.stats \(line)") }
+                    let text = conn.hudLines(tier: .detailed, advanced: true, facts: self.hudFacts())
+                        .map(\.text).joined(separator: " | ")
+                    statsLog.info("\(text, privacy: .public)")
+                    if statsToStdout { print("pf.stats \(text)") }
                 }
             }
         }
         // .common so the HUD keeps updating during window drags / menu tracking.
         RunLoop.main.add(timer, forMode: .common)
         statsTimer = timer
+    }
+
+    /// Re-format the overlay from the last drained window: each second, and at once on a tier
+    /// change so a cycle never waits for the next tick.
+    func renderHud() {
+        guard let conn = connection else {
+            hudLines = []
+            return
+        }
+        let advanced = UserDefaults.standard.bool(forKey: DefaultsKey.advancedStats)
+        hudLines = conn.hudLines(tier: statsVerbosity, advanced: advanced, facts: hudFacts())
+    }
+
+    /// What only the app knows: the floor policy (macOS presents straight to the display, so
+    /// nothing is shaved there), this app's audio ring, the profile, and the Apple-only lines.
+    private func hudFacts() -> PunktfunkConnection.HudFacts {
+        var f = PunktfunkConnection.HudFacts()
+        #if os(macOS)
+        f.shaveOsFloor = false
+        #else
+        f.shaveOsFloor = true
+        #endif
+        if let a = audio?.stats {
+            f.audioBufferMs = UInt32(clamping: a.bufferMS)
+            f.avOffsetMs = Int32(clamping: a.avOffsetMS)
+        }
+        f.profile = settings.profileName
+        // The deadline link's ask beside its readback: a readback that differs is the one clamp
+        // signal the API gives, and on tvOS the screen is the only place to read it.
+        if let l = PresentLinkInfo.shared.snapshot() {
+            f.extras.append(.init(role: .muted, text: String(
+                format: "link latency ask %.2f readback %.2f · range %.0f-%.0f Hz · drawables %lld",
+                l.ask, l.latency, l.rangeMin, l.rangeMax, l.drawables)))
+        }
+        // Receipt → pull: ~0 when healthy; a value that persists is a standing receive backlog.
+        if let q = queueP50Ms, q >= 2 {
+            f.extras.append(.init(role: .muted, text: String(
+                format: "client queue +%.1f (receive backlog — standing if it persists)", q)))
+        }
+        return f
     }
 }

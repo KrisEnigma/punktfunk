@@ -83,6 +83,7 @@ struct SettingsView: View {
     // the legacy-hudEnabled migration (same pattern as ContentView/StreamCommands).
     @AppStorage(DefaultsKey.statsVerbosity) var statsVerbosityRaw = StatsVerbosity.current.rawValue
     @AppStorage(DefaultsKey.hudPlacement) var hudPlacement = HUDPlacement.topTrailing.rawValue
+    @AppStorage(DefaultsKey.advancedStats) var advancedStats = false
     @ObservedObject var gamepads = GamepadManager.shared
     @AppStorage(DefaultsKey.gamepadUIEnabled) var gamepadUIEnabled = true
     /// When the switch above takes over — read (and shown) only while it is on.
@@ -434,6 +435,10 @@ struct SettingsView: View {
         Binding(get: { autoWakeEnabled ? "on" : "off" }, set: { autoWakeEnabled = $0 == "on" })
     }
 
+    private var advancedStatsTag: Binding<String> {
+        Binding(get: { advancedStats ? "on" : "off" }, set: { advancedStats = $0 == "on" })
+    }
+
     /// One cluster caption, TV-legible — the 10-foot analogue of the touch/desktop per-row
     /// `described` captions (per-row text doesn't scale to TV type sizes).
     private func tvCaption(_ text: String) -> some View {
@@ -525,6 +530,11 @@ struct SettingsView: View {
                 TVSelectionRow(
                     title: "Statistics overlay",
                     options: SettingsOptions.statsVerbosities, selection: $statsVerbosityRaw)
+                TVSelectionRow(
+                    title: "Advanced statistics",
+                    options: [("On", "on"), ("Off", "off")], selection: advancedStatsTag)
+                tvCaption(Self.advancedStatisticsDescription
+                    + " What each number means: docs.punktfunk.unom.io/docs/stats")
                 TVSelectionRow(
                     title: "Statistics position", options: SettingsOptions.hudPlacements,
                     selection: $hudPlacement)

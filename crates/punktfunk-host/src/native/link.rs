@@ -95,6 +95,11 @@ impl SessionLink {
         }
     }
 
+    /// Smoothed round trip of the connection underneath.
+    pub(crate) fn rtt(&self) -> std::time::Duration {
+        self.quic().rtt()
+    }
+
     /// Unreliable datagram: audio, cursor, rumble, HID out.
     ///
     /// The three outcomes callers actually act on, because they act differently: a frame too big

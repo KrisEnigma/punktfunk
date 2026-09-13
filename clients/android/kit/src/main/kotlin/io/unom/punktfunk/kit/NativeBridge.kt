@@ -286,53 +286,25 @@ object NativeBridge {
     external fun nativeVideoDrain(handle: Long, on: Boolean)
 
     /**
-     * The resolved decoder identity for the HUD, e.g. `c2.qti.avc.decoder · low-latency`, or `""`
-     * before the decode thread has resolved one. One-shot (fixed for the session); poll once after
-     * the HUD appears.
+     * Close ~1 s of the stats overlay window and return it formatted for [tier] (0 Off, 1 Compact,
+     * 2 Normal, 3 Detailed) in the Advanced vocabulary when [advanced]: one `<role>\t<text>` per
+     * line, or `null` when no decode thread runs. [panelHz] is the rate this app may render at and
+     * [panelModeHz] the panel's active mode (0 = unknown); [profile] closes the first line. Poll
+     * ~1 Hz; each call closes the window.
      */
-    external fun nativeVideoDecoderLabel(handle: Long): String
-
-    /**
-     * Drain ~1 s of live decode stats for the on-stream HUD, or `null` when no decode thread runs.
-     * Returns 38 doubles (unified stats spec, `design/stats-unification.md`):
-     * `[fps, mbps, e2eP50Ms, e2eP95Ms, latValid, skewCorrected, width, height, refreshHz, framesLost,
-     * bitDepth, colorPrimaries, colorTransfer, chromaFormatIdc, hostNetP50Ms, decodeP50Ms, hostP50Ms,
-     * netP50Ms, lostWindow, skippedWindow, fecWindow, framesWindow, dispValid, displayP50Ms,
-     * e2eDispP50Ms, e2eDispP95Ms, paceP50Ms, latchP50Ms, presentsWindow, presenterActive,
-     * feedP50Ms, codecP50Ms, skippedOverflowWindow, audioBufferMs, audioAvOffsetMs, audioCodec,
-     * audioRateHz, audioBits]`
-     * (the flags are 1.0/0.0; indexes 2/3 are the end-to-end capture→decoded headline; 10–13
-     * describe the negotiated video feed — bit depth 8/10, CICP primaries/transfer, and the HEVC
-     * chroma_format_idc 1=4:2:0 / 3=4:4:4; 14/15 are the stage p50s tiling the headline —
-     * `host+network` = capture→received, `decode` = received→decoded; 16/17 split the
-     * `host+network` term via the host's per-AU 0xCF timings — `host` = the host's capture→sent,
-     * `network` = the remainder — both 0.0 when no timing matched this window, i.e. an old host;
-     * 18–21 are the per-window reliability counters — lost/skipped/FEC/received; 22–25 are the
-     * `display` stage from the OnFrameRendered render timestamps — when `dispValid` is 1.0 the
-     * headline becomes the directly-measured capture→displayed pair at 24/25, tiled by
-     * `host+network` + `decode` + `display` (23), and when 0.0 the HUD falls back to the
-     * capture→decoded headline at 2/3 without the `display` term; 26–29 split the `display`
-     * term the timeline presenter owns — `pace` = decoded→release, `latch` = release→displayed,
-     * the window's on-glass confirm count, and whether the presenter is active at all; 30/31
-     * split `decode` (15) the same way — `feed` = received→queued (hand-off + input-slot wait),
-     * `codec` = queued→decoded, the decoder's own time; 32 is the parked-AU overflow subset of
-     * `skipped` (19), i.e. the decoder falling behind rather than benign newest-wins pacing;
-     * 33/34 are the AUDIO plane — the playback ring's live depth in ms and the A/V sync loop's
-     * smoothed offset in ms, positive meaning audio plays BEHIND the picture. Those two are live
-     * gauges, not windowed samples, and the offset reads 0 until the loop has a video reference;
-     * 35–37 are the audio FORMAT the host RESOLVED at the handshake — `audioCodec` 0 = Opus on
-     * `0xC9`, 2 = lossless PCM on `0xD3` — plus the resolved rate in Hz and depth in bits. Static
-     * for the session, and separate from 33/34 because they answer a different question: not "how
-     * late is the audio" but "is this the format the user asked for", which nothing else can tell
-     * apart — a declined lossless session looks exactly like a granted one from the outside).
-     * Poll ~1 Hz; each call resets the measurement window.
-     */
-    external fun nativeVideoStats(handle: Long): DoubleArray?
+    external fun nativeVideoStatsLines(
+        handle: Long,
+        tier: Int,
+        advanced: Boolean,
+        panelHz: Float,
+        panelModeHz: Float,
+        profile: String?,
+    ): String?
 
     /**
      * Gate per-frame stats sampling on the HUD being visible: while disabled the decode thread
      * skips the per-AU clock read + lock, so toggle this with the overlay (and only poll
-     * [nativeVideoStats] while it's on). Enabling resets the measurement window — no stale data.
+     * [nativeVideoStatsLines] while it's on). Enabling resets the measurement window — no stale data.
      * Sticky for the session (survives video stop/start). No-op on `0`.
      */
     external fun nativeSetVideoStatsEnabled(handle: Long, enabled: Boolean)

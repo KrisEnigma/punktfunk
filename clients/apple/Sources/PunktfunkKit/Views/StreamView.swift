@@ -92,9 +92,6 @@ public struct StreamView: NSViewRepresentable {
     private let onResizeTarget: ((UInt32, UInt32) -> Void)?
     private let onDecodedSize: (@Sendable (Int, Int) -> Void)?
     private let endToEndMeter: LatencyMeter?
-    private let decodeMeter: LatencyMeter?
-    private let displayMeter: LatencyMeter?
-    private let presentFloorMeter: LatencyMeter?
 
     /// `onFrame`/`onSessionEnd` fire on the pump thread — hop to the main actor for UI.
     /// `captureEnabled: false` disables input capture entirely while UI (e.g. a trust
@@ -102,10 +99,8 @@ public struct StreamView: NSViewRepresentable {
     /// once. `onCaptureChange` (main thread) reports engage/release — drive the HUD's
     /// "click to capture" / "⌃⌥⇧Q releases" hint with it. `onDisconnectRequest` (main
     /// thread) fires on the reserved ⌃⌥⇧D combo while captured — the owner ends the
-    /// session (released, the same combo reaches the Stream menu instead). The meters
-    /// record the unified latency stages when the stage-2 presenter is active
-    /// (design/stats-unification.md): `endToEndMeter` capture→on-glass, `decodeMeter`
-    /// received→decoded, `displayMeter` decoded→on-glass.
+    /// session (released, the same combo reaches the Stream menu instead).
+    /// `endToEndMeter` records capture→on-glass for the A/V sync loop.
     public init(
         connection: PunktfunkConnection,
         captureEnabled: Bool = true,
@@ -118,10 +113,7 @@ public struct StreamView: NSViewRepresentable {
         onSessionEnd: (@Sendable () -> Void)? = nil,
         onResizeTarget: ((UInt32, UInt32) -> Void)? = nil,
         onDecodedSize: (@Sendable (Int, Int) -> Void)? = nil,
-        endToEndMeter: LatencyMeter? = nil,
-        decodeMeter: LatencyMeter? = nil,
-        displayMeter: LatencyMeter? = nil,
-        presentFloorMeter: LatencyMeter? = nil
+        endToEndMeter: LatencyMeter? = nil
     ) {
         self.connection = connection
         self.captureEnabled = captureEnabled
@@ -132,9 +124,6 @@ public struct StreamView: NSViewRepresentable {
         self.onResizeTarget = onResizeTarget
         self.onDecodedSize = onDecodedSize
         self.endToEndMeter = endToEndMeter
-        self.decodeMeter = decodeMeter
-        self.displayMeter = displayMeter
-        self.presentFloorMeter = presentFloorMeter
     }
 
     public func makeNSView(context: Context) -> StreamLayerView {
@@ -143,9 +132,6 @@ public struct StreamView: NSViewRepresentable {
         view.onDisconnectRequest = onDisconnectRequest
         view.captureEnabled = captureEnabled
         view.endToEndMeter = endToEndMeter
-        view.decodeMeter = decodeMeter
-        view.displayMeter = displayMeter
-        view.presentFloorMeter = presentFloorMeter
         view.onResizeTarget = onResizeTarget
         view.onDecodedSize = onDecodedSize
         view.start(connection: connection, onFrame: onFrame, onSessionEnd: onSessionEnd)
@@ -157,9 +143,6 @@ public struct StreamView: NSViewRepresentable {
         view.onDisconnectRequest = onDisconnectRequest
         view.captureEnabled = captureEnabled
         view.endToEndMeter = endToEndMeter
-        view.decodeMeter = decodeMeter
-        view.displayMeter = displayMeter
-        view.presentFloorMeter = presentFloorMeter
         view.onResizeTarget = onResizeTarget
         view.onDecodedSize = onDecodedSize
         // SwiftUI reuses the NSView across state changes — repoint the pump only when the
@@ -176,12 +159,8 @@ public struct StreamView: NSViewRepresentable {
 
 public final class StreamLayerView: NSView {
     private let displayLayer = AVSampleBufferDisplayLayer()
-    /// Record the unified latency stages (end-to-end / decode / display) when the stage-2
-    /// presenter is active. Consulted at start().
+    /// Capture→on-glass for the A/V sync loop while the stage-2 presenter runs. Read at start().
     var endToEndMeter: LatencyMeter?
-    var decodeMeter: LatencyMeter?
-    var displayMeter: LatencyMeter?
-    var presentFloorMeter: LatencyMeter?
     /// The shared presenter stack: stage-2 (CAMetalLayer sublayer + display link) with the
     /// stage-1 StreamPump → displayLayer path as the Metal-unavailable / DEBUG fallback.
     private let presenter = SessionPresenter()
@@ -1026,9 +1005,6 @@ public final class StreamLayerView: NSView {
             connection: connection,
             baseLayer: displayLayer,
             endToEndMeter: endToEndMeter,
-            decodeMeter: decodeMeter,
-            displayMeter: displayMeter,
-            presentFloorMeter: presentFloorMeter,
             makeDisplayLink: { [unowned self] in self.displayLink(target: $0, selector: $1) },
             onFrame: onFrame,
             onSessionEnd: onSessionEnd,

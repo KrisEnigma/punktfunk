@@ -75,9 +75,13 @@ pub struct Hello {
     pub audio_rate_hz: u32,
     /// Requested depth: [`BITS_16`](crate::audio::pcm::BITS_16) or
     /// [`BITS_24`](crate::audio::pcm::BITS_24). Host answers in [`Welcome::audio_bits`].
-    /// Last field: `0`/absence → 16-bit, and nothing can force this byte — a 96 kHz/16-bit
+    /// `0`/absence → 16-bit; only `audio_layout` can force this byte — a 96 kHz/16-bit
     /// request emits the rate and stops.
     pub audio_bits: u8,
+    /// Requested surround coupling, an [`AudioLayout`](crate::audio::AudioLayout) wire id.
+    /// Host answers in [`Welcome::audio_layout`] with what it encodes. Last field: `0`/absence
+    /// is the legacy coupling, so a stereo or legacy Hello never carries this byte.
+    pub audio_layout: u8,
 }
 
 /// QUIC application close: client deliberate quit. Host tears the virtual display down
@@ -186,8 +190,12 @@ pub struct Welcome {
     pub audio_frame_us: u16,
     /// Second host-capability byte ([`HOST_CAP2_REPEAT_MARK`](super::HOST_CAP2_REPEAT_MARK),
     /// [`HOST_CAP2_TOUCH`](super::HOST_CAP2_TOUCH)). Nonzero forces the audio-block placeholders.
-    /// Last field: offset 87 (AES) / 119 (ChaCha). Omit → `0`.
+    /// Offset 87 (AES) / 119 (ChaCha). Omit → `0`.
     pub host_caps2: u8,
+    /// The surround coupling the host encodes, an [`AudioLayout`](crate::audio::AudioLayout)
+    /// wire id: what [`Hello::audio_layout`] asked for when the host knows it, else `0`. Build
+    /// the decoder from THIS. Last field: offset 88 (AES) / 120 (ChaCha). Omit → `0`, legacy.
+    pub audio_layout: u8,
 }
 
 /// `client → host`: data plane is bound, begin streaming.
@@ -236,7 +244,8 @@ impl Hello {
         let arate_present =
             self.audio_rate_hz != 0 && self.audio_rate_hz != crate::audio::SAMPLE_RATE_HZ;
         let abits_present = self.audio_bits != 0 && self.audio_bits != crate::audio::pcm::BITS_16;
-        let audio_present = arate_present || abits_present;
+        let alayout_present = self.audio_layout != 0;
+        let audio_present = arate_present || abits_present || alayout_present;
         let need_placeholders = self.video_caps != 0
             || ac_present
             || vcodecs_present
@@ -304,9 +313,18 @@ impl Hello {
             };
             b.extend_from_slice(&rate.to_le_bytes());
         }
-        // Last field: nothing can force it. A 96 kHz/16-bit request stops after the rate.
-        if abits_present {
-            b.push(self.audio_bits);
+        // A 96 kHz/16-bit request stops after the rate; only a layout forces the depth out,
+        // as 16 when it was left at zero.
+        if abits_present || alayout_present {
+            b.push(if abits_present {
+                self.audio_bits
+            } else {
+                crate::audio::pcm::BITS_16
+            });
+        }
+        // Last field: nothing can force it.
+        if alayout_present {
+            b.push(self.audio_layout);
         }
         b
     }
@@ -401,6 +419,9 @@ impl Hello {
                 Some(d) if crate::audio::pcm::depth_is_supported(d) => d,
                 _ => crate::audio::pcm::BITS_16,
             },
+            // Verbatim: the host answers a layout it knows or `0`, so an id from a newer
+            // client costs nothing here and must not be folded onto one it did not ask for.
+            audio_layout: b.get(post_hdr + 8).copied().unwrap_or(0),
         })
     }
 }
@@ -452,31 +473,37 @@ impl Welcome {
         let access_present = self.grants != super::access::GRANT_ALL || self.expires_in_secs != 0;
         let audio_present = self.audio_codec != AUDIO_CODEC_OPUS;
         let caps2_present = self.host_caps2 != 0;
+        let layout_present = self.audio_layout != 0;
         if self.cipher != CIPHER_AES_128_GCM
             || mgmt_present
             || access_present
             || audio_present
             || caps2_present
+            || layout_present
         {
             b.push(self.cipher);
             if let Some(k) = &self.key_chacha {
                 b.extend_from_slice(k);
             }
-            if mgmt_present || access_present || audio_present || caps2_present {
+            if mgmt_present || access_present || audio_present || caps2_present || layout_present {
                 b.extend_from_slice(&self.mgmt_port.to_le_bytes());
             }
-            if access_present || audio_present || caps2_present {
+            if access_present || audio_present || caps2_present || layout_present {
                 b.extend_from_slice(&self.grants.to_le_bytes());
                 b.extend_from_slice(&self.expires_in_secs.to_le_bytes());
             }
-            if audio_present || caps2_present {
+            if audio_present || caps2_present || layout_present {
                 b.push(self.audio_codec);
                 b.extend_from_slice(&self.audio_rate_hz.to_le_bytes());
                 b.push(self.audio_bits);
                 b.extend_from_slice(&self.audio_frame_us.to_le_bytes());
             }
-            if caps2_present {
+            if caps2_present || layout_present {
                 b.push(self.host_caps2);
+            }
+            // Last field: nothing can force it.
+            if layout_present {
+                b.push(self.audio_layout);
             }
         }
         b
@@ -484,9 +511,9 @@ impl Welcome {
 
     pub fn decode(b: &[u8]) -> Result<Welcome> {
         // Trailing from compositor (53) on is optional. mgmt_port, grants, audio, and
-        // host_caps2 follow the cipher block — shifted 32 when a ChaCha key precedes
-        // them — so they are read from `mgmt_off`, not a constant. Emitting a later
-        // field forces every earlier one; full length 87 AES / 119 ChaCha.
+        // host_caps2 and audio_layout follow the cipher block — shifted 32 when a ChaCha
+        // key precedes them — so they are read from `mgmt_off`, not a constant. Emitting a
+        // later field forces every earlier one; audio_layout, the last, sits at 88 AES / 120 ChaCha.
         if b.len() < 53 || &b[0..4] != MAGIC {
             return Err(PunktfunkError::InvalidArg("bad Welcome"));
         }
@@ -560,6 +587,9 @@ impl Welcome {
             .unwrap_or(0);
         // Trails the audio block (87 AES / 119 ChaCha). Absent → 0.
         let host_caps2 = b.get(audio_off + 8).copied().unwrap_or(0);
+        // Verbatim, like `audio_codec`: an id this build does not know must reach the client
+        // as itself, so it can refuse the decoder rather than build the wrong one.
+        let audio_layout = b.get(audio_off + 9).copied().unwrap_or(0);
         Ok(Welcome {
             abi_version: u32at(4),
             udp_port: u16at(8),
@@ -629,6 +659,7 @@ impl Welcome {
             audio_bits,
             audio_frame_us,
             host_caps2,
+            audio_layout,
         })
     }
 
@@ -719,6 +750,7 @@ mod tests {
             audio_codec: AUDIO_CODEC_OPUS,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
             audio_frame_us: 0,
             host_caps2: 0,
         };
@@ -790,6 +822,7 @@ mod tests {
             audio_codec: AUDIO_CODEC_OPUS,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
             audio_frame_us: 0,
             host_caps2: 0,
         };
@@ -1016,6 +1049,7 @@ mod tests {
                 audio_codec: AUDIO_CODEC_OPUS,
                 audio_rate_hz: SAMPLE_RATE_HZ,
                 audio_bits: BITS_16,
+                audio_layout: 0,
                 audio_frame_us: 0,
                 host_caps2: 0,
             }
@@ -1049,6 +1083,7 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         let enc = h.encode();
         let dec = Hello::decode(&enc).unwrap();
@@ -1099,6 +1134,7 @@ mod tests {
                 audio_codec: AUDIO_CODEC_OPUS,
                 audio_rate_hz: SAMPLE_RATE_HZ,
                 audio_bits: BITS_16,
+                audio_layout: 0,
                 audio_frame_us: 0,
                 host_caps2: 0,
             }
@@ -1137,6 +1173,7 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         assert_eq!(Hello::decode(&h.encode()).unwrap(), h);
         let s = Start {
@@ -1169,6 +1206,7 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         let enc = h.encode();
         assert_eq!(enc.len(), 26);
@@ -1220,6 +1258,7 @@ mod tests {
             audio_codec: AUDIO_CODEC_OPUS,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
             audio_frame_us: 0,
             host_caps2: 0,
         };
@@ -1298,6 +1337,7 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         let enc = base.encode();
         assert_eq!(
@@ -1352,6 +1392,7 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         // Launch alone: a zero-length name placeholder keeps the offset deterministic.
         let with_launch = Hello {
@@ -1414,6 +1455,7 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         let vol = HdrMeta {
             display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]], // G, B, R
@@ -1479,6 +1521,7 @@ mod tests {
                 max_shard_payload: 0,
                 audio_rate_hz: SAMPLE_RATE_HZ,
                 audio_bits: BITS_16,
+                audio_layout: 0,
             }
             .encode();
             assert!(PairRequest::decode(&h).is_err(), "abi {abi} parsed as pair");
@@ -1516,6 +1559,7 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         let vol = HdrMeta {
             display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
@@ -1583,6 +1627,7 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         // Advertisement alone: earlier trailing fields are placeholders so the 2 LE bytes land.
         let adv = Hello {
@@ -1670,12 +1715,25 @@ mod tests {
             audio_codec: AUDIO_CODEC_OPUS,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
             audio_frame_us: 0,
             host_caps2: 0,
         };
         // Opus session stays 68 bytes — the pre-cipher / pre-hi-res wire.
         assert_eq!(base.encode().len(), 68);
         assert_eq!(Welcome::decode(&base.encode()).unwrap(), base);
+
+        // A layout answer trails host_caps2 and forces the whole tail out. Cut before it, the
+        // Welcome reads as an older host's: legacy coupling.
+        let coupled = Welcome {
+            audio_layout: 1,
+            ..base
+        };
+        let enc = coupled.encode();
+        assert_eq!(enc.len(), 89);
+        assert_eq!(enc[88], 1);
+        assert_eq!(Welcome::decode(&enc).unwrap(), coupled);
+        assert_eq!(Welcome::decode(&enc[..88]).unwrap().audio_layout, 0);
 
         // Presence is codec alone. Rate/depth must not put the block on an Opus Welcome.
         let opus_with_stray_format = Welcome {
@@ -1864,6 +1922,7 @@ mod tests {
             audio_codec: AUDIO_CODEC_OPUS,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
             audio_frame_us: 0,
             host_caps2: 0,
         };
@@ -1925,10 +1984,24 @@ mod tests {
             max_shard_payload: 0,
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
+            audio_layout: 0,
         };
         // Legacy request is still 26 bytes.
         assert_eq!(base.encode().len(), 26);
         assert_eq!(Hello::decode(&base.encode()).unwrap(), base);
+
+        // A layout ask forces the depth out as the legacy 16 and lands after it; cut before
+        // it, the Hello reads as an older client's: legacy coupling.
+        let coupled = Hello {
+            audio_layout: 1,
+            ..base.clone()
+        };
+        let enc = coupled.encode();
+        assert_eq!(enc.len(), 26 + 6 + 1 + 2 + 4 + 1 + 1);
+        assert_eq!(enc[39], BITS_16, "depth forced out as 16");
+        assert_eq!(enc[40], 1);
+        assert_eq!(Hello::decode(&enc).unwrap(), coupled);
+        assert_eq!(Hello::decode(&enc[..40]).unwrap().audio_layout, 0);
 
         // 26 + 6 placeholders + client_caps 1 + max_shard_payload 2 + rate 4.
         // No HDR, no depth byte (16-bit is default and last).

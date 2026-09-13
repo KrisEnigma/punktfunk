@@ -69,6 +69,8 @@ pub enum RowId {
     /// `trust::Settings::overlay_actions`. Action row: opens [`super::ring_editor::RingEditorScreen`].
     QuickActions,
     Stats,
+    /// `trust::Settings::advanced_stats`: which vocabulary the overlay speaks. Device-wide.
+    AdvancedStats,
     Fullscreen,
     AutoWake,
     /// `trust::Settings::follow_os_theme`. Shown only while the embedder publishes
@@ -254,6 +256,7 @@ const TABS: [(&str, &[RowId]); 7] = [
             RowId::LibraryCollections,
             RowId::StartIn,
             RowId::Stats,
+            RowId::AdvancedStats,
             RowId::Fullscreen,
             RowId::AutoWake,
             RowId::GamepadUi,
@@ -1269,6 +1272,7 @@ pub fn row_spec(id: RowId, ctx: &Ctx, profiles: &[(String, String)]) -> RowSpec 
             "Statistics overlay",
             s.stats_verbosity().label().into(),
         ),
+        RowId::AdvancedStats => (None, "Advanced statistics", on_off(s.advanced_stats).into()),
         RowId::Fullscreen => (
             None,
             "Start streams fullscreen",
@@ -1521,6 +1525,10 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                 "How much the overlay shows: Compact (one line) → Normal → Detailed."
             }
         },
+        RowId::AdvancedStats => {
+            "Off shows the figures Moonlight's overlay also shows. On shows capture to glass as \
+             p50/p95 and every stage between. Every number: docs.punktfunk.unom.io/docs/stats"
+        }
         RowId::Fullscreen => "Streams open fullscreen instead of windowed.",
         RowId::AutoWake => {
             "Send Wake-on-LAN to a sleeping host before connecting. Turn off for hosts \
@@ -1810,6 +1818,7 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             step_option(cur, StatsVerbosity::ALL.len(), delta, wrap)
                 .map(|i| s.set_stats_verbosity(StatsVerbosity::ALL[i]))
         }
+        RowId::AdvancedStats => toggle(&mut s.advanced_stats, delta, wrap),
         RowId::FollowOsTheme => toggle(&mut s.follow_os_theme, delta, wrap),
         RowId::Palette => {
             let all = &crate::library::PALETTES;
@@ -2917,8 +2926,9 @@ pub(crate) mod tests {
                 seen.push(*id);
             }
         }
-        assert_eq!(seen.len(), 52, "{seen:?}");
+        assert_eq!(seen.len(), 53, "{seen:?}");
         assert!(seen.contains(&RowId::StartIn));
+        assert!(seen.contains(&RowId::AdvancedStats));
         assert!(seen.contains(&RowId::FollowOsTheme));
         assert!(seen.contains(&RowId::Palette));
         assert!(seen.contains(&RowId::ReduceMotion));
