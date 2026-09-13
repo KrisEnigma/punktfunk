@@ -24,11 +24,11 @@ struct AddHostSheet: View {
     /// This host's DEFAULT settings preset — what a plain click/tap uses. Empty = Default
     /// settings (design/client-settings-profiles.md §5.2). Changing it here is the only way the
     /// default moves; "Connect with ▸" is deliberately a one-off.
-    @State private var profileID: String
+    @State private var presetID: String
     /// Presets pinned as their own cards for this host (§5.2a) — presentation only, and
     /// independent of the default above.
     @State private var pinnedIDs: Set<String>
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
     #endif
     #if !os(tvOS)
     /// Share the clipboard with this host (design clipboard-and-file-transfer.md §5.3). Off by
@@ -82,8 +82,8 @@ struct AddHostSheet: View {
         _clipboardSync = State(initialValue: existing?.clipboardSync ?? false)
         #endif
         #if !os(tvOS)
-        _profileID = State(initialValue: existing?.profileID ?? "")
-        _pinnedIDs = State(initialValue: Set(existing?.pinnedProfileIDs ?? []))
+        _presetID = State(initialValue: existing?.presetID ?? "")
+        _pinnedIDs = State(initialValue: Set(existing?.pinnedPresetIDs ?? []))
         #endif
     }
 
@@ -212,8 +212,8 @@ struct AddHostSheet: View {
     private var sheetHeight: CGFloat {
         var height: CGFloat = 392 + 44 // the fields and action row, plus the clipboard toggle
         if showsPresetRows {
-            height += 116 // the Profile picker and its footnote
-            height += 96 + CGFloat(profiles.profiles.count) * 44 // the pins, their header + footer
+            height += 116 // the Preset picker and its footnote
+            height += 96 + CGFloat(presets.presets.count) * 44 // the pins, their header + footer
         }
         return height
     }
@@ -229,7 +229,7 @@ struct AddHostSheet: View {
         #if os(tvOS)
         return false
         #else
-        return isEditing && !profiles.profiles.isEmpty
+        return isEditing && !presets.presets.isEmpty
         #endif
     }
 
@@ -243,15 +243,15 @@ struct AddHostSheet: View {
         #if !os(tvOS)
         if showsPresetRows {
             Section {
-                Picker("Preset", selection: $profileID) {
+                Picker("Preset", selection: $presetID) {
                     Text("Default settings").tag("")
-                    ForEach(profiles.profiles) { profile in
-                        Text(profile.name).tag(profile.id)
+                    ForEach(presets.presets) { preset in
+                        Text(preset.name).tag(preset.id)
                     }
                     // A binding whose preset was deleted resolves as Default settings anyway;
                     // saying so beats an empty picker, and saving cleans the field up.
-                    if !profileID.isEmpty, profiles.preset(id: profileID) == nil {
-                        Text("Default settings (preset deleted)").tag(profileID)
+                    if !presetID.isEmpty, presets.preset(id: presetID) == nil {
+                        Text("Default settings (preset deleted)").tag(presetID)
                     }
                 }
             } footer: {
@@ -260,14 +260,14 @@ struct AddHostSheet: View {
                     .foregroundStyle(.secondary)
             }
             Section {
-                ForEach(profiles.profiles) { profile in
-                    Toggle(profile.name, isOn: Binding(
-                        get: { pinnedIDs.contains(profile.id) },
+                ForEach(presets.presets) { preset in
+                    Toggle(preset.name, isOn: Binding(
+                        get: { pinnedIDs.contains(preset.id) },
                         set: { on in
                             if on {
-                                pinnedIDs.insert(profile.id)
+                                pinnedIDs.insert(preset.id)
                             } else {
-                                pinnedIDs.remove(profile.id)
+                                pinnedIDs.remove(preset.id)
                             }
                         }))
                 }
@@ -294,13 +294,13 @@ struct AddHostSheet: View {
         #if !os(tvOS)
         // nil rather than "" for the same forward-compat reason, and a dangling binding is
         // cleaned up on this save (§6) instead of lingering as a stale id forever.
-        host.profileID = profiles.preset(id: profileID) == nil ? nil : profileID
+        host.presetID = presets.preset(id: presetID) == nil ? nil : presetID
         // Keep the stored ORDER (it is card order) and drop what this sheet unpinned; anything
         // newly ticked goes on the end.
-        let kept = (host.pinnedProfileIDs ?? []).filter { pinnedIDs.contains($0) }
+        let kept = (host.pinnedPresetIDs ?? []).filter { pinnedIDs.contains($0) }
         let added = pinnedIDs.filter { !kept.contains($0) }.sorted()
         let pins = kept + added
-        host.pinnedProfileIDs = pins.isEmpty ? nil : pins
+        host.pinnedPresetIDs = pins.isEmpty ? nil : pins
         #endif
         onSave(host)
         dismiss()

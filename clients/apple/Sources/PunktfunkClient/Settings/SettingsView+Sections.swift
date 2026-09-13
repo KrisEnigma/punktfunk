@@ -8,10 +8,10 @@
 // the description is DYNAMIC — it explains the current choice. The only footers left are the
 // one-line "Applies from the next session." form notes.
 //
-// The SAME builders edit settings profiles (design/client-settings-profiles.md §5.1 —
+// The SAME builders edit settings presets (design/client-settings-profiles.md §5.1 —
 // SettingsView+Scope): a control's binding comes from `scoped(...)` rather than `@AppStorage`, so
 // it writes whichever layer the scope switcher selected, and `described(_:field:)` marks the row
-// when the edited profile overrides it. Rows that are NOT presetable — tier G (this device's
+// when the edited preset overrides it. Rows that are NOT presetable — tier G (this device's
 // hardware and endpoints) and tier H (properties of a host) — are gated on `!inPresetScope` and
 // simply don't render there; sections that would end up empty don't either.
 //

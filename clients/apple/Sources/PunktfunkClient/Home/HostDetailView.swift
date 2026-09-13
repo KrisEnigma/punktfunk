@@ -102,19 +102,19 @@ struct HostDetailView: View {
     }
 
     @ViewBuilder private func presetsSection(_ host: StoredHost, _ a: HostActions) -> some View {
-        if let menu = a.presets, !menu.profiles.isEmpty {
+        if let menu = a.presets, !menu.presets.isEmpty {
             Section {
                 // A binding to a deleted preset reads as Default settings, as a connect does.
                 Picker("Connect with", selection: Binding(
-                    get: { menu.profiles.contains { $0.id == menu.boundID } ? menu.boundID ?? "" : "" },
+                    get: { menu.presets.contains { $0.id == menu.boundID } ? menu.boundID ?? "" : "" },
                     set: { menu.setDefault($0.isEmpty ? nil : $0) }
                 )) {
                     Text("Default settings").tag("")
-                    ForEach(menu.profiles) { preset in
+                    ForEach(menu.presets) { preset in
                         Text(preset.name).tag(preset.id)
                     }
                 }
-                ForEach(menu.profiles) { preset in
+                ForEach(menu.presets) { preset in
                     Toggle("Pin \u{201C}\(preset.name)\u{201D} as a card", isOn: Binding(
                         get: { menu.pinnedIDs.contains(preset.id) },
                         set: { _ in menu.togglePin(preset.id) }))

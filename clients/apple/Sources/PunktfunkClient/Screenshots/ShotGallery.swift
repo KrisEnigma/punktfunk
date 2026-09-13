@@ -60,7 +60,7 @@ extension ShotMock {
             pinnedSHA256: hostFingerprint(1), osChain: "linux/fedora/bazzite")
         let office = StoredHost(
             id: officeID, name: "Office NUC", address: "192.168.1.33", port: 9777,
-            pinnedSHA256: hostFingerprint(4), profileID: couchProfileID, osChain: "linux/ubuntu")
+            pinnedSHA256: hostFingerprint(4), presetID: couchPresetID, osChain: "linux/ubuntu")
         let workshop = StoredHost(
             id: workshopID, name: "Workshop", address: "10.0.0.7", port: 9777,
             pinnedSHA256: hostFingerprint(2), macAddresses: ["de:ad:be:ef:00:07"],
@@ -73,11 +73,11 @@ extension ShotMock {
         let crowded = StoredHost(
             id: editingID, name: "Living Room Gaming PC (behind the TV)",
             address: "fd7a:115c:a1e0::1a2b", port: 9777, pinnedSHA256: hostFingerprint(5),
-            profileID: hdrProfileID, osChain: "linux/nobara")
+            presetID: hdrPresetID, osChain: "linux/nobara")
         return [
             GalleryVariant(name: "Online") { card(battlestation) },
             GalleryVariant(name: "Playing") { card(livingRoom, playing: "Hollow Knight") },
-            GalleryVariant(name: "Bound preset") { card(office, bound: couchProfileID) },
+            GalleryVariant(name: "Bound preset") { card(office, bound: couchPresetID) },
             GalleryVariant(name: "Pinned preset card") { card(battlestation, pinned: hdrPreset) },
             GalleryVariant(name: "Default host") { card(battlestation, isDefault: true) },
             GalleryVariant(name: "Connecting") { card(battlestation, connecting: true) },
@@ -85,7 +85,7 @@ extension ShotMock {
             GalleryVariant(name: "Offline") { card(bedroom, online: false) },
             GalleryVariant(name: "Not paired") { card(unpaired) },
             GalleryVariant(name: "Everything at once") {
-                card(crowded, isDefault: true, bound: hdrProfileID,
+                card(crowded, isDefault: true, bound: hdrPresetID,
                      playing: "Starfall Vale: Definitive Edition")
             },
             GalleryVariant(name: "Discovered") { discovered(pairing: false) },
@@ -205,7 +205,7 @@ extension ShotMock {
             copyLink: {}, showDetails: pinned == nil ? {} : nil,
             power: pinned == nil && paired && online ? powerGrant : [],
             presets: HostPresetMenu(
-                profiles: [hdrPreset, couchPreset], boundID: bound ?? host.profileID,
+                presets: [hdrPreset, couchPreset], boundID: bound ?? host.presetID,
                 pinnedIDs: pinned.map { [$0.id] } ?? [], connectWith: { _ in },
                 setDefault: { _ in }, togglePin: { _ in }))
     }

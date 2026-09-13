@@ -23,12 +23,12 @@ import SwiftUI
 /// move between a host's own shelf and one of its pins.
 struct LibraryTarget: Identifiable, Hashable {
     let host: StoredHost
-    /// `.inherit` from the host's own card (its binding decides, as it always has); `.profile` from
+    /// `.inherit` from the host's own card (its binding decides, as it always has); `.preset` from
     /// a pinned card. `.defaults` never reaches here — nothing opens a library "with the globals".
-    var profile: PresetSelection = .inherit
+    var preset: PresetSelection = .inherit
 
     var id: String {
-        switch profile {
+        switch preset {
         case .inherit: host.id.uuidString
         case .defaults: "\(host.id.uuidString)#defaults"
         case .preset(let id): "\(host.id.uuidString)#\(id)"
@@ -36,8 +36,8 @@ struct LibraryTarget: Identifiable, Hashable {
     }
 
     /// The pinned preset's id, if this shelf belongs to a pinned card.
-    var pinnedProfileID: String? {
-        if case .preset(let id) = profile { return id }
+    var pinnedPresetID: String? {
+        if case .preset(let id) = preset { return id }
         return nil
     }
 
@@ -46,10 +46,10 @@ struct LibraryTarget: Identifiable, Hashable {
     /// than remembered from the card you pressed. A pin whose preset has since been deleted
     /// resolves as no preset everywhere else, and reads as the plain host here.
     @MainActor func title(in catalog: PresetStore) -> String {
-        guard let id = pinnedProfileID, let profile = catalog.preset(id: id) else {
+        guard let id = pinnedPresetID, let preset = catalog.preset(id: id) else {
             return host.displayName
         }
-        return "\(host.displayName) \u{b7} \(profile.name)"
+        return "\(host.displayName) \u{b7} \(preset.name)"
     }
 }
 
@@ -58,8 +58,8 @@ struct LibraryView: View {
     /// The shelf being browsed — the host, plus the pinned preset when a pinned card opened it.
     let target: LibraryTarget
     /// Tapping a title starts a session that asks the host to launch it (the library id is passed
-    /// through). `nil` ⇒ browse-only (cards aren't tappable). The PROFILE a launch runs with is the
-    /// caller's to apply: it holds `target` and connects with `target.profile`.
+    /// through). `nil` ⇒ browse-only (cards aren't tappable). The PRESET a launch runs with is the
+    /// caller's to apply: it holds `target` and connects with `target.preset`.
     var onLaunch: ((String) -> Void)? = nil
     /// Stream this shelf's host without launching anything — "Resume <title>" while it has a
     /// game up. nil ⇒ browse-only, the same gate `onLaunch` uses.
@@ -94,7 +94,7 @@ struct LibraryView: View {
     @AppStorage(DefaultsKey.libraryGroupBy) private var groupByRaw = ""
     @Environment(\.dismiss) private var dismiss
     /// Resolves a pinned shelf's preset NAME for the title (the target carries only its id).
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
     /// The shared "what is up on this host" answer, which this screen both READS (the menu's
     /// Resume row) and FEEDS: its own `/status` fetch below is the freshest one anybody has.
     @ObservedObject private var nowPlayingStore = NowPlayingStore.shared
@@ -699,7 +699,7 @@ struct LibraryView: View {
     private func copyLink(_ game: GameEntry) {
         let current = store.hosts.first { $0.id == host.id } ?? host
         LinkClipboard.copy(
-            DeepLink.forHost(current, launch: game.id, preset: target.pinnedProfileID).urlString)
+            DeepLink.forHost(current, launch: game.id, preset: target.pinnedPresetID).urlString)
     }
 
     /// Whether the keyboard cursor is on this tile (always false where there is no keyboard
@@ -986,7 +986,7 @@ struct LibraryView: View {
     /// `host` → `host · preset` (a pinned card's shelf) → `host · preset · collection` (drilled
     /// into one group), joined with `·` — the desktop's title shape.
     private var shelfTitle: String {
-        let base = target.title(in: profiles)
+        let base = target.title(in: presets)
         guard let collectionLabel else { return base }
         return "\(base) \u{b7} \(collectionLabel)"
     }

@@ -20,7 +20,7 @@ struct HomeView: View {
     @ObservedObject var discovery: HostDiscovery
     /// The preset catalog — the source of the card chips, the "Connect with ▸" menu, and the
     /// pinned host+preset cards the grid renders alongside their host (design §5.2a).
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
     @Binding var showAddHost: Bool
     @Binding var pairingTarget: StoredHost?
     @Binding var speedTestTarget: StoredHost?
@@ -316,7 +316,7 @@ struct HomeView: View {
     /// binding (`HostArrangement`).
     private var hostGroups: [HostGroup] {
         HostArrangement.groups(
-            hosts: store.hosts, catalog: profiles.catalog,
+            hosts: store.hosts, catalog: presets.catalog,
             online: Set(store.hosts.filter(isOnline).map(\.id)),
             sort: HostSort(rawValue: sortRaw) ?? .added,
             grouping: HostGrouping(rawValue: groupingRaw) ?? .none)
@@ -373,7 +373,7 @@ struct HomeView: View {
             forget: { store.forgetIdentity(host) },
             remove: { store.remove(host) },
             browseLibrary: paired
-                ? { libraryTarget = LibraryTarget(host: host, profile: selection) } : nil,
+                ? { libraryTarget = LibraryTarget(host: host, preset: selection) } : nil,
             speedTest: paired ? { if !model.isBusy { speedTestTarget = host } } : nil,
             sendLogs: paired ? { Task { sendLogsResult = await SendLogs.toHost(host) } } : nil,
             wake: wakeable ? { wake(host) } : nil,
@@ -409,14 +409,14 @@ struct HomeView: View {
     /// The preset affordances every host card carries (§5.2/§5.2a).
     private func presetMenu(for host: StoredHost) -> HostPresetMenu {
         HostPresetMenu(
-            profiles: profiles.profiles,
-            boundID: host.profileID,
-            pinnedIDs: host.pinnedProfileIDs ?? [],
+            presets: presets.presets,
+            boundID: host.presetID,
+            pinnedIDs: host.pinnedPresetIDs ?? [],
             connectWith: { selection in connect(host, selection) },
-            setDefault: { store.setPreset(host.id, profileID: $0) },
+            setDefault: { store.setPreset(host.id, presetID: $0) },
             togglePin: { id in
-                let pinned = (host.pinnedProfileIDs ?? []).contains(id)
-                store.setPinned(host.id, profileID: id, pinned: !pinned)
+                let pinned = (host.pinnedPresetIDs ?? []).contains(id)
+                store.setPinned(host.id, presetID: id, pinned: !pinned)
             })
     }
 

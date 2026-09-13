@@ -1,6 +1,6 @@
 // What a `punktfunk://` link should DO, decided once for both routes.
 //
-// Connect and browse each ran the same three checks side by side — resolve a `profile=` reference,
+// Connect and browse each ran the same three checks side by side — resolve a `preset=` reference,
 // refuse a fingerprint that disagrees with the saved record, refuse to preempt a live session —
 // and had already drifted: the same unsaved host produced two different sentences depending on
 // which route the user came in on.

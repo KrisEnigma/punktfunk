@@ -22,7 +22,7 @@ struct ContentView: View {
     @ObservedObject private var store = HostStore.shared
     /// The settings-preset catalog (design/client-settings-profiles.md §4.2) — read at every
     /// connect to resolve the session's `EffectiveSettings`, and edited by the settings surface.
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
     @StateObject private var discovery = HostDiscovery()
     // The dev auto-connect hook (DEBUG-only — see `autoConnectIfAsked`) writes these three, so
     // they stay observed here; every OTHER stream setting reaches a session through
@@ -62,7 +62,7 @@ struct ContentView: View {
     private struct DeepLinkConfirm {
         let host: StoredHost
         let launch: String?
-        let profile: PresetSelection
+        let preset: PresetSelection
         /// A `browse` link: open the host's library instead of dialing it.
         let browse: Bool
 
@@ -269,9 +269,9 @@ struct ContentView: View {
     private func runDeepLinkConfirm(_ confirm: DeepLinkConfirm) {
         deepLinkConfirm = nil
         if confirm.browse {
-            libraryTarget = LibraryTarget(host: confirm.host, profile: confirm.profile)
+            libraryTarget = LibraryTarget(host: confirm.host, preset: confirm.preset)
         } else {
-            connect(confirm.host, launchID: confirm.launch, profile: confirm.profile)
+            connect(confirm.host, launchID: confirm.launch, preset: confirm.preset)
         }
     }
 
@@ -780,7 +780,7 @@ struct ContentView: View {
 
     /// Route a `punktfunk://` deep link into the existing connect path — the whole §2 grammar
     /// (design/client-deep-links.md): a stable id, a unique host name or an `addr[:port]`, with
-    /// `fp`/`host` recovery parameters and a one-off `profile`.
+    /// `fp`/`host` recovery parameters and a one-off `preset`.
     ///
     /// The security posture is the parser's plus four rules that live here, and none of them
     /// bends: a URL never pairs and never trusts on its own (an unknown host becomes a
@@ -826,7 +826,7 @@ struct ContentView: View {
             activeHostID: model.activeHost?.id,
             activeHostName: model.activeHost?.displayName)
         switch DeepLinkRouter.resolve(
-            link: link, hosts: store.hosts, catalog: profiles.catalog,
+            link: link, hosts: store.hosts, catalog: presets.catalog,
             session: session, browse: false
         ) {
         case .notice(let text):
@@ -835,9 +835,9 @@ struct ContentView: View {
             break // deep-linked to the host we're already on — nothing to do
         case .confirm(let host, let selection):
             deepLinkConfirm = DeepLinkConfirm(
-                host: host, launch: link.launch, profile: selection, browse: false)
+                host: host, launch: link.launch, preset: selection, browse: false)
         case .proceed(let host, let selection):
-            connect(host, launchID: link.launch, profile: selection)
+            connect(host, launchID: link.launch, preset: selection)
         }
     }
 
@@ -855,7 +855,7 @@ struct ContentView: View {
             activeHostID: model.activeHost?.id,
             activeHostName: model.activeHost?.displayName)
         switch DeepLinkRouter.resolve(
-            link: link, hosts: store.hosts, catalog: profiles.catalog,
+            link: link, hosts: store.hosts, catalog: presets.catalog,
             session: session, browse: true
         ) {
         case .notice(let text):
@@ -864,9 +864,9 @@ struct ContentView: View {
             break // browsing the host we're already streaming — nothing to do
         case .confirm(let host, let selection):
             deepLinkConfirm = DeepLinkConfirm(
-                host: host, launch: nil, profile: selection, browse: true)
+                host: host, launch: nil, preset: selection, browse: true)
         case .proceed(let host, let selection):
-            libraryTarget = LibraryTarget(host: host, profile: selection)
+            libraryTarget = LibraryTarget(host: host, preset: selection)
         }
     }
 
@@ -914,7 +914,7 @@ struct ContentView: View {
                     store: store, model: model, discovery: discovery,
                     libraryTarget: $libraryTarget, pairingTarget: $pairingTarget,
                     onPaired: handlePaired, waker: waker,
-                    connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
+                    connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
                     launchTitle: launchTitle,
                     connectShelf: connectFromShelf,
                     wakeOnly: { wakeOnly($0) },
@@ -924,7 +924,7 @@ struct ContentView: View {
                     store: store, model: model, discovery: discovery,
                     showAddHost: $showAddHost, pairingTarget: $pairingTarget,
                     speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
-                    connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
+                    connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
                     onPaired: handlePaired, onLaunchTitle: launchTitle,
                     onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
             }
@@ -936,7 +936,7 @@ struct ContentView: View {
                     store: store, model: model, discovery: discovery,
                     libraryTarget: $libraryTarget, pairingTarget: $pairingTarget,
                     onPaired: handlePaired, waker: waker,
-                    connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
+                    connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
                     launchTitle: launchTitle,
                     connectShelf: connectFromShelf,
                     wakeOnly: { wakeOnly($0) },
@@ -986,7 +986,7 @@ struct ContentView: View {
                         .tag(TouchTab.hosts)
                     LibraryTabView(
                         store: store, onLaunch: launchTitle, onConnectShelf: connectFromShelf,
-                        onConnectHost: { connect($0, profile: .inherit, fromLibrary: true) },
+                        onConnectHost: { connect($0, preset: .inherit, fromLibrary: true) },
                         showHosts: { touchTab = .hosts })
                         .tabItem { Label("Library", systemImage: "square.grid.2x2") }
                         .tag(TouchTab.library)
@@ -1010,7 +1010,7 @@ struct ContentView: View {
             showAddHost: $showAddHost, pairingTarget: $pairingTarget,
             speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
             showSettings: $showSettings,
-            connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
+            connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
             onPaired: handlePaired, onLaunchTitle: launchTitle,
             onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
     }
@@ -1408,13 +1408,13 @@ struct ContentView: View {
 
     // MARK: - Connect
 
-    /// `profile` is this connect's one-off pick ("Connect with ▸", a pinned card, a link's
+    /// `preset` is this connect's one-off pick ("Connect with ▸", a pinned card, a link's
     /// `preset=`). `.inherit` — the default, and what a plain card tap passes — falls through to
     /// the host's binding. A one-off NEVER rebinds the host: rebinding is always an explicit act
     /// in the edit sheet (design §5.2).
     private func connect(
         _ host: StoredHost, launchID: String? = nil,
-        profile: PresetSelection = .inherit, allowTofu: Bool? = nil,
+        preset: PresetSelection = .inherit, allowTofu: Bool? = nil,
         fromLibrary: Bool = false
     ) {
         // A pinned host connects on its stored fingerprint; an unpinned host may only TOFU when
@@ -1436,7 +1436,7 @@ struct ContentView: View {
             }
         }
         startSession(
-            host, launchID: launchID, profile: profile, allowTofu: host.pinnedSHA256 == nil,
+            host, launchID: launchID, preset: preset, allowTofu: host.pinnedSHA256 == nil,
             fromLibrary: fromLibrary)
     }
 
@@ -1446,7 +1446,7 @@ struct ContentView: View {
     /// connect (host parks it until the operator approves).
     private func startSession(
         _ host: StoredHost, launchID: String? = nil,
-        profile: PresetSelection = .inherit,
+        preset: PresetSelection = .inherit,
         allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil,
         fromLibrary: Bool = false
     ) {
@@ -1455,7 +1455,7 @@ struct ContentView: View {
         let go = {
             startSessionDirect(
                 store.hosts.first { $0.id == host.id } ?? host,
-                launchID: launchID, profile: profile, allowTofu: allowTofu,
+                launchID: launchID, preset: preset, allowTofu: allowTofu,
                 requestAccess: requestAccess, approvalReq: approvalReq,
                 fromLibrary: fromLibrary)
         }
@@ -1470,7 +1470,7 @@ struct ContentView: View {
            !host.wakeMacs.isEmpty, !store.probedOnline.contains(host.id) {
             discovery.start() // so the wake-wait can pick up a host that moved address
             startSessionDirect(
-                host, launchID: launchID, profile: profile, allowTofu: allowTofu,
+                host, launchID: launchID, preset: preset, allowTofu: allowTofu,
                 requestAccess: requestAccess, approvalReq: approvalReq, fromLibrary: fromLibrary,
                 onUnreachable: {
                     waker.start(
@@ -1489,7 +1489,7 @@ struct ContentView: View {
     /// failure back to the caller (the wake-wait fallback) instead of the error alert.
     private func startSessionDirect(
         _ host: StoredHost, launchID: String? = nil,
-        profile: PresetSelection = .inherit,
+        preset: PresetSelection = .inherit,
         allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil,
         fromLibrary: Bool = false,
         onUnreachable: (@MainActor () -> Void)? = nil
@@ -1502,7 +1502,7 @@ struct ContentView: View {
         // The model latches the result for the whole session, so nothing downstream can end up
         // applying a preset to half of it.
         let effective = EffectiveSettings.resolve(
-            host: host, selection: profile, catalog: profiles.catalog)
+            host: host, selection: preset, catalog: presets.catalog)
         model.connect(
             to: host,
             effective: effective,
@@ -1515,7 +1515,7 @@ struct ContentView: View {
             // did NOT come off a shelf, which is what keeps a plain host-list connect ending on
             // the host list.
             shelf: launchID != nil || fromLibrary
-                ? LibraryTarget(host: host, profile: profile) : nil,
+                ? LibraryTarget(host: host, preset: preset) : nil,
             allowTofu: allowTofu,
             requestAccess: requestAccess,
             onUnreachable: onUnreachable)
@@ -1580,7 +1580,7 @@ struct ContentView: View {
     /// `.inherit` and the binding decides, exactly as a plain card tap does.
     private func launchTitle(_ shelf: LibraryTarget, _ id: String) {
         libraryTarget = nil
-        connect(shelf.host, launchID: id, profile: shelf.profile)
+        connect(shelf.host, launchID: id, preset: shelf.preset)
     }
 
     /// A shelf's own Connect / Resume: dial its host launching NOTHING. The host is already
@@ -1591,7 +1591,7 @@ struct ContentView: View {
     /// session) comes back here rather than to the host list.
     private func connectFromShelf(_ shelf: LibraryTarget) {
         libraryTarget = nil
-        connect(shelf.host, profile: shelf.profile, fromLibrary: true)
+        connect(shelf.host, preset: shelf.preset, fromLibrary: true)
     }
 
     /// Tap a discovered host: save it (so the session has a stored identity and the trust pin

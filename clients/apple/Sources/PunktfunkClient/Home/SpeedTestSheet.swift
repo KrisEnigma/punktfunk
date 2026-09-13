@@ -37,7 +37,7 @@ struct SpeedTestSheet: View {
     @AppStorage(DefaultsKey.bitrateKbps) private var bitrateKbps = 0
     /// The catalog, so the Apply button can write to the layer this host actually reads its
     /// bitrate from (design/client-settings-profiles.md §5.3).
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
 
     private enum Phase: Equatable {
         case connecting
@@ -125,11 +125,11 @@ struct SpeedTestSheet: View {
     ///
     /// Every button names its target, so what a click changes is never inferred from context.
     @ViewBuilder private func applyButtons(_ recommended: Int) -> some View {
-        let bound = profiles.binding(for: host)
+        let bound = presets.binding(for: host)
         let label = Self.mbpsLabel(kbps: recommended)
         if let bound {
             Button("Apply to “\(bound.name)”") {
-                profiles.setOverride(bound.id, \.bitrateKbps, recommended)
+                presets.setOverride(bound.id, \.bitrateKbps, recommended)
                 dismiss()
             }
             .glassProminentButtonStyle()
@@ -228,7 +228,7 @@ struct SpeedTestSheet: View {
         let pin = host.pinnedSHA256
         // Probe at the mode this host would actually stream at — its preset's, if it is bound to
         // one. The measurement IS the streaming path, so it should be the streaming path's mode.
-        let mode = EffectiveSettings.resolve(host: host, catalog: profiles.catalog)
+        let mode = EffectiveSettings.resolve(host: host, catalog: presets.catalog)
         let (w, h, fps) = (
             UInt32(clamping: mode.width), UInt32(clamping: mode.height),
             UInt32(clamping: mode.refreshHz))

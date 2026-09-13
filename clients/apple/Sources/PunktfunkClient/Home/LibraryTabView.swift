@@ -29,7 +29,7 @@ struct LibraryTabView: View {
         store.hosts.filter { $0.pinnedSHA256 != nil }.flatMap { host in
             [LibraryTarget(host: host)]
                 + presets.catalog.pinned(for: host).map {
-                    LibraryTarget(host: host, profile: .preset($0.id))
+                    LibraryTarget(host: host, preset: .preset($0.id))
                 }
         }
     }

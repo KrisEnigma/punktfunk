@@ -165,11 +165,11 @@ enum ShotMock {
     static let editingID = UUID(uuidString: "5B0D1E00-0000-4000-8000-000000000005")!
     static let bedroomID = UUID(uuidString: "5B0D1E00-0000-4000-8000-000000000006")!
 
-    static let hdrProfileID = "a71c4e0d9f22"
-    static let couchProfileID = "3e88b107c4da"
-    static let hdrPreset = StreamPreset(name: "4K HDR", id: hdrProfileID, accent: "#8B7BF7")
+    static let hdrPresetID = "a71c4e0d9f22"
+    static let couchPresetID = "3e88b107c4da"
+    static let hdrPreset = StreamPreset(name: "4K HDR", id: hdrPresetID, accent: "#8B7BF7")
     static let couchPreset = StreamPreset(
-        name: "Couch 1080p", id: couchProfileID, accent: "#4FD1A5")
+        name: "Couch 1080p", id: couchPresetID, accent: "#4FD1A5")
 
     /// The catalog the host cards read their chips and pinned cards from. Seeded once, on the
     /// first store build — `PresetStore` is a singleton, and in shot mode its write-back is
@@ -196,7 +196,7 @@ enum ShotMock {
             StoredHost(
                 id: battlestationID, name: "Battlestation", address: "192.168.1.20", port: 9777,
                 pinnedSHA256: fingerprint, lastConnected: Date().addingTimeInterval(-420),
-                macAddresses: ["a4:b1:c2:d3:e4:f5"], profileID: hdrProfileID,
+                macAddresses: ["a4:b1:c2:d3:e4:f5"], presetID: hdrPresetID,
                 osChain: "windows/11"),
             StoredHost(
                 id: livingRoomID, name: "Living Room PC", address: "192.168.1.41", port: 9777,
@@ -205,7 +205,7 @@ enum ShotMock {
             StoredHost(
                 id: officeID, name: "Office NUC", address: "192.168.1.33", port: 9777,
                 pinnedSHA256: hostFingerprint(4), lastConnected: Date().addingTimeInterval(-259_200),
-                profileID: couchProfileID, osChain: "linux/ubuntu"),
+                presetID: couchPresetID, osChain: "linux/ubuntu"),
             StoredHost(
                 id: workshopID, name: "Workshop", address: "10.0.0.7", port: 9777,
                 pinnedSHA256: hostFingerprint(2), macAddresses: ["de:ad:be:ef:00:07"],

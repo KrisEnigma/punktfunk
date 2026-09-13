@@ -94,7 +94,7 @@ func monogramTile(
 /// has to offer the SAME set — a menu that quietly lacks "Pin as card" on one screen is how a
 /// feature becomes folklore.
 struct HostPresetMenu {
-    var profiles: [StreamPreset]
+    var presets: [StreamPreset]
     /// The host's default preset — the chip, and the checkmark in "Connect with ▸".
     var boundID: String?
     var pinnedIDs: [String]
@@ -227,7 +227,7 @@ struct HostCardView: View {
     /// The preset this card announces: a pinned card's own, else the host's binding.
     private var shownPreset: StreamPreset? {
         pinnedPreset ?? actions.presets.flatMap { menu in
-            menu.boundID.flatMap { id in menu.profiles.first { $0.id == id } }
+            menu.boundID.flatMap { id in menu.presets.first { $0.id == id } }
         }
     }
 
@@ -253,7 +253,7 @@ struct HostCardView: View {
                             Spacer(minLength: 8)
                             if let preset = shownPreset {
                                 PresetChip(
-                                    profile: preset, size: m.status,
+                                    preset: preset, size: m.status,
                                     prominent: pinnedPreset != nil)
                                     .layoutPriority(1)
                             }
@@ -363,14 +363,14 @@ struct HostCardView: View {
     /// "Connect with ▸": a one-off pick that never rebinds the host, with a checkmark on what a
     /// plain tap uses. Rebinding lives on the host page.
     @ViewBuilder private func connectWithMenu(_ menu: HostPresetMenu) -> some View {
-        if !menu.profiles.isEmpty {
+        if !menu.presets.isEmpty {
             Menu {
                 Button {
                     menu.connectWith(.defaults)
                 } label: {
                     checkable("Default settings", on: menu.boundID == nil)
                 }
-                ForEach(menu.profiles) { preset in
+                ForEach(menu.presets) { preset in
                     Button {
                         menu.connectWith(.preset(preset.id))
                     } label: {
@@ -402,18 +402,18 @@ struct HostCardView: View {
 /// Prominence is fill and weight only, never TYPE SIZE: the chip sits on the card's title line,
 /// and a chip taller than the name would make pinned cards taller than their host's.
 struct PresetChip: View {
-    let profile: StreamPreset
+    let preset: StreamPreset
     let size: CGFloat
     var prominent = false
 
     var body: some View {
-        let tint = profile.accentColor
+        let tint = preset.accentColor
         return HStack(spacing: 5) {
             Circle()
                 .fill(tint)
                 .frame(width: size * 0.55, height: size * 0.55)
                 .accessibilityHidden(true) // the name is right there
-            Text(profile.name)
+            Text(preset.name)
                 .font(.geist(size, prominent ? .bold : .semibold, relativeTo: .caption2))
                 .lineLimit(1)
         }
@@ -421,7 +421,7 @@ struct PresetChip: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 2)
         .background(Capsule().fill(tint.opacity(prominent ? 0.24 : 0.12)))
-        .accessibilityLabel("Preset \(profile.name)")
+        .accessibilityLabel("Preset \(preset.name)")
     }
 }
 
