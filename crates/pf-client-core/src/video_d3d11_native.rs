@@ -22,14 +22,18 @@ use std::time::{Duration, Instant};
 use windows::core::{Interface, GUID};
 use windows::Win32::d3d11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDecoder,
-    ID3D11VideoDecoderOutputView, ID3D11VideoDevice, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    D3D11_VDOV_DIMENSION_TEXTURE2D, D3D11_VIDEO_DECODER_BUFFER_BITSTREAM,
+    ID3D11VideoDecoderOutputView, ID3D11VideoDevice, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_RESOURCE_MISC_SHARED, D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VDOV_DIMENSION_TEXTURE2D, D3D11_VIDEO_DECODER_BUFFER_BITSTREAM,
     D3D11_VIDEO_DECODER_BUFFER_DESC, D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX,
     D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
     D3D11_VIDEO_DECODER_BUFFER_TYPE, D3D11_VIDEO_DECODER_CONFIG, D3D11_VIDEO_DECODER_DESC,
     D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC,
 };
-use windows::Win32::dxgi::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
+use windows::Win32::dxgi::{
+    IDXGIResource1, DXGI_FORMAT, DXGI_SAMPLE_DESC, DXGI_SHARED_RESOURCE_READ,
+    DXGI_SHARED_RESOURCE_WRITE,
+};
 
 use crate::video::{ColorDesc, DecodeHealth, StreamFormat};
 use crate::video_d3d11::{create_device, D3d11Frame, HandoffRing, HandoffSource};
@@ -1144,6 +1148,15 @@ impl Session {
         let pool_size =
             pf_dxvadec::pool_size(slots.capacity(), facts[index].min_render_target_buffers);
 
+        // `PUNKTFUNK_DXVA_SHARED_POOL=1` shares the pool by NT handle; `=srv` also binds it
+        // for sampling. A probe for a zero-copy pool: nothing imports it yet.
+        let shared_pool = std::env::var("PUNKTFUNK_DXVA_SHARED_POOL").ok();
+        let shared = (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE) as u32;
+        let (bind_extra, misc): (u32, u32) = match shared_pool.as_deref() {
+            Some("1") => (0, shared),
+            Some("srv") => (D3D11_BIND_SHADER_RESOURCE as u32, shared),
+            _ => (0, 0),
+        };
         let pool_desc = D3D11_TEXTURE2D_DESC {
             Width: aligned_width,
             Height: aligned_height,
@@ -1155,9 +1168,9 @@ impl Session {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: BIND_DECODER,
+            BindFlags: BIND_DECODER | bind_extra,
             CPUAccessFlags: 0,
-            MiscFlags: 0,
+            MiscFlags: misc,
         };
         let mut pool = None;
         // SAFETY: a `?`-checked `CreateTexture2D` on the live device, over a fully-initialized
@@ -1166,6 +1179,9 @@ impl Session {
             .ok()
             .context("create the D3D11VA decode surface pool")?;
         let pool: ID3D11Texture2D = pool.expect("CreateTexture2D succeeded");
+        if misc != 0 {
+            log_pool_share(&pool, shared_pool.as_deref().unwrap_or_default());
+        }
 
         // One output view per array slice. `DecoderBeginFrame` targets the view;
         // `ArraySlice` is the DXVA surface index, so `views[i]` is DPB slot i.
@@ -1210,6 +1226,35 @@ impl Session {
             shape,
             profile,
         })
+    }
+}
+
+/// Probe log for a shared pool: whether the NT handle a presenter would import exists.
+fn log_pool_share(pool: &ID3D11Texture2D, mode: &str) {
+    let handle = pool
+        .cast::<IDXGIResource1>()
+        .context("pool lacks IDXGIResource1")
+        .and_then(|r| {
+            // SAFETY: a COM call on the live pool; the returned NT handle is closed below.
+            unsafe {
+                r.CreateSharedHandle(
+                    None,
+                    DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE as u32,
+                    None,
+                )
+            }
+            .context("CreateSharedHandle")
+        });
+    match handle {
+        Ok(h) => {
+            // SAFETY: `h` was returned above and is closed exactly once here.
+            unsafe {
+                let _ = windows::Win32::handleapi::CloseHandle(h);
+            }
+            tracing::info!(mode, "D3D11VA decode pool shared by NT handle (probe)");
+        }
+        Err(e) => tracing::warn!(mode, error = %format!("{e:#}"),
+            "D3D11VA decode pool not shareable (probe)"),
     }
 }
 

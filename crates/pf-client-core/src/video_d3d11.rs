@@ -27,13 +27,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use windows::core::Interface;
 use windows::Win32::d3d11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Query,
-    ID3D11Texture2D, ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
-    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorEnumerator1, ID3D11VideoProcessorInputView,
-    ID3D11VideoProcessorOutputView, D3D11_ASYNC_GETDATA_DONOTFLUSH, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_QUERY_DATA_TIMESTAMP_DISJOINT, D3D11_QUERY_DESC,
-    D3D11_QUERY_TIMESTAMP, D3D11_QUERY_TIMESTAMP_DISJOINT, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
+    D3D11CreateDevice, ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11Fence,
+    ID3D11Multithread, ID3D11Query, ID3D11Texture2D, ID3D11VideoContext1, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorEnumerator1,
+    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_ASYNC_GETDATA_DONOTFLUSH,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_FENCE_FLAG_SHARED,
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT, D3D11_QUERY_DESC, D3D11_QUERY_TIMESTAMP,
+    D3D11_QUERY_TIMESTAMP_DISJOINT, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
     D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
@@ -53,7 +54,7 @@ use windows::Win32::dxgi::{
     DXGI_SHARED_RESOURCE_WRITE,
 };
 use windows::Win32::windef::RECT;
-use windows::Win32::winnt::HANDLE;
+use windows::Win32::winnt::{GENERIC_ALL, HANDLE};
 
 /// Six slots: the pump holds 2 decoded frames and the presenter has one in flight, so 3 are
 /// outstanding. Double that leaves margin without meaningful VRAM cost.
@@ -613,6 +614,27 @@ fn read_blt_us(context: &ID3D11DeviceContext, set: &QueryTriple) -> Option<u32> 
     u32::try_from((t1 - t0) * 1_000_000 / disjoint.Frequency).ok()
 }
 
+/// Can this device create a shared fence and hand out its NT handle? A shared fence would
+/// replace the keyed mutex; the Vulkan half of the answer is the presenter's import line.
+fn shared_fence_supported(device: &ID3D11Device) -> Result<()> {
+    let device5: ID3D11Device5 = device
+        .cast()
+        .context("device lacks ID3D11Device5 (pre-1703 Windows?)")?;
+    let mut fence: Option<ID3D11Fence> = None;
+    // SAFETY: a COM call on the live device writing a local `Option` out-param, checked below.
+    unsafe { device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence) }
+        .context("CreateFence(SHARED)")?;
+    let fence = fence.ok_or_else(|| anyhow!("CreateFence returned no fence"))?;
+    // SAFETY: a COM call on the fence just created; the returned NT handle is closed below.
+    let handle = unsafe { fence.CreateSharedHandle(None, GENERIC_ALL as u32, None) }
+        .context("fence CreateSharedHandle")?;
+    // SAFETY: `handle` was returned above and is closed exactly once here.
+    unsafe {
+        let _ = windows::Win32::handleapi::CloseHandle(handle);
+    }
+    Ok(())
+}
+
 /// One-second window of hand-off costs. `info` under `PUNKTFUNK_PRESENT_DEBUG=1` (the
 /// presenter's window switch) or when a frame stalled; `debug` otherwise.
 struct HandoffWindow {
@@ -748,6 +770,10 @@ impl HandoffRing {
         let video_context1: ID3D11VideoContext1 = context
             .cast()
             .context("context lacks ID3D11VideoContext1 (pre-1703 Windows?)")?;
+        match shared_fence_supported(&device) {
+            Ok(()) => tracing::info!("D3D11 shared fence supported"),
+            Err(e) => tracing::info!(error = %format!("{e:#}"), "D3D11 shared fence unsupported"),
+        }
         let timer = BltTimer::new(&device);
         Ok(HandoffRing {
             device,
