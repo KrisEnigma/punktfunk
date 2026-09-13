@@ -54,8 +54,8 @@ struct LibraryTarget: Identifiable, Hashable {
 }
 
 extension LibraryTarget {
-    /// Every shelf there is: each paired host, then each preset pinned to it. The Library tab's
-    /// title menu and the Mac's source list both list these.
+    /// Every shelf there is: each paired host, then each preset pinned to it. The Library's title
+    /// menu lists these, on the touch UI and the Mac alike.
     @MainActor static func shelves(of hosts: [StoredHost], presets: PresetStore) -> [LibraryTarget] {
         hosts.filter { $0.pinnedSHA256 != nil }.flatMap { host in
             [LibraryTarget(host: host)]

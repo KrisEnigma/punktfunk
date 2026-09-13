@@ -1,15 +1,15 @@
-// The Mac's window (design/apple-touch-ui-overhaul.md §4): a source list with Hosts and one row
-// per library shelf, the chosen destination beside it, and ⌘1 / ⌘2 / ⌥⌘I in the View menu. The
-// touch UI's tabs are this list's rows; the host page is HomeView's inspector.
+// The Mac's window (design/apple-touch-ui-overhaul.md §4): a source list with Hosts and Library,
+// the chosen destination beside it, and ⌘1 / ⌘2 / ⌥⌘I in the View menu. The touch UI's tabs are
+// this list's rows; the Library row is the Library tab, whose title menu picks the host.
 
 import PunktfunkKit
 import SwiftUI
 #if os(macOS)
 
-/// Where the Mac window points: the host grid, or one shelf's library.
+/// Where the Mac window points: the host grid or the library.
 enum MacDestination: Hashable {
     case hosts
-    case shelf(LibraryTarget)
+    case library
 }
 
 struct MacShellView<Hosts: View>: View {
@@ -19,64 +19,34 @@ struct MacShellView<Hosts: View>: View {
     let onLaunch: (LibraryTarget, String) -> Void
     let onConnectShelf: (LibraryTarget) -> Void
     let onConnectHost: (StoredHost) -> Void
-    @ObservedObject private var presets = PresetStore.shared
-    @AppStorage(DefaultsKey.libraryShelf) private var shelfID = ""
-    @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
 
     var body: some View {
         NavigationSplitView {
             List(selection: rowSelection) {
                 Label("Hosts", systemImage: "desktopcomputer")
                     .tag(MacDestination.hosts)
-                Section("Library") {
-                    ForEach(shelves) { shelf in
-                        Label(
-                            shelf.title(in: presets),
-                            systemImage: shelf.pinnedPresetID == nil
-                                ? "square.grid.2x2" : "slider.horizontal.3")
-                            .tag(MacDestination.shelf(shelf))
-                    }
-                }
+                Label("Library", systemImage: "square.grid.2x2")
+                    .tag(MacDestination.library)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
+            .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 240)
         } detail: {
             switch selection {
             case .hosts:
                 hosts
-            case .shelf(let shelf):
-                NavigationStack {
-                    LibraryView(
-                        store: store, target: shelf, onLaunch: { onLaunch(shelf, $0) },
-                        onConnect: { onConnectShelf(shelf) }, inTab: true,
-                        onConnectHost: onConnectHost)
-                }
-                .id(shelf.id)
+            case .library:
+                LibraryTabView(
+                    store: store, onLaunch: onLaunch, onConnectShelf: onConnectShelf,
+                    onConnectHost: onConnectHost, showHosts: { selection = .hosts })
             }
         }
-        .onChange(of: selection) { _, destination in
-            if case .shelf(let shelf) = destination { shelfID = shelf.id }
-        }
         .focusedSceneValue(
-            \.macNavigation, MacNavigation(showHosts: { selection = .hosts }, showLibrary: showLibrary))
-    }
-
-    private var shelves: [LibraryTarget] {
-        LibraryTarget.shelves(of: store.hosts, presets: presets)
+            \.macNavigation,
+            MacNavigation(showHosts: { selection = .hosts }, showLibrary: { selection = .library }))
     }
 
     /// A click on empty space deselects a List; the window always shows something.
     private var rowSelection: Binding<MacDestination?> {
         Binding(get: { selection }, set: { if let next = $0 { selection = next } })
-    }
-
-    /// ⌘2: the remembered shelf, else the default host's, else the first.
-    private func showLibrary() {
-        let all = shelves
-        let byDefault = StartScreen.defaultHost(id: defaultHostID, hosts: store.hosts).host
-            .flatMap { host in all.first { $0.id == LibraryTarget(host: host).id } }
-        if let shelf = all.first(where: { $0.id == shelfID }) ?? byDefault ?? all.first {
-            selection = .shelf(shelf)
-        }
     }
 }
 

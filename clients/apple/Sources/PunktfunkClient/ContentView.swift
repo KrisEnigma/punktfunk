@@ -106,7 +106,7 @@ struct ContentView: View {
     @AppStorage(DefaultsKey.libraryShelf) private var libraryShelfID = ""
     #endif
     #if os(macOS)
-    /// The Mac's source-list selection. A written `libraryTarget` selects its shelf.
+    /// The Mac's source-list selection. A written `libraryTarget` opens the Library row on it.
     @State private var macDestination: MacDestination = .hosts
     #endif
     /// Wakes a sleeping host and waits for it to come back online before connecting (drives the
@@ -717,12 +717,13 @@ struct ContentView: View {
     #endif
 
     #if os(macOS)
-    /// On the Mac a shelf is a source-list row, not a presentation: a written `libraryTarget`
-    /// selects it and clears. Gamepad mode keeps its sheet (`macLibrarySheet`).
+    /// On the Mac a shelf is the Library row's pick, not a presentation: a written `libraryTarget`
+    /// becomes that pick, selects the row and clears. Gamepad mode keeps its sheet
+    /// (`macLibrarySheet`).
     private func showShelfInSidebar() {
         guard !gamepadUIActive, let shelf = libraryTarget else { return }
         libraryShelfID = shelf.id
-        macDestination = .shelf(shelf)
+        macDestination = .library
         libraryTarget = nil
     }
 

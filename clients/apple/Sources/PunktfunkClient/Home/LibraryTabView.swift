@@ -1,17 +1,19 @@
-// The Library tab (design/apple-touch-ui-overhaul.md §2.5): one shelf, picked from the title
-// menu and remembered across launches. `LibraryView` still owns the fetch, the cache, the wake
-// and the art; this view picks which shelf it shows, and what the tab says with no paired host.
-// A write to `libraryTarget` lands here through ContentView's `showShelfInTab`.
+// The Library tab (design/apple-touch-ui-overhaul.md §2.5) and the Mac's Library row: one shelf,
+// picked from the title menu and remembered. `LibraryView` owns the fetch, cache, wake and art;
+// this view picks the shelf, and what to say with no paired host. A written `libraryTarget`
+// lands here through ContentView's `showShelfInTab` or `showShelfInSidebar`.
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import PunktfunkKit
 import SwiftUI
 
+#if os(iOS)
 /// The touch UI's two destinations: the remote-desktop face and the gaming face.
 enum TouchTab: Hashable {
     case hosts
     case library
 }
+#endif
 
 struct LibraryTabView: View {
     @ObservedObject var store: HostStore
