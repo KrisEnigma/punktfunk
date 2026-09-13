@@ -321,16 +321,15 @@ fn an_upgrade_over_inno_retires_its_uninstaller_between_files_and_arp() {
 
 // ------------------------------------------------------------------- named traps (§5, D11, D12)
 
-// Coexistence is a SetEnv, never an abort. The value is the Linux one.
+// Coexistence is a `service install` flag, never an abort. The value is the Linux one.
 #[test]
 fn a_sunshine_box_coexists_by_moving_the_management_port() {
     let facts = sunshine();
     let plan = host_plan(&facts, &WinChoices::derive(&facts, Artifact::Host));
-    assert!(plan.steps().any(|s| matches!(
-        s,
-        WinAction::SetEnv { key, value }
-            if key == "PUNKTFUNK_MGMT_BIND" && value == "0.0.0.0:47991"
-    )));
+    assert!(plan
+        .commands()
+        .iter()
+        .any(|c| c.contains("service install") && c.contains("--mgmt-bind=0.0.0.0:47991")));
 }
 
 #[test]
@@ -340,9 +339,7 @@ fn an_operator_mgmt_bind_is_never_rewritten() {
         ..sunshine()
     };
     let plan = host_plan(&facts, &WinChoices::derive(&facts, Artifact::Host));
-    assert!(!plan
-        .steps()
-        .any(|s| matches!(s, WinAction::SetEnv { key, .. } if key == "PUNKTFUNK_MGMT_BIND")));
+    assert!(!plan.commands().iter().any(|c| c.contains("--mgmt-bind")));
 }
 
 // Silent installs never touch a network profile. Skip is a warning only.

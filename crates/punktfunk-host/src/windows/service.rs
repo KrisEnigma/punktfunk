@@ -1068,6 +1068,14 @@ fn install(args: &[String]) -> Result<()> {
         Some(v) => bail!("--gamestream must be 'on' or 'off' (got '{v}')"),
         None => None,
     };
+    // `None` = flag absent: host.env keeps its bind.
+    let mgmt_bind = match args.iter().find_map(|a| a.strip_prefix("--mgmt-bind=")) {
+        Some(v) => match v.parse::<std::net::SocketAddr>() {
+            Ok(addr) => Some(addr),
+            Err(_) => bail!("--mgmt-bind must be IP:PORT (got '{v}')"),
+        },
+        None => None,
+    };
 
     let exe = std::env::current_exe().context("current_exe")?;
     let manager = ServiceManager::local_computer(
@@ -1145,6 +1153,10 @@ fn install(args: &[String]) -> Result<()> {
     ensure_default_host_env()?;
     if let Some(on) = gamestream {
         apply_gamestream_choice(on);
+    }
+    // Before the rules below: the mgmt rule reads its port back from host.env.
+    if let Some(addr) = mgmt_bind {
+        set_host_env_line("PUNKTFUNK_MGMT_BIND", &addr.to_string())?;
     }
     // Remove prior rules first so an upgrade tightens scope instead of leaving a stale
     // all-profiles rule. Flag absent (upgrades) keeps the recorded choice.
@@ -1341,6 +1353,36 @@ fn apply_gamestream_choice(enable: bool) {
     );
 }
 
+/// `text` with its last live `key=` line set to `value`, else one appended. Last wins, as
+/// [`load_host_env`] and [`mgmt_port`] read it.
+fn with_env_line(text: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{key}=");
+    let line = format!("{key}={value}");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    match lines
+        .iter()
+        .rposition(|l| l.trim_start().starts_with(&prefix))
+    {
+        Some(i) => lines[i] = line,
+        None => lines.push(line),
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Write `key=value` into the existing host.env, keeping every other line.
+fn set_host_env_line(key: &str, value: &str) -> Result<()> {
+    let path = host_env_path();
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    // `write_secret_file` re-asserts the SYSTEM/Administrators DACL.
+    pf_paths::write_secret_file(&path, with_env_line(&text, key, value).as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
+    println!("{key}={value} → {}", path.display());
+    Ok(())
+}
+
 /// `netsh` `profile=` for inbound rules. Default Domain+Private; `allow_public` is all profiles.
 /// Shared with the web-console rule in `install.rs`.
 pub(crate) fn firewall_profile_arg(allow_public: bool) -> &'static str {
@@ -1446,8 +1488,8 @@ fn add_firewall_rules(allow_public: bool) {
             None
         }
     };
-    // Mgmt/library on host.env's port (LAN read-only, paired-cert). The setup writes the move
-    // before `service install`. GameStream 47984/47989/48010, 47998-48010; native 9777; mDNS 5353.
+    // Mgmt/library on host.env's port (LAN read-only, paired-cert); `--mgmt-bind` lands there
+    // first. GameStream 47984/47989/48010, 47998-48010; native 9777; mDNS 5353.
     let mgmt = mgmt_port(&std::fs::read_to_string(host_env_path()).unwrap_or_default());
     let tcp = format!("47984,47989,48010,{mgmt}");
     let rules = [
@@ -1799,5 +1841,25 @@ mod firewall_tests {
         );
         assert_eq!(mgmt_port("PUNKTFUNK_MGMT_BIND=\"[::]:48123\"\n"), 48123);
         assert_eq!(mgmt_port("PUNKTFUNK_MGMT_BIND=nonsense\n"), 47990);
+    }
+
+    /// `--mgmt-bind` writes the line the mgmt rule reads back, whatever host.env already holds.
+    #[test]
+    fn the_mgmt_bind_flag_lands_where_the_rule_reads() {
+        let set =
+            |text: &str| mgmt_port(&with_env_line(text, "PUNKTFUNK_MGMT_BIND", "0.0.0.0:47991"));
+        assert_eq!(set(""), 47991);
+        assert_eq!(
+            set("RUST_LOG=info\n# PUNKTFUNK_MGMT_BIND=0.0.0.0:1\n"),
+            47991
+        );
+        assert_eq!(
+            set("PUNKTFUNK_MGMT_BIND=0.0.0.0:1\nPUNKTFUNK_MGMT_BIND=0.0.0.0:2\n"),
+            47991
+        );
+        assert_eq!(
+            with_env_line("A=1\n# K=0\nK=2\n", "K", "3"),
+            "A=1\n# K=0\nK=3\n"
+        );
     }
 }

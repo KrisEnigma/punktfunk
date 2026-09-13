@@ -67,11 +67,6 @@ pub enum WinAction {
     /// Stop the run before it touches the box. A dry run renders it and carries on.
     Refuse(String),
     Note(Level, String),
-    /// One `KEY=VALUE` line in `%ProgramData%\punktfunk\host.env`.
-    SetEnv {
-        key: String,
-        value: String,
-    },
     DeployFiles {
         dest: String,
     },
@@ -361,6 +356,10 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
             if on { "on" } else { "off" }
         ));
     }
+    // The host writes host.env and opens the firewall for the port in one place.
+    if facts.needs_coexistence() {
+        service.push(format!("--mgmt-bind=0.0.0.0:{MGMT_PORT_MOVED}"));
+    }
     let mut service_steps = vec![WinAction::Run(service)];
     if choices.start_service {
         service_steps.push(run(&[&host_exe, "service", "start"]));
@@ -559,10 +558,10 @@ fn coexist_steps(facts: &WinFacts, choices: &WinChoices) -> Vec<WinAction> {
             Level::Warn,
             format!("{who} is active on this box — both want TCP 47990 (its web UI, punktfunk's management API)"),
         ),
-        WinAction::SetEnv {
-            key: "PUNKTFUNK_MGMT_BIND".into(),
-            value: format!("0.0.0.0:{MGMT_PORT_MOVED}"),
-        },
+        note(
+            Level::Ok,
+            format!("PUNKTFUNK_MGMT_BIND=0.0.0.0:{MGMT_PORT_MOVED} — the service step writes it to host.env and opens the firewall for it"),
+        ),
         note(
             Level::Ok,
             format!("Clients learn the port from discovery; the console and plugins read it from mgmt-endpoint. Details: {DOCS}/switching-from-sunshine"),

@@ -191,7 +191,6 @@ impl WinExecutor<'_> {
                 self.ui.warn(text);
                 Ok(())
             }
-            WinAction::SetEnv { key, value } => self.set_env(key, value),
             WinAction::DeployFiles { dest } => {
                 if self.dry {
                     self.ui.ok(&format!("would unpack the payload into {dest}"));
@@ -350,26 +349,6 @@ impl WinExecutor<'_> {
             WinAction::EnsureAppRuntime { arch } => self.ensure_app_runtime(arch),
             WinAction::KillPortListeners { ports } => self.kill_port_listeners(ports),
         }
-    }
-
-    fn set_env(&self, key: &str, value: &str) -> Result<(), Failed> {
-        if self.dry {
-            self.ui.ok(&format!(
-                r"would set {key}={value} in %ProgramData%\punktfunk\host.env"
-            ));
-            return Ok(());
-        }
-        let path = self.paths.host_env();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        let body = upsert_env(&existing, key, value);
-        std::fs::write(&path, body).map_err(|e| Failed(format!("couldn't write host.env: {e}")))?;
-        self.ui.ok(&format!(
-            r"{key}={value} → %ProgramData%\punktfunk\host.env"
-        ));
-        Ok(())
     }
 
     /// PATH via `reg.exe` so FakeRunner pins the write; type is REG_EXPAND_SZ.
@@ -686,18 +665,6 @@ impl WinExecutor<'_> {
     }
 }
 
-fn upsert_env(existing: &str, key: &str, value: &str) -> String {
-    let prefix = format!("{key}=");
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    match lines.iter_mut().find(|l| l.starts_with(&prefix)) {
-        Some(line) => *line = format!("{key}={value}"),
-        None => lines.push(format!("{key}={value}")),
-    }
-    let mut body = lines.join("\n");
-    body.push('\n');
-    body
-}
-
 /// `None` = already an entry (case-insensitive, slash-insensitive).
 fn path_with(current: &str, dir: &str) -> Option<String> {
     let want = dir.trim_end_matches('\\');
@@ -875,13 +842,6 @@ mod tests {
             exec.sub(r"<start menu>\Punktfunk.lnk"),
             r"C:\Users\me\Start Menu\Programs\Punktfunk.lnk"
         );
-    }
-
-    #[test]
-    fn upsert_env_replaces_in_place_and_appends() {
-        assert_eq!(upsert_env("", "K", "1"), "K=1\n");
-        assert_eq!(upsert_env("A=2\nK=0\n", "K", "1"), "A=2\nK=1\n");
-        assert_eq!(upsert_env("A=2\n", "K", "1"), "A=2\nK=1\n");
     }
 
     #[test]
