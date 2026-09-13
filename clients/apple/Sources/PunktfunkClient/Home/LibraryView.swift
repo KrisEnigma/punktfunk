@@ -758,8 +758,9 @@ struct LibraryView: View {
     /// played under Recent, how long under Most played, nothing otherwise.
     private func sortCaption(_ game: GameEntry) -> String? {
         switch LibrarySortKey(stored: sortRaw) {
-        case .recent: return PlayStatsText.lastPlayed(game.stats)
-        case .playTime: return PlayStatsText.playTime(game.stats)
+        // Blank, not nil, for a title with nothing recorded: its tile keeps the caption line.
+        case .recent: return PlayStatsText.lastPlayed(game.stats) ?? ""
+        case .playTime: return PlayStatsText.playTime(game.stats) ?? ""
         default: return nil
         }
     }
@@ -1204,13 +1205,14 @@ struct GameCard: View {
                 }
             Text(game.title)
                 .font(.geist(12, relativeTo: .caption))
-                .lineLimit(2)
+                // Two lines held for every title, so every tile in a row stands the same height.
+                .lineLimit(2, reservesSpace: true)
                 .foregroundStyle(.secondary)
             if let caption {
                 Text(caption)
                     .font(.geist(11, relativeTo: .caption2))
                     .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                    .lineLimit(1, reservesSpace: true)
             }
         }
     }
