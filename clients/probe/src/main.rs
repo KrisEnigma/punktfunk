@@ -539,6 +539,8 @@ async fn session(args: Args) -> Result<()> {
             // `--audio-channels` (default stereo); the probe multistream-decodes + validates the
             // host's frames to exercise the surround encode path headlessly.
             audio_channels: args.audio_channels,
+            // Legacy coupling; the probe decodes whatever the host answers (`Welcome::audio_layout`).
+            audio_layout: 0,
             // The probe just dumps the bitstream (no decode), so it advertises every codec — HEVC
             // (the host default) AND H.264 (so it can drive a GPU-less software host,
             // `PUNKTFUNK_ENCODER=software`) AND AV1. The host picks one and reports it in
@@ -1308,12 +1310,14 @@ async fn session(args: Args) -> Result<()> {
         let audio_rate_hz = welcome.audio_rate_hz;
         let audio_bits = welcome.audio_bits;
         let audio_out_path = args.audio_out.clone();
+        let audio_layout =
+            punktfunk_core::audio::AudioLayout::from_wire(welcome.audio_layout).unwrap_or_default();
         tokio::spawn(async move {
             use std::sync::atomic::Ordering::Relaxed;
             let mut hdr_logged = false;
             let mut rumble_logged = false;
             let lossless = audio_codec == punktfunk_core::quic::AUDIO_CODEC_PCM;
-            let layout = punktfunk_core::audio::layout_for(audio_channels, false);
+            let layout = punktfunk_core::audio::layout_for(audio_channels, audio_layout);
             let mut audio_dec = (!lossless)
                 .then(|| {
                     opus::MSDecoder::new(48_000, layout.streams, layout.coupled, layout.mapping)

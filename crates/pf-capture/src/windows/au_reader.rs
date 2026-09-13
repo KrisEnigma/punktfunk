@@ -105,6 +105,12 @@ impl AuView {
                 .load(Ordering::Relaxed),
             flags: u32_at(offset_of!(AuSlot, flags)),
             state,
+            qpc_submit: self
+                .word64(au::slot_offset(i) + offset_of!(AuSlot, qpc_submit))
+                .load(Ordering::Relaxed),
+            qpc_published: self
+                .word64(au::slot_offset(i) + offset_of!(AuSlot, qpc_published))
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -136,6 +142,9 @@ pub(crate) struct Taken {
     pub wire_seq: u32,
     pub source_seq: u32,
     pub qpc_pts: u64,
+    /// The driver's encode-submit and publish stamps; `0` from a driver that predates them.
+    pub qpc_submit: u64,
+    pub qpc_published: u64,
     pub flags: u32,
 }
 
@@ -357,6 +366,8 @@ impl AuReader {
             wire_seq: s.wire_seq,
             source_seq: s.source_seq,
             qpc_pts: s.qpc_pts,
+            qpc_submit: s.qpc_submit,
+            qpc_published: s.qpc_published,
             flags: s.flags,
         }))
     }
@@ -440,9 +451,18 @@ pub(crate) mod producer {
             w(offset_of!(AuSlot, wire_seq), wire_seq);
             w(offset_of!(AuSlot, source_seq), source_seq);
             w(offset_of!(AuSlot, flags), flags);
-            self.view
-                .word64(au::slot_offset(i) + offset_of!(AuSlot, qpc_pts))
-                .store(qpc_pts, Ordering::Relaxed);
+            let w64 = |f: usize, v: u64| {
+                self.view
+                    .word64(au::slot_offset(i) + f)
+                    .store(v, Ordering::Relaxed)
+            };
+            w64(offset_of!(AuSlot, qpc_pts), qpc_pts);
+            // Fixed offsets past the present stamp: what a driver's submit and publish look like.
+            w64(offset_of!(AuSlot, qpc_submit), qpc_pts.saturating_add(7));
+            w64(
+                offset_of!(AuSlot, qpc_published),
+                qpc_pts.saturating_add(11),
+            );
             self.view
                 .slot32(i, STATE)
                 .store(au::PUBLISHED, Ordering::Release);
@@ -527,6 +547,10 @@ mod tests {
         assert_eq!(rd.ready_aus(), 3);
         let mut got = Vec::new();
         while let Some(t) = rd.take_next().unwrap() {
+            assert_eq!(
+                (t.qpc_submit, t.qpc_published),
+                (t.qpc_pts + 7, t.qpc_pts + 11)
+            );
             got.push((t.wire_seq, t.data, t.source_seq, t.qpc_pts, t.flags));
         }
         assert_eq!(

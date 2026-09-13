@@ -961,6 +961,7 @@ fn audio_reserved_kbps(welcome: &punktfunk_core::quic::Welcome) -> u32 {
         punktfunk_core::audio::plan_audio_budget(
             welcome.bitrate_kbps,
             welcome.audio_channels,
+            punktfunk_core::audio::AudioLayout::from_wire(welcome.audio_layout).unwrap_or_default(),
             punktfunk_core::audio::AudioTier::default(),
             welcome.host_caps & punktfunk_core::quic::HOST_CAP_AUDIO_RED != 0,
         )
@@ -1875,14 +1876,15 @@ pub(crate) async fn run_admitted(
         let stop = stop.clone();
         let cap = audio_cap.clone();
         let channels = welcome.audio_channels;
+        // Format from Welcome bytes, not a second evaluation of the gate (config + live property).
+        let audio_plane = handshake::AudioPlane::from_welcome(&welcome);
         // Read the granted bit back off Welcome, then re-derive the same budget rung from it.
         let budget = handshake::audio_budget(
             welcome.host_caps & punktfunk_core::quic::HOST_CAP_AUDIO_RED != 0,
             welcome.bitrate_kbps,
             channels,
+            audio_plane.layout,
         );
-        // Format from Welcome bytes, not a second evaluation of the gate (config + live property).
-        let audio_plane = handshake::AudioPlane::from_welcome(&welcome);
         // Isolated session captures its own named sink; `None` is the shared path.
         #[cfg(target_os = "linux")]
         let iso_sink = isolation.as_ref().and_then(|i| i.sink.clone());
@@ -3560,6 +3562,7 @@ mod tests {
             // to a client that omits hi-res fields.
             audio_rate_hz: punktfunk_core::audio::SAMPLE_RATE_HZ,
             audio_bits: punktfunk_core::audio::pcm::BITS_16,
+            audio_layout: 0,
         };
         io::write_msg(&mut send, &hello.encode())
             .await

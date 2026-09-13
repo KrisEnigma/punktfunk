@@ -124,6 +124,9 @@ pub(crate) struct SessionAudio {
     /// 44 100 Hz carries 220 samples per channel = 4 988 662 ns. Size from [`Self::frame_samples`];
     /// time from [`pcm::frame_duration_ns`].
     pub(crate) frame_us: u32,
+    /// Surround coupling, verbatim off Welcome ([`punktfunk_core::audio::AudioLayout`] wire
+    /// id). `0` from every host this client has asked.
+    pub(crate) layout: u8,
 }
 
 impl SessionAudio {
@@ -135,13 +138,16 @@ impl SessionAudio {
     /// `-D warnings` is a hard gate there.
     #[cfg(target_os = "android")]
     pub(crate) fn of(client: &NativeClient) -> SessionAudio {
-        SessionAudio::resolved(
-            client.audio_codec,
-            client.audio_sample_rate_hz,
-            client.audio_bits,
-            client.audio_channels,
-            u32::from(client.audio_frame_us),
-        )
+        SessionAudio {
+            layout: client.audio_layout,
+            ..SessionAudio::resolved(
+                client.audio_codec,
+                client.audio_sample_rate_hz,
+                client.audio_bits,
+                client.audio_channels,
+                u32::from(client.audio_frame_us),
+            )
+        }
     }
 
     /// The `Welcome`'s five audio fields, clamped into something every buffer below can be sized
@@ -169,6 +175,8 @@ impl SessionAudio {
             rate_hz,
             bits,
             channels: punktfunk_core::audio::normalize_channels(channels) as usize,
+            // Set by [`Self::of`]; the pure half has no Welcome to read it from.
+            layout: 0,
             // Same reasoning as the rate: an old host sends no `audio_frame_us` at all and a
             // hostile one could send 0, and this number divides nothing but sizes everything.
             //
@@ -225,6 +233,7 @@ mod tests {
 
     fn fmt(rate_hz: u32, channels: usize, frame_us: u32) -> SessionAudio {
         SessionAudio {
+            layout: 0,
             codec: punktfunk_core::quic::AUDIO_CODEC_PCM,
             rate_hz,
             bits: pcm::BITS_24,

@@ -203,7 +203,6 @@ unsafe extern "C" fn on_frame_rendered(
     // garbage `system_nano` (observed on-glass: an epoch-sized latch max on the session's first
     // window), and one such sample would poison every max/percentile it lands in.
     let clamp = |v: i128| (v > 0 && v < 10_000_000_000).then_some((v / 1000) as u64);
-    let display_us = paired.and_then(|(d, _)| clamp(displayed_ns - d));
     let latch_us = paired.and_then(|(_, r)| clamp(displayed_ns - r));
     // Always-on half: the presenter's pf-present line reads these with the HUD off.
     t.meter.note_latch(latch_us);
@@ -224,11 +223,9 @@ unsafe extern "C" fn on_frame_rendered(
     if !t.stats.enabled() {
         return; // HUD hidden — skip the stats lock
     }
-    t.stats.note_displayed(
-        e2e_valid.then_some((e2e_ns / 1000) as u64),
-        display_us,
-        latch_us,
-    );
+    let (decoded_ns, released_ns) = paired.unwrap_or((0, 0));
+    t.stats
+        .note_displayed(pts_us * 1000, decoded_ns, released_ns, displayed_ns);
 }
 
 /// React to an output-format change by signalling the stream's HDR dataspace on the Surface (SDR

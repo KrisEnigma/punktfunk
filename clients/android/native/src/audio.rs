@@ -172,7 +172,17 @@ impl AudioDec {
                 opus::Channels::Stereo,
             )?))
         } else {
-            let l = punktfunk_core::audio::layout_for(channels, false);
+            // This client asks for the legacy coupling, so a conforming host answers `0`; any
+            // other id is a host defect, named once rather than played as silence.
+            let layout =
+                punktfunk_core::audio::AudioLayout::from_wire(fmt.layout).unwrap_or_else(|| {
+                    tracing::warn!(
+                        layout = fmt.layout,
+                        "unknown audio layout from the host — decoding as legacy"
+                    );
+                    punktfunk_core::audio::AudioLayout::Legacy
+                });
+            let l = punktfunk_core::audio::layout_for(channels, layout);
             Ok(AudioDec::Surround(opus::MSDecoder::new(
                 fmt.rate_hz,
                 l.streams,

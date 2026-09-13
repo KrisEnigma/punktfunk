@@ -125,6 +125,8 @@ pub(super) async fn connect_and_handshake(args: &WorkerArgs) -> Result<Handshake
                 // is the opt-in, these are its parameters.
                 audio_rate_hz: args.audio_rate_hz,
                 audio_bits: args.audio_bits,
+                // The coupling asked for; `0` (legacy) keeps the Hello byte-identical.
+                audio_layout: args.audio_layout.wire(),
             }
             .encode(),
         )
@@ -213,6 +215,7 @@ pub(super) async fn connect_and_handshake(args: &WorkerArgs) -> Result<Handshake
                 audio_rate_hz: welcome.audio_rate_hz,
                 audio_bits: welcome.audio_bits,
                 audio_frame_us: welcome.audio_frame_us,
+                audio_layout: welcome.audio_layout,
                 codec: welcome.codec,
                 shard_payload: welcome.shard_payload,
                 host_caps: welcome.host_caps,

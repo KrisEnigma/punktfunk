@@ -250,7 +250,7 @@ fn connect_spawn(
     // A fresh child slot per spawn, installed where Disconnect/Cancel can reach it.
     let child = crate::spawn::SessionChild::default();
     *ctx.shared.session.lock().unwrap() = child.clone();
-    ctx.shared.stats_line.lock().unwrap().clear();
+    *ctx.shared.stats.lock().unwrap() = None;
     ctx.shared.browse.store(false, Ordering::SeqCst);
     set_status.call(String::new());
     set_screen.call(if opts.awaiting_approval {
@@ -319,7 +319,7 @@ fn connect_spawn(
                     crate::shell_window::hide();
                     ss.call(Screen::Stream);
                 }
-                SpawnEvent::Stats(line) => *shared.stats_line.lock().unwrap() = line,
+                SpawnEvent::Stats(s) => *shared.stats.lock().unwrap() = Some(*s),
                 SpawnEvent::Exited { error, ended, code } => {
                     match error {
                         Some((msg, true)) => {
@@ -380,7 +380,7 @@ pub(crate) fn open_console(
 ) {
     let child = crate::spawn::SessionChild::default();
     *ctx.shared.session.lock().unwrap() = child.clone();
-    ctx.shared.stats_line.lock().unwrap().clear();
+    *ctx.shared.stats.lock().unwrap() = None;
     ctx.shared.browse.store(true, Ordering::SeqCst);
     if let Some(t) = target.clone() {
         *ctx.shared.target.lock().unwrap() = t;
@@ -405,7 +405,7 @@ pub(crate) fn open_console(
                     crate::shell_window::hide();
                     ss.call(Screen::Stream);
                 }
-                SpawnEvent::Stats(line) => *shared.stats_line.lock().unwrap() = line,
+                SpawnEvent::Stats(s) => *shared.stats.lock().unwrap() = Some(*s),
                 SpawnEvent::Exited { error, ended, code } => {
                     crate::shell_window::restore();
                     // Quit from the library (B / closing the window) returns silently;

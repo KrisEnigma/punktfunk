@@ -3,7 +3,12 @@ import { CaptureControlCard } from "@/sections/Stats/CaptureControl";
 import { DetailCard } from "@/sections/Stats/Detail";
 import { RecordingsCard } from "@/sections/Stats/Recordings";
 import { StatsView } from "@/sections/Stats/view";
-import { captureDetail, captureMetas, statsStatusIdle } from "./lib/fixtures";
+import {
+	captureDetail,
+	captureDetailDriver,
+	captureMetas,
+	statsStatusIdle,
+} from "./lib/fixtures";
 
 const noop = () => {};
 const idle = { isLoading: false, error: null, refetch: noop };
@@ -46,6 +51,38 @@ export const Recording: Story = {
 		),
 		detail: (
 			<DetailCard detail={{ data: captureDetail, ...idle }} onClose={noop} />
+		),
+	},
+};
+
+// A Windows capture: the driver's lump against a 120 Hz frame, pool drops, and the sample cap.
+export const WindowsDriver: Story = {
+	args: {
+		control: (
+			<CaptureControlCard
+				status={{ data: statsStatusIdle, ...idle }}
+				onStart={noop}
+				onStop={noop}
+				isStarting={false}
+				isStopping={false}
+			/>
+		),
+		live: null,
+		recordings: (
+			<RecordingsCard
+				recordings={{ data: captureMetas, ...idle }}
+				selectedId={captureMetas[1]?.id ?? null}
+				onSelect={noop}
+				onDownload={noop}
+				onDelete={noop}
+				isDeleting={false}
+			/>
+		),
+		detail: (
+			<DetailCard
+				detail={{ data: captureDetailDriver, ...idle }}
+				onClose={noop}
+			/>
 		),
 	},
 };

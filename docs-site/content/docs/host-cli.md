@@ -66,17 +66,15 @@ These are the only flags `serve` accepts.
 The management API is **always HTTPS**. It binds all interfaces by default so a **paired client** can
 fetch the game library over its mTLS certificate — but off loopback that certificate reaches only the
 read-only status + library endpoints. The **admin surface** (arming pairing, removing devices, session
-control, library edits) authenticates with a **bearer token** and is honored **from loopback only**, so
-it is never LAN-exposed even under the default wide bind. If you don't pass `--mgmt-token`, a token is
-auto-generated and persisted to `~/.config/punktfunk/mgmt-token` (the bundled web console reads the same
-file); `--mgmt-token` only overrides it. Pass `--mgmt-bind 127.0.0.1:47990` to keep 47990 loopback-only.
-Every endpoint is documented in the interactive [**API Reference**](/api).
+control, library edits) needs a **bearer token** and is honored **from loopback only**. Without
+`--mgmt-token` a token is generated and persisted to `~/.config/punktfunk/mgmt-token` (the web console
+reads the same file). Pass `--mgmt-bind 127.0.0.1:47990` to keep 47990 loopback-only. Every endpoint
+is in the interactive [**API Reference**](/api).
 
 By default the host **requires pairing** — see [Pairing & Trust](/docs/pairing). On `serve` you
-**arm pairing from the web console** (or mgmt API); the host then displays a 4-digit PIN. Pass `--open` to
-turn off the mandatory-pairing default and serve any device on the network (trusted single-user setups
-only). `punktfunk1-host` (below) requires pairing by default too; its `--allow-tofu` flag is the
-test-host equivalent of `--open`.
+**arm pairing from the web console**; the host then displays a 4-digit PIN. `--open` serves any
+device on the network (trusted single-user setups only). `punktfunk1-host` requires pairing too;
+its `--allow-tofu` flag is the test-host equivalent of `--open`.
 
 ## `ctl`
 
@@ -177,23 +175,18 @@ the host's own message and exit 1.
 `ctl` reads two files from the host's config directory (`~/.config/punktfunk`, mode 0700) and
 nothing else:
 
-- `mgmt-token` — the operator token the host mints for itself on first start, the same one the web
-  console uses. `ctl` **consumes** it and never creates one: a missing token is an error, not a
-  prompt.
-- `native-cert.pem` (or `cert.pem` on older hosts) — the host's own certificate, which `ctl` pins
-  **before** sending the token. If the process answering on the management port presents anything
-  else, the connection fails during the TLS handshake and no credential is ever transmitted —
-  that is exit code 4.
+- `mgmt-token` — the operator token the host mints on first start, the same one the web console
+  uses. `ctl` **consumes** it and never creates one: a missing token is an error, not a prompt.
+- `native-cert.pem` (or `cert.pem` on older hosts) — the host's certificate, which `ctl` pins
+  **before** sending the token. Anything else answering on the management port fails the TLS
+  handshake and no credential is ever transmitted — that is exit code 4.
 
-There is deliberately **no `--token` flag and no token environment variable**. A credential on a
-command line or in an environment is readable by other processes on the box through
-`/proc/<pid>/cmdline` and `/proc/<pid>/environ`, which is exactly what the 0700 config directory
-exists to prevent. The consequence worth knowing: a host started with `--mgmt-token` (or
-`PUNKTFUNK_MGMT_TOKEN`) and no persisted token file cannot be reached by `ctl`. Every packaged
-install persists one, so this only affects hand-run dev hosts.
+There is deliberately **no `--token` flag and no token environment variable** — a credential on a
+command line or in an environment is readable by other processes on the box. The consequence: a
+host started with `--mgmt-token` and no persisted token file can't be reached by `ctl`. Every
+packaged install persists one, so this only affects hand-run dev hosts.
 
-Everything runs over loopback, because the management API honours the admin surface from loopback
-peers only — `ctl` adds no listener and no new way in.
+Everything runs over loopback — `ctl` adds no listener and no new way in.
 
 ## `punktfunk1-host`
 

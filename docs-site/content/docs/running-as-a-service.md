@@ -252,8 +252,7 @@ host — apt, dnf, pacman, the Bazzite sysext, the NixOS module, the Steam Deck 
 second, deliberately small program, **`punktfunk-encode-worker`**, and grants `cap_sys_nice=ep` to
 *that*. The host starts one per PyroWave session, hands it the captured frames, and takes the
 compressed video back; the worker talks to nothing else, not your desktop and not the network.
-`punktfunk-host` itself carries **no capability, on any channel** — its posture since 0.25.0, and
-the one KDE needs.
+`punktfunk-host` itself must carry **no capability** — see below.
 
 > **Never `setcap` `punktfunk-host`.** Not by hand, not through a systemd `AmbientCapabilities=`
 > line, not through a NixOS `security.wrappers` entry. All three put the capability in the same
@@ -271,11 +270,8 @@ KWin virtual output failed: KWin does not expose zkde_screencast_unstable_v1 to 
 ```
 
 which reads exactly like a missing or mis-installed `.desktop` file and survives reinstalling both
-ends. The first 0.26.0 packages granted the host the capability and shipped precisely this, on every
-Linux channel; the grant was revoked everywhere later the same day, and 0.27.0 is the first release
-whose version number carries that revocation to a machine that already installed one of them. If
-you see that error, check the binaries first — the host's own message names the capability when it
-finds one:
+ends. If you see that error, check the binaries — the host's own message names the capability when
+it finds one:
 
 ```sh
 getcap /usr/bin/punktfunk-host              # correct output is nothing at all

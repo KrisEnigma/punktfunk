@@ -667,6 +667,26 @@ private fun GeneralSettings(s: Settings, update: (Settings) -> Unit) {
             caption = "Compact is one line; Detailed adds the decoder and latency breakdown. " +
                 "A 3-finger tap, or Select + X on a pad, cycles the tiers in-stream.",
         ) { v -> update(s.copy(statsVerbosity = v)) }
+        DeviceScopeOnly {
+            ToggleRow(
+                title = "Advanced statistics",
+                subtitle = "Off shows the figures Moonlight's overlay also shows. On shows " +
+                    "capture to glass as p50/p95 and every stage between.",
+                checked = s.advancedStats,
+                onCheckedChange = { on -> update(s.copy(advancedStats = on)) },
+            )
+            val context = LocalContext.current
+            ClickableRow(title = "What each number means", subtitle = "docs.punktfunk.unom.io/docs/stats") {
+                runCatching {
+                    context.startActivity(
+                        android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse("https://docs.punktfunk.unom.io/docs/stats"),
+                        ),
+                    )
+                }
+            }
+        }
     }
     DeviceScopeOnly {
         SettingsGroup("Library") {

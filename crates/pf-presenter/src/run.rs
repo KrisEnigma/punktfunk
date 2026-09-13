@@ -6,9 +6,9 @@
 //! exits when it ends. **browse** (`run_browse`) idles the console library between
 //! streams; overlay actions launch, session end returns to the library.
 //!
-//! Stdout is the machine interface: `{"ready":true}` after the first presented frame,
-//! `stats: …` once per window while the overlay tier is not Off. The stats line always
-//! carries the full Detailed text so parsers see a stable shape. Logs go to stderr.
+//! Stdout is the machine interface: `{"ready":true}` after the first presented frame, then
+//! once per window while the overlay tier is not Off: `stats: …` (the Advanced Detailed
+//! text, lines joined by ` | `) and `stats-json: …` (the snapshot). Logs go to stderr.
 //!
 //! In-stream chords share Ctrl+Alt+Shift: Q release/engage, M mouse model, D
 //! disconnect, S stats tier, V microphone mute.
@@ -26,12 +26,13 @@ use crate::touch::{Abs, Act};
 use crate::vk::{FrameInput, Presenter};
 use anyhow::{Context as _, Result};
 use pf_client_core::gamepad::GamepadService;
-use pf_client_core::session::{self, SessionEvent, SessionHandle, SessionParams, Stats};
+use pf_client_core::session::{self, DecodeFacts, SessionEvent, SessionHandle, SessionParams};
 use pf_client_core::trust::{MouseMode, PresentPriority, StatsVerbosity, TouchMode};
 use pf_client_core::video::VulkanDecodeDevice;
-use pf_client_core::video::{DecodedFrame, DecodedImage};
+use pf_client_core::video::{DecodeHealth, DecodedFrame, DecodedImage};
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::config::{CompositorPref, Mode};
+use punktfunk_core::hud::{self, HudLine, StatsSnapshot};
 use sdl3::event::{DisplayEvent, Event, WindowEvent};
 use sdl3::keyboard::Mod;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -207,18 +208,19 @@ struct StreamState {
     /// OSD `HDR→SDR (raw)`: this lane showed PQ with no tone-map. Nothing sets it
     /// today — every lane goes through planar CSC. Kept so a future bypass can say so.
     hdr_untonemapped: bool,
-    /// 1 s window: e2e capture→displayed (host-clock corrected) p50+p95;
-    /// `win_disp_us` = decoded→displayed p50.
-    win_e2e_us: Vec<u64>,
-    win_disp_us: Vec<u64>,
-    /// Display stage halves (present-timing only): decoded→submit and submit→on-glass.
-    win_pace_us: Vec<u64>,
-    win_latch_us: Vec<u64>,
-    /// Per present: D3D11 import lookup (0 off that lane) and `vkQueueSubmit` wall time.
-    win_import_us: Vec<u64>,
-    win_submit_us: Vec<u64>,
+    /// Per present: D3D11 import lookup (0 off that lane) and `vkQueueSubmit` wall time,
+    /// for the presenter window line.
+    win_import_us: Vec<u32>,
+    win_submit_us: Vec<u32>,
+    /// The overlay window (`NativeClient::hud`) closes here once a second.
     win_start: Instant,
-    presented: PresentedWindow,
+    /// Last closed window, so a tier cycle re-renders at once rather than up to 1 s later.
+    last_snap: Option<StatsSnapshot>,
+    /// Latest decoder facts from the pump, and the integrity counters as of the last window.
+    facts: DecodeFacts,
+    health_seen: Option<DecodeHealth>,
+    /// Glass-gate force-opens in the last window. The VRR probe trusts only healthy windows.
+    last_forced: u32,
     /// Newest-wins under latency, smoothing FIFO under smoothness. A smoothing store
     /// holds decoder-pool frames up to `buffer` deep on top of the depth-2 wake
     /// channels — headroom for 1..=3; deeper must revisit pool sizing.
@@ -262,10 +264,7 @@ struct StreamState {
     /// left to demote to.
     cpu_present_warned: bool,
     hw_fails: u32,
-    osd_text: String,
-    /// Last pump window, so a Ctrl+Alt+Shift+S cycle can re-render the OSD instead of
-    /// waiting up to 1 s for the next Stats event.
-    last_stats: Option<Stats>,
+    osd: Vec<HudLine>,
     /// Last resize event's stamp. `Some` = pending; the tick fires once ~400 ms pass
     /// with no further size events (never per drag-frame — each switch rebuilds the host).
     resize_pending: Option<Instant>,
@@ -366,14 +365,13 @@ impl StreamState {
             video_e2e: None,
             hdr: false,
             hdr_untonemapped: false,
-            win_e2e_us: Vec::with_capacity(256),
-            win_disp_us: Vec::with_capacity(256),
-            win_pace_us: Vec::with_capacity(256),
-            win_latch_us: Vec::with_capacity(256),
             win_import_us: Vec::with_capacity(256),
             win_submit_us: Vec::with_capacity(256),
             win_start: Instant::now(),
-            presented: PresentedWindow::default(),
+            last_snap: None,
+            facts: DecodeFacts::default(),
+            health_seen: None,
+            last_forced: 0,
             store: FrameStore::new(usize::from(priority.fifo_capacity())),
             clock: LatchClock::new(native_refresh_hz),
             pacer: SourcePacer::new(),
@@ -391,8 +389,7 @@ impl StreamState {
             pyro_present_warned: false,
             cpu_present_warned: false,
             hw_fails: 0,
-            osd_text: String::new(),
-            last_stats: None,
+            osd: Vec::new(),
             resize_pending: None,
             resize_sent_at: None,
             resize_requested: None,
@@ -923,7 +920,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         continue;
                     }
                     if chord && sc == Scancode::S {
-                        bump_stats_tier(&mut stats_verbosity, &mut stream, &presenter);
+                        bump_stats_tier(&mut stats_verbosity, &mut stream);
                         tracing::info!(tier = ?stats_verbosity, "chord: stats verbosity");
                         continue;
                     }
@@ -1086,13 +1083,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             y,
                             timestamp,
                         ) {
-                            on_touch_act(
-                                act,
-                                &mut stats_verbosity,
-                                &mut stream,
-                                &presenter,
-                                &mut overlay,
-                            );
+                            on_touch_act(act, &mut stats_verbosity, &mut stream, &mut overlay);
                         }
                     } else if let Some(st) = stream.as_mut() {
                         // A finger from a device SDL does not call a touchscreen: ignored,
@@ -1129,13 +1120,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             y,
                             timestamp,
                         ) {
-                            on_touch_act(
-                                act,
-                                &mut stats_verbosity,
-                                &mut stream,
-                                &presenter,
-                                &mut overlay,
-                            );
+                            on_touch_act(act, &mut stats_verbosity, &mut stream, &mut overlay);
                         }
                     }
                 }
@@ -1160,13 +1145,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             y,
                             timestamp,
                         ) {
-                            on_touch_act(
-                                act,
-                                &mut stats_verbosity,
-                                &mut stream,
-                                &presenter,
-                                &mut overlay,
-                            );
+                            on_touch_act(act, &mut stats_verbosity, &mut stream, &mut overlay);
                         }
                     }
                 }
@@ -1532,41 +1511,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         o.session_phase(SessionPhase::Streaming);
                     }
                 }
-                SessionEvent::Stats(s) => {
-                    st.osd_text = stats_text(
-                        stats_verbosity,
-                        &st.mode_line,
-                        &s,
-                        &st.presented,
-                        st.hdr,
-                        presenter.hdr_active(),
-                        st.hdr_untonemapped,
-                        st.profile.as_deref(),
-                    );
-                    if stats_verbosity != StatsVerbosity::Off {
-                        // The stdout line is the machine interface — always the full
-                        // Detailed text, whatever the OSD tier.
-                        let full = stats_text(
-                            StatsVerbosity::Detailed,
-                            &st.mode_line,
-                            &s,
-                            &st.presented,
-                            st.hdr,
-                            presenter.hdr_active(),
-                            st.hdr_untonemapped,
-                            st.profile.as_deref(),
-                        );
-                        // Not `println!`: it panics on EPIPE, and this is the most frequent
-                        // write on a pipe whose reader (the shell) can exit mid-stream.
-                        use std::io::Write as _;
-                        let _ = writeln!(
-                            std::io::stdout().lock(),
-                            "stats: {}",
-                            full.replace('\n', " | ")
-                        );
-                    }
-                    st.last_stats = Some(s);
-                }
+                SessionEvent::DecodeFacts(f) => st.facts = f,
                 // Welcome advert first, then every mid-session AccessUpdate. Re-gate live
                 // capture: a removed POINTER/KEYBOARD bit releases the lock it backed;
                 // with neither class left the capture drops (auto-release, so a later
@@ -1760,7 +1705,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             tracing::info!(?cmd, "ring");
             match cmd {
                 RingCommand::CycleStats => {
-                    bump_stats_tier(&mut stats_verbosity, &mut stream, &presenter);
+                    bump_stats_tier(&mut stats_verbosity, &mut stream);
                 }
                 RingCommand::Keyboard => ring_keyboard = !ring_keyboard,
                 // The pad worker owns the wire index and the owed release, so this one is
@@ -1800,8 +1745,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         _ => None,
                     };
                     (
-                        (stats_verbosity != StatsVerbosity::Off && !st.osd_text.is_empty())
-                            .then_some(st.osd_text.as_str()),
+                        (stats_verbosity != StatsVerbosity::Off && !st.osd.is_empty())
+                            .then_some(st.osd.as_slice()),
                         hint,
                     )
                 }
@@ -1888,22 +1833,20 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         let e2e = (s.displayed_ns as i128 + clock_offset_ns as i128
                             - s.pts_ns as i128)
                             .max(0) as u64;
+                        // Hand the audio plane the figure it has to hit: the on-glass branch.
                         if e2e > 0 && e2e < 10_000_000_000 {
-                            st.win_e2e_us.push(e2e / 1000);
-                            // Hand the audio plane the figure it has to hit. This is the
-                            // true on-glass branch.
                             if let Some(c) = st.video_e2e.as_ref() {
                                 c.store(e2e, Ordering::Relaxed);
                             }
                         }
-                        st.win_disp_us
-                            .push(s.displayed_ns.saturating_sub(s.decoded_ns) / 1000);
-                        // Display split: our pipeline vs the vsync latch. Only meaningful
-                        // with true glass stamps.
-                        st.win_pace_us
-                            .push(s.submitted_ns.saturating_sub(s.decoded_ns) / 1000);
-                        st.win_latch_us
-                            .push(s.displayed_ns.saturating_sub(s.submitted_ns) / 1000);
+                        if let Some(c) = &st.connector {
+                            c.hud().note_displayed(
+                                s.pts_ns,
+                                s.decoded_ns,
+                                s.submitted_ns,
+                                s.displayed_ns,
+                            );
+                        }
                         // Latch miss: glass later than one panel period past submit plus
                         // the lead we already applied. Store evictions happen whenever
                         // the stream out-runs the panel and say nothing about the latch.
@@ -1919,7 +1862,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     // (not the learned one — a slow stream makes the learner adopt our
                     // cadence as "the grid"). FIFO-family only: MAILBOX/IMMEDIATE never
                     // wait for vblank, so they would look like VRR. Else Unknown.
-                    let healthy = st.presented.forced == 0;
+                    let healthy = st.last_forced == 0;
                     if presenter.vblank_locked() {
                         st.cadence.note(&stamps, st.mode_period_ns, healthy);
                     }
@@ -2202,8 +2145,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 if did_present {
                     presented_video = true;
                     let (import_us, submit_us) = presenter.last_timings();
-                    st.win_import_us.push(u64::from(import_us));
-                    st.win_submit_us.push(u64::from(submit_us));
+                    st.win_import_us.push(import_us);
+                    st.win_submit_us.push(submit_us);
                     if opts.json_status && !st.ready_announced {
                         st.ready_announced = true;
                         println!("{{\"ready\":true}}");
@@ -2222,17 +2165,16 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             .map_or(0, |o| o.load(Ordering::Relaxed));
                         let e2e = (displayed_ns as i128 + clock_offset_ns as i128 - pts_ns as i128)
                             .max(0) as u64;
+                        // Same hand-off as the glass-stamped branch. Anchored on submit, so it
+                        // understates the video leg by up to a refresh: inside the audio deadband.
                         if e2e > 0 && e2e < 10_000_000_000 {
-                            st.win_e2e_us.push(e2e / 1000);
-                            // Same hand-off as the glass-stamped branch. Anchored on submit
-                            // rather than a true latch, so it understates the video leg by
-                            // up to a refresh — the audio loop's deadband is wider than that.
                             if let Some(c) = st.video_e2e.as_ref() {
                                 c.store(e2e, Ordering::Relaxed);
                             }
                         }
-                        st.win_disp_us
-                            .push(displayed_ns.saturating_sub(decoded_ns) / 1000);
+                        if let Some(c) = &st.connector {
+                            c.hud().note_displayed(pts_ns, decoded_ns, 0, displayed_ns);
+                        }
                         // No glass stamps: the submit instant anchors an approximate grid
                         // on the mode's refresh period, so smoothness still drains one
                         // frame per (approximate) slot.
@@ -2241,25 +2183,16 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 }
             }
 
-            // Fold the presenter window into the shared stats line once per second.
+            // Close the overlay window once per second.
             if st.win_start.elapsed() >= Duration::from_secs(1) {
-                let (e2e_p50, e2e_p95) = session::window_percentiles(&mut st.win_e2e_us);
-                let (disp_p50, _) = session::window_percentiles(&mut st.win_disp_us);
-                let (pace_p50, _) = session::window_percentiles(&mut st.win_pace_us);
-                let (latch_p50, _) = session::window_percentiles(&mut st.win_latch_us);
-                let (import_p50, _) = session::window_percentiles(&mut st.win_import_us);
-                let (submit_p50, _) = session::window_percentiles(&mut st.win_submit_us);
-                let submit_max = st.win_submit_us.iter().copied().max().unwrap_or(0);
+                let import = punktfunk_core::hud::Summary::of(&mut st.win_import_us);
+                let submit = punktfunk_core::hud::Summary::of(&mut st.win_submit_us);
                 // Drained once per window and shared by the HUD and the log line — a
                 // second `take_counters` would read zeros.
                 let (replaced, q_drop, q_dry) = st.store.take_counters();
                 let (gated, forced) = st.gate.take_counters();
-                st.presented = PresentedWindow {
-                    e2e_p50_ms: e2e_p50 as f32 / 1000.0,
-                    e2e_p95_ms: e2e_p95 as f32 / 1000.0,
-                    display_ms: disp_p50 as f32 / 1000.0,
-                    pace_ms: pace_p50 as f32 / 1000.0,
-                    latch_ms: latch_p50 as f32 / 1000.0,
+                st.last_forced = forced;
+                let present = PresentCounters {
                     mode: presenter.present_mode_name(),
                     vrr: st.cadence.verdict(),
                     smoothing: st.store.is_smoothing(),
@@ -2268,12 +2201,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     gated,
                     forced,
                 };
-                st.win_e2e_us.clear();
-                st.win_disp_us.clear();
-                st.win_pace_us.clear();
-                st.win_latch_us.clear();
                 st.win_import_us.clear();
                 st.win_submit_us.clear();
+                let (pace_ms, latch_ms) =
+                    close_window(st, &presenter, &present, replaced, stats_verbosity);
                 st.win_start = Instant::now();
                 // Adaptive slot margin: start at 0 — a fixed lead is display tax — and
                 // widen one step per window whose measured latch misses demand it.
@@ -2291,9 +2222,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 if pacing_active && (present_debug || q_drop + q_dry + gated + forced > 0) {
                     let cadence_health = st.pacer.health();
                     tracing::info!(
-                        smoothing = st.presented.smoothing,
-                        mode = st.presented.mode,
-                        vrr = st.presented.vrr.label(),
+                        smoothing = present.smoothing,
+                        mode = present.mode,
+                        vrr = present.vrr.label(),
                         replaced,
                         q_drop,
                         q_dry,
@@ -2301,11 +2232,11 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         forced,
                         misses = st.win_misses,
                         out_max = st.win_out_max,
-                        pace_ms = st.presented.pace_ms,
-                        latch_ms = st.presented.latch_ms,
-                        import_us = import_p50,
-                        submit_us = submit_p50,
-                        submit_max_us = submit_max,
+                        pace_ms,
+                        latch_ms,
+                        import_us = import.p50_us,
+                        submit_us = submit.p50_us,
+                        submit_max_us = submit.max_us,
                         period_us = st.clock.period_ns() / 1000,
                         margin_us = st.margin_ns / 1000,
                         // Cadence loop's current hold and the jitter it is sized from,
@@ -2831,11 +2762,10 @@ fn on_touch_act(
     act: Act,
     verbosity: &mut StatsVerbosity,
     stream: &mut Option<StreamState>,
-    presenter: &Presenter,
     overlay: &mut Option<Box<dyn Overlay>>,
 ) {
     let input = match act {
-        Act::CycleStats => return bump_stats_tier(verbosity, stream, presenter),
+        Act::CycleStats => return bump_stats_tier(verbosity, stream),
         Act::Dial {
             progress,
             clockwise,
@@ -2991,26 +2921,10 @@ fn ring_command(
 
 /// Advance the stats-overlay tier and re-render the OSD immediately from the last
 /// window (waiting for the next Stats event would lag the trigger by up to 1 s).
-fn bump_stats_tier(
-    verbosity: &mut StatsVerbosity,
-    stream: &mut Option<StreamState>,
-    presenter: &Presenter,
-) {
+fn bump_stats_tier(verbosity: &mut StatsVerbosity, stream: &mut Option<StreamState>) {
     *verbosity = verbosity.next();
     if let Some(st) = stream {
-        st.osd_text = match &st.last_stats {
-            Some(s) => stats_text(
-                *verbosity,
-                &st.mode_line,
-                s,
-                &st.presented,
-                st.hdr,
-                presenter.hdr_active(),
-                st.hdr_untonemapped,
-                st.profile.as_deref(),
-            ),
-            None => String::new(),
-        };
+        render_osd(st, *verbosity);
     }
 }
 
@@ -3100,31 +3014,6 @@ fn overlay_scale(display_scale: f32, pref: f32) -> f32 {
     (base * pref).clamp(0.5, 4.0)
 }
 
-/// The presenter's share of the unified stats window — folded into each printed line.
-#[derive(Default)]
-struct PresentedWindow {
-    e2e_p50_ms: f32,
-    e2e_p95_ms: f32,
-    display_ms: f32,
-    /// Display stage split: `pace` = decoded → present-submit (our pipeline), `latch`
-    /// = submit → on-glass. Both `0` without `VK_KHR_present_wait`, where the two are
-    /// not separable — the HUD then shows the unsplit figure rather than a zero latch.
-    /// Latch dominating means the vsync/queue floor; pace dominating means us.
-    pace_ms: f32,
-    latch_ms: f32,
-    /// Live swapchain present mode. A MAILBOX request that landed on FIFO is why latch
-    /// is a refresh long.
-    mode: &'static str,
-    /// Whether variable refresh is measurably live (never claimed without evidence).
-    vrr: Cadence,
-    /// Smoothing FIFO overflow drops and post-preroll underflows; glass gate holds/force-opens.
-    smoothing: bool,
-    q_drop: u32,
-    q_dry: u32,
-    gated: u32,
-    forced: u32,
-}
-
 /// How long an access toast holds the pill slot. The chip keeps the standing truth.
 const ACCESS_NOTICE_S: u64 = 6;
 
@@ -3134,230 +3023,181 @@ const HINT_KEYBOARD: &str = "Click the stream to capture input · Ctrl+Alt+Shift
 const HINT_WITH_PAD: &str = "Click the stream to capture input · Ctrl+Alt+Shift+Q releases · \
      Ctrl+Alt+Shift+D disconnects · hold L1 + R1 + Start + Select to leave";
 
-/// Unified stats window as OSD text. Compact = one line, Normal = mode + e2e + loss,
-/// Detailed = decoder path, HDR tag and the per-stage equation. Off reads empty.
-/// Multi-line for the console panel; the stdout `stats:` line joins Detailed with `|`.
-///
-/// HDR tag: `HDR` only when the swapchain actually runs HDR10; a PQ stream tone-mapped
-/// onto SDR shows `HDR→SDR`; a lane that shows PQ with no tone-map (`hdr_untonemapped`)
-/// shows `HDR→SDR (raw)`. No present arm sets that flag; the branch is kept so a
-/// bypass can say so. See `StreamState::hdr_untonemapped`.
-///
-/// `profile` closes the first line at every tier (`None` = global defaults).
-#[allow(clippy::too_many_arguments)]
-fn stats_text(
-    verbosity: StatsVerbosity,
-    mode_line: &str,
-    s: &Stats,
-    p: &PresentedWindow,
-    hdr_stream: bool,
-    hdr_display: bool,
-    hdr_untonemapped: bool,
-    profile: Option<&str>,
-) -> String {
-    let profile_tag = profile.map(|n| format!(" · {n}")).unwrap_or_default();
-    match verbosity {
-        StatsVerbosity::Off => return String::new(),
-        StatsVerbosity::Compact => {
-            // fps · e2e ms · Mb/s — the latency term waits for the first presenter
-            // window (0 = no capture→displayed samples yet).
-            let mut text = format!("{:.0} fps", s.fps);
-            if p.e2e_p50_ms > 0.0 {
-                text.push_str(&format!(" · {:.1} ms", p.e2e_p50_ms));
-            }
-            text.push_str(&format!(" · {:.0} Mb/s", s.mbps));
-            if s.lost > 0 {
-                text.push_str(&format!(" · lost {}", s.lost));
-            }
-            text.push_str(&profile_tag);
-            return text;
-        }
-        StatsVerbosity::Normal | StatsVerbosity::Detailed => {}
-    }
-    let detailed = verbosity == StatsVerbosity::Detailed;
-    let mut text = if detailed {
-        // Encoder target next to measured rate: measured alone cannot distinguish a
-        // capped encoder from a cheap scene. `(auto)` marks Automatic — the ABR moves
-        // the target by design. Omitted when the host never reported a rate.
-        let target = match (s.target_kbps, s.auto_rate) {
-            (0, _) => String::new(),
-            (t, true) => format!(" · target {:.0} Mb/s (auto)", f64::from(t) / 1000.0),
-            (t, false) => format!(" · target {:.0} Mb/s", f64::from(t) / 1000.0),
-        };
-        // `4:4:4→4:2:0` = asked for full chroma and the host resolved 4:2:0 — otherwise
-        // the Settings switch's effect is unobservable.
-        let chroma = match (s.asked_444, s.chroma_444) {
-            (_, true) => " · 4:4:4",
-            (true, false) => " · 4:4:4→4:2:0",
-            _ => "",
-        };
-        format!(
-            "{mode_line} · {:.0} fps · {:.1} Mb/s{target} · {}{}{chroma}",
-            s.fps,
-            s.mbps,
-            if s.decoder.is_empty() { "-" } else { s.decoder },
-            match (hdr_stream, hdr_display) {
-                (true, true) => " · HDR",
-                (true, false) if hdr_untonemapped => " · HDR→SDR (raw)",
-                (true, false) => " · HDR→SDR",
-                _ => "",
-            },
-        )
-    } else {
-        format!("{mode_line} · {:.0} fps · {:.1} Mb/s", s.fps, s.mbps)
+/// The presenter's own counters for one window: what the `present:` line reports.
+struct PresentCounters {
+    mode: &'static str,
+    vrr: Cadence,
+    smoothing: bool,
+    q_drop: u32,
+    q_dry: u32,
+    gated: u32,
+    forced: u32,
+}
+
+/// Close the overlay window: the connector's snapshot plus what only the presenter knows,
+/// then the OSD and the stdout lines. Returns the display split's p50s (ms) for the log.
+fn close_window(
+    st: &mut StreamState,
+    presenter: &Presenter,
+    present: &PresentCounters,
+    replaced: u32,
+    tier: StatsVerbosity,
+) -> (f32, f32) {
+    let Some(c) = st.connector.clone() else {
+        return (0.0, 0.0);
     };
-    text.push_str(&profile_tag);
-    text.push_str(&format!(
-        "\ne2e {:.1}/{:.1} ms (p50/p95)",
-        p.e2e_p50_ms, p.e2e_p95_ms
-    ));
-    if detailed {
-        if s.split {
-            text.push_str(&format!(" · host {:.1} · net {:.1}", s.host_ms, s.net_ms));
-        } else {
-            text.push_str(&format!(" · host+net {:.1}", s.host_net_ms));
-        }
-        // `decode` joins the partition line only where it is one. On the async native-
-        // Vulkan rung `decoded` is a submission stamp, so GPU decode sits inside
-        // `display` and this figure re-counts it. They add up without it.
-        // See `Stats::decode_overlaps_display`.
-        if s.decode_overlaps_display {
-            text.push_str(&format!(" · display {:.1} ms", p.display_ms));
-        } else {
-            text.push_str(&format!(
-                " · decode {:.1} · display {:.1} ms",
-                s.decode_ms, p.display_ms
-            ));
-        }
-        // Display split. Only with true on-glass stamps — without them the unsplit
-        // figure stands alone rather than implying a zero latch.
-        if p.latch_ms > 0.0 || p.pace_ms > 0.0 {
-            text.push_str(&format!(
-                " (pace {:.1} + latch {:.1})",
-                p.pace_ms, p.latch_ms
-            ));
-        }
-        // Own line, qualified: one frame per window on this rung (a per-frame fence wait
-        // would serialise the decode pipeline), so it is a single sample rather than a
-        // p50; and it is already inside `display`. Suppressed at 0 (every fence wait
-        // timed out) rather than a real zero.
-        if s.decode_overlaps_display && s.decode_ms > 0.0 {
-            text.push_str(&format!(
-                "\ndecode {:.1} ms (1 sample, inside display — not additive)",
-                s.decode_ms
-            ));
-        }
-        // Extended 0xCF host-stage split: its own line so queue → encode → seal/xfer →
-        // pace reads as the host pipeline in order.
-        if s.staged {
-            text.push_str(&format!(
-                "\nhost: queue {:.1} · encode {:.1} · xfer {:.1} · pace {:.1} ms",
-                s.host_queue_ms, s.host_encode_ms, s.host_xfer_ms, s.host_pace_ms
-            ));
-        }
-        // Presenter line: live swapchain mode, chosen intent, engine counters.
-        // Counters only when non-zero, so a healthy latency session shows just the mode.
-        if !p.mode.is_empty() {
-            text.push_str(&format!("\npresent: {}", p.mode));
-            // Only once measured — an unproven "vrr no" would be a claim, not a reading.
-            if p.vrr != Cadence::Unknown {
-                text.push_str(&format!(" · vrr {}", p.vrr.label()));
-            }
-            if p.smoothing {
-                text.push_str(" · smoothing");
-            }
-            if p.q_drop > 0 {
-                text.push_str(&format!(" · qdrop {}", p.q_drop));
-            }
-            if p.q_dry > 0 {
-                text.push_str(&format!(" · qdry {}", p.q_dry));
-            }
-            if p.gated > 0 {
-                text.push_str(&format!(" · gated {}", p.gated));
-            }
-            if p.forced > 0 {
-                text.push_str(&format!(" · forced {}", p.forced));
-            }
-        }
+    // Replaced before display, or dropped from a full smoothing queue: decoded, never shown.
+    c.hud()
+        .note_skipped(replaced.saturating_add(present.q_drop), 0);
+    let mut snap = c.hud_snapshot();
+    snap.decoder = st.facts.decoder.to_string();
+    snap.hdr = hdr_shown(st.hdr, presenter.hdr_active(), st.hdr_untonemapped);
+    snap.asked_444 = st.params.video_caps & punktfunk_core::quic::VIDEO_CAP_444 != 0;
+    snap.profile = st.profile.clone();
+    snap.on_glass = presenter.present_timing_active();
+    let prev = std::mem::replace(&mut st.health_seen, st.facts.health);
+    snap.extras = desktop_extras(present, st.facts.health, prev, session::codec_fallbacks());
+    tracing::debug!(
+        e2e_p50_us = snap.e2e.p50_us,
+        e2e_p95_us = snap.e2e.p95_us,
+        host_p50_us = snap.host.p50_us,
+        host_p95_us = snap.host.p95_us,
+        net_p50_us = snap.net.p50_us,
+        net_p95_us = snap.net.p95_us,
+        decode_p50_us = snap.decode.p50_us,
+        decode_p95_us = snap.decode.p95_us,
+        display_p50_us = snap.display.p50_us,
+        display_p95_us = snap.display.p95_us,
+        rtt_us = snap.rtt_us.unwrap_or(0),
+        lost = snap.lost,
+        received = snap.received,
+        "stream window"
+    );
+    if tier != StatsVerbosity::Off {
+        print_stats(&snap);
     }
-    if s.lost > 0 {
-        text.push_str(&format!("\nlost {} ({:.1}%)", s.lost, s.lost_pct));
+    let split = (
+        snap.pace.p50_us as f32 / 1000.0,
+        snap.latch.p50_us as f32 / 1000.0,
+    );
+    st.last_snap = Some(snap);
+    render_osd(st, tier);
+    split
+}
+
+/// Re-render the OSD from the last closed window at `tier`.
+fn render_osd(st: &mut StreamState, tier: StatsVerbosity) {
+    st.osd = match &st.last_snap {
+        Some(s) => hud::format(s, tier, st.params.advanced_stats),
+        None => Vec::new(),
+    };
+}
+
+/// The stdout machine interface: the Advanced Detailed text for a person reading a log, and
+/// the snapshot for a program. Both are additive; readers skip what they do not know.
+fn print_stats(snap: &StatsSnapshot) {
+    use std::io::Write as _;
+    let text = hud::join(&hud::format(snap, StatsVerbosity::Detailed, true), " | ");
+    let json = serde_json::to_string(snap).unwrap_or_default();
+    // Not `println!`: it panics on EPIPE, and the reader (the shell) can exit mid-stream.
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "stats: {text}");
+    let _ = writeln!(out, "stats-json: {json}");
+}
+
+/// How the stream reaches the screen. No present arm sets `untonemapped` today; the tag
+/// stays so a lane that bypasses CSC can say so rather than claim a tone-map.
+fn hdr_shown(stream_hdr: bool, display_hdr: bool, untonemapped: bool) -> hud::Hdr {
+    match (stream_hdr, display_hdr, untonemapped) {
+        (false, ..) => hud::Hdr::Sdr,
+        (true, true, _) => hud::Hdr::Hdr,
+        (true, false, true) => hud::Hdr::Untonemapped,
+        (true, false, false) => hud::Hdr::ToneMapped,
     }
-    // Mic uplink line only while voice is going out (a healthy 10 ms-frame uplink reads
-    // ~100 f/s) and only in Detailed. A muted mic reads 0 and drops the line; mute has
-    // its own badge, so this stays a throughput readout.
-    if detailed && (s.mic_sent > 0 || s.mic_dropped > 0) {
-        text.push_str(&format!("\nmic {} f/s", s.mic_sent));
-        if s.mic_dropped > 0 {
-            text.push_str(&format!(" · dropped {}", s.mic_dropped));
+}
+
+/// Lines only the desktop measures: the live present path, decode integrity over this window
+/// (`health` against `prev`), and this process's codec fallbacks.
+fn desktop_extras(
+    p: &PresentCounters,
+    health: Option<DecodeHealth>,
+    prev: Option<DecodeHealth>,
+    codec_fallbacks: u64,
+) -> Vec<hud::Extra> {
+    let mut out = Vec::new();
+    if !p.mode.is_empty() {
+        let mut t = format!("present: {}", p.mode);
+        // Only once measured: an unproven "vrr no" would be a claim, not a reading.
+        if p.vrr != Cadence::Unknown {
+            t.push_str(&format!(" · vrr {}", p.vrr.label()));
         }
+        if p.smoothing {
+            t.push_str(" · smoothing");
+        }
+        for (name, n) in [
+            ("qdrop", p.q_drop),
+            ("qdry", p.q_dry),
+            ("gated", p.gated),
+            ("forced", p.forced),
+        ] {
+            if n > 0 {
+                t.push_str(&format!(" · {name} {n}"));
+            }
+        }
+        out.push(hud::Extra {
+            text: t,
+            tier: StatsVerbosity::Detailed,
+            advanced_only: false,
+            role: hud::Role::Muted,
+        });
     }
-    // Audio plane latency, Detailed-only. `buffer` is decoded audio queued ahead of
-    // the speaker; `a/v` is where that puts it relative to the picture (+ = audio behind).
-    // Both: a deep ring on a jittery link is correct, and only the offset distinguishes
-    // that from a ring holding audio late.
-    if detailed && s.audio_buffer_ms > 0 {
-        text.push_str(&format!("\naudio buffer {} ms", s.audio_buffer_ms));
-        if s.audio_av_offset_ms != 0 {
-            text.push_str(&format!(" · a/v {:+} ms", s.audio_av_offset_ms));
+    // A lane that cannot see damage says nothing; one that looked and saw none also says
+    // nothing; one with half its detectors says so every window.
+    if let Some(h) = health {
+        let base = prev.unwrap_or_default();
+        let damaged = h.damaged.saturating_sub(base.damaged);
+        let refused = h.refused.saturating_sub(base.refused);
+        let failed = h.failed.saturating_sub(base.failed);
+        let mut parts = Vec::new();
+        if damaged > 0 {
+            parts.push(format!("damaged {damaged}"));
         }
-    }
-    // Resolved audio format. Not gated to Detailed: it is the one thing a user who
-    // turned lossless on needs to see. Settings shows what was requested; the host
-    // can decline every condition. Silent on Opus (every session's default) rather
-    // than printing `audio opus 48 kHz`. A zero rate/depth is no reading — no print.
-    if s.audio_lossless && s.audio_rate_hz > 0 && s.audio_bits > 0 {
-        let rate = if s.audio_rate_hz % 1000 == 0 {
-            format!("{} kHz", s.audio_rate_hz / 1000)
-        } else {
-            format!("{} Hz", s.audio_rate_hz)
-        };
-        text.push_str(&format!("\naudio lossless {rate} / {}-bit", s.audio_bits));
-    }
-    // Decode integrity. Last, and only when it has something to say — additive for
-    // stdout parsers. A device with no `RESULT_STATUS` (RADV) still prints "no driver
-    // status": a silent line would look like a clean bill of health. A lane that
-    // cannot report at all (CPU, PyroWave) prints nothing rather than zeros.
-    if detailed && s.decode_integrity {
-        let mut parts: Vec<String> = Vec::new();
-        if s.decode_damaged > 0 {
-            parts.push(format!("damaged {}", s.decode_damaged));
+        if refused > 0 {
+            parts.push(format!("refused {refused}"));
         }
-        if s.decode_refused > 0 {
-            // Decoder could not run at all — the screen is frozen rather than
-            // occasionally glitching. Without it a rung refusing every AU prints
-            // no integrity line.
-            parts.push(format!("refused {}", s.decode_refused));
+        if failed > 0 {
+            parts.push(format!("driver-failed {failed}"));
         }
-        if s.decode_failed > 0 {
-            parts.push(format!("driver-failed {}", s.decode_failed));
+        if h.run > 0 {
+            parts.push(format!("run {}", h.run));
         }
-        if s.concealed_run > 0 {
-            // A run still climbing at the end of the window is a different problem
-            // from the same count of isolated damaged AUs.
-            parts.push(format!("run {}", s.concealed_run));
+        // Session-cumulative: a 1 Hz sample of `run` misses the worst moment.
+        if h.worst_run > h.run {
+            parts.push(format!("worst run {}", h.worst_run));
         }
-        if s.worst_concealed_run > s.concealed_run {
-            // Only when it says something the instantaneous run does not: sampled once
-            // a second, the worst moment lasts a handful of frames. Session-cumulative,
-            // unlike everything before it on this line, which is why it is labelled.
-            parts.push(format!("worst run {}", s.worst_concealed_run));
-        }
-        if !s.decode_status_queries {
+        if !h.status_queries {
             parts.push("no driver status".into());
         }
         if !parts.is_empty() {
-            text.push_str(&format!("\nintegrity: {}", parts.join(" · ")));
+            let hurt = damaged + refused + failed > 0 || h.run > 0;
+            out.push(hud::Extra {
+                text: format!("integrity: {}", parts.join(" · ")),
+                tier: StatsVerbosity::Detailed,
+                advanced_only: true,
+                role: if hurt {
+                    hud::Role::Warn
+                } else {
+                    hud::Role::Muted
+                },
+            });
         }
     }
-    // How many times in this process a session's codec ran out of decode rungs and
-    // reconnected as another. Process-cumulative, last, only when nonzero — additive
-    // for stdout parsers. On the line because the question is a rate across sessions.
-    let fallbacks = pf_client_core::session::codec_fallbacks();
-    if detailed && fallbacks > 0 {
-        text.push_str(&format!("\ncodec_fallbacks {fallbacks}"));
+    if codec_fallbacks > 0 {
+        out.push(hud::Extra::detail(format!(
+            "codec_fallbacks {codec_fallbacks}"
+        )));
     }
-    text
+    out
 }
 
 #[cfg(test)]
@@ -3628,520 +3468,134 @@ mod tests {
         );
     }
 
-    fn sample() -> (Stats, PresentedWindow) {
-        (
-            Stats {
-                fps: 119.6,
-                mbps: 24.3,
-                host_net_ms: 2.1,
-                host_ms: 1.2,
-                net_ms: 0.9,
-                split: true,
-                host_queue_ms: 0.3,
-                host_encode_ms: 0.5,
-                host_xfer_ms: 0.1,
-                host_pace_ms: 0.3,
-                staged: true,
-                decode_ms: 1.8,
-                // The fixture is the synchronous shape, so `decode` stays on the partition
-                // line; the async rung's split-out rendering is exercised separately below.
-                decode_overlaps_display: false,
-                lost: 3,
-                lost_pct: 0.4,
-                mic_sent: 0,
-                mic_dropped: 0,
-                audio_buffer_ms: 0,
-                audio_av_offset_ms: 0,
-                // The Opus plane every ordinary session runs, so the tier texts below
-                // stay silent on audio format.
-                audio_lossless: false,
-                audio_rate_hz: 0,
-                audio_bits: 0,
-                decoder: "native-vulkan",
-                // Baseline: no reported target, 4:2:0 never asked.
-                target_kbps: 0,
-                auto_rate: false,
-                chroma_444: false,
-                asked_444: false,
-                // A lane with no detectors (CPU / PyroWave): it cannot answer integrity
-                // questions, so every existing tier text below must stay unchanged.
-                decode_integrity: false,
-                decode_damaged: 0,
-                decode_failed: 0,
-                decode_refused: 0,
-                concealed_run: 0,
-                worst_concealed_run: 0,
-                decode_status_queries: false,
-            },
-            PresentedWindow {
-                e2e_p50_ms: 6.4,
-                e2e_p95_ms: 9.1,
-                display_ms: 1.1,
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Off is empty, Compact is one line, Normal adds mode + e2e but no stage terms,
-    /// Detailed carries everything.
-    #[test]
-    fn stats_text_tiers() {
-        let (s, p) = sample();
-        let text = |v| stats_text(v, "1920×1080@120", &s, &p, true, false, false, None);
-
-        assert_eq!(text(StatsVerbosity::Off), "");
-
-        let compact = text(StatsVerbosity::Compact);
-        assert_eq!(compact, "120 fps · 6.4 ms · 24 Mb/s · lost 3");
-        assert_eq!(compact.lines().count(), 1);
-
-        let normal = text(StatsVerbosity::Normal);
-        assert!(normal.starts_with("1920×1080@120 · 120 fps · 24.3 Mb/s\n"));
-        assert!(normal.contains("e2e 6.4/9.1 ms (p50/p95)"));
-        assert!(normal.contains("lost 3 (0.4%)"));
-        assert!(
-            !normal.contains("native-vulkan"),
-            "decoder tag is Detailed-only"
-        );
-        assert!(!normal.contains("decode"), "stage terms are Detailed-only");
-
-        let detailed = text(StatsVerbosity::Detailed);
-        assert!(detailed.contains("vulkan · HDR→SDR"));
-        assert!(
-            !detailed.contains("(raw)"),
-            "the hardware lane tone-maps — no raw tag"
-        );
-        assert!(detailed.contains("host 1.2 · net 0.9 · decode 1.8 · display 1.1 ms"));
-        assert!(detailed.contains("host: queue 0.3 · encode 0.5 · xfer 0.1 · pace 0.3 ms"));
-        assert!(detailed.contains("lost 3 (0.4%)"));
-        assert!(
-            !normal.contains("queue"),
-            "host-stage split is Detailed-only"
-        );
-        assert!(
-            !detailed.contains("pace 1.1"),
-            "no glass stamps in this sample — the display stage stays unsplit"
-        );
-    }
-
-    /// With true on-glass stamps the display stage reads as its two halves and the live
-    /// present mode is named. Counters render only when non-zero. Without glass stamps
-    /// the split is absent rather than a zero latch.
-    #[test]
-    fn detailed_splits_display_into_pace_and_latch() {
-        let (s, mut p) = sample();
-        p.display_ms = 12.4;
-        p.pace_ms = 1.1;
-        p.latch_ms = 11.3;
-        p.mode = "fifo";
-        let split = stats_text(
-            StatsVerbosity::Detailed,
-            "m",
-            &s,
-            &p,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert!(split.contains("display 12.4 ms (pace 1.1 + latch 11.3)"));
-        assert!(split.contains("\npresent: fifo"));
-        assert!(
-            !split.contains("qdrop") && !split.contains("gated") && !split.contains("smoothing"),
-            "quiet counters stay off the HUD: {split}"
-        );
-
-        p.smoothing = true;
-        p.q_drop = 2;
-        p.q_dry = 1;
-        p.gated = 7;
-        p.forced = 1;
-        let busy = stats_text(
-            StatsVerbosity::Detailed,
-            "m",
-            &s,
-            &p,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert!(busy.contains("present: fifo · smoothing · qdrop 2 · qdry 1 · gated 7 · forced 1"));
-
-        let normal = stats_text(
-            StatsVerbosity::Normal,
-            "m",
-            &s,
-            &p,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert!(!normal.contains("present:") && !normal.contains("pace"));
-    }
-
-    /// The stage line must stay a partition of `e2e`. On the async native-Vulkan rung
-    /// `decoded` is a submission stamp, so GPU decode is inside `display` and `decode`
-    /// re-counts it — the figure leaves that line and says what it is.
-    #[test]
-    fn an_overlapping_decode_figure_leaves_the_stage_line_and_says_so() {
-        let (mut s, p) = sample();
-
-        assert!(!s.decode_overlaps_display, "the fixture is the sync shape");
-        let sync = stats_text(
-            StatsVerbosity::Detailed,
-            "m",
-            &s,
-            &p,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert!(sync.contains("host 1.2 · net 0.9 · decode 1.8 · display 1.1 ms"));
-        assert!(!sync.contains("not additive"));
-
-        s.decode_overlaps_display = true;
-        let async_ = stats_text(
-            StatsVerbosity::Detailed,
-            "m",
-            &s,
-            &p,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert!(
-            async_.contains("host 1.2 · net 0.9 · display 1.1 ms"),
-            "the stage line keeps only terms that tile e2e: {async_}"
-        );
-        assert!(async_.contains("\ndecode 1.8 ms (1 sample, inside display — not additive)"));
-
-        // Every fence wait timed out reports 0 — an absence of measurement, not an
-        // instant decode. It must not render as either.
-        s.decode_ms = 0.0;
-        let none = stats_text(
-            StatsVerbosity::Detailed,
-            "m",
-            &s,
-            &p,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert!(
-            !none.contains("decode"),
-            "a 0 sample renders nothing: {none}"
-        );
-    }
-
-    /// Integrity line tells three "no complaints" states apart: a lane that cannot see
-    /// corruption (silent, never zeros), a lane that looked and saw nothing (also
-    /// silent), and a lane with only half its detectors (says so every window).
-    #[test]
-    fn the_integrity_line_distinguishes_clean_from_unmeasurable() {
-        let (base, p) = sample();
-        let line = |s: &Stats| {
-            stats_text(
-                StatsVerbosity::Detailed,
-                "m",
-                s,
-                &p,
-                false,
-                false,
-                false,
-                None,
-            )
-            .lines()
-            .find(|l| l.starts_with("integrity:"))
-            .map(str::to_string)
-        };
-
-        assert_eq!(line(&base), None, "a lane with no detectors says nothing");
-
-        // Native rung, full status support, decoding clean: a healthy session's OSD
-        // stays quiet.
-        let clean = Stats {
-            decode_integrity: true,
-            decode_status_queries: true,
-            ..base
-        };
-        assert_eq!(line(&clean), None);
-
-        // Same rung on RADV, where a RESULT_STATUS query would hang the VCN ring:
-        // clean counters, but only the parser's half was measured — the line says so
-        // rather than implying a full bill of health.
-        let unmeasured = Stats {
-            decode_status_queries: false,
-            ..clean
-        };
-        assert_eq!(
-            line(&unmeasured).as_deref(),
-            Some("integrity: no driver status")
-        );
-
-        // Damage, attributed: concealment is the stream's, `driver-failed` is the
-        // hardware's, and `run` answers "did it come back?".
-        let damaged = Stats {
-            decode_damaged: 4,
-            decode_failed: 2,
-            concealed_run: 3,
-            worst_concealed_run: 3,
-            ..clean
-        };
-        assert_eq!(
-            line(&damaged).as_deref(),
-            Some("integrity: damaged 4 · driver-failed 2 · run 3")
-        );
-
-        // A lossy window the stream recovered from: the run is 0 and drops out.
-        let recovered = Stats {
-            decode_damaged: 4,
-            concealed_run: 0,
-            ..clean
-        };
-        assert_eq!(line(&recovered).as_deref(), Some("integrity: damaged 4"));
-
-        // `concealed_run` is an instant sampled once a second; the freeze it missed
-        // lasted 40 AUs. Forty isolated glitches and one 40-AU freeze that recovered
-        // render identically without the session's worst run.
-        let recovered_hard = Stats {
-            worst_concealed_run: 40,
-            ..recovered
-        };
-        assert_eq!(
-            line(&recovered_hard).as_deref(),
-            Some("integrity: damaged 4 · worst run 40")
-        );
-        // Quiet whenever it adds nothing — a run still climbing at the end of the
-        // window already is the worst one.
-        let still_broken = Stats {
-            concealed_run: 40,
-            worst_concealed_run: 40,
-            ..recovered
-        };
-        assert_eq!(
-            line(&still_broken).as_deref(),
-            Some("integrity: damaged 4 · run 40")
-        );
-
-        // A rung that refused every AU. The screen is frozen, nothing was concealed,
-        // no driver verdict exists — without this it prints no integrity line at all.
-        let refusing = Stats {
-            decode_refused: 60,
-            concealed_run: 60,
-            worst_concealed_run: 60,
-            ..clean
-        };
-        assert_eq!(
-            line(&refusing).as_deref(),
-            Some("integrity: refused 60 · run 60")
-        );
-
-        // Never below Detailed — diagnostic detail, not a glanceable number.
-        for tier in [
-            StatsVerbosity::Compact,
-            StatsVerbosity::Normal,
-            StatsVerbosity::Off,
-        ] {
-            assert!(
-                !stats_text(tier, "m", &damaged, &p, false, false, false, None)
-                    .contains("integrity:"),
-                "{tier:?}"
-            );
+    fn counters() -> PresentCounters {
+        PresentCounters {
+            mode: "fifo",
+            vrr: Cadence::Unknown,
+            smoothing: false,
+            q_drop: 0,
+            q_dry: 0,
+            gated: 0,
+            forced: 0,
         }
     }
 
-    /// Tests the formatter, not a state any present arm is in — every arm writes
-    /// `hdr_untonemapped = false`. Kept so a lane that bypasses CSC can say so rather
-    /// than claim a tone-map. See `StreamState::hdr_untonemapped`.
+    /// The present line names the live mode; counters show only when non-zero, and VRR only
+    /// once measured.
     #[test]
-    fn hdr_badge_names_the_untonemapped_cpu_lane() {
-        let (s, p) = sample();
-        let badge = |hdr_display, raw| {
-            stats_text(
-                StatsVerbosity::Detailed,
-                "m",
-                &s,
-                &p,
-                true,
-                hdr_display,
-                raw,
-                None,
-            )
+    fn the_present_line_says_only_what_moved() {
+        let quiet = desktop_extras(&counters(), None, None, 0);
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(quiet[0].text, "present: fifo");
+        assert!(
+            !quiet[0].advanced_only,
+            "Standard Detailed shows the present path too"
+        );
+        let busy = PresentCounters {
+            vrr: Cadence::Variable,
+            smoothing: true,
+            q_drop: 2,
+            q_dry: 1,
+            gated: 7,
+            forced: 1,
+            ..counters()
         };
-        assert!(badge(false, true).contains(" · HDR→SDR (raw)"));
-        assert!(!badge(false, false).contains("(raw)"));
-        assert!(badge(false, false).contains(" · HDR→SDR"));
-        assert!(badge(true, false).contains(" · HDR"));
-        assert!(!badge(true, false).contains("HDR→SDR"));
+        assert_eq!(
+            desktop_extras(&busy, None, None, 0)[0].text,
+            "present: fifo · vrr yes · smoothing · qdrop 2 · qdry 1 · gated 7 · forced 1"
+        );
+        let no_mode = PresentCounters {
+            mode: "",
+            ..counters()
+        };
+        assert!(desktop_extras(&no_mode, None, None, 0).is_empty());
+        assert_eq!(
+            desktop_extras(&no_mode, None, None, 2)[0].text,
+            "codec_fallbacks 2"
+        );
     }
 
-    /// Detailed shows the negotiated encoder target next to the measured rate, tagged
-    /// `(auto)` when the ABR owns it, plus the chroma tag when 4:4:4 was asked.
+    /// Integrity tells three quiet states apart: a lane that cannot see damage, one that
+    /// looked and saw none, and one with only half its detectors.
     #[test]
-    fn detailed_shows_target_and_chroma_resolution() {
-        let (mut s, p) = sample();
-        let line1 = |s: &Stats, v| {
-            stats_text(v, "m", s, &p, false, false, false, None)
-                .lines()
+    fn the_integrity_line_distinguishes_clean_from_unmeasurable() {
+        let no_mode = PresentCounters {
+            mode: "",
+            ..counters()
+        };
+        let line = |now: DecodeHealth, prev: Option<DecodeHealth>| {
+            desktop_extras(&no_mode, Some(now), prev, 0)
+                .into_iter()
+                .map(|e| e.text)
                 .next()
-                .unwrap()
-                .to_string()
         };
-        // Explicit 200 Mb/s honoured, cheap scene: measured and target both show.
-        s.target_kbps = 200_000;
-        assert!(line1(&s, StatsVerbosity::Detailed).contains("24.3 Mb/s · target 200 Mb/s · "));
-        // An Automatic session's moving target reads as policy, not a broken setting.
-        (s.target_kbps, s.auto_rate) = (20_000, true);
-        assert!(line1(&s, StatsVerbosity::Detailed).contains("target 20 Mb/s (auto)"));
-        assert!(!line1(&s, StatsVerbosity::Normal).contains("target"));
-        // A host that never reported a rate shows no target element.
-        s.target_kbps = 0;
-        assert!(!line1(&s, StatsVerbosity::Detailed).contains("target"));
-        (s.asked_444, s.chroma_444) = (true, true);
-        assert!(line1(&s, StatsVerbosity::Detailed).ends_with("· 4:4:4"));
-        // Asked and declined: the downgrade is said out loud, mirroring `HDR→SDR`.
-        s.chroma_444 = false;
-        assert!(line1(&s, StatsVerbosity::Detailed).ends_with("· 4:4:4→4:2:0"));
-        // Unasked stays untagged (4:2:0 is the default).
-        s.asked_444 = false;
-        assert!(!line1(&s, StatsVerbosity::Detailed).contains("4:4:4"));
-    }
-
-    /// Mic uplink line: Detailed-only, and only while the uplink is live.
-    #[test]
-    fn stats_text_mic_line() {
-        let (mut s, p) = sample();
-        let text = |s: &Stats, v| stats_text(v, "m", s, &p, false, false, false, None);
-        assert!(
-            !text(&s, StatsVerbosity::Detailed).contains("mic"),
-            "no mic line while the mic is off"
-        );
-        s.mic_sent = 100;
-        let detailed = text(&s, StatsVerbosity::Detailed);
-        assert!(detailed.contains("\nmic 100 f/s"));
-        assert!(
-            !detailed.contains("dropped"),
-            "a healthy uplink shows no drop term"
-        );
-        assert!(
-            !text(&s, StatsVerbosity::Normal).contains("mic"),
-            "mic line is Detailed-only"
-        );
-        s.mic_dropped = 7;
-        assert!(text(&s, StatsVerbosity::Detailed).contains("mic 100 f/s · dropped 7"));
-    }
-
-    /// Resolved audio format: silent on Opus, silent when the host reported no format,
-    /// and — unlike every other audio figure — visible from Normal up. A declined
-    /// lossless session is indistinguishable from a granted one without this line.
-    #[test]
-    fn stats_text_audio_format_line() {
-        let (mut s, p) = sample();
-        let text = |s: &Stats, v| stats_text(v, "m", s, &p, false, false, false, None);
-        assert!(
-            !text(&s, StatsVerbosity::Detailed).contains("audio lossless"),
-            "the Opus plane every ordinary session runs says nothing"
-        );
-
-        s.audio_lossless = true;
-        s.audio_rate_hz = 96_000;
-        s.audio_bits = 24;
-        assert!(text(&s, StatsVerbosity::Normal).contains("\naudio lossless 96 kHz / 24-bit"));
-        assert!(text(&s, StatsVerbosity::Detailed).contains("\naudio lossless 96 kHz / 24-bit"));
-        assert!(!text(&s, StatsVerbosity::Compact).contains("audio"));
-        assert!(text(&s, StatsVerbosity::Off).is_empty());
-
-        s.audio_rate_hz = 48_000;
-        assert!(text(&s, StatsVerbosity::Normal).contains("\naudio lossless 48 kHz / 24-bit"));
-
-        // Host reported no format: no reading, so nothing is printed.
-        s.audio_rate_hz = 0;
-        assert!(!text(&s, StatsVerbosity::Detailed).contains("audio lossless"));
-        s.audio_rate_hz = 96_000;
-        s.audio_bits = 0;
-        assert!(!text(&s, StatsVerbosity::Detailed).contains("audio lossless"));
-    }
-
-    /// Compact omits the latency term until the presenter's first e2e window lands.
-    #[test]
-    fn compact_waits_for_e2e() {
-        let (mut s, _) = sample();
-        s.lost = 0;
-        let p = PresentedWindow::default();
+        assert!(desktop_extras(&no_mode, None, None, 0).is_empty());
+        let clean = DecodeHealth {
+            status_queries: true,
+            ..DecodeHealth::default()
+        };
+        assert_eq!(line(clean, None), None);
+        let radv = DecodeHealth {
+            status_queries: false,
+            ..clean
+        };
         assert_eq!(
-            stats_text(
-                StatsVerbosity::Compact,
-                "m",
-                &s,
-                &p,
-                false,
-                false,
-                false,
-                None
-            ),
-            "120 fps · 24 Mb/s"
+            line(radv, None).as_deref(),
+            Some("integrity: no driver status")
         );
+        let damaged = DecodeHealth {
+            damaged: 4,
+            failed: 2,
+            run: 3,
+            worst_run: 3,
+            ..clean
+        };
+        assert_eq!(
+            line(damaged, None).as_deref(),
+            Some("integrity: damaged 4 · driver-failed 2 · run 3")
+        );
+        let recovered_hard = DecodeHealth {
+            damaged: 4,
+            worst_run: 40,
+            ..clean
+        };
+        assert_eq!(
+            line(recovered_hard, None).as_deref(),
+            Some("integrity: damaged 4 · worst run 40")
+        );
+        let refusing = DecodeHealth {
+            refused: 60,
+            run: 60,
+            worst_run: 60,
+            ..clean
+        };
+        assert_eq!(
+            line(refusing, None).as_deref(),
+            Some("integrity: refused 60 · run 60")
+        );
+        // Windowed against the last window's cumulative counters.
+        let later = DecodeHealth {
+            damaged: 6,
+            ..clean
+        };
+        let before = DecodeHealth {
+            damaged: 4,
+            ..clean
+        };
+        assert_eq!(
+            line(later, Some(before)).as_deref(),
+            Some("integrity: damaged 2")
+        );
+        let e = desktop_extras(&no_mode, Some(damaged), None, 0);
+        assert!(e[0].advanced_only && e[0].role == hud::Role::Warn);
     }
 
-    /// The session's settings profile closes the first line at every tier; nothing
-    /// renders without one.
     #[test]
-    fn stats_text_names_the_active_profile() {
-        let (s, p) = sample();
-        assert_eq!(
-            stats_text(
-                StatsVerbosity::Compact,
-                "m",
-                &s,
-                &p,
-                false,
-                false,
-                false,
-                Some("Game")
-            ),
-            "120 fps · 6.4 ms · 24 Mb/s · lost 3 · Game"
-        );
-        let normal = stats_text(
-            StatsVerbosity::Normal,
-            "1920×1080@120",
-            &s,
-            &p,
-            false,
-            false,
-            false,
-            Some("Work"),
-        );
-        assert_eq!(
-            normal.lines().next().unwrap(),
-            "1920×1080@120 · 120 fps · 24.3 Mb/s · Work"
-        );
-        let detailed = stats_text(
-            StatsVerbosity::Detailed,
-            "1920×1080@120",
-            &s,
-            &p,
-            true,
-            true,
-            false,
-            Some("Work"),
-        );
-        assert!(detailed.lines().next().unwrap().ends_with("· HDR · Work"));
-        assert!(!stats_text(
-            StatsVerbosity::Normal,
-            "m",
-            &s,
-            &p,
-            false,
-            false,
-            false,
-            None
-        )
-        .contains(" ·  "));
+    fn hdr_tag_follows_the_swapchain() {
+        assert_eq!(hdr_shown(false, true, false), hud::Hdr::Sdr);
+        assert_eq!(hdr_shown(true, true, false), hud::Hdr::Hdr);
+        assert_eq!(hdr_shown(true, false, false), hud::Hdr::ToneMapped);
+        assert_eq!(hdr_shown(true, false, true), hud::Hdr::Untonemapped);
     }
 
     #[test]

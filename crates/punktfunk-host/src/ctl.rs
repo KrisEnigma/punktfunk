@@ -580,12 +580,29 @@ fn render_stats(v: &Value) {
     if new_fps < 1.0 && repeat_fps > 1.0 {
         println!("          (nothing on screen is changing — the last frame is being repeated)");
     }
-    println!(
-        "loss      {} frames dropped · {} packets lost · {} recovered by FEC",
-        p["frames_dropped"].as_i64().unwrap_or(0),
-        p["packets_dropped"].as_i64().unwrap_or(0),
-        p["fec_recovered"].as_i64().unwrap_or(0)
-    );
+    // A counter this path cannot see is absent from the sample; print only what was measured.
+    let loss: Vec<String> = [
+        ("frames_dropped", "frames dropped"),
+        ("send_dropped", "send drops"),
+        ("packets_dropped", "packets lost"),
+        ("fec_recovered", "recovered by FEC"),
+    ]
+    .iter()
+    .filter_map(|(k, label)| p[*k].as_i64().map(|n| format!("{n} {label}")))
+    .collect();
+    if !loss.is_empty() {
+        println!("loss      {}", loss.join(" · "));
+    }
+    if let (Some(p50), Some(p99)) = (p["host_p50_us"].as_f64(), p["host_p99_us"].as_f64()) {
+        println!(
+            "host      {} p50 · {} p99 (capture to sent)",
+            dur_us(p50),
+            dur_us(p99)
+        );
+    }
+    if let Some(rtt) = p["rtt_us"].as_f64() {
+        println!("rtt       {}", dur_us(rtt));
+    }
     for st in p["stages"].as_array().into_iter().flatten() {
         println!(
             "  {:<12} p50 {} · p99 {}",

@@ -1136,7 +1136,15 @@ fn stream_body(
     let (mut mx_cap, mut mx_enc, mut mx_pkt, mut mx_send, mut uniq) =
         (0u128, 0u128, 0u128, 0u128, 0u32);
     let codec_name = cfg.codec.label();
-    let mut sid: Option<u32> = None;
+    let mut sid: Option<(u64, u32)> = None;
+    // Windows driver: the per-tick present → arrival lump and the pool's drops.
+    let mut v_driver: Vec<u32> = Vec::new();
+    let mut driver_path = false;
+    // The driver's own split of that lump, once it stamps its slots.
+    let (mut v_pool, mut v_denc, mut v_ipc): (Vec<u32>, Vec<u32>, Vec<u32>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut driver_split = false;
+    let mut last_driver_dropped: u64 = 0;
     let (mut v_cap, mut v_enc, mut v_pkt, mut v_send): (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut last_dropped_batches: u64 = 0;
@@ -1469,6 +1477,20 @@ fn stream_body(
             v_enc.push(enc_us as u32);
             v_pkt.push(poll_us as u32);
             v_send.push(enqueue_us as u32);
+            if owed.is_some() {
+                driver_path = true;
+                let us = |d: Duration| d.as_micros().min(u128::from(u32::MAX)) as u32;
+                let t = enc.telemetry();
+                match t.as_ref().and_then(|t| t.driver_split) {
+                    Some(s) => {
+                        driver_split = true;
+                        v_pool.extend(s.pool.map(us));
+                        v_denc.push(us(s.encode));
+                        v_ipc.push(us(s.ipc));
+                    }
+                    None => v_driver.extend(t.and_then(|t| t.present_to_arrival).map(us)),
+                }
+            }
         }
 
         fps_count += 1;
@@ -1496,60 +1518,90 @@ fn stream_body(
                     "video: streaming"
                 );
             }
-            // Host send side has no receiver-side loss / FEC-recovery / EAGAIN counters; leave 0.
+            let driver_dropped = enc
+                .telemetry()
+                .map_or(last_driver_dropped, |t| t.dropped_total);
+            // The host sees no receiver loss, FEC recovery or EAGAIN here: those stay absent.
             if stats.is_armed() {
-                let session_id = *sid.get_or_insert_with(|| {
-                    stats.register_session(
-                        "gamestream",
-                        cfg.width,
-                        cfg.height,
-                        cfg.fps,
-                        codec_name,
-                        client_label,
-                    )
-                });
+                let capture_gen = stats.generation();
+                let session_id = match sid {
+                    Some((g, id)) if g == capture_gen => id,
+                    _ => {
+                        let id = stats.register_session(
+                            "gamestream",
+                            cfg.width,
+                            cfg.height,
+                            cfg.fps,
+                            codec_name,
+                            client_label,
+                        );
+                        sid = Some((capture_gen, id));
+                        id
+                    }
+                };
+                let stage = |name: &str, v: &mut Vec<u32>| crate::stats_recorder::StageTiming {
+                    name: name.into(),
+                    p50_us: percentile(v, 0.50) as f32,
+                    p99_us: percentile(v, 0.99) as f32,
+                };
+                // On the driver, `capture` is host bookkeeping and `encode` the wait for the
+                // driver's next AU: its own stamps replace both, or its lump when it has none.
+                let stages = if driver_split {
+                    vec![
+                        stage("pool", &mut v_pool),
+                        stage("encode", &mut v_denc),
+                        stage("ipc", &mut v_ipc),
+                        stage("copy", &mut v_pkt),
+                        stage("send", &mut v_send),
+                        stage("send_spread", &mut v_spread),
+                    ]
+                } else if driver_path {
+                    vec![
+                        stage("driver", &mut v_driver),
+                        stage("copy", &mut v_pkt),
+                        stage("send", &mut v_send),
+                        stage("send_spread", &mut v_spread),
+                    ]
+                } else {
+                    vec![
+                        stage("capture", &mut v_cap),
+                        stage("encode", &mut v_enc),
+                        stage("packetize", &mut v_pkt),
+                        stage("send", &mut v_send),
+                        stage("send_spread", &mut v_spread),
+                    ]
+                };
+                let queue_drops = dropped_batches.saturating_sub(last_dropped_batches);
+                let pool_drops = driver_dropped.saturating_sub(last_driver_dropped);
                 let sample = crate::stats_recorder::StatsSample {
                     t_ms: 0,
                     session_id,
-                    stages: vec![
-                        crate::stats_recorder::StageTiming {
-                            name: "capture".into(),
-                            p50_us: percentile(&mut v_cap, 0.50) as f32,
-                            p99_us: percentile(&mut v_cap, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "encode".into(),
-                            p50_us: percentile(&mut v_enc, 0.50) as f32,
-                            p99_us: percentile(&mut v_enc, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "packetize".into(),
-                            p50_us: percentile(&mut v_pkt, 0.50) as f32,
-                            p99_us: percentile(&mut v_pkt, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "send".into(),
-                            p50_us: percentile(&mut v_send, 0.50) as f32,
-                            p99_us: percentile(&mut v_send, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "send_spread".into(),
-                            p50_us: percentile(&mut v_spread, 0.50) as f32,
-                            p99_us: percentile(&mut v_spread, 0.99) as f32,
-                        },
-                    ],
+                    stages,
                     fps: (uniq as f64 / secs) as f32,
                     repeat_fps: (fps_count.saturating_sub(uniq) as f64 / secs) as f32,
                     mbps: (win_bytes as f64 * 8.0 / secs / 1_000_000.0) as f32,
                     // Live wire budget, not the client's ask.
                     bitrate_kbps: adapt.budget_kbps,
-                    frames_dropped: dropped_batches.saturating_sub(last_dropped_batches) as u32,
-                    packets_dropped: 0,
-                    send_dropped: 0,
-                    fec_recovered: 0,
+                    frames_dropped: Some((queue_drops + pool_drops) as u32),
+                    packets_dropped: None,
+                    send_dropped: None,
+                    fec_recovered: None,
+                    host_p50_us: None,
+                    host_p99_us: None,
+                    rtt_us: None,
+                    fec_us: None,
+                    seal_us: None,
+                    sock_us: None,
                 };
                 stats.push_sample(session_id, sample);
             }
+            last_driver_dropped = driver_dropped;
+            v_driver.clear();
+            driver_path = false;
+            v_pool.clear();
+            v_denc.clear();
+            v_ipc.clear();
+            driver_split = false;
             // Wire never exceeds the live budget. A refused in-place retarget disables
             // adaptation: raising FEC with a frozen encoder rate would overshoot.
             if adapt_supported && gs_adapt_enabled() {
