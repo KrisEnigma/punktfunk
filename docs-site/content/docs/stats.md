@@ -27,6 +27,7 @@ one below it shows. Settings picks the level a stream starts at; cycle it live i
 | Apple TV | **hold Play/Pause** on the Siri Remote |
 | Any Apple or Android client, controller in hand | **Select + X** |
 | LG TV (webOS) | the **green** button on the remote |
+| Browser (preview) | **Ctrl+Alt+Shift+S**; the quality dot shows or hides the overlay |
 
 A cycle lasts for that stream; the next stream starts at the level in Settings again.
 **Ctrl+Alt+Shift+S** is one of a small set of shortcuts a stream reserves; the others are in
@@ -154,6 +155,7 @@ its clock and the host's and corrects for it. When that was not possible, the he
 | iOS, tvOS | `capture→on-glass` | available, with the OS present floor left out |
 | Android | `capture→displayed` | the platform's render timestamp, with the OS present floor left out |
 | LG TV (webOS) | `capture→received` | the TV's decoder presents on its own |
+| Browser (preview) | `capture→displayed` | the page's draw call, not the screen; always `(same-host clock)`, since a browser measures no clock offset |
 | macOS/iOS fallback presenter | `capture→received` | the system video layer hides decode and present timing |
 
 ## Comparing with Moonlight / Sunshine
