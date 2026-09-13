@@ -24,8 +24,8 @@ class SettingsFieldsTest {
     }
 
     @Test
-    fun everyOverlayPropertyHasAProfileRow() {
-        assertEquals(properties(SettingsOverlay::class.java), SettingsFields.PROFILE.map { it.name }.toSet())
+    fun everyOverlayPropertyHasAPresetRow() {
+        assertEquals(properties(SettingsOverlay::class.java), SettingsFields.PRESET.map { it.name }.toSet())
     }
 
     /** A value that differs from the default in every row, so a dropped row shows as a mismatch. */
@@ -50,15 +50,15 @@ class SettingsFieldsTest {
     }
 
     @Test
-    fun theProfileOverlayRoundTripsEveryRow() {
+    fun thePresetOverlayRoundTripsEveryRow() {
         val want = moved()
         val overlay = SettingsOverlay().absorb(Settings(), want)
-        assertEquals(SettingsFields.PROFILE_KEYS, overlay.overridden() - SettingsOverlay.FIELD_RESOLUTION + setOf("width", "height"))
+        assertEquals(SettingsFields.PRESET_KEYS, overlay.overridden() - SettingsOverlay.FIELD_RESOLUTION + setOf("width", "height"))
         val back = SettingsOverlay.fromJson(JSONObject(overlay.toJson().toString()))
         assertEquals(overlay, back)
-        for (f in SettingsFields.PROFILE) assertEquals(f.name, f.get(want), f.get(back.apply(Settings())))
+        for (f in SettingsFields.PRESET) assertEquals(f.name, f.get(want), f.get(back.apply(Settings())))
         // Clearing every override by key leaves nothing — including keys a stale KNOWN list once missed.
-        val cleared = SettingsFields.PROFILE.fold(back) { o, f -> o.clear(f.key) }
+        val cleared = SettingsFields.PRESET.fold(back) { o, f -> o.clear(f.key) }
         assertEquals(emptySet<String>(), cleared.overridden())
         assertEquals(0, cleared.toJson().length())
     }

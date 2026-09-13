@@ -101,9 +101,9 @@ import io.unom.punktfunk.kit.security.KnownHostStore
  * footers, one per affected category.
  *
  * **One settings UI, not two.** The scope switcher on top edits either the global defaults
- * ([onChange], the base layer every profile inherits from) or one profile's overrides — the same
- * rows either way, so a profile can never drift from the surface it overrides. In profile scope
- * only profileable settings render, every row shows the EFFECTIVE value, and a row the profile
+ * ([onChange], the base layer every preset inherits from) or one preset's overrides — the same
+ * rows either way, so a preset can never drift from the surface it overrides. In preset scope
+ * only presetable settings render, every row shows the EFFECTIVE value, and a row the preset
  * overrides carries a marker and a reset. See [SettingsOverlay] for the model.
  */
 @Composable
@@ -117,30 +117,30 @@ fun SettingsScreen(
      * `PUNKTFUNK_SHOT_SETTINGS_SCOPE` seeds its scope.
      */
     initialCategory: SettingsCategory? = null,
-    /** Seeds the scope the same way, for a screenshot of a profile being edited. */
-    initialProfileId: String? = null,
+    /** Seeds the scope the same way, for a screenshot of a preset being edited. */
+    initialPresetId: String? = null,
 ) {
     var globals by remember { mutableStateOf(initial) }
     val context = LocalContext.current
-    val profileStore = remember { ProfileStore(context) }
+    val presetStore = remember { PresetStore(context) }
     val hostStore = remember { KnownHostStore(context) }
-    var profiles by remember { mutableStateOf(profileStore.all()) }
-    // Which layer is being edited: null = the global defaults, else a profile id. Survives rotation
+    var presets by remember { mutableStateOf(presetStore.all()) }
+    // Which layer is being edited: null = the global defaults, else a preset id. Survives rotation
     // but not a trip out of Settings — coming back should land on the defaults, which is what the
     // host cards actually connect with unless they say otherwise.
-    var scopeId by rememberSaveable { mutableStateOf(initialProfileId) }
-    // A profile deleted from under the scope (or a store that never had it) falls back to defaults.
-    val active = scopeId?.let { id -> profiles.firstOrNull { it.id == id } }
+    var scopeId by rememberSaveable { mutableStateOf(initialPresetId) }
+    // A preset deleted from under the scope (or a store that never had it) falls back to defaults.
+    val active = scopeId?.let { id -> presets.firstOrNull { it.id == id } }
     if (scopeId != null && active == null) scopeId = null
 
     var showLicenses by remember { mutableStateOf(false) }
     var showControllers by remember { mutableStateOf(false) }
     var showQuickActions by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<EditIntent?>(null) }
-    var deleting by remember { mutableStateOf<StreamProfile?>(null) }
+    var deleting by remember { mutableStateOf<StreamPreset?>(null) }
 
-    // Every row renders the EFFECTIVE value: the globals with this profile's overrides on top, so a
-    // row the profile doesn't override reads as the live global — and keeps following it.
+    // Every row renders the EFFECTIVE value: the globals with this preset's overrides on top, so a
+    // row the preset doesn't override reads as the live global — and keeps following it.
     val s = globals.effectiveFor(active)
 
     /**
@@ -149,17 +149,17 @@ fun SettingsScreen(
      * [update] and [resetField] reach the rows as `::update` / `::resetField` — callable references,
      * and two of those compare EQUAL however different the scope they captured. Compose therefore
      * sees an unchanged callback and skips [CategoryDetail] on a scope switch that doesn't move any
-     * value on screen — which is the ordinary case, since a profile inherits the globals until it
+     * value on screen — which is the ordinary case, since a preset inherits the globals until it
      * overrides something. The row then kept calling the reference it was first handed and wrote
-     * into the scope the user had just LEFT: edit a default, switch to a profile, edit the same row
-     * — the globals move again and the profile records nothing; switch back and the next edit lands
-     * on the profile. Reading the live state here is what makes the write follow the chips.
+     * into the scope the user had just LEFT: edit a default, switch to a preset, edit the same row
+     * — the globals move again and the preset records nothing; switch back and the next edit lands
+     * on the preset. Reading the live state here is what makes the write follow the chips.
      */
-    fun scopeProfile(): StreamProfile? = scopeId?.let { id -> profiles.firstOrNull { it.id == id } }
+    fun scopePreset(): StreamPreset? = scopeId?.let { id -> presets.firstOrNull { it.id == id } }
 
     fun update(next: Settings) {
-        val profile = scopeProfile()
-        if (profile == null) {
+        val preset = scopePreset()
+        if (preset == null) {
             globals = next
             onChange(next)
         } else {
@@ -167,16 +167,16 @@ fun SettingsScreen(
             // still recorded as an override (the pin) — see [SettingsOverlay.absorb]. A skipped row
             // shows what a fresh one would (that is WHY it skipped), so the effective settings
             // recomputed here are the same ones it rendered.
-            val shown = globals.effectiveFor(profile)
-            profileStore.save(profile.copy(overrides = profile.overrides.absorb(shown, next)))
-            profiles = profileStore.all()
+            val shown = globals.effectiveFor(preset)
+            presetStore.save(preset.copy(overrides = preset.overrides.absorb(shown, next)))
+            presets = presetStore.all()
         }
     }
 
     fun resetField(field: String) {
-        val profile = scopeProfile() ?: return
-        profileStore.save(profile.copy(overrides = profile.overrides.clear(field)))
-        profiles = profileStore.all()
+        val preset = scopePreset() ?: return
+        presetStore.save(preset.copy(overrides = preset.overrides.clear(field)))
+        presets = presetStore.all()
     }
 
     // Mic uplink — turning it on requests RECORD_AUDIO; if denied, the toggle stays off.
@@ -205,7 +205,7 @@ fun SettingsScreen(
         QuickActionsScreen(
             blob = s.overlayActions,
             onChange = { update(s.copy(overlayActions = it)) },
-            // Reset drops the override in profile scope (design §3.3) and clears the global
+            // Reset drops the override in preset scope (design §3.3) and clears the global
             // otherwise; an empty blob is the platform default.
             onReset = {
                 if (active != null) resetField("overlay_actions") else update(s.copy(overlayActions = ""))
@@ -218,26 +218,26 @@ fun SettingsScreen(
 
     // Selected category persists across rotation (stored by name — null = the bare list on a phone).
     var selectedName by rememberSaveable { mutableStateOf(initialCategory?.name) }
-    val categories = SettingsCategory.entries.filter { active == null || it.profileable }
+    val categories = SettingsCategory.entries.filter { active == null || it.presetable }
     val selected = selectedName
         ?.let { n -> categories.firstOrNull { it.name == n } }
 
     Column(Modifier.fillMaxSize()) {
-        ProfileScopeChips(
-            profiles = profiles,
+        PresetScopeChips(
+            presets = presets,
             selectedId = active?.id,
             onSelect = { id ->
                 scopeId = id
-                // About has no profileable rows at all; don't strand the pane on it.
-                if (id != null && selected?.profileable == false) selectedName = null
+                // About has no presetable rows at all; don't strand the pane on it.
+                if (id != null && selected?.presetable == false) selectedName = null
             },
-            onNew = { editing = EditIntent.New(nextAccent(profiles)) },
+            onNew = { editing = EditIntent.New(nextAccent(presets)) },
             onEdit = { p -> editing = EditIntent.Existing(p) },
             onDuplicate = { p ->
-                val copy = newProfile(uniqueName(profileStore, p.name), p.accent)
+                val copy = newPreset(uniqueName(presetStore, p.name), p.accent)
                     .copy(overrides = p.overrides)
-                profileStore.save(copy)
-                profiles = profileStore.all()
+                presetStore.save(copy)
+                presets = presetStore.all()
                 scopeId = copy.id
             },
             onDelete = { p -> deleting = p },
@@ -256,7 +256,7 @@ fun SettingsScreen(
 
         CompositionLocalProvider(
             LocalSettingsScope provides SettingsScopeState(
-                profileScope = active != null,
+                presetScope = active != null,
                 overridden = active?.overrides?.overridden() ?: emptySet(),
                 onReset = ::resetField,
             ),
@@ -268,9 +268,9 @@ fun SettingsScreen(
                 onBack = onBack,
             ) { cat, back ->
                 // Keyed on the scope: switching chips rebuilds the page rather than recomposing
-                // it in place. Correctness no longer depends on it (see [scopeProfile]), but a
+                // it in place. Correctness no longer depends on it (see [scopePreset]), but a
                 // row's own `remember` is per-scope state too — "Custom…" picked while editing
-                // a profile has no business still being picked over on the defaults.
+                // a preset has no business still being picked over on the defaults.
                 key(active?.id) {
                     CategoryDetail(
                         category = cat,
@@ -288,13 +288,13 @@ fun SettingsScreen(
         }
     }
 
-    ProfileDialogs(
+    PresetDialogs(
         editing = editing,
         deleting = deleting,
-        profileStore = profileStore,
+        presetStore = presetStore,
         hostStore = hostStore,
-        onSaved = { id -> profiles = profileStore.all(); scopeId = id; editing = null },
-        onDeleted = { profiles = profileStore.all(); scopeId = null; deleting = null },
+        onSaved = { id -> presets = presetStore.all(); scopeId = id; editing = null },
+        onDeleted = { presets = presetStore.all(); scopeId = null; deleting = null },
         onDismiss = { editing = null; deleting = null },
     )
 }
@@ -367,44 +367,44 @@ private fun CategoryPanes(
     }
 }
 
-/** The profile editor and the delete confirmation, whichever intent is pending. */
+/** The preset editor and the delete confirmation, whichever intent is pending. */
 @Composable
-private fun ProfileDialogs(
+private fun PresetDialogs(
     editing: EditIntent?,
-    deleting: StreamProfile?,
-    profileStore: ProfileStore,
+    deleting: StreamPreset?,
+    presetStore: PresetStore,
     hostStore: KnownHostStore,
     onSaved: (id: String) -> Unit,
     onDeleted: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     editing?.let { intent ->
-        val existing = (intent as? EditIntent.Existing)?.profile
-        ProfileEditorDialog(
-            title = if (existing == null) "New profile" else "Edit profile",
+        val existing = (intent as? EditIntent.Existing)?.preset
+        PresetEditorDialog(
+            title = if (existing == null) "New preset" else "Edit preset",
             confirmLabel = if (existing == null) "Create" else "Save",
             initialName = existing?.name.orEmpty(),
             initialAccent = existing?.accent ?: (intent as? EditIntent.New)?.accent,
             creating = existing == null,
-            taken = { profileStore.nameTaken(it, except = existing?.id) },
+            taken = { presetStore.nameTaken(it, except = existing?.id) },
             onConfirm = { name, accent ->
                 val saved = existing?.copy(name = name, accent = accent)
-                    ?: newProfile(name, accent)
-                profileStore.save(saved)
+                    ?: newPreset(name, accent)
+                presetStore.save(saved)
                 onSaved(saved.id)
             },
             onDismiss = onDismiss,
         )
     }
-    deleting?.let { profile ->
+    deleting?.let { preset ->
         val hosts = hostStore.all()
-        DeleteProfileDialog(
-            profile = profile,
-            boundHosts = hosts.count { it.profileId == profile.id },
-            pinnedCards = hosts.count { profile.id in it.pinnedProfileIds },
+        DeletePresetDialog(
+            preset = preset,
+            boundHosts = hosts.count { it.presetId == preset.id },
+            pinnedCards = hosts.count { preset.id in it.pinnedPresetIds },
             onConfirm = {
-                profileStore.delete(profile.id)
-                // Bindings and pins are left dangling on purpose: they resolve to "no profile" and
+                presetStore.delete(preset.id)
+                // Bindings and pins are left dangling on purpose: they resolve to "no preset" and
                 // to "no card", which is exactly right, and rewriting every host record here would
                 // be a second write pass over data the user didn't ask us to touch.
                 onDeleted()
@@ -414,15 +414,15 @@ private fun ProfileDialogs(
     }
 }
 
-/** What the profile editor is for — a fresh profile (with the colour creation picked out for it),
+/** What the preset editor is for — a fresh preset (with the colour creation picked out for it),
  * or one that already exists. */
 private sealed interface EditIntent {
     data class New(val accent: String) : EditIntent
-    data class Existing(val profile: StreamProfile) : EditIntent
+    data class Existing(val preset: StreamPreset) : EditIntent
 }
 
 /** "Work" → "Work copy" → "Work copy 2" — the first name Duplicate can actually save. */
-private fun uniqueName(store: ProfileStore, base: String): String {
+private fun uniqueName(store: PresetStore, base: String): String {
     val first = "$base copy"
     if (!store.nameTaken(first)) return first
     var n = 2
@@ -438,35 +438,35 @@ private fun uniqueName(store: ProfileStore, base: String): String {
  * scope only decides whether tier-G rows render at all and whether a row wears an override marker.
  */
 private class SettingsScopeState(
-    val profileScope: Boolean,
+    val presetScope: Boolean,
     val overridden: Set<String>,
     val onReset: (String) -> Unit,
 )
 
 private val LocalSettingsScope = compositionLocalOf {
-    SettingsScopeState(profileScope = false, overridden = emptySet(), onReset = {})
+    SettingsScopeState(presetScope = false, overridden = emptySet(), onReset = {})
 }
 
 /**
  * Wraps rows that are facts about THIS DEVICE or this app rather than about a stream — the console
  * UI toggle, the library browser, auto-wake, the controller diagnostics, rumble mirroring, SC2
- * capture (design §3, tiers G and H). They never belong to a profile, so in profile scope they
+ * capture (design §3, tiers G and H). They never belong to a preset, so in preset scope they
  * simply don't render.
  */
 @Composable
 private fun DeviceScopeOnly(content: @Composable () -> Unit) {
-    if (!LocalSettingsScope.current.profileScope) content()
+    if (!LocalSettingsScope.current.presetScope) content()
 }
 
 /**
- * The accent marker and reset a row wears when the selected profile overrides it. Nothing renders
- * in the defaults scope, or on a row the profile inherits — an inherited row shows the live global
+ * The accent marker and reset a row wears when the selected preset overrides it. Nothing renders
+ * in the defaults scope, or on a row the preset inherits — an inherited row shows the live global
  * value in the ordinary quiet style, which is the whole point of inherit-by-default.
  */
 @Composable
 private fun OverrideBadge(field: String?) {
     val scope = LocalSettingsScope.current
-    if (!scope.profileScope || field == null || field !in scope.overridden) return
+    if (!scope.presetScope || field == null || field !in scope.overridden) return
     // One compact line. A `TextButton` here carried its own 48dp touch target and dwarfed both the
     // control it annotates and the caption under it; the reset keeps a generous padded hit area
     // instead, which is the right trade for a secondary action inside a dense settings list.
@@ -504,20 +504,20 @@ private fun OverrideBadge(field: String?) {
  * The map and its order are the cross-client one (Apple's `SettingsCategory`, the Windows
  * NavigationView, the GTK pages): General, Display, Input, Audio, Controllers, About.
  *
- * [profileable] is false for a category with no profileable rows at all — it isn't offered in
- * profile scope, rather than opening onto an empty page.
+ * [presetable] is false for a category with no presetable rows at all — it isn't offered in
+ * preset scope, rather than opening onto an empty page.
  */
 enum class SettingsCategory(
     val title: String,
     val icon: ImageVector,
-    internal val profileable: Boolean = true,
+    internal val presetable: Boolean = true,
 ) {
     General("General", Icons.Filled.Tune),
     Display("Display", Icons.Filled.Tv),
     Input("Input", Icons.Filled.TouchApp),
     Audio("Audio", Icons.AutoMirrored.Filled.VolumeUp),
     Controllers("Controllers", Icons.Filled.SportsEsports),
-    About("About", Icons.Filled.Info, profileable = false),
+    About("About", Icons.Filled.Info, presetable = false),
 }
 
 /** The category list — the settings root. Highlights the [selected] row when it drives a detail pane. */
@@ -864,10 +864,10 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
         )
     }
 
-    // The desktop clients group their decoder and GPU pickers here, and keep them out of profiles —
+    // The desktop clients group their decoder and GPU pickers here, and keep them out of presets —
     // they are facts about that machine's hardware. Android has neither choice (MediaCodec resolves
     // both), and the one knob it does have IS worth varying per host: a marginal link is exactly
-    // where you want the plain decode path back (design §3 lists it as an Android-only profileable).
+    // where you want the plain decode path back (design §3 lists it as an Android-only presetable).
     SettingsGroup("Decoding") {
         ToggleRow(
             title = "Low-latency mode",
@@ -878,7 +878,7 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
             onCheckedChange = { on -> update(s.copy(lowLatencyMode = on)) },
         )
         // The timeline presenter's intent — the Apple client's "Prioritize" pair, same stored
-        // values, so a profile written on one platform means the same thing here.
+        // values, so a preset written on one platform means the same thing here.
         SettingDropdown(
             label = "Prioritize",
             options = PRESENT_PRIORITY_OPTIONS,
@@ -928,7 +928,7 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
                 subtitle = "Back, a two-finger twist, Ctrl+Alt+Shift+O or Select + A on a pad " +
                     "opens it mid-stream. " +
                     "Which actions the in-stream dial offers and the shortcuts it can send; " +
-                    "a profile that changes it owns the whole dial",
+                    "a preset that changes it owns the whole dial",
                 onClick = onOpenQuickActions,
             )
         }
@@ -1045,8 +1045,8 @@ private fun AudioSettings(s: Settings, update: (Settings) -> Unit, onMicChange: 
 @Composable
 private fun ControllerSettings(s: Settings, update: (Settings) -> Unit, onOpenControllers: () -> Unit) {
     SettingsGroup(footer = "Applies from the next session.") {
-        // The master switch, above everything it governs. Profileable, so it shows in both
-        // scopes: a "Work" profile can decline to forward what "Game" forwards.
+        // The master switch, above everything it governs. Presetable, so it shows in both
+        // scopes: a "Work" preset can decline to forward what "Game" forwards.
         ToggleRow(
             title = "Forward controllers",
             subtitle = "Send this device's controllers to the host. Turn it off when your " +

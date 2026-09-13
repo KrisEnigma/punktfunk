@@ -93,7 +93,7 @@ class GamepadRouter(
     /**
      * Forward raw guide/QAM presses (`Settings.systemButtons` resolved — auto = forward on
      * Android, where the press reaches the app on most devices; `local` exists for
-     * cross-client profile parity with the Gaming-Mode clients). Off keeps them entirely
+     * cross-client preset parity with the Gaming-Mode clients). Off keeps them entirely
      * with this device.
      */
     private val systemForward: Boolean = true,

@@ -47,8 +47,8 @@ struct CreateOptions {
     fallback_ui: bool,
     /// The settings snapshot the shell starts from (`pf_client_core::trust::Settings` JSON).
     settings: pf_client_core::trust::Settings,
-    /// The preset catalog as `[[id, name], …]`, under the key Kotlin sends.
-    #[serde(default, rename = "profiles")]
+    /// The preset catalog as `[[id, name], …]`.
+    #[serde(default)]
     presets: Vec<(String, String)>,
     /// The known-hosts records (`KnownHosts` JSON) — for building `punktfunk://` links.
     #[serde(default)]
@@ -775,8 +775,8 @@ json_pusher!(
 );
 
 json_pusher!(
-/// `NativeBridge.nativeConsoleSetProfiles(handle, json)` — the preset catalog `[[id, name]]`.
-    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetProfiles,
+/// `NativeBridge.nativeConsoleSetPresets(handle, json)` — the preset catalog `[[id, name]]`.
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPresets,
     Vec<(String, String)>,
     |h, p| h.store.set_presets(p)
 );
