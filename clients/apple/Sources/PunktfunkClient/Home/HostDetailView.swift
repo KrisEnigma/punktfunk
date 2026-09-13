@@ -6,9 +6,10 @@
 import PunktfunkKit
 import SwiftUI
 
-/// The host page's parts: one form on touch, one sidebar row each in the Mac's host window.
+/// The host page's parts: one form on touch, where the speed test is a page of its own, and one
+/// sidebar row each in the Mac's host window.
 enum HostSection: String, CaseIterable, Identifiable {
-    case overview, presets, connection, pairing, power
+    case overview, presets, connection, speedTest, pairing, power
 
     var id: Self { self }
 
@@ -17,6 +18,7 @@ enum HostSection: String, CaseIterable, Identifiable {
         case .overview: "Overview"
         case .presets: "Presets"
         case .connection: "Connection"
+        case .speedTest: "Speed Test"
         case .pairing: "Pairing"
         case .power: "Power"
         }
@@ -27,6 +29,7 @@ enum HostSection: String, CaseIterable, Identifiable {
         case .overview: "desktopcomputer"
         case .presets: "slider.horizontal.3"
         case .connection: "network"
+        case .speedTest: "gauge.with.needle"
         case .pairing: "lock"
         case .power: "power"
         }

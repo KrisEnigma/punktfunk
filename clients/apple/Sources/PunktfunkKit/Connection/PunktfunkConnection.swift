@@ -1062,6 +1062,20 @@ public final class PunktfunkConnection: @unchecked Sendable {
         public let throughputKbps: UInt32
         /// Delivery loss `(hostBytes − recvBytes) / hostBytes`, percent (0 if unknown).
         public let lossPct: Float
+
+        public init(
+            done: Bool, recvBytes: UInt64, recvPackets: UInt32, hostBytes: UInt64,
+            hostPackets: UInt32, elapsedMs: UInt32, throughputKbps: UInt32, lossPct: Float
+        ) {
+            self.done = done
+            self.recvBytes = recvBytes
+            self.recvPackets = recvPackets
+            self.hostBytes = hostBytes
+            self.hostPackets = hostPackets
+            self.elapsedMs = elapsedMs
+            self.throughputKbps = throughputKbps
+            self.lossPct = lossPct
+        }
     }
 
     /// Start a bandwidth speed test: the host bursts filler over the data plane at

@@ -85,6 +85,9 @@ enum ShotScenes {
                 AnyView(ShotGalleryView(
                     title: "Library states", variants: ShotMock.libraryStateVariants))
             },
+            ShotScene(name: "14e-gallery-speed-test", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(title: "Speed test", variants: ShotMock.speedTestVariants))
+            },
             ShotScene(name: "15-library-touch", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotLibraryTouch())
             },
@@ -152,6 +155,11 @@ enum ShotScenes {
                 AnyView(MacHostWindow(
                     hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
                     section: .connection))
+            },
+            ShotScene(name: "16d-host-window-speed-test", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
+                    section: .speedTest))
             },
         ]
         #endif

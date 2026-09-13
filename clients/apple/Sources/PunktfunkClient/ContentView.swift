@@ -571,9 +571,6 @@ struct ContentView: View {
             PairSheet(host: host) { fingerprint in handlePaired(host, fingerprint: fingerprint) }
             #endif
         }
-        .sheet(item: $speedTestTarget) { host in
-            SpeedTestSheet(host: host)
-        }
         // The library is a full-screen presentation, not a sheet: on iPad a sheet is a centered page
         // card, but the gamepad coverflow is meant to be an immersive, full-bleed screen (and the
         // launcher behind it stops consuming the controller — see GamepadHomeView's `isActive`).
@@ -756,8 +753,6 @@ struct ContentView: View {
             if let host = saved(id) { wakeOnly(host) }
         case .pair(let id):
             if let host = saved(id), !model.isBusy { pairingTarget = host }
-        case .speedTest(let id):
-            if let host = saved(id), !model.isBusy { speedTestTarget = host }
         }
     }
     #endif

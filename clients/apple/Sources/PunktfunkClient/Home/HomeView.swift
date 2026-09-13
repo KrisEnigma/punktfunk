@@ -168,12 +168,19 @@ struct HomeView: View {
                     try? await Task.sleep(for: .seconds(10))
                 }
             }
-            // The host page, from a card's ⓘ or its menu (design §2.4): pushed on touch. The Mac
-            // opens it in its own window (`MacHostWindow`).
+            // The host page, from a card's ⓘ or its menu (design §2.4), and the speed test pushed
+            // from it. The Mac opens both in the host's own window (`MacHostWindow`).
             #if !os(macOS)
             .navigationDestination(item: $detailTarget) { id in
                 HostDetailView(
                     store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
+            }
+            .navigationDestination(item: $speedTestTarget) { host in
+                SpeedTestView(host: host)
+                    .navigationTitle("Speed Test")
+                    #if os(iOS)
+                    .navigationBarTitleDisplayMode(.inline)
+                    #endif
             }
             #endif
             #if os(tvOS)
@@ -187,9 +194,6 @@ struct HomeView: View {
             }
             .navigationDestination(item: $pairingTarget) { host in
                 PairSheet(host: host) { fingerprint in onPaired(host, fingerprint) }
-            }
-            .navigationDestination(item: $speedTestTarget) { host in
-                SpeedTestSheet(host: host)
             }
             .navigationDestination(item: $editTarget) { host in
                 AddHostSheet(

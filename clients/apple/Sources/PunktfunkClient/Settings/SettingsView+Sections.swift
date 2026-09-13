@@ -301,7 +301,7 @@ extension SettingsView {
                 Slider(value: bitrateSlider, in: 0...1) {
                     Text("Bitrate")
                 }
-                Text(SpeedTestSheet.mbpsLabel(kbps: effective.bitrateKbps))
+                Text(SpeedTestView.mbpsLabel(kbps: effective.bitrateKbps))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 76, alignment: .trailing)

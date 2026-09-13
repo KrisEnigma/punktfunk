@@ -12,7 +12,6 @@ enum MacHostRequest: Equatable {
     case browse(StoredHost.ID)
     case wake(StoredHost.ID)
     case pair(StoredHost.ID)
-    case speedTest(StoredHost.ID)
 }
 
 /// Carries one request from a host window to a main window. The first main window to `take` it
@@ -58,8 +57,14 @@ struct MacHostWindow: View {
             }
             .navigationSplitViewColumnWidth(min: 150, ideal: 170, max: 220)
         } detail: {
-            HostDetailView(store: store, hostID: hostID, actions: actions, only: section)
-                .navigationSubtitle(section.title)
+            Group {
+                if section == .speedTest {
+                    speedTestPane
+                } else {
+                    HostDetailView(store: store, hostID: hostID, actions: actions, only: section)
+                }
+            }
+            .navigationSubtitle(section.title)
         }
         .sheet(item: $editTarget) { host in
             AddHostSheet(existing: host, onSave: { store.update($0) })
@@ -99,6 +104,20 @@ struct MacHostWindow: View {
         .font(nil)
     }
 
+    /// The speed test waits for Start here: picking the row is not asking for a burst.
+    @ViewBuilder private var speedTestPane: some View {
+        if let host = store.hosts.first(where: { $0.id == hostID }) {
+            if host.pinnedSHA256 != nil {
+                SpeedTestView(host: host, startsOnAppear: false)
+                    .navigationTitle(host.displayName)
+            } else {
+                ContentUnavailableView(
+                    "Pair First", systemImage: "lock",
+                    description: Text("Pair with \(host.displayName) to test the network speed."))
+            }
+        }
+    }
+
     /// A click on empty space deselects a List; the window always shows a section.
     private var sectionSelection: Binding<HostSection?> {
         Binding(get: { section }, set: { if let next = $0 { section = next } })
@@ -114,7 +133,7 @@ struct MacHostWindow: View {
                 pair: { hand(.pair(host.id)) },
                 edit: { editTarget = host },
                 browse: { _ in hand(.browse(host.id)) },
-                speedTest: { hand(.speedTest(host.id)) },
+                speedTest: { section = .speedTest },
                 sendLogs: {
                     Task {
                         let sent = await SendLogs.toHost(host)
