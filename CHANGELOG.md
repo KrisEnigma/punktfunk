@@ -14,6 +14,58 @@ short; the version-bump commit retitles it. Older sections stay as they are.
 
 ---
 
+## v0.37.0
+
+91 commits since v0.36.0. Wire stays 2. **C ABI 30**, additive. **Driver protocol floor 9.**
+Deep dive: `git log v0.36.0..v0.37.0`
+
+### Versions
+
+| | v0.36.0 | v0.37.0 | Notes |
+|---|---|---|---|
+| Wire protocol | 2 | **2** | unchanged; optional Hello/Welcome `audio_layout` byte |
+| C ABI | 29 | **30** | Additive: `punktfunk_connection_hud_{decoded,displayed,os_floor,drain,text}`, `PunktfunkHudFacts`, `USER_FLAG_RECOVERY_CLOSE` |
+| Rust edition | 2024 | **2024** | unchanged |
+| MSRV (`rust-version`) | 1.85 | **1.85** | unchanged |
+| Workspace crate dirs | 32 | **32** | unchanged |
+| Virtual-display driver protocol | 8 | **9** | `AuSlot` 32 → 48 bytes, AU section 8. Floor equals current. Matching host+driver — Breaking |
+| Windows virtual-gamepad channel | 3 | **3** | unchanged |
+| Plugin index schema | 1 | **1** | unchanged |
+| Host event schema | 1 | **1** | unchanged |
+| `api/openapi.json` | 0.36.0 | **0.37.0** | Recording samples: `fec_us`, `seal_us`, `sock_us`, `host_p50_us`, `host_p99_us`, `rtt_us`; `CaptureMeta.truncated`; four counters optional — Breaking |
+| gamescope patch level (`+pfhdrN`) | 10 | **10** | unchanged |
+| `@punktfunk/host` (SDK) | 0.2.0 | **0.2.0** | unchanged; in-tree types follow the recorder fields |
+| `@punktfunk/plugin-kit` | 0.4.6 | **0.4.6** | unchanged |
+
+### Breaking
+
+- **Windows driver protocol floor 9.** Each `AuSlot` carries the encoder-submit and publish QPC
+  stamps. Install the matching host and driver — they ship in one installer. A mismatch ends the
+  session (`driver outdated`).
+- **C ABI 30.** Additive: the shared stats-overlay window, and `USER_FLAG_RECOVERY_CLOSE` on a
+  wave's close AU. An embedder that checks `punktfunk_abi_version()` must rebuild against the new
+  header.
+- **Recording counters can be absent.** `frames_dropped`, `packets_dropped`, `send_dropped` and
+  `fec_recovered` are left out where a path can't see them, never zero. Stage names follow the
+  path (Windows driver: `pool encode ipc copy send`). A consumer that required them must accept
+  absent.
+- **JNI.** `nativeVideoStats` and `nativeVideoDecoderLabel` are gone.
+  `nativeVideoStatsLines(handle, tier, advanced, panelHz, panelModeHz, profile): String?` returns
+  the formatted overlay lines. Rebuild the kit.
+
+### Knobs
+
+- Client settings gain `advanced_stats` (off). Per device; profiles do not carry it.
+- The session binary's stdout keeps `stats:` (Advanced Detailed text) and adds `stats-json:`, the
+  snapshot the WinUI shell renders.
+- Wire: Hello asks an Opus surround coupling in `audio_layout` and Welcome answers it. Absent on
+  either side means the legacy coupling, so older peers keep today's stream.
+- `PUNKTFUNK_D3D11_PLANAR=0|1` (Windows client) overrides the vendor gate on the planar D3D11VA
+  hand-off; NVIDIA stays on the RGB ring by default.
+- `punktfunk-host service install` (Windows) opens the firewall on the mgmt port in `host.env`.
+
+---
+
 ## v0.36.0
 
 225 commits since v0.35.0. Wire stays 2. **C ABI 29**, additive. Driver protocol stays 8.
