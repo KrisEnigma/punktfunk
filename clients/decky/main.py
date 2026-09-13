@@ -17,8 +17,8 @@ Thin CLI shells — each is build argv, run, parse JSON, map the exit code:
 * **discover()** — ``punktfunk discover --json``: the LAN's hosts, already annotated with
   whether this device has them saved and paired.
 * **hosts()** — ``punktfunk hosts list --probe --json``: the saved hosts with a live,
-  mDNS-independent reachability probe, and their profile bindings and pinned cards already
-  resolved against the profile catalog.
+  mDNS-independent reachability probe, and their preset bindings and pinned cards already
+  resolved against the preset catalog.
 * **pair(addr, port, pin, name)** — ``punktfunk pair``: the SPAKE2 PIN ceremony.
 * **trust_host(addr, port, fp, name)** — ``punktfunk hosts add --fp``: step 1 of request
   access, and the ONLY write this backend makes to the client's store.
@@ -37,7 +37,7 @@ What is deliberately NOT here: the stream launch. It goes through Steam
 (SteamClient.Apps.RunGame on a non-Steam shortcut pointing at ``bin/punktfunkrun.sh``),
 because gamescope only focuses/fullscreens windows in the process tree Steam launched via
 ``reaper`` — a client spawned from this backend would come up invisible and unfocused
-(gamescope#484). Settings, add-host-by-address, the library browser and profile editing are
+(gamescope#484). Settings, add-host-by-address, the library browser and preset editing are
 not here either: they are one shortcut away in the client's own console home.
 """
 
@@ -852,10 +852,10 @@ class Plugin:
         (``punktfunk hosts list --probe --json``).
 
         ``--probe`` asks each host directly rather than waiting for an advert, so a host reached
-        over a routed network (Tailscale/VPN) reports online instead of looking dead. Profile
-        bindings and pinned cards come back already resolved against the profile catalog —
+        over a routed network (Tailscale/VPN) reports online instead of looking dead. Preset
+        bindings and pinned cards come back already resolved against the preset catalog —
         dangling ids dropped, names attached — so the panel renders them without ever opening
-        ``client-profiles.json``."""
+        the catalog file."""
         return await _cli_json(["hosts", "list", "--probe", "--json"], timeout=30.0)
 
     async def pair(self, addr: str, port: int, pin: str, name: str = "Steam Deck") -> dict:

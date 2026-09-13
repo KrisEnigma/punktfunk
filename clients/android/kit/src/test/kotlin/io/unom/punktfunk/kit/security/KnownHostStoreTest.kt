@@ -57,16 +57,34 @@ class KnownHostStoreTest {
     }
 
     @Test
-    fun perTitleProfileBindingsSurviveTheRoundTripAndDefaultEmpty() {
+    fun perTitlePresetBindingsSurviveTheRoundTripAndDefaultEmpty() {
         val plain = KnownHost("10.0.0.5", 9777, "HTPC", "a".repeat(64), true)
-        assertTrue(plain.gameProfiles.isEmpty())
-        val bound = plain.copy(gameProfiles = mapOf("halo" to "p2"))
+        assertTrue(plain.gamePresets.isEmpty())
+        val bound = plain.copy(gamePresets = mapOf("halo" to "p2"))
         val j = JSONObject(KnownHostStore.encode(bound))
-        assertEquals("p2", j.getJSONObject("game_profiles").getString("halo"))
+        assertEquals("p2", j.getJSONObject("game_presets").getString("halo"))
         // A record written before the field existed has no key and reads back empty —
         // the same additive rule as `os` above, so no migration is owed.
         val legacy = JSONObject(KnownHostStore.encode(plain))
-        assertEquals(0, legacy.getJSONObject("game_profiles").length())
+        assertEquals(0, legacy.getJSONObject("game_presets").length())
+    }
+
+    /** A record from before the rename keeps its bindings, and encoding writes both spellings. */
+    @Test
+    fun aPreRenameRecordKeepsItsBindings() {
+        val plain = KnownHost("10.0.0.5", 9777, "HTPC", "a".repeat(64), true)
+        val old = JSONObject(KnownHostStore.encode(plain))
+            .put("profile", "p1")
+            .put("game_profiles", JSONObject().put("halo", "p2"))
+        old.remove("preset")
+        old.remove("game_presets")
+        val h = KnownHostStore.decode(old.toString())!!
+        assertEquals("p1", h.presetId)
+        assertEquals(mapOf("halo" to "p2"), h.gamePresets)
+        val j = JSONObject(KnownHostStore.encode(h))
+        assertEquals("p1", j.getString("preset"))
+        assertEquals("p1", j.getString("profile"))
+        assertEquals("p2", j.getJSONObject("game_profiles").getString("halo"))
     }
 }
 

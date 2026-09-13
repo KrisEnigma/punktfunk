@@ -9,7 +9,7 @@
 //! Discovery churns the list; focus follows the tile key, not the index. A
 //! press on a side tile only retargets the cursor — Confirm starts a session.
 //! Pin with the tests in this module: key-follow, confirm routing, padless
-//! Settings/Options, pinned-card profile, trailing Add Host.
+//! Settings/Options, pinned-card preset, trailing Add Host.
 
 use crate::anim::{entrances, Entrance, EntranceAt, Spring};
 use crate::glyphs::{Hint, HintKey};
@@ -152,7 +152,7 @@ impl HomeScreen {
                                 None => h.name.clone(),
                             },
                             request_access: false,
-                            profile: h.pin.as_ref().map(|p| p.id.clone()),
+                            preset: h.pin.as_ref().map(|p| p.id.clone()),
                         });
                     }
                 }
@@ -268,7 +268,7 @@ impl HomeScreen {
     pub(crate) fn announcement(&self, hosts: &[HostRow]) -> Option<String> {
         let say = |(title, sub): (&str, &str)| format!("{title}, {sub}");
         Some(match self.slot(hosts) {
-            Slot::Host(h) => match (&h.pin, &h.bound_profile) {
+            Slot::Host(h) => match (&h.pin, &h.bound_preset) {
                 (Some(p), _) => format!("{}, {}", h.name, p.name),
                 (None, Some(b)) => format!("{}, {}:{} · {}", h.name, h.addr, h.port, b.name),
                 (None, None) => format!("{}, {}:{}", h.name, h.addr, h.port),
@@ -500,7 +500,7 @@ fn draw_host_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, rect: Rect, k: f6
 
     let max_w = f64::from(rect.width()) - 2.0 * pad;
     let sub_base = f64::from(rect.bottom) - pad;
-    match (&h.pin, &h.bound_profile) {
+    match (&h.pin, &h.bound_preset) {
         (Some(p), _) => {
             fonts.draw_clipped(
                 canvas,
@@ -826,9 +826,9 @@ mod tests {
             os: String::new(),
             actions: Vec::new(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         }
     }
 
@@ -953,14 +953,14 @@ mod tests {
         );
     }
 
-    /// A pin's Confirm connects with that profile (one-off); the overlay title
-    /// names the host and the profile.
+    /// A pin's Confirm connects with that preset (one-off); the overlay title
+    /// names the host and the preset.
     #[test]
-    fn pinned_card_connects_with_its_profile() {
+    fn pinned_card_connects_with_its_preset() {
         let mut settings = ctx_settings();
         let mut pinned = host("ab\0p1", true, true, false);
         pinned.name = "Tower".into();
-        pinned.pin = Some(crate::model::ProfileChip {
+        pinned.pin = Some(crate::model::PresetChip {
             id: "p1".into(),
             name: "Work".into(),
             accent: None,
@@ -986,7 +986,7 @@ mod tests {
         let mut fx = Outbox::default();
         s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
         let intent = fx.connect.expect("a pinned card connects");
-        assert_eq!(intent.profile.as_deref(), Some("p1"));
+        assert_eq!(intent.preset.as_deref(), Some("p1"));
         assert_eq!(intent.title, "Tower · Work");
     }
 

@@ -1,5 +1,5 @@
-// A settings profile as an App Intents entity — the parameter type for "Stream <host> with
-// <profile>" in Shortcuts (design/client-deep-links.md §6). Lives beside `HostEntity` in the
+// A settings preset as an App Intents entity — the parameter type for "Stream <host> with
+// <preset>" in Shortcuts (design/client-deep-links.md §6). Lives beside `HostEntity` in the
 // shared module for the same reason: an intent (and, later, a configurable widget) executes
 // outside the app, so the entity and its query must not need PunktfunkKit.
 //
@@ -29,8 +29,8 @@ public struct ProfileEntity: AppEntity, Identifiable {
         self.accent = accent
     }
 
-    public init(_ profile: StreamPreset) {
-        self.init(id: profile.id, name: profile.name, accent: profile.accent)
+    public init(_ preset: StreamPreset) {
+        self.init(id: preset.id, name: preset.name, accent: preset.accent)
     }
 
     public var displayRepresentation: DisplayRepresentation {
@@ -42,13 +42,13 @@ public struct ProfileEntityQuery: EntityQuery {
     public init() {}
 
     public func entities(for identifiers: [String]) async throws -> [ProfileEntity] {
-        PresetCatalog.load().profiles
+        PresetCatalog.load().presets
             .filter { identifiers.contains($0.id) }
             .map(ProfileEntity.init)
     }
 
     public func suggestedEntities() async throws -> [ProfileEntity] {
-        PresetCatalog.load().profiles.map(ProfileEntity.init)
+        PresetCatalog.load().presets.map(ProfileEntity.init)
     }
 }
 #endif

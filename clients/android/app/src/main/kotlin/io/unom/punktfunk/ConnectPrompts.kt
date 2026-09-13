@@ -24,7 +24,7 @@ import io.unom.punktfunk.models.PendingTrust
 internal fun ConnectPrompts(
     /** The client identity — the PIN ceremony needs it to run SPAKE2; null while it is still minting. */
     identity: ClientIdentity?,
-    profiles: List<StreamProfile>,
+    presets: List<StreamPreset>,
     isOnline: (KnownHost) -> Boolean,
     // ---- trust / pairing --------------------------------------------------------------------
     pendingTrust: PendingTrust?,
@@ -49,7 +49,7 @@ internal fun ConnectPrompts(
     /** Which layer Apply writes to. Resolved by the caller (it holds the store); set with [speedTest]. */
     speedTestTarget: SpeedTestTarget?,
     speedTestPhase: SpeedTestPhase,
-    /** true = write the measured bitrate to the profile, false = to the global default. */
+    /** true = write the measured bitrate to the preset, false = to the global default. */
     onApplySpeedTest: (Boolean) -> Unit,
     onDismissSpeedTest: () -> Unit,
     // ---- edit host ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ internal fun ConnectPrompts(
         EditHostDialog(
             target = kh,
             suggestedMacs = editSuggestedMacs,
-            profiles = profiles,
+            presets = presets,
             onSave = onSaveHost,
             onDismiss = onDismissEdit,
         )

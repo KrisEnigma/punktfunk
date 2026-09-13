@@ -88,9 +88,10 @@ pub fn exec_session() -> glib::ExitCode {
         "--launch",
         "--mgmt",
         "--connect-timeout",
-        // A one-off profile pick, same grammar the session documents (`--profile ""` forces
-        // the global defaults). Without it here, `punktfunk --connect … --profile Work` from a
-        // script or a Decky wrapper streamed with the host's binding instead.
+        // A one-off preset pick, same grammar the session documents (`--preset ""` forces the
+        // global defaults). `--profile` is its pre-rename spelling, which scripts and Decky
+        // wrappers still pass.
+        "--preset",
         "--profile",
     ];
     let mut cmd = std::process::Command::new(crate::spawn::session_binary());
@@ -483,7 +484,7 @@ pub fn run_shot(ctx: &ShotCtx, scene: &str) {
         pair_optional: true,
         launch: None,
         mac: Vec::new(),
-        profile: None,
+        preset: None,
     };
     let mock_advert =
         |key: &str, name: &str, addr: &str, fp: &str| crate::discovery::DiscoveredHost {
@@ -537,17 +538,17 @@ pub fn run_shot(ctx: &ShotCtx, scene: &str) {
                 speakers: vec![dev("alsa_output.mock-hdmi", "HDMI / DisplayPort Audio")],
                 mics: vec![dev("alsa_input.mock-usb", "USB Microphone Analog Stereo")],
             };
-            // `PUNKTFUNK_SHOT_SETTINGS_SCOPE=<profile id|name>` captures the dialog in
-            // PROFILE scope — the second half of the settings surface (design
-            // client-settings-profiles.md §5.1), where only profileable rows render.
+            // `PUNKTFUNK_SHOT_SETTINGS_SCOPE=<preset id|name>` captures the dialog in
+            // PRESET scope — the second half of the settings surface (design
+            // client-settings-profiles.md §5.1), where only presetable rows render.
             let scope = std::env::var("PUNKTFUNK_SHOT_SETTINGS_SCOPE")
                 .ok()
                 .filter(|v| !v.is_empty())
                 .and_then(|reference| {
-                    pf_client_core::profiles::ProfilesFile::load()
+                    pf_client_core::presets::PresetsFile::load()
                         .resolve(&reference)
                         .0
-                        .map(|p| crate::ui_settings::Scope::Profile(p.id.clone()))
+                        .map(|p| crate::ui_settings::Scope::Preset(p.id.clone()))
                 })
                 .unwrap_or(crate::ui_settings::Scope::Defaults);
             let dialog = crate::ui_settings::show_scoped(

@@ -194,8 +194,8 @@ struct StreamState {
     canceled: bool,
     ready_announced: bool,
     mode_line: String,
-    /// Settings profile this session resolved; `None` = global defaults, nothing shown.
-    profile: Option<String>,
+    /// Settings preset this session resolved; `None` = global defaults, nothing shown.
+    preset: Option<String>,
     /// Latch grid the pump's PhaseReports read, written by the 1 Hz present-timing fold.
     /// `None` = the session did not advertise phase lock.
     latch_grid: Option<Arc<session::LatchGrid>>,
@@ -326,7 +326,7 @@ impl StreamState {
         priority: PresentPriority,
         native_refresh_hz: u32,
     ) -> StreamState {
-        let profile = params.profile.clone();
+        let preset = params.preset.clone();
         // Rate we asked for, until Welcome resolves it. No frames flow before that,
         // so this only has to be sane, not right.
         let source_interval_ns = frame_interval_ns(params.mode.refresh_hz, native_refresh_hz);
@@ -363,7 +363,7 @@ impl StreamState {
             mode_line: String::new(),
             fp_hex: String::new(),
             native_mode: (0, 0, 0),
-            profile,
+            preset,
             latch_grid,
             clock_offset: None,
             video_e2e: None,
@@ -3075,7 +3075,7 @@ fn close_window(
     snap.decoder = st.facts.decoder.to_string();
     snap.hdr = hdr_shown(st.hdr, presenter.hdr_active(), st.hdr_untonemapped);
     snap.asked_444 = st.params.video_caps & punktfunk_core::quic::VIDEO_CAP_444 != 0;
-    snap.profile = st.profile.clone();
+    snap.preset = st.preset.clone();
     snap.on_glass = presenter.present_timing_active();
     let prev = std::mem::replace(&mut st.health_seen, st.facts.health);
     snap.extras = desktop_extras(present, st.facts.health, prev, session::codec_fallbacks());

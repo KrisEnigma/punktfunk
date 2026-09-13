@@ -7,7 +7,7 @@ import {
   discover,
   DiscoveredHost,
   hosts as listHosts,
-  Profile,
+  Preset,
   SavedHost,
   updateClient,
   UpdateInfo,
@@ -97,10 +97,10 @@ export interface HostView {
    * the trust sheet is about to save, or a client too old to have minted ids).
    */
   ref: string;
-  /** The host's default profile binding — applied silently by a plain connect, not a card. */
-  profile: Profile | null;
+  /** The host's default preset binding — applied silently by a plain connect, not a card. */
+  preset: Preset | null;
   /** The cards to render nested under this host; already resolved against the catalog. */
-  pinnedProfiles: Profile[];
+  pinnedPresets: Preset[];
   lastUsed: number | null;
 }
 
@@ -176,8 +176,8 @@ export function mergeHosts(saved: SavedHost[], discovered: DiscoveredHost[]): Ho
       pairPolicy: advert?.pair ?? "",
       os: advert?.os || s.os || "",
       ref: s.id || `${advert?.addr ?? s.addr}:${advert?.port ?? s.port}`,
-      profile: s.profile,
-      pinnedProfiles: s.pinned_profiles ?? [],
+      preset: s.preset ?? s.profile ?? null,
+      pinnedPresets: s.pinned_presets ?? s.pinned_profiles ?? [],
       lastUsed: s.last_used,
     };
   });
@@ -200,8 +200,8 @@ export function mergeHosts(saved: SavedHost[], discovered: DiscoveredHost[]): Ho
       pairPolicy: a.pair,
       os: a.os,
       ref: `${a.addr}:${a.port}`,
-      profile: null,
-      pinnedProfiles: [],
+      preset: null,
+      pinnedPresets: [],
       lastUsed: null,
     });
   }
@@ -521,7 +521,7 @@ export async function applyUpdate(
 // ----------------------------------------------------------------------------------------
 
 /**
- * Stream this host. `opts.profileId` streams one of its pinned cards; `opts.requestAccess`
+ * Stream this host. `opts.presetId` streams one of its pinned cards; `opts.requestAccess`
  * runs the supervised launch that waits for the host's operator to approve this Deck.
  *
  * The host is named by REFERENCE (`v.ref`), never by value — no resolution, bitrate or codec

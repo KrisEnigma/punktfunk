@@ -22,7 +22,7 @@ struct ContentView: View {
     @ObservedObject private var store = HostStore.shared
     /// The settings-preset catalog (design/client-settings-profiles.md §4.2) — read at every
     /// connect to resolve the session's `EffectiveSettings`, and edited by the settings surface.
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
     @StateObject private var discovery = HostDiscovery()
     // The dev auto-connect hook (DEBUG-only — see `autoConnectIfAsked`) writes these three, so
     // they stay observed here; every OTHER stream setting reaches a session through
@@ -62,7 +62,7 @@ struct ContentView: View {
     private struct DeepLinkConfirm {
         let host: StoredHost
         let launch: String?
-        let profile: PresetSelection
+        let preset: PresetSelection
         /// A `browse` link: open the host's library instead of dialing it.
         let browse: Bool
 
@@ -98,6 +98,19 @@ struct ContentView: View {
     @State private var awaitingApproval: ApprovalRequest?
     @State private var speedTestTarget: StoredHost?
     @State private var libraryTarget: LibraryTarget?
+    #if os(iOS)
+    /// The touch UI's tab. A written `libraryTarget` lands on the Library tab.
+    @State private var touchTab: TouchTab = .hosts
+    #endif
+    #if os(iOS) || os(macOS)
+    @AppStorage(DefaultsKey.libraryShelf) private var libraryShelfID = ""
+    #endif
+    #if os(macOS)
+    /// The Mac's source-list selection. A written `libraryTarget` opens the Library row on it.
+    @State private var macDestination: MacDestination = .hosts
+    /// What a host window hands over: this window streams, browses, wakes and pairs for it.
+    @ObservedObject private var hostRouter = MacHostRouter.shared
+    #endif
     /// Wakes a sleeping host and waits for it to come back online before connecting (drives the
     /// "Waking…" phase of the connect overlay). Available on every platform now that the iOS/tvOS
     /// multicast entitlement is granted (see PunktfunkConnection.wakeOnLANAvailable).
@@ -194,14 +207,13 @@ struct ContentView: View {
     // macOS builds never reveal. Keep new modifiers on whichever half is shorter.
     var body: some View {
         driven
-            // Fresh pair=required / unknown host: offer the two ways in. An action sheet (not an
-            // alert) so it never collides with the wait alert below. "Request Access" is the
-            // no-PIN delegated-approval path; "Pair with PIN…" runs the SPAKE2 ceremony. The
-            // follow-on presentation is deferred a tick so this dialog is fully dismissed first.
-            .confirmationDialog(
+            // Fresh pair=required / unknown host: the two ways in. An alert, since iOS 26 draws a
+            // confirmation dialog as a narrow popover that squeezes this message. "Request Access"
+            // is the no-PIN approval path, "Pair with PIN…" the SPAKE2 ceremony. The follow-on
+            // presentation waits a tick so this alert is fully dismissed first.
+            .alert(
                 "Pairing required",
                 isPresented: approvalChoicePresented,
-                titleVisibility: .visible,
                 presenting: approvalChoice
             ) { req in
                 Button("Request Access") {
@@ -264,9 +276,9 @@ struct ContentView: View {
     private func runDeepLinkConfirm(_ confirm: DeepLinkConfirm) {
         deepLinkConfirm = nil
         if confirm.browse {
-            libraryTarget = LibraryTarget(host: confirm.host, profile: confirm.profile)
+            libraryTarget = LibraryTarget(host: confirm.host, preset: confirm.preset)
         } else {
-            connect(confirm.host, launchID: confirm.launch, profile: confirm.profile)
+            connect(confirm.host, launchID: confirm.launch, preset: confirm.preset)
         }
     }
 
@@ -528,6 +540,16 @@ struct ContentView: View {
             model.returnToLibrary = nil
             libraryTarget = shelf
         }
+        #if os(macOS)
+        .onChange(of: hostRouter.pending) { _, request in
+            if request != nil { takeHostRequest() }
+        }
+        .onAppear {
+            hostRouter.mainWindows += 1
+            takeHostRequest()
+        }
+        .onDisappear { hostRouter.mainWindows -= 1 }
+        #endif
         // On the outer Group so the sheet survives the trust-prompt → home transition
         // (the "Pair with PIN instead" path disconnects first — the host's accept loop
         // is sequential, a pairing connection would queue behind the live session).
@@ -548,9 +570,6 @@ struct ContentView: View {
             PairSheet(host: host) { fingerprint in handlePaired(host, fingerprint: fingerprint) }
             #endif
         }
-        .sheet(item: $speedTestTarget) { host in
-            SpeedTestSheet(host: host)
-        }
         // The library is a full-screen presentation, not a sheet: on iPad a sheet is a centered page
         // card, but the gamepad coverflow is meant to be an immersive, full-bleed screen (and the
         // launcher behind it stops consuming the controller — see GamepadHomeView's `isActive`).
@@ -559,31 +578,15 @@ struct ContentView: View {
         // (the coverflow is a GeometryReader, ideal ≈ zero), so without a frame it collapses to a
         // tiny panel.
         #if os(macOS)
-        .sheet(item: $libraryTarget) { shelf in
+        .sheet(item: macLibrarySheet) { shelf in
             NavigationStack {
                 LibraryView(
                     store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) },
                     onConnect: { connectFromShelf(shelf) })
             }
             .frame(minWidth: 940, minHeight: 620)
-            // The stack draws the title, and it sits outside LibraryView's own ink — see the tvOS
-            // cover. Gated, because this sheet is BOTH modes' library on macOS and the touch
-            // grid's title belongs to the system background.
-            .gamepadPaletteInk(gamepadUIActive)
-        }
-        #else
-        // iOS: the cover is the TOUCH UI's presentation only. In gamepad mode the library is one
-        // of GamepadHomeView's in-place layers (the console shell — no bottom-up cover), so the
-        // proxy hides the target from the cover while that mode owns it; every writer (Y on a
-        // tile, `returnToLibrary`) keeps writing the same `libraryTarget` either way, and a
-        // controller arriving or leaving mid-browse hands the open library to whichever
-        // presentation the new mode owns.
-        .fullScreenCover(item: touchLibraryTarget) { shelf in
-            NavigationStack {
-                LibraryView(
-                    store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) },
-                    onConnect: { connectFromShelf(shelf) })
-            }
+            // The stack draws the title, outside LibraryView's own ink (see the tvOS cover).
+            .gamepadPaletteInk()
         }
         #endif
         #endif
@@ -710,13 +713,48 @@ struct ContentView: View {
     }
     #endif
 
-    /// The iOS library cover's item: `libraryTarget`, hidden while the gamepad shell presents
-    /// the library in place (see the cover's comment).
-    private var touchLibraryTarget: Binding<LibraryTarget?> {
-        Binding(
-            get: { gamepadUIActive ? nil : libraryTarget },
-            set: { libraryTarget = $0 })
+    #if os(iOS)
+    /// In the touch UI a shelf is a tab, not a presentation: a written `libraryTarget` becomes the
+    /// Library tab's shelf and clears, so the gamepad shell never inherits it as an open layer.
+    private func showShelfInTab() {
+        guard !gamepadUIActive, let shelf = libraryTarget else { return }
+        libraryShelfID = shelf.id
+        touchTab = .library
+        libraryTarget = nil
     }
+    #endif
+
+    #if os(macOS)
+    /// On the Mac a shelf is the Library row's pick, not a presentation: a written `libraryTarget`
+    /// becomes that pick, selects the row and clears. Gamepad mode keeps its sheet
+    /// (`macLibrarySheet`).
+    private func showShelfInSidebar() {
+        guard !gamepadUIActive, let shelf = libraryTarget else { return }
+        libraryShelfID = shelf.id
+        macDestination = .library
+        libraryTarget = nil
+    }
+
+    private var macLibrarySheet: Binding<LibraryTarget?> {
+        Binding(get: { gamepadUIActive ? libraryTarget : nil }, set: { libraryTarget = $0 })
+    }
+
+    /// Run a host window's pending request here, unless another main window took it first.
+    private func takeHostRequest() {
+        guard let request = hostRouter.take() else { return }
+        func saved(_ id: StoredHost.ID) -> StoredHost? { store.hosts.first { $0.id == id } }
+        switch request {
+        case .connect(let id, let selection):
+            if let host = saved(id), !model.isBusy { connect(host, preset: selection) }
+        case .browse(let id):
+            if let host = saved(id) { libraryTarget = LibraryTarget(host: host) }
+        case .wake(let id):
+            if let host = saved(id) { wakeOnly(host) }
+        case .pair(let id):
+            if let host = saved(id), !model.isBusy { pairingTarget = host }
+        }
+    }
+    #endif
 
     /// The pairing sheet's item. On iOS it hides while the gamepad shell presents the pair screen
     /// in place — the same proxy the library uses, and for the same reason: every writer keeps
@@ -786,7 +824,7 @@ struct ContentView: View {
 
     /// Route a `punktfunk://` deep link into the existing connect path — the whole §2 grammar
     /// (design/client-deep-links.md): a stable id, a unique host name or an `addr[:port]`, with
-    /// `fp`/`host` recovery parameters and a one-off `profile`.
+    /// `fp`/`host` recovery parameters and a one-off `preset`.
     ///
     /// The security posture is the parser's plus four rules that live here, and none of them
     /// bends: a URL never pairs and never trusts on its own (an unknown host becomes a
@@ -816,7 +854,7 @@ struct ContentView: View {
             break
         case .browse:
             // The reserved library route, now real: open the host's game library without starting
-            // a session. `launch=`/`profile=` are meaningless on a browse (nothing streams until a
+            // a session. `launch=`/`preset=` are meaningless on a browse (nothing streams until a
             // title is picked, and that connect resolves its own preset) — ignored, not refused,
             // per the unknown-parameter rule.
             openLibrary(from: link)
@@ -832,7 +870,7 @@ struct ContentView: View {
             activeHostID: model.activeHost?.id,
             activeHostName: model.activeHost?.displayName)
         switch DeepLinkRouter.resolve(
-            link: link, hosts: store.hosts, catalog: profiles.catalog,
+            link: link, hosts: store.hosts, catalog: presets.catalog,
             session: session, browse: false
         ) {
         case .notice(let text):
@@ -841,9 +879,9 @@ struct ContentView: View {
             break // deep-linked to the host we're already on — nothing to do
         case .confirm(let host, let selection):
             deepLinkConfirm = DeepLinkConfirm(
-                host: host, launch: link.launch, profile: selection, browse: false)
+                host: host, launch: link.launch, preset: selection, browse: false)
         case .proceed(let host, let selection):
-            connect(host, launchID: link.launch, profile: selection)
+            connect(host, launchID: link.launch, preset: selection)
         }
     }
 
@@ -861,7 +899,7 @@ struct ContentView: View {
             activeHostID: model.activeHost?.id,
             activeHostName: model.activeHost?.displayName)
         switch DeepLinkRouter.resolve(
-            link: link, hosts: store.hosts, catalog: profiles.catalog,
+            link: link, hosts: store.hosts, catalog: presets.catalog,
             session: session, browse: true
         ) {
         case .notice(let text):
@@ -870,9 +908,9 @@ struct ContentView: View {
             break // browsing the host we're already streaming — nothing to do
         case .confirm(let host, let selection):
             deepLinkConfirm = DeepLinkConfirm(
-                host: host, launch: nil, profile: selection, browse: true)
+                host: host, launch: nil, preset: selection, browse: true)
         case .proceed(let host, let selection):
-            libraryTarget = LibraryTarget(host: host, profile: selection)
+            libraryTarget = LibraryTarget(host: host, preset: selection)
         }
     }
 
@@ -920,19 +958,26 @@ struct ContentView: View {
                     store: store, model: model, discovery: discovery,
                     libraryTarget: $libraryTarget, pairingTarget: $pairingTarget,
                     onPaired: handlePaired, waker: waker,
-                    connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
+                    connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
                     launchTitle: launchTitle,
                     connectShelf: connectFromShelf,
                     wakeOnly: { wakeOnly($0) },
                     promptActive: consolePromptShowing)
             } else {
-                HomeView(
-                    store: store, model: model, discovery: discovery,
-                    showAddHost: $showAddHost, pairingTarget: $pairingTarget,
-                    speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
-                    connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
-                    onPaired: handlePaired, onLaunchTitle: launchTitle,
-                    onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
+                MacShellView(
+                    store: store, selection: $macDestination,
+                    hosts: HomeView(
+                        store: store, model: model, discovery: discovery,
+                        showAddHost: $showAddHost, pairingTarget: $pairingTarget,
+                        speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
+                        connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
+                        onPaired: handlePaired, onLaunchTitle: launchTitle,
+                        onConnectShelf: connectFromShelf, wake: { wakeOnly($0) }),
+                    onLaunch: launchTitle, onConnectShelf: connectFromShelf,
+                    onConnectHost: { connect($0, preset: .inherit, fromLibrary: true) })
+                // On appear too: `returnToLibrary` writes the shelf while the stream is still up.
+                .onAppear(perform: showShelfInSidebar)
+                .onChange(of: libraryTarget) { _, _ in showShelfInSidebar() }
             }
         }
         #else
@@ -942,7 +987,7 @@ struct ContentView: View {
                     store: store, model: model, discovery: discovery,
                     libraryTarget: $libraryTarget, pairingTarget: $pairingTarget,
                     onPaired: handlePaired, waker: waker,
-                    connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
+                    connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
                     launchTitle: launchTitle,
                     connectShelf: connectFromShelf,
                     wakeOnly: { wakeOnly($0) },
@@ -985,18 +1030,64 @@ struct ContentView: View {
                 }
                 #endif
             } else {
-                HomeView(
-                    store: store, model: model, discovery: discovery,
-                    showAddHost: $showAddHost, pairingTarget: $pairingTarget,
-                    speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
-                    showSettings: $showSettings,
-                    connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
-                    onPaired: handlePaired, onLaunchTitle: launchTitle,
-                    onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
+                #if os(iOS)
+                touchTabs
+                    // On appear too: `returnToLibrary` writes the shelf while the stream is still up.
+                    .onAppear(perform: showShelfInTab)
+                    .onChange(of: libraryTarget) { _, _ in showShelfInTab() }
+                #else
+                touchHome
+                #endif
             }
         }
         #endif
     }
+
+    #if !os(macOS)
+    /// The host list of the touch and remote UIs.
+    private var touchHome: some View {
+        HomeView(
+            store: store, model: model, discovery: discovery,
+            showAddHost: $showAddHost, pairingTarget: $pairingTarget,
+            speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
+            showSettings: $showSettings,
+            connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
+            onPaired: handlePaired, onLaunchTitle: launchTitle,
+            onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
+    }
+    #endif
+
+    #if os(iOS)
+    /// Hosts and Library. On iPadOS 18 the tab bar turns into a sidebar at a tap, as iPad apps do;
+    /// iOS 17 keeps the plain tab bar.
+    @ViewBuilder private var touchTabs: some View {
+        if #available(iOS 18, *) {
+            TabView(selection: $touchTab) {
+                Tab("Hosts", systemImage: "desktopcomputer", value: TouchTab.hosts) { touchHome }
+                Tab("Library", systemImage: "square.grid.2x2", value: TouchTab.library) {
+                    libraryTab
+                }
+            }
+            .tabViewStyle(.sidebarAdaptable)
+        } else {
+            TabView(selection: $touchTab) {
+                touchHome
+                    .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
+                    .tag(TouchTab.hosts)
+                libraryTab
+                    .tabItem { Label("Library", systemImage: "square.grid.2x2") }
+                    .tag(TouchTab.library)
+            }
+        }
+    }
+
+    private var libraryTab: some View {
+        LibraryTabView(
+            store: store, onLaunch: launchTitle, onConnectShelf: connectFromShelf,
+            onConnectHost: { connect($0, preset: .inherit, fromLibrary: true) },
+            showHosts: { touchTab = .hosts })
+    }
+    #endif
 
     // MARK: - Session
 
@@ -1390,13 +1481,13 @@ struct ContentView: View {
 
     // MARK: - Connect
 
-    /// `profile` is this connect's one-off pick ("Connect with ▸", a pinned card, a link's
-    /// `profile=`). `.inherit` — the default, and what a plain card tap passes — falls through to
+    /// `preset` is this connect's one-off pick ("Connect with ▸", a pinned card, a link's
+    /// `preset=`). `.inherit` — the default, and what a plain card tap passes — falls through to
     /// the host's binding. A one-off NEVER rebinds the host: rebinding is always an explicit act
     /// in the edit sheet (design §5.2).
     private func connect(
         _ host: StoredHost, launchID: String? = nil,
-        profile: PresetSelection = .inherit, allowTofu: Bool? = nil,
+        preset: PresetSelection = .inherit, allowTofu: Bool? = nil,
         fromLibrary: Bool = false
     ) {
         // A pinned host connects on its stored fingerprint; an unpinned host may only TOFU when
@@ -1418,7 +1509,7 @@ struct ContentView: View {
             }
         }
         startSession(
-            host, launchID: launchID, profile: profile, allowTofu: host.pinnedSHA256 == nil,
+            host, launchID: launchID, preset: preset, allowTofu: host.pinnedSHA256 == nil,
             fromLibrary: fromLibrary)
     }
 
@@ -1428,7 +1519,7 @@ struct ContentView: View {
     /// connect (host parks it until the operator approves).
     private func startSession(
         _ host: StoredHost, launchID: String? = nil,
-        profile: PresetSelection = .inherit,
+        preset: PresetSelection = .inherit,
         allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil,
         fromLibrary: Bool = false
     ) {
@@ -1437,7 +1528,7 @@ struct ContentView: View {
         let go = {
             startSessionDirect(
                 store.hosts.first { $0.id == host.id } ?? host,
-                launchID: launchID, profile: profile, allowTofu: allowTofu,
+                launchID: launchID, preset: preset, allowTofu: allowTofu,
                 requestAccess: requestAccess, approvalReq: approvalReq,
                 fromLibrary: fromLibrary)
         }
@@ -1452,7 +1543,7 @@ struct ContentView: View {
            !host.wakeMacs.isEmpty, !store.probedOnline.contains(host.id) {
             discovery.start() // so the wake-wait can pick up a host that moved address
             startSessionDirect(
-                host, launchID: launchID, profile: profile, allowTofu: allowTofu,
+                host, launchID: launchID, preset: preset, allowTofu: allowTofu,
                 requestAccess: requestAccess, approvalReq: approvalReq, fromLibrary: fromLibrary,
                 onUnreachable: {
                     waker.start(
@@ -1471,7 +1562,7 @@ struct ContentView: View {
     /// failure back to the caller (the wake-wait fallback) instead of the error alert.
     private func startSessionDirect(
         _ host: StoredHost, launchID: String? = nil,
-        profile: PresetSelection = .inherit,
+        preset: PresetSelection = .inherit,
         allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil,
         fromLibrary: Bool = false,
         onUnreachable: (@MainActor () -> Void)? = nil
@@ -1484,7 +1575,7 @@ struct ContentView: View {
         // The model latches the result for the whole session, so nothing downstream can end up
         // applying a preset to half of it.
         let effective = EffectiveSettings.resolve(
-            host: host, selection: profile, catalog: profiles.catalog)
+            host: host, selection: preset, catalog: presets.catalog)
         model.connect(
             to: host,
             effective: effective,
@@ -1497,7 +1588,7 @@ struct ContentView: View {
             // did NOT come off a shelf, which is what keeps a plain host-list connect ending on
             // the host list.
             shelf: launchID != nil || fromLibrary
-                ? LibraryTarget(host: host, profile: profile) : nil,
+                ? LibraryTarget(host: host, preset: preset) : nil,
             allowTofu: allowTofu,
             requestAccess: requestAccess,
             onUnreachable: onUnreachable)
@@ -1562,7 +1653,7 @@ struct ContentView: View {
     /// `.inherit` and the binding decides, exactly as a plain card tap does.
     private func launchTitle(_ shelf: LibraryTarget, _ id: String) {
         libraryTarget = nil
-        connect(shelf.host, launchID: id, profile: shelf.profile)
+        connect(shelf.host, launchID: id, preset: shelf.preset)
     }
 
     /// A shelf's own Connect / Resume: dial its host launching NOTHING. The host is already
@@ -1573,7 +1664,7 @@ struct ContentView: View {
     /// session) comes back here rather than to the host list.
     private func connectFromShelf(_ shelf: LibraryTarget) {
         libraryTarget = nil
-        connect(shelf.host, profile: shelf.profile, fromLibrary: true)
+        connect(shelf.host, preset: shelf.preset, fromLibrary: true)
     }
 
     /// Tap a discovered host: save it (so the session has a stored identity and the trust pin

@@ -6,9 +6,9 @@
 // the view and is tested. It sits in PunktfunkShared because everything it touches — `StoredHost`,
 // `PresetCatalog` — already does.
 //
-// It arranges CARDS, not hosts. A host contributes its own card plus one per pinned profile
-// (§5.2a), and under profile grouping those go to different bands — the pinned card belongs to
-// the profile it connects with, which is the whole reason it exists.
+// It arranges CARDS, not hosts. A host contributes its own card plus one per pinned preset
+// (§5.2a), and under preset grouping those go to different bands — the pinned card belongs to
+// the preset it connects with, which is the whole reason it exists.
 
 import Foundation
 
@@ -45,9 +45,19 @@ public enum HostGrouping: String, CaseIterable, Identifiable, Sendable {
     /// The preset each CARD connects with: a host's own card follows its binding, a pinned card
     /// follows its pin. Grouping by the binding alone would file every pinned card under "No
     /// Preset" — pins are not bindings, and a pinned card is precisely the one that knows which
-    /// preset it means. The raw value is stored, so it keeps the old word.
-    case preset = "profile"
+    /// preset it means. Stored as its raw value, which `init(rawValue:)` also reads under its
+    /// pre-rename spelling.
+    case preset
     case status
+
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "none": self = .none
+        case "preset", "profile": self = .preset
+        case "status": self = .status
+        default: return nil
+        }
+    }
 
     public var id: String { rawValue }
 
@@ -155,23 +165,23 @@ public enum HostArrangement {
             // Catalog order, so the bands sit in the same order the scope menu lists them, then
             // whatever belongs to no preset. A band with nothing in it isn't drawn.
             let sorted = ordered(ranked)
-            var groups: [HostGroup] = catalog.profiles.compactMap { profile in
+            var groups: [HostGroup] = catalog.presets.compactMap { preset in
                 let members: [HostCard] = sorted.flatMap { host -> [HostCard] in
                     var found: [HostCard] = []
                     // A host BOUND to this preset brings its own card…
-                    if catalog.binding(for: host)?.id == profile.id {
+                    if catalog.binding(for: host)?.id == preset.id {
                         found.append(HostCard(host: host))
                     }
                     // …and a host that PINNED it brings that pinned card, whatever it is bound
                     // to. Both can be true: a bound preset may also be pinned.
-                    if let pin = catalog.pinned(for: host).first(where: { $0.id == profile.id }) {
+                    if let pin = catalog.pinned(for: host).first(where: { $0.id == preset.id }) {
                         found.append(HostCard(host: host, pinned: pin))
                     }
                     return found
                 }
                 guard !members.isEmpty else { return nil }
                 return HostGroup(
-                    id: "profile-\(profile.id)", title: profile.name, accent: profile.accent,
+                    id: "preset-\(preset.id)", title: preset.name, accent: preset.accent,
                     cards: members)
             }
             // Hosts that a plain tap streams with the defaults. A dangling binding resolves as
@@ -180,7 +190,7 @@ public enum HostArrangement {
             let unbound = sorted.filter { catalog.binding(for: $0) == nil }.map { HostCard(host: $0) }
             if !unbound.isEmpty {
                 groups.append(
-                    HostGroup(id: "profile-none", title: "No Preset", cards: unbound))
+                    HostGroup(id: "preset-none", title: "No Preset", cards: unbound))
             }
             return groups
 

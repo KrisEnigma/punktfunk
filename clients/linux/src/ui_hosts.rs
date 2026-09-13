@@ -33,15 +33,15 @@ pub struct ConnectRequest {
     pub launch: Option<(String, String)>,
     /// Wake-on-LAN MAC(s) for this host. Empty when none is known.
     pub mac: Vec<String>,
-    /// A ONE-OFF settings profile for this connect ("Connect with ▸ X"): `Some(id)` overrides
+    /// A ONE-OFF settings preset for this connect ("Connect with ▸ X"): `Some(id)` overrides
     /// the host's binding for this launch, `Some("")` forces the global defaults on a bound
     /// host, `None` honors the binding. It never rebinds anything — the host's default changes
-    /// only through an explicit "Default profile" pick (design/client-settings-profiles.md §5.2).
-    pub profile: Option<String>,
+    /// only through an explicit "Default preset" pick (design/client-settings-profiles.md §5.2).
+    pub preset: Option<String>,
 }
 
 /// A saved host's plain connect: its fingerprint is already pinned, so this is the silent
-/// pinned dial a card's click makes. `profile: None` honours the host's own binding, which
+/// pinned dial a card's click makes. `preset: None` honours the host's own binding, which
 /// is what a click without "Connect with" does — the card overrides it for a pinned card.
 ///
 /// Free rather than a method so the shell's start screen can build one before any card exists.
@@ -57,7 +57,7 @@ pub fn saved_request(k: &trust::KnownHost) -> ConnectRequest {
         pair_optional: false,
         launch: None,
         mac: k.mac.clone(),
-        profile: None,
+        preset: None,
     }
 }
 
@@ -82,10 +82,10 @@ pub struct HostCard {
     connecting: bool,
 }
 
-/// One catalog entry as the cards need it: what to call the profile, and the colour its chips
-/// carry (`StreamProfile.accent`) — the field the schema reserved for exactly this.
+/// One catalog entry as the cards need it: what to call the preset, and the colour its chips
+/// carry (`StreamPreset.accent`) — the field the schema reserved for exactly this.
 #[derive(Clone, Debug)]
-pub struct Profile {
+pub struct Preset {
     pub id: String,
     pub name: String,
     pub accent: Option<String>,
@@ -97,11 +97,11 @@ enum CardKind {
         host: KnownHost,
         online: bool,
         recent: bool,
-        /// The profile catalog as `(id, name)`, for this card's menus and chip. Shared per
+        /// The preset catalog as `(id, name)`, for this card's menus and chip. Shared per
         /// refresh rather than re-read per card.
-        profiles: Rc<Vec<Profile>>,
-        /// `Some((id, name))` when this card is a PINNED host+profile pair rather than the
-        /// host's primary card (design §5.2a): a one-click shortcut for a profile the user
+        presets: Rc<Vec<Preset>>,
+        /// `Some((id, name))` when this card is a PINNED host+preset pair rather than the
+        /// host's primary card (design §5.2a): a one-click shortcut for a preset the user
         /// reaches for often. It is presentation state on the host record — never a second
         /// host entry, which would fork pairing, WoL and renames.
         pinned: Option<(String, String)>,
@@ -128,7 +128,7 @@ pub enum CardOutput {
         /// Ask before running: the action loses whatever is on that machine.
         danger: bool,
     },
-    /// Open the host edit sheet (name, profile binding, pinned cards, clipboard).
+    /// Open the host edit sheet (name, preset binding, pinned cards, clipboard).
     ///
     /// Identified by the stable record id with `addr:port` behind it, like [`MakeDefault`] —
     /// NOT by fingerprint, which an unpaired card leaves empty and which then names every
@@ -167,13 +167,13 @@ pub enum CardOutput {
         label: String,
         url: String,
     },
-    /// Add or remove a pinned host+profile card (design §5.2a). Presentation only — it never
-    /// changes the host's default profile, and unpinning never touches the profile itself.
+    /// Add or remove a pinned host+preset card (design §5.2a). Presentation only — it never
+    /// changes the host's default preset, and unpinning never touches the preset itself.
     TogglePin {
         fp_hex: String,
         addr: String,
         port: u16,
-        profile_id: String,
+        preset_id: String,
         pin: bool,
     },
 }
@@ -184,9 +184,9 @@ impl HostCard {
             CardKind::Saved {
                 host: k, pinned, ..
             } => ConnectRequest {
-                // A pinned card IS its profile: clicking it connects with that one, without
+                // A pinned card IS its preset: clicking it connects with that one, without
                 // touching the host's default.
-                profile: pinned.as_ref().map(|(id, _)| id.clone()),
+                preset: pinned.as_ref().map(|(id, _)| id.clone()),
                 ..saved_request(k)
             },
             CardKind::Discovered(a) => ConnectRequest {
@@ -198,7 +198,7 @@ impl HostCard {
                 pair_optional: a.pair == "optional",
                 launch: None,
                 mac: a.mac.clone(),
-                profile: None,
+                preset: None,
             },
         }
     }
@@ -289,7 +289,7 @@ impl relm4::factory::FactoryComponent for HostCard {
             CardKind::Saved {
                 host: k,
                 online,
-                profiles,
+                presets,
                 pinned,
                 ..
             } => {
@@ -310,18 +310,18 @@ impl relm4::factory::FactoryComponent for HostCard {
                 } else {
                     pill("Trusted", "pf-accent")
                 });
-                // The chip says what a plain click on THIS card will do: its own profile on
+                // The chip says what a plain click on THIS card will do: its own preset on
                 // a pinned card, the host's binding on the primary one. Both resolve through
-                // the catalog so the chip can carry the profile's colour; a binding whose
-                // profile was deleted shows nothing and resolves as the defaults, which is
+                // the catalog so the chip can carry the preset's colour; a binding whose
+                // preset was deleted shows nothing and resolves as the defaults, which is
                 // exactly what will happen on connect (design §6).
                 let chip = pinned
                     .as_ref()
                     .map(|(id, _)| id.as_str())
-                    .or(k.profile_id.as_deref())
-                    .and_then(|id| profiles.iter().find(|p| p.id == id));
+                    .or(k.preset_id.as_deref())
+                    .and_then(|id| presets.iter().find(|p| p.id == id));
                 if let Some(p) = chip {
-                    status.append(&profile_pill(p));
+                    status.append(&preset_pill(p));
                 }
             }
             CardKind::Discovered(_) => {
@@ -346,7 +346,7 @@ impl relm4::factory::FactoryComponent for HostCard {
                 host: k,
                 online,
                 recent,
-                profiles,
+                presets,
                 pinned,
             } => {
                 if *recent {
@@ -477,14 +477,14 @@ impl relm4::factory::FactoryComponent for HostCard {
                 // configured with. It carries the stable id AND host+fp, so it still resolves
                 // after a re-address or a reinstall (design/client-deep-links.md §2/§5).
                 {
-                    let (host, profile) = (k.clone(), pinned.clone());
+                    let (host, preset) = (k.clone(), pinned.clone());
                     let a = gio::SimpleAction::new("copy-link", None);
                     let sender = sender.clone();
                     a.connect_activate(move |_, _| {
                         let url = pf_client_core::deeplink::DeepLink::for_host(
                             &host,
                             None,
-                            profile.as_ref().map(|(id, _)| id.as_str()),
+                            preset.as_ref().map(|(id, _)| id.as_str()),
                         )
                         .to_url();
                         let _ = sender.output(CardOutput::CopyLink(url));
@@ -492,17 +492,17 @@ impl relm4::factory::FactoryComponent for HostCard {
                     actions.add_action(&a);
                 }
                 {
-                    let (host, profile) = (k.clone(), pinned.clone());
+                    let (host, preset) = (k.clone(), pinned.clone());
                     let a = gio::SimpleAction::new("shortcut", None);
                     let sender = sender.clone();
                     a.connect_activate(move |_, _| {
                         let url = pf_client_core::deeplink::DeepLink::for_host(
                             &host,
                             None,
-                            profile.as_ref().map(|(id, _)| id.as_str()),
+                            preset.as_ref().map(|(id, _)| id.as_str()),
                         )
                         .to_url();
-                        let label = match &profile {
+                        let label = match &preset {
                             Some((_, name)) => format!("{} \u{00b7} {name}", host.name),
                             None => host.name.clone(),
                         };
@@ -514,7 +514,7 @@ impl relm4::factory::FactoryComponent for HostCard {
                 // predictability rule is that it can't change what the card does next time.
                 // Rebinding, and pinning, live in the edit sheet (design §5.2).
                 {
-                    let profile_action =
+                    let preset_action =
                         |name: &str, out: Box<dyn Fn(Option<String>) -> CardOutput>| {
                             let a = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
                             let sender = sender.clone();
@@ -527,13 +527,13 @@ impl relm4::factory::FactoryComponent for HostCard {
                             actions.add_action(&a);
                         };
                     let req_for_connect = req.clone();
-                    profile_action(
+                    preset_action(
                         "connect-with",
                         Box::new(move |id| {
                             let mut req = req_for_connect.clone();
                             // `Some("")` — not `None` — so a bound host really does connect
                             // with the defaults when the user asks for them.
-                            req.profile = Some(id.unwrap_or_default());
+                            req.preset = Some(id.unwrap_or_default());
                             CardOutput::Connect(req)
                         }),
                     );
@@ -541,20 +541,20 @@ impl relm4::factory::FactoryComponent for HostCard {
                     // which of the two this card is decides the direction.
                     let (fp, addr, port) = (k.fp_hex.clone(), k.addr.clone(), k.port);
                     let pinning = pinned.is_none();
-                    profile_action(
+                    preset_action(
                         "toggle-pin",
                         Box::new(move |id| CardOutput::TogglePin {
                             fp_hex: fp.clone(),
                             addr: addr.clone(),
                             port,
-                            profile_id: id.unwrap_or_default(),
+                            preset_id: id.unwrap_or_default(),
                             pin: pinning,
                         }),
                     );
                 }
                 overlay.insert_action_group("card", Some(&actions));
 
-                // Keep this menu short: anything that CONFIGURES the host — the default profile,
+                // Keep this menu short: anything that CONFIGURES the host — the default preset,
                 // the pinned cards — belongs in the edit sheet, not here. What remains is
                 // grouped into sections: start something, view something, take a link, manage
                 // the host.
@@ -565,7 +565,7 @@ impl relm4::factory::FactoryComponent for HostCard {
                     // offering them here would blur what the card is.
                     let launch = gio::Menu::new();
                     launch.append(Some("Connect"), Some("card.connect"));
-                    // Browse library starts this card with its own profile, not the binding's,
+                    // Browse library starts this card with its own preset, not the binding's,
                     // so it belongs to a shortcut as much as Connect does. Paired only: the
                     // fetch authenticates as this device, so a merely trusted host refuses it.
                     if k.paired {
@@ -591,12 +591,12 @@ impl relm4::factory::FactoryComponent for HostCard {
                     menu.append_section(None, &manage);
                 } else {
                     // Starting a stream: a plain click already connects with the host's own
-                    // profile, so the menu only needs the one-offs — and only when there are
-                    // profiles to pick between.
-                    if !profiles.is_empty() {
+                    // preset, so the menu only needs the one-offs — and only when there are
+                    // presets to pick between.
+                    if !presets.is_empty() {
                         let with = gio::Menu::new();
                         for (label, id) in std::iter::once(("Default settings", ""))
-                            .chain(profiles.iter().map(|p| (p.name.as_str(), p.id.as_str())))
+                            .chain(presets.iter().map(|p| (p.name.as_str(), p.id.as_str())))
                         {
                             let item = gio::MenuItem::new(Some(label), None);
                             item.set_action_and_target_value(
@@ -722,8 +722,8 @@ const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// The key a saved host is tracked under in the probe-results map: its fingerprint (stable
 /// across IP changes) when it has one, else `addr:port` (a not-yet-paired manual entry).
-/// A profile chip in that profile's colour. `accent` is the field the catalog schema reserved
-/// for this — without it every profile is the same grey, and telling them apart across a grid
+/// A preset chip in that preset's colour. `accent` is the field the catalog schema reserved
+/// for this — without it every preset is the same grey, and telling them apart across a grid
 /// at a glance is the whole reason the chip exists. No colour set keeps the neutral pill, so
 /// the palette stays opt-in.
 /// The OS-icon tokens this shell ships symbolic art for (`data/icons/.../pf-os-<t>-symbolic.svg`,
@@ -745,7 +745,7 @@ fn os_icon_name(chain: &str) -> Option<String> {
     Some(format!("pf-os-{token}-symbolic"))
 }
 
-fn profile_pill(p: &Profile) -> gtk::Widget {
+fn preset_pill(p: &Preset) -> gtk::Widget {
     let label = gtk::Label::new(Some(&p.name));
     label.add_css_class("pf-pill");
     let Some(hex) = p.accent.as_deref().filter(|h| is_hex_colour(h)) else {
@@ -761,7 +761,7 @@ fn profile_pill(p: &Profile) -> gtk::Widget {
 ///
 /// Per-widget providers are gone since GTK 4.10, and the colour is user data rather than one of
 /// a fixed set, so the rule is generated once per distinct colour and added display-wide. A
-/// handful of profiles means a handful of tiny rules, and re-rendering the grid (which happens
+/// handful of presets means a handful of tiny rules, and re-rendering the grid (which happens
 /// on every state change) reuses them instead of allocating more.
 fn tint_class(hex: &str) -> String {
     thread_local! {
@@ -1221,7 +1221,7 @@ impl SimpleComponent for HostsPage {
                     fp_hex,
                     addr,
                     port,
-                    profile_id,
+                    preset_id,
                     pin,
                 } => {
                     let mut known = KnownHosts::load();
@@ -1229,9 +1229,9 @@ impl SimpleComponent for HostsPage {
                         (!fp_hex.is_empty() && h.fp_hex == fp_hex)
                             || (h.addr == addr && h.port == port)
                     }) {
-                        h.pinned_profiles.retain(|p| p != &profile_id);
+                        h.pinned_presets.retain(|p| p != &preset_id);
                         if pin {
-                            h.pinned_profiles.push(profile_id);
+                            h.pinned_presets.push(preset_id);
                         }
                         if let Err(e) = known.save() {
                             tracing::warn!(error = %format!("{e:#}"), "saving the pinned cards");
@@ -1260,11 +1260,11 @@ impl HostsPage {
             .max_by_key(|&(_, t)| t)
             .map(|(fp, _)| fp);
         // One catalog read per refresh, shared by every card's menus and chip.
-        let profiles: Rc<Vec<Profile>> = Rc::new(
-            pf_client_core::profiles::ProfilesFile::load()
-                .profiles
+        let presets: Rc<Vec<Preset>> = Rc::new(
+            pf_client_core::presets::PresetsFile::load()
+                .presets
                 .into_iter()
-                .map(|p| Profile {
+                .map(|p| Preset {
                     id: p.id,
                     name: p.name,
                     accent: p.accent,
@@ -1320,16 +1320,16 @@ impl HostsPage {
                     kind: CardKind::Saved {
                         host: k.clone(),
                         online,
-                        profiles: profiles.clone(),
+                        presets: presets.clone(),
                         recent: most_recent.as_deref() == Some(k.fp_hex.as_str()),
                         pinned: None,
                     },
                 });
-                // …then its pinned host+profile cards, in the order the user pinned them.
+                // …then its pinned host+preset cards, in the order the user pinned them.
                 // They share the host's live status because they read the same record, and a
-                // pin whose profile is gone simply doesn't render (design §5.2a).
-                for id in &k.pinned_profiles {
-                    let Some(p) = profiles.iter().find(|p| &p.id == id) else {
+                // pin whose preset is gone simply doesn't render (design §5.2a).
+                for id in &k.pinned_presets {
+                    let Some(p) = presets.iter().find(|p| &p.id == id) else {
                         continue;
                     };
                     let (id, name) = (p.id.clone(), p.name.clone());
@@ -1340,7 +1340,7 @@ impl HostsPage {
                         kind: CardKind::Saved {
                             host: k.clone(),
                             online,
-                            profiles: profiles.clone(),
+                            presets: presets.clone(),
                             recent: false,
                             pinned: Some((id, name)),
                         },
@@ -1460,7 +1460,7 @@ impl HostsPage {
 
     /// The host edit sheet — the per-host settings that are properties of the HOST, not of
     /// the stream: its name, whether this machine shares its clipboard with it, and which
-    /// settings profile it defaults to.
+    /// settings preset it defaults to.
     ///
     /// Linux had only "Rename" until now; the clipboard toggle in particular existed in the
     /// store and on the Apple and Windows clients but had no Linux surface at all, so a Linux
@@ -1489,35 +1489,35 @@ impl HostsPage {
             .build();
         clipboard_row.set_active(stored.as_ref().is_some_and(|h| h.clipboard_sync));
 
-        // Profile picker: "Default settings" plus the catalog, seeded to the current binding.
-        let catalog = pf_client_core::profiles::ProfilesFile::load();
+        // Preset picker: "Default settings" plus the catalog, seeded to the current binding.
+        let catalog = pf_client_core::presets::PresetsFile::load();
         let mut labels = vec!["Default settings".to_string()];
         let mut ids: Vec<String> = vec![String::new()];
-        for p in &catalog.profiles {
+        for p in &catalog.presets {
             labels.push(p.name.clone());
             ids.push(p.id.clone());
         }
-        let bound = stored.as_ref().and_then(|h| h.profile_id.clone());
-        // A binding whose profile is gone reads as Default settings and is cleaned up on save
+        let bound = stored.as_ref().and_then(|h| h.preset_id.clone());
+        // A binding whose preset is gone reads as Default settings and is cleaned up on save
         // — the same "dangling resolves as none" rule the connect path follows.
         let selected = bound
             .as_ref()
             .and_then(|id| ids.iter().position(|i| i == id))
             .unwrap_or(0);
-        let profile_row = adw::ComboRow::builder()
-            .title("Profile")
+        let preset_row = adw::ComboRow::builder()
+            .title("Preset")
             .subtitle("The settings a plain click uses for this host")
             .model(&gtk::StringList::new(
                 &labels.iter().map(String::as_str).collect::<Vec<_>>(),
             ))
             .build();
-        profile_row.set_selected(selected as u32);
+        preset_row.set_selected(selected as u32);
 
-        // Pinned cards: which profiles get their own one-click card for this host. They used
+        // Pinned cards: which presets get their own one-click card for this host. They used
         // to be a third submenu on the card, which is what tipped that menu over — and this is
         // where they belong anyway, next to the default they sit beside (design §5.2a).
         let pin_rows: Vec<(String, adw::SwitchRow)> = catalog
-            .profiles
+            .presets
             .iter()
             .map(|p| {
                 let row = adw::SwitchRow::builder()
@@ -1527,7 +1527,7 @@ impl HostsPage {
                 row.set_active(
                     stored
                         .as_ref()
-                        .is_some_and(|h| h.pinned_profiles.iter().any(|id| id == &p.id)),
+                        .is_some_and(|h| h.pinned_presets.iter().any(|id| id == &p.id)),
                 );
                 (p.id.clone(), row)
             })
@@ -1538,7 +1538,7 @@ impl HostsPage {
             .css_classes(["boxed-list"])
             .build();
         list.append(&name_row);
-        list.append(&profile_row);
+        list.append(&preset_row);
         list.append(&clipboard_row);
         for (_, row) in &pin_rows {
             list.append(row);
@@ -1562,13 +1562,13 @@ impl HostsPage {
                         h.name = name;
                     }
                     h.clipboard_sync = clipboard_row.is_active();
-                    h.profile_id = ids
-                        .get(profile_row.selected() as usize)
+                    h.preset_id = ids
+                        .get(preset_row.selected() as usize)
                         .filter(|id| !id.is_empty())
                         .cloned();
                     // Rebuilt from the switches rather than toggled, so the card order follows
-                    // the catalog and a profile deleted meanwhile simply drops out.
-                    h.pinned_profiles = pin_rows
+                    // the catalog and a preset deleted meanwhile simply drops out.
+                    h.pinned_presets = pin_rows
                         .iter()
                         .filter(|(_, row)| row.is_active())
                         .map(|(id, _)| id.clone())
@@ -1682,7 +1682,7 @@ impl HostsPage {
                     pair_optional: false,
                     launch: None,
                     mac: Vec::new(),
-                    profile: None,
+                    preset: None,
                 }));
             });
         }
