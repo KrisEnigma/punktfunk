@@ -199,7 +199,7 @@ impl Console {
 
 /// The desktop connect a [`ConsoleEntry::Stream`] carries. Built from the entry's own
 /// row, never from `Shell::hosts` — that list is empty until the first `sync()`. Same
-/// shape as the Options screen's "Connect to X": no launch, no profile override.
+/// shape as the Options screen's "Connect to X": no launch, no preset override.
 fn stream_intent(entry: &ConsoleEntry) -> Option<crate::screens::ConnectIntent> {
     let ConsoleEntry::Stream(host) = entry else {
         return None;
@@ -211,7 +211,7 @@ fn stream_intent(entry: &ConsoleEntry) -> Option<crate::screens::ConnectIntent> 
         launch: None,
         title: host.name.clone(),
         request_access: false,
-        profile: None,
+        preset: None,
     })
 }
 
@@ -252,14 +252,14 @@ mod tests {
             os: String::new(),
             actions: Vec::new(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         }
     }
 
     /// Stream is the Library stack plus a desktop connect. Nothing else raises one,
-    /// and the connect launches no title and overrides no profile.
+    /// and the connect launches no title and overrides no preset.
     #[test]
     fn only_a_stream_entry_carries_a_connect() {
         assert!(stream_intent(&ConsoleEntry::Home).is_none());
@@ -269,7 +269,7 @@ mod tests {
             stream_intent(&ConsoleEntry::Stream(Box::new(row()))).expect("a desktop connect");
         assert_eq!(intent.addr, "10.0.0.5");
         assert_eq!(intent.launch, None);
-        assert_eq!(intent.profile, None);
+        assert_eq!(intent.preset, None);
         assert!(!intent.request_access);
         assert_eq!(intent.title, "Desk");
     }

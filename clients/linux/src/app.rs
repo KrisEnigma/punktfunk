@@ -36,8 +36,8 @@ const CSS: &str = "
 .pf-pip { min-width: 8px; min-height: 8px; border-radius: 999px;
           background: alpha(currentColor, 0.35); }
 .pf-pip.pf-online { background: @success_color; }
-/* An overridden row in profile scope: an accent dot in the prefix, so which settings this
-   profile changes is legible at a glance without reading every value. (Plain string literal
+/* An overridden row in preset scope: an accent dot in the prefix, so which settings this
+   preset changes is legible at a glance without reading every value. (Plain string literal
    -- a quote in here would end it.) */
 .pf-override-dot { min-width: 8px; min-height: 8px; border-radius: 999px;
                    background: @accent_color; }
@@ -60,7 +60,7 @@ const CSS: &str = "
 .pf-keycap-small .pf-keycap-mods { font-size: 0.5em; }
 .pf-keycap-small .pf-keycap-key { font-size: 0.75em; }
 .pf-key { min-width: 36px; padding: 4px 8px; }
-/* Profile colour swatches (the accent a profile's chips carry). One class per palette entry
+/* Preset colour swatches (the accent a preset's chips carry). One class per palette entry
    because a per-widget CSS provider for eight buttons is a lot of machinery for a dot. */
 .pf-swatch { min-width: 26px; min-height: 26px; border-radius: 999px; padding: 0; }
 .pf-swatch-none   { background: alpha(currentColor, 0.15); }
@@ -626,7 +626,7 @@ impl SimpleComponent for AppModel {
                 self.hosts
                     .emit(HostsMsg::SetConnecting(Some(req.card_key())));
                 // No settings ride along: the spawner resolves this host's effective ones
-                // (globals + its profile) for both the argv and the child's spec.
+                // (globals + its preset) for both the argv and the child's spec.
                 if let Err(e) =
                     spawn::spawn_session(sender.input_sender().clone(), req, fp_hex, tofu, opts)
                 {
@@ -794,7 +794,7 @@ impl SimpleComponent for AppModel {
                     // dialog stays a pure view.
                     move |next| reopen.input(AppMsg::ShowPreferencesScoped(next)),
                     move || {
-                        // The library toggle changes the saved cards' menu, and a profile edit
+                        // The library toggle changes the saved cards' menu, and a preset edit
                         // changes the chips — re-render either way.
                         let _ = hosts.send(HostsMsg::Refresh);
                     },
@@ -813,7 +813,7 @@ impl AppModel {
         self.toasts.add_toast(adw::Toast::new(msg));
     }
 
-    /// Route a `punktfunk://` URL (design/client-deep-links.md §4.1). Parsing, host/profile
+    /// Route a `punktfunk://` URL (design/client-deep-links.md §4.1). Parsing, host/preset
     /// resolution and every refusal rule — including "only a stable record id may dial
     /// unattended" — live in the shared brain (`plan_from_link`); this is only the GTK end of
     /// it: turn the outcome into the same messages a card click raises, so a link gets the
@@ -821,7 +821,7 @@ impl AppModel {
     fn open_deep_link(&mut self, url: &str, sender: &ComponentSender<AppModel>) {
         use pf_client_core::deeplink;
         use pf_client_core::orchestrate::{plan_from_link, PlanOutcome};
-        use pf_client_core::profiles::ProfilesFile;
+        use pf_client_core::presets::PresetsFile;
 
         tracing::debug!(%url, "deep link");
         let link = match deeplink::parse(url) {
@@ -829,12 +829,7 @@ impl AppModel {
             Err(e) => return self.toast(&e.message()),
         };
         let known = trust::KnownHosts::load();
-        let outcome = plan_from_link(
-            &link,
-            &known,
-            &ProfilesFile::load(),
-            &self.settings.borrow(),
-        );
+        let outcome = plan_from_link(&link, &known, &PresetsFile::load(), &self.settings.borrow());
         match outcome {
             Ok(PlanOutcome::Connect(plan)) => {
                 // Rule 2 of §3: never preempt a live session. Only this layer knows one is
@@ -852,7 +847,7 @@ impl AppModel {
                     mac: plan.host.mac.clone(),
                     // `preset=` in a URL is a one-off, exactly like "Connect with ▸": it
                     // shapes this session and leaves the host's binding alone.
-                    profile: plan.profile_override.clone(),
+                    preset: plan.preset_override.clone(),
                 };
                 // A link is a launch like any other: with a MAC it takes the dial-first wake
                 // path, so a sleeping host wakes instead of erroring.
@@ -879,7 +874,7 @@ impl AppModel {
                     pair_optional: false,
                     launch: plan.launch.clone().map(|id| (id.clone(), id)),
                     mac: plan.host.mac.clone(),
-                    profile: plan.profile_override.clone(),
+                    preset: plan.preset_override.clone(),
                 };
                 let mut body = format!("A link asks to connect to {} ({}).", req.name, req.addr);
                 if let Some((id, _)) = &req.launch {
@@ -923,7 +918,7 @@ impl AppModel {
                     pair_optional: false,
                     launch: unknown.launch.clone().map(|id| (id.clone(), id)),
                     mac: Vec::new(),
-                    profile: None,
+                    preset: None,
                 };
                 self.toast(&format!(
                     "{} isn't paired with this device yet — pair it to continue.",
@@ -969,13 +964,13 @@ impl AppModel {
             SpeedTestTarget::Global => {
                 dialog.add_responses(&[("close", "Close"), ("apply", "Apply")]);
             }
-            SpeedTestTarget::Profile(p) => {
+            SpeedTestTarget::Preset(p) => {
                 dialog.add_responses(&[
                     ("close", "Close"),
                     ("apply", &format!("Apply to “{}”", p.name)),
                 ]);
             }
-            // A bound host whose profile doesn't override bitrate could legitimately mean
+            // A bound host whose preset doesn't override bitrate could legitimately mean
             // either: the user gets both, rather than us guessing which layer they meant.
             SpeedTestTarget::Ask(p) => {
                 dialog.add_responses(&[
@@ -1084,8 +1079,8 @@ impl AppModel {
                                     s.save();
                                     "the default bitrate".to_string()
                                 }
-                                SpeedTestTarget::Profile(p) | SpeedTestTarget::Ask(p) => {
-                                    write_profile_bitrate(&p.id, recommended_kbps);
+                                SpeedTestTarget::Preset(p) | SpeedTestTarget::Ask(p) => {
+                                    write_preset_bitrate(&p.id, recommended_kbps);
                                     format!("“{}”", p.name)
                                 }
                             };
@@ -1115,12 +1110,12 @@ impl AppModel {
 /// Which layer a measured bitrate should land in for the host that was tested
 /// (design/client-settings-profiles.md §5.3).
 enum SpeedTestTarget {
-    /// No profile bound — the global default, i.e. what has always happened.
+    /// No preset bound — the global default, i.e. what has always happened.
     Global,
-    /// The bound profile already overrides bitrate, so that override is what this host reads.
-    Profile(pf_client_core::profiles::StreamProfile),
-    /// Bound, but the profile inherits bitrate: writing either layer is defensible, so ask.
-    Ask(pf_client_core::profiles::StreamProfile),
+    /// The bound preset already overrides bitrate, so that override is what this host reads.
+    Preset(pf_client_core::presets::StreamPreset),
+    /// Bound, but the preset inherits bitrate: writing either layer is defensible, so ask.
+    Ask(pf_client_core::presets::StreamPreset),
 }
 
 impl SpeedTestTarget {
@@ -1129,8 +1124,8 @@ impl SpeedTestTarget {
         // started with (a pinned card carries one), else the host's binding.
         let bound = trust::KnownHosts::load()
             .find_by_addr(&req.addr, req.port)
-            .and_then(|h| h.profile_id.clone());
-        let reference = match req.profile.as_deref() {
+            .and_then(|h| h.preset_id.clone());
+        let reference = match req.preset.as_deref() {
             Some("") => return SpeedTestTarget::Global,
             Some(id) => Some(id.to_string()),
             None => bound,
@@ -1138,20 +1133,20 @@ impl SpeedTestTarget {
         let Some(reference) = reference else {
             return SpeedTestTarget::Global;
         };
-        let catalog = pf_client_core::profiles::ProfilesFile::load();
+        let catalog = pf_client_core::presets::PresetsFile::load();
         match catalog.resolve(&reference).0 {
-            Some(p) if p.overrides.bitrate_kbps.is_some() => SpeedTestTarget::Profile(p.clone()),
+            Some(p) if p.overrides.bitrate_kbps.is_some() => SpeedTestTarget::Preset(p.clone()),
             Some(p) => SpeedTestTarget::Ask(p.clone()),
-            // A dangling binding resolves as no profile everywhere else; here too.
+            // A dangling binding resolves as no preset everywhere else; here too.
             None => SpeedTestTarget::Global,
         }
     }
 }
 
-/// Write a measured bitrate into one profile's overlay, leaving everything else alone.
-fn write_profile_bitrate(id: &str, kbps: u32) {
-    let mut catalog = pf_client_core::profiles::ProfilesFile::load();
-    let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == id) else {
+/// Write a measured bitrate into one preset's overlay, leaving everything else alone.
+fn write_preset_bitrate(id: &str, kbps: u32) {
+    let mut catalog = pf_client_core::presets::PresetsFile::load();
+    let Some(p) = catalog.presets.iter_mut().find(|p| p.id == id) else {
         return; // deleted while the test ran — the toast still tells the truth about the test
     };
     p.overrides.bitrate_kbps = Some(kbps);

@@ -15,8 +15,10 @@ pub enum OverlayAction {
         launch: Option<String>,
         title: String,
         /// A dangling id falls back through `trust::effective_settings`;
-        /// it never blocks the connect.
-        profile: Option<String>,
+        /// it never blocks the connect. Serialized under its pre-rename key, the one
+        /// Android's console bridge (`SkiaConsole.kt`) reads.
+        #[serde(rename = "profile")]
+        preset: Option<String>,
         /// Pin the advertised fingerprint and park the connect until the
         /// operator approves this device. `false` is an ordinary paired connect.
         request_access: bool,

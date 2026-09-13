@@ -243,7 +243,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoDrain(
     })
 }
 
-/// `NativeBridge.nativeVideoStatsLines(handle, tier, advanced, panelHz, panelModeHz, profile):
+/// `NativeBridge.nativeVideoStatsLines(handle, tier, advanced, panelHz, panelModeHz, preset):
 /// String?` — close the overlay window and return it formatted by `punktfunk_core::hud`, one
 /// `<role>\t<text>` per line, or `null` when no decode thread runs. `panelHz` is the rate this app
 /// may render at and `panelModeHz` the panel's mode (0 = unknown). Poll ~1 Hz; each call closes
@@ -258,7 +258,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoStatsL
     advanced: jboolean,
     panel_hz: jfloat,
     panel_mode_hz: jfloat,
-    profile: JString<'local>,
+    preset: JString<'local>,
 ) -> JString<'local> {
     use punktfunk_core::hud::{self, Extra, Role, StatsVerbosity};
     env.with_env(|env| -> jni::errors::Result<JString<'local>> {
@@ -268,12 +268,12 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoStatsL
         if lock_recover(&h.video).is_none() {
             return Ok(JString::default()); // not streaming → no stats
         }
-        let profile = profile.try_to_string(env).unwrap_or_default();
+        let preset = preset.try_to_string(env).unwrap_or_default();
         let mut s = h.client.hud_snapshot();
         s.decoder = h.stats.decoder_label();
         // SurfaceFlinger's latch is pipeline depth no client paces under: reported, not charged.
         s.shave_os_floor = true;
-        s.preset = (!profile.is_empty()).then_some(profile);
+        s.preset = (!preset.is_empty()).then_some(preset);
         let (judder, coalesced) = (h.stats.judder_permille(), h.stats.coalesced());
         let cadence: Vec<String> = [
             (judder > 0).then(|| format!("judder {judder}‰")),

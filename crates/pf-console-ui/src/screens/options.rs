@@ -1,5 +1,5 @@
 //! Context menu for whatever the console is looking at: a saved host, a pinned
-//! profile card, or a library title. One screen; the subject names the object
+//! preset card, or a library title. One screen; the subject names the object
 //! and [`OptionsScreen::actions`] owns the verbs.
 //!
 //! Which face button raises it is per screen (carousel ▲, library X); both
@@ -44,9 +44,9 @@ enum Action {
     SpeedTest,
     CopyLink,
     Edit,
-    /// [`Screen::BindProfile`] for the primary tile, or for a library title. Not on
-    /// a pin: the pin is the profile.
-    BindProfile,
+    /// [`Screen::BindPreset`] for the primary tile, or for a library title. Not on
+    /// a pin: the pin is the preset.
+    BindPreset,
     /// Per-host [`KnownHost::clipboard_sync`]. Lives on the host, not Settings:
     /// the other end of the pipe is this machine.
     Clipboard,
@@ -58,7 +58,7 @@ enum Action {
 /// What the menu was raised on. A third kind is a variant plus a row list, not
 /// another screen.
 pub(crate) enum Subject {
-    /// Saved host tile, or a pinned profile card (the pin rides in the row).
+    /// Saved host tile, or a pinned preset card (the pin rides in the row).
     Host(HostRow),
     /// Title on a shelf, with the serving host (pin included) so a link off a
     /// pinned card still streams as that card does.
@@ -117,8 +117,8 @@ impl OptionsScreen {
     }
 
     /// What the connecting takeover names for [`Action::Connect`]: the game being
-    /// resumed if there is one, else the host — with a pinned card's profile, the
-    /// same `host · profile` shape its tile wears.
+    /// resumed if there is one, else the host — with a pinned card's preset, the
+    /// same `host · preset` shape its tile wears.
     fn title_for_connect(&self) -> String {
         let host = self.host();
         let subject = if host.running.is_empty() {
@@ -132,7 +132,7 @@ impl OptionsScreen {
         }
     }
 
-    /// Pinned-card keys append the profile id past a NUL (service row builder).
+    /// Pinned-card keys append the preset id past a NUL (service row builder).
     /// Commands address the host half.
     fn host_key(&self) -> &str {
         let key = self.host().key.as_str();
@@ -145,13 +145,13 @@ impl OptionsScreen {
             Subject::Host(h) => h,
             // Not Play: the tile's A already launches THIS title. Connect is the other
             // press — it starts nothing — and leads because on a shelf with a game up it
-            // is the row you came for. Settings profile is the one place a per-title
+            // is the row you came for. Settings preset is the one place a per-title
             // override can be set, so it ships even with an empty catalog.
             Subject::Game { .. } => {
                 return vec![
                     Action::Connect,
                     Action::CopyLink,
-                    Action::BindProfile,
+                    Action::BindPreset,
                     Action::Cancel,
                 ]
             }
@@ -188,7 +188,7 @@ impl OptionsScreen {
         a.extend([
             Action::CopyLink,
             Action::Edit,
-            Action::BindProfile,
+            Action::BindPreset,
             Action::Clipboard,
             Action::Forget,
             Action::Cancel,
@@ -227,9 +227,9 @@ impl OptionsScreen {
             Action::SpeedTest => "Test network speed\u{2026}".into(),
             Action::CopyLink => "Copy link".into(),
             Action::Edit => "Edit\u{2026}".into(),
-            Action::BindProfile => match self.subject {
-                Subject::Game { .. } => "Settings profile\u{2026}".into(),
-                Subject::Host(_) => "Default profile\u{2026}".into(),
+            Action::BindPreset => match self.subject {
+                Subject::Game { .. } => "Settings preset\u{2026}".into(),
+                Subject::Host(_) => "Default preset\u{2026}".into(),
             },
             Action::Clipboard => format!(
                 "Shared clipboard: {}",
@@ -399,7 +399,7 @@ impl OptionsScreen {
                     launch: None,
                     title: self.title_for_connect(),
                     request_access: false,
-                    profile: host.pin.as_ref().map(|p| p.id.clone()),
+                    preset: host.pin.as_ref().map(|p| p.id.clone()),
                 });
                 fx.pop();
             }
@@ -423,27 +423,25 @@ impl OptionsScreen {
                 self.host(),
             ))),
             // Same screen either way; the subject decides which binding it writes.
-            Action::BindProfile => {
+            Action::BindPreset => {
                 let host_name = self.host().name.clone();
                 let screen = match &self.subject {
                     Subject::Game { id, title, .. } => {
-                        super::bind_profile::BindProfileScreen::for_game(
+                        super::bind_preset::BindPresetScreen::for_game(
                             key,
                             host_name,
-                            super::bind_profile::GameSubject {
+                            super::bind_preset::GameSubject {
                                 id: id.clone(),
                                 title: title.clone(),
                             },
-                            store.profiles(),
+                            store.presets(),
                         )
                     }
-                    Subject::Host(_) => super::bind_profile::BindProfileScreen::new(
-                        key,
-                        host_name,
-                        store.profiles(),
-                    ),
+                    Subject::Host(_) => {
+                        super::bind_preset::BindPresetScreen::new(key, host_name, store.presets())
+                    }
                 };
-                fx.replace(Screen::BindProfile(screen));
+                fx.replace(Screen::BindPreset(screen));
             }
             Action::Clipboard => {
                 let host = self.host();
@@ -504,7 +502,7 @@ impl OptionsScreen {
                 if let Some(p) = &self.host().pin {
                     fx.cmds.push(ConsoleCmd::SetPin {
                         key,
-                        profile_id: p.id.clone(),
+                        preset_id: p.id.clone(),
                         pin: false,
                     });
                     fx.toast = Some(format!("Unpinned {}", p.name));
@@ -525,8 +523,8 @@ impl OptionsScreen {
     fn blurb(&self) -> String {
         match &self.subject {
             Subject::Host(h) if h.pin.is_some() => {
-                "This card is a shortcut to one profile on this host. Unpinning it changes \
-                 nothing about the host or the profile."
+                "This card is a shortcut to one preset on this host. Unpinning it changes \
+                 nothing about the host or the preset."
                     .into()
             }
             Subject::Host(_) => "Manage this saved host.".into(),
@@ -588,7 +586,7 @@ impl OptionsScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ProfileChip;
+    use crate::model::PresetChip;
     use crate::screens::settings::tests::fake_home;
     use crate::screens::Nav;
 
@@ -632,9 +630,9 @@ mod tests {
             os: String::new(),
             actions: Vec::new(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         }
     }
 
@@ -663,7 +661,7 @@ mod tests {
     fn pinned() -> HostRow {
         HostRow {
             key: "aa\u{0}prof-1".into(),
-            pin: Some(ProfileChip {
+            pin: Some(PresetChip {
                 id: "prof-1".into(),
                 name: "4K".into(),
                 accent: None,
@@ -749,11 +747,11 @@ mod tests {
 
     #[test]
     fn a_pinned_card_offers_no_speed_test() {
-        // A pin is a shortcut to one profile, not a second host — same rule as Send logs.
+        // A pin is a shortcut to one preset, not a second host — same rule as Send logs.
         let pinned = OptionsScreen::for_host(&HostRow {
             paired: true,
             online: true,
-            pin: Some(ProfileChip {
+            pin: Some(PresetChip {
                 id: "prof-1".into(),
                 name: "4K".into(),
                 accent: None,
@@ -911,17 +909,17 @@ mod tests {
     }
 
     #[test]
-    fn default_profile_opens_the_chooser_on_the_hosts_plain_key() {
+    fn default_preset_opens_the_chooser_on_the_hosts_plain_key() {
         let mut s = OptionsScreen::for_host(&host());
         assert!(s
             .actions(crate::platform::Platform::Desktop)
-            .contains(&Action::BindProfile));
+            .contains(&Action::BindPreset));
         let mut fx = Outbox::default();
-        run_action(&mut s, Action::BindProfile, &mut fx);
+        run_action(&mut s, Action::BindPreset, &mut fx);
         match fx.nav {
             Some(crate::screens::Nav::Replace(screen)) => match *screen {
-                Screen::BindProfile(b) => assert_eq!(b.host_name(), "Desk"),
-                _ => panic!("expected the bind-profile chooser"),
+                Screen::BindPreset(b) => assert_eq!(b.host_name(), "Desk"),
+                _ => panic!("expected the bind-preset chooser"),
             },
             _ => panic!("expected a replace"),
         }
@@ -1008,23 +1006,20 @@ mod tests {
     /// Still nothing the cover already does — the shelf's A launches this title, and no row
     /// here repeats it. Connect is the other press: it starts nothing.
     #[test]
-    fn a_title_offers_the_link_its_profile_and_nothing_its_cover_already_does() {
+    fn a_title_offers_the_link_its_preset_and_nothing_its_cover_already_does() {
         let s = OptionsScreen::for_game(&host(), &game());
-        // No Play row: the cover's own A launches. Connect and the profile row are the
+        // No Play row: the cover's own A launches. Connect and the preset row are the
         // verbs a title owns that nothing else on the shelf offers.
         assert_eq!(
             s.actions(crate::platform::Platform::Desktop),
             vec![
                 Action::Connect,
                 Action::CopyLink,
-                Action::BindProfile,
+                Action::BindPreset,
                 Action::Cancel
             ]
         );
-        assert_eq!(
-            s.label(Action::BindProfile, None),
-            "Settings profile\u{2026}"
-        );
+        assert_eq!(s.label(Action::BindPreset, None), "Settings preset\u{2026}");
         // Cursor starts at 0: the row that gets you onto the host is under confirm.
         assert_eq!(s.list.cursor, 0);
         assert_eq!(s.title(), "Hollow Knight");
@@ -1046,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn a_titles_menu_keeps_the_shelfs_whole_host_so_a_pinned_cards_profile_survives() {
+    fn a_titles_menu_keeps_the_shelfs_whole_host_so_a_pinned_cards_preset_survives() {
         let s = OptionsScreen::for_game(&pinned(), &game());
         let Subject::Game { host, id, .. } = &s.subject else {
             panic!("built as a title menu");
@@ -1055,7 +1050,7 @@ mod tests {
         assert_eq!(
             host.pin.as_ref().map(|p| p.id.as_str()),
             Some("prof-1"),
-            "a link taken off a pinned card's shelf carries that card's profile"
+            "a link taken off a pinned card's shelf carries that card's preset"
         );
         // Host-addressed commands still use the host half of a pin key.
         assert_eq!(s.host_key(), "aa");
@@ -1117,9 +1112,9 @@ mod tests {
         assert_eq!(intent.launch, None, "resume must not re-launch the title");
         assert_eq!(intent.addr, "10.0.0.5");
         assert_eq!(
-            intent.profile.as_deref(),
+            intent.preset.as_deref(),
             Some("prof-1"),
-            "a pinned card's shelf resumes with that card's profile"
+            "a pinned card's shelf resumes with that card's preset"
         );
         assert_eq!(
             intent.title, "Elden Ring \u{b7} 4K",
@@ -1151,7 +1146,7 @@ mod tests {
                 ..saved.clone()
             },
             HostRow {
-                pin: Some(ProfileChip {
+                pin: Some(PresetChip {
                     id: "prof-1".into(),
                     name: "4K".into(),
                     accent: None,

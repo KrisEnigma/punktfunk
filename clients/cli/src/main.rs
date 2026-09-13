@@ -25,7 +25,7 @@ mod cli {
     use pf_client_core::orchestrate::{
         self, ConnectPlan, PlanOutcome, SessionEvent, WakeOutcome, WakeWait,
     };
-    use pf_client_core::profiles::ProfilesFile;
+    use pf_client_core::presets::PresetsFile;
     use pf_client_core::trust::{self, KnownHost, KnownHosts, Settings};
     use pf_client_core::{library, start, wol};
     use std::time::Duration;
@@ -34,7 +34,7 @@ mod cli {
     pub const CONNECT_FAILED: u8 = 2;
     pub const TRUST_REJECTED: u8 = 3;
     pub const RENDERER_FAILED: u8 = 4;
-    /// Nothing here matches what you named (host, profile, game).
+    /// Nothing here matches what you named (host, preset, game).
     pub const UNRESOLVED: u8 = 5;
     /// Refused because it needs a person: pairing, or trusting an unknown host.
     pub const NEEDS_INTERACTION: u8 = 6;
@@ -629,14 +629,14 @@ from the config directory for a true factory reset."
                     )
                 });
                 if has(args, "--json") {
-                    let catalog = ProfilesFile::load();
+                    let catalog = PresetsFile::load();
                     let rows: Vec<serde_json::Value> = known
                         .hosts
                         .iter()
                         .enumerate()
                         .map(|(i, h)| {
                             let preset = h
-                                .profile_id
+                                .preset_id
                                 .as_ref()
                                 .and_then(|id| catalog.find_by_id(id))
                                 .map(|p| serde_json::json!({"id": p.id, "name": p.name}));
@@ -1007,7 +1007,7 @@ from the config directory for a true factory reset."
         let outcome = orchestrate::plan_from_link(
             &link,
             &known,
-            &ProfilesFile::load(),
+            &PresetsFile::load(),
             &trust::Settings::load(),
         );
         match outcome {
@@ -1117,7 +1117,7 @@ from the config directory for a true factory reset."
                 }
             }
         }
-        if let Some(p) = &plan.profile {
+        if let Some(p) = &plan.preset {
             eprintln!("streaming with \"{}\"", p.name);
         }
         if exec {
@@ -1216,8 +1216,8 @@ from the config directory for a true factory reset."
 
     /// `speed-test <host-ref>` — measure the real data plane and print what it recommends.
     /// Deliberately does NOT apply the result: which layer a bitrate belongs in is a decision
-    /// the GUI makes with the user (bound profile vs global, design §5.3), and a CLI silently
-    /// rewriting a profile would be the surprise that rule exists to prevent.
+    /// the GUI makes with the user (bound preset vs global, design §5.3), and a CLI silently
+    /// rewriting a preset would be the surprise that rule exists to prevent.
     fn speed_test(args: &[String]) -> u8 {
         let Some(reference) = positional(args, 0) else {
             eprintln!("usage: punktfunk speed-test <host-ref>");
@@ -1312,11 +1312,11 @@ from the config directory for a true factory reset."
     fn presets(args: &[String], legacy: bool) -> u8 {
         match positional(args, 0).as_deref() {
             Some("list") | None => {
-                let catalog = ProfilesFile::load();
-                if has(args, "--json") && !legacy {
+                let catalog = PresetsFile::load();
+                if has(args, "--json") && legacy {
                     let json = serde_json::json!({
                         "version": catalog.version,
-                        "presets": catalog.profiles,
+                        "profiles": catalog.presets,
                     });
                     println!("{json}");
                 } else if has(args, "--json") {
@@ -1325,7 +1325,7 @@ from the config directory for a true factory reset."
                         serde_json::to_string(&catalog).unwrap_or_else(|_| "{}".into())
                     );
                 } else {
-                    for p in &catalog.profiles {
+                    for p in &catalog.presets {
                         let n = serde_json::to_value(&p.overrides)
                             .ok()
                             .and_then(|v| v.as_object().map(|o| o.len()))

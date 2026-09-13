@@ -3,7 +3,7 @@
 //! The host bursts filler over the real data plane — the same path a stream uses, so the answer is
 //! about the link the stream will actually take rather than about some generic throughput. It is
 //! deliberately *measure-only*: which layer a measured bitrate belongs in (the global default, or a
-//! host's bound profile) is a decision the UI makes with the user
+//! host's bound preset) is a decision the UI makes with the user
 //! (design/client-settings-profiles.md §5.3), never one this shim makes for them.
 //!
 //! Two calls: start, then poll. Both are cheap and non-blocking, so Kotlin can drive them from a

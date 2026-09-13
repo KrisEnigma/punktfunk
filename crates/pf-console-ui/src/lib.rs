@@ -72,7 +72,7 @@ pub use input::Key;
 pub use library::decode_poster_off_thread;
 pub use library::{DecodedPoster, LibraryGame, LibraryPhase, LibraryShared, Stale};
 pub use model::{
-    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, PairPhase, ProfileChip, SpeedPhase,
+    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, PairPhase, PresetChip, SpeedPhase,
     SpeedStatus, WakeStatus,
 };
 pub use platform::{Platform, PlatformScreen};

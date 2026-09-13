@@ -792,7 +792,7 @@ mod tests {
         );
     }
 
-    /// A settings string, a profile written by a newer build, or a corrupted preference must never
+    /// A settings string, a preset written by a newer build, or a corrupted preference must never
     /// reach the wire as a format the plane cannot carry — and must never block a connect either.
     /// Every one resolves to the "did not ask" sentinel, which every host can answer.
     ///

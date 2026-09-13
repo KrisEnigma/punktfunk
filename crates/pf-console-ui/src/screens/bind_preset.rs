@@ -1,7 +1,7 @@
-//! Bind the profile a plain A-press on a saved host connects with
-//! (`KnownHost::profile_id`). Reached from the host tile's Options menu.
+//! Bind the preset a plain A-press on a saved host connects with
+//! (`KnownHost::preset_id`). Reached from the host tile's Options menu.
 //!
-//! Choosing emits [`ConsoleCmd::BindProfile`]; the checkmark is read back from
+//! Choosing emits [`ConsoleCmd::BindPreset`]; the checkmark is read back from
 //! the host row, never stored here. Pinning is the sibling (`pin_hosts.rs`):
 //! a pin adds a card, this changes what the primary tile itself does.
 
@@ -20,29 +20,29 @@ pub(crate) struct GameSubject {
     pub title: String,
 }
 
-pub(crate) struct BindProfileScreen {
+pub(crate) struct BindPresetScreen {
     /// Host primary key (fingerprint or `addr:port`), never a pinned-card composite.
     host_key: String,
     host_name: String,
-    /// Catalog snapshot at construction. The console cannot create profiles, so
+    /// Catalog snapshot at construction. The console cannot create presets, so
     /// this list cannot change while the screen is open.
-    profiles: Vec<(String, String)>,
+    presets: Vec<(String, String)>,
     /// Set when the menu was raised on a title rather than the host tile. Same catalog
     /// and same radio behaviour either way — only the binding it writes differs.
     game: Option<GameSubject>,
     list: MenuList,
 }
 
-impl BindProfileScreen {
+impl BindPresetScreen {
     pub(crate) fn new(
         host_key: String,
         host_name: String,
-        profiles: Vec<(String, String)>,
-    ) -> BindProfileScreen {
-        BindProfileScreen {
+        presets: Vec<(String, String)>,
+    ) -> BindPresetScreen {
+        BindPresetScreen {
             host_key,
             host_name,
-            profiles,
+            presets,
             game: None,
             list: MenuList::new(),
         }
@@ -53,11 +53,11 @@ impl BindProfileScreen {
         host_key: String,
         host_name: String,
         game: GameSubject,
-        profiles: Vec<(String, String)>,
-    ) -> BindProfileScreen {
-        BindProfileScreen {
+        presets: Vec<(String, String)>,
+    ) -> BindPresetScreen {
+        BindPresetScreen {
             game: Some(game),
-            ..BindProfileScreen::new(host_key, host_name, profiles)
+            ..BindPresetScreen::new(host_key, host_name, presets)
         }
     }
 
@@ -68,18 +68,18 @@ impl BindProfileScreen {
     /// Stack title: the subject the user picked is the one named.
     pub(crate) fn heading(&self) -> String {
         match &self.game {
-            Some(g) => format!("Profile for {}", g.title),
+            Some(g) => format!("Preset for {}", g.title),
             None => format!("Default for {}", self.host_name()),
         }
     }
 
-    /// Read from the model, never remembered: the row's chip and its `game_profiles`
+    /// Read from the model, never remembered: the row's chip and its `game_presets`
     /// ARE the state, so the checkmark cannot disagree with what the carousel shows.
     fn bound(&self, ctx: &Ctx) -> Option<String> {
         let row = ctx.hosts.iter().find(|r| r.key == self.host_key)?;
         match &self.game {
-            Some(g) => row.game_profiles.get(&g.id).cloned(),
-            None => row.bound_profile.as_ref().map(|p| p.id.clone()),
+            Some(g) => row.game_presets.get(&g.id).cloned(),
+            None => row.bound_preset.as_ref().map(|p| p.id.clone()),
         }
     }
 
@@ -87,12 +87,12 @@ impl BindProfileScreen {
         if i == 0 {
             Some(None)
         } else {
-            self.profiles.get(i - 1).map(|(id, _)| Some(id.as_str()))
+            self.presets.get(i - 1).map(|(id, _)| Some(id.as_str()))
         }
     }
 
     fn len(&self) -> usize {
-        self.profiles.len() + 1
+        self.presets.len() + 1
     }
 
     pub(crate) fn menu(
@@ -137,10 +137,10 @@ impl BindProfileScreen {
                 if current.as_deref() == choice {
                     return Some(MenuPulse::Boundary);
                 }
-                fx.cmds.push(ConsoleCmd::BindProfile {
+                fx.cmds.push(ConsoleCmd::BindPreset {
                     key: self.host_key.clone(),
                     game: self.game.as_ref().map(|g| g.id.clone()),
-                    profile_id: choice.map(str::to_owned),
+                    preset_id: choice.map(str::to_owned),
                 });
                 Some(MenuPulse::Confirm)
             }
@@ -148,7 +148,7 @@ impl BindProfileScreen {
     }
 
     pub(crate) fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
-        if self.profiles.is_empty() {
+        if self.presets.is_empty() {
             return vec![Hint::new(HintKey::Back, "Done")];
         }
         let verb = if self.game.is_some() {
@@ -172,10 +172,10 @@ impl BindProfileScreen {
         ctx: &mut Ctx,
     ) {
         let cx = f64::from(rect.left) + f64::from(rect.width()) / 2.0;
-        if self.profiles.is_empty() {
+        if self.presets.is_empty() {
             fonts.centered(
                 canvas,
-                "No profiles yet \u{2014} create them in the desktop app, then choose one here.",
+                "No presets yet \u{2014} create them in the desktop app, then choose one here.",
                 W::Regular,
                 14.0 * k,
                 fg(0.55),
@@ -206,7 +206,7 @@ impl BindProfileScreen {
                     };
                     (none.to_string(), None)
                 } else {
-                    let (id, name) = &self.profiles[i - 1];
+                    let (id, name) = &self.presets[i - 1];
                     (name.clone(), Some(id.as_str()))
                 };
                 let current = bound.as_deref() == id;
@@ -254,7 +254,7 @@ impl BindProfileScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{HostRow, ProfileChip};
+    use crate::model::{HostRow, PresetChip};
     use pf_client_core::menu_nav::MenuDir;
     use pf_client_core::trust::Settings;
 
@@ -276,19 +276,19 @@ mod tests {
             os: String::new(),
             actions: Vec::new(),
             pin: None,
-            bound_profile: bound.map(|id| ProfileChip {
+            bound_preset: bound.map(|id| PresetChip {
                 id: id.into(),
                 name: "Work".into(),
                 accent: None,
                 bitrate_kbps: None,
             }),
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         }
     }
 
-    fn screen() -> BindProfileScreen {
-        BindProfileScreen::new(
+    fn screen() -> BindPresetScreen {
+        BindPresetScreen::new(
             "aa".into(),
             "Desk".into(),
             vec![("p1".into(), "Work".into()), ("p2".into(), "Game".into())],
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_profile_binds_and_no_default_clears() {
+    fn choosing_a_preset_binds_and_no_default_clears() {
         let mut settings = Settings::default();
         let pads = Vec::new();
         let library = crate::library::LibraryShared::default();
@@ -321,10 +321,10 @@ mod tests {
         let pulse = s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
         assert_eq!(
             fx.cmds,
-            vec![ConsoleCmd::BindProfile {
+            vec![ConsoleCmd::BindPreset {
                 key: "aa".into(),
                 game: None,
-                profile_id: Some("p2".into()),
+                preset_id: Some("p2".into()),
             }]
         );
         assert!(matches!(pulse, Some(MenuPulse::Confirm)));
@@ -335,10 +335,10 @@ mod tests {
         s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
         assert_eq!(
             fx.cmds,
-            vec![ConsoleCmd::BindProfile {
+            vec![ConsoleCmd::BindPreset {
                 key: "aa".into(),
                 game: None,
-                profile_id: None,
+                preset_id: None,
             }]
         );
     }
@@ -392,15 +392,15 @@ mod tests {
     }
 
     /// Raised on a title: the command names the game, the checkmark comes from
-    /// `game_profiles` (not the host's chip), and re-choosing it is still a boundary.
+    /// `game_presets` (not the host's chip), and re-choosing it is still a boundary.
     #[test]
-    fn a_title_binds_its_own_profile_and_reads_its_own_checkmark() {
+    fn a_title_binds_its_own_preset_and_reads_its_own_checkmark() {
         let mut settings = Settings::default();
         let pads = Vec::new();
         let library = crate::library::LibraryShared::default();
         // Host bound to p1, title already bound to p2 — the two must not be confused.
         let mut row = host(Some("p1"));
-        row.game_profiles
+        row.game_presets
             .insert("halo".to_string(), "p2".to_string());
         let hosts = [row];
         let mut ctx = Ctx {
@@ -416,7 +416,7 @@ mod tests {
             device_name: "t",
             t: 0.0,
         };
-        let mut s = BindProfileScreen::for_game(
+        let mut s = BindPresetScreen::for_game(
             "aa".into(),
             "Desk".into(),
             GameSubject {
@@ -425,7 +425,7 @@ mod tests {
             },
             vec![("p1".into(), "Work".into()), ("p2".into(), "Game".into())],
         );
-        assert_eq!(s.heading(), "Profile for Halo");
+        assert_eq!(s.heading(), "Preset for Halo");
 
         // Row 2 is p2, which this title already uses: a boundary, not a second write.
         let mut fx = Outbox::default();
@@ -441,10 +441,10 @@ mod tests {
         s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
         assert_eq!(
             fx.cmds,
-            vec![ConsoleCmd::BindProfile {
+            vec![ConsoleCmd::BindPreset {
                 key: "aa".into(),
                 game: Some("halo".into()),
-                profile_id: Some("p1".into()),
+                preset_id: Some("p1".into()),
             }]
         );
 
@@ -454,10 +454,10 @@ mod tests {
         s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
         assert_eq!(
             fx.cmds,
-            vec![ConsoleCmd::BindProfile {
+            vec![ConsoleCmd::BindPreset {
                 key: "aa".into(),
                 game: Some("halo".into()),
-                profile_id: None,
+                preset_id: None,
             }]
         );
     }
