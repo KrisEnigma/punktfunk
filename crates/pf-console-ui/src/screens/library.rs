@@ -4,7 +4,7 @@
 //! focused title in this window. The shell owns aurora, chrome, and the
 //! connecting overlay.
 //!
-//! `host.pin` is load-bearing: a pinned card launches with that profile.
+//! `host.pin` is load-bearing: a pinned card launches with that preset.
 //! Posters decode here ([`decode_poster`]) so collections and this screen
 //! share one cache size. Entrance waits for neighbourhood art or 400 ms.
 //!
@@ -357,7 +357,7 @@ impl LibraryBar {
 }
 
 pub(crate) struct LibraryScreen {
-    /// Whole row: collections builds a second shelf from it. `pin` is the one-off profile.
+    /// Whole row: collections builds a second shelf from it. `pin` is the one-off preset.
     host: HostRow,
     shared: Option<LibraryShared>,
     // Snapshot of the shared model; re-pulled when `generation` bumps.
@@ -554,7 +554,7 @@ impl LibraryScreen {
         self.view.len()
     }
 
-    // Narrow host readers for `RefreshRunning`. A `&HostRow` also hands over pin and profile.
+    // Narrow host readers for `RefreshRunning`. A `&HostRow` also hands over pin and preset.
     pub(crate) fn host_addr(&self) -> &str {
         &self.host.addr
     }
@@ -918,7 +918,7 @@ impl LibraryScreen {
                 None => subject.clone(),
             },
             request_access: false,
-            profile: self.host.pin.as_ref().map(|p| p.id.clone()),
+            preset: self.host.pin.as_ref().map(|p| p.id.clone()),
         }
     }
 
@@ -943,8 +943,8 @@ impl LibraryScreen {
                         None => g.title.clone(),
                     },
                     request_access: false,
-                    // Pinned card: that profile as a one-off. Primary tile: host default.
-                    profile: self.host.pin.as_ref().map(|p| p.id.clone()),
+                    // Pinned card: that preset as a one-off. Primary tile: host default.
+                    preset: self.host.pin.as_ref().map(|p| p.id.clone()),
                 });
                 Some(MenuPulse::Confirm)
             }
@@ -1785,9 +1785,9 @@ mod tests {
             os: String::new(),
             actions: Vec::new(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         }
     }
 
@@ -2550,7 +2550,7 @@ mod tests {
     }
 
     /// The tile is the host, not a title: Confirm streams it with no launch id, and X
-    /// opens the HOST's options — a title menu here would offer a per-title profile
+    /// opens the HOST's options — a title menu here would offer a per-title preset
     /// binding for a title that does not exist.
     #[test]
     fn confirm_on_the_desktop_tile_launches_nothing() {

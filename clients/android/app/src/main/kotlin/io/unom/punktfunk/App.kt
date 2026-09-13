@@ -252,7 +252,7 @@ fun App(forceGamepadUi: Boolean = false) {
         KnownHostStore(context).all().firstOrNull { it.id == id }?.let { kh ->
             // A pin unpinned while the game was running is no longer a shelf: fall back to the
             // host's own, rather than a card that no longer exists.
-            touchLibrary = kh to pinId?.takeIf { it in kh.pinnedProfileIds }
+            touchLibrary = kh to pinId?.takeIf { it in kh.pinnedPresetIds }
         }
         reopenLibrary = null
     }
@@ -284,7 +284,7 @@ fun App(forceGamepadUi: Boolean = false) {
                 // its `remember`s), so the intent is hoisted here and handed back on the way in.
                 reopenLibrary =
                     if (reason == SessionEndReason.GAME_EXITED && active.launchedFromLibrary) {
-                        active.hostId?.let { LibraryReturn(it, active.libraryProfileId) }
+                        active.hostId?.let { LibraryReturn(it, active.libraryPresetId) }
                     } else {
                         null
                     }
@@ -317,7 +317,7 @@ fun App(forceGamepadUi: Boolean = false) {
                     touchLibrary = null
                     touchAutoStream = false
                 },
-                pinnedProfileId = library.second,
+                pinnedPresetId = library.second,
                 autoStream = touchAutoStream,
             )
             else -> TouchTabs(tab, onTab = { tab = it }) { targetTab ->

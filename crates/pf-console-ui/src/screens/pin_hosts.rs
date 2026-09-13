@@ -1,8 +1,8 @@
-//! Pin a profile onto saved hosts as extra connect cards
-//! (`KnownHost::pinned_profiles`). Reached from the settings Profiles section.
+//! Pin a preset onto saved hosts as extra connect cards
+//! (`KnownHost::pinned_presets`). Reached from the settings Presets section.
 //!
 //! A toggle emits [`ConsoleCmd::SetPin`]; pinned/off is read back from the
-//! host rows, never stored here. Binding is the sibling (`bind_profile.rs`):
+//! host rows, never stored here. Binding is the sibling (`bind_preset.rs`):
 //! that changes what the primary tile does; this adds a card.
 
 use crate::glyphs::{Hint, HintKey};
@@ -15,8 +15,8 @@ use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Rect};
 
 pub(crate) struct PinHostsScreen {
-    profile_id: String,
-    profile_name: String,
+    preset_id: String,
+    preset_name: String,
     list: MenuList,
 }
 
@@ -31,30 +31,30 @@ fn host_indices(ctx: &Ctx) -> Vec<usize> {
 }
 
 impl PinHostsScreen {
-    pub(crate) fn new(profile_id: String, profile_name: String) -> PinHostsScreen {
+    pub(crate) fn new(preset_id: String, preset_name: String) -> PinHostsScreen {
         PinHostsScreen {
-            profile_id,
-            profile_name,
+            preset_id,
+            preset_name,
             list: MenuList::new(),
         }
     }
 
-    pub(crate) fn profile_name(&self) -> &str {
-        &self.profile_name
+    pub(crate) fn preset_name(&self) -> &str {
+        &self.preset_name
     }
 
     /// Read from the model — the pinned card's row is the state, so the toggle cannot
     /// disagree with the carousel.
     fn pinned(&self, ctx: &Ctx, host_idx: usize) -> bool {
         let host = &ctx.hosts[host_idx];
-        // The host half of the key (a pinned card appends its profile id past a NUL), not the
+        // The host half of the key (a pinned card appends its preset id past a NUL), not the
         // address: two OS installs of a dual-boot box are two hosts at one address.
         fn host_key(k: &str) -> &str {
             k.split('\0').next().unwrap_or(k)
         }
         let key = host_key(&host.key);
         ctx.hosts.iter().any(|r| {
-            host_key(&r.key) == key && r.pin.as_ref().is_some_and(|p| p.id == self.profile_id)
+            host_key(&r.key) == key && r.pin.as_ref().is_some_and(|p| p.id == self.preset_id)
         })
     }
 
@@ -105,7 +105,7 @@ impl PinHostsScreen {
         }
         fx.cmds.push(ConsoleCmd::SetPin {
             key: ctx.hosts[host_idx].key.clone(),
-            profile_id: self.profile_id.clone(),
+            preset_id: self.preset_id.clone(),
             pin: target,
         });
         Some(MenuPulse::Move)
@@ -135,7 +135,7 @@ impl PinHostsScreen {
         if indices.is_empty() {
             fonts.centered(
                 canvas,
-                "No saved hosts yet — pair with a host first, then pin this profile to it.",
+                "No saved hosts yet — pair with a host first, then pin this preset to it.",
                 W::Regular,
                 14.0 * k,
                 fg(0.55),
@@ -178,7 +178,7 @@ impl PinHostsScreen {
             .render(canvas, list_rect, &rows, fonts, k, dt, true);
         fonts.centered(
             canvas,
-            "A pinned profile appears as its own card on the host — one press connects with it.",
+            "A pinned preset appears as its own card on the host — one press connects with it.",
             W::Regular,
             13.0 * k,
             fg(0.55),
@@ -192,7 +192,7 @@ impl PinHostsScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{HostRow, ProfileChip};
+    use crate::model::{HostRow, PresetChip};
     use crate::screens::Outbox;
     use pf_client_core::trust::Settings;
 
@@ -213,15 +213,15 @@ mod tests {
             last_used: None,
             os: String::new(),
             actions: Vec::new(),
-            pin: pin.map(|id| ProfileChip {
+            pin: pin.map(|id| PresetChip {
                 id: id.into(),
                 name: "Work".into(),
                 accent: None,
                 bitrate_kbps: None,
             }),
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         }
     }
 
@@ -251,7 +251,7 @@ mod tests {
             fx.cmds,
             vec![ConsoleCmd::SetPin {
                 key: "aa".into(),
-                profile_id: "p1".into(),
+                preset_id: "p1".into(),
                 pin: true,
             }]
         );
@@ -295,7 +295,7 @@ mod tests {
             fx.cmds,
             vec![ConsoleCmd::SetPin {
                 key: "aa".into(),
-                profile_id: "p1".into(),
+                preset_id: "p1".into(),
                 pin: false,
             }]
         );

@@ -200,7 +200,7 @@ public final class GamepadCapture {
 
     /// Forward the raw guide + share/QAM presses (`EffectiveSettings.systemButtonsForward`,
     /// default true on Apple — where the OS shows its own overlay for them, that's the OS's
-    /// business; local mode exists for profile parity with the Gaming-Mode clients).
+    /// business; local mode exists for preset parity with the Gaming-Mode clients).
     public let systemForward: Bool
     /// The hold-Select guide gesture (`EffectiveSettings.guideGestureEnabled` — auto = on
     /// everywhere but macOS). See `guideHold`.

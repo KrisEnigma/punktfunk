@@ -13,7 +13,7 @@
 # options by the plugin (SteamClient.Apps.SetAppLaunchOptions), so ONE generic shortcut serves
 # every host:
 #   PF_REF     host reference — a saved host's stable id, or addr[:port]  (required to stream)
-#   PF_PROFILE settings-profile id for a pinned card                      (optional)
+#   PF_PRESET  preset id for a pinned card (old name: PF_PROFILE)         (optional)
 #   PF_GAME    store-qualified library id (steam:570) the host launches into the stream —
 #              set by a stream started from a Steam game's page          (optional)
 #   PF_REQUEST_ACCESS  non-empty = ask the host's operator to admit this device instead of
@@ -25,7 +25,7 @@
 #                  resolved a non-flatpak install — then the client is run directly and
 #                  PF_APPID/PF_FLATPAK are unused)
 #
-# A REFERENCE, NEVER A VALUE. Host refs and profile ids are the only things that ride this
+# A REFERENCE, NEVER A VALUE. Host refs and preset ids are the only things that ride this
 # channel; no resolution, bitrate or codec ever does. The client resolves both against its own
 # stores, which is what keeps a Steam launch option from becoming a second settings surface.
 # The plugin validates them to space/quote-free ASCII before they reach Steam's tokenizer.
@@ -82,8 +82,11 @@ if [ -z "${PF_REF:-}" ]; then
 fi
 
 set -- --fullscreen
-if [ -n "${PF_PROFILE:-}" ]; then
-    set -- --profile "$PF_PROFILE" "$@"
+# PF_PROFILE is the old name, still in shortcuts an older plugin wrote. `--profile` is the
+# spelling every client version accepts.
+PF_PRESET="${PF_PRESET:-${PF_PROFILE:-}}"
+if [ -n "$PF_PRESET" ]; then
+    set -- --profile "$PF_PRESET" "$@"
 fi
 # A title to launch into the stream: the CLI hands the id to the host, which resolves it
 # against its own library — the Deck never learns what the launch recipe is.

@@ -207,7 +207,7 @@ internal fun PairPinDialog(
 internal fun EditHostDialog(
     target: KnownHost,
     suggestedMacs: List<String>,
-    profiles: List<StreamProfile>,
+    presets: List<StreamPreset>,
     onSave: (KnownHost) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -218,12 +218,12 @@ internal fun EditHostDialog(
         mutableStateOf(target.mac.ifEmpty { suggestedMacs }.joinToString(", "))
     }
     var clipboard by remember(target) { mutableStateOf(target.clipboardSync) }
-    // A binding whose profile was deleted reads as "Default settings" (which is what it already
+    // A binding whose preset was deleted reads as "Default settings" (which is what it already
     // resolves to) and is cleaned off the record on the next save — never an error state.
-    var boundId by remember(target, profiles) {
-        mutableStateOf(target.profileId?.takeIf { id -> profiles.any { it.id == id } })
+    var boundId by remember(target, presets) {
+        mutableStateOf(target.presetId?.takeIf { id -> presets.any { it.id == id } })
     }
-    var pins by remember(target) { mutableStateOf(target.pinnedProfileIds) }
+    var pins by remember(target) { mutableStateOf(target.pinnedPresetIds) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Edit host") },
@@ -273,9 +273,9 @@ internal fun EditHostDialog(
                     }
                     Switch(checked = clipboard, onCheckedChange = { clipboard = it })
                 }
-                if (profiles.isNotEmpty()) {
-                    HostProfileBinding(
-                        profiles = profiles,
+                if (presets.isNotEmpty()) {
+                    HostPresetBinding(
+                        presets = presets,
                         boundId = boundId,
                         onBind = { boundId = it },
                         pins = pins,
@@ -297,8 +297,8 @@ internal fun EditHostDialog(
                             port = port.toIntOrNull() ?: target.port,
                             mac = KnownHostStore.parseMacs(mac),
                             clipboardSync = clipboard,
-                            profileId = boundId,
-                            pinnedProfileIds = pins,
+                            presetId = boundId,
+                            pinnedPresetIds = pins,
                         ),
                     )
                 },

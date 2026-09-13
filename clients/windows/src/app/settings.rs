@@ -15,10 +15,10 @@ use super::lucide;
 use super::style::*;
 use super::{AppCtx, Screen};
 use crate::trust::{KnownHosts, Settings};
-use pf_client_core::profiles::{ProfilesFile, StreamProfile};
+use pf_client_core::presets::{PresetsFile, StreamPreset};
 // The audio-format table lives in the session crate, not here: the same three stored values also
 // have to reach the wire, and they are shared verbatim with the Apple and Android clients so one
-// profile round-trips. A second copy of the spellings in this file is exactly the drift the
+// preset round-trips. A second copy of the spellings in this file is exactly the drift the
 // shared table exists to prevent — which is why this row has no `const` beside AUDIO_CHANNELS.
 use pf_client_core::session::AUDIO_FORMATS;
 use pf_client_core::start;
@@ -121,7 +121,7 @@ const MOUSE_MODES: &[(&str, &str)] = &[
     ("desktop", "Desktop (absolute)"),
 ];
 /// Presentation intent: `(stored value, display label)` — the `present_priority` key the
-/// Apple and Android clients share, so one profile means the same thing everywhere.
+/// Apple and Android clients share, so one preset means the same thing everywhere.
 const PRESENT_PRIORITIES: &[(&str, &str)] =
     &[("latency", "Lowest latency"), ("smooth", "Smoothness")];
 /// Smoothness buffer depth in frames: `(stored value, display label)`. `0` = Automatic,
@@ -143,9 +143,9 @@ const COMPOSITORS: &[(&str, &str)] = &[
     ("gamescope", "gamescope"),
 ];
 
-/// The chip palette a profile can carry (`StreamProfile.accent`), same set as the GTK client so
-/// a profile looks the same on both. Eight legible colours rather than a free picker: the job is
-/// telling profiles apart at a glance on a host tile, and the schema still accepts any
+/// The chip palette a preset can carry (`StreamPreset.accent`), same set as the GTK client so
+/// a preset looks the same on both. Eight legible colours rather than a free picker: the job is
+/// telling presets apart at a glance on a host tile, and the schema still accepts any
 /// `#RRGGBB` a hand-edit writes.
 const SWATCHES: &[(&str, &str)] = &[
     ("", "None"),
@@ -175,8 +175,8 @@ pub(crate) fn hex_color(hex: &str) -> Option<Color> {
 }
 
 /// The colour row: one tappable swatch per palette entry, the current one ringed.
-fn colour_swatches(profile: &StreamProfile, rev: u64, set_rev: &AsyncSetState<u64>) -> Element {
-    let current = profile.accent.clone().unwrap_or_default();
+fn colour_swatches(preset: &StreamPreset, rev: u64, set_rev: &AsyncSetState<u64>) -> Element {
+    let current = preset.accent.clone().unwrap_or_default();
     let mut row: Vec<Element> = vec![text_block("Colour")
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText)
@@ -193,7 +193,7 @@ fn colour_swatches(profile: &StreamProfile, rev: u64, set_rev: &AsyncSetState<u6
             g: 128,
             b: 128,
         });
-        let (id, set_rev, hex_owned) = (profile.id.clone(), set_rev.clone(), hex.to_string());
+        let (id, set_rev, hex_owned) = (preset.id.clone(), set_rev.clone(), hex.to_string());
         row.push(
             // Size on the BORDER itself: sized only via its child, the border gets squeezed
             // by the sheet's layout and the discs render as squashed ovals.
@@ -210,11 +210,11 @@ fn colour_swatches(profile: &StreamProfile, rev: u64, set_rev: &AsyncSetState<u6
                 .border_thickness(uniform(if selected { 2.0 } else { 1.0 }))
                 .tooltip(*name)
                 .on_tapped(move || {
-                    let mut catalog = ProfilesFile::load();
-                    if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == id) {
+                    let mut catalog = PresetsFile::load();
+                    if let Some(p) = catalog.presets.iter_mut().find(|p| p.id == id) {
                         p.accent = (!hex_owned.is_empty()).then(|| hex_owned.clone());
                         if let Err(e) = catalog.save() {
-                            tracing::warn!(error = %format!("{e:#}"), "saving the profile colour");
+                            tracing::warn!(error = %format!("{e:#}"), "saving the preset colour");
                         }
                     }
                     set_rev.call(rev + 1);
@@ -225,15 +225,15 @@ fn colour_swatches(profile: &StreamProfile, rev: u64, set_rev: &AsyncSetState<u6
     hstack(row).spacing(8.0).into()
 }
 
-/// The Edit-profile modal: a scrim + centered card, the same in-tree overlay the Add-host
+/// The Edit-preset modal: a scrim + centered card, the same in-tree overlay the Add-host
 /// modal uses (ContentDialog is text-only in windows-reactor — no room for a text field or
 /// the swatch row). Every control in it commits in place, exactly like the settings rows, so
 /// the modal needs no draft state and Close is the only way out — there is nothing to cancel.
-/// The one deferred repaint is the profile NAME: renaming commits as you type but the pane's
+/// The one deferred repaint is the preset NAME: renaming commits as you type but the pane's
 /// scope dropdown refreshes on Close (one revision bump), so the ComboBox is not remounted
 /// under the user mid-keystroke.
-fn edit_profile_modal(
-    profile: Option<&StreamProfile>,
+fn edit_preset_modal(
+    preset: Option<&StreamPreset>,
     switcher: Option<ComboBox>,
     set_scope: &AsyncSetState<String>,
     set_delete: &AsyncSetState<Option<String>>,
@@ -242,9 +242,9 @@ fn edit_profile_modal(
     set_rev: &AsyncSetState<u64>,
 ) -> Element {
     let mut rows: Vec<Element> = vec![text_block(if switcher.is_some() {
-        "Profiles"
+        "Presets"
     } else {
-        "Edit profile"
+        "Edit preset"
     })
     .font_size(20.0)
     .bold()
@@ -257,41 +257,41 @@ fn edit_profile_modal(
             vstack(vec![Element::from(sw)])
                 .with_key(format!(
                     "sheet-scope-{}",
-                    profile.map(|p| p.id.as_str()).unwrap_or("")
+                    preset.map(|p| p.id.as_str()).unwrap_or("")
                 ))
                 .into(),
         );
     }
-    if let Some(profile) = profile {
-        let id = profile.id.clone();
+    if let Some(preset) = preset {
+        let id = preset.id.clone();
         let name_box = {
             let id = id.clone();
-            text_box(&profile.name)
+            text_box(&preset.name)
                 .header("Name")
-                .placeholder_text("Profile name")
+                .placeholder_text("Preset name")
                 .on_text_changed(move |t: String| {
                     let name = t.trim().to_string();
                     if name.is_empty() {
                         return;
                     }
-                    let mut catalog = ProfilesFile::load();
+                    let mut catalog = PresetsFile::load();
                     // Names are unique case-insensitively — menus keyed by name are ambiguous
                     // otherwise. A collision simply doesn't commit; the box keeps what was typed.
                     if catalog.name_taken(&name, Some(&id)) {
                         return;
                     }
-                    if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == id) {
+                    if let Some(p) = catalog.presets.iter_mut().find(|p| p.id == id) {
                         p.name = name;
                         let _ = catalog.save();
                     }
                 })
         };
         rows.push(name_box.into());
-        rows.push(colour_swatches(profile, rev, set_rev));
+        rows.push(colour_swatches(preset, rev, set_rev));
     }
     rows.push(
         text_block(
-            "A profile overrides only what you change while it is selected; everything \
+            "A preset overrides only what you change while it is selected; everything \
              else follows Default settings. Renaming applies as you type. Deleting leaves \
              hosts that used it on Default settings.",
         )
@@ -301,7 +301,7 @@ fn edit_profile_modal(
         .into(),
     );
     let mut buttons: Vec<Element> = Vec::new();
-    if let Some(p) = profile {
+    if let Some(p) = preset {
         let id = p.id.clone();
         buttons.push(
             {
@@ -309,7 +309,7 @@ fn edit_profile_modal(
                 button("Duplicate")
                     .icon(lucide::icon("copy"))
                     .on_click(move || {
-                        let mut catalog = ProfilesFile::load();
+                        let mut catalog = PresetsFile::load();
                         let Some(source) = catalog.find_by_id(&id).cloned() else {
                             return;
                         };
@@ -317,11 +317,11 @@ fn edit_profile_modal(
                             .map(|n| format!("{} {n}", source.name))
                             .find(|n| !catalog.name_taken(n, None))
                             .unwrap_or_else(|| source.name.clone());
-                        let mut copy = StreamProfile::new(name);
+                        let mut copy = StreamPreset::new(name);
                         copy.overrides = source.overrides.clone();
                         copy.accent = source.accent.clone();
                         let new_id = copy.id.clone();
-                        catalog.profiles.push(copy);
+                        catalog.presets.push(copy);
                         if catalog.save().is_ok() {
                             // The sheet stays open and now edits the copy — scope follows it.
                             set_scope.call(new_id);
@@ -411,12 +411,12 @@ fn edit_profile_modal(
 /// Persist one control's edit into the layer being edited.
 ///
 /// This shell commits PER CONTROL (unlike the GTK one, which writes when its dialog closes),
-/// so it can't hand the profile a list of touched fields. It hands over the effective settings
+/// so it can't hand the preset a list of touched fields. It hands over the effective settings
 /// before and after instead, and [`SettingsOverlay::absorb`] records the field that moved —
 /// the comparison is against what the control was SHOWING, so picking a value that happens to
 /// equal the global still records an override (the pin the design asks for).
 ///
-/// Every commit ends by bumping the revision: a profile-scope edit changes what the page
+/// Every commit ends by bumping the revision: a preset-scope edit changes what the page
 /// should SHOW (the row's Overridden marker, the catalog behind the controls) without
 /// changing any state the page reads, so without the bump no render pass runs and the
 /// marker only appears after some unrelated re-render — the exact bug the Linux client
@@ -430,13 +430,10 @@ pub(super) fn commit(
     edit: impl FnOnce(&mut Settings),
 ) {
     if scope.is_empty() {
-        // Rebase on the file before the whole-struct save: the process-lifetime snapshot
-        // in `ctx.settings` is not the only writer — a spawned session persists its
-        // match-window size, the console's own settings screen saves too — and saving the
-        // stale snapshot would silently revert whatever they stored (the same
-        // load-modify-save family as the GTK dialog's 2026-07-31 fix; profiles.rs
-        // documents why there's no merge). The edit lands on the fresh load, and the
-        // snapshot follows so every row keeps rendering what's on disk.
+        // Rebase on the file before the whole-struct save: a spawned session and the console
+        // write it too (match-window size, their own settings), and saving the stale snapshot
+        // in `ctx.settings` would revert them. presets.rs says why there is no merge. The
+        // snapshot follows the fresh load, so every row renders what is on disk.
         let mut s = ctx.settings.lock().unwrap();
         *s = Settings::load();
         edit(&mut s);
@@ -444,7 +441,7 @@ pub(super) fn commit(
         rev.1.call(rev.0 + 1);
         return;
     }
-    let mut catalog = ProfilesFile::load();
+    let mut catalog = PresetsFile::load();
     // The same rebase as the global arm above: `base` is what `absorb`'s before/after
     // effective settings derive from, and the snapshot is not the file — another process
     // (session resize, console UI, Decky) may have moved a global under us. The historical
@@ -455,7 +452,7 @@ pub(super) fn commit(
         *s = Settings::load();
         s.clone()
     };
-    let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == scope) else {
+    let Some(p) = catalog.presets.iter_mut().find(|p| p.id == scope) else {
         return; // deleted from under us; the next render falls back to the defaults scope
     };
     let before = p.overrides.apply(&base);
@@ -463,7 +460,7 @@ pub(super) fn commit(
     edit(&mut after);
     p.overrides.absorb(&before, &after);
     if let Err(e) = catalog.save() {
-        tracing::warn!(error = %format!("{e:#}"), "saving the profile catalog");
+        tracing::warn!(error = %format!("{e:#}"), "saving the preset catalog");
     }
     rev.1.call(rev.0 + 1);
 }
@@ -471,7 +468,7 @@ pub(super) fn commit(
 /// Re-base the process-lifetime settings snapshot on the file — called from the navigation
 /// handlers that (re)enter this page, NOT per render pass. `ctx.settings` is loaded once at
 /// process start and this process is not the file's only writer (a spawned session persists
-/// its match-window size, the console UI and Decky save too — profiles.rs documents the
+/// its match-window size, the console UI and Decky save too — presets.rs documents the
 /// family), so without this the page opens showing values another process already replaced,
 /// which then visibly "jump" the moment a row is touched and `commit`'s rebase pulls the
 /// file in. The field report this fixes: a codec setting that "changed by itself".
@@ -479,7 +476,7 @@ pub(crate) fn refresh_snapshot(ctx: &Arc<AppCtx>) {
     *ctx.settings.lock().unwrap() = Settings::load();
 }
 
-/// Which tier-P rows the profile in scope overrides. Plain bools rather than a lookup so the
+/// Which tier-P rows the preset in scope overrides. Plain bools rather than a lookup so the
 /// call sites read as `over.codec` — the row and its flag stay visibly paired.
 #[derive(Default)]
 struct OverrideFlags {
@@ -511,13 +508,13 @@ struct OverrideFlags {
     smooth_buffer: bool,
     vsync: bool,
     allow_vrr: bool,
-    /// The whole ring: a profile that touches it owns all of it (D10).
+    /// The whole ring: a preset that touches it owns all of it (D10).
     overlay_actions: bool,
 }
 
 impl OverrideFlags {
-    fn of(profile: Option<&StreamProfile>) -> OverrideFlags {
-        let Some(o) = profile.map(|p| &p.overrides) else {
+    fn of(preset: Option<&StreamPreset>) -> OverrideFlags {
+        let Some(o) = preset.map(|p| &p.overrides) else {
             return OverrideFlags::default();
         };
         OverrideFlags {
@@ -557,9 +554,9 @@ impl OverrideFlags {
 }
 
 /// The layer the settings screen is editing, resolved for display: `None` = the defaults.
-pub(super) fn active_profile(scope: &str) -> Option<StreamProfile> {
+pub(super) fn active_preset(scope: &str) -> Option<StreamPreset> {
     (!scope.is_empty())
-        .then(|| ProfilesFile::load().find_by_id(scope).cloned())
+        .then(|| PresetsFile::load().find_by_id(scope).cloned())
         .flatten()
 }
 
@@ -637,8 +634,8 @@ fn setting_toggle(
 /// but a caption under it reads as a caption, which is how every Windows Settings page and
 /// the Apple client both do it. Width-capped for the same reason Apple caps at 360pt: a
 /// full-width caption runs into the control column and the whole cell reads as one block.
-/// [`described_labeled`], plus the override marker and reset a profile-scope row carries: the caption
-/// says the profile changes this one, and the button is the only way back to inheriting.
+/// [`described_labeled`], plus the override marker and reset a preset-scope row carries: the caption
+/// says the preset changes this one, and the button is the only way back to inheriting.
 /// An override is recorded when a control's committed value differs from what it was
 /// SHOWING (`SettingsOverlay::absorb` diffs against the effective snapshot — see `commit`);
 /// WinUI change events don't fire on a no-op re-selection, so every reachable edit marks
@@ -688,10 +685,10 @@ fn described_overridable(
     .border_thickness(uniform(1.0))
     .corner_radius(10.0)
     .padding(edges(10.0, 3.0, 10.0, 3.0))
-    .tooltip("Overridden by this profile \u{2014} Reset returns it to Default settings")
+    .tooltip("Overridden by this preset \u{2014} Reset returns it to Default settings")
     .on_tapped(move || {
-        let mut catalog = ProfilesFile::load();
-        if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == scope) {
+        let mut catalog = PresetsFile::load();
+        if let Some(p) = catalog.presets.iter_mut().find(|p| p.id == scope) {
             p.overrides.clear(field);
             if let Err(e) = catalog.save() {
                 tracing::warn!(error = %format!("{e:#}"), "clearing an override");
@@ -754,8 +751,8 @@ fn group_heading(label: &str) -> Element {
 
 /// One settings group: an optional sub-section label, a card of fields, and an optional
 /// form-level note under it (Apple's Section header/footer). Groups stack down the page.
-/// A group with NO fields renders NOTHING — several groups pass an empty list in profile
-/// scope (Decoding, Library: device facts, never per profile), and a heading over an empty
+/// A group with NO fields renders NOTHING — several groups pass an empty list in preset
+/// scope (Decoding, Library: device facts, never per preset), and a heading over an empty
 /// card read as a bug.
 fn group(header: Option<&str>, fields: Vec<Element>, footer: Option<&str>) -> Vec<Element> {
     if fields.is_empty() {
@@ -802,19 +799,19 @@ pub(crate) fn settings_page(
     set_rev: &AsyncSetState<u64>,
     progress: f64,
 ) -> Element {
-    // The layer being edited. A scope pointing at a deleted profile degrades to the defaults,
+    // The layer being edited. A scope pointing at a deleted preset degrades to the defaults,
     // the same rule a dangling host binding follows.
-    let active = active_profile(scope_id);
+    let active = active_preset(scope_id);
     let scope: &str = match &active {
         Some(p) => &p.id,
         None => "",
     };
-    let profile_mode = active.is_some();
-    // Which rows this profile overrides — the marker + reset each of them carries. In the
+    let preset_mode = active.is_some();
+    // Which rows this preset overrides — the marker + reset each of them carries. In the
     // defaults scope nothing is marked, and `described_overridable` degrades to `described_labeled`.
     let over = OverrideFlags::of(active.as_ref());
-    // Every control shows the EFFECTIVE value: the global underneath with this profile's
-    // overrides on top, so a row the profile doesn't override reads as the live global.
+    // Every control shows the EFFECTIVE value: the global underneath with this preset's
+    // overrides on top, so a row the preset doesn't override reads as the live global.
     let s = {
         let base = ctx.settings.lock().unwrap().clone();
         match &active {
@@ -890,7 +887,7 @@ pub(crate) fn settings_page(
         s.auto_wake = on
     });
     // Where a bare launch opens. A device preference like auto-wake beside it: which host this
-    // machine opens on says nothing about how a stream should look, so it is never profileable.
+    // machine opens on says nothing about how a stream should look, so it is never presetable.
     let start_in_combo = {
         let want = start::StartIn::parse(&s.start_in);
         let names = start::StartIn::ALL
@@ -947,7 +944,7 @@ pub(crate) fn settings_page(
     });
     // Free-form Mb/s (0 = host default) instead of presets, so a speed-test recommendation
     // round-trips exactly. Through `commit` like every other row: writing `ctx.settings`
-    // directly here would edit the GLOBAL defaults from inside a profile scope (and record
+    // directly here would edit the GLOBAL defaults from inside a preset scope (and record
     // no override, so the row could never say "Overridden here").
     let bitrate_box = {
         let (ctx, scope, set_rev) = (ctx.clone(), scope.to_string(), set_rev.clone());
@@ -1054,7 +1051,7 @@ pub(crate) fn settings_page(
         });
     // The two DualSense pad-audio rows, GTK parity. The session binary this shell spawns has
     // honoured both all along; only the rows were missing here. Global scope only, like GTK's:
-    // no override marker exists for either, so a profile-scope toggle would be discarded.
+    // no override marker exists for either, so a preset-scope toggle would be discarded.
     let pad_haptics_toggle = setting_toggle(ctx, scope, (rev, set_rev), s.pad_haptics, |s, on| {
         s.pad_haptics = on
     });
@@ -1119,7 +1116,7 @@ pub(crate) fn settings_page(
         s.audio_channels = AUDIO_CHANNELS[i].0;
     });
     // The lossless-audio opt-in. An unknown stored value (a newer client's row, arriving through a
-    // shared profile) shows as Opus — which is what the session resolves it to as well, so the row
+    // shared preset) shows as Opus — which is what the session resolves it to as well, so the row
     // and the wire agree rather than the combo silently rewriting the user's choice on save.
     let (af_names, af_i) = presets(AUDIO_FORMATS, |v| *v == s.audio_format);
     let format_combo = setting_combo(ctx, scope, (rev, set_rev), af_names, af_i, |s, i| {
@@ -1317,10 +1314,10 @@ pub(crate) fn settings_page(
                 ],
                 None,
             ));
-            // Decoder and GPU are facts about THIS device's hardware — never per profile.
+            // Decoder and GPU are facts about THIS device's hardware — never per preset.
             out.extend(group(
                 Some("Decoding"),
-                if profile_mode {
+                if preset_mode {
                     Vec::new()
                 } else {
                     let mut fields = vec![described_labeled(
@@ -1489,7 +1486,7 @@ pub(crate) fn settings_page(
                     },
                 ),
                 "The dial Ctrl+Alt+Shift+O, a two-finger twist or Select+A opens in a stream: what \
-                 its six buttons hold, and the shortcut chords they can send. A profile that \
+                 its six buttons hold, and the shortcut chords they can send. A preset that \
                  changes it owns the whole dial.",
             )],
         ),
@@ -1501,7 +1498,7 @@ pub(crate) fn settings_page(
                     // The read-only pad inventory (GTK parity): what THIS device sees right
                     // now — the fastest answer to "is my controller even detected?". A
                     // device fact, so defaults scope only, like the forward picker below.
-                    (!profile_mode).then(|| {
+                    (!preset_mode).then(|| {
                         let inventory: Element = if pads.is_empty() {
                             text_block("No controllers detected")
                                 .font_size(12.0)
@@ -1538,8 +1535,8 @@ pub(crate) fn settings_page(
                             "Plug in or pair a controller and it appears here.",
                         )
                     }),
-                    // Whether ANY controller is forwarded — profileable, so it renders in
-                    // both scopes (a "Work" profile can decline what "Game" forwards),
+                    // Whether ANY controller is forwarded — presetable, so it renders in
+                    // both scopes (a "Work" preset can decline what "Game" forwards),
                     // unlike the device-fact picker below it.
                     Some(described_overridable(
                         (rev, set_rev),
@@ -1558,8 +1555,8 @@ pub(crate) fn settings_page(
                     // NOT Apple's wording: Apple forwards ONE pad as player 1, this client
                     // forwards every controller as its own player. Same picker, different rule.
                     // Which physical pad this device forwards is a device fact (tier G), so it
-                    // renders only in the defaults scope; the EMULATED type below is profileable.
-                    (!profile_mode).then(|| {
+                    // renders only in the defaults scope; the EMULATED type below is presetable.
+                    (!preset_mode).then(|| {
                         described_labeled(
                         "Forwarded controller",
                         forward_combo,
@@ -1602,7 +1599,7 @@ pub(crate) fn settings_page(
                          still goes through, slightly delayed. Automatic arms it only where \
                          the real button can't reach the host.",
                     )),
-                    (!profile_mode).then(|| {
+                    (!preset_mode).then(|| {
                         described_labeled(
                             "Controller haptics",
                             pad_haptics_toggle,
@@ -1610,7 +1607,7 @@ pub(crate) fn settings_page(
                              pads only, and only while controllers are forwarded.",
                         )
                     }),
-                    (!profile_mode).then(|| {
+                    (!preset_mode).then(|| {
                         described_labeled(
                             "Controller speaker",
                             pad_speaker_toggle,
@@ -1676,8 +1673,8 @@ pub(crate) fn settings_page(
                          or newer.",
                     )),
                     // The endpoint picks are facts about THIS device's hardware — never
-                    // per profile, like Decoder/GPU.
-                    (!profile_mode)
+                    // per preset, like Decoder/GPU.
+                    (!preset_mode)
                         .then(|| {
                             speaker_combo.map(|c| {
                                 described_labeled(
@@ -1699,7 +1696,7 @@ pub(crate) fn settings_page(
                         "This device\u{2019}s microphone feeds the host\u{2019}s virtual mic. \
                          Ctrl+Alt+Shift+V mutes and unmutes it during a stream.",
                     )),
-                    (!profile_mode)
+                    (!preset_mode)
                         .then(|| {
                             mic_dev_combo.map(|c| {
                                 described_labeled(
@@ -1762,7 +1759,7 @@ pub(crate) fn settings_page(
                 .into_iter()
                 // Auto-wake is about this host and this network, not about "Game vs Work" —
                 // it stays global in v1 (design §3, tier H/G).
-                .chain((!profile_mode).then(|| {
+                .chain((!preset_mode).then(|| {
                     described_labeled(
                         "Auto-wake on connect",
                         auto_wake_toggle,
@@ -1772,7 +1769,7 @@ pub(crate) fn settings_page(
                     )
                 }))
                 .chain(
-                    (!profile_mode)
+                    (!preset_mode)
                         .then(|| described_labeled("Start in", start_in_combo, &start_in_help())),
                 )
                 .collect(),
@@ -1788,8 +1785,8 @@ pub(crate) fn settings_page(
                 "Live session stats in a corner overlay \u{2014} Compact is a one-line pill, \
                  Detailed adds the stage breakdown. Ctrl+Alt+Shift+S cycles the tiers any time.",
             )];
-            // Device-wide: a profile never carries the vocabulary.
-            if !profile_mode {
+            // Device-wide: a preset never carries the vocabulary.
+            if !preset_mode {
                 stats_rows.push(described_labeled(
                     "Advanced statistics",
                     advanced_toggle,
@@ -1830,37 +1827,19 @@ pub(crate) fn settings_page(
             .tag("about")
             .icon(lucide::icon("circle-help")),
     ];
-    // The card is KEYED by section so switching panes REMOUNTS it instead of diffing one
-    // section's controls into another's: an in-place diff re-sets a reused ComboBox's items
-    // (which clears WinUI's selection) but skips `selected_index` whenever the two sections'
-    // values compare equal — the combo then renders with no selected option. A fresh mount
-    // applies every prop, so the selection always displays.
-    //
-    // The content column (not the NavigationView — the sidebar must stay put) carries the
-    // section-switch entrance: fade + slide-up from the root-driven tween.
-    // No max-width cap here (unlike the other pages): the NavigationView already spends the
-    // left third on its pane, so a 640-wide column left the cards as a narrow ribbon.
-    // The category title is rendered HERE, not via NavigationView's Header: that header's
-    // left inset belongs to WinUI's own template (a string prop is all we can set), so it
-    // sat noticeably right of the cards under it. In the content column it shares the cards'
-    // left edge by construction.
-    // The scope switcher is a slim BAR ABOVE the whole NavigationView — visible from every
-    // section, at every window size, in every pane state — and the switcher itself is ONE
-    // native control: a DropDownButton whose label is the scope in play and whose menu
-    // holds the choices, "New profile…", and "Edit …". Faking a fused combo+pencil out of
-    // separate controls looked exactly like what it was (the toolkit exposes no per-corner
-    // radius to build a real input group, though WinUI itself has one) — the native
-    // dropdown IS the coherent element, with one hover state and no seams. It also retires
-    // the ComboBox items/selected_index remount hazard: a button label is one plain prop.
-    let catalog = ProfilesFile::load();
+    // The card is keyed by section, so a pane switch remounts it (a reused ComboBox loses its
+    // selection). The content column carries the section entrance and the category title, so
+    // the title shares the cards' left edge; no max-width, as the pane already takes a third.
+    // The scope switcher is one native DropDownButton in a bar above the NavigationView.
+    let catalog = PresetsFile::load();
     let scope_pairs: Vec<(String, String)> = catalog
-        .profiles
+        .presets
         .iter()
         .map(|p| (p.id.clone(), p.name.clone()))
         .collect();
     const SCOPE_DEFAULT: &str = "Default settings";
-    const SCOPE_NEW: &str = "New profile\u{2026}";
-    // The Edit entry's prefix — the suffix is the profile's display name.
+    const SCOPE_NEW: &str = "New preset\u{2026}";
+    // The Edit entry's prefix — the suffix is the preset's display name.
     const SCOPE_EDIT: &str = "Edit \u{201c}";
     let scope_bar: Element = {
         let scope_label = match &active {
@@ -1882,19 +1861,19 @@ pub(crate) fn settings_page(
             drop_down_button(&scope_label)
                 .menu_flyout(items)
                 .on_item_clicked(move |item: String| {
-                    // Fixed entries first — a profile could share their text.
+                    // Fixed entries first — a preset could share their text.
                     if item == SCOPE_NEW {
-                        // A new profile takes an auto-numbered name and lands straight in
+                        // A new preset takes an auto-numbered name and lands straight in
                         // the sheet to be named — creation and naming are one gesture, and
                         // there is no half-created state a Cancel would have to unwind.
-                        let mut catalog = ProfilesFile::load();
+                        let mut catalog = PresetsFile::load();
                         let name = (1..)
-                            .map(|n| format!("Profile {n}"))
+                            .map(|n| format!("Preset {n}"))
                             .find(|n| !catalog.name_taken(n, None))
-                            .unwrap_or_else(|| "Profile".to_string());
-                        let profile = StreamProfile::new(name);
-                        let new_id = profile.id.clone();
-                        catalog.profiles.push(profile);
+                            .unwrap_or_else(|| "Preset".to_string());
+                        let preset = StreamPreset::new(name);
+                        let new_id = preset.id.clone();
+                        catalog.presets.push(preset);
                         if catalog.save().is_ok() {
                             set_scope.call(new_id);
                             set_edit.call(true);
@@ -1919,7 +1898,7 @@ pub(crate) fn settings_page(
             .foreground(ThemeRef::SecondaryText)
             .vertical_alignment(VerticalAlignment::Center)
             .into()];
-        // The profile's colour, right where the choice is made (menu items are plain
+        // The preset's colour, right where the choice is made (menu items are plain
         // strings in this toolkit, so the chip cannot ride inside the menu).
         if let Some(c) = active
             .as_ref()
@@ -1987,7 +1966,7 @@ pub(crate) fn settings_page(
     let confirm: Element = {
         let pending = delete_pending
             .as_ref()
-            .and_then(|id| ProfilesFile::load().find_by_id(id).cloned());
+            .and_then(|id| PresetsFile::load().find_by_id(id).cloned());
         // The warning counts what actually breaks: hosts that fall back to the defaults,
         // and pinned cards that disappear (design §6).
         let body = pending
@@ -1997,12 +1976,12 @@ pub(crate) fn settings_page(
                 let bound = known
                     .hosts
                     .iter()
-                    .filter(|h| h.profile_id.as_deref() == Some(p.id.as_str()))
+                    .filter(|h| h.preset_id.as_deref() == Some(p.id.as_str()))
                     .count();
                 let pinned = known
                     .hosts
                     .iter()
-                    .filter(|h| h.pinned_profiles.iter().any(|x| x == &p.id))
+                    .filter(|h| h.pinned_presets.iter().any(|x| x == &p.id))
                     .count();
                 let mut body = format!("\u{201c}{}\u{201d} will be removed.", p.name);
                 if bound > 0 {
@@ -2026,7 +2005,7 @@ pub(crate) fn settings_page(
             set_delete.clone(),
             set_edit.clone(),
         );
-        ContentDialog::new("Delete profile?")
+        ContentDialog::new("Delete preset?")
             .content(body)
             .primary_button_text("Delete")
             .close_button_text("Cancel")
@@ -2039,15 +2018,15 @@ pub(crate) fn settings_page(
                 let Some(id) = id.clone() else {
                     return;
                 };
-                let mut catalog = ProfilesFile::load();
-                catalog.profiles.retain(|p| p.id != id);
+                let mut catalog = PresetsFile::load();
+                catalog.presets.retain(|p| p.id != id);
                 // Bindings and pins are left dangling on purpose: they resolve as "no
-                // profile" everywhere, and rewriting every host record here would be a
+                // preset" everywhere, and rewriting every host record here would be a
                 // second, racier source of truth.
                 if catalog.save().is_ok() {
                     set_scope.call(String::new());
-                    // The profile the sheet was showing is gone — without this, the
-                    // still-armed flag would pop the sheet open on the NEXT profile pick.
+                    // The preset the sheet was showing is gone — without this, the
+                    // still-armed flag would pop the sheet open on the NEXT preset pick.
                     set_edit.call(false);
                 }
             })
@@ -2073,10 +2052,10 @@ pub(crate) fn settings_page(
     // above), and a closed sheet leaves a same-kind, background-less Border in its slot
     // (invisible, and per style.rs a null background is not hit-testable, so it swallows
     // no clicks).
-    let sheet_slot: Element = if edit_open && profile_mode {
-        // The profile sheet — "Edit profile…" in the bar. The bar owns the scope choice,
-        // so the sheet carries only the profile being edited.
-        edit_profile_modal(
+    let sheet_slot: Element = if edit_open && preset_mode {
+        // The preset sheet — "Edit preset…" in the bar. The bar owns the scope choice,
+        // so the sheet carries only the preset being edited.
+        edit_preset_modal(
             active.as_ref(),
             None,
             set_scope,
@@ -2088,17 +2067,10 @@ pub(crate) fn settings_page(
     } else {
         border(vstack(Vec::<Element>::new())).into()
     };
-    // Every save on this page is fire-and-forget by design — a failed settings write must
-    // never take a stream down — so a client whose config store rejects writes looks entirely
-    // normal: toggles move, profiles appear, and NOTHING survives a restart. That is exactly
-    // how it reached us from the field ("it's in read-only mode"), with no log file to send
-    // either. When the store is refusing writes, say so, name the path, and stop pretending.
-    //
-    // Same always-mounted-slot discipline as `sheet_slot`: one child in both states, and the
-    // SAME KIND in both (a Border wrapping the bar, versus an empty background-less Border —
-    // which per style.rs is not hit-testable, so it swallows no clicks). Neither a grid child
-    // nor a vstack child is ever added or removed, which is where this reconciler's phantom
-    // bookkeeping breaks.
+    // Saves are fire-and-forget, so a config store that refuses writes looks normal until a
+    // restart loses everything. When it refuses, say so and name the path. Always mounted, like
+    // `sheet_slot`: a Border in both states (an empty one is not hit-testable), since adding or
+    // removing a child is where this reconciler's phantom bookkeeping breaks.
     let store_slot: Element = match pf_client_core::trust::store_health::last_error() {
         Some(err) => border(
             InfoBar::new("Your changes aren\u{2019}t being saved")
@@ -2126,7 +2098,7 @@ pub(crate) fn settings_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pf_client_core::profiles::SettingsOverlay;
+    use pf_client_core::presets::SettingsOverlay;
 
     /// Every overlay field maps to its row flag — including the tri-state resolution
     /// (any of width/height/match_window marks the one Resolution row) and the 4:4:4
@@ -2137,7 +2109,7 @@ mod tests {
         let none = OverrideFlags::of(None);
         assert!(!none.resolution && !none.enable_444 && !none.codec);
 
-        let mut p = StreamProfile::new("t".to_string());
+        let mut p = StreamPreset::new("t".to_string());
         p.overrides = SettingsOverlay {
             match_window: Some(true),
             enable_444: Some(true),
@@ -2152,7 +2124,7 @@ mod tests {
         assert!(f.bitrate_kbps);
         assert!(!f.hdr_enabled && !f.compositor && !f.render_scale);
 
-        let mut p2 = StreamProfile::new("t2".to_string());
+        let mut p2 = StreamPreset::new("t2".to_string());
         p2.overrides = SettingsOverlay {
             width: Some(3840),
             height: Some(2160),
@@ -2160,9 +2132,9 @@ mod tests {
         };
         assert!(OverrideFlags::of(Some(&p2)).resolution);
 
-        // The audio pair: the mic and its echo canceller are separate overrides, so a profile
+        // The audio pair: the mic and its echo canceller are separate overrides, so a preset
         // can pin one without claiming the other.
-        let mut p3 = StreamProfile::new("t3".to_string());
+        let mut p3 = StreamPreset::new("t3".to_string());
         p3.overrides = SettingsOverlay {
             echo_cancel: Some(false),
             ..Default::default()
@@ -2171,10 +2143,10 @@ mod tests {
         assert!(f3.echo_cancel);
         assert!(!f3.mic_enabled);
 
-        // Channels and format are likewise independent — a "lossless on this host" profile that
+        // Channels and format are likewise independent — a "lossless on this host" preset that
         // leaves the layout following the global is valid, and the two are separate keys in the
         // catalog every client shares.
-        let mut p3b = StreamProfile::new("t3b".to_string());
+        let mut p3b = StreamPreset::new("t3b".to_string());
         p3b.overrides = SettingsOverlay {
             audio_format: Some(pf_client_core::session::AUDIO_FORMAT_LOSSLESS_96.into()),
             ..Default::default()
@@ -2184,8 +2156,8 @@ mod tests {
         assert!(!f3b.audio_channels);
 
         // The presentation pair, likewise independent: pinning the intent doesn't claim
-        // the buffer (a "Smoothness, whatever the global buffer is" profile is valid).
-        let mut p4 = StreamProfile::new("t4".to_string());
+        // the buffer (a "Smoothness, whatever the global buffer is" preset is valid).
+        let mut p4 = StreamPreset::new("t4".to_string());
         p4.overrides = SettingsOverlay {
             present_priority: Some("smooth".into()),
             ..Default::default()
@@ -2195,7 +2167,7 @@ mod tests {
         assert!(!f4.smooth_buffer);
 
         // V-Sync and VRR are independent of each other and of the intent pair.
-        let mut p5 = StreamProfile::new("t5".to_string());
+        let mut p5 = StreamPreset::new("t5".to_string());
         p5.overrides = SettingsOverlay {
             vsync: Some(false),
             ..Default::default()

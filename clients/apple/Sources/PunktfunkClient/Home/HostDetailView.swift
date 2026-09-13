@@ -1,18 +1,48 @@
 // The host page (design/apple-touch-ui-overhaul.md §2.4): everything about one saved host that
-// is not "connect to it", pushed from a card's ⓘ or its menu's Host Details…. The card keeps the
-// daily acts; this page holds presets, connection, pairing, power, support and removal, each
-// with a line saying what it does. It reads the live record by id, so an edit shows at once and
-// a removal pops the page. Its acts come from the grid's own builder, the same set the card's
-// menu offers.
+// is not "connect to it", with the acts its card's menu offers. Touch pushes it as one form; the
+// Mac's `MacHostWindow` shows one section at a time beside a sidebar. It reads the live record
+// by id, so an edit shows at once and a removal closes it.
 
 import PunktfunkKit
 import SwiftUI
 
+/// The host page's parts: one form on touch, where the speed test is a page of its own, and one
+/// sidebar row each in the Mac's host window.
+enum HostSection: String, CaseIterable, Identifiable {
+    case overview, presets, connection, speedTest, pairing, power
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .overview: "Overview"
+        case .presets: "Presets"
+        case .connection: "Connection"
+        case .speedTest: "Speed Test"
+        case .pairing: "Pairing"
+        case .power: "Power"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .overview: "desktopcomputer"
+        case .presets: "slider.horizontal.3"
+        case .connection: "network"
+        case .speedTest: "gauge.with.needle"
+        case .pairing: "lock"
+        case .power: "power"
+        }
+    }
+}
+
 struct HostDetailView: View {
     @ObservedObject var store: HostStore
     let hostID: StoredHost.ID
-    /// The grid's per-host builder (`HomeView.hostActions`).
+    /// The surface's per-host builder (`HostActions(host:…)`).
     let actions: (StoredHost) -> HostActions
+    /// One section alone (the Mac's host window), or nil for every section in one form.
+    var only: HostSection?
     @ObservedObject private var nowPlaying = NowPlayingStore.shared
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     @AppStorage(DefaultsKey.autoWake) private var autoWake = true
@@ -36,53 +66,67 @@ struct HostDetailView: View {
             host: host, isOnline: online, isConnecting: false, nowPlaying: playing,
             autoWake: autoWake)
         return Form {
-            Section {
-                header(host, status)
-                Button(action: a.connect) {
-                    Label(playing.map { "Resume \($0)" } ?? "Connect", systemImage: "play.fill")
-                }
-                if let browse = a.browseLibrary {
-                    Button(action: browse) {
-                        Label("Browse Library", systemImage: "square.grid.2x2")
+            if shows(.overview) {
+                Section {
+                    header(host, status)
+                    Button(action: a.connect) {
+                        Label(playing.map { "Resume \($0)" } ?? "Connect", systemImage: "play.fill")
+                    }
+                    if let browse = a.browseLibrary {
+                        Button(action: browse) {
+                            Label("Browse Library", systemImage: "square.grid.2x2")
+                        }
                     }
                 }
             }
-            presetsSection(host, a)
-            connectionSection(host, a)
-            pairingSection(host, a)
-            powerSection(a)
-            if let sendLogs = a.sendLogs {
+            if shows(.presets) { presetsSection(host, a) }
+            if shows(.connection) { connectionSection(host, a) }
+            if shows(.pairing) { pairingSection(host, a) }
+            if shows(.power) { powerSection(a) }
+            if shows(.overview) {
+                if let sendLogs = a.sendLogs {
+                    Section {
+                        Button("Send Logs to Host", systemImage: "doc.text", action: sendLogs)
+                    } footer: {
+                        Text("Uploads this device's recent log to the host, for a bug report.")
+                    }
+                }
                 Section {
-                    Button("Send Logs to Host", systemImage: "doc.text", action: sendLogs)
+                    // A Mac form draws even a destructive button in the window's tint.
+                Button("Remove Host", role: .destructive) { confirmRemove = true }
+                    .tint(.red)
+                    // On the button, so iOS 26 opens the dialog from the row that asked.
+                    .confirmationDialog(
+                        "Remove \(host.displayName)?", isPresented: $confirmRemove,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Remove Host", role: .destructive, action: a.remove)
+                    } message: {
+                        Text("You can add it again later.")
+                    }
                 } footer: {
-                    Text("Uploads this device's recent log to the host, for a bug report.")
+                    Text("Deletes the host from this device. The host itself is untouched.")
                 }
             }
-            Section {
-                Button("Remove Host", role: .destructive) { confirmRemove = true }
-            } footer: {
-                Text("Deletes the host from this device. The host itself is untouched.")
-            }
         }
-        .navigationTitle(host.displayName)
+        #if os(macOS)
+        .formStyle(.grouped)
+        #endif
+        .navigationTitle(pageTitle(host))
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .confirmationDialog(
-            "Forget the identity of \(host.displayName)?", isPresented: $confirmForget,
-            titleVisibility: .visible
-        ) {
-            Button("Forget Identity", role: .destructive, action: a.forget)
-        } message: {
-            Text("The next connect asks for a PIN again.")
-        }
-        .confirmationDialog(
-            "Remove \(host.displayName)?", isPresented: $confirmRemove, titleVisibility: .visible
-        ) {
-            Button("Remove Host", role: .destructive, action: a.remove)
-        } message: {
-            Text("You can add it again later.")
-        }
+    }
+
+    private func shows(_ section: HostSection) -> Bool { only == nil || only == section }
+
+    /// The host's name, except in the iPad's sheet of sections: its sidebar names the host, so the
+    /// pane names its section.
+    private func pageTitle(_ host: StoredHost) -> String {
+        #if os(iOS)
+        if let only { return only.title }
+        #endif
+        return host.displayName
     }
 
     private func header(_ host: StoredHost, _ status: HostStatus) -> some View {
@@ -102,19 +146,19 @@ struct HostDetailView: View {
     }
 
     @ViewBuilder private func presetsSection(_ host: StoredHost, _ a: HostActions) -> some View {
-        if let menu = a.presets, !menu.profiles.isEmpty {
+        if let menu = a.presets, !menu.presets.isEmpty {
             Section {
                 // A binding to a deleted preset reads as Default settings, as a connect does.
                 Picker("Connect with", selection: Binding(
-                    get: { menu.profiles.contains { $0.id == menu.boundID } ? menu.boundID ?? "" : "" },
+                    get: { menu.presets.contains { $0.id == menu.boundID } ? menu.boundID ?? "" : "" },
                     set: { menu.setDefault($0.isEmpty ? nil : $0) }
                 )) {
                     Text("Default settings").tag("")
-                    ForEach(menu.profiles) { preset in
+                    ForEach(menu.presets) { preset in
                         Text(preset.name).tag(preset.id)
                     }
                 }
-                ForEach(menu.profiles) { preset in
+                ForEach(menu.presets) { preset in
                     Toggle("Pin \u{201C}\(preset.name)\u{201D} as a card", isOn: Binding(
                         get: { menu.pinnedIDs.contains(preset.id) },
                         set: { _ in menu.togglePin(preset.id) }))
@@ -124,6 +168,11 @@ struct HostDetailView: View {
             } footer: {
                 Text("A tap on the card connects with the chosen preset. A pinned preset gets its "
                     + "own card next to this host.")
+            }
+        } else if only == .presets {
+            Section {
+                Text("No presets yet. Make one in Settings, then choose it here.")
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -169,6 +218,15 @@ struct HostDetailView: View {
                     get: { defaultHostID.lowercased() == host.id.uuidString.lowercased() },
                     set: { defaultHostID = $0 ? host.id.uuidString : "" }))
                 Button("Forget Identity…", role: .destructive) { confirmForget = true }
+                    .tint(.red)
+                    .confirmationDialog(
+                        "Forget the identity of \(host.displayName)?", isPresented: $confirmForget,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Forget Identity", role: .destructive, action: a.forget)
+                    } message: {
+                        Text("The next connect asks for a PIN again.")
+                    }
             }
         } header: {
             Text("Pairing")
@@ -196,6 +254,11 @@ struct HostDetailView: View {
                 Text("Power")
             } footer: {
                 Text("Restart and shut down end every stream from this host, and ask first.")
+            }
+        } else if only == .power {
+            Section {
+                Text("This host offers this device no power actions.")
+                    .foregroundStyle(.secondary)
             }
         }
     }

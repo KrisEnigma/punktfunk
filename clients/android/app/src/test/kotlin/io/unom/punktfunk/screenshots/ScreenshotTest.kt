@@ -84,7 +84,7 @@ class ScreenshotTest {
     }
 
     @Test
-    fun settingsProfile() = shootRoot("settings-profile") { SettingsProfileScene() }
+    fun settingsPreset() = shootRoot("settings-preset") { SettingsPresetScene() }
 
     @Test
     @Config(sdk = [36], qualifiers = "w800dp-h360dp-xxhdpi") // landscape — the stream is immersive
@@ -160,7 +160,7 @@ class ScreenshotTest {
     }
 
     @Test
-    fun newProfile() = shootRoot("new-profile") { NewProfileScene() }
+    fun newPreset() = shootRoot("new-preset") { NewPresetScene() }
 
     @Test
     fun speedTest() = shootScreen("speed-test") {

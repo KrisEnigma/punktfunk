@@ -4,7 +4,7 @@
 // swap, tap the centre to see depth two; the shortcuts list and the reset sit under it. A
 // shortcut is edited on its own sheet: a name, the modifiers as chips, the key on a keyboard
 // you tap, and the disc as it will look. It edits whichever layer the settings surface is on —
-// the binding comes from `scoped(SettingsFields.overlayActions)` — so a profile that touches it
+// the binding comes from `scoped(SettingsFields.overlayActions)` — so a preset that touches it
 // owns the whole ring (D10).
 //
 // On the Mac the same editor, minus the twist: the backdrop is inert and the ring simply sits

@@ -379,7 +379,7 @@ macOS, iOS/iPadOS and tvOS. Android is one app, with Android TV being the same a
 
 ### Before you connect
 
-| Client | Profiles | `punktfunk://` links | Game library | Speed test | Wake-on-LAN | Updates itself |
+| Client | Presets | `punktfunk://` links | Game library | Speed test | Wake-on-LAN | Updates itself |
 |---|---|---|---|---|---|---|
 | Linux desktop | ✅ | ✅ | ✅ ¹ | ✅ | ✅ | ⚠️ ² |
 | Windows desktop | ✅ | ✅ | ✅ ¹ | ✅ | ✅ | ❌ ³ |
@@ -401,21 +401,21 @@ macOS, iOS/iPadOS and tvOS. Android is one app, with Android TV being the same a
    [Updating](/docs/updating).
 3. Updates arrive through the store or installer you got the app from.
 4. On by default on Apple.
-5. Profiles are **honoured** on tvOS but cannot be **made** there: the Apple TV settings screens
-   edit the global defaults only — there is no scope switcher and no profile editor. The catalog
-   is per-device and does not sync, and a `punktfunk://` link can only name a profile that already
-   exists, so a fresh Apple TV has none. Of the settings a profile can carry, tvOS also drops the
+5. Presets are **honoured** on tvOS but cannot be **made** there: the Apple TV settings screens
+   edit the global defaults only — there is no scope switcher and no preset editor. The catalog
+   is per-device and does not sync, and a `punktfunk://` link can only name a preset that already
+   exists, so a fresh Apple TV has none. Of the settings a preset can carry, tvOS also drops the
    ones the platform has no input for: inverted scroll, modifier layout, variable refresh rate,
    mouse mode and touch mode.
-6. The panel *shows* the profiles a host has pinned, as nested one-tap cards, and streams with
-   them; it has no profile surface of its own. Pins are made in a client's own UI — including the
+6. The panel *shows* the presets a host has pinned, as nested one-tap cards, and streams with
+   them; it has no preset surface of its own. Pins are made in a client's own UI — including the
    console home **Open Punktfunk** opens — and are shared, so every client shows the same cards.
-   Creating and editing a profile stays a desktop-app job.
+   Creating and editing a preset stays a desktop-app job.
 7. Not in the panel: **Open Punktfunk** opens the client's console home, and a paired host's
    library is one button from there.
 8. Both the plugin itself and, where the install kind allows it, the client it launches.
 9. The CLI parses and follows links; it does not register the URL scheme — the graphical apps do.
-10. [Profiles and links](/docs/profiles-and-links) are Punktfunk-app concepts and do not exist on
+10. [Presets and links](/docs/presets-and-links) are Punktfunk-app concepts and do not exist on
     the GameStream plane.
 11. Moonlight sees the host's titles as ordinary GameStream apps.
 12. These live in whichever Moonlight app you use, not in this project. The host does publish the
@@ -518,7 +518,7 @@ text from an IME), are covered in [Input](/docs/input).
     until the host also enables its clipboard, but the client-side consent is pre-granted.
 11. Decided entirely by the host and layered into what Moonlight is offered.
 12. Moonlight has its own overlay; [stats](/docs/stats) here describes Punktfunk's.
-13. Opt-in — the per-profile **Full chroma (4:4:4)** switch, off by default — and advertised with
+13. Opt-in — the per-preset **Full chroma (4:4:4)** switch, off by default — and advertised with
     no client-side probe. Both halves earn the ⚠️. On the **client** it is a hardware path with no
     software floor under it (note 4 under [Client decode](#client-decode)). On the **host** it
     needs HEVC on an **NVIDIA** host, or the PyroWave codec, which carries it on any vendor. On
@@ -559,7 +559,7 @@ capability.
 | **Protocol core** — `punktfunk-core`, the C ABI, FEC and crypto | Stable. Both the wire format and the embeddable C surface are versioned contracts (see below) and are changed reluctantly. |
 | **Linux host** | The oldest and most exercised surface. What differs is not the host but the desktop under it — each compositor gets its own capture, virtual-display and input backend, and they are not equally capable. |
 | **Windows host** | Newest large surface, shipping as an installer with its own virtual-display driver — both signed with Punktfunk's own certificates rather than a publicly trusted one, so Windows warns on install (see [Windows host](/docs/windows-host#about-the-signatures)). NVENC is well trodden; the AMD (AMF) path was validated on real hardware in mid-2026 (Ryzen 7000 iGPU, 1080p120 HDR P010) and the Intel (QSV) path on Arc, but both see far less field time than NVENC — several of QSV's newer arms are still marked unvalidated in the code. One structural constraint that catches people: it must run in the interactive console session, not session 0. |
-| **GameStream / Moonlight plane** | Works, and whether it is on depends on how you installed. Every Linux package (deb, RPM, Arch, the Bazzite sysext) and the SteamOS installer ship the unit as `serve --gamestream`, so GameStream is **on** there; NixOS defaults it on too. The Windows installer's checkbox is unticked, so it is **off** unless you asked for it, and a bare `punktfunk-host serve` is off. It pairs over plain HTTP with weaker legacy encryption — trusted LAN only, and worth turning off if you don't use Moonlight (see [Security](/docs/security#gamestream--moonlight-compatibility-is-the-weak-crypto-path)). It is a compatibility surface, so Punktfunk-only features (profiles, links, clipboard, microphone) are not on it. |
+| **GameStream / Moonlight plane** | Works, and whether it is on depends on how you installed. Every Linux package (deb, RPM, Arch, the Bazzite sysext) and the SteamOS installer ship the unit as `serve --gamestream`, so GameStream is **on** there; NixOS defaults it on too. The Windows installer's checkbox is unticked, so it is **off** unless you asked for it, and a bare `punktfunk-host serve` is off. It pairs over plain HTTP with weaker legacy encryption — trusted LAN only, and worth turning off if you don't use Moonlight (see [Security](/docs/security#gamestream--moonlight-compatibility-is-the-weak-crypto-path)). It is a compatibility surface, so Punktfunk-only features (presets, links, clipboard, microphone) are not on it. |
 | **Linux and Windows desktop clients** | Packaged and current. They are one codebase: the same session binary streams for both, and for the Decky plugin and the `punktfunk` CLI. |
 | **Apple client** (macOS · iOS · iPadOS · tvOS) | One universal build, distributed as a **TestFlight beta**; the Mac also has a notarized DMG. Feature-complete apart from the platform gaps named above (no microphone or clipboard on tvOS). |
 | **Android client** (phone · TV) | Published on **Google Play** as a public listing for releases, with an invite-only Internal testing track for canary, plus a sideloadable APK. The same app in leanback mode is the TV client. |

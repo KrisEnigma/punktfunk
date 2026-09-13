@@ -7,15 +7,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-/// Resolved catalog entry. The service thread opens the profiles file; the shell never
+/// Resolved catalog entry. The service thread opens the presets file; the shell never
 /// does.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProfileChip {
+pub struct PresetChip {
     pub id: String,
     pub name: String,
     /// `#RRGGBB`.
     pub accent: Option<String>,
-    /// Bitrate this profile pins, if it pins one; `None` inherits the global. Only the
+    /// Bitrate this preset pins, if it pins one; `None` inherits the global. Only the
     /// speed test reads it, to name the layer the tested host actually resolves bitrate
     /// from. A producer that predates the field leaves it `None`, which reads as
     /// "inherits" — the safe half, since that is where the console writes.
@@ -59,12 +59,12 @@ pub struct HostRow {
     /// Empty when the host is unreachable or the route does not exist.
     #[serde(default)]
     pub actions: Vec<HostAction>,
-    /// Pinned-profile shortcut after the host's primary tile, sharing its live state.
+    /// Pinned-preset shortcut after the host's primary tile, sharing its live state.
     /// `None` = this row is the primary tile.
-    pub pin: Option<ProfileChip>,
-    /// Default profile (`KnownHost::profile_id`). Always `None` on a pinned row — that
-    /// profile is `pin`.
-    pub bound_profile: Option<ProfileChip>,
+    pub pin: Option<PresetChip>,
+    /// Default preset (`KnownHost::preset_id`). Always `None` on a pinned row — that
+    /// preset is `pin`.
+    pub bound_preset: Option<PresetChip>,
     /// What this host has up right now (`GET /api/v1/status`), as a title to show.
     /// Empty = nothing running, unpaired, unreachable, or a host too old to ask —
     /// every one of which the tile renders the same way: no line.
@@ -74,11 +74,11 @@ pub struct HostRow {
     /// coming back claiming a game is up because it was up last night.
     #[serde(default)]
     pub running: String,
-    /// Library title id → profile id (`KnownHost::game_profiles`), for the bind screen's
+    /// Library title id → preset id (`KnownHost::game_presets`), for the bind screen's
     /// checkmark. Ids, not chips: the shell only compares them, and a title's binding
-    /// outranks `bound_profile` at launch, which the host resolves.
+    /// outranks `bound_preset` at launch, which the host resolves.
     #[serde(default)]
-    pub game_profiles: BTreeMap<String, String>,
+    pub game_presets: BTreeMap<String, String>,
 }
 
 /// One host-offered action, resolved from `GET /api/v1/actions`
@@ -308,23 +308,23 @@ pub enum ConsoleCmd {
     /// Stop the wake loop and clear its status.
     CancelWake,
     Probe,
-    /// Pin or unpin a profile card on a saved host (`KnownHost::pinned_profiles`).
+    /// Pin or unpin a preset card on a saved host (`KnownHost::pinned_presets`).
     /// `key` is the host row. Presentation only: does not touch the default binding
-    /// or the profile. Idempotent.
+    /// or the preset. Idempotent.
     SetPin {
         key: String,
-        profile_id: String,
+        preset_id: String,
         pin: bool,
     },
-    /// Bind or clear a profile. `game` names a library title
-    /// (`KnownHost::game_profiles`); `None` binds the host's own default
-    /// (`KnownHost::profile_id`). [`Self::SetPin`] is presentation; this is the
-    /// binding. `profile_id: None` clears. Idempotent.
-    BindProfile {
+    /// Bind or clear a preset. `game` names a library title
+    /// (`KnownHost::game_presets`); `None` binds the host's own default
+    /// (`KnownHost::preset_id`). [`Self::SetPin`] is presentation; this is the
+    /// binding. `preset_id: None` clears. Idempotent.
+    BindPreset {
         key: String,
         #[serde(default)]
         game: Option<String>,
-        profile_id: Option<String>,
+        preset_id: Option<String>,
     },
     /// Per-host clipboard share while streaming (`KnownHost::clipboard_sync`).
     /// Never global.
@@ -403,9 +403,9 @@ mod tests {
             os: String::new(),
             actions: Vec::new(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         };
         shared.set_hosts(vec![row.clone()]);
         let g1 = shared.hosts_gen();

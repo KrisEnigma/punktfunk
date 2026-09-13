@@ -57,7 +57,7 @@ const PLATE_DY: f64 = 2.0;
 const PLATE_ALPHA: f32 = 0.38;
 
 pub(crate) struct CollectionsScreen {
-    /// Host and pinned profile from the shelf that opened this. A drill-in off a
+    /// Host and pinned preset from the shelf that opened this. A drill-in off a
     /// pinned card must still launch the way that card does.
     host: HostRow,
     cursor: i32,
@@ -750,9 +750,9 @@ mod tests {
             os: String::new(),
             actions: Vec::new(),
             pin: None,
-            bound_profile: None,
+            bound_preset: None,
             running: String::new(),
-            game_profiles: Default::default(),
+            game_presets: Default::default(),
         }
     }
 

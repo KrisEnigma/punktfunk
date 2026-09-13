@@ -252,20 +252,20 @@ final class HostStore: ObservableObject {
     /// Bind this host to a settings preset, or to "Default settings" (nil) — the ONLY way the
     /// default changes. A one-off "Connect with ▸" deliberately never lands here (§5.2:
     /// predictable, not sticky).
-    func setPreset(_ hostID: UUID, profileID: String?) {
+    func setPreset(_ hostID: UUID, presetID: String?) {
         guard let i = hosts.firstIndex(where: { $0.id == hostID }) else { return }
-        hosts[i].profileID = profileID
+        hosts[i].presetID = presetID
     }
 
     /// Pin or unpin a host+preset combo as its own card (§5.2a). Presentation only: it never
     /// touches the default binding or the preset itself. nil stays out of the saved JSON when
     /// nothing is pinned, so the widget contract sees no new key for the common case.
-    func setPinned(_ hostID: UUID, profileID: String, pinned: Bool) {
+    func setPinned(_ hostID: UUID, presetID: String, pinned: Bool) {
         guard let i = hosts.firstIndex(where: { $0.id == hostID }) else { return }
-        var pins = hosts[i].pinnedProfileIDs ?? []
-        pins.removeAll { $0 == profileID }
-        if pinned { pins.append(profileID) }
-        hosts[i].pinnedProfileIDs = pins.isEmpty ? nil : pins
+        var pins = hosts[i].pinnedPresetIDs ?? []
+        pins.removeAll { $0 == presetID }
+        if pinned { pins.append(presetID) }
+        hosts[i].pinnedPresetIDs = pins.isEmpty ? nil : pins
     }
 
     /// Drop the pinned identity (e.g. after a legitimate host reinstall). This does NOT downgrade

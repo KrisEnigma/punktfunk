@@ -121,7 +121,7 @@ data class Settings(
     val statsVerbosity: StatsVerbosity = StatsVerbosity.NORMAL,
     /**
      * Which vocabulary the stats overlay speaks: off (the default) shows the figures Moonlight's
-     * overlay also shows, on shows capture to glass and every stage. Device-wide; a profile never
+     * overlay also shows, on shows capture to glass and every stage. Device-wide; a preset never
      * carries it.
      */
     val advancedStats: Boolean = false,
@@ -172,7 +172,7 @@ data class Settings(
      * `"abyss"`, `"ember"`, `"moss"`, `"graphite"`, then the six pale fields. See
      * [GamepadPalette], whose table and maths mirror the desktop console's and the Apple
      * client's under the same names. Presentation only: nothing
-     * about a stream depends on it, so it is a device preference and never part of a profile.
+     * about a stream depends on it, so it is a device preference and never part of a preset.
      * An unknown value reads as the default rather than failing — a newer client may have shipped
      * a palette this build doesn't know.
      */
@@ -679,12 +679,12 @@ const val AUDIO_FORMAT_LOSSLESS_1764 = "lossless1764"
 
 /**
  * (stored value, label) for the requested audio format — the cross-client table, matching the
- * Apple client's `AudioFormatChoice` raw values and the desktop `AUDIO_FORMATS` so a profile
+ * Apple client's `AudioFormatChoice` raw values and the desktop `AUDIO_FORMATS` so a preset
  * written on any of them is honoured on the others.
  *
- * ⚠ **The stored values are shared VERBATIM and must never be renamed.** A profile carries the key
+ * ⚠ **The stored values are shared VERBATIM and must never be renamed.** A preset carries the key
  * through untouched, so a spelling that differs by one character fails in the worst possible way:
- * the profile keeps "working" on the other client and silently inherits its global default
+ * the preset keeps "working" on the other client and silently inherits its global default
  * instead. The naming rule is the kHz figure with the decimal point dropped — `lossless48`,
  * `lossless96`, and for the 44.1 family `lossless441` / `lossless882` / `lossless1764`.
  *
@@ -758,7 +758,7 @@ val AUDIO_FORMAT_WIRE_UNSPECIFIED = 0 to 0
 
 /**
  * (stored value, label) for the preferred video codec — the cross-client table (the Rust
- * `CODECS`), so a value another client or a profile stored is always representable here.
+ * `CODECS`), so a value another client or a preset stored is always representable here.
  * `"auto"` = host decides.
  *
  * Two rows are capability-gated by [codecOptionsFor] rather than dropped from the table: `"av1"`

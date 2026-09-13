@@ -147,7 +147,7 @@ pub mod pad_audio;
     target_os = "android",
     target_family = "wasm"
 ))]
-pub mod profiles;
+pub mod presets;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod session;
 // One decode-less connect and one host burst — the shared half of every "Test network

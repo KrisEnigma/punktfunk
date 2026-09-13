@@ -87,10 +87,10 @@ pub struct SessionParams {
     /// to software and re-requests a keyframe. Decode still succeeds in that state, so
     /// without this the stream stays black.
     pub force_software: Arc<AtomicBool>,
-    /// Settings profile these params were resolved with (`None` = globals). Display
-    /// only — values are already baked in; it rides so the overlay can name the profile
+    /// Settings preset these params were resolved with (`None` = globals). Display
+    /// only — values are already baked in; it rides so the overlay can name the preset
     /// without re-reading a store.
-    pub profile: Option<String>,
+    pub preset: Option<String>,
     /// Overlay tier this launch resolved to. Presentation-only: the controller never
     /// reads it. It rides so a browse-mode presenter (one window, many sessions) can
     /// adopt a per-launch choice; the in-stream cycle chord still wins for that stream.
@@ -506,7 +506,7 @@ fn connect_plan(params: &SessionParams) -> ConnectPlan {
     ) & !params.exclude_codecs;
     // PyroWave is always Automatic bitrate: a fixed kbps is ill-defined for the
     // all-intra codec (bpp is the operating point) and used to bypass the host
-    // ceiling. Send 0; the stored profile value is untouched. Gated on the codec
+    // ceiling. Send 0; the stored preset value is untouched. Gated on the codec
     // actually being advertised, so a failed probe falls back to H.26x with the user's rate.
     let bitrate_kbps = if preferred == punktfunk_core::quic::CODEC_PYROWAVE
         && advertised_codecs & punktfunk_core::quic::CODEC_PYROWAVE != 0
@@ -1791,7 +1791,7 @@ mod tests {
 
     /// Stored values and the pair each asks for. Spellings are shared with Apple
     /// `AudioFormatChoice` and Android `AUDIO_FORMAT_*`, so a typo here is ignored
-    /// on this client while the profile keeps working on the others.
+    /// on this client while the preset keeps working on the others.
     #[test]
     fn the_audio_format_setting_speaks_the_cross_client_spellings() {
         use punktfunk_core::audio::pcm::BITS_24;
