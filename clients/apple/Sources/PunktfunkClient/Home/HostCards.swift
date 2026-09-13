@@ -92,8 +92,12 @@ private struct DefaultHostBadge: View {
     let size: CGFloat
 
     var body: some View {
+        // Resizable, so the star centres on its own bounds rather than on a text baseline.
         Image(systemName: "star.fill")
-            .font(.system(size: size * 0.2, weight: .bold))
+            .resizable()
+            .scaledToFit()
+            .fontWeight(.bold)
+            .frame(width: size * 0.2, height: size * 0.2)
             .foregroundStyle(.white)
             .frame(width: size * 0.38, height: size * 0.38)
             .background(Circle().fill(Color.brand))
