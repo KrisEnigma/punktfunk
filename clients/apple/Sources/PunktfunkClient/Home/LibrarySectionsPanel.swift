@@ -29,9 +29,13 @@ struct LibrarySectionsPanel: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Customize Library")
                 .font(.headline)
-            // A Mac list paints its own fill, a dark slab on the popover's material.
+            // A Mac list paints its own fill and insets its rows. Without both gone the rows sat in
+            // a dark slab, indented past the popover's own padding.
             List { rows }
+                .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .contentMargins(0, for: .scrollContent)
+                .padding(.horizontal, -8) // the plain list's own row indent, so rows meet the title
             Text(note)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -82,6 +86,9 @@ struct LibrarySectionsPanel: View {
                     .help("Drag to reorder")
                 #endif
             }
+            #if os(macOS)
+            .listRowInsets(EdgeInsets(top: 3, leading: 0, bottom: 3, trailing: 0))
+            #endif
         }
         .onMove(perform: move)
     }

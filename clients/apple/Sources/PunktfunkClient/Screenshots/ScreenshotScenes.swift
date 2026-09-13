@@ -151,7 +151,7 @@ enum ShotScenes {
             },
             ShotScene(name: "15e-customize-mac", orientation: .natural, colorScheme: .dark) {
                 // On material, as the popover draws it: a list fill shows up as a dark slab.
-                AnyView(LibrarySectionsPanel(shotLayout: "").frame(width: 320, height: 284)
+                AnyView(LibrarySectionsPanel(shotLayout: "").frame(width: 320, height: 250)
                     .background(.regularMaterial, in: .rect(cornerRadius: 12)))
             },
             ShotScene(name: "16c-host-window-connection", orientation: .natural, colorScheme: .dark) {
