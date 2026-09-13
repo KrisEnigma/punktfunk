@@ -130,6 +130,11 @@ struct LibraryView: View {
 
     @State private var games: [GameEntry] = []
     @State private var loading = false
+    /// Held back a moment, so a cache that answers at once never flashes a spinner.
+    @State private var spinnerDue = false
+    /// The catalogs this run has shown, by host: a shelf the filter switches back to opens on its
+    /// titles rather than on an empty frame and a spinner.
+    @MainActor private static var shown: [String: [GameEntry]] = [:]
     @State private var errorText: String?
     /// What the host has launched right now, keyed by library id — the `Resume` affordance. Empty
     /// on an older host, an unreachable one, or while the catalog is being served from cache.
@@ -216,7 +221,19 @@ struct LibraryView: View {
             #if os(iOS) || os(macOS)
             .sheet(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
             #endif
+            // Before the first frame: a shelf seen this run opens on its titles, any other one on
+            // the (held back) spinner rather than a flash of the empty state.
+            .onAppear {
+                guard games.isEmpty else { return }
+                if let seen = Self.shown[host.id.uuidString] { games = seen } else { loading = true }
+            }
             .task { await load() }
+            .task(id: loading) {
+                spinnerDue = false
+                guard loading else { return }
+                try? await Task.sleep(for: .milliseconds(300))
+                spinnerDue = loading
+            }
             .onDisappear {
                 // Hand the loader off before clearing it, so its pooled connections are closed
                 // rather than left open on a screen the user has left.
@@ -548,7 +565,7 @@ struct LibraryView: View {
         if games.isEmpty {
             Group {
                 if loading {
-                    ProgressView("Loading library…")
+                    if spinnerDue { ProgressView("Loading library…") }
                 } else if let errorText {
                     errorState(errorText)
                 } else {
@@ -886,6 +903,7 @@ struct LibraryView: View {
         if let cached = await LibraryCache.shared?.load(hostID: current.id.uuidString) {
             games = cached.games.launchersFirst
             servedFromCacheAt = cached.fetchedAt
+            Self.shown[current.id.uuidString] = games
         }
         // ...and wake the box while the player is still choosing. Waking has always been bound to
         // CONNECTING, which is too late to help: by then they have picked a title and are waiting
@@ -930,6 +948,7 @@ struct LibraryView: View {
                 servedFromCacheAt = nil
                 errorText = nil
                 await LibraryCache.shared?.store(fetched, hostID: current.id.uuidString)
+                Self.shown[current.id.uuidString] = games
                 break
             } catch {
                 // Anything other than "can't reach it" is settled — a rejected certificate does not
