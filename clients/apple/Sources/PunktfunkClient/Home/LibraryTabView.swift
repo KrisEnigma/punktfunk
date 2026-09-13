@@ -55,6 +55,10 @@ struct LibraryTabView: View {
                 LibraryNoHostView(showHosts: showHosts)
             }
         }
+        #if os(macOS)
+        // The host grid's floor, so the window can't squeeze the Library past it.
+        .frame(minWidth: 480, minHeight: 360)
+        #endif
     }
 
     private func library(_ shelf: LibraryTarget) -> LibraryView {
