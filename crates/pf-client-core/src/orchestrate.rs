@@ -8,7 +8,7 @@
 //! Wake cadence lives on [`WAKE_TIMEOUT_SECS`] / [`WAKE_RESEND_SECS`].
 
 use crate::deeplink::{DeepLink, HostResolution, Route};
-use crate::profiles::{ProfilesFile, Resolution, StreamProfile};
+use crate::presets::{PresetsFile, Resolution, StreamPreset};
 use crate::trust::{effective_settings, KnownHost, KnownHosts, Settings};
 use serde::{Deserialize, Serialize};
 use std::process::{Child, Command, Stdio};
@@ -49,11 +49,11 @@ impl From<&KnownHost> for HostTarget {
 pub struct ConnectPlan {
     pub host: HostTarget,
     pub launch: Option<String>,
-    pub profile: Option<StreamProfile>,
-    /// One-off override handed to the session: `Some(id)` picks that profile,
+    pub preset: Option<StreamPreset>,
+    /// One-off override handed to the session: `Some(id)` picks that preset,
     /// `Some("")` forces the defaults, `None` lets the session resolve the host binding.
     /// Both paths use the same resolver, so they cannot disagree.
-    pub profile_override: Option<String>,
+    pub preset_override: Option<String>,
     pub settings: Settings,
     /// Magic packet first; wake-and-wait if the dial fails. Off with no MAC, and when
     /// auto-wake is off — VPN hosts look offline when they aren't.
@@ -64,27 +64,26 @@ pub struct ConnectPlan {
     /// Pin came from an advert, not the store. Persist only after `ready` — that proves
     /// the host holds this identity.
     pub tofu: bool,
-    /// Per-host trust decision, not a profile setting. Resolved here so the renderer
+    /// Per-host trust decision, not a preset setting. Resolved here so the renderer
     /// does not look it up again.
     pub clipboard: bool,
 }
 
 impl ConnectPlan {
-    /// Card-click plan. `one_off_profile`: `Some("")` forces the global defaults on a
+    /// Card-click plan. `one_off_preset`: `Some("")` forces the global defaults on a
     /// bound host; `None` honors the binding. Loads stores; use [`ConnectPlan::resolve`]
     /// when the caller already holds them.
     pub fn for_host(
         host: &KnownHost,
         launch: Option<&str>,
-        one_off_profile: Option<&str>,
+        one_off_preset: Option<&str>,
     ) -> ConnectPlan {
-        let (settings, profile) =
-            effective_settings(&host.addr, host.port, one_off_profile, launch);
+        let (settings, preset) = effective_settings(&host.addr, host.port, one_off_preset, launch);
         ConnectPlan {
             host: HostTarget::from(host),
             launch: launch.map(str::to_string),
-            profile,
-            profile_override: one_off_profile.map(str::to_string),
+            preset,
+            preset_override: one_off_preset.map(str::to_string),
             wake: settings.auto_wake && !host.mac.is_empty(),
             settings,
             connect_timeout_secs: None,
@@ -94,14 +93,14 @@ impl ConnectPlan {
     }
 
     /// Plan for a host the front-end already holds as values, not a stored [`KnownHost`].
-    /// Resolves settings, profile, and clipboard through the same helpers as
+    /// Resolves settings, preset, and clipboard through the same helpers as
     /// [`ConnectPlan::for_host`]. Hand-building the struct is a trap: [`spawn_session`]
     /// writes `settings` into `--resolved-spec`, and a spec-mode session reads no stores,
     /// so `..Settings::default()` silently streams at every default.
     pub fn for_target(
         host: HostTarget,
         launch: Option<String>,
-        one_off_profile: Option<String>,
+        one_off_preset: Option<String>,
     ) -> ConnectPlan {
         let known = KnownHosts::load();
         // First connect off an advert: no record. Default = no binding, no clipboard.
@@ -112,8 +111,8 @@ impl ConnectPlan {
         let mut plan = ConnectPlan::resolve(
             stored,
             launch.as_deref(),
-            one_off_profile.as_deref(),
-            &ProfilesFile::load(),
+            one_off_preset.as_deref(),
+            &PresetsFile::load(),
             &Settings::load(),
         );
         // Caller's target wins: its fingerprint may be TOFU (not yet stored), and `wake`
@@ -124,31 +123,31 @@ impl ConnectPlan {
     }
 
     /// Same plan from stores the caller already holds — no disk, no clock, no
-    /// environment. Precedence is `trust::resolve_profile`'s, called rather than
+    /// environment. Precedence is `trust::resolve_preset`'s, called rather than
     /// restated: this path and [`effective_settings`] must not be able to disagree
-    /// about which profile a launch gets.
+    /// about which preset a launch gets.
     pub fn resolve(
         host: &KnownHost,
         launch: Option<&str>,
-        one_off_profile: Option<&str>,
-        catalog: &ProfilesFile,
+        one_off_preset: Option<&str>,
+        catalog: &PresetsFile,
         base: &Settings,
     ) -> ConnectPlan {
-        let profile = crate::trust::resolve_profile(
+        let preset = crate::trust::resolve_preset(
             catalog,
-            host.profile_id.as_deref(),
-            launch.and_then(|game| host.profile_for_game(game)),
-            one_off_profile,
+            host.preset_id.as_deref(),
+            launch.and_then(|game| host.preset_for_game(game)),
+            one_off_preset,
         );
-        let settings = match &profile {
+        let settings = match &preset {
             Some(p) => p.overrides.apply(base),
             None => base.clone(),
         };
         ConnectPlan {
             host: HostTarget::from(host),
             launch: launch.map(str::to_string),
-            profile,
-            profile_override: one_off_profile.map(str::to_string),
+            preset,
+            preset_override: one_off_preset.map(str::to_string),
             wake: settings.auto_wake && !host.mac.is_empty(),
             settings,
             connect_timeout_secs: None,
@@ -162,7 +161,7 @@ impl ConnectPlan {
         ResolvedSpec {
             settings: self.settings.clone(),
             clipboard,
-            profile: self.profile.as_ref().map(|p| p.name.clone()),
+            preset: self.preset.as_ref().map(|p| p.name.clone()),
         }
     }
 
@@ -182,9 +181,9 @@ impl ConnectPlan {
         }
         // Only a one-off rides the flag. Without it the session resolves the host binding
         // through the same helper this plan used.
-        if let Some(profile) = &self.profile_override {
+        if let Some(preset) = &self.preset_override {
             args.push("--preset".into());
-            args.push(profile.clone());
+            args.push(preset.clone());
         }
         if let Some(secs) = self.connect_timeout_secs {
             args.push("--connect-timeout".into());
@@ -225,7 +224,7 @@ pub struct UnknownHost {
     /// verified, not blind TOFU.
     pub fp: Option<String>,
     pub launch: Option<String>,
-    pub profile: Option<String>,
+    pub preset: Option<String>,
 }
 
 /// Why a link cannot become a plan. Each is a notice, never a degraded connect
@@ -235,8 +234,8 @@ pub enum PlanError {
     AmbiguousHost(String),
     UnresolvableHost(String),
     PinConflict { host: String },
-    UnknownProfile(String),
-    AmbiguousProfile(String),
+    UnknownPreset(String),
+    AmbiguousPreset(String),
 }
 
 impl PlanError {
@@ -254,11 +253,11 @@ impl PlanError {
                 "That link's fingerprint doesn't match the one saved for {host} — it's out of \
                  date, or it isn't that host. Nothing was connected."
             ),
-            PlanError::UnknownProfile(p) => {
-                format!("That link asks for a settings profile called \"{p}\", which doesn't exist here.")
+            PlanError::UnknownPreset(p) => {
+                format!("That link asks for a settings preset called \"{p}\", which doesn't exist here.")
             }
-            PlanError::AmbiguousProfile(p) => {
-                format!("More than one settings profile is called \"{p}\" — rename one, or use its id in the link.")
+            PlanError::AmbiguousPreset(p) => {
+                format!("More than one settings preset is called \"{p}\" — rename one, or use its id in the link.")
             }
         }
     }
@@ -274,7 +273,7 @@ impl PlanError {
 pub fn plan_from_link(
     link: &DeepLink,
     known: &KnownHosts,
-    catalog: &ProfilesFile,
+    catalog: &PresetsFile,
     base: &Settings,
 ) -> Result<PlanOutcome, PlanError> {
     if link.route != Route::Connect {
@@ -286,9 +285,9 @@ pub fn plan_from_link(
         match catalog.resolve(reference) {
             (Some(_), _) => {}
             (_, Resolution::Ambiguous) => {
-                return Err(PlanError::AmbiguousProfile(reference.clone()))
+                return Err(PlanError::AmbiguousPreset(reference.clone()))
             }
-            _ => return Err(PlanError::UnknownProfile(reference.clone())),
+            _ => return Err(PlanError::UnknownPreset(reference.clone())),
         }
     }
     let resolution = crate::deeplink::resolve_host(link, known);
@@ -317,7 +316,7 @@ pub fn plan_from_link(
                     name: Some(plan.host.name),
                     fp: link.fp.clone(),
                     launch: link.launch.clone(),
-                    profile: link.preset.clone(),
+                    preset: link.preset.clone(),
                 })));
             }
             if plan.host.name.is_empty() {
@@ -342,7 +341,7 @@ pub fn plan_from_link(
             name,
             fp,
             launch: link.launch.clone(),
-            profile: link.preset.clone(),
+            preset: link.preset.clone(),
         }))),
         HostResolution::Ambiguous => Err(PlanError::AmbiguousHost(link.host_ref.clone())),
         HostResolution::Unresolvable => Err(PlanError::UnresolvableHost(link.host_ref.clone())),
@@ -460,9 +459,9 @@ pub struct ResolvedSpec {
     pub settings: Settings,
     /// Per-host trust decision, resolved by the spawner — not re-looked-up here.
     pub clipboard: bool,
-    /// Profile name for the stats overlay. `None` = the global defaults.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
+    /// Preset name for the stats overlay. `None` = the global defaults.
+    #[serde(default, alias = "profile", skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 impl ResolvedSpec {
@@ -642,7 +641,7 @@ pub fn spawn_session(
     }
     tracing::info!(
         host = %plan.host.addr, port = plan.host.port,
-        profile = plan.profile.as_ref().map(|p| p.name.as_str()).unwrap_or("-"),
+        preset = plan.preset.as_ref().map(|p| p.name.as_str()).unwrap_or("-"),
         "session binary spawned"
     );
     let stdout = child.stdout.take().expect("piped stdout");
@@ -766,7 +765,7 @@ mod tests {
         assert!(w.tick(false).send_packet);
     }
 
-    /// One-off profile rides the flag; a host binding does not — the session
+    /// One-off preset rides the flag; a host binding does not — the session
     /// resolves it with the same helper, so passing it would be a second source of truth.
     #[test]
     fn session_args_are_assembled_in_one_place() {
@@ -779,8 +778,8 @@ mod tests {
         let mut plan = ConnectPlan {
             host: HostTarget::from(&h),
             launch: Some("steam:570".into()),
-            profile: None,
-            profile_override: None,
+            preset: None,
+            preset_override: None,
             settings: Settings {
                 fullscreen_on_stream: false,
                 ..Default::default()
@@ -802,7 +801,7 @@ mod tests {
             ]
         );
 
-        plan.profile_override = Some("aaaaaaaaaaaa".into());
+        plan.preset_override = Some("aaaaaaaaaaaa".into());
         plan.connect_timeout_secs = Some(185);
         plan.settings.fullscreen_on_stream = true;
         let args = plan.session_args();
@@ -812,14 +811,14 @@ mod tests {
 
         // "Connect with ▸ Default settings" on a bound host is an empty override, not
         // the same as no override — it has to survive as a flag.
-        plan.profile_override = Some(String::new());
+        plan.preset_override = Some(String::new());
         let args = plan.session_args();
         let i = args.iter().position(|a| a == "--preset").unwrap();
         assert_eq!(args[i + 1], "");
     }
 
     /// Unknown host is a prompt, a contradicted pin is a refusal, an unhonorable
-    /// profile is a refusal, and an ambiguous reference is never guessed at.
+    /// preset is a refusal, and an ambiguous reference is never guessed at.
     #[test]
     fn link_plans_refuse_rather_than_degrade() {
         let fp = "a".repeat(64);
@@ -846,7 +845,7 @@ mod tests {
             ],
         };
         // Pure inputs — the test never touches the config directory.
-        let catalog = ProfilesFile::default();
+        let catalog = PresetsFile::default();
         let base = Settings::default();
         let plan =
             |url: &str| plan_from_link(&deeplink::parse(url).unwrap(), &known, &catalog, &base);
@@ -855,7 +854,7 @@ mod tests {
         match out {
             PlanOutcome::Connect(p) => {
                 assert_eq!(p.host.addr, "192.168.1.50");
-                assert_eq!(p.profile_override, None);
+                assert_eq!(p.preset_override, None);
                 assert!(p.host.fp_hex.is_some());
             }
             other => panic!("expected a connect, got {other:?}"),
@@ -893,7 +892,7 @@ mod tests {
         );
         assert_eq!(
             plan("punktfunk://connect/Desk?profile=NoSuchProfile"),
-            Err(PlanError::UnknownProfile("NoSuchProfile".into()))
+            Err(PlanError::UnknownPreset("NoSuchProfile".into()))
         );
         // Unknown address: confirmation sheet, never auto-connect. Carries the claimed
         // name and expected pin so the first connect is verified, not TOFU.
@@ -910,7 +909,7 @@ mod tests {
                     name: Some("Studio".into()),
                     fp: Some(fp.clone()),
                     launch: None,
-                    profile: None,
+                    preset: None,
                 }
             ),
             other => panic!("expected a confirmation, got {other:?}"),
@@ -945,18 +944,18 @@ mod tests {
                 ..Default::default()
             },
             clipboard: true,
-            profile: Some("Work".into()),
+            preset: Some("Work".into()),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(serde_json::from_str::<ResolvedSpec>(&json).unwrap(), spec);
 
-        // No profile: the key is absent, not null.
+        // No preset: the key is absent, not null.
         let plain = ResolvedSpec {
-            profile: None,
+            preset: None,
             ..spec.clone()
         };
         let json = serde_json::to_string(&plain).unwrap();
-        assert!(!json.contains("profile"));
+        assert!(!json.contains("preset"));
         assert_eq!(serde_json::from_str::<ResolvedSpec>(&json).unwrap(), plain);
     }
 
@@ -969,25 +968,25 @@ mod tests {
             addr: "192.168.1.50".into(),
             fp_hex: "a".repeat(64),
             clipboard_sync: true,
-            profile_id: Some("aaaaaaaaaaaa".into()),
+            preset_id: Some("aaaaaaaaaaaa".into()),
             ..Default::default()
         };
-        let catalog = ProfilesFile {
+        let catalog = PresetsFile {
             version: 1,
-            profiles: vec![crate::profiles::StreamProfile {
+            presets: vec![crate::presets::StreamPreset {
                 id: "aaaaaaaaaaaa".into(),
                 name: "Game".into(),
-                overrides: crate::profiles::SettingsOverlay {
+                overrides: crate::presets::SettingsOverlay {
                     bitrate_kbps: Some(80000),
                     ..Default::default()
                 },
-                ..crate::profiles::StreamProfile::new("")
+                ..crate::presets::StreamPreset::new("")
             }],
         };
         let plan = ConnectPlan::resolve(&h, None, None, &catalog, &Settings::default());
         let spec = plan.spec(plan.clipboard);
         assert_eq!(spec.settings.bitrate_kbps, 80000, "the overlay is baked in");
-        assert_eq!(spec.profile.as_deref(), Some("Game"));
+        assert_eq!(spec.preset.as_deref(), Some("Game"));
         assert!(spec.clipboard, "the host's decision, resolved once");
     }
 

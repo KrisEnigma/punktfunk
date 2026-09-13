@@ -195,12 +195,12 @@ fun LibraryScreen(
     onLaunched: (ActiveSession) -> Unit,
     onBack: () -> Unit,
     /**
-     * The profile this shelf launches with, when it was opened from a PINNED host+profile card
+     * The preset this shelf launches with, when it was opened from a PINNED host+preset card
      * (design §5.2a) rather than the host's own tile: a one-off, exactly like the card's plain
      * connect. Null = the host's tile, and the host's binding decides — the same rule
-     * [ProfileStore.resolveFor] applies to every other connect.
+     * [PresetStore.resolveFor] applies to every other connect.
      */
-    pinnedProfileId: String? = null,
+    pinnedPresetId: String? = null,
     /**
      * Stream this host's desktop as soon as the shelf can dial (`start_in = stream`). One attempt,
      * once per screen: a refusal leaves the shelf on screen and nothing retries. Goes through the
@@ -217,14 +217,14 @@ fun LibraryScreen(
     var state by remember { mutableStateOf<LibState>(LibState.Loading) }
     // A launch (connect) in flight: shows an overlay + gates the pad so a second press can't dial twice.
     var launching by remember { mutableStateOf(false) }
-    // The profile every launch off this shelf runs with, resolved ONCE per shelf by the same rule
+    // The preset every launch off this shelf runs with, resolved ONCE per shelf by the same rule
     // the host-list connect uses: this card's pin as the one-off, else the host's binding, else the
-    // globals. Resolved here rather than per launch so a profile edited mid-browse cannot make two
+    // globals. Resolved here rather than per launch so a preset edited mid-browse cannot make two
     // titles on one shelf stream differently.
-    val profile = remember(host.id, pinnedProfileId) {
-        ProfileStore(context).resolveFor(host, pinnedProfileId)
+    val preset = remember(host.id, pinnedPresetId) {
+        PresetStore(context).resolveFor(host, pinnedPresetId)
     }
-    val streamSettings = remember(settings, profile) { settings.effectiveFor(profile) }
+    val streamSettings = remember(settings, preset) { settings.effectiveFor(preset) }
 
     // Keyed on the mgmt port too: a discovery tick can learn it after this screen is composed, and
     // the fetch must redo itself against the real port rather than stay on a stale 47990 failure.
@@ -246,10 +246,10 @@ fun LibraryScreen(
         loadLibrary(context, host) { state = it }
     }
 
-    // A pinned card's shelf says so, in the card's own `host · profile` shape: what a launch here
+    // A pinned card's shelf says so, in the card's own `host · preset` shape: what a launch here
     // will use is a property of the shelf, not something to remember from the tile two screens back.
-    val title = if (pinnedProfileId != null && profile != null) {
-        "${host.name} · ${profile.name} — Library"
+    val title = if (pinnedPresetId != null && preset != null) {
+        "${host.name} · ${preset.name} — Library"
     } else {
         "${host.name} — Library"
     }
@@ -284,12 +284,12 @@ fun LibraryScreen(
                         handle,
                         streamSettings,
                         host.clipboardSync,
-                        profileName = profile?.name,
+                        presetName = preset?.name,
                         hostId = host.id,
                         // Where to come back to when this game exits — this shelf, pin and all,
                         // not the host's default one.
                         launchedFromLibrary = true,
-                        libraryProfileId = pinnedProfileId,
+                        libraryPresetId = pinnedPresetId,
                         // The host never tracks a launcher tile or the desktop, so there is
                         // nothing to wait for.
                         launchHold = game.takeUnless { it.isLauncher || it.isDesktop }?.let {
@@ -321,9 +321,9 @@ fun LibraryScreen(
     // "Copy link" for one TITLE — the self-emitted form a host card already hands out (design/
     // client-deep-links.md §4/§5), plus this game's `launch=` id, so pasting the URL into Playnite
     // or a Stream Deck macro boots straight into it. A shelf opened from a PINNED card copies that
-    // card's profile with it, because that combination is the thing being copied.
+    // card's preset with it, because that combination is the thing being copied.
     fun copyLink(game: GameEntry) {
-        val url = DeepLinks.forHost(host, launch = game.id, preset = pinnedProfileId).toUrl()
+        val url = DeepLinks.forHost(host, launch = game.id, preset = pinnedPresetId).toUrl()
         // A toast either way here: this screen renders neither the touch home's notice banner nor
         // the console's status line, and both of its presentations are full-bleed over artwork.
         linkCopyMessage(putLinkOnClipboard(context, url))?.let {
@@ -334,7 +334,7 @@ fun LibraryScreen(
     // Lambdas, NOT `::launch` / `::copyLink`: two callable references to the same local function
     // compare EQUAL however different the frame they captured, so a skipped recomposition would
     // leave the child calling a closure over stale settings. SettingsScreen documents the same
-    // trap at `scopeProfile()`, having been bitten by it.
+    // trap at `scopePreset()`, having been bitten by it.
     // Where this shelf should open. Read ONCE per screen (not per recomposition) so a launch
     // rewriting it mid-browse cannot make the grid jump under the player's thumb; the effects that
     // consume it are one-shot on top of that.

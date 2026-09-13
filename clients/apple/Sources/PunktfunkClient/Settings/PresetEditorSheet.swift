@@ -1,10 +1,10 @@
-// Creating, duplicating, renaming, recolouring and deleting a settings profile — one sheet for
+// Creating, duplicating, renaming, recolouring and deleting a settings preset — one sheet for
 // all five (design/client-settings-profiles.md §5.1).
 //
 // It replaced a menu of four separate actions, three of which raised their own bare text alert
-// and the fourth a submenu of colour NAMES with no colour anywhere on it. Making a profile then
+// and the fourth a submenu of colour NAMES with no colour anywhere on it. Making a preset then
 // meant: name it in an alert, find it again in the scope menu, open a submenu, and pick "Amber"
-// on faith. The two things a profile has — a name and a colour — are decided together here, with
+// on faith. The two things a preset has — a name and a colour — are decided together here, with
 // a live chip showing exactly what the host cards will render.
 
 import PunktfunkKit
@@ -29,22 +29,22 @@ struct PresetDraft: Identifiable {
         PresetDraft(name: "", accent: nil, title: "New Preset", accept: "Create")
     }
 
-    static func edit(_ profile: StreamPreset) -> PresetDraft {
+    static func edit(_ preset: StreamPreset) -> PresetDraft {
         PresetDraft(
-            editingID: profile.id, name: profile.name, accent: profile.accent,
+            editingID: preset.id, name: preset.name, accent: preset.accent,
             title: "Edit Preset", accept: "Save")
     }
 
-    static func duplicate(_ profile: StreamPreset, name: String) -> PresetDraft {
+    static func duplicate(_ preset: StreamPreset, name: String) -> PresetDraft {
         PresetDraft(
-            name: name, accent: profile.accent, overrides: profile.overrides,
+            name: name, accent: preset.accent, overrides: preset.overrides,
             title: "Duplicate Preset", accept: "Duplicate")
     }
 }
 
 struct PresetEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
 
     let draft: PresetDraft
     /// Where the settings surface should be pointing afterwards — at the preset that was just
@@ -143,7 +143,7 @@ struct PresetEditorSheet: View {
     private var preview: some View {
         let shown = name.trimmingCharacters(in: .whitespaces)
         return PresetChip(
-            profile: StreamPreset(name: shown.isEmpty ? "Preset" : shown, accent: accent),
+            preset: StreamPreset(name: shown.isEmpty ? "Preset" : shown, accent: accent),
             size: 13, prominent: true)
             .opacity(shown.isEmpty ? 0.5 : 1)
             .animation(.easeOut(duration: 0.15), value: accent)
@@ -202,7 +202,7 @@ struct PresetEditorSheet: View {
     /// Case-insensitively unique — two "Work"s make every menu ambiguous, and the deep-link
     /// grammar has to refuse an ambiguous reference rather than guess which one was meant.
     private var duplicateName: Bool {
-        !trimmedName.isEmpty && profiles.nameTaken(trimmedName, except: draft.editingID)
+        !trimmedName.isEmpty && presets.nameTaken(trimmedName, except: draft.editingID)
     }
 
     private var isNameAcceptable: Bool { !trimmedName.isEmpty && !duplicateName }
@@ -217,15 +217,15 @@ struct PresetEditorSheet: View {
     private func commit() {
         guard isNameAcceptable else { return }
         if let id = draft.editingID {
-            profiles.rename(id, to: trimmedName)
-            profiles.setAccent(id, to: accent)
+            presets.rename(id, to: trimmedName)
+            presets.setAccent(id, to: accent)
         } else {
-            var profile = StreamPreset(name: trimmedName, accent: accent)
-            profile.overrides = draft.overrides
-            profiles.add(profile)
+            var preset = StreamPreset(name: trimmedName, accent: accent)
+            preset.overrides = draft.overrides
+            presets.add(preset)
             // Land in the thing that was just made — creating a preset and being left on the
             // defaults is how you end up editing the wrong layer.
-            onScope(.preset(profile.id))
+            onScope(.preset(preset.id))
         }
         dismiss()
     }

@@ -1,13 +1,13 @@
-// Client settings profiles — named bundles of setting overrides applied on top of the global
+// Client settings presets — named bundles of setting overrides applied on top of the global
 // defaults (design/client-settings-profiles.md §4). The Swift half of the model whose Rust
-// original is `crates/pf-client-core/src/profiles.rs`; the two are mirrored field for field so a
+// original is `crates/pf-client-core/src/presets.rs`; the two are mirrored field for field so a
 // future export/import has one shape to speak.
 //
-// A profile overrides only the fields the user touched; everything else keeps following the
+// A preset overrides only the fields the user touched; everything else keeps following the
 // global defaults *live*, so fixing a global once fixes it everywhere. That is why an overlay is
 // sparse `Optional`s rather than a snapshot copy, and why `.some(x)` is written on touch and nil
 // on an explicit "reset to default" — never by diffing against the current global (a `.some`
-// equal to today's global is a legitimate *pin*: the profile keeps `x` when the global later
+// equal to today's global is a legitimate *pin*: the preset keeps `x` when the global later
 // moves).
 //
 // The catalog lives in the APP GROUP suite, with the saved hosts rather than with the settings:
@@ -406,7 +406,7 @@ public struct StreamPreset: Codable, Equatable, Identifiable, Sendable {
 
     /// A new, empty preset: inherits everything (the right creation default under
     /// inherit-by-exception — "Duplicate" covers starting from another preset).
-    public init(name: String, id: String = newProfileID(), accent: String? = nil,
+    public init(name: String, id: String = newPresetID(), accent: String? = nil,
                 overrides: SettingsOverlay = SettingsOverlay()) {
         self.id = id
         self.name = name
@@ -420,7 +420,7 @@ public struct StreamPreset: Codable, Equatable, Identifiable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: AnyKey.self)
-        id = (try? c.decode(String.self, forKey: AnyKey(Key.id.rawValue))) ?? newProfileID()
+        id = (try? c.decode(String.self, forKey: AnyKey(Key.id.rawValue))) ?? newPresetID()
         name = (try? c.decode(String.self, forKey: AnyKey(Key.name.rawValue))) ?? ""
         accent = try? c.decodeIfPresent(String.self, forKey: AnyKey(Key.accent.rawValue))
         overrides = (try? c.decodeIfPresent(
@@ -444,9 +444,9 @@ public struct StreamPreset: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-/// 12 lowercase hex characters — the shape the Rust `new_profile_id` mints, so the two catalogs
+/// 12 lowercase hex characters — the shape the Rust `new_preset_id` mints, so the two catalogs
 /// speak one id format.
-public func newProfileID() -> String {
+public func newPresetID() -> String {
     (0..<6).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
 }
 
@@ -465,25 +465,32 @@ public enum PresetResolution: Equatable, Sendable {
 /// preset, and the per-host part is only the binding on the host record.
 public struct PresetCatalog: Codable, Equatable, Sendable {
     public var version: Int
-    public var profiles: [StreamPreset]
+    public var presets: [StreamPreset]
 
-    public init(version: Int = punktfunkPresetsVersion, profiles: [StreamPreset] = []) {
+    public init(version: Int = punktfunkPresetsVersion, presets: [StreamPreset] = []) {
         self.version = version
-        self.profiles = profiles
+        self.presets = presets
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = (try? c.decodeIfPresent(Int.self, forKey: .version)) ?? 0
-        profiles = (try? c.decodeIfPresent([StreamPreset].self, forKey: .profiles)) ?? []
+        // `profiles`: the key a catalog saved before the rename carries.
+        let old = try decoder.container(keyedBy: LegacyKeys.self)
+        presets = (try? c.decodeIfPresent([StreamPreset].self, forKey: .presets))
+            ?? (try? old.decodeIfPresent([StreamPreset].self, forKey: .profiles)) ?? []
     }
 
+    private enum LegacyKeys: String, CodingKey { case profiles }
+
     /// The stored catalog, or an empty one — a missing or unreadable blob is "no presets", never
-    /// an error: nothing about streaming may hinge on this key existing.
+    /// an error: nothing about streaming may hinge on this key existing. A catalog saved before the
+    /// rename is read from its old entry until the first save writes the new one.
     public static func load(from defaults: UserDefaults = AppGroup.defaults) -> PresetCatalog {
-        guard let data = defaults.data(forKey: DefaultsKey.profiles),
+        guard let data = defaults.data(forKey: DefaultsKey.presets)
+                ?? defaults.data(forKey: DefaultsKey.legacyPresets),
               let catalog = try? JSONDecoder().decode(PresetCatalog.self, from: data)
-        else { return PresetCatalog(profiles: []) }
+        else { return PresetCatalog(presets: []) }
         return catalog
     }
 
@@ -491,24 +498,24 @@ public struct PresetCatalog: Codable, Equatable, Sendable {
         var out = self
         out.version = punktfunkPresetsVersion
         guard let data = try? JSONEncoder().encode(out) else { return }
-        defaults.set(data, forKey: DefaultsKey.profiles)
+        defaults.set(data, forKey: DefaultsKey.presets)
     }
 
     public func preset(id: String) -> StreamPreset? {
-        profiles.first { $0.id == id }
+        presets.first { $0.id == id }
     }
 
     /// The binding a host resolves to, dropping a dangling id: a preset deleted out from under a
     /// host is "no preset" (today's behaviour), never an error and never a blocked connect.
     public func binding(for host: StoredHost) -> StreamPreset? {
-        host.profileID.flatMap { preset(id: $0) }
+        host.presetID.flatMap { preset(id: $0) }
     }
 
     /// This host's pinned presets, in card order, with duplicates and dangling ids dropped —
     /// a pin is presentation only, so a deleted preset just loses its card.
     public func pinned(for host: StoredHost) -> [StreamPreset] {
         var seen = Set<String>()
-        return (host.pinnedProfileIDs ?? [])
+        return (host.pinnedPresetIDs ?? [])
             .filter { seen.insert($0).inserted }
             .compactMap { preset(id: $0) }
     }
@@ -517,7 +524,7 @@ public struct PresetCatalog: Codable, Equatable, Sendable {
     /// case-insensitive name. Ambiguous names resolve to `.ambiguous`, never to the first match.
     public func resolve(_ reference: String) -> (StreamPreset?, PresetResolution) {
         if let p = preset(id: reference) { return (p, .found) }
-        let hits = profiles.filter { $0.name.lowercased() == reference.lowercased() }
+        let hits = presets.filter { $0.name.lowercased() == reference.lowercased() }
         switch hits.count {
         case 1: return (hits[0], .found)
         case 0: return (nil, .notFound)
@@ -528,7 +535,7 @@ public struct PresetCatalog: Codable, Equatable, Sendable {
     /// Is this name already used (case-insensitively) by a *different* preset? The create/rename
     /// guard — `except` is the preset being renamed, so renaming "Work" to "work" is allowed.
     public func nameTaken(_ name: String, except: String? = nil) -> Bool {
-        profiles.contains {
+        presets.contains {
             $0.name.lowercased() == name.lowercased() && $0.id != except
         }
     }

@@ -2,25 +2,25 @@
 //!
 //! An overlay is sparse `Option`s, not a snapshot. `Some(x)` is written on
 //! touch and `None` on an explicit reset — never by diffing against the
-//! current global. A `Some` equal to today's global is a pin: the profile
+//! current global. A `Some` equal to today's global is a pin: the preset
 //! keeps `x` when the global later moves.
 //!
-//! The catalog is `client-profiles.json` beside the settings file, not
+//! The catalog is `client-presets.json` beside the settings file, not
 //! inside it: settings writers load-modify-save the whole file with no
-//! merge. Written temp+rename. Host→profile binding lives on
+//! merge. Written temp+rename. Host→preset binding lives on
 //! [`crate::trust::KnownHost`], not here.
 //!
 //! Design: `design/client-settings-profiles.md`.
 
-use crate::trust::{config_dir, write_atomic, Settings, StatsVerbosity};
+use crate::trust::{config_dir, load_json, write_atomic, Settings, StatsVerbosity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::Path;
 
 /// Bumped only for a breaking shape change; additive fields ride `extra`.
-pub const PROFILES_VERSION: u32 = 1;
+pub const PRESETS_VERSION: u32 = 1;
 
-/// Sparse overlay of profileable (tier-P) settings. `None` inherits the
+/// Sparse overlay of presetable (tier-P) settings. `None` inherits the
 /// live global. Host properties (tier H) and this device's hardware
 /// (tier G) are absent.
 ///
@@ -54,7 +54,7 @@ pub struct SettingsOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_channels: Option<u8>,
     /// How the host is streamed, not this device's hardware — that is why
-    /// it is profileable rather than tier-G. Shared key across clients.
+    /// it is presetable rather than tier-G. Shared key across clients.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,7 +86,7 @@ pub struct SettingsOverlay {
     pub stats_verbosity: Option<StatsVerbosity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fullscreen_on_stream: Option<bool>,
-    /// First-class so a profile authored on any client applies here
+    /// First-class so a preset authored on any client applies here
     /// instead of riding `extra` unapplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub present_priority: Option<String>,
@@ -345,7 +345,7 @@ impl SettingsOverlay {
     }
 
     /// True when nothing is overridden. Unknown-key carry-through counts:
-    /// a profile that only holds a newer client's field is not empty.
+    /// a preset that only holds a newer client's field is not empty.
     pub fn is_empty(&self) -> bool {
         *self == SettingsOverlay::default()
     }
@@ -354,10 +354,10 @@ impl SettingsOverlay {
 /// Named override bundle. `id` is stable across renames; bindings and
 /// deep links point at it, never at the name.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct StreamProfile {
+pub struct StreamPreset {
     pub id: String,
     /// User-facing; unique case-insensitively (menus are ambiguous otherwise).
-    /// Editing UIs check [`ProfilesFile::name_taken`].
+    /// Editing UIs check [`PresetsFile::name_taken`].
     pub name: String,
     /// Optional `#RRGGBB` chip. The schema reserves it; a UI may ignore it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -369,11 +369,11 @@ pub struct StreamProfile {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
-impl StreamProfile {
-    /// Empty profile: inherits everything. Start from another via Duplicate.
-    pub fn new(name: impl Into<String>) -> StreamProfile {
-        StreamProfile {
-            id: new_profile_id(),
+impl StreamPreset {
+    /// Empty preset: inherits everything. Start from another via Duplicate.
+    pub fn new(name: impl Into<String>) -> StreamPreset {
+        StreamPreset {
+            id: new_preset_id(),
             name: name.into(),
             accent: None,
             overrides: SettingsOverlay::default(),
@@ -388,53 +388,95 @@ impl StreamProfile {
 pub enum Resolution {
     Found,
     NotFound,
-    /// More than one profile carries this name (case-insensitively).
+    /// More than one preset carries this name (case-insensitively).
     Ambiguous,
 }
 
 /// Client-wide catalog. Per-host binding lives on the host record, not here.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct ProfilesFile {
+pub struct PresetsFile {
     #[serde(default)]
     pub version: u32,
     #[serde(default)]
-    pub profiles: Vec<StreamProfile>,
+    pub presets: Vec<StreamPreset>,
 }
 
-impl ProfilesFile {
-    pub fn path() -> anyhow::Result<PathBuf> {
-        Ok(config_dir()?.join("client-profiles.json"))
+/// The catalog's file.
+const FILE: &str = "client-presets.json";
+/// Its pre-rename file (`design/preset-rename.md`), kept as a mirror so a client older
+/// than the rename still finds the presets.
+const LEGACY_FILE: &str = "client-profiles.json";
+
+/// [`LEGACY_FILE`] in its old shape.
+#[derive(Serialize, Deserialize)]
+struct LegacyFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    profiles: Vec<StreamPreset>,
+    /// Set by this client's mirror. An older client drops unknown keys when it saves, so a
+    /// file without it holds that client's edits.
+    #[serde(default)]
+    mirror: bool,
+}
+
+impl PresetsFile {
+    /// Stored catalog, or empty. A missing or unreadable file is "no presets",
+    /// never an error — streaming must not hinge on this file existing.
+    pub fn load() -> PresetsFile {
+        config_dir()
+            .map(|dir| Self::load_from(&dir))
+            .unwrap_or_default()
     }
 
-    /// Stored catalog, or empty. A missing or unreadable file is "no profiles",
-    /// never an error — streaming must not hinge on this file existing.
-    pub fn load() -> ProfilesFile {
-        Self::path()
-            .map(|p| crate::trust::load_json_or_default(&p))
-            .unwrap_or_default()
+    fn load_from(dir: &Path) -> PresetsFile {
+        let current: Option<PresetsFile> = load_json(&dir.join(FILE));
+        let legacy: Option<LegacyFile> = load_json(&dir.join(LEGACY_FILE));
+        match (current, legacy) {
+            (Some(current), Some(old)) if old.mirror => current,
+            (Some(current), None) => current,
+            // No mirror mark: written before this client first saved, or by an older client
+            // since, so it is the newest catalog. A marked one stands in for a lost new file.
+            (_, Some(old)) => PresetsFile {
+                version: old.version,
+                presets: old.profiles,
+            },
+            (None, None) => PresetsFile::default(),
+        }
     }
 
     /// Persist temp+rename so a crash or full disk mid-write leaves the previous catalog intact.
     pub fn save(&mut self) -> anyhow::Result<()> {
-        self.version = PROFILES_VERSION;
-        let p = Self::path()?;
-        std::fs::create_dir_all(p.parent().unwrap())?;
-        write_atomic(&p, &serde_json::to_vec_pretty(self)?)?;
+        self.save_to(&config_dir()?)
+    }
+
+    /// The mirror goes first. If it fails, the save fails before the new file changes, so no
+    /// later load prefers a stale mirror over an edit that was reported saved.
+    fn save_to(&mut self, dir: &Path) -> anyhow::Result<()> {
+        self.version = PRESETS_VERSION;
+        std::fs::create_dir_all(dir)?;
+        let mirror = LegacyFile {
+            version: self.version,
+            profiles: self.presets.clone(),
+            mirror: true,
+        };
+        write_atomic(&dir.join(LEGACY_FILE), &serde_json::to_vec_pretty(&mirror)?)?;
+        write_atomic(&dir.join(FILE), &serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
 
-    pub fn find_by_id(&self, id: &str) -> Option<&StreamProfile> {
-        self.profiles.iter().find(|p| p.id == id)
+    pub fn find_by_id(&self, id: &str) -> Option<&StreamPreset> {
+        self.presets.iter().find(|p| p.id == id)
     }
 
     /// Exact id first, then a unique case-insensitive name. Ambiguous names
     /// are [`Resolution::Ambiguous`], never the first match.
-    pub fn resolve(&self, reference: &str) -> (Option<&StreamProfile>, Resolution) {
+    pub fn resolve(&self, reference: &str) -> (Option<&StreamPreset>, Resolution) {
         if let Some(p) = self.find_by_id(reference) {
             return (Some(p), Resolution::Found);
         }
         let mut hits = self
-            .profiles
+            .presets
             .iter()
             .filter(|p| p.name.eq_ignore_ascii_case(reference));
         match (hits.next(), hits.next()) {
@@ -444,17 +486,17 @@ impl ProfilesFile {
         }
     }
 
-    /// True if another profile already uses this name (case-insensitive).
-    /// `except` is the profile being renamed, so "Work" → "work" is allowed.
+    /// True if another preset already uses this name (case-insensitive).
+    /// `except` is the preset being renamed, so "Work" → "work" is allowed.
     pub fn name_taken(&self, name: &str, except: Option<&str>) -> bool {
-        self.profiles
+        self.presets
             .iter()
             .any(|p| p.name.eq_ignore_ascii_case(name) && Some(p.id.as_str()) != except)
     }
 }
 
 /// 12 lowercase hex chars — the `library::new_id` shape, from the OS RNG.
-pub fn new_profile_id() -> String {
+pub fn new_preset_id() -> String {
     let b: [u8; 6] = rand::random();
     hex_lower(&b)
 }
@@ -675,7 +717,7 @@ mod tests {
     }
 
     /// Unmodelled keys survive load→save in `extra` without applying. This
-    /// field must be first-class or a lossless profile would stream Opus.
+    /// field must be first-class or a lossless preset would stream Opus.
     #[test]
     fn audio_format_is_a_first_class_override() {
         let base = Settings::default();
@@ -780,7 +822,7 @@ mod tests {
     }
 
     /// `false` is the interesting override (default is on). Dropping it in
-    /// `apply` would silently forward a pad the profile refused.
+    /// `apply` would silently forward a pad the preset refused.
     #[test]
     fn gamepad_forwarding_overrides_off_and_resets_back() {
         let base = Settings::default();
@@ -821,7 +863,7 @@ mod tests {
         // `r##` — the accent value below contains a `"#` pair that would close an `r#` literal.
         let stored = r##"{
             "version": 1,
-            "profiles": [
+            "presets": [
                 {
                     "id": "a1b2c3d4e5f6",
                     "name": "Game",
@@ -832,13 +874,13 @@ mod tests {
                         "some_new_axis": {"nested": true},
                         "stats_verbosity": "compact"
                     },
-                    "future_profile_key": 7
+                    "future_preset_key": 7
                 },
                 { "id": "0f0f0f0f0f0f", "name": "Work" }
             ]
         }"##;
-        let file: ProfilesFile = serde_json::from_str(stored).unwrap();
-        assert_eq!(file.profiles.len(), 2);
+        let file: PresetsFile = serde_json::from_str(stored).unwrap();
+        assert_eq!(file.presets.len(), 2);
         let game = file.find_by_id("a1b2c3d4e5f6").unwrap();
         assert_eq!(game.accent.as_deref(), Some("#ff8800"));
         assert_eq!(game.overrides.codec.as_deref(), Some("vvc-from-the-future"));
@@ -856,10 +898,10 @@ mod tests {
         let text = serde_json::to_string(&file).unwrap();
         assert!(text.contains("vvc-from-the-future"));
         assert!(text.contains("some_new_axis"));
-        assert!(text.contains("future_profile_key"));
+        assert!(text.contains("future_preset_key"));
         // Absent overrides omit rather than serialize as null.
         assert!(!text.contains("null"));
-        let round: ProfilesFile = serde_json::from_str(&text).unwrap();
+        let round: PresetsFile = serde_json::from_str(&text).unwrap();
         let game = round.find_by_id("a1b2c3d4e5f6").unwrap();
         assert_eq!(game.overrides.width, Some(3840));
         assert_eq!(game.overrides.extra.len(), 1);
@@ -870,25 +912,93 @@ mod tests {
         assert_eq!(applied.codec, "vvc-from-the-future");
     }
 
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pf-client-core-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn names(file: &PresetsFile) -> Vec<&str> {
+        file.presets.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    /// A catalog from before the rename loads. The first save writes the new file, plus a
+    /// mirror in the old shape that a client older than the rename reads.
+    #[test]
+    fn a_pre_rename_catalog_loads_and_saves_under_both_names() {
+        let dir = scratch_dir("presets-migrate");
+        std::fs::write(
+            dir.join(LEGACY_FILE),
+            r#"{"version": 1, "profiles": [{"id": "a1b2c3d4e5f6", "name": "Game"}]}"#,
+        )
+        .unwrap();
+        let mut file = PresetsFile::load_from(&dir);
+        assert_eq!(names(&file), ["Game"]);
+
+        file.save_to(&dir).unwrap();
+        let read = |name: &str| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(dir.join(name)).unwrap()).unwrap()
+        };
+        let current = read(FILE);
+        assert_eq!(current["presets"][0]["name"], "Game");
+        assert!(current.get("profiles").is_none());
+        let mirror = read(LEGACY_FILE);
+        assert_eq!(mirror["profiles"][0]["name"], "Game");
+        assert_eq!(mirror["mirror"], true);
+        assert_eq!(names(&PresetsFile::load_from(&dir)), ["Game"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An older client rewrites the old file without the mirror mark, so its edit is the
+    /// newest. A marked mirror defers to the new file, and stands in when that file is gone.
+    #[test]
+    fn the_legacy_file_wins_only_when_an_older_client_wrote_it() {
+        let dir = scratch_dir("presets-downgrade");
+        let mut file = PresetsFile {
+            version: 1,
+            presets: vec![StreamPreset::new("New")],
+        };
+        file.save_to(&dir).unwrap();
+        assert_eq!(names(&PresetsFile::load_from(&dir)), ["New"]);
+
+        std::fs::write(
+            dir.join(LEGACY_FILE),
+            r#"{"version": 1, "profiles": [{"id": "0f0f0f0f0f0f", "name": "Edited"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(names(&PresetsFile::load_from(&dir)), ["Edited"]);
+
+        file.save_to(&dir).unwrap();
+        std::fs::remove_file(dir.join(FILE)).unwrap();
+        assert_eq!(names(&PresetsFile::load_from(&dir)), ["New"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn resolve_prefers_ids_and_refuses_ambiguity() {
-        let file = ProfilesFile {
+        let file = PresetsFile {
             version: 1,
-            profiles: vec![
-                StreamProfile {
+            presets: vec![
+                StreamPreset {
                     id: "111111111111".into(),
                     name: "Work".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
-                StreamProfile {
+                StreamPreset {
                     id: "222222222222".into(),
                     name: "work".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
-                StreamProfile {
+                StreamPreset {
                     id: "333333333333".into(),
                     name: "Game".into(),
-                    ..StreamProfile::new("")
+                    ..StreamPreset::new("")
                 },
             ],
         };
@@ -907,12 +1017,12 @@ mod tests {
 
     #[test]
     fn minted_ids_are_well_formed() {
-        let a = new_profile_id();
+        let a = new_preset_id();
         assert_eq!(a.len(), 12);
         assert!(a
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
-        assert_ne!(a, new_profile_id());
+        assert_ne!(a, new_preset_id());
 
         let u = new_record_uuid();
         assert_eq!(u.len(), 36);

@@ -331,3 +331,52 @@ struct LibraryDesktopTile: View {
     }
 }
 
+/// What the host recorded about playing a title, in words: the grid's captions and the details
+/// sheet's stats line share the phrasing.
+enum PlayStatsText {
+    /// `2 hr. ago`, or nil for a title never played.
+    static func lastPlayed(_ stats: GameStats?) -> String? {
+        guard let ms = stats?.lastPlayedUnixMs, ms > 0 else { return nil }
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        return relativeDate.localizedString(for: date, relativeTo: Date())
+    }
+
+    /// `14 hr`. Under a minute says nothing: a launch that never really ran is not play time.
+    static func playTime(_ stats: GameStats?) -> String? {
+        guard let ms = stats?.playTimeMs, ms >= 60_000 else { return nil }
+        return Duration.milliseconds(Int64(clamping: ms)).formatted(
+            .units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 1))
+    }
+
+    /// `Last played 2 hr. ago · 14 hr total · 12 launches`, or nil with nothing recorded.
+    static func summary(_ stats: GameStats?) -> String? {
+        var parts: [String] = []
+        if let last = lastPlayed(stats) { parts.append("Last played \(last)") }
+        if let total = playTime(stats) { parts.append("\(total) total") }
+        if let count = stats?.launchCount, count > 0 {
+            parts.append(count == 1 ? "1 launch" : "\(count) launches")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " \u{b7} ")
+    }
+
+    private static let relativeDate: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+}
+
+/// The Library tab with no paired host: nothing to browse yet, and the way to fix that.
+struct LibraryNoHostView: View {
+    let showHosts: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("No Library Yet", systemImage: "square.grid.2x2")
+        } description: {
+            Text("Pair a host to browse its games here.")
+        } actions: {
+            Button("Show Hosts", action: showHosts)
+        }
+    }
+}

@@ -165,13 +165,10 @@ struct GamepadMenuList<Item: Identifiable, Row: View>: View where Item.ID: Hasha
 
     private func wire() {
         #if os(tvOS)
-        // The focus engine owns up/down and select (Button rows) and Menu (onExitCommand) — the
-        // poll carries ONLY the horizontal axis, where its dominant-axis deadzone + hold-repeat
-        // are exactly the adjust feel the other platforms have, and where the focus engine has
-        // nothing to move to in a vertical list. Vertical poll directions are deliberately
-        // dropped: acting on them would double the engine's own focus moves. (The Siri Remote
-        // never reaches this poll — no extended profile — so remote users cycle values with
-        // select instead, which `activate` already does.)
+        // The focus engine owns up/down, select and Menu; this poll takes only the horizontal axis,
+        // whose deadzone and hold-repeat give the adjust feel, and drops vertical moves the engine
+        // already makes. The Siri Remote has no extended gamepad profile and never reaches this
+        // poll, so remote users cycle values with select, which `activate` already does.
         input.onMove = { direction in
             switch direction {
             case .left: adjust(by: -1)

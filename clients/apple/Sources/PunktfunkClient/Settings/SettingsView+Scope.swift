@@ -1,21 +1,21 @@
-// The settings surface edits SETTINGS PROFILES too (design/client-settings-profiles.md §5.1): a
-// scope switcher swaps the whole screen between the global defaults and one profile's overrides.
+// The settings surface edits SETTINGS PRESETS too (design/client-settings-profiles.md §5.1): a
+// scope switcher swaps the whole screen between the global defaults and one preset's overrides.
 //
-// It is deliberately not a second editor. A parallel profile editor would drift from this one
+// It is deliberately not a second editor. A parallel preset editor would drift from this one
 // field by field, and the caption/curation work of the 2026-07 revamp would have to be done twice.
 // So the section builders stay the single definition of every row and simply change which LAYER
 // their binding reads and writes.
 //
-// Three rules make it a profile editor rather than a settings copier:
-//   • every row shows the EFFECTIVE value — the inherited global until this profile overrides it;
+// Three rules make it a preset editor rather than a settings copier:
+//   • every row shows the EFFECTIVE value — the inherited global until this preset overrides it;
 //   • touching a control records the override, always, even when the new value happens to equal
 //     today's global (that is a PIN: it keeps its value when the global later moves). Overrides
 //     are never inferred by diffing at save time;
 //   • the only way back to inheriting is an explicit per-row reset — which is why the marker and
-//     its Reset action below are not optional garnish: without them a profile is a one-way door.
+//     its Reset action below are not optional garnish: without them a preset is a one-way door.
 //
 // Tier-G/H rows (this device's endpoints and hardware, properties of a host) simply don't render
-// in profile scope — see §3's curation and `isPresetable` at each call site.
+// in preset scope — see §3's curation and `isPresetable` at each call site.
 
 import PunktfunkKit
 import SwiftUI
@@ -27,7 +27,7 @@ enum SettingsScope: Equatable, Hashable {
     /// One preset's overrides, by id.
     case preset(String)
 
-    var profileID: String? {
+    var presetID: String? {
         if case .preset(let id) = self { return id }
         return nil
     }
@@ -187,7 +187,7 @@ extension SettingsView {
     // MARK: - The layer being edited
 
     var activePreset: StreamPreset? {
-        scope.profileID.flatMap { profiles.preset(id: $0) }
+        scope.presetID.flatMap { presets.preset(id: $0) }
     }
 
     /// True while a preset is being edited — the gate every tier-G/H row is hidden behind.
@@ -238,8 +238,8 @@ extension SettingsView {
         #if os(iOS)
         base.touchMode = touchMode
         #endif
-        guard let profile = activePreset else { return base }
-        return base.applying(profile.overrides)
+        guard let preset = activePreset else { return base }
+        return base.applying(preset.overrides)
     }
 
     // MARK: - Scoped bindings
@@ -254,12 +254,12 @@ extension SettingsView {
         Binding(
             get: { effective[keyPath: field.effective] },
             set: { newValue in
-                guard let id = scope.profileID else {
+                guard let id = scope.presetID else {
                     // @AppStorage observes this key, so the write re-renders the whole surface.
                     UserDefaults.standard.set(newValue, forKey: field.key)
                     return
                 }
-                profiles.setOverride(id, field.overlay, newValue)
+                presets.setOverride(id, field.overlay, newValue)
             })
     }
 
@@ -278,15 +278,15 @@ extension SettingsView {
     /// Does the edited preset override this row? False in defaults scope, where there is nothing
     /// to inherit from.
     func isOverridden(_ name: String) -> Bool {
-        guard let profile = activePreset else { return false }
-        return OverlayField.isOverridden(name, in: profile.overrides)
+        guard let preset = activePreset else { return false }
+        return OverlayField.isOverridden(name, in: preset.overrides)
     }
 
     /// Put a row back to inheriting. The ONLY way an override is removed — the model never infers
     /// "not overridden" from a value comparison.
     func resetOverride(_ name: String) {
-        guard let id = scope.profileID else { return }
-        profiles.clearOverride(id, field: name)
+        guard let id = scope.presetID else { return }
+        presets.clearOverride(id, field: name)
     }
 
     /// The accent dot + Reset affordance a row carries while it overrides the defaults. Rendered
@@ -346,19 +346,19 @@ extension SettingsView {
         Picker("Editing", selection: scopeSelection) {
             Label("Default settings", systemImage: "gearshape")
                 .tag(SettingsScope.defaults)
-            ForEach(profiles.profiles) { profile in
+            ForEach(presets.presets) { preset in
                 Label {
-                    Text(profile.name)
+                    Text(preset.name)
                 } icon: {
                     // Rasterised, not tinted — see MenuIcon: a tinted symbol in a menu is a
                     // stencil, and the colour never arrives.
-                    if let chip = MenuIcon.swatch(profile.accentColor, scheme: colorScheme) {
+                    if let chip = MenuIcon.swatch(preset.accentColor, scheme: colorScheme) {
                         chip
                     } else {
                         Image(systemName: "circle.fill")
                     }
                 }
-                .tag(SettingsScope.preset(profile.id))
+                .tag(SettingsScope.preset(preset.id))
             }
         }
         .pickerStyle(.inline)
@@ -378,7 +378,7 @@ extension SettingsView {
                 Label("Edit “\(active.name)”…", systemImage: "pencil")
             }
             Button {
-                presetDraft = .duplicate(active, name: Self.copyName(of: active.name, in: profiles))
+                presetDraft = .duplicate(active, name: Self.copyName(of: active.name, in: presets))
             } label: {
                 Label("Duplicate “\(active.name)”…", systemImage: "plus.square.on.square")
             }
@@ -409,9 +409,9 @@ extension SettingsView {
     /// defaults. Colour is only worth choosing if it shows up where you chose it.
     @ViewBuilder
     var scopeDot: some View {
-        if let profile = activePreset {
+        if let preset = activePreset {
             Circle()
-                .fill(profile.accentColor)
+                .fill(preset.accentColor)
                 .frame(width: 9, height: 9)
                 .accessibilityHidden(true) // the name is right beside it
         } else {
@@ -494,15 +494,15 @@ extension SettingsView {
                 "Delete “\(presetPendingDelete?.name ?? "")”?",
                 isPresented: presetDeletePresented,
                 presenting: presetPendingDelete
-            ) { profile in
+            ) { preset in
                 Button("Cancel", role: .cancel) { presetPendingDelete = nil }
                 Button("Delete", role: .destructive) {
-                    profiles.delete(profile.id)
+                    presets.delete(preset.id)
                     scope = .defaults
                     presetPendingDelete = nil
                 }
-            } message: { profile in
-                Text(deleteWarning(for: profile))
+            } message: { preset in
+                Text(deleteWarning(for: preset))
             }
     }
 
@@ -512,8 +512,8 @@ extension SettingsView {
             set: { if !$0 { presetPendingDelete = nil } })
     }
 
-    private func deleteWarning(for profile: StreamPreset) -> String {
-        let (bound, pinned) = profiles.usage(of: profile.id)
+    private func deleteWarning(for preset: StreamPreset) -> String {
+        let (bound, pinned) = presets.usage(of: preset.id)
         var parts: [String] = []
         if bound > 0 {
             parts.append("\(bound) host\(bound == 1 ? "" : "s") will fall back to Default settings")
