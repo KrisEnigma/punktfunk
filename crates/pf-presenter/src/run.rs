@@ -208,6 +208,10 @@ struct StreamState {
     /// OSD `HDR→SDR (raw)`: this lane showed PQ with no tone-map. Nothing sets it
     /// today — every lane goes through planar CSC. Kept so a future bypass can say so.
     hdr_untonemapped: bool,
+    /// Per present: D3D11 import lookup (0 off that lane) and `vkQueueSubmit` wall time,
+    /// for the presenter window line.
+    win_import_us: Vec<u32>,
+    win_submit_us: Vec<u32>,
     /// The overlay window (`NativeClient::hud`) closes here once a second.
     win_start: Instant,
     /// Last closed window, so a tier cycle re-renders at once rather than up to 1 s later.
@@ -361,6 +365,8 @@ impl StreamState {
             video_e2e: None,
             hdr: false,
             hdr_untonemapped: false,
+            win_import_us: Vec::with_capacity(256),
+            win_submit_us: Vec::with_capacity(256),
             win_start: Instant::now(),
             last_snap: None,
             facts: DecodeFacts::default(),
@@ -2138,6 +2144,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 };
                 if did_present {
                     presented_video = true;
+                    let (import_us, submit_us) = presenter.last_timings();
+                    st.win_import_us.push(import_us);
+                    st.win_submit_us.push(submit_us);
                     if opts.json_status && !st.ready_announced {
                         st.ready_announced = true;
                         println!("{{\"ready\":true}}");
@@ -2176,6 +2185,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
 
             // Close the overlay window once per second.
             if st.win_start.elapsed() >= Duration::from_secs(1) {
+                let import = punktfunk_core::hud::Summary::of(&mut st.win_import_us);
+                let submit = punktfunk_core::hud::Summary::of(&mut st.win_submit_us);
                 // Drained once per window and shared by the HUD and the log line — a
                 // second `take_counters` would read zeros.
                 let (replaced, q_drop, q_dry) = st.store.take_counters();
@@ -2190,6 +2201,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     gated,
                     forced,
                 };
+                st.win_import_us.clear();
+                st.win_submit_us.clear();
                 let (pace_ms, latch_ms) =
                     close_window(st, &presenter, &present, replaced, stats_verbosity);
                 st.win_start = Instant::now();
@@ -2221,6 +2234,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         out_max = st.win_out_max,
                         pace_ms,
                         latch_ms,
+                        import_us = import.p50_us,
+                        submit_us = submit.p50_us,
+                        submit_max_us = submit.max_us,
                         period_us = st.clock.period_ns() / 1000,
                         margin_us = st.margin_ns / 1000,
                         // Cadence loop's current hold and the jitter it is sized from,

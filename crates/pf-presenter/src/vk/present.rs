@@ -68,7 +68,10 @@ impl Presenter {
         #[cfg(target_os = "linux")]
         let mut hw_frame: Option<HwFrame> = None;
         #[cfg(windows)]
-        let mut win_frame: Option<crate::d3d11::HwFrame> = None;
+        let mut win_frame: Option<(
+            pf_client_core::video::D3d11Frame,
+            crate::d3d11::Imported,
+        )> = None;
         let mut native_frame: Option<NativeVkFrame> = None;
         #[cfg(all(any(target_os = "linux", windows), feature = "pyrowave"))]
         let mut pyro_frame: Option<pf_client_core::video_pyrowave::PyroWavePlanarFrame> = None;
@@ -92,9 +95,14 @@ impl Presenter {
             FrameInput::D3d11(d) => {
                 let hw = self
                     .hw_win
-                    .as_ref()
+                    .as_mut()
                     .context("D3D11 frame without win32 import support")?;
-                win_frame = Some(crate::d3d11::import(&self.device, &hw.ext_mem_win32, &d)?);
+                let started = std::time::Instant::now();
+                let imported = hw
+                    .imports
+                    .get_or_import(&self.device, &hw.ext_mem_win32, &d)?;
+                self.last_import_us = started.elapsed().as_micros() as u32;
+                win_frame = Some((d, imported));
                 hw_lane = true;
                 None
             }
@@ -128,6 +136,12 @@ impl Presenter {
         if let Some(old) = self.retired_hw.take() {
             old.destroy(&self.device);
         }
+        // Nothing is in flight past the wait above: imports of a superseded ring
+        // generation can go now.
+        #[cfg(windows)]
+        if let (Some((d, _)), Some(hw)) = (&win_frame, self.hw_win.as_mut()) {
+            hw.imports.retire_stale(&self.device, d.generation);
+        }
         // First fence wait is the first moment the software plane images are
         // unreferenced. Hardware lane will not sample them again.
         if hw_lane {
@@ -156,7 +170,7 @@ impl Presenter {
                 .bind_planes(&self.device, f.luma_view, f.chroma_view);
         }
         #[cfg(windows)]
-        if let Some(f) = &win_frame {
+        if let Some((f, _)) = &win_frame {
             if self
                 .video
                 .as_ref()
@@ -257,10 +271,6 @@ impl Presenter {
                 if let Some(f) = hw_frame {
                     f.destroy(&self.device);
                 }
-                #[cfg(windows)]
-                if let Some(f) = win_frame {
-                    f.destroy(&self.device);
-                }
                 self.recreate_swapchain(window)?;
                 return Ok(false);
             }
@@ -306,8 +316,8 @@ impl Presenter {
             // image; blit is component order. Cross-API sync is the keyed mutex
             // on submit, not this external-queue acquire.
             #[cfg(windows)]
-            if let (Some(f), Some(v)) = (&win_frame, &self.video) {
-                external_acquire_barrier(&self.device, self.cmd_buf, f.image(), self.qfi);
+            if let (Some((_, f)), Some(v)) = (&win_frame, &self.video) {
+                external_acquire_barrier(&self.device, self.cmd_buf, f.image, self.qfi);
                 barrier(
                     &self.device,
                     self.cmd_buf,
@@ -327,7 +337,7 @@ impl Presenter {
                     .dst_offsets([vk::Offset3D::default(), extent]);
                 self.device.cmd_blit_image(
                     self.cmd_buf,
-                    f.image(),
+                    f.image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     v.image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -635,11 +645,11 @@ impl Presenter {
             #[cfg(windows)]
             let mut keyed_info;
             #[cfg(windows)]
-            if let Some(f) = &win_frame {
+            if let Some((_, f)) = &win_frame {
                 // `PUNKTFUNK_D3D11_NO_MUTEX=1` skips acquire/release (torn frames;
                 // debugging only).
                 if std::env::var_os("PUNKTFUNK_D3D11_NO_MUTEX").is_none() {
-                    keyed_mem = [f.memory()];
+                    keyed_mem = [f.memory];
                     keyed_info = vk::Win32KeyedMutexAcquireReleaseInfoKHR::default()
                         .acquire_syncs(&keyed_mem)
                         .acquire_keys(&keyed_keys)
@@ -649,23 +659,22 @@ impl Presenter {
                     submit = submit.push_next(&mut keyed_info);
                 }
             }
+            let submit_started = std::time::Instant::now();
             let submitted = {
                 // Queue external sync vs the pump's decode submits (`queue_lock`).
                 let _q = self.queue_lock.guard();
                 self.device.queue_submit(self.queue, &[submit], self.fence)
             };
+            self.last_submit_us = submit_started.elapsed().as_micros() as u32;
             submitted?;
             self.submitted = true;
             // Park until the fence proves the reads done (next present's wait, or
-            // Drop). At most one of hw_frame / win_frame / native_frame is set.
+            // Drop). At most one of hw_frame / native_frame is set; a D3D11 slot stays
+            // in the import cache.
             self.retired_hw = None;
             #[cfg(target_os = "linux")]
             if let Some(f) = hw_frame.take() {
                 self.retired_hw = Some(Retired::Dmabuf(f));
-            }
-            #[cfg(windows)]
-            if let Some(f) = win_frame.take() {
-                self.retired_hw = Some(Retired::D3d11(f));
             }
             // Submit enqueued `value + 1` — `mark_presented` so the decoder waits
             // that write-back. Failed submit never reaches here (no phantom signal).

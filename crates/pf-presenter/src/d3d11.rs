@@ -1,18 +1,20 @@
 //! D3D11 shared-texture → Vulkan import (Windows): presenter half of
-//! D3D11VA (`pf_client_core::video_d3d11`). Each frame is the NT handle of
-//! a shareable single-plane RGB texture — BGRA8 sRGB, or RGB10A2 PQ
-//! (the video processor already did YUV→RGB). Imported as one `VkImage`
+//! D3D11VA (`pf_client_core::video_d3d11`). Each frame names the NT handle of
+//! a shareable single-plane RGB ring slot — BGRA8 sRGB, or RGB10A2 PQ (the
+//! video processor already did YUV→RGB) — imported as one `VkImage`
 //! (`VK_KHR_external_memory_win32`, dedicated allocation) and blitted into
 //! the video image; no CSC.
 //!
-//! Both sides acquire/release the DXGI keyed mutex (`VK_KHR_win32_keyed_mutex`)
-//! on key 0. Import is per-frame (parked in `Retired` until the fence);
-//! the decoder ring still owns the NT handle. A driver reject is a clean
-//! error; the caller demotes.
+//! Slots stay imported across frames ([`ImportCache`], keyed by ring
+//! generation and handle); a superseded generation is destroyed after the
+//! fence that could still read it. Both sides acquire/release the DXGI keyed
+//! mutex (`VK_KHR_win32_keyed_mutex`) on key 0. The decoder ring owns the NT
+//! handle; a driver reject is a clean error and the caller demotes.
 
 use anyhow::{bail, Context as _, Result};
 use ash::vk;
-use pf_client_core::video::{ColorDesc, D3d11Frame};
+use pf_client_core::video::{D3d11Frame, SlotHandle};
+use std::sync::Arc;
 
 /// Required at device creation. Missing either, `supports_d3d11()` is false.
 pub const DEVICE_EXTENSIONS: [&std::ffi::CStr; 2] = [
@@ -55,42 +57,96 @@ pub fn import_supported(instance: &ash::Instance, pdev: vk::PhysicalDevice) -> (
     (bgra8, rgb10)
 }
 
-/// Imported blit source. Park until the in-flight fence signals, then
-/// [`HwFrame::destroy`]. `memory` is what the submit's keyed-mutex info names.
-pub struct HwFrame {
-    pub color: ColorDesc,
-    pub width: u32,
-    pub height: u32,
-    image: vk::Image,
-    memory: vk::DeviceMemory,
+/// One imported slot, what a submit names. The cache owns the objects.
+#[derive(Clone, Copy)]
+pub struct Imported {
+    pub image: vk::Image,
+    /// The submit's keyed-mutex acquire/release info names this allocation.
+    pub memory: vk::DeviceMemory,
 }
 
-impl HwFrame {
-    pub fn image(&self) -> vk::Image {
-        self.image
+struct Entry {
+    generation: u32,
+    handle: isize,
+    imported: Imported,
+    /// Keeps the NT handle open while the import lives, so `handle` cannot be reused.
+    _keep: Arc<SlotHandle>,
+}
+
+/// Imported ring slots: six per generation, imported on first sight. Nothing here is
+/// destroyed while a submit may read it — [`ImportCache::retire_stale`] runs after the
+/// in-flight fence and [`ImportCache::destroy_all`] after a device wait-idle.
+#[derive(Default)]
+pub struct ImportCache {
+    entries: Vec<Entry>,
+}
+
+impl ImportCache {
+    /// The slot's import, made on the first frame from `(generation, handle)`.
+    pub fn get_or_import(
+        &mut self,
+        device: &ash::Device,
+        ext_mem_win32: &ash::khr::external_memory_win32::Device,
+        frame: &D3d11Frame,
+    ) -> Result<Imported> {
+        let handle = frame.handle.raw();
+        if let Some(e) = self
+            .entries
+            .iter()
+            .find(|e| e.generation == frame.generation && e.handle == handle)
+        {
+            return Ok(e.imported);
+        }
+        let imported = import(device, ext_mem_win32, frame)?;
+        self.entries.push(Entry {
+            generation: frame.generation,
+            handle,
+            imported,
+            _keep: frame.handle.clone(),
+        });
+        Ok(imported)
     }
 
-    /// The submit's keyed-mutex acquire/release info names this allocation.
-    pub fn memory(&self) -> vk::DeviceMemory {
-        self.memory
+    /// Destroy every import of a generation other than `generation`. Call only after the
+    /// in-flight fence: a ring rebuild retires its slots while the last frame of the old
+    /// generation may still be on the GPU.
+    pub fn retire_stale(&mut self, device: &ash::Device, generation: u32) {
+        let (keep, stale): (Vec<_>, Vec<_>) = self
+            .entries
+            .drain(..)
+            .partition(|e| e.generation == generation);
+        self.entries = keep;
+        for e in stale {
+            // SAFETY: the caller's fence wait; no submit references these objects.
+            unsafe { destroy(device, e.imported) };
+        }
     }
 
-    pub fn destroy(self, device: &ash::Device) {
-        // SAFETY: `self` owns `image` and `memory`. Called only after the frame's
-        // fence has signaled, so the GPU is idle on them.
-        unsafe {
-            device.destroy_image(self.image, None);
-            device.free_memory(self.memory, None);
+    /// Call only after a device wait-idle (`Presenter::drop`).
+    pub fn destroy_all(&mut self, device: &ash::Device) {
+        for e in self.entries.drain(..) {
+            // SAFETY: the caller's wait-idle; the GPU is done with every entry.
+            unsafe { destroy(device, e.imported) };
         }
     }
 }
 
-/// Import one hand-off frame. A driver reject is a clean error; the caller demotes.
-pub fn import(
+/// # Safety
+/// The GPU must be idle on `imported`.
+unsafe fn destroy(device: &ash::Device, imported: Imported) {
+    // SAFETY: per this fn's contract; the cache created both handles and drops them once.
+    unsafe {
+        device.destroy_image(imported.image, None);
+        device.free_memory(imported.memory, None);
+    }
+}
+
+/// Import one ring slot. A driver reject is a clean error; the caller demotes.
+fn import(
     device: &ash::Device,
     ext_mem_win32: &ash::khr::external_memory_win32::Device,
     frame: &D3d11Frame,
-) -> Result<HwFrame> {
+) -> Result<Imported> {
     // Test hook: fault every import so demotion is exercisable without a broken driver.
     if std::env::var_os("PUNKTFUNK_HW_FAULT").is_some_and(|v| v == "import") {
         bail!("injected import failure (PUNKTFUNK_HW_FAULT=import)");
@@ -134,10 +190,10 @@ pub fn import(
     })?;
 
     let result = (|| {
-        let handle = frame.handle as vk::HANDLE;
+        let handle = frame.handle.raw() as vk::HANDLE;
         let mut handle_props = vk::MemoryWin32HandlePropertiesKHR::default();
-        // SAFETY: `handle` is the decoder ring's live NT handle; `handle_props` is a
-        // local that outlives the call.
+        // SAFETY: `handle` is the decoder ring's live NT handle (the frame holds it open);
+        // `handle_props` is a local that outlives the call.
         unsafe {
             ext_mem_win32.get_memory_win32_handle_properties(handle_type, handle, &mut handle_props)
         }
@@ -149,7 +205,7 @@ pub fn import(
             .find(|i| bits & (1 << i) != 0)
             .context("no importable memory type for the D3D11 texture")?;
 
-        // Import does not take NT-handle ownership; the decoder ring still closes it.
+        // Import does not take NT-handle ownership; the ring's last `SlotHandle` closes it.
         let mut import_info = vk::ImportMemoryWin32HandleInfoKHR::default()
             .handle_type(handle_type)
             .handle(handle);
@@ -175,20 +231,12 @@ pub fn import(
         }
         Ok(memory)
     })();
-    let memory = match result {
-        Ok(m) => m,
+    match result {
+        Ok(memory) => Ok(Imported { image, memory }),
         Err(e) => {
             // SAFETY: `image` was created in this call and never bound, so the GPU is idle on it.
             unsafe { device.destroy_image(image, None) };
-            return Err(e);
+            Err(e)
         }
-    };
-
-    Ok(HwFrame {
-        color: frame.color,
-        width: frame.width,
-        height: frame.height,
-        image,
-        memory,
-    })
+    }
 }

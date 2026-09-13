@@ -8,11 +8,12 @@ use pf_client_core::video::CpuPlanarFrame;
 
 impl Retired {
     pub(super) fn destroy(self, device: &ash::Device) {
+        // Only the dmabuf lane owns Vulkan objects here; D3D11 imports retire in their cache.
+        #[cfg(not(target_os = "linux"))]
+        let _ = device;
         match self {
             #[cfg(target_os = "linux")]
             Retired::Dmabuf(f) => f.destroy(device),
-            #[cfg(windows)]
-            Retired::D3d11(f) => f.destroy(device),
             // Image and plane views belong to the decoder's pools — nothing
             // of ours to destroy. Drop sends the release token; the caller
             // reaches here only after the sampling fence (GPU reads done).

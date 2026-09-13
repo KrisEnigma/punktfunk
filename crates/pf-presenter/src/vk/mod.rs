@@ -77,14 +77,14 @@ struct HwCtx {
 #[cfg(windows)]
 struct HwCtxWin {
     ext_mem_win32: ash::khr::external_memory_win32::Device,
+    /// Ring slots imported once per ring generation, not per frame.
+    imports: crate::d3d11::ImportCache,
 }
 
 /// Hardware frame held until the in-flight fence proves GPU reads are done.
 enum Retired {
     #[cfg(target_os = "linux")]
     Dmabuf(HwFrame),
-    #[cfg(windows)]
-    D3d11(crate::d3d11::HwFrame),
     /// Decoder-owned image + views: destroy nothing; drop after the fence to return the slot.
     NativeVk(NativeVkFrame),
 }
@@ -166,6 +166,10 @@ pub struct Presenter {
     overlay_pipe: OverlayPipe,
     /// In-flight hardware frame; released after the next fence wait.
     retired_hw: Option<Retired>,
+    /// Wall time of this present's D3D11 import lookup and of `vkQueueSubmit`, for the
+    /// presenter window line. A submit that blocks on a keyed-mutex acquire shows here.
+    last_import_us: u32,
+    last_submit_us: u32,
     /// External-sync lock over this device's queues, shared with decode and the overlay.
     /// The decoder submits on this same graphics queue from the pump thread; every
     /// `vkQueueSubmit` / `vkQueuePresentKHR` / wait-idle here must hold it or the
@@ -273,6 +277,11 @@ impl Presenter {
 
     /// Active swapchain present mode for the stats overlay. Can differ from the request
     /// when the surface does not offer it.
+    /// `(import_us, submit_us)` of the last present: D3D11 import lookup and `vkQueueSubmit`.
+    pub(crate) fn last_timings(&self) -> (u32, u32) {
+        (self.last_import_us, self.last_submit_us)
+    }
+
     pub(crate) fn present_mode_name(&self) -> &'static str {
         match self.present_mode {
             vk::PresentModeKHR::MAILBOX => "mailbox",
@@ -363,6 +372,10 @@ impl Drop for Presenter {
             }
             if let Some(f) = self.retired_hw.take() {
                 f.destroy(&self.device); // GPU idle above — reads are done
+            }
+            #[cfg(windows)]
+            if let Some(hw) = self.hw_win.as_mut() {
+                hw.imports.destroy_all(&self.device); // GPU idle above
             }
             if let Some(s) = self.staging.take() {
                 self.device.unmap_memory(s.memory);

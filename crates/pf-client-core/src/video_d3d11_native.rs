@@ -18,6 +18,7 @@
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use pf_dxvadec::{Codec, DxvaProfile};
+use std::time::{Duration, Instant};
 use windows::core::{Interface, GUID};
 use windows::Win32::d3d11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDecoder,
@@ -36,12 +37,13 @@ use crate::video_d3d11::{create_device, D3d11Frame, HandoffRing, HandoffSource};
 /// Decode-pool bind flag. The pool takes this flag alone.
 const BIND_DECODER: u32 = 0x200;
 
-/// `DecoderBeginFrame` returns `E_PENDING` while hardware is busy. libavcodec's
-/// `ff_dxva2_common_end_frame` retries 50 times at `av_usleep(2000)` — 100 ms — and
-/// these two constants are that budget. A shorter one turns a busy 4K decode into
-/// `Err` and ticks the ladder's demotion streak.
-const BEGIN_FRAME_RETRIES: u32 = 50;
-const BEGIN_FRAME_BACKOFF: std::time::Duration = std::time::Duration::from_millis(2);
+/// `DecoderBeginFrame` returns `E_PENDING` while the driver's decode queue is full (Intel).
+/// libavcodec's `ff_dxva2_common_end_frame` waits 50 × 2 ms; this waits the same 100 ms,
+/// spinning for the first 500 µs — a queue that drains within a decode costs no sleep —
+/// then in 1 ms sleeps. A shorter budget turns a busy 4K decode into a demotion strike.
+const BEGIN_FRAME_BUDGET: Duration = Duration::from_millis(100);
+const BEGIN_FRAME_SPIN: Duration = Duration::from_micros(500);
+const BEGIN_FRAME_SLEEP: Duration = Duration::from_millis(1);
 const E_PENDING: i32 = 0x8000_000A_u32 as i32;
 
 /// Pin string for this rung.
@@ -722,7 +724,8 @@ impl NativeD3d11Decoder {
             .get(usize::from(sub.setup_slot))
             .ok_or_else(|| anyhow!("setup surface {} is outside the pool", sub.setup_slot))?;
 
-        begin_frame(&self.video_context, &session.decoder, view)?;
+        let (retries, waited) = begin_frame(&self.video_context, &session.decoder, view)?;
+        self.handoff.note_begin_frame(retries, waited);
         // Inside a frame from here; every exit must `DecoderEndFrame` or the next
         // `DecoderBeginFrame` fails and the session is wedged.
         let result = self.fill_and_submit(au, sub, session);
@@ -1210,25 +1213,53 @@ impl Session {
     }
 }
 
-/// `DecoderBeginFrame` with the `E_PENDING` retry: hardware busy, not a failure.
+/// What a busy `DecoderBeginFrame` waits for next, `elapsed` into its budget.
+#[derive(Debug, PartialEq, Eq)]
+enum BusyWait {
+    Yield,
+    Sleep(Duration),
+    GiveUp,
+}
+
+fn busy_wait_after(elapsed: Duration) -> BusyWait {
+    if elapsed >= BEGIN_FRAME_BUDGET {
+        BusyWait::GiveUp
+    } else if elapsed < BEGIN_FRAME_SPIN {
+        BusyWait::Yield
+    } else {
+        BusyWait::Sleep(BEGIN_FRAME_SLEEP)
+    }
+}
+
+/// `DecoderBeginFrame` with the `E_PENDING` retry: hardware busy, not a failure. Returns
+/// the retry count and the time they cost, for the hand-off window log.
 fn begin_frame(
     context: &ID3D11VideoContext,
     decoder: &ID3D11VideoDecoder,
     view: &ID3D11VideoDecoderOutputView,
-) -> Result<()> {
-    for attempt in 0..BEGIN_FRAME_RETRIES {
+) -> Result<(u32, Duration)> {
+    let start = Instant::now();
+    let mut retries = 0u32;
+    loop {
         // SAFETY: a COM call on the live video context with the live decoder and output view;
         // the content-key arguments are the "no protected content" pair (size 0, null).
         let hr = unsafe { context.DecoderBeginFrame(decoder, view, 0, None) };
-        if hr.0 == E_PENDING {
-            std::thread::sleep(BEGIN_FRAME_BACKOFF);
-            continue;
+        if hr.0 != E_PENDING {
+            return hr
+                .ok()
+                .with_context(|| format!("DecoderBeginFrame (after {retries} pending retries)"))
+                .map(|()| (retries, start.elapsed()));
         }
-        return hr
-            .ok()
-            .with_context(|| format!("DecoderBeginFrame (after {attempt} pending retries)"));
+        retries += 1;
+        match busy_wait_after(start.elapsed()) {
+            BusyWait::Yield => std::thread::yield_now(),
+            BusyWait::Sleep(d) => std::thread::sleep(d),
+            BusyWait::GiveUp => bail!(
+                "DecoderBeginFrame stayed E_PENDING for {retries} attempts over {:?}",
+                start.elapsed()
+            ),
+        }
     }
-    bail!("DecoderBeginFrame stayed E_PENDING for {BEGIN_FRAME_RETRIES} attempts")
 }
 
 /// Map one decoder buffer, let `write` fill it, release it back.
@@ -1312,6 +1343,28 @@ fn copy_into(dst: &mut [u8], src: &[u8]) -> Result<()> {
     }
     dst[..src.len()].copy_from_slice(src);
     Ok(())
+}
+
+#[cfg(test)]
+mod busy_wait {
+    use super::*;
+
+    /// Spin first, 1 ms sleeps after, give up at the libavcodec budget.
+    #[test]
+    fn busy_wait_spins_then_sleeps_then_gives_up() {
+        let us = Duration::from_micros;
+        assert_eq!(busy_wait_after(Duration::ZERO), BusyWait::Yield);
+        assert_eq!(busy_wait_after(BEGIN_FRAME_SPIN - us(1)), BusyWait::Yield);
+        assert_eq!(
+            busy_wait_after(BEGIN_FRAME_SPIN),
+            BusyWait::Sleep(BEGIN_FRAME_SLEEP)
+        );
+        assert_eq!(
+            busy_wait_after(BEGIN_FRAME_BUDGET - us(1)),
+            BusyWait::Sleep(BEGIN_FRAME_SLEEP)
+        );
+        assert_eq!(busy_wait_after(BEGIN_FRAME_BUDGET), BusyWait::GiveUp);
+    }
 }
 
 #[cfg(test)]
