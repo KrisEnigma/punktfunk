@@ -137,6 +137,23 @@ class DeepLinkResolutionTest {
         assertEquals(HostResolution.Unresolvable, resolve("punktfunk://connect/Basement%20PC"))
     }
 
+    /** Both OS installs of a dual-boot box at one address: the link's `fp` picks its own record. */
+    @Test
+    fun aLinksPinPicksItsOwnOsAtASharedAddress() {
+        val linuxFp = "b".repeat(64)
+        val third = "c".repeat(64)
+        val linux = host("Desk (Linux)", "192.168.1.50", "66666666-7777-4888-8999-bbbbbbbbbbbb", linuxFp)
+        val both = listOf(desk, linux)
+        fun r(url: String) = DeepLinks.resolveHost((DeepLinks.parse(url) as DeepLinkResult.Parsed).link, both)
+        assertEquals(HostResolution.Confirm(desk), r("punktfunk://connect/192.168.1.50?fp=$fp"))
+        assertEquals(HostResolution.Confirm(linux), r("punktfunk://connect/192.168.1.50?fp=$linuxFp"))
+        // A pin nobody holds is a new host — the sheet, never the neighbour.
+        assertEquals(
+            HostResolution.Unknown("192.168.1.50", DeepLinks.DEFAULT_PORT, null, third),
+            r("punktfunk://connect/192.168.1.50?fp=$third"),
+        )
+    }
+
     @Test
     fun anUnknownHostBecomesTheConfirmationSheetsInput() {
         val r = resolve("punktfunk://connect/10.0.0.9:7000?name=Studio&fp=$fp")

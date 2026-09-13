@@ -344,17 +344,24 @@ public struct DeepLink: Equatable, Sendable {
         let byName = hosts.filter { !$0.name.isEmpty && $0.name.lowercased() == reference }
         if byName.count == 1 { return .confirm(byName[0]) }
         if byName.count > 1 { return .ambiguous }
-        // `addr[:port]` literal, then the `host=` recovery parameter — both matched the way every
-        // other per-host lookup in the client matches. The literal is only considered when the
-        // reference could BE an address: a stale record id must fall through to `host=` (or to a
-        // refusal), never be offered as a box to dial.
+        // `addr[:port]` literal, then the `host=` recovery parameter. At that address the link's
+        // `fp` picks its record — a dual-boot box answers there with two pins — else only an
+        // unpinned one stands in. The literal is only considered when the reference could BE an
+        // address: a stale record id must fall through to `host=` (or to a refusal), never dial.
         let literal = Self.looksLikeAddress(hostRef) ? Self.parseAddressPort(hostRef) : nil
+        let pin = fp?.lowercased()
         for candidate in [literal, host].compactMap({ $0 }) {
-            if let match = hosts.first(where: {
+            let atAddress = hosts.filter {
                 $0.address == candidate.address && $0.port == candidate.port
-            }) {
-                return .confirm(match)
             }
+            let match: StoredHost?
+            if let pin {
+                match = atAddress.first(where: { $0.pinnedSHA256.map(Self.hexLower) == pin })
+                    ?? atAddress.first(where: { $0.pinnedSHA256 == nil })
+            } else {
+                match = atAddress.first
+            }
+            if let match { return .confirm(match) }
         }
         guard let target = literal ?? host else { return .unresolvable }
         return .unknown(address: target.address, port: target.port, name: name, fp: fp)

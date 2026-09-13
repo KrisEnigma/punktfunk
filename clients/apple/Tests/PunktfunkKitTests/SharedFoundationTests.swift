@@ -269,6 +269,26 @@ final class SharedFoundationTests: XCTestCase {
         XCTAssertFalse(lying.pinConflict(with: couchA))
     }
 
+    /// Both OS installs of a dual-boot box at one address: the link's `fp` picks its own record,
+    /// and a pin nobody holds is a new host — the sheet, never the neighbour.
+    func testDeepLinkPinPicksItsOwnOSAtASharedAddress() throws {
+        let windows = StoredHost(
+            name: "Desk (Windows)", address: "192.168.1.50",
+            pinnedSHA256: Data(repeating: 0xAA, count: 32))
+        let linux = StoredHost(
+            name: "Desk (Linux)", address: "192.168.1.50",
+            pinnedSHA256: Data(repeating: 0xBB, count: 32))
+        func resolve(_ fp: String) throws -> DeepLink.HostResolution {
+            try DeepLink.parse("punktfunk://connect/192.168.1.50:9777?fp=\(fp)")
+                .resolveHost(in: [windows, linux])
+        }
+        XCTAssertEqual(try resolve(String(repeating: "a", count: 64)), .confirm(windows))
+        XCTAssertEqual(try resolve(String(repeating: "b", count: 64)), .confirm(linux))
+        let third = String(repeating: "c", count: 64)
+        XCTAssertEqual(
+            try resolve(third), .unknown(address: "192.168.1.50", port: 9777, name: nil, fp: third))
+    }
+
     // MARK: - Host grid arrangement
 
     private func arrangementFixture() -> (hosts: [StoredHost], catalog: ProfileCatalog) {
