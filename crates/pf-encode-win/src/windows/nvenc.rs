@@ -3094,16 +3094,17 @@ mod tests {
                     "AU {i}: the close bit on every unspoiled close"
                 );
             }
-            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
-            let view: Vec<u8> = aus
+            let full: Vec<&[u8]> = aus.iter().map(|a| a.data.as_slice()).collect();
+            let view: Vec<&[u8]> = aus
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| !lost.contains(i))
-                .flat_map(|(_, a)| a.data.iter().copied())
+                .map(|(_, a)| a.data.as_slice())
                 .collect();
             let dir = std::env::var("PUNKTFUNK_SMOKE_DIR").unwrap_or_else(|_| ".".into());
-            std::fs::write(format!("{dir}/nvenc-wave.{ext}"), &full).expect("write");
-            std::fs::write(format!("{dir}/nvenc-wave-dropS.{ext}"), &view).expect("write");
+            let capture = crate::smoke_pattern::write_capture;
+            capture(&format!("{dir}/nvenc-wave.{ext}"), &full).expect("write");
+            capture(&format!("{dir}/nvenc-wave-dropS.{ext}"), &view).expect("write");
             let csv = |v: &[usize]| {
                 v.iter()
                     .map(|n| n.to_string())

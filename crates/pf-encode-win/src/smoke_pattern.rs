@@ -1,4 +1,5 @@
-//! The moving texture the wave smokes encode. Rows band by luma and columns band the green,
+//! What the wave smokes share: the moving texture they encode, and the writer that stores a
+//! stream the way `gpu_parity`'s field hashers read it. Rows band by luma and columns band the green,
 //! so motion in either axis codes; `PF_WAVE_SCROLL=dx,dy` moves it that many pixels per
 //! frame (default down 6, so motion vectors point up into rows a sweep already refreshed);
 //! `PF_WAVE_NOISE=1` adds per-pixel noise that scrolls with the content, which starves the
@@ -43,4 +44,18 @@ pub fn scroll_pattern(w: usize, h: usize, frame: usize) -> Vec<u8> {
         }
     }
     px
+}
+
+/// Write `aus` to `path` with the `.idx` sidecar a `PUNKTFUNK_DUMP_VIDEO` capture carries
+/// (`offset len flags complete` per access unit), so a field hasher splits any codec's stream
+/// by access unit.
+pub fn write_capture(path: &str, aus: &[&[u8]]) -> std::io::Result<()> {
+    let mut data = Vec::new();
+    let mut idx = String::new();
+    for au in aus {
+        idx.push_str(&format!("{} {} 0x0 1\n", data.len(), au.len()));
+        data.extend_from_slice(au);
+    }
+    std::fs::write(path, &data)?;
+    std::fs::write(format!("{path}.idx"), idx)
 }
