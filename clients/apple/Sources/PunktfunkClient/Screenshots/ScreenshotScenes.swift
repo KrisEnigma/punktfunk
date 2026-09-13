@@ -144,6 +144,13 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "15b-library-sections", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotLibrarySections())
         })
+        scenes.append(ShotScene(name: "15c-title-details", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTitleDetails())
+        })
+        // One section switched off and one moved, as Customize shows them.
+        scenes.append(ShotScene(name: "15d-library-customize", orientation: .natural, colorScheme: .dark) {
+            AnyView(LibrarySectionsPanel(shotLayout: "desktops,favorites,recent,-launchers,games"))
+        })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())

@@ -8,9 +8,18 @@ import SwiftUI
 
 struct LibrarySectionsPanel: View {
     @AppStorage(DefaultsKey.librarySections) private var storedLayout = ""
+    #if DEBUG
+    /// Shot harness: a layout that never touches the device's own.
+    var shotLayout: String?
+    #endif
     @Environment(\.dismiss) private var dismiss
 
-    private var layout: LibrarySectionLayout { LibrarySectionLayout(stored: storedLayout) }
+    private var layout: LibrarySectionLayout {
+        #if DEBUG
+        if let shotLayout { return LibrarySectionLayout(stored: shotLayout) }
+        #endif
+        return LibrarySectionLayout(stored: storedLayout)
+    }
 
     var body: some View {
         NavigationStack {

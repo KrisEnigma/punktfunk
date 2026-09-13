@@ -156,6 +156,9 @@ extension ShotMock {
             GalleryVariant(name: "Live, one title up") {
                 shelf(.catalog(games, running: ["steam:starfall"]))
             },
+            GalleryVariant(name: "No paired host") {
+                AnyView(LibraryNoHostView(showHosts: {}).frame(height: 440))
+            },
         ]
     }
 
@@ -297,6 +300,16 @@ struct ShotLibrarySections: View {
             .tabItem { Label("Library", systemImage: "square.grid.2x2") }
             .tag(TouchTab.library)
         }
+    }
+}
+
+/// The details sheet for a played title that is up on the host, marked a favorite.
+struct ShotTitleDetails: View {
+    var body: some View {
+        TitleDetailSheet(
+            game: ShotMock.games.first { $0.id == "steam:starfall" } ?? ShotMock.games[0],
+            artLoader: ShotPosterArt.source, playLabel: "Resume", isRunning: true, isFavorite: true,
+            onPlay: {}, onCopyLink: {})
     }
 }
 #endif

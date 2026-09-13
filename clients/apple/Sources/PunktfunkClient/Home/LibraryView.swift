@@ -102,6 +102,11 @@ struct LibraryView: View {
     @AppStorage(DefaultsKey.librarySections) private var sectionsRaw = ""
     @State private var search = ""
     @State private var showCustomize = false
+    /// The title whose details sheet is up (the title menu's Details…).
+    @State private var detailGame: GameEntry?
+    /// A Play pressed on that sheet, run once the sheet is down so the session never presents
+    /// over a sheet that is still leaving.
+    @State private var launchAfterDetails: String?
 
     /// The host this shelf belongs to — every fetch, every poster URL and the launch itself address
     /// it, and a pinned shelf is the same host seen through one of its cards.
@@ -190,6 +195,9 @@ struct LibraryView: View {
             #if os(iOS)
             .modifier(TitleSearch(active: inTab, text: $search))
             .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
+            #endif
+            #if os(iOS) || os(macOS)
+            .sheet(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
             #endif
             .task { await load() }
             .onDisappear {
@@ -471,7 +479,7 @@ struct LibraryView: View {
             if !played.isEmpty {
                 row(section) {
                     ForEach(played) { game in
-                        tile(game, caption: lastPlayedCaption(game), scope: "recent")
+                        tile(game, caption: PlayStatsText.lastPlayed(game.stats), scope: "recent")
                             .frame(width: rowTileWidth)
                     }
                 }
@@ -644,8 +652,12 @@ struct LibraryView: View {
             isRunning: running[game.id] != nil, caption: caption)
     }
 
-    /// A title's own acts, one level below a host card's.
+    /// A title's own acts, one level below a host card's (design §2.5): Play / Resume leads,
+    /// then what a tap cannot do.
     @ViewBuilder private func titleMenu(_ game: GameEntry) -> some View {
+        if let launch = launchAndRemember {
+            Button(playLabel(game), systemImage: "play.fill") { launch(game.id) }
+        }
         if inTab, game.id != LibraryCollation.desktopID {
             let marked = favoriteIDs.contains(game.id)
             Button(
@@ -655,39 +667,56 @@ struct LibraryView: View {
                 favorites.toggle(game.id, host: host.id.uuidString)
             }
         }
+        #if os(iOS) || os(macOS)
+        if game.id != LibraryCollation.desktopID {
+            Button("Details…", systemImage: "info.circle") { detailGame = game }
+        }
+        #endif
         if LinkClipboard.isAvailable {
             Button("Copy Link", systemImage: "link") { copyLink(game) }
         }
     }
 
+    private func playLabel(_ game: GameEntry) -> String {
+        if game.id == LibraryCollation.desktopID { return "Connect" }
+        return running[game.id] != nil ? "Resume" : "Play"
+    }
+
+    #if os(iOS) || os(macOS)
+    private func detailSheet(_ game: GameEntry) -> some View {
+        TitleDetailSheet(
+            game: game, artLoader: artLoader, playLabel: playLabel(game),
+            isRunning: running[game.id] != nil,
+            isFavorite: inTab ? favoriteIDs.contains(game.id) : nil,
+            onToggleFavorite: { favorites.toggle(game.id, host: host.id.uuidString) },
+            onPlay: launchAndRemember == nil ? nil : {
+                launchAfterDetails = game.id
+                detailGame = nil
+            },
+            onCopyLink: LinkClipboard.isAvailable ? { copyLink(game) } : nil)
+            #if os(iOS)
+            .presentationDetents([.medium, .large])
+            #else
+            .frame(minWidth: 440, minHeight: 360)
+            #endif
+    }
+
+    private func launchPendingTitle() {
+        guard let id = launchAfterDetails else { return }
+        launchAfterDetails = nil
+        launchAndRemember?(id)
+    }
+    #endif
+
     /// What a tile says under its title for the active sort (design P6): when it was last
     /// played under Recent, how long under Most played, nothing otherwise.
     private func sortCaption(_ game: GameEntry) -> String? {
         switch LibrarySortKey(stored: sortRaw) {
-        case .recent: return lastPlayedCaption(game)
-        case .playTime: return playTimeCaption(game)
+        case .recent: return PlayStatsText.lastPlayed(game.stats)
+        case .playTime: return PlayStatsText.playTime(game.stats)
         default: return nil
         }
     }
-
-    private func lastPlayedCaption(_ game: GameEntry) -> String? {
-        guard let ms = game.stats?.lastPlayedUnixMs, ms > 0 else { return nil }
-        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
-        return Self.relativeDate.localizedString(for: date, relativeTo: Date())
-    }
-
-    /// Under a minute says nothing: a launch that never really ran is not play time.
-    private func playTimeCaption(_ game: GameEntry) -> String? {
-        guard let ms = game.stats?.playTimeMs, ms >= 60_000 else { return nil }
-        return Duration.milliseconds(Int64(clamping: ms)).formatted(
-            .units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 1))
-    }
-
-    private static let relativeDate: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter
-    }()
 
     /// Put this title's self-emitted `punktfunk://` link on the clipboard: the shelf's host,
     /// the pinned card's preset when a pin opened it, and the game's own `launch=` id — so

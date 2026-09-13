@@ -55,13 +55,7 @@ struct LibraryTabView: View {
                     .id(shelf.id)
                     .toolbarTitleMenu { shelfPicker(current: shelf) }
             } else {
-                ContentUnavailableView {
-                    Label("No Library Yet", systemImage: "square.grid.2x2")
-                } description: {
-                    Text("Pair a host to browse its games here.")
-                } actions: {
-                    Button("Show Hosts", action: showHosts)
-                }
+                LibraryNoHostView(showHosts: showHosts)
             }
         }
     }
