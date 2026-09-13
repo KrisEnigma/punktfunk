@@ -2929,10 +2929,15 @@ mod tests {
         } else {
             (Codec::H265, "h265")
         };
-        assert!(
+        // `PF_WAVE_ANCHOR=1`: answer each loss with an RFI anchor instead of a wave (leave
+        // `PUNKTFUNK_NVENC_IR_ALWAYS` unset); the anchor P must decode exact at once.
+        let anchor = std::env::var("PF_WAVE_ANCHOR").is_ok_and(|v| v == "1");
+        assert_ne!(
+            anchor,
             std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1"),
-            "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave"
+            "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave; PF_WAVE_ANCHOR=1 wants anchors"
         );
+        assert!(!(anchor && (spoil || idr)), "PF_WAVE_ANCHOR runs alone");
         let mut parts = shape.split(':');
         let (w, h) = parts
             .next()
@@ -3027,18 +3032,24 @@ mod tests {
             let mut starts = Vec::new();
             let mut closes = Vec::new();
             let mut idrs = Vec::new();
+            let mut anchors = Vec::new();
             let mut aus = Vec::new();
             for i in 0..=last {
                 let offset = (i >= 3 && (i - 3) / period < waves).then(|| (i - 3) % period);
                 match offset {
                     Some(0) => {
                         let l = (i - 2) as i64;
-                        assert!(enc.invalidate_ref_frames(l, l), "the always-wave answers");
-                        assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
+                        assert!(enc.invalidate_ref_frames(l, l), "the ask is answered");
                         lost.push(i - 2);
-                        starts.push(i);
-                        if !spoil && !idr {
-                            closes.push(i + cycle - 1);
+                        if anchor {
+                            assert!(enc.pending_anchor && enc.wave.is_none(), "an anchor");
+                            anchors.push(i);
+                        } else {
+                            assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
+                            starts.push(i);
+                            if !spoil && !idr {
+                                closes.push(i + cycle - 1);
+                            }
                         }
                     }
                     Some(2) if idr => {
@@ -3092,6 +3103,11 @@ mod tests {
                     au.recovery_close,
                     closes.contains(&i),
                     "AU {i}: the close bit on every unspoiled close"
+                );
+                assert_eq!(
+                    au.recovery_anchor,
+                    anchors.contains(&i),
+                    "AU {i}: anchors where asked"
                 );
             }
             let full: Vec<&[u8]> = aus.iter().map(|a| a.data.as_slice()).collect();
