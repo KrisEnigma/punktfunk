@@ -18,9 +18,9 @@ struct HomeView: View {
     @ObservedObject var store: HostStore
     @ObservedObject var model: SessionModel
     @ObservedObject var discovery: HostDiscovery
-    /// The profile catalog — the source of the card chips, the "Connect with ▸" menu, and the
-    /// pinned host+profile cards the grid renders alongside their host (design §5.2a).
-    @ObservedObject private var profiles = ProfileStore.shared
+    /// The preset catalog — the source of the card chips, the "Connect with ▸" menu, and the
+    /// pinned host+preset cards the grid renders alongside their host (design §5.2a).
+    @ObservedObject private var profiles = PresetStore.shared
     @Binding var showAddHost: Bool
     @Binding var pairingTarget: StoredHost?
     @Binding var speedTestTarget: StoredHost?
@@ -28,14 +28,14 @@ struct HomeView: View {
     #if !os(macOS)
     @Binding var showSettings: Bool
     #endif
-    /// Start a session with this host, using the given profile selection — `.inherit` for a plain
+    /// Start a session with this host, using the given preset selection — `.inherit` for a plain
     /// card tap (the host's binding), an explicit pick from "Connect with ▸" or a pinned card.
-    let connect: (StoredHost, ProfileSelection) -> Void
+    let connect: (StoredHost, PresetSelection) -> Void
     let connectDiscovered: (DiscoveredHost) -> Void
     /// Pairing succeeded (tvOS PairSheet route) — pin + connect (ContentView guards staleness).
     let onPaired: (StoredHost, Data) -> Void
     /// Picked a title in the (experimental) library — start a session that launches it, with the
-    /// shelf's profile (a pinned card's own; the host's binding on its primary card).
+    /// shelf's preset (a pinned card's own; the host's binding on its primary card).
     let onLaunchTitle: (LibraryTarget, String) -> Void
     /// Stream a shelf's host without launching anything (its menu's Connect / Resume row).
     let onConnectShelf: (LibraryTarget) -> Void
@@ -297,7 +297,7 @@ struct HomeView: View {
     // MARK: - Cards
 
     /// The grid's bands, ordered and divided per this device's preference — cards and all, so a
-    /// pinned card can be filed under the profile it connects with rather than under its host's
+    /// pinned card can be filed under the preset it connects with rather than under its host's
     /// binding (`HostArrangement`).
     private var hostGroups: [HostGroup] {
         HostArrangement.groups(
@@ -329,9 +329,9 @@ struct HomeView: View {
         .padding(.top, 4)
     }
 
-    private func hostCard(_ host: StoredHost, pinned: StreamProfile?) -> some View {
-        // A pinned card connects with ITS profile; the primary card follows the binding.
-        let selection: ProfileSelection = pinned.map { .profile($0.id) } ?? .inherit
+    private func hostCard(_ host: StoredHost, pinned: StreamPreset?) -> some View {
+        // A pinned card connects with ITS preset; the primary card follows the binding.
+        let selection: PresetSelection = pinned.map { .preset($0.id) } ?? .inherit
         // …and browsing is that same connect with a title picked first, so a pinned card opens its
         // OWN shelf: every launch off it carries the card's profile rather than the host's binding.
         // Gated on a pinned identity, not just the feature toggle: the library plane's
@@ -361,12 +361,12 @@ struct HomeView: View {
             onEdit: { editTarget = host },
             onSendLogs: host.pinnedSHA256 != nil
                 ? { Task { sendLogsResult = await SendLogs.toHost(host) } } : nil,
-            // A pinned card is a shortcut to one profile, not a second host, so it carries no
+            // A pinned card is a shortcut to one preset, not a second host, so it carries no
             // host actions — the same rule the console's menu applies.
             hostActions: pinned == nil ? hostPower.actions(for: host) : [],
             onHostAction: { action in hostAction(action, on: host) },
-            profileMenu: profileMenu(for: host),
-            pinnedProfile: pinned,
+            presetMenu: presetMenu(for: host),
+            pinnedPreset: pinned,
             nowPlaying: nowPlaying.title(for: host))
     }
 
@@ -390,14 +390,14 @@ struct HomeView: View {
         Task { hostActionResult = await hostPower.invoke(action, on: host) }
     }
 
-    /// The profile affordances every host card carries (§5.2/§5.2a).
-    private func profileMenu(for host: StoredHost) -> HostProfileMenu {
-        HostProfileMenu(
+    /// The preset affordances every host card carries (§5.2/§5.2a).
+    private func presetMenu(for host: StoredHost) -> HostPresetMenu {
+        HostPresetMenu(
             profiles: profiles.profiles,
             boundID: host.profileID,
             pinnedIDs: host.pinnedProfileIDs ?? [],
             connectWith: { selection in connect(host, selection) },
-            setDefault: { store.setProfile(host.id, profileID: $0) },
+            setDefault: { store.setPreset(host.id, profileID: $0) },
             togglePin: { id in
                 let pinned = (host.pinnedProfileIDs ?? []).contains(id)
                 store.setPinned(host.id, profileID: id, pinned: !pinned)

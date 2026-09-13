@@ -37,7 +37,7 @@ struct SpeedTestSheet: View {
     @AppStorage(DefaultsKey.bitrateKbps) private var bitrateKbps = 0
     /// The catalog, so the Apply button can write to the layer this host actually reads its
     /// bitrate from (design/client-settings-profiles.md §5.3).
-    @ObservedObject private var profiles = ProfileStore.shared
+    @ObservedObject private var profiles = PresetStore.shared
 
     private enum Phase: Equatable {
         case connecting
@@ -119,8 +119,8 @@ struct SpeedTestSheet: View {
     /// sharpest symptom of the missing feature was a per-host measurement overwriting the global.
     ///
     ///   • unbound host → the global, exactly as before;
-    ///   • bound to a profile that already overrides bitrate → that override;
-    ///   • bound to a profile that INHERITS bitrate → both are offered, because either is a
+    ///   • bound to a preset that already overrides bitrate → that override;
+    ///   • bound to a preset that INHERITS bitrate → both are offered, because either is a
     ///     defensible answer and guessing would silently pick one.
     ///
     /// Every button names its target, so what a click changes is never inferred from context.
@@ -226,7 +226,7 @@ struct SpeedTestSheet: View {
         let address = host.address
         let port = host.port
         let pin = host.pinnedSHA256
-        // Probe at the mode this host would actually stream at — its profile's, if it is bound to
+        // Probe at the mode this host would actually stream at — its preset's, if it is bound to
         // one. The measurement IS the streaming path, so it should be the streaming path's mode.
         let mode = EffectiveSettings.resolve(host: host, catalog: profiles.catalog)
         let (w, h, fps) = (

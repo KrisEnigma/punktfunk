@@ -54,7 +54,7 @@ enum SettingsOptions {
     /// Virtual-pad types — the `tag` is the wire value (`PunktfunkConnection.GamepadType` raw).
     /// This picks the pad the HOST presents to the game, so it does not depend on what this
     /// device can capture. Keep in step with pf-console-ui's `PAD_TYPES` and the Linux shell's
-    /// `GAMEPADS`: a profile written on one client opens on another, and a tag missing here has
+    /// `GAMEPADS`: a preset written on one client opens on another, and a tag missing here has
     /// no index in the picker.
     static let padTypes: [(label: String, tag: Int)] = [
         ("Automatic", 0),

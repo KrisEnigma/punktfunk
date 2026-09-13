@@ -1200,7 +1200,7 @@ public final class PunktfunkConnection: @unchecked Sendable {
     }
 
     /// What only the app knows about the window being drawn: the floor policy, its own audio
-    /// ring, the profile, and Apple-only diagnostic lines (Advanced Detailed).
+    /// ring, the preset, and Apple-only diagnostic lines (Advanced Detailed).
     public struct HudFacts: Sendable {
         public var onGlass = true
         public var shaveOsFloor = false
@@ -1628,7 +1628,7 @@ public final class PunktfunkConnection: @unchecked Sendable {
     /// exactly as it always did, so it is safe to set unconditionally from the user's setting.
     public static let clientCapKeepHostAudio: UInt8 = UInt8(PUNKTFUNK_CLIENT_CAP_KEEP_HOST_AUDIO)
 
-    /// The `codec` SETTING (a `DefaultsKey.codec` / profile-overlay string) as a soft-preference
+    /// The `codec` SETTING (a `DefaultsKey.codec` / preset-overlay string) as a soft-preference
     /// byte; `0` = Automatic, i.e. the host decides. Lives here beside the bits so the settings
     /// string is mapped to the wire in exactly one place — a session and a speed test that
     /// disagreed on what "pyrowave" means would be a silent mismatch.

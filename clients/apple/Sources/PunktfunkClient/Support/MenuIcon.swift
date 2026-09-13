@@ -13,7 +13,7 @@ import SwiftUI
 
 @MainActor
 enum MenuIcon {
-    /// A filled dot in `color` — a profile's chip, at menu-icon size.
+    /// A filled dot in `color` — a preset's chip, at menu-icon size.
     static func swatch(_ color: Color, scheme: ColorScheme) -> Image? {
         render(key: "dot-\(scheme)-\(color)", scheme: scheme) {
             Circle().fill(color).frame(width: 12, height: 12)

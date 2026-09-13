@@ -24,7 +24,7 @@ final class DeepLinkRouterTests: XCTestCase {
         let saved = host()
         let out = DeepLinkRouter.resolve(
             link: try link("punktfunk://connect/\(saved.id.uuidString)"),
-            hosts: [saved], catalog: ProfileCatalog(profiles: []), session: idle, browse: false)
+            hosts: [saved], catalog: PresetCatalog(profiles: []), session: idle, browse: false)
         guard case .proceed(let h, let selection) = out else { return XCTFail("got \(out)") }
         XCTAssertEqual(h.id, saved.id)
         XCTAssertEqual(selection, .inherit)
@@ -35,7 +35,7 @@ final class DeepLinkRouterTests: XCTestCase {
         let saved = host("Desk")
         let out = DeepLinkRouter.resolve(
             link: try link("punktfunk://connect/Desk"),
-            hosts: [saved], catalog: ProfileCatalog(profiles: []), session: idle, browse: false)
+            hosts: [saved], catalog: PresetCatalog(profiles: []), session: idle, browse: false)
         guard case .confirm = out else { return XCTFail("a guessable ref must confirm, got \(out)") }
     }
 
@@ -44,7 +44,7 @@ final class DeepLinkRouterTests: XCTestCase {
         let other = String(repeating: "cd", count: 32)
         let out = DeepLinkRouter.resolve(
             link: try link("punktfunk://connect/\(saved.id.uuidString)?fp=\(other)"),
-            hosts: [saved], catalog: ProfileCatalog(profiles: []), session: idle, browse: false)
+            hosts: [saved], catalog: PresetCatalog(profiles: []), session: idle, browse: false)
         guard case .notice(let text) = out else { return XCTFail("got \(out)") }
         XCTAssertTrue(text.contains("fingerprint"), text)
     }
@@ -56,7 +56,7 @@ final class DeepLinkRouterTests: XCTestCase {
             isIdle: false, activeHostID: other.id, activeHostName: other.displayName)
         let out = DeepLinkRouter.resolve(
             link: try link("punktfunk://connect/\(saved.id.uuidString)"),
-            hosts: [saved, other], catalog: ProfileCatalog(profiles: []),
+            hosts: [saved, other], catalog: PresetCatalog(profiles: []),
             session: busy, browse: false)
         guard case .notice(let text) = out else { return XCTFail("got \(out)") }
         XCTAssertTrue(text.contains("Couch"), text)
@@ -68,16 +68,16 @@ final class DeepLinkRouterTests: XCTestCase {
             isIdle: false, activeHostID: saved.id, activeHostName: saved.displayName)
         let out = DeepLinkRouter.resolve(
             link: try link("punktfunk://connect/\(saved.id.uuidString)"),
-            hosts: [saved], catalog: ProfileCatalog(profiles: []), session: busy, browse: false)
+            hosts: [saved], catalog: PresetCatalog(profiles: []), session: busy, browse: false)
         XCTAssertEqual(out, .alreadyHere)
     }
 
-    func testAnUnknownProfileRefusesRatherThanInheriting() throws {
+    func testAnUnknownPresetRefusesRatherThanInheriting() throws {
         // The quiet degrade is the dangerous one: it streams with settings nobody asked for.
         let saved = host()
         let out = DeepLinkRouter.resolve(
             link: try link("punktfunk://connect/\(saved.id.uuidString)?profile=Nope"),
-            hosts: [saved], catalog: ProfileCatalog(profiles: []), session: idle, browse: false)
+            hosts: [saved], catalog: PresetCatalog(profiles: []), session: idle, browse: false)
         guard case .notice(let text) = out else { return XCTFail("got \(out)") }
         XCTAssertTrue(text.contains("Nope"), text)
     }
@@ -95,10 +95,10 @@ final class DeepLinkRouterTests: XCTestCase {
         for raw in cases {
             let parsed = try link(raw)
             let connect = DeepLinkRouter.resolve(
-                link: parsed, hosts: [saved], catalog: ProfileCatalog(profiles: []),
+                link: parsed, hosts: [saved], catalog: PresetCatalog(profiles: []),
                 session: idle, browse: false)
             let browse = DeepLinkRouter.resolve(
-                link: parsed, hosts: [saved], catalog: ProfileCatalog(profiles: []),
+                link: parsed, hosts: [saved], catalog: PresetCatalog(profiles: []),
                 session: idle, browse: true)
             XCTAssertEqual(connect, browse, "routes disagree about \(raw)")
         }
@@ -109,7 +109,7 @@ final class DeepLinkRouterTests: XCTestCase {
         // there is nothing to show before the host is saved, while a connect can at least name
         // the address the link pointed at.
         let parsed = try link("punktfunk://connect/nosuchhost")
-        let empty = ProfileCatalog(profiles: [])
+        let empty = PresetCatalog(profiles: [])
         let connect = DeepLinkRouter.resolve(
             link: parsed, hosts: [], catalog: empty, session: idle, browse: false)
         let browse = DeepLinkRouter.resolve(

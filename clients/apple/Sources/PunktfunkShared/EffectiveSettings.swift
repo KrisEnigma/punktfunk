@@ -17,7 +17,7 @@
 import Foundation
 
 public struct EffectiveSettings: Equatable, Sendable {
-    // Tier P — profileable (design §3).
+    // Tier P — presetable (design §3).
     public var width = 1920
     public var height = 1080
     public var refreshHz = 60
@@ -45,7 +45,7 @@ public struct EffectiveSettings: Equatable, Sendable {
     public var gamepadType = 0
     public var gamepadForwarding = true
     /// Steam Controller 2 as-is passthrough (`DefaultsKey.sc2Capture`, default off). Read at
-    /// connect beside `gamepadForwarding`. Deliberately NOT profileable (no overlay field): the
+    /// connect beside `gamepadForwarding`. Deliberately NOT presetable (no overlay field): the
     /// toggle is about hardware this device captures, not about how a host is streamed.
     public var sc2Capture = false
     /// Cross-client `system_buttons`: "auto" | "forward" | "local".
@@ -65,20 +65,20 @@ public struct EffectiveSettings: Equatable, Sendable {
     public var windowedSafePresent = true
     public var modifierLayout = "mac"
     // Tier G — this device's endpoints and hardware. Session-consumed, so they ride along, but
-    // never profileable: a profile is about how a host is streamed, not about which speaker this
+    // never presetable: a preset is about how a host is streamed, not about which speaker this
     // Mac uses.
     public var speakerUID = ""
     public var micUID = ""
     public var micChannel = 0
     public var pointerCapture = true
-    /// The profile this resolution came from, when one applied — the HUD names it so "which
-    /// profile am I on?" is answerable mid-session, and the one-off/binding distinction never has
+    /// The preset this resolution came from, when one applied — the HUD names it so "which
+    /// preset am I on?" is answerable mid-session, and the one-off/binding distinction never has
     /// to be guessed from the settings themselves.
     public var profileID: String?
-    public var profileName: String?
-    /// The profile's `#RRGGBB` chip colour, so the HUD names it in the same colour the card that
-    /// launched it wore — the colour is an identifier, and it only works if it's the same one.
-    public var profileAccent: String?
+    public var presetName: String?
+    /// The preset's `#RRGGBB` chip colour. The HUD tints the name with it, matching the card
+    /// that launched the session.
+    public var presetAccent: String?
 
     public init() {}
 
@@ -221,30 +221,30 @@ public struct EffectiveSettings: Equatable, Sendable {
     }
 
     /// The whole resolution, in one call, in the precedence every client shares:
-    /// **one-off pick ?? host binding ?? none**. A dangling id — a profile deleted out from under
+    /// **one-off pick ?? host binding ?? none**. A dangling id — a preset deleted out from under
     /// a binding, a link naming one that no longer exists — resolves as none: never an error,
     /// never a blocked connect (§4.4).
     public static func resolve(
-        host: StoredHost?, selection: ProfileSelection = .inherit,
-        catalog: ProfileCatalog? = nil, defaults: UserDefaults = .standard
+        host: StoredHost?, selection: PresetSelection = .inherit,
+        catalog: PresetCatalog? = nil, defaults: UserDefaults = .standard
     ) -> EffectiveSettings {
         let base = EffectiveSettings(defaults: defaults)
-        let profile: StreamProfile? = {
+        let profile: StreamPreset? = {
             switch selection {
             case .defaults:
                 return nil
-            case .profile(let id):
-                return (catalog ?? ProfileCatalog.load()).profile(id: id)
+            case .preset(let id):
+                return (catalog ?? PresetCatalog.load()).preset(id: id)
             case .inherit:
                 guard let host else { return nil }
-                return (catalog ?? ProfileCatalog.load()).binding(for: host)
+                return (catalog ?? PresetCatalog.load()).binding(for: host)
             }
         }()
         guard let profile else { return base }
         var out = base.applying(profile.overrides)
         out.profileID = profile.id
-        out.profileName = profile.name
-        out.profileAccent = profile.accent
+        out.presetName = profile.name
+        out.presetAccent = profile.accent
         return out
     }
 }
@@ -306,9 +306,9 @@ public enum AudioFormatChoice: String, CaseIterable, Sendable {
     /// The stored raw value, falling back to `.opus` for anything a newer build wrote.
     ///
     /// ⚠ **The raw values are shared VERBATIM with `pf_client_core::session::AUDIO_FORMATS` and the
-    /// Android client's `AUDIO_FORMAT_*`, and must never be renamed.** One profile catalog
+    /// Android client's `AUDIO_FORMAT_*`, and must never be renamed.** One preset catalog
     /// round-trips through all four clients, and a spelling that differs by a single character
-    /// fails in the worst possible way: the key is carried through untouched, so the profile keeps
+    /// fails in the worst possible way: the key is carried through untouched, so the preset keeps
     /// "working" on the other client and silently inherits its global default instead. The naming
     /// rule is the kHz figure with the decimal point dropped — `lossless48`, `lossless96`, and for
     /// the 44.1 family `lossless441` / `lossless882` / `lossless1764`. Left implicit (case name ==
@@ -350,21 +350,21 @@ public extension EffectiveSettings {
 
 /// What a single connect was told to use, before any store is consulted.
 ///
-/// The third case is why this is an enum rather than an `Optional<StreamProfile>`: "Connect with ▸
+/// The third case is why this is an enum rather than an `Optional<StreamPreset>`: "Connect with ▸
 /// Default settings" on a BOUND host has to force the globals, and "no pick at all" has to fall
 /// through to the binding. Collapsing the two would make the menu item that says "Default
-/// settings" silently connect with the host's profile. It is the same distinction the session
+/// settings" silently connect with the host's preset. It is the same distinction the session
 /// binary's `--profile ""` reserves on the desktop clients.
-public enum ProfileSelection: Hashable, Sendable {
+public enum PresetSelection: Hashable, Sendable {
     /// No pick — the host's default binding applies (a plain click/tap).
     case inherit
     /// Force the global defaults for this one connect, whatever the host is bound to.
     case defaults
-    /// This profile, for this one connect. NEVER rebinds the host (§5.2).
-    case profile(String)
+    /// This preset, for this one connect. NEVER rebinds the host (§5.2).
+    case preset(String)
 
     public init(profileID: String?) {
-        self = profileID.map(ProfileSelection.profile) ?? .inherit
+        self = profileID.map(PresetSelection.preset) ?? .inherit
     }
 }
 

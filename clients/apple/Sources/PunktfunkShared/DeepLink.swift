@@ -129,7 +129,7 @@ public struct DeepLink: Equatable, Sendable {
     public var host: DeepLinkAddress?
     /// A store-qualified library id (`steam:570`) for the host to launch on arrival.
     public var launch: String?
-    /// A settings-profile reference (id, or a unique name) — one-off, never rebinding.
+    /// A settings-preset reference (id, or a unique name) — one-off, never rebinding.
     public var profile: String?
     /// Display label for the unknown-host confirmation sheet (external emitters).
     public var name: String?

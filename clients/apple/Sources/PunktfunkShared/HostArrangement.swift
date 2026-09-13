@@ -4,7 +4,7 @@
 // obviously right and behaves subtly wrong (an unstable sort reshuffling equal rows on every
 // redraw, a never-connected host sorting as if it were connected in 1970), so it lives apart from
 // the view and is tested. It sits in PunktfunkShared because everything it touches — `StoredHost`,
-// `ProfileCatalog` — already does.
+// `PresetCatalog` — already does.
 //
 // It arranges CARDS, not hosts. A host contributes its own card plus one per pinned profile
 // (§5.2a), and under profile grouping those go to different bands — the pinned card belongs to
@@ -42,11 +42,11 @@ public enum HostSort: String, CaseIterable, Identifiable, Sendable {
 /// What the grid is divided by.
 public enum HostGrouping: String, CaseIterable, Identifiable, Sendable {
     case none
-    /// The profile each CARD connects with: a host's own card follows its binding, a pinned card
+    /// The preset each CARD connects with: a host's own card follows its binding, a pinned card
     /// follows its pin. Grouping by the binding alone would file every pinned card under "No
-    /// Profile" — pins are not bindings, and a pinned card is precisely the one that knows which
-    /// profile it means.
-    case profile
+    /// Preset" — pins are not bindings, and a pinned card is precisely the one that knows which
+    /// preset it means. The raw value is stored, so it keeps the old word.
+    case preset = "profile"
     case status
 
     public var id: String { rawValue }
@@ -54,7 +54,7 @@ public enum HostGrouping: String, CaseIterable, Identifiable, Sendable {
     public var label: String {
         switch self {
         case .none: return "None"
-        case .profile: return "Profile"
+        case .preset: return "Preset"
         case .status: return "Status"
         }
     }
@@ -62,22 +62,22 @@ public enum HostGrouping: String, CaseIterable, Identifiable, Sendable {
     public var symbol: String {
         switch self {
         case .none: return "square.grid.2x2"
-        case .profile: return "slider.horizontal.3"
+        case .preset: return "slider.horizontal.3"
         case .status: return "wifi"
         }
     }
 }
 
-/// One card in the grid: a host, and the profile that card connects with.
+/// One card in the grid: a host, and the preset that card connects with.
 public struct HostCard: Identifiable, Equatable, Sendable {
     public let host: StoredHost
     /// nil = the host's own card, which follows whatever it is bound to. Set = a pinned
-    /// host+profile card (§5.2a).
-    public let pinned: StreamProfile?
+    /// host+preset card (§5.2a).
+    public let pinned: StreamPreset?
 
     public var id: String { "\(host.id.uuidString)#\(pinned?.id ?? "")" }
 
-    public init(host: StoredHost, pinned: StreamProfile? = nil) {
+    public init(host: StoredHost, pinned: StreamPreset? = nil) {
         self.host = host
         self.pinned = pinned
     }
@@ -88,7 +88,7 @@ public struct HostCard: Identifiable, Equatable, Sendable {
 public struct HostGroup: Identifiable, Equatable, Sendable {
     public let id: String
     public let title: String?
-    /// `#RRGGBB` when the band is a profile — its chip colour, so the header matches the cards.
+    /// `#RRGGBB` when the band is a preset — its chip colour, so the header matches the cards.
     public let accent: String?
     public let cards: [HostCard]
 
@@ -104,7 +104,7 @@ public enum HostArrangement {
     /// Group, then sort within each group. `online` is the set of host ids currently reachable —
     /// the caller owns that (mDNS plus the reachability probe), this only reads it.
     public static func groups(
-        hosts: [StoredHost], catalog: ProfileCatalog, online: Set<UUID>,
+        hosts: [StoredHost], catalog: PresetCatalog, online: Set<UUID>,
         sort: HostSort, grouping: HostGrouping
     ) -> [HostGroup] {
         // The original index is the tie-break for every sort below. `Array.sorted` is NOT stable
@@ -141,7 +141,7 @@ public enum HostArrangement {
             }.map(\.host)
         }
 
-        /// A host's own card, then one per pinned profile — so a pin reads as belonging to its
+        /// A host's own card, then one per pinned preset — so a pin reads as belonging to its
         /// host wherever the two sit together.
         func cards(_ host: StoredHost) -> [HostCard] {
             [HostCard(host: host)] + catalog.pinned(for: host).map { HostCard(host: host, pinned: $0) }
@@ -151,19 +151,19 @@ public enum HostArrangement {
         case .none:
             return [HostGroup(id: "all", title: nil, cards: ordered(ranked).flatMap(cards))]
 
-        case .profile:
+        case .preset:
             // Catalog order, so the bands sit in the same order the scope menu lists them, then
-            // whatever belongs to no profile. A band with nothing in it isn't drawn.
+            // whatever belongs to no preset. A band with nothing in it isn't drawn.
             let sorted = ordered(ranked)
             var groups: [HostGroup] = catalog.profiles.compactMap { profile in
                 let members: [HostCard] = sorted.flatMap { host -> [HostCard] in
                     var found: [HostCard] = []
-                    // A host BOUND to this profile brings its own card…
+                    // A host BOUND to this preset brings its own card…
                     if catalog.binding(for: host)?.id == profile.id {
                         found.append(HostCard(host: host))
                     }
                     // …and a host that PINNED it brings that pinned card, whatever it is bound
-                    // to. Both can be true: a bound profile may also be pinned.
+                    // to. Both can be true: a bound preset may also be pinned.
                     if let pin = catalog.pinned(for: host).first(where: { $0.id == profile.id }) {
                         found.append(HostCard(host: host, pinned: pin))
                     }
@@ -175,12 +175,12 @@ public enum HostArrangement {
                     cards: members)
             }
             // Hosts that a plain tap streams with the defaults. A dangling binding resolves as
-            // none (§4.4), so it lands here rather than in a band named after a profile that no
+            // none (§4.4), so it lands here rather than in a band named after a preset that no
             // longer exists.
             let unbound = sorted.filter { catalog.binding(for: $0) == nil }.map { HostCard(host: $0) }
             if !unbound.isEmpty {
                 groups.append(
-                    HostGroup(id: "profile-none", title: "No Profile", cards: unbound))
+                    HostGroup(id: "profile-none", title: "No Preset", cards: unbound))
             }
             return groups
 

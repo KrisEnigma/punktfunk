@@ -10,7 +10,7 @@
 
 import SwiftUI
 
-public struct ProfileAccent: Identifiable, Sendable, Hashable {
+public struct PresetAccent: Identifiable, Sendable, Hashable {
     /// `#RRGGBB`, lowercase — exactly what lands in the catalog.
     public let hex: String
     public let name: String
@@ -23,25 +23,25 @@ public struct ProfileAccent: Identifiable, Sendable, Hashable {
     /// and that stay tellable apart from each other at chip size.
     /// No violet: the brand purple IS the default, and a swatch a shade off it would be a
     /// choice you can't see you made.
-    public static let palette: [ProfileAccent] = [
-        ProfileAccent(hex: "#3aa0ff", name: "Blue"),
-        ProfileAccent(hex: "#2bb8a6", name: "Teal"),
-        ProfileAccent(hex: "#35c759", name: "Green"),
-        ProfileAccent(hex: "#e0a800", name: "Amber"),
-        ProfileAccent(hex: "#ff8800", name: "Orange"),
-        ProfileAccent(hex: "#ff4f6d", name: "Red"),
-        ProfileAccent(hex: "#ff4f9a", name: "Pink"),
-        ProfileAccent(hex: "#8e8e93", name: "Graphite"),
+    public static let palette: [PresetAccent] = [
+        PresetAccent(hex: "#3aa0ff", name: "Blue"),
+        PresetAccent(hex: "#2bb8a6", name: "Teal"),
+        PresetAccent(hex: "#35c759", name: "Green"),
+        PresetAccent(hex: "#e0a800", name: "Amber"),
+        PresetAccent(hex: "#ff8800", name: "Orange"),
+        PresetAccent(hex: "#ff4f6d", name: "Red"),
+        PresetAccent(hex: "#ff4f9a", name: "Pink"),
+        PresetAccent(hex: "#8e8e93", name: "Graphite"),
     ]
 
-    public static func named(_ hex: String?) -> ProfileAccent? {
+    public static func named(_ hex: String?) -> PresetAccent? {
         guard let hex else { return nil }
         return palette.first { $0.hex.caseInsensitiveCompare(hex) == .orderedSame }
     }
 }
 
 public extension Color {
-    /// Parse a `#RRGGBB` string. nil for anything else — a profile with an accent this build
+    /// Parse a `#RRGGBB` string. nil for anything else — a preset with an accent this build
     /// can't read falls back to the brand tint rather than rendering as black.
     init?(hex: String) {
         guard hex.hasPrefix("#"), hex.count == 7,
@@ -54,8 +54,8 @@ public extension Color {
     }
 }
 
-public extension StreamProfile {
-    /// This profile's colour, or the brand tint when it has none — every surface that shows a
-    /// profile reads it through here, so "no colour chosen" looks deliberate everywhere.
+public extension StreamPreset {
+    /// This preset's colour, or the brand tint when it has none — every surface that shows a
+    /// preset reads it through here, so "no colour chosen" looks deliberate everywhere.
     var accentColor: Color { Color(hex: accent ?? "") ?? .brand }
 }

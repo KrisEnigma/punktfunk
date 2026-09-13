@@ -45,7 +45,7 @@ extension SettingsView {
     /// a picker's meaning depends on the selection, pass a DYNAMIC string describing the current
     /// choice.
     /// `field` is the overlay's name for this row (see `SettingsField`). Passing it puts the
-    /// override marker + Reset in the caption line while a profile is being edited — with the row
+    /// override marker + Reset in the caption line while a preset is being edited — with the row
     /// it belongs to, which is the only place the state is legible.
     @ViewBuilder
     func described<Content: View>(
@@ -93,7 +93,7 @@ extension SettingsView {
         "Above 1 Gbps — more than the link sustains causes loss and stutter. Speed-test first."
 
     /// `bitrateKbps == 0` is Automatic; switching to manual lands on the host default. Scoped, so
-    /// flipping it in a profile records the override there rather than moving the global.
+    /// flipping it in a preset records the override there rather than moving the global.
     var automaticBitrate: Binding<Bool> {
         let bitrate = scoped(SettingsFields.bitrateKbps)
         return Binding(

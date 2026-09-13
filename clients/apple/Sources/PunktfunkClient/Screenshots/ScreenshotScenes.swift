@@ -128,7 +128,7 @@ enum ShotScenes {
 
 @MainActor
 enum ShotMock {
-    // Stable ids so the store, the adverts and the profile bindings all point at the same things
+    // Stable ids so the store, the adverts and the preset bindings all point at the same things
     // across every scene and every run.
     static let battlestationID = UUID(uuidString: "5B0D1E00-0000-4000-8000-000000000001")!
     static let livingRoomID = UUID(uuidString: "5B0D1E00-0000-4000-8000-000000000002")!
@@ -141,28 +141,28 @@ enum ShotMock {
     static let couchProfileID = "3e88b107c4da"
 
     /// The catalog the host cards read their chips and pinned cards from. Seeded once, on the
-    /// first store build — `ProfileStore` is a singleton, and in shot mode its write-back is
+    /// first store build — `PresetStore` is a singleton, and in shot mode its write-back is
     /// suppressed, so this never reaches a real user's catalog.
-    static func installProfiles() {
-        guard !profilesInstalled else { return }
-        profilesInstalled = true
-        ProfileStore.shared.debugSet([
-            StreamProfile(name: "4K HDR", id: hdrProfileID, accent: "#8B7BF7"),
-            StreamProfile(name: "Couch 1080p", id: couchProfileID, accent: "#4FD1A5"),
+    static func installPresets() {
+        guard !presetsInstalled else { return }
+        presetsInstalled = true
+        PresetStore.shared.debugSet([
+            StreamPreset(name: "4K HDR", id: hdrProfileID, accent: "#8B7BF7"),
+            StreamPreset(name: "Couch 1080p", id: couchProfileID, accent: "#4FD1A5"),
         ])
     }
 
-    private static var profilesInstalled = false
+    private static var presetsInstalled = false
 
-    /// A populated saved-host grid: the most-recent host bound to a profile (its chip), a second
+    /// A populated saved-host grid: the most-recent host bound to a preset (its chip), a second
     /// paired machine, and one asleep box we hold a MAC for (so its card offers Wake-on-LAN). OS
     /// chains give every tile its real vendor mark instead of a letter monogram.
     ///
-    /// No PINNED host+profile card: it renders a second tile for the SAME host, which is the
+    /// No PINNED host+preset card: it renders a second tile for the SAME host, which is the
     /// feature working as designed but reads as a duplicate to anyone meeting the app in a store
-    /// listing. The binding chip carries the profile story on its own.
+    /// listing. The binding chip carries the preset story on its own.
     static func hostStore() -> HostStore {
-        installProfiles()
+        installPresets()
         let store = HostStore()
         store.hosts = [
             StoredHost(

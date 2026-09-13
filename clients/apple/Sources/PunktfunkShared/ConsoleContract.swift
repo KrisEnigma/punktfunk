@@ -51,10 +51,14 @@ public enum GpSettingsTab: String, CaseIterable, Hashable, Sendable {
     case audio = "Audio"
     case controller = "Controller"
     case interface = "Interface"
-    case profiles = "Profiles"
-    /// Trailing, like Profiles: both are built from something other than the settings store, and
+    case presets = "Profiles"
+    /// Trailing, like Presets: both are built from something other than the settings store, and
     /// About is where the strip ends because it is the one section that changes nothing.
     case about = "About"
+
+    /// What the strip shows. The raw value is the shared id, which says Profiles until the
+    /// console shells rename it.
+    public var title: String { self == .presets ? "Presets" : rawValue }
 
     /// The tabs this client shares with the vectors' list — everything but its own About.
     public static var shared: [GpSettingsTab] { allCases.filter { $0 != .about } }

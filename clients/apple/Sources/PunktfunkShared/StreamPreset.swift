@@ -19,11 +19,11 @@ import Foundation
 
 /// The catalog file's schema version. Bumped only for a breaking shape change — additive fields
 /// ride the unknown-key preservation below.
-public let punktfunkProfilesVersion = 1
+public let punktfunkPresetsVersion = 1
 
 // MARK: - Unknown-key carry-through
 
-/// A decoded-but-unmodelled JSON value. Exists only so an overlay (or a profile) written by a
+/// A decoded-but-unmodelled JSON value. Exists only so an overlay (or a preset) written by a
 /// NEWER build survives an open→save round-trip on an older one: the don't-clobber rule from the
 /// design's §4.1, and the reason the Rust overlay carries a `#[serde(flatten)] extra` map.
 public enum JSONValue: Codable, Equatable, Sendable {
@@ -82,7 +82,7 @@ private struct AnyKey: CodingKey {
 
 // MARK: - The overlay
 
-/// Every profileable ("tier P") setting, as an `Optional`: nil = inherit the global value, live.
+/// Every presetable ("tier P") setting, as an `Optional`: nil = inherit the global value, live.
 ///
 /// Tier-H fields (host properties like the per-host clipboard toggle) and tier-G ones (this
 /// device's hardware and audio endpoints) are deliberately absent — see the design's §3 curation.
@@ -104,12 +104,12 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
     public var hdrEnabled: Bool?
     public var compositor: Int?
     public var audioChannels: Int?
-    /// An `AudioFormatChoice` raw value — the audio format this profile asks the host for.
-    /// Profileable because it is about how a HOST is streamed (a wired desktop can afford
+    /// An `AudioFormatChoice` raw value — the audio format this preset asks the host for.
+    /// Presetable because it is about how a HOST is streamed (a wired desktop can afford
     /// lossless; a phone on cellular cannot), not about this device's hardware.
     ///
-    /// The Rust overlay (`pf-client-core::profiles`) carries the same `audio_format` key with the
-    /// same spellings, but its table stops at `opus`/`lossless48`/`lossless96`. A profile written
+    /// The Rust overlay (`pf-client-core::presets`) carries the same `audio_format` key with the
+    /// same spellings, but its table stops at `opus`/`lossless48`/`lossless96`. A preset written
     /// here as `lossless441` or `lossless882` round-trips there intact and plays as Opus, since an
     /// unrecognized value falls back to the default rather than failing the connect.
     public var audioFormat: String?
@@ -119,7 +119,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
     public var touchMode: String?
     public var mouseMode: String?
     public var invertScroll: Bool?
-    /// The whole ring blob (design/touch-client-overlay.md D10): a profile inherits the default
+    /// The whole ring blob (design/touch-client-overlay.md D10): a preset inherits the default
     /// ring entirely or owns its own ring and shortcuts.
     public var overlayActions: String?
     public var inhibitShortcuts: Bool?
@@ -146,8 +146,8 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
 
     public init() {}
 
-    /// True when the profile overrides nothing — "inherits everything", the state a freshly
-    /// created profile starts in. Unknown-key carry-through counts: a profile that only holds a
+    /// True when the preset overrides nothing — "inherits everything", the state a freshly
+    /// created preset starts in. Unknown-key carry-through counts: a preset that only holds a
     /// newer build's field is not empty.
     public var isEmpty: Bool { self == SettingsOverlay() }
 
@@ -388,24 +388,24 @@ public enum OverlayField {
     }
 }
 
-// MARK: - The profile
+// MARK: - The preset
 
 /// One named bundle of overrides. `id` is stable across renames — bindings, pins and deep links
 /// all point at it, never at the name.
-public struct StreamProfile: Codable, Equatable, Identifiable, Sendable {
+public struct StreamPreset: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     /// User-facing and editable; unique case-insensitively (menus are ambiguous otherwise —
-    /// enforced by the editing UIs via `ProfileCatalog.nameTaken`).
+    /// enforced by the editing UIs via `PresetCatalog.nameTaken`).
     public var name: String
     /// `#RRGGBB` chip color. The UI may ignore it; the schema reserves it (pinned cards use it
     /// to tint their subtitle).
     public var accent: String?
     public var overrides: SettingsOverlay
-    /// Profile keys a newer build wrote — preserved across a load→save round-trip.
+    /// Preset keys a newer build wrote — preserved across a load→save round-trip.
     public var extra: [String: JSONValue] = [:]
 
-    /// A new, empty profile: inherits everything (the right creation default under
-    /// inherit-by-exception — "Duplicate" covers starting from another profile).
+    /// A new, empty preset: inherits everything (the right creation default under
+    /// inherit-by-exception — "Duplicate" covers starting from another preset).
     public init(name: String, id: String = newProfileID(), accent: String? = nil,
                 overrides: SettingsOverlay = SettingsOverlay()) {
         self.id = id
@@ -453,21 +453,21 @@ public func newProfileID() -> String {
 // MARK: - The catalog
 
 /// What a `profile=` / `Connect with ▸` reference resolved to. Ambiguity is reported rather than
-/// guessed: a link naming two profiles must refuse, not pick one.
-public enum ProfileResolution: Equatable, Sendable {
+/// guessed: a link naming two presets must refuse, not pick one.
+public enum PresetResolution: Equatable, Sendable {
     case found
     case notFound
-    /// More than one profile carries this name (case-insensitively).
+    /// More than one preset carries this name (case-insensitively).
     case ambiguous
 }
 
-/// The profile catalog — client-wide, not per host: "Work" applied to three hosts is one
-/// profile, and the per-host part is only the binding on the host record.
-public struct ProfileCatalog: Codable, Equatable, Sendable {
+/// The preset catalog — client-wide, not per host: "Work" applied to three hosts is one
+/// preset, and the per-host part is only the binding on the host record.
+public struct PresetCatalog: Codable, Equatable, Sendable {
     public var version: Int
-    public var profiles: [StreamProfile]
+    public var profiles: [StreamPreset]
 
-    public init(version: Int = punktfunkProfilesVersion, profiles: [StreamProfile] = []) {
+    public init(version: Int = punktfunkPresetsVersion, profiles: [StreamPreset] = []) {
         self.version = version
         self.profiles = profiles
     }
@@ -475,48 +475,48 @@ public struct ProfileCatalog: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = (try? c.decodeIfPresent(Int.self, forKey: .version)) ?? 0
-        profiles = (try? c.decodeIfPresent([StreamProfile].self, forKey: .profiles)) ?? []
+        profiles = (try? c.decodeIfPresent([StreamPreset].self, forKey: .profiles)) ?? []
     }
 
-    /// The stored catalog, or an empty one — a missing or unreadable blob is "no profiles", never
+    /// The stored catalog, or an empty one — a missing or unreadable blob is "no presets", never
     /// an error: nothing about streaming may hinge on this key existing.
-    public static func load(from defaults: UserDefaults = AppGroup.defaults) -> ProfileCatalog {
+    public static func load(from defaults: UserDefaults = AppGroup.defaults) -> PresetCatalog {
         guard let data = defaults.data(forKey: DefaultsKey.profiles),
-              let catalog = try? JSONDecoder().decode(ProfileCatalog.self, from: data)
-        else { return ProfileCatalog(profiles: []) }
+              let catalog = try? JSONDecoder().decode(PresetCatalog.self, from: data)
+        else { return PresetCatalog(profiles: []) }
         return catalog
     }
 
     public func save(to defaults: UserDefaults = AppGroup.defaults) {
         var out = self
-        out.version = punktfunkProfilesVersion
+        out.version = punktfunkPresetsVersion
         guard let data = try? JSONEncoder().encode(out) else { return }
         defaults.set(data, forKey: DefaultsKey.profiles)
     }
 
-    public func profile(id: String) -> StreamProfile? {
+    public func preset(id: String) -> StreamPreset? {
         profiles.first { $0.id == id }
     }
 
-    /// The binding a host resolves to, dropping a dangling id: a profile deleted out from under a
-    /// host is "no profile" (today's behaviour), never an error and never a blocked connect.
-    public func binding(for host: StoredHost) -> StreamProfile? {
-        host.profileID.flatMap { profile(id: $0) }
+    /// The binding a host resolves to, dropping a dangling id: a preset deleted out from under a
+    /// host is "no preset" (today's behaviour), never an error and never a blocked connect.
+    public func binding(for host: StoredHost) -> StreamPreset? {
+        host.profileID.flatMap { preset(id: $0) }
     }
 
-    /// This host's pinned profiles, in card order, with duplicates and dangling ids dropped —
-    /// a pin is presentation only, so a deleted profile just loses its card.
-    public func pinned(for host: StoredHost) -> [StreamProfile] {
+    /// This host's pinned presets, in card order, with duplicates and dangling ids dropped —
+    /// a pin is presentation only, so a deleted preset just loses its card.
+    public func pinned(for host: StoredHost) -> [StreamPreset] {
         var seen = Set<String>()
         return (host.pinnedProfileIDs ?? [])
             .filter { seen.insert($0).inserted }
-            .compactMap { profile(id: $0) }
+            .compactMap { preset(id: $0) }
     }
 
     /// Resolve a reference the way every surface must: exact id first, then a unique
     /// case-insensitive name. Ambiguous names resolve to `.ambiguous`, never to the first match.
-    public func resolve(_ reference: String) -> (StreamProfile?, ProfileResolution) {
-        if let p = profile(id: reference) { return (p, .found) }
+    public func resolve(_ reference: String) -> (StreamPreset?, PresetResolution) {
+        if let p = preset(id: reference) { return (p, .found) }
         let hits = profiles.filter { $0.name.lowercased() == reference.lowercased() }
         switch hits.count {
         case 1: return (hits[0], .found)
@@ -525,8 +525,8 @@ public struct ProfileCatalog: Codable, Equatable, Sendable {
         }
     }
 
-    /// Is this name already used (case-insensitively) by a *different* profile? The create/rename
-    /// guard — `except` is the profile being renamed, so renaming "Work" to "work" is allowed.
+    /// Is this name already used (case-insensitively) by a *different* preset? The create/rename
+    /// guard — `except` is the preset being renamed, so renaming "Work" to "work" is allowed.
     public func nameTaken(_ name: String, except: String? = nil) -> Bool {
         profiles.contains {
             $0.name.lowercased() == name.lowercased() && $0.id != except

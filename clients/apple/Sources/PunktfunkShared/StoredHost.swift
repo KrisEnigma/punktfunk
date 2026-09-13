@@ -39,13 +39,13 @@ public struct StoredHost: Identifiable, Codable, Hashable, Sendable {
     /// keeps older saved JSON decoding — same forward-compat reason as `mgmtPort`). Honored only
     /// when the host advertises `HOST_CAP_CLIPBOARD`.
     public var clipboardSync: Bool?
-    /// This host's default settings profile (`StreamProfile.id`) — what a plain click/tap uses.
-    /// nil, or an id whose profile was deleted, resolves as "Default settings", i.e. exactly
+    /// This host's default settings preset (`StreamPreset.id`) — what a plain click/tap uses.
+    /// nil, or an id whose preset was deleted, resolves as "Default settings", i.e. exactly
     /// today's behaviour: a dangling binding is never an error and never blocks a connect
     /// (design/client-settings-profiles.md §4.4). Optional and appended last for the same
     /// widget-contract reason as `mgmtPort`.
     public var profileID: String?
-    /// Profiles pinned as additional cards for this host (design §5.2a), in card order. NOT the
+    /// Presets pinned as additional cards for this host (design §5.2a), in card order. NOT the
     /// default — that is `profileID`; a pin is presentation only, and duplicates and dangling ids
     /// are dropped when the cards are built. Optional for the same forward-compat reason.
     public var pinnedProfileIDs: [String]?

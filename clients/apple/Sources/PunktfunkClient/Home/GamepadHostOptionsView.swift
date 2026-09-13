@@ -28,8 +28,8 @@ import SwiftUI
 /// could hand "Remove" a different host than the one the user was looking at.
 struct HostOptionsTarget: Identifiable {
     let host: StoredHost
-    /// Non-nil ⇒ a pinned profile card rather than the host's own tile.
-    var profile: StreamProfile?
+    /// Non-nil ⇒ a pinned preset card rather than the host's own tile.
+    var profile: StreamPreset?
 
     /// Keyed on the CARD, not the host: a host and each of its pinned cards open different menus,
     /// and sharing an id would let one stand in for another mid-transition (the same rule
@@ -51,8 +51,8 @@ struct GamepadHostOptionsView: View {
     /// service pass; holding an index or a live lookup would let the menu retarget itself onto
     /// whichever host slid into that slot, and "Remove" must never be able to do that.
     let host: StoredHost
-    /// Non-nil ⇒ opened on a pinned profile card rather than the host's own tile.
-    var pinnedProfile: StreamProfile?
+    /// Non-nil ⇒ opened on a pinned preset card rather than the host's own tile.
+    var pinnedPreset: StreamPreset?
     /// Whether the host is reachable right now — decides whether Wake is worth offering.
     var isOnline = false
     /// Whether waking is possible at all (the setting is on, WoL is available, a MAC is known).
@@ -204,7 +204,7 @@ struct GamepadHostOptionsView: View {
     }
 
     private var title: String {
-        pinnedProfile.map { "\(host.displayName) · \($0.name)" } ?? host.displayName
+        pinnedPreset.map { "\(host.displayName) · \($0.name)" } ?? host.displayName
     }
 
     // MARK: - Rows
@@ -230,7 +230,7 @@ struct GamepadHostOptionsView: View {
 
     private var rows: [Row] {
         // A pinned card is a shortcut, not a host: everything host-level is deliberately absent.
-        if pinnedProfile != nil {
+        if pinnedPreset != nil {
             return [
                 Row(action: .unpin, label: "Unpin card", icon: "pin.slash"),
                 Row(action: .copyLink, label: copied ? "Copied" : "Copy link", icon: "link"),
@@ -331,7 +331,7 @@ struct GamepadHostOptionsView: View {
                 ? "Press again to remove — this can't be undone."
                 : "Delete this host, its pairing and its pinned cards from this device."
         case .unpin:
-            return "Remove this profile's card. The profile itself and the host are untouched."
+            return "Remove this preset's card. The preset itself and the host are untouched."
         case .cancel, .none:
             return ""
         }
@@ -391,7 +391,7 @@ struct GamepadHostOptionsView: View {
             performClose()
         case .copyLink:
             LinkClipboard.copy(
-                DeepLink.forHost(host, profile: pinnedProfile?.id).urlString)
+                DeepLink.forHost(host, profile: pinnedPreset?.id).urlString)
             // No toast machinery on this surface — the row says so itself, which is the same
             // acknowledgement in the place the user is already looking.
             withAnimation(.smooth(duration: 0.2)) { copied = true }

@@ -15,25 +15,25 @@
 //     its Reset action below are not optional garnish: without them a profile is a one-way door.
 //
 // Tier-G/H rows (this device's endpoints and hardware, properties of a host) simply don't render
-// in profile scope — see §3's curation and `isProfileable` at each call site.
+// in profile scope — see §3's curation and `isPresetable` at each call site.
 
 import PunktfunkKit
 import SwiftUI
 
 /// Which layer the settings surface is editing.
 enum SettingsScope: Equatable, Hashable {
-    /// The global defaults every profile inherits from — the only scope before this feature.
+    /// The global defaults every preset inherits from — the only scope before this feature.
     case defaults
-    /// One profile's overrides, by id.
-    case profile(String)
+    /// One preset's overrides, by id.
+    case preset(String)
 
     var profileID: String? {
-        if case .profile(let id) = self { return id }
+        if case .preset(let id) = self { return id }
         return nil
     }
 }
 
-/// One profileable setting, in the one place that knows all three of its faces: the
+/// One presetable setting, in the one place that knows all three of its faces: the
 /// `UserDefaults` key its global lives under, the overlay slot an override lives in, and the
 /// serialized name a per-row reset carries. Keeping them together is what stops a row from
 /// writing an override the reset button can't find.
@@ -46,7 +46,7 @@ struct SettingsField<Value> {
     let effective: KeyPath<EffectiveSettings, Value>
 }
 
-/// The catalog of profileable rows. A plain namespace rather than statics on the generic
+/// The catalog of presetable rows. A plain namespace rather than statics on the generic
 /// `SettingsField` itself: members of a generic type can't have their parameter inferred from the
 /// member alone, so every call site would need to spell the type out anyway.
 enum SettingsFields {
@@ -186,15 +186,15 @@ enum SettingsFields {
 extension SettingsView {
     // MARK: - The layer being edited
 
-    var activeProfile: StreamProfile? {
-        scope.profileID.flatMap { profiles.profile(id: $0) }
+    var activePreset: StreamPreset? {
+        scope.profileID.flatMap { profiles.preset(id: $0) }
     }
 
-    /// True while a profile is being edited — the gate every tier-G/H row is hidden behind.
-    var inProfileScope: Bool { activeProfile != nil }
+    /// True while a preset is being edited — the gate every tier-G/H row is hidden behind.
+    var inPresetScope: Bool { activePreset != nil }
 
     /// What every row displays: the globals as this view's `@AppStorage` sees them (so SwiftUI
-    /// tracks each of them), with the edited profile's overrides on top. A row the profile doesn't
+    /// tracks each of them), with the edited preset's overrides on top. A row the preset doesn't
     /// override therefore reads as the LIVE global, which is what inherit-by-default has to look
     /// like.
     var effective: EffectiveSettings {
@@ -238,14 +238,14 @@ extension SettingsView {
         #if os(iOS)
         base.touchMode = touchMode
         #endif
-        guard let profile = activeProfile else { return base }
+        guard let profile = activePreset else { return base }
         return base.applying(profile.overrides)
     }
 
     // MARK: - Scoped bindings
 
     /// A control's binding for whichever layer is being edited: `UserDefaults` in defaults scope,
-    /// the profile's overlay in profile scope.
+    /// the preset's overlay in preset scope.
     ///
     /// The setter always WRITES on touch. It never compares the new value against the global to
     /// decide whether to record an override — that comparison is exactly the "copy the settings"
@@ -275,10 +275,10 @@ extension SettingsView {
 
     // MARK: - Override markers + per-row reset
 
-    /// Does the edited profile override this row? False in defaults scope, where there is nothing
+    /// Does the edited preset override this row? False in defaults scope, where there is nothing
     /// to inherit from.
     func isOverridden(_ name: String) -> Bool {
-        guard let profile = activeProfile else { return false }
+        guard let profile = activePreset else { return false }
         return OverlayField.isOverridden(name, in: profile.overrides)
     }
 
@@ -329,19 +329,19 @@ extension SettingsView {
 
     // MARK: - The scope switcher
 
-    /// The menu itself — which layer to edit, plus the edited profile's own management actions.
+    /// The menu itself — which layer to edit, plus the edited preset's own management actions.
     /// ONE definition, two chromes: the macOS preferences window heads itself with a button menu
     /// (`scopeSwitcher`), while iOS puts a value row at the top of the settings list
     /// (`scopeRow`) — a form sheet has no window header to hang a button off, and a bordered
     /// button dropped into a `List` renders as neither a row nor a control.
     ///
-    /// Absent on tvOS: controller-first surfaces honor profiles and render pinned cards, but don't
+    /// Absent on tvOS: controller-first surfaces honor presets and render pinned cards, but don't
     /// EDIT them in v1 (design §5.4) — a name prompt and a nested management menu are not what a
     /// remote does well, and the pattern should prove itself on the primary surfaces first.
     @ViewBuilder
     var scopeMenuContent: some View {
         // A Picker rather than hand-rolled buttons: the platform owns the selection checkmark
-        // and draws it in its OWN column, which leaves each row's icon free to be the profile's
+        // and draws it in its OWN column, which leaves each row's icon free to be the preset's
         // colour chip. Rolling the selection by hand would have cost one or the other.
         Picker("Editing", selection: scopeSelection) {
             Label("Default settings", systemImage: "gearshape")
@@ -358,33 +358,33 @@ extension SettingsView {
                         Image(systemName: "circle.fill")
                     }
                 }
-                .tag(SettingsScope.profile(profile.id))
+                .tag(SettingsScope.preset(profile.id))
             }
         }
         .pickerStyle(.inline)
         Divider()
-        // Three actions, one sheet. A profile is a name and a colour; deciding them in separate
-        // menu items — each raising its own bare alert — is how "make a Work profile" became four
+        // Three actions, one sheet. A preset is a name and a colour; deciding them in separate
+        // menu items — each raising its own bare alert — is how "make a Work preset" became four
         // trips through this menu.
         Button {
-            profileDraft = .create()
+            presetDraft = .create()
         } label: {
-            Label("New Profile…", systemImage: "plus")
+            Label("New Preset…", systemImage: "plus")
         }
-        if let active = activeProfile {
+        if let active = activePreset {
             Button {
-                profileDraft = .edit(active)
+                presetDraft = .edit(active)
             } label: {
                 Label("Edit “\(active.name)”…", systemImage: "pencil")
             }
             Button {
-                profileDraft = .duplicate(active, name: Self.copyName(of: active.name, in: profiles))
+                presetDraft = .duplicate(active, name: Self.copyName(of: active.name, in: profiles))
             } label: {
                 Label("Duplicate “\(active.name)”…", systemImage: "plus.square.on.square")
             }
             Divider()
             Button(role: .destructive) {
-                profilePendingDelete = active
+                presetPendingDelete = active
             } label: {
                 Label {
                     Text("Delete “\(active.name)”…")
@@ -403,13 +403,13 @@ extension SettingsView {
 
     /// The name of the layer being edited, and one line on what editing it means. Shared by both
     /// chromes — the caption is a stacked line on macOS and the list section's footer on iOS.
-    var scopeName: String { activeProfile?.name ?? "Default settings" }
+    var scopeName: String { activePreset?.name ?? "Default settings" }
 
-    /// The edited layer as a glyph: a profile's own colour, or the settings gear for the
+    /// The edited layer as a glyph: a preset's own colour, or the settings gear for the
     /// defaults. Colour is only worth choosing if it shows up where you chose it.
     @ViewBuilder
     var scopeDot: some View {
-        if let profile = activeProfile {
+        if let profile = activePreset {
             Circle()
                 .fill(profile.accentColor)
                 .frame(width: 9, height: 9)
@@ -421,16 +421,16 @@ extension SettingsView {
     }
 
     var scopeCaption: String {
-        activeProfile == nil
-            ? "The settings every profile inherits from."
-            : "Overrides Default settings for hosts that use this profile. Untouched rows keep "
+        activePreset == nil
+            ? "The settings every preset inherits from."
+            : "Overrides Default settings for hosts that use this preset. Untouched rows keep "
                 + "following the defaults."
     }
 
     #if os(macOS)
     /// The control that heads the preferences window.
     var scopeSwitcher: some View {
-        profilePrompts(
+        presetPrompts(
             VStack(alignment: .leading, spacing: 4) {
                 Menu { scopeMenuContent } label: {
                     HStack(spacing: 6) {
@@ -442,7 +442,7 @@ extension SettingsView {
                 .fixedSize()
                 // Same reason as the host grid's sort menu: a Menu draws its label — and the
                 // icons of everything inside it — in the ACCENT colour, which put a purple wash
-                // over a control whose only meaningful colour is the profile chips. Those are
+                // over a control whose only meaningful colour is the preset chips. Those are
                 // rendered bitmaps (see MenuIcon), so they keep their colour; the decoration
                 // loses its. macOS only — iOS menus already draw their icons in the label colour.
                 .tint(.primary)
@@ -460,7 +460,7 @@ extension SettingsView {
     /// the row — stacked inside the row it wrapped to four lines and made the first thing on the
     /// screen a block of text.
     var scopeRow: some View {
-        profilePrompts(
+        presetPrompts(
             Menu { scopeMenuContent } label: {
                 HStack(spacing: 8) {
                     Text("Editing")
@@ -482,37 +482,37 @@ extension SettingsView {
     #endif
 
     /// The editor and the delete confirmation, attached wherever the menu lives.
-    private func profilePrompts<Content: View>(_ content: Content) -> some View {
+    private func presetPrompts<Content: View>(_ content: Content) -> some View {
         content
-            .sheet(item: $profileDraft) { draft in
-                ProfileEditorSheet(draft: draft) { scope = $0 }
+            .sheet(item: $presetDraft) { draft in
+                PresetEditorSheet(draft: draft) { scope = $0 }
             }
             // Deleting warns with what it changes (§6): bound hosts fall back to Default settings
             // and pinned cards disappear. Neither is an error, but neither should be a surprise —
             // so the counts are in the question, not discovered afterwards.
             .alert(
-                "Delete “\(profilePendingDelete?.name ?? "")”?",
-                isPresented: profileDeletePresented,
-                presenting: profilePendingDelete
+                "Delete “\(presetPendingDelete?.name ?? "")”?",
+                isPresented: presetDeletePresented,
+                presenting: presetPendingDelete
             ) { profile in
-                Button("Cancel", role: .cancel) { profilePendingDelete = nil }
+                Button("Cancel", role: .cancel) { presetPendingDelete = nil }
                 Button("Delete", role: .destructive) {
                     profiles.delete(profile.id)
                     scope = .defaults
-                    profilePendingDelete = nil
+                    presetPendingDelete = nil
                 }
             } message: { profile in
                 Text(deleteWarning(for: profile))
             }
     }
 
-    private var profileDeletePresented: Binding<Bool> {
+    private var presetDeletePresented: Binding<Bool> {
         Binding(
-            get: { profilePendingDelete != nil },
-            set: { if !$0 { profilePendingDelete = nil } })
+            get: { presetPendingDelete != nil },
+            set: { if !$0 { presetPendingDelete = nil } })
     }
 
-    private func deleteWarning(for profile: StreamProfile) -> String {
+    private func deleteWarning(for profile: StreamPreset) -> String {
         let (bound, pinned) = profiles.usage(of: profile.id)
         var parts: [String] = []
         if bound > 0 {
@@ -521,7 +521,7 @@ extension SettingsView {
         if pinned > 0 {
             parts.append("\(pinned) pinned card\(pinned == 1 ? "" : "s") will disappear")
         }
-        guard !parts.isEmpty else { return "Nothing uses this profile yet." }
+        guard !parts.isEmpty else { return "Nothing uses this preset yet." }
         return parts.joined(separator: ", ") + "."
     }
 
@@ -533,7 +533,7 @@ extension SettingsView {
 
     /// "Game copy", "Game copy 2", … — the first name that isn't taken, so Duplicate never opens
     /// with a name the accept button refuses.
-    private static func copyName(of name: String, in store: ProfileStore) -> String {
+    private static func copyName(of name: String, in store: PresetStore) -> String {
         let base = "\(name) copy"
         if !store.nameTaken(base) { return base }
         for n in 2...99 where !store.nameTaken("\(base) \(n)") { return "\(base) \(n)" }

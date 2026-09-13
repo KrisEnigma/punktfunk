@@ -28,7 +28,7 @@ private struct SlotGroup: Identifiable {
     let options: [SlotOption]
 }
 
-/// The catalogue by group (§3.3), with each entry's availability note. The profile's own
+/// The catalogue by group (§3.3), with each entry's availability note. The preset's own
 /// shortcuts and the empty slot are appended per config.
 private let builtinGroups: [SlotGroup] = [
     .init(id: "Session", options: [
@@ -56,7 +56,7 @@ private let builtinGroups: [SlotGroup] = [
 
 #if os(macOS)
 /// The slots a Mac cannot serve, said once in the catalogue so a dimmed disc is never a surprise
-/// found after picking it. The profile still syncs — an iPhone on the same profile runs them.
+/// found after picking it. The preset still syncs — an iPhone on the same preset runs them.
 private let noMacNote: String? = "Not on a Mac — no touch screen"
 private let macKeyboardNote: String? = "Not on a Mac — use its own keyboard"
 /// The pointer verb, so the instructions name what the reader is actually holding.
@@ -104,10 +104,10 @@ private let previewHosts = [
 struct QuickActionsEditor: View {
     /// The `overlay_actions` blob of the layer being edited; empty is the platform default.
     @Binding var blob: String
-    /// The edited profile owns its own ring (the row's override marker says so; this says it
+    /// The edited preset owns its own ring (the row's override marker says so; this says it
     /// under the ring).
     let overridden: Bool
-    /// Back to the platform ring: drops the override in profile scope, clears the global
+    /// Back to the platform ring: drops the override in preset scope, clears the global
     /// otherwise.
     let reset: () -> Void
     @StateObject private var ring = RingState()
@@ -168,7 +168,7 @@ struct QuickActionsEditor: View {
                 // system footer style renders larger than every other settings caption.
                 Text(overridden
                      ? "\(pickVerb) a button to change it, drag one onto another to swap. "
-                       + "This profile has its own quick actions; the default dial no longer reaches it."
+                       + "This preset has its own quick actions; the default dial no longer reaches it."
                      : "\(pickVerb) a button to change it, drag one onto another to swap.")
                     .font(.geist(13, relativeTo: .footnote))
             }

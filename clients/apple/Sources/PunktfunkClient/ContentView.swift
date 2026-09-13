@@ -20,9 +20,9 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var model = SessionModel()
     @ObservedObject private var store = HostStore.shared
-    /// The settings-profile catalog (design/client-settings-profiles.md §4.2) — read at every
+    /// The settings-preset catalog (design/client-settings-profiles.md §4.2) — read at every
     /// connect to resolve the session's `EffectiveSettings`, and edited by the settings surface.
-    @ObservedObject private var profiles = ProfileStore.shared
+    @ObservedObject private var profiles = PresetStore.shared
     @StateObject private var discovery = HostDiscovery()
     // The dev auto-connect hook (DEBUG-only — see `autoConnectIfAsked`) writes these three, so
     // they stay observed here; every OTHER stream setting reaches a session through
@@ -36,14 +36,14 @@ struct ContentView: View {
     @AppStorage(DefaultsKey.statsVerbosity) private var statsVerbosityRaw
         = StatsVerbosity.current.rawValue
     @AppStorage(DefaultsKey.hudPlacement) private var hudPlacement = HUDPlacement.topTrailing.rawValue
-    /// The tier the overlay actually shows: the live session's (its profile's, then whatever the
+    /// The tier the overlay actually shows: the live session's (its preset's, then whatever the
     /// ⌃⌥⇧S/three-finger cycle moved it to) while streaming, the persisted global otherwise.
     private var statsVerbosity: StatsVerbosity {
         model.connection != nil
             ? model.statsVerbosity
             : (StatsVerbosity(rawValue: statsVerbosityRaw) ?? .normal)
     }
-    /// Fullscreen-while-streaming is profileable (a Game profile goes fullscreen, a Work one
+    /// Fullscreen-while-streaming is presetable (a Game preset goes fullscreen, a Work one
     /// doesn't), so a live session obeys ITS value and the host list obeys the global.
     private var fullscreenForSession: Bool {
         model.connection != nil ? model.settings.fullscreenWhileStreaming : fullscreenWhileStreaming
@@ -62,7 +62,7 @@ struct ContentView: View {
     private struct DeepLinkConfirm {
         let host: StoredHost
         let launch: String?
-        let profile: ProfileSelection
+        let profile: PresetSelection
         /// A `browse` link: open the host's library instead of dialing it.
         let browse: Bool
 
@@ -238,7 +238,7 @@ struct ContentView: View {
                     + "console (port 47992 → Pairing). This device connects automatically once you "
                     + "approve it — no need to reconnect.")
             }
-            // Informational deep-link outcome (unknown host, a refused profile, already
+            // Informational deep-link outcome (unknown host, a refused preset, already
             // streaming). Not an error.
             .alert("Can't open", isPresented: deepLinkNoticePresented) {
                 Button("OK", role: .cancel) {}
@@ -793,7 +793,7 @@ struct ContentView: View {
     /// confirmation, not a connect), never dials on a GUESSABLE reference (only the stable record
     /// id connects unattended — a label or an address becomes a confirmation), never preempts a
     /// live session (same host → focus, different host → say so; NEVER tear one down on a
-    /// background tap), and carries only references — a profile it can't honor refuses with a
+    /// background tap), and carries only references — a preset it can't honor refuses with a
     /// notice rather than streaming with the wrong settings.
     private func handleDeepLink(_ url: URL) {
         // Explicit intent beats the start-screen policy, and the two race on a cold start:
@@ -817,7 +817,7 @@ struct ContentView: View {
         case .browse:
             // The reserved library route, now real: open the host's game library without starting
             // a session. `launch=`/`profile=` are meaningless on a browse (nothing streams until a
-            // title is picked, and that connect resolves its own profile) — ignored, not refused,
+            // title is picked, and that connect resolves its own preset) — ignored, not refused,
             // per the unknown-parameter rule.
             openLibrary(from: link)
             return
@@ -1396,7 +1396,7 @@ struct ContentView: View {
     /// in the edit sheet (design §5.2).
     private func connect(
         _ host: StoredHost, launchID: String? = nil,
-        profile: ProfileSelection = .inherit, allowTofu: Bool? = nil,
+        profile: PresetSelection = .inherit, allowTofu: Bool? = nil,
         fromLibrary: Bool = false
     ) {
         // A pinned host connects on its stored fingerprint; an unpinned host may only TOFU when
@@ -1428,7 +1428,7 @@ struct ContentView: View {
     /// connect (host parks it until the operator approves).
     private func startSession(
         _ host: StoredHost, launchID: String? = nil,
-        profile: ProfileSelection = .inherit,
+        profile: PresetSelection = .inherit,
         allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil,
         fromLibrary: Bool = false
     ) {
@@ -1471,7 +1471,7 @@ struct ContentView: View {
     /// failure back to the caller (the wake-wait fallback) instead of the error alert.
     private func startSessionDirect(
         _ host: StoredHost, launchID: String? = nil,
-        profile: ProfileSelection = .inherit,
+        profile: PresetSelection = .inherit,
         allowTofu: Bool, requestAccess: Bool = false, approvalReq: ApprovalRequest? = nil,
         fromLibrary: Bool = false,
         onUnreachable: (@MainActor () -> Void)? = nil
@@ -1480,9 +1480,9 @@ struct ContentView: View {
         // The delegated-approval wait prompt only makes sense once we're actually dialing — set it
         // here (after any wake), not before, so it never stacks under the "Waking…" overlay.
         if let approvalReq { awaitingApproval = approvalReq }
-        // THE resolution point (design §4.4): the globals plus this connect's profile, once, here.
+        // THE resolution point (design §4.4): the globals plus this connect's preset, once, here.
         // The model latches the result for the whole session, so nothing downstream can end up
-        // applying a profile to half of it.
+        // applying a preset to half of it.
         let effective = EffectiveSettings.resolve(
             host: host, selection: profile, catalog: profiles.catalog)
         model.connect(
@@ -1493,7 +1493,7 @@ struct ContentView: View {
                     rawValue: UInt32(clamping: effective.gamepadType)) ?? .auto),
             launchID: launchID,
             // Where this session goes back to when it ends: the shelf it started from — the
-            // host's own, or the pinned card whose profile it is using. nil for a connect that
+            // host's own, or the pinned card whose preset it is using. nil for a connect that
             // did NOT come off a shelf, which is what keeps a plain host-list connect ending on
             // the host list.
             shelf: launchID != nil || fromLibrary
@@ -1557,8 +1557,8 @@ struct ContentView: View {
     /// Picked a title in the (experimental) library: dismiss the browser and start a session that
     /// asks the host to launch it.
     /// A title picked on a library shelf: dial its host, booting straight into that title — with
-    /// the shelf's profile. A pinned card's shelf carries its card's profile as the one-off, so a
-    /// launch made there streams with the profile the card promises; the host's own shelf carries
+    /// the shelf's preset. A pinned card's shelf carries its card's preset as the one-off, so a
+    /// launch made there streams with the preset the card promises; the host's own shelf carries
     /// `.inherit` and the binding decides, exactly as a plain card tap does.
     private func launchTitle(_ shelf: LibraryTarget, _ id: String) {
         libraryTarget = nil

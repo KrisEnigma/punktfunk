@@ -138,20 +138,20 @@ final class SessionModel: ObservableObject {
     /// in that library when its game exits, not on the host-selection screen.
     private var launchedTitleID: String?
     /// WHICH library shelf that title was launched from — a host's own, or one of its pinned
-    /// host+profile cards (§5.2a). The host alone would not answer it: a pinned card's shelf
-    /// launches with that card's profile, so returning to the host's default shelf would quietly
+    /// host+preset cards (§5.2a). The host alone would not answer it: a pinned card's shelf
+    /// launches with that card's preset, so returning to the host's default shelf would quietly
     /// change what the next title streams with.
     private var launchedShelf: LibraryTarget?
     /// Set when a session ended because its game exited and it began as a library launch: the
     /// shelf to reopen. The view layer consumes it and sets it back to nil.
     @Published var returnToLibrary: LibraryTarget?
-    /// The settings THIS session runs on — the globals with its profile overlaid, resolved once at
+    /// The settings THIS session runs on — the globals with its preset overlaid, resolved once at
     /// connect (design/client-settings-profiles.md §4.2). Also mirrored into `SessionSettings` for
     /// the readers that live in PunktfunkKit and can't see this model.
     @Published private(set) var settings = EffectiveSettings()
     /// The stats-overlay tier for this session: the resolved one at connect, then whatever the
     /// live cycle surfaces (⌃⌥⇧S, the three-finger tap) move it to. Separate from the @AppStorage
-    /// global so a profile that overrides the tier actually gets it, without the cycle breaking.
+    /// global so a preset that overrides the tier actually gets it, without the cycle breaking.
     @Published var statsVerbosity: StatsVerbosity = .normal
     @Published var errorMessage: String?
     /// The stats overlay's lines for the live tier and vocabulary: formatted by the core each
@@ -352,7 +352,7 @@ final class SessionModel: ObservableObject {
     /// advertising). It never fires for the delegated-approval path, whose failure text carries
     /// its own instructions.
     /// `effective` is the whole stream mode + input/audio configuration for this session, already
-    /// resolved from the globals and the session's profile by the caller — the ONE place that
+    /// resolved from the globals and the session's preset by the caller — the ONE place that
     /// resolution happens (§4.4). It is latched into `SessionSettings` here so the kit-side
     /// readers (the presenter, the input paths, the match-window follower) see the same values
     /// this connect asked the host for, instead of re-reading the globals mid-session.
@@ -653,7 +653,7 @@ final class SessionModel: ObservableObject {
     // MARK: - Microphone mute (in-stream, per session)
 
     /// Whether this session has a mic uplink there is any point in muting: the mic must be on in
-    /// the session's RESOLVED settings (a profile can turn it on or off), the platform must have
+    /// the session's RESOLVED settings (a preset can turn it on or off), the platform must have
     /// an app-accessible input at all, and the OS must not have refused us one. Drives whether the
     /// mute control is offered — a live-looking mute button over a session that sends no
     /// microphone would be a lie. Same three conditions `SessionAudio` starts an uplink on
@@ -812,7 +812,7 @@ final class SessionModel: ObservableObject {
 
     /// Follow a live stats-overlay cycle (⌃⌥⇧S, the three-finger tap, the Stream menu). Those
     /// surfaces write the GLOBAL setting as they always have; this moves the session's own tier
-    /// with it, so cycling still works in a session a profile put on a different tier.
+    /// with it, so cycling still works in a session a preset put on a different tier.
     func setStatsVerbosity(_ tier: StatsVerbosity) {
         guard statsVerbosity != tier else { return }
         statsVerbosity = tier
@@ -846,7 +846,7 @@ final class SessionModel: ObservableObject {
         // out the cache's TTL naming the game the user just left.
         if let host = activeHost { NowPlayingStore.shared.invalidate(host) }
         // Release the session's resolved settings: from here every reader falls back to the plain
-        // globals, which is exactly what they saw before profiles existed.
+        // globals, which is exactly what they saw before presets existed.
         SessionSettings.end()
         // No-op when this session never reached `.streaming` (a refused/aborted connect).
         displaySleepGuard.release()
@@ -1081,7 +1081,7 @@ final class SessionModel: ObservableObject {
         displaySleepGuard.acquire()
         // Audio starts with streaming, not during the trust prompt — no host sound (or
         // mic uplink!) before the user trusted the host. Devices and the mic switch come from the
-        // session's resolved settings ("" = system default), so a profile that turns the mic on
+        // session's resolved settings ("" = system default), so a preset that turns the mic on
         // for work calls applies to the uplink too.
         let audio = SessionAudio(connection: conn)
         audio.start(
@@ -1263,7 +1263,7 @@ final class SessionModel: ObservableObject {
     }
 
     /// What only the app knows: the floor policy (macOS presents straight to the display, so
-    /// nothing is shaved there), this app's audio ring, the profile, and the Apple-only lines.
+    /// nothing is shaved there), this app's audio ring, the preset, and the Apple-only lines.
     private func hudFacts() -> PunktfunkConnection.HudFacts {
         var f = PunktfunkConnection.HudFacts()
         #if os(macOS)
@@ -1275,7 +1275,7 @@ final class SessionModel: ObservableObject {
             f.audioBufferMs = UInt32(clamping: a.bufferMS)
             f.avOffsetMs = Int32(clamping: a.avOffsetMS)
         }
-        f.profile = settings.profileName
+        f.profile = settings.presetName
         // The deadline link's ask beside its readback: a readback that differs is the one clamp
         // signal the API gives, and on tvOS the screen is the only place to read it.
         if let l = PresentLinkInfo.shared.snapshot() {

@@ -52,7 +52,7 @@ struct StreamCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Stream") {
-            // Through the shared cycle so it advances from the LIVE session's tier — a profile
+            // Through the shared cycle so it advances from the LIVE session's tier — a preset
             // that starts a session on Detailed must cycle to Off from here, not from whatever
             // the global default happens to be.
             Button("Cycle Statistics") { StatsVerbosity.cycle() }

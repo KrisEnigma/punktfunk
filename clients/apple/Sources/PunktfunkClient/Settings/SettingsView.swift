@@ -22,14 +22,14 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     // Which LAYER this surface is editing (SettingsView+Scope): the global defaults, or one
-    // profile's overrides. tvOS keeps defaults-only in v1 — controller-first surfaces honor
-    // profiles and render pinned cards, but don't edit them (design §5.4).
-    @ObservedObject var profiles = ProfileStore.shared
+    // preset's overrides. tvOS keeps defaults-only in v1 — controller-first surfaces honor
+    // presets and render pinned cards, but don't edit them (design §5.4).
+    @ObservedObject var profiles = PresetStore.shared
     @State var scope: SettingsScope = .defaults
-    /// The profile editor (create / duplicate / edit), when it is open, and the profile a delete
+    /// The preset editor (create / duplicate / edit), when it is open, and the preset a delete
     /// is being confirmed for.
-    @State var profileDraft: ProfileDraft?
-    @State var profilePendingDelete: StreamProfile?
+    @State var presetDraft: PresetDraft?
+    @State var presetPendingDelete: StreamPreset?
     /// The menu's icons are rasterised per appearance (see `MenuIcon`), so the surface has to know
     /// which one it is drawing in.
     @Environment(\.colorScheme) var colorScheme

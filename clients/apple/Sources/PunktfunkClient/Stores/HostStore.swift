@@ -245,16 +245,16 @@ final class HostStore: ObservableObject {
         hosts[i].mgmtPort = port
     }
 
-    /// Bind this host to a settings profile, or to "Default settings" (nil) — the ONLY way the
+    /// Bind this host to a settings preset, or to "Default settings" (nil) — the ONLY way the
     /// default changes. A one-off "Connect with ▸" deliberately never lands here (§5.2:
     /// predictable, not sticky).
-    func setProfile(_ hostID: UUID, profileID: String?) {
+    func setPreset(_ hostID: UUID, profileID: String?) {
         guard let i = hosts.firstIndex(where: { $0.id == hostID }) else { return }
         hosts[i].profileID = profileID
     }
 
-    /// Pin or unpin a host+profile combo as its own card (§5.2a). Presentation only: it never
-    /// touches the default binding or the profile itself. nil stays out of the saved JSON when
+    /// Pin or unpin a host+preset combo as its own card (§5.2a). Presentation only: it never
+    /// touches the default binding or the preset itself. nil stays out of the saved JSON when
     /// nothing is pinned, so the widget contract sees no new key for the common case.
     func setPinned(_ hostID: UUID, profileID: String, pinned: Bool) {
         guard let i = hosts.firstIndex(where: { $0.id == hostID }) else { return }

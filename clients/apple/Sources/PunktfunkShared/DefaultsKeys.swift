@@ -173,11 +173,11 @@ public enum DefaultsKey {
     public static let tenBitSdr = "punktfunk.tenBitSdr"
     public static let hosts = "punktfunk.hosts"
     /// How the host grid is ordered (a `HostSort` raw value) and what it's divided by (a
-    /// `HostGrouping`). Per device, never per profile: it is this device's window on its own
+    /// `HostGrouping`). Per device, never per preset: it is this device's window on its own
     /// list, not something about how a host is streamed.
     public static let hostSort = "punktfunk.hostSort"
     public static let hostGrouping = "punktfunk.hostGrouping"
-    /// The settings-profile catalog (`ProfileCatalog`, one JSON blob) — design
+    /// The settings-preset catalog (`PresetCatalog`, one JSON blob) — design
     /// client-settings-profiles.md §4.2. Lives in the APP GROUP suite with `hosts`, not with the
     /// settings: bindings and pins are fields on the host record, and an extension that can read
     /// the hosts should be able to read what they point at.
@@ -195,7 +195,7 @@ public enum DefaultsKey {
     public static let invertScroll = "punktfunk.invertScroll"
     /// The in-stream quick-action ring: one JSON blob parsed by `OverlayConfig.parse` (six slots,
     /// shortcuts, the virtual pad's preset). Empty = the platform default ring. Cross-client
-    /// `overlay_actions`, profileable as the whole blob.
+    /// `overlay_actions`, presetable as the whole blob.
     public static let overlayActions = "punktfunk.overlayActions"
     /// Location-based modifier mapping (a `ModifierLayout` value, default `.mac`): which Windows VK
     /// each PHYSICAL modifier position forwards to the host. `.mac` keeps ⌥ Option → Alt and
@@ -211,7 +211,7 @@ public enum DefaultsKey {
     /// the Windows key); macOS has no such grab from a plain app, so `InputCapture`'s keyDown
     /// monitor implements it by taking every ⌘ chord off AppKit before a menu key equivalent can
     /// fire and forwarding it instead — which is what makes ⌘Q reach the host's compositor rather
-    /// than quitting the client. Off keeps the chords local (the second-screen/work profile).
+    /// than quitting the client. Off keeps the chords local (the second-screen/work preset).
     /// The client's own reserved chords (⌘⎋, ⌃⌘F, ⌃⌥⇧…) are never forwarded either way, and — as
     /// on the SDL clients — the setting has no effect under the `desktop` mouse model, which is
     /// something you ⌘Tab *away* from. macOS-only today; nothing reads it on iOS/tvOS.
@@ -235,7 +235,7 @@ public enum DefaultsKey {
     /// (`"host"` = the host's own order, the default; `"title"` A–Z; `"platform"`; `"store"`).
     /// The cross-client `library_sort` key: the desktop console persists the same ids, and an
     /// unknown value reads as host order. Presentation only — a device preference, never part of
-    /// a stream profile. Written by the library's sort/view bar and by the Collections screen.
+    /// a stream preset. Written by the library's sort/view bar and by the Collections screen.
     public static let librarySort = "punktfunk.librarySort"
     /// Which arrangement the gamepad library opens in — a `LibraryArrangement` stored value
     /// (`"shelf"` = the coverflow, the default; `"grid"`). The cross-client `library_view` key;
@@ -250,7 +250,7 @@ public enum DefaultsKey {
     /// Where a bare launch opens — a `StartIn` stored value (`"hosts"` the default, `"library"`,
     /// `"stream"`). The cross-client `start_in` key; unknown reads as hosts, and with no default
     /// host every value degrades to the host list. Resolve through `StartScreen.resolve`, never by
-    /// reading this alone. Presentation only — a device preference, never part of a profile.
+    /// reading this alone. Presentation only — a device preference, never part of a preset.
     public static let startIn = "punktfunk.startIn"
     /// The host a bare launch opens on — a `StoredHost.id` uuid string, absent when there is none.
     /// The cross-client `default_host` key. Only half the answer: with exactly one paired host
@@ -277,7 +277,7 @@ public enum DefaultsKey {
     /// ("topLeading"/"topTrailing"/"bottomLeading"/"bottomTrailing"). Default top-trailing.
     public static let hudPlacement = "punktfunk.hudPlacement"
     /// The stats overlay's vocabulary: false (default) shows the figures Moonlight's overlay also
-    /// shows, true the Advanced capture-to-glass view. Device-wide; a profile never carries it.
+    /// shows, true the Advanced capture-to-glass view. Device-wide; a preset never carries it.
     public static let advancedStats = "punktfunk.advancedStats"
     /// iOS/iPadOS/macOS: switch the host list, settings and game library to a controller-friendly
     /// layout (the console launcher, gamepad-navigable settings, a coverflow-style library).
@@ -288,13 +288,13 @@ public enum DefaultsKey {
     /// for someone who prefers the console layout with no pad in reach (a TV-connected iPad, a
     /// Mac driven from the couch). Read only while `gamepadUIEnabled` is on, which is why the
     /// settings rows hide it when the switch is off. Anything unrecognized reads as
-    /// `"connected"`. A device preference, never part of a stream profile.
+    /// `"connected"`. A device preference, never part of a stream preset.
     public static let gamepadUIMode = "punktfunk.gamepadUIMode"
     /// Which colour family the gamepad UI's living backdrop drifts through — a
     /// `GamepadPalette` id ("violet" = the brand default, then "oled"/"nebula"/"abyss"/"ember"/
     /// "moss"/"graphite", then the pale ones). The cross-client `ui_palette` key: the desktop
     /// console and the Android client carry the same table under the same names. Presentation
-    /// only, so it is a device preference and never part of a stream profile. An unknown value
+    /// only, so it is a device preference and never part of a stream preset. An unknown value
     /// reads as the default rather than failing — a newer client may have shipped a palette this
     /// build doesn't know.
     public static let uiPalette = "punktfunk.uiPalette"

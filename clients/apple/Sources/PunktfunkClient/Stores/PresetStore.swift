@@ -1,5 +1,5 @@
 // The settings-profile catalog as an observable store — the app-side wrapper around
-// `ProfileCatalog` (design/client-settings-profiles.md §4.2), matching what `HostStore` is to
+// `PresetCatalog` (design/client-settings-profiles.md §4.2), matching what `HostStore` is to
 // `[StoredHost]`.
 //
 // The catalog lives in the App Group suite beside the saved hosts, because that is where the
@@ -12,17 +12,17 @@ import PunktfunkKit
 import SwiftUI
 
 @MainActor
-final class ProfileStore: ObservableObject {
+final class PresetStore: ObservableObject {
     /// One catalog for the whole app. Unlike `HostStore` (which ContentView owns and hands down),
     /// the settings surface reaches this from a SEPARATE macOS `Settings` scene, where no parent
-    /// can pass it — and two instances would mean editing a profile in Preferences while the host
+    /// can pass it — and two instances would mean editing a preset in Preferences while the host
     /// grid still shows the old one. Same shape as `GamepadManager.shared`.
-    static let shared = ProfileStore()
+    static let shared = PresetStore()
 
-    @Published private(set) var catalog: ProfileCatalog {
+    @Published private(set) var catalog: PresetCatalog {
         didSet {
             #if DEBUG
-            // Shot mode seeds this SINGLETON with mock profiles to populate the host cards.
+            // Shot mode seeds this SINGLETON with mock presets to populate the host cards.
             // Saving would write them into the tester's real catalog — see HostStore.persist().
             if ScreenshotMode.isActive { return }
             #endif
@@ -30,7 +30,7 @@ final class ProfileStore: ObservableObject {
         }
     }
 
-    /// Coalesces the write. A save encodes EVERY profile, and a continuous control in profile
+    /// Coalesces the write. A save encodes EVERY preset, and a continuous control in preset
     /// scope writes per drag tick — dragging one slider re-encoded the whole catalog hundreds of
     /// times. One run-loop turn is enough to collapse a drag into a single write while still
     /// landing long before the app can be killed.
@@ -56,30 +56,30 @@ final class ProfileStore: ObservableObject {
         catalog.save()
     }
 
-    var profiles: [StreamProfile] { catalog.profiles }
+    var profiles: [StreamPreset] { catalog.profiles }
 
-    init(catalog: ProfileCatalog? = nil) {
-        self.catalog = catalog ?? ProfileCatalog.load()
+    init(catalog: PresetCatalog? = nil) {
+        self.catalog = catalog ?? PresetCatalog.load()
     }
 
-    func profile(id: String?) -> StreamProfile? {
-        id.flatMap { catalog.profile(id: $0) }
+    func preset(id: String?) -> StreamPreset? {
+        id.flatMap { catalog.preset(id: $0) }
     }
 
     #if DEBUG
-    /// Shot-mode seed: replace the catalog outright so a capture shows a known set of profiles
+    /// Shot-mode seed: replace the catalog outright so a capture shows a known set of presets
     /// rather than the tester's. Safe because `didSet` suppresses the write-back in shot mode.
-    func debugSet(_ profiles: [StreamProfile]) {
-        catalog = ProfileCatalog(profiles: profiles)
+    func debugSet(_ profiles: [StreamPreset]) {
+        catalog = PresetCatalog(profiles: profiles)
     }
     #endif
 
-    /// This host's default profile, dangling ids dropped — a deleted profile resolves as "Default
+    /// This host's default preset, dangling ids dropped — a deleted preset resolves as "Default
     /// settings", never an error (§4.4).
-    func binding(for host: StoredHost) -> StreamProfile? { catalog.binding(for: host) }
+    func binding(for host: StoredHost) -> StreamPreset? { catalog.binding(for: host) }
 
-    /// This host's pinned profiles in card order, duplicates and dangling ids dropped.
-    func pinned(for host: StoredHost) -> [StreamProfile] { catalog.pinned(for: host) }
+    /// This host's pinned presets in card order, duplicates and dangling ids dropped.
+    func pinned(for host: StoredHost) -> [StreamPreset] { catalog.pinned(for: host) }
 
     func nameTaken(_ name: String, except: String? = nil) -> Bool {
         catalog.nameTaken(name, except: except)
@@ -87,10 +87,10 @@ final class ProfileStore: ObservableObject {
 
     // MARK: - Catalog management (the scope menu's Rename / Duplicate / Delete)
 
-    /// Add a profile the editor built. A blank one inherits everything — the right creation
+    /// Add a preset the editor built. A blank one inherits everything — the right creation
     /// default under inherit-by-exception; a duplicate arrives carrying the source's overrides,
     /// which is what duplicating is for.
-    func add(_ profile: StreamProfile) {
+    func add(_ profile: StreamPreset) {
         catalog.profiles.append(profile)
     }
 
@@ -104,14 +104,14 @@ final class ProfileStore: ObservableObject {
         catalog.profiles[i].accent = accent
     }
 
-    /// Delete a profile. Bindings and pins pointing at it are left alone deliberately: they
+    /// Delete a preset. Bindings and pins pointing at it are left alone deliberately: they
     /// degrade to "Default settings" / a dropped card at read time (§6), so a delete never has to
     /// walk the host store — and a host record saved by an older build can't resurrect a stale id.
     func delete(_ id: String) {
         catalog.profiles.removeAll { $0.id == id }
     }
 
-    /// How the delete warning counts what it is about to change: hosts bound to this profile and
+    /// How the delete warning counts what it is about to change: hosts bound to this preset and
     /// pinned cards that will disappear.
     func usage(of id: String) -> (bound: Int, pinned: Int) {
         let hosts = Self.savedHosts()
@@ -129,7 +129,7 @@ final class ProfileStore: ObservableObject {
     // MARK: - Overrides
 
     /// Record an override, always by explicit write — never by comparing the new value against
-    /// today's global. A value that happens to equal the global is a legitimate PIN: the profile
+    /// today's global. A value that happens to equal the global is a legitimate PIN: the preset
     /// keeps it when the global later moves, and that is the whole difference between this feature
     /// and "copy the settings" (§4.1).
     func setOverride<Value>(

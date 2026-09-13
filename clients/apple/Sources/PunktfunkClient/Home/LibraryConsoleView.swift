@@ -49,7 +49,7 @@ struct LibraryConsoleView: View {
     /// connect takeover.
     var controllerActive = true
     /// The collection the shelf is filtered to (its label), or nil — the container reports it so
-    /// the screen's title can read `host · profile · collection` like the desktop's.
+    /// the screen's title can read `host · preset · collection` like the desktop's.
     var onCollectionChanged: ((String?) -> Void)?
     /// Screenshot/dev overrides: force an arrangement, open with the bar focused, or start on
     /// the Collections tiles regardless of the setting.

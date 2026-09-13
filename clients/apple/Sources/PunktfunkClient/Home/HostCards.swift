@@ -87,30 +87,30 @@ private func monogramTile(
     }
 }
 
-/// Everything a card's profile affordances need: the catalog to offer, what this host is bound
+/// Everything a card's preset affordances need: the catalog to offer, what this host is bound
 /// and pinned to, and the acts a menu can perform (design/client-settings-profiles.md §5.2/§5.2a).
 ///
 /// Passed as one value rather than eight closures because every surface that renders a host card
 /// has to offer the SAME set — a menu that quietly lacks "Pin as card" on one screen is how a
 /// feature becomes folklore.
-struct HostProfileMenu {
-    var profiles: [StreamProfile]
-    /// The host's default profile — the chip, and the checkmark in "Connect with ▸".
+struct HostPresetMenu {
+    var profiles: [StreamPreset]
+    /// The host's default preset — the chip, and the checkmark in "Connect with ▸".
     var boundID: String?
     var pinnedIDs: [String]
     /// A ONE-OFF connect. Never rebinds: rebinding is `setDefault`, an explicit act (§5.2).
-    var connectWith: (ProfileSelection) -> Void
+    var connectWith: (PresetSelection) -> Void
     var setDefault: (String?) -> Void
     var togglePin: (String) -> Void
-    /// Copy a `punktfunk://` link for this host, optionally carrying a profile.
+    /// Copy a `punktfunk://` link for this host, optionally carrying a preset.
     var copyLink: (String?) -> Void
 }
 
 /// A saved host. A left accent bar marks the most-recently-connected one; the context menu
 /// pairs / speed-tests / forgets / removes. Disabled while a session is busy.
 ///
-/// The same view renders a PINNED host+profile card (§5.2a): same host, same live status, with
-/// the profile as the prominent subtitle. A pinned card is a shortcut, not a second host, so its
+/// The same view renders a PINNED host+preset card (§5.2a): same host, same live status, with
+/// the preset as the prominent subtitle. A pinned card is a shortcut, not a second host, so its
 /// menu carries only connect-shaped actions — edit/pair/forget/remove stay on the primary card,
 /// where the thing they act on actually lives.
 struct HostCardView: View {
@@ -150,14 +150,14 @@ struct HostCardView: View {
     /// Run one of the above. `nil` alongside a non-empty `hostActions` would be a bug, so the
     /// rows render disabled in that case rather than silently doing nothing.
     var onHostAction: ((HostAction) -> Void)? = nil
-    /// This card's profile affordances — nil on surfaces that don't offer them.
-    var profileMenu: HostProfileMenu? = nil
-    /// Set on a PINNED card: the profile this card connects with. nil = the host's primary card,
+    /// This card's preset affordances — nil on surfaces that don't offer them.
+    var presetMenu: HostPresetMenu? = nil
+    /// Set on a PINNED card: the preset this card connects with. nil = the host's primary card,
     /// which follows the binding.
-    var pinnedProfile: StreamProfile? = nil
+    var pinnedPreset: StreamPreset? = nil
     /// What this host has up right now (`NowPlayingStore`), if anything. It rides the status
     /// line rather than a line of its own: a card that grows when a game starts would make the
-    /// grid's rows jump, which is the reason the profile chip shares the title line too.
+    /// grid's rows jump, which is the reason the preset chip shares the title line too.
     var nowPlaying: String? = nil
     /// The start-screen pointer, written from this card's own menu. Empty means none is stored,
     /// which with exactly one paired host still resolves to that host.
@@ -170,9 +170,9 @@ struct HostCardView: View {
             && defaultHostID.lowercased() == host.id.uuidString.lowercased()
     }
 
-    /// The profile this card announces: a pinned card's own, else the host's binding.
-    private var shownProfile: StreamProfile? {
-        pinnedProfile ?? profileMenu.flatMap { menu in
+    /// The preset this card announces: a pinned card's own, else the host's binding.
+    private var shownPreset: StreamPreset? {
+        pinnedPreset ?? presetMenu.flatMap { menu in
             menu.boundID.flatMap { id in menu.profiles.first { $0.id == id } }
         }
     }
@@ -186,7 +186,7 @@ struct HostCardView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     // The chip rides the TITLE line, anchored to the card's trailing edge — not
                     // trailing the name, where it read as part of the title, and not on a line of
-                    // its own, where it made cards with a profile taller than cards without and a
+                    // its own, where it made cards with a preset taller than cards without and a
                     // pinned card stuck out of its grid row. The spacer is what anchors it: the
                     // name truncates against that gap instead of ever running into the chip.
                     HStack(spacing: 6) {
@@ -195,12 +195,12 @@ struct HostCardView: View {
                             .foregroundStyle(.primary)
                             .lineLimit(1)
                         Spacer(minLength: 8)
-                        if let profile = shownProfile {
-                            ProfileChip(
+                        if let profile = shownPreset {
+                            PresetChip(
                                 profile: profile, size: m.status,
-                                prominent: pinnedProfile != nil)
+                                prominent: pinnedPreset != nil)
                                 // The name gives up width first: a truncated host name still reads,
-                                // a truncated profile name is the one thing the chip exists to say.
+                                // a truncated preset name is the one thing the chip exists to say.
                                 .layoutPriority(1)
                         }
                     }
@@ -245,14 +245,14 @@ struct HostCardView: View {
     }
 
     @ViewBuilder private var menuItems: some View {
-        if let pinned = pinnedProfile, let menu = profileMenu {
+        if let pinned = pinnedPreset, let menu = presetMenu {
             // A pinned card is a shortcut, not a second host: only connect-shaped actions, plus
-            // the way to remove the shortcut itself. Unpinning touches neither the profile nor
+            // the way to remove the shortcut itself. Unpinning touches neither the preset nor
             // the host's default binding.
             connectWithMenu(menu)
             // Browsing IS a connect-shaped action — it is this card's connect with a title picked
             // first — so a pinned card offers it and opens its own shelf, whose launches carry the
-            // pinned profile. (Pair / speed test / wake / forget stay on the host's card: those
+            // pinned preset. (Pair / speed test / wake / forget stay on the host's card: those
             // are about the machine, and a shortcut has no business claiming them.)
             if let onBrowseLibrary {
                 Button("Browse Library…", action: onBrowseLibrary)
@@ -267,7 +267,7 @@ struct HostCardView: View {
             if let onEdit {
                 Button("Edit…", systemImage: "pencil", action: onEdit)
             }
-            if let menu = profileMenu {
+            if let menu = presetMenu {
                 connectWithMenu(menu)
                 pinMenu(menu)
                 if LinkClipboard.isAvailable {
@@ -321,7 +321,7 @@ struct HostCardView: View {
     /// "Connect with ▸" — a ONE-OFF pick that never rebinds the host, with a checkmark on what a
     /// plain click would use. Its last item is the explicit way to rebind, for the users who do
     /// want that from here.
-    @ViewBuilder private func connectWithMenu(_ menu: HostProfileMenu) -> some View {
+    @ViewBuilder private func connectWithMenu(_ menu: HostPresetMenu) -> some View {
         if !menu.profiles.isEmpty {
             Menu("Connect with") {
                 Button {
@@ -331,13 +331,13 @@ struct HostCardView: View {
                 }
                 ForEach(menu.profiles) { profile in
                     Button {
-                        menu.connectWith(.profile(profile.id))
+                        menu.connectWith(.preset(profile.id))
                     } label: {
                         checkable(profile.name, on: menu.boundID == profile.id)
                     }
                 }
                 Divider()
-                Menu("Set Default Profile") {
+                Menu("Set Default Preset") {
                     Button("Default settings") { menu.setDefault(nil) }
                     ForEach(menu.profiles) { profile in
                         Button(profile.name) { menu.setDefault(profile.id) }
@@ -347,9 +347,9 @@ struct HostCardView: View {
         }
     }
 
-    /// "Pin as card ▸" — a host+profile combo gets its own one-click card in the grid, which is
-    /// what turns a regularly-used profile from a menu dive into a press (§5.2a).
-    @ViewBuilder private func pinMenu(_ menu: HostProfileMenu) -> some View {
+    /// "Pin as card ▸" — a host+preset combo gets its own one-click card in the grid, which is
+    /// what turns a regularly-used preset from a menu dive into a press (§5.2a).
+    @ViewBuilder private func pinMenu(_ menu: HostPresetMenu) -> some View {
         if !menu.profiles.isEmpty {
             Menu("Pin as Card") {
                 ForEach(menu.profiles) { profile in
@@ -404,14 +404,14 @@ struct HostCardView: View {
     }
 }
 
-/// The profile a card connects with, as a tinted pill. Quiet on a bound primary card (it only
-/// answers "what will a click do?"); prominent on a pinned card, where the profile IS the reason
+/// The preset a card connects with, as a tinted pill. Quiet on a bound primary card (it only
+/// answers "what will a click do?"); prominent on a pinned card, where the preset IS the reason
 /// the card exists — which is where the catalog's `accent` earns its keep.
 ///
 /// Prominence is fill and weight only, never TYPE SIZE: the chip sits on the card's title line,
 /// and a chip taller than the name would make pinned cards taller than their host's.
-struct ProfileChip: View {
-    let profile: StreamProfile
+struct PresetChip: View {
+    let profile: StreamPreset
     let size: CGFloat
     var prominent = false
 
@@ -430,7 +430,7 @@ struct ProfileChip: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 2)
         .background(Capsule().fill(tint.opacity(prominent ? 0.24 : 0.12)))
-        .accessibilityLabel("Profile \(profile.name)")
+        .accessibilityLabel("Preset \(profile.name)")
     }
 }
 
