@@ -139,7 +139,8 @@ enum ShotScenes {
         ]
         #endif
         #if os(macOS)
-        // The Mac's host window, as a card's ⓘ opens it, and one of its other sections.
+        // The Mac's host window, as a card's ⓘ opens it, some of its sections, and the Library's
+        // Customize popover.
         scenes += [
             ShotScene(name: "16b-host-window", orientation: .natural, colorScheme: .dark) {
                 AnyView(MacHostWindow(hostID: ShotMock.battlestationID, store: ShotMock.pageStore))
@@ -147,6 +148,9 @@ enum ShotScenes {
             ShotScene(name: "16e-host-window-presets", orientation: .natural, colorScheme: .dark) {
                 AnyView(MacHostWindow(
                     hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .presets))
+            },
+            ShotScene(name: "15e-customize-mac", orientation: .natural, colorScheme: .dark) {
+                AnyView(LibrarySectionsPanel(shotLayout: "").frame(width: 320, height: 300))
             },
             ShotScene(name: "16c-host-window-connection", orientation: .natural, colorScheme: .dark) {
                 AnyView(MacHostWindow(

@@ -1,6 +1,7 @@
-// The Library tab's Customize sheet (design/apple-touch-ui-overhaul.md §2.5): every section with
-// a switch, in the order the tab draws them, dragged to reorder. It writes
+// The Library's Customize panel (design/apple-touch-ui-overhaul.md §2.5): every section with a
+// switch, in the order the tab draws them, dragged to reorder. It writes
 // `punktfunk.librarySections`, which the tab reads; a switched-off section stays listed here.
+// A sheet on the iPhone, a plain popover on the Mac, where each row carries a drag grip.
 
 import PunktfunkKit
 import SwiftUI
@@ -13,6 +14,8 @@ struct LibrarySectionsPanel: View {
     var shotLayout: String?
     #endif
     @Environment(\.dismiss) private var dismiss
+    private let note = "Drag to reorder. A section with nothing to show stays hidden until it has "
+        + "something."
 
     private var layout: LibrarySectionLayout {
         #if DEBUG
@@ -22,28 +25,30 @@ struct LibrarySectionsPanel: View {
     }
 
     var body: some View {
+        #if os(macOS)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Customize Library")
+                .font(.headline)
+            List { rows }
+            Text(note)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            restoreButton
+        }
+        .padding(16)
+        #else
         NavigationStack {
             List {
                 Section {
-                    ForEach(layout.entries) { entry in
-                        Toggle(isOn: isOn(entry.section)) {
-                            Label(entry.section.label, systemImage: entry.section.symbol)
-                        }
-                    }
-                    .onMove(perform: move)
+                    rows
                 } footer: {
-                    Text("Drag to reorder. A section with nothing to show stays hidden until it has "
-                        + "something.")
+                    Text(note)
                 }
-                Section {
-                    Button("Restore Default Order") { storedLayout = "" }
-                        .disabled(storedLayout.isEmpty)
-                }
+                Section { restoreButton }
             }
-            #if os(iOS)
             .environment(\.editMode, .constant(.active))
             .navigationBarTitleDisplayMode(.inline)
-            #endif
             .navigationTitle("Customize Library")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -51,6 +56,30 @@ struct LibrarySectionsPanel: View {
                 }
             }
         }
+        #endif
+    }
+
+    private var rows: some View {
+        ForEach(layout.entries) { entry in
+            HStack {
+                Toggle(isOn: isOn(entry.section)) {
+                    Label(entry.section.label, systemImage: entry.section.symbol)
+                }
+                #if os(macOS)
+                Spacer()
+                // A Mac list draws no handle of its own; the whole row drags.
+                Image(systemName: "line.3.horizontal")
+                    .foregroundStyle(.tertiary)
+                    .help("Drag to reorder")
+                #endif
+            }
+        }
+        .onMove(perform: move)
+    }
+
+    private var restoreButton: some View {
+        Button("Restore Default Order") { storedLayout = "" }
+            .disabled(storedLayout.isEmpty)
     }
 
     private func isOn(_ section: LibrarySection) -> Binding<Bool> {
