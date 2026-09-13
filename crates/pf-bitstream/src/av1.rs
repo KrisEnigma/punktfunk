@@ -324,6 +324,8 @@ impl Av1Planner {
 
     /// An intra refresh wave finished on a picture the freeze gate accepted: forget the
     /// unclean marks, which a chain through half-refreshed pictures cannot clear itself.
+    /// Whole-ledger, unlike H.264/H.265: an inter frame names seven slots and which of
+    /// them a wave host's frames leave on older pictures is not measured.
     pub fn forgive_unclean(&mut self) {
         self.clean.clear();
     }
