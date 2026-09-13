@@ -609,6 +609,8 @@ impl Presenter {
             video_export,
             overlay_pipe,
             retired_hw: None,
+            #[cfg(windows)]
+            retained_slot: None,
             last_import_us: 0,
             last_submit_us: 0,
             queue_lock,

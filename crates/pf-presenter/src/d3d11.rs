@@ -2,8 +2,8 @@
 //! D3D11VA (`pf_client_core::video_d3d11`). Each frame names the NT handle of
 //! a shareable single-plane RGB ring slot — BGRA8 sRGB, or RGB10A2 PQ (the
 //! video processor already did YUV→RGB) — imported as one `VkImage`
-//! (`VK_KHR_external_memory_win32`, dedicated allocation) and blitted into
-//! the video image; no CSC.
+//! (`VK_KHR_external_memory_win32`, dedicated allocation) and composited
+//! straight into the swapchain; no CSC and no video image.
 //!
 //! Slots stay imported across frames ([`ImportCache`], keyed by ring
 //! generation and handle); a superseded generation is destroyed after the

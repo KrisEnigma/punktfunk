@@ -166,6 +166,11 @@ pub struct Presenter {
     overlay_pipe: OverlayPipe,
     /// In-flight hardware frame; released after the next fence wait.
     retired_hw: Option<Retired>,
+    /// D3D11 lane: the slot last composited and its picture size, which `Redraw` blits
+    /// again. The import cache owns the objects; a newer picture in that slot (six
+    /// decodes later) is not a visual error.
+    #[cfg(windows)]
+    retained_slot: Option<(crate::d3d11::Imported, u32, u32)>,
     /// Wall time of this present's D3D11 import lookup and of `vkQueueSubmit`, for the
     /// presenter window line. A submit that blocks on a keyed-mutex acquire shows here.
     last_import_us: u32,

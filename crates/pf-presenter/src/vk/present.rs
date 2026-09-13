@@ -1,4 +1,6 @@
 //! Per-frame present: `FrameInput` → video image → CSC → letterboxed blit → present.
+//! The D3D11 lane arrives as RGB already; its imported ring slot is the blit source
+//! and the `Redraw` picture, with no video image.
 //!
 //! [`Presenter::present`] returns `false` when the swapchain is out of date; the
 //! caller recreates with current window state and may retry. One frame in flight:
@@ -63,6 +65,8 @@ impl Presenter {
                 self.set_hdr_mode(window, want)?;
             }
         }
+        #[cfg(windows)]
+        let redraw = matches!(input, FrameInput::Redraw);
         // Import/view before acquire: a reject must fail before this present
         // consumes the acquire semaphore.
         #[cfg(target_os = "linux")]
@@ -168,17 +172,6 @@ impl Presenter {
             // Descriptor set idle: fence wait above.
             self.csc
                 .bind_planes(&self.device, f.luma_view, f.chroma_view);
-        }
-        #[cfg(windows)]
-        if let Some((f, _)) = &win_frame {
-            if self
-                .video
-                .as_ref()
-                .is_none_or(|v| v.width != f.width || v.height != f.height)
-            {
-                self.rebuild_video_image(f.width, f.height)?;
-                tracing::info!(width = f.width, height = f.height, "video image (re)built");
-            }
         }
         if let Some(f) = &native_frame {
             if self
@@ -312,45 +305,17 @@ impl Presenter {
                 );
             }
 
-            // VideoProcessor already delivered RGB matching the HDR-mode video
-            // image; blit is component order. Cross-API sync is the keyed mutex
-            // on submit, not this external-queue acquire.
+            // The VideoProcessor already delivered RGB matching the HDR mode: the
+            // composite reads the slot itself (this frame's, or the retained one on
+            // `Redraw`). Cross-API sync is the keyed mutex on submit, not this barrier.
             #[cfg(windows)]
-            if let (Some((_, f)), Some(v)) = (&win_frame, &self.video) {
+            let slot = win_frame
+                .as_ref()
+                .map(|(d, f)| (*f, d.width, d.height))
+                .or(self.retained_slot.filter(|_| redraw));
+            #[cfg(windows)]
+            if let Some((f, _, _)) = slot {
                 external_acquire_barrier(&self.device, self.cmd_buf, f.image, self.qfi);
-                barrier(
-                    &self.device,
-                    self.cmd_buf,
-                    v.image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                );
-                let extent = vk::Offset3D {
-                    x: v.width as i32,
-                    y: v.height as i32,
-                    z: 1,
-                };
-                let blit = vk::ImageBlit::default()
-                    .src_subresource(subresource_layers())
-                    .src_offsets([vk::Offset3D::default(), extent])
-                    .dst_subresource(subresource_layers())
-                    .dst_offsets([vk::Offset3D::default(), extent]);
-                self.device.cmd_blit_image(
-                    self.cmd_buf,
-                    f.image,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    v.image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[blit],
-                    vk::Filter::NEAREST, // 1:1; the composite blit below scales
-                );
-                barrier(
-                    &self.device,
-                    self.cmd_buf,
-                    v.image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                );
             }
 
             // Image already on this device; layout and semaphore ride the frame.
@@ -501,15 +466,18 @@ impl Presenter {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             );
-            if let Some(v) = &self.video {
-                let (dst0, dst1) = letterbox(self.extent, v.width, v.height);
+            let source = self.video.as_ref().map(|v| (v.image, v.width, v.height));
+            #[cfg(windows)]
+            let source = slot.map(|(f, w, h)| (f.image, w, h)).or(source);
+            if let Some((image, width, height)) = source {
+                let (dst0, dst1) = letterbox(self.extent, width, height);
                 let blit = vk::ImageBlit::default()
                     .src_subresource(subresource_layers())
                     .src_offsets([
                         vk::Offset3D { x: 0, y: 0, z: 0 },
                         vk::Offset3D {
-                            x: v.width as i32,
-                            y: v.height as i32,
+                            x: width as i32,
+                            y: height as i32,
                             z: 1,
                         },
                     ])
@@ -517,7 +485,7 @@ impl Presenter {
                     .dst_offsets([dst0, dst1]);
                 self.device.cmd_blit_image(
                     self.cmd_buf,
-                    v.image,
+                    image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     swap_image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -640,8 +608,8 @@ impl Presenter {
                 submit = submit.push_next(&mut timeline);
             }
             // Keyed mutex, key 0 both ways (decode copies under acquire(0)/release(0)
-            // too). Acquire orders sampling after the decoder copy; release
-            // unblocks the ring slot.
+            // too), on every submit that reads a slot, `Redraw` included. Acquire orders
+            // the read after the decoder's Blt; release unblocks the ring slot.
             #[cfg(windows)]
             let keyed_mem;
             #[cfg(windows)]
@@ -651,7 +619,7 @@ impl Presenter {
             #[cfg(windows)]
             let mut keyed_info;
             #[cfg(windows)]
-            if let Some((_, f)) = &win_frame {
+            if let Some((f, _, _)) = slot {
                 // `PUNKTFUNK_D3D11_NO_MUTEX=1` skips acquire/release (torn frames;
                 // debugging only).
                 if std::env::var_os("PUNKTFUNK_D3D11_NO_MUTEX").is_none() {
@@ -674,6 +642,11 @@ impl Presenter {
             self.last_submit_us = submit_started.elapsed().as_micros() as u32;
             submitted?;
             self.submitted = true;
+            // A real frame from any other lane ends the D3D11 picture; `Redraw` keeps it.
+            #[cfg(windows)]
+            {
+                self.retained_slot = slot;
+            }
             // Park until the fence proves the reads done (next present's wait, or
             // Drop). At most one of hw_frame / native_frame is set; a D3D11 slot stays
             // in the import cache.
