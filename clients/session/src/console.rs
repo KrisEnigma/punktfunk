@@ -1363,6 +1363,7 @@ fn to_model(games: &[library::GameEntry]) -> Vec<LibraryGame> {
             developer: g.developer.clone(),
             year: g.release_year,
             genres: g.genres.clone(),
+            stats: g.stats,
             running: false,
         })
         .collect()

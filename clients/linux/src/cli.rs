@@ -642,6 +642,7 @@ fn mock_library() -> (
         genres: Vec::new(),
         role: None,
         icon: None,
+        stats: None,
     };
     let games = vec![
         game("steam:570", "steam", "Dota 2"),

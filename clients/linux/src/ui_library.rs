@@ -588,6 +588,7 @@ fn desktop_entry() -> GameEntry {
         genres: Vec::new(),
         role: None,
         icon: Some(DESKTOP_ICON.into()),
+        stats: None,
     }
 }
 

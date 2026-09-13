@@ -684,6 +684,7 @@ mod tests {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         }
     }

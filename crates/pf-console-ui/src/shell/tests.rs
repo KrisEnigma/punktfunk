@@ -263,6 +263,7 @@ fn a_pinned_cards_library_launches_with_its_profile() {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     }]);
     // Past the desktop tile, which leads every shelf and launches nothing.
@@ -300,6 +301,7 @@ fn a_primary_tiles_library_leaves_the_profile_to_the_binding() {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     }]);
     s.handle_menu(MenuEvent::Confirm);
@@ -767,6 +769,7 @@ fn mixed_library(library: &LibraryShared) {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         }
     };
@@ -914,6 +917,7 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         },
         crate::library::LibraryGame {
@@ -926,6 +930,7 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         },
     ]);
@@ -1165,6 +1170,7 @@ fn dump_console_screens() {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         })
         .collect(),
@@ -1334,6 +1340,7 @@ fn platform_games() -> Vec<crate::library::LibraryGame> {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     })
     .collect()
@@ -1631,6 +1638,7 @@ fn store_games() -> Vec<crate::library::LibraryGame> {
         developer: None,
         year: None,
         genres: Vec::new(),
+        stats: None,
         running: false,
     };
     let mut games = vec![game("steam:launcher".into(), "Steam", true)];
@@ -2115,6 +2123,7 @@ mod launch_hold {
             developer: None,
             year: None,
             genres: Vec::new(),
+            stats: None,
             running: false,
         }
     }
