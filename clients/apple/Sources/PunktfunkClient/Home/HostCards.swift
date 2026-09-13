@@ -1,17 +1,17 @@
-// The host grid's cards: a saved host (tap to connect, context menu) and an mDNS-discovered
-// host (tap to save + connect). Both share the "monogram module" look — a squared brand-purple
-// monogram tile + a left-aligned bold Geist name over monospaced technical metadata
-// (address, status), framed by a hairline panel border. Industrial, not soft.
+// The host grid's cards: a saved host (tap to connect, ⓘ for its page, a short context menu) and
+// an mDNS-discovered host (tap to save + connect). Both share the "monogram module" look — a
+// squared brand-purple tile beside a bold Geist name and one line under it, in a hairline panel.
+// A saved card's second line is its status and preset; its address lives on the host page.
 
 import PunktfunkKit
 import SwiftUI
 
 /// Shared host-card sizing — touch-first on iOS, compact on macOS, roomy on tvOS.
-private struct CardMetrics {
+struct CardMetrics {
     let tile: CGFloat       // monogram tile side
     let monogram: CGFloat   // monogram letter point size
     let name: CGFloat       // host-name point size
-    let meta: CGFloat       // address (mono) point size
+    let meta: CGFloat       // second line: a saved card's status, a discovered card's address
     let status: CGFloat     // status-label (mono) point size
     let padding: CGFloat
     let spacing: CGFloat    // tile ↔ text gap
@@ -33,7 +33,7 @@ private struct CardMetrics {
 }
 
 /// First letter of a host name, uppercased — the monogram glyph. Falls back to a bullet.
-private func monogram(_ name: String) -> String {
+func monogram(_ name: String) -> String {
     guard let first = name.trimmingCharacters(in: .whitespacesAndNewlines).first else { return "•" }
     return String(first).uppercased()
 }
@@ -45,7 +45,7 @@ private func monogram(_ name: String) -> String {
 /// machine better than its initial ever did, and on a row of similarly-named boxes the initial says
 /// nothing the name beneath it doesn't already say. A host that advertises no OS chain — or one we
 /// ship no art for — keeps its letter, so a mixed row still reads as one set.
-private func monogramTile(
+func monogramTile(
     _ letter: String, osChain: String?, m: CardMetrics, connecting: Bool, filled: Bool
 ) -> some View {
     let shape = RoundedRectangle(cornerRadius: m.radius - 3, style: .continuous)
@@ -87,6 +87,29 @@ private func monogramTile(
     }
 }
 
+/// The default host's mark: a star on the tile's corner.
+private struct DefaultHostBadge: View {
+    let size: CGFloat
+
+    var body: some View {
+        // Resizable, so the star centres on its own bounds rather than on a text baseline.
+        Image(systemName: "star.fill")
+            .resizable()
+            .scaledToFit()
+            .fontWeight(.bold)
+            .frame(width: size * 0.2, height: size * 0.2)
+            .foregroundStyle(.white)
+            .frame(width: size * 0.38, height: size * 0.38)
+            .background(Circle().fill(Color.brand))
+            .overlay(Circle().strokeBorder(.background, lineWidth: max(1, size * 0.035)))
+            .offset(x: size * 0.06, y: size * 0.06)
+            .accessibilityLabel("Default host")
+            #if os(macOS)
+            .help("Default host: Start in opens here")
+            #endif
+    }
+}
+
 /// Everything a card's preset affordances need: the catalog to offer, what this host is bound
 /// and pinned to, and the acts a menu can perform (design/client-settings-profiles.md §5.2/§5.2a).
 ///
@@ -94,7 +117,7 @@ private func monogramTile(
 /// has to offer the SAME set — a menu that quietly lacks "Pin as card" on one screen is how a
 /// feature becomes folklore.
 struct HostPresetMenu {
-    var profiles: [StreamPreset]
+    var presets: [StreamPreset]
     /// The host's default preset — the chip, and the checkmark in "Connect with ▸".
     var boundID: String?
     var pinnedIDs: [String]
@@ -102,263 +125,347 @@ struct HostPresetMenu {
     var connectWith: (PresetSelection) -> Void
     var setDefault: (String?) -> Void
     var togglePin: (String) -> Void
-    /// Copy a `punktfunk://` link for this host, optionally carrying a preset.
-    var copyLink: (String?) -> Void
 }
 
-/// A saved host. A left accent bar marks the most-recently-connected one; the context menu
-/// pairs / speed-tests / forgets / removes. Disabled while a session is busy.
-///
-/// The same view renders a PINNED host+preset card (§5.2a): same host, same live status, with
-/// the preset as the prominent subtitle. A pinned card is a shortcut, not a second host, so its
-/// menu carries only connect-shaped actions — edit/pair/forget/remove stay on the primary card,
-/// where the thing they act on actually lives.
+/// Everything a saved host's card and its page can do. The grid builds one per card and the
+/// host page asks the same builder, so the menu and the page never offer different sets. An
+/// optional act is nil where the host can't take it yet: the library, the speed test and the
+/// logs need a pairing, a wake needs an offline host with a known MAC.
+struct HostActions {
+    var connect: () -> Void
+    var pair: () -> Void
+    var edit: () -> Void
+    var forget: () -> Void
+    var remove: () -> Void
+    var browseLibrary: (() -> Void)?
+    var speedTest: (() -> Void)?
+    var sendLogs: (() -> Void)?
+    var wake: (() -> Void)?
+    var copyLink: (() -> Void)?
+    /// Opens the host page. nil on a pinned card, which is a shortcut rather than a host.
+    var showDetails: (() -> Void)?
+    /// What the host says this device may do to it (`design/host-actions.md` §7).
+    var power: [HostAction] = []
+    var runPower: (HostAction) -> Void = { _ in }
+    var presets: HostPresetMenu?
+}
+
+/// Where one surface runs the acts that need more than the store: a sheet, a dial, a window.
+struct HostActionSurface {
+    var connect: (PresetSelection) -> Void
+    var pair: () -> Void
+    var edit: () -> Void
+    var browse: (PresetSelection) -> Void
+    var speedTest: () -> Void
+    var sendLogs: () -> Void
+    var wake: () -> Void
+    var showDetails: () -> Void
+    var runPower: (HostAction) -> Void
+}
+
+extension HostActions {
+    /// What `host` offers, gated in one place for the grid and the Mac's host window. A pinned
+    /// card connects and browses with ITS preset and carries no host acts: it is a shortcut, not
+    /// a second host.
+    @MainActor init(
+        host: StoredHost, pinned: StreamPreset?, online: Bool, store: HostStore,
+        presets: [StreamPreset], power: [HostAction], surface: HostActionSurface
+    ) {
+        let selection: PresetSelection = pinned.map { .preset($0.id) } ?? .inherit
+        // Library, speed test and logs dial with the pinned identity, and an unpinned host would
+        // accept any certificate. So they wait for a pairing.
+        let paired = host.pinnedSHA256 != nil
+        let wakeable = pinned == nil && !online && !host.wakeMacs.isEmpty
+            && PunktfunkConnection.wakeOnLANAvailable
+        self.init(
+            connect: { surface.connect(selection) },
+            pair: surface.pair,
+            edit: surface.edit,
+            forget: { store.forgetIdentity(host) },
+            remove: { store.remove(host) },
+            browseLibrary: paired ? { surface.browse(selection) } : nil,
+            speedTest: paired ? surface.speedTest : nil,
+            sendLogs: paired ? surface.sendLogs : nil,
+            wake: wakeable ? surface.wake : nil,
+            copyLink: LinkClipboard.isAvailable
+                ? { LinkClipboard.copy(DeepLink.forHost(host, preset: pinned?.id).urlString) }
+                : nil,
+            showDetails: pinned == nil ? surface.showDetails : nil,
+            power: pinned == nil ? power : [],
+            runPower: surface.runPower,
+            presets: HostPresetMenu(
+                presets: presets,
+                boundID: host.presetID,
+                pinnedIDs: host.pinnedPresetIDs ?? [],
+                connectWith: surface.connect,
+                setDefault: { store.setPreset(host.id, presetID: $0) },
+                togglePin: { id in
+                    let pinned = (host.pinnedPresetIDs ?? []).contains(id)
+                    store.setPinned(host.id, presetID: id, pinned: !pinned)
+                }))
+    }
+}
+
+/// A host's state as one plain sentence: a saved card's second line and the host page's subtitle.
+enum HostStatus: Equatable {
+    case connecting
+    case playing(String)
+    case online
+    case notPaired
+    /// Offline, and a tap sends a Wake-on-LAN packet before it dials.
+    case offlineWakes
+    case offline
+
+    init(
+        host: StoredHost, isOnline: Bool, isConnecting: Bool, nowPlaying: String?, autoWake: Bool
+    ) {
+        if isConnecting {
+            self = .connecting
+        } else if isOnline {
+            if host.pinnedSHA256 == nil {
+                self = .notPaired
+            } else if let nowPlaying {
+                self = .playing(nowPlaying)
+            } else {
+                self = .online
+            }
+        } else if autoWake, !host.wakeMacs.isEmpty, PunktfunkConnection.wakeOnLANAvailable {
+            self = .offlineWakes
+        } else {
+            self = .offline
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .connecting: return "Connecting…"
+        case .playing(let title): return "Playing \(title)"
+        case .online: return "Online"
+        case .notPaired: return "Not paired"
+        case .offlineWakes: return "Offline · wakes on tap"
+        case .offline: return "Offline"
+        }
+    }
+
+    var isPlaying: Bool {
+        if case .playing = self { return true }
+        return false
+    }
+}
+
+/// The status sentence behind its presence dot: green while the host answers, grey when it
+/// doesn't, none while dialing (the tile spins instead). A game up reads in green.
+struct HostStatusLine: View {
+    let status: HostStatus
+    let size: CGFloat
+    /// The dot alone: a card that shows its preset drops a plain "Online" beside it.
+    var dotOnly = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            switch status {
+            case .connecting:
+                EmptyView()
+            case .offline, .offlineWakes:
+                dot(Color.secondary.opacity(0.4))
+            case .online, .notPaired, .playing:
+                dot(Color.green)
+            }
+            if !dotOnly {
+                Text(status.text)
+                    .lineLimit(1)
+            }
+        }
+        .font(.geist(size, .medium, relativeTo: .footnote))
+        .foregroundStyle(status.isPlaying ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary))
+        // With the words gone the dot still has to say it.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(status.text)
+    }
+
+    private func dot(_ color: Color) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: size * 0.5, height: size * 0.5)
+            .accessibilityHidden(true) // the sentence says it
+    }
+}
+
+/// A saved host in two lines: the name, then its status with the preset chip. A tap connects; ⓘ
+/// and the menu's Host Details… open the host page; a star on the tile marks the default host.
+/// The same view renders a pinned host+preset card, a shortcut whose menu carries only its own
+/// acts (§5.2a).
 struct HostCardView: View {
     let host: StoredHost
-    /// Currently advertising on the LAN (matched against live mDNS discovery). False means
-    /// "not seen on this network" — off, or a remote/cross-subnet host we can't observe.
+    /// Answered the last reachability probe.
     let isOnline: Bool
     let isConnecting: Bool
-    let isMostRecent: Bool
+    /// The host Start in opens on, explicit or derived. Its tile carries a star.
+    let isDefaultHost: Bool
     let isBusy: Bool
-    let onConnect: () -> Void
-    let onPair: () -> Void
-    /// Optional for the same reason `onBrowseLibrary` is: the probe dials with the device
-    /// identity and, on an unpinned host, accepts whatever certificate answers. Offered only
-    /// where a pin already exists.
-    var onSpeedTest: (() -> Void)?
-    let onForget: () -> Void
-    let onRemove: () -> Void
-    /// Open this host's game library — a MENU action. `nil` — no library affordance at all — when
-    /// the setting is off or the host is unpaired (the library plane needs the pinned identity).
-    ///
-    /// Never the card's primary tap: tapping a host connects to it, on every surface. Browsing is
-    /// one step further in, exactly where the console shell keeps it (Y on a tile).
-    var onBrowseLibrary: (() -> Void)? = nil
-    /// Send a Wake-on-LAN magic packet. Shown only when the host is offline and we have a stored
-    /// MAC to target (a tap-to-connect already auto-wakes; this is the explicit "just wake it").
-    var onWake: (() -> Void)? = nil
-    /// Open the edit sheet (name / address / port / Wake-on-LAN MAC).
-    var onEdit: (() -> Void)? = nil
-    /// Upload this device's recent log to the host (`SendLogs`). `nil` when the host is unpaired —
-    /// the upload is authenticated by the pairing, so there is nothing to offer before it.
-    var onSendLogs: (() -> Void)? = nil
-    /// What this host says this device may do TO it — sleep, restart, shut it down
-    /// (`design/host-actions.md` §7). Empty on every surface that doesn't offer them, and on
-    /// every host that hasn't answered or hasn't granted them.
-    var hostActions: [HostAction] = []
-    /// Run one of the above. `nil` alongside a non-empty `hostActions` would be a bug, so the
-    /// rows render disabled in that case rather than silently doing nothing.
-    var onHostAction: ((HostAction) -> Void)? = nil
-    /// This card's preset affordances — nil on surfaces that don't offer them.
-    var presetMenu: HostPresetMenu? = nil
-    /// Set on a PINNED card: the preset this card connects with. nil = the host's primary card,
-    /// which follows the binding.
+    let actions: HostActions
+    /// Set on a pinned card: the preset it connects with. nil = the host's own card.
     var pinnedPreset: StreamPreset? = nil
-    /// What this host has up right now (`NowPlayingStore`), if anything. It rides the status
-    /// line rather than a line of its own: a card that grows when a game starts would make the
-    /// grid's rows jump, which is the reason the preset chip shares the title line too.
+    /// What the host has up right now (`NowPlayingStore`), if anything.
     var nowPlaying: String? = nil
-    /// The start-screen pointer, written from this card's own menu. Empty means none is stored,
-    /// which with exactly one paired host still resolves to that host.
-    @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
-
-    /// The pointer names this host. Case-insensitive: the Rust client mints lowercase ids into
-    /// the same key, and `UUID.uuidString` is uppercase.
-    private var isDefaultHost: Bool {
-        !defaultHostID.isEmpty
-            && defaultHostID.lowercased() == host.id.uuidString.lowercased()
-    }
+    @AppStorage(DefaultsKey.autoWake) private var autoWake = true
 
     /// The preset this card announces: a pinned card's own, else the host's binding.
     private var shownPreset: StreamPreset? {
-        pinnedPreset ?? presetMenu.flatMap { menu in
-            menu.boundID.flatMap { id in menu.profiles.first { $0.id == id } }
+        pinnedPreset ?? actions.presets.flatMap { menu in
+            menu.boundID.flatMap { id in menu.presets.first { $0.id == id } }
         }
     }
 
     var body: some View {
         let m = CardMetrics.current
-        return Button(action: onConnect) {
-            HStack(spacing: m.spacing) {
-                monogramTile(monogram(host.displayName), osChain: host.osChain,
-                             m: m, connecting: isConnecting, filled: true)
-                VStack(alignment: .leading, spacing: 4) {
-                    // The chip rides the TITLE line, anchored to the card's trailing edge — not
-                    // trailing the name, where it read as part of the title, and not on a line of
-                    // its own, where it made cards with a preset taller than cards without and a
-                    // pinned card stuck out of its grid row. The spacer is what anchors it: the
-                    // name truncates against that gap instead of ever running into the chip.
-                    HStack(spacing: 6) {
+        let status = HostStatus(
+            host: host, isOnline: isOnline, isConnecting: isConnecting, nowPlaying: nowPlaying,
+            autoWake: autoWake)
+        return ZStack(alignment: .trailing) {
+            Button(action: actions.connect) {
+                HStack(spacing: m.spacing) {
+                    monogramTile(monogram(host.displayName), osChain: host.osChain,
+                                 m: m, connecting: isConnecting, filled: host.pinnedSHA256 != nil)
+                        .opacity(isOnline || isConnecting ? 1 : 0.55)
+                        .overlay(alignment: .bottomTrailing) {
+                            if isDefaultHost { DefaultHostBadge(size: m.tile) }
+                        }
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(host.displayName)
                             .font(.geist(m.name, .bold, relativeTo: .title3))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Spacer(minLength: 8)
-                        if let profile = shownPreset {
-                            PresetChip(
-                                profile: profile, size: m.status,
-                                prominent: pinnedPreset != nil)
-                                // The name gives up width first: a truncated host name still reads,
-                                // a truncated preset name is the one thing the chip exists to say.
-                                .layoutPriority(1)
+                        HStack(spacing: 8) {
+                            HostStatusLine(
+                                status: status, size: m.meta,
+                                dotOnly: shownPreset != nil && status == .online)
+                            if let preset = shownPreset {
+                                // Whole even when the status has to shorten: the preset says what a
+                                // tap does, and the host page has the full status.
+                                PresetChip(
+                                    preset: preset, size: m.status,
+                                    prominent: pinnedPreset != nil)
+                                    .fixedSize()
+                            }
                         }
+                        // One height with or without a chip, so preset cards line up with the rest.
+                        .frame(height: m.meta * 1.4, alignment: .leading)
                     }
-                    Text("\(host.address):\(String(host.port))")
-                        .font(.geist(m.meta, relativeTo: .caption))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    statusRow(m)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                // Fills the card so the title row's trailing spacer reaches the real edge; without
-                // it the text column hugs its content and "trailing" means "just after the name".
+                .padding(m.padding)
+                .padding(.trailing, infoInset(m))
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(m.padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            #if !os(tvOS)
-            // tvOS: the .card button style owns platter + focus motion; extra chrome mutes it.
-            // Elsewhere: a flat material panel with a hairline border (industrial, not a soft blob),
-            // and a brand accent bar down the leading edge for the most-recent host.
-            .background(.regularMaterial)
-            .overlay(alignment: .leading) {
-                if isMostRecent {
-                    Rectangle().fill(Color.brand).frame(width: 3)
+                #if !os(tvOS)
+                // tvOS: the .card button style owns platter + focus motion; extra chrome mutes it.
+                .background(.regularMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: m.radius, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: m.radius, style: .continuous)
+                        .strokeBorder(.quaternary, lineWidth: 1)
                 }
+                #endif
             }
-            .clipShape(RoundedRectangle(cornerRadius: m.radius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: m.radius, style: .continuous)
-                    .strokeBorder(.quaternary, lineWidth: 1)
+            #if os(tvOS)
+            .buttonStyle(.card)
+            #elseif os(iOS)
+            .buttonStyle(HostCardButtonStyle(cornerRadius: m.radius))
+            #else
+            .buttonStyle(.plain)
+            #endif
+            .disabled(isBusy)
+            .contextMenu { menuItems }
+            #if !os(tvOS)
+            // A sibling of the card, not part of its label: a button inside a button never
+            // receives the tap. tvOS reaches the page from the context menu instead.
+            if let showDetails = actions.showDetails {
+                Button(action: showDetails) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: m.name * 0.95))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                #if os(iOS)
+                .hoverEffect(.highlight)
+                #endif
+                .padding(.trailing, 4)
+                .accessibilityLabel("Details for \(host.displayName)")
+                #if os(macOS)
+                .help("Host details")
+                #endif
             }
             #endif
         }
-        #if os(tvOS)
-        .buttonStyle(.card)
-        #elseif os(iOS)
-        .buttonStyle(HostCardButtonStyle(cornerRadius: m.radius))
-        #else
-        .buttonStyle(.plain)
+        #if os(macOS)
+        .help("\(host.address):\(String(host.port))")
         #endif
-        .disabled(isBusy)
-        .contextMenu { menuItems }
     }
 
+    /// Room kept at the trailing edge for ⓘ, so the preset chip never slides under it.
+    private func infoInset(_ m: CardMetrics) -> CGFloat {
+        #if os(tvOS)
+        0
+        #else
+        actions.showDetails == nil ? 0 : max(0, 48 - m.padding)
+        #endif
+    }
+
+    /// The daily acts, five rows at most (design §2.3). Setup, diagnostics, power and removal
+    /// live on the host page. A pinned card offers only its shortcut's acts.
     @ViewBuilder private var menuItems: some View {
-        if let pinned = pinnedPreset, let menu = presetMenu {
-            // A pinned card is a shortcut, not a second host: only connect-shaped actions, plus
-            // the way to remove the shortcut itself. Unpinning touches neither the preset nor
-            // the host's default binding.
-            connectWithMenu(menu)
-            // Browsing IS a connect-shaped action — it is this card's connect with a title picked
-            // first — so a pinned card offers it and opens its own shelf, whose launches carry the
-            // pinned preset. (Pair / speed test / wake / forget stay on the host's card: those
-            // are about the machine, and a shortcut has no business claiming them.)
-            if let onBrowseLibrary {
-                Button("Browse Library…", action: onBrowseLibrary)
+        if let pinned = pinnedPreset {
+            if let browse = actions.browseLibrary {
+                Button("Browse Library", systemImage: "square.grid.2x2", action: browse)
             }
-            if LinkClipboard.isAvailable {
-                Button("Copy Link") { menu.copyLink(pinned.id) }
+            if let copyLink = actions.copyLink {
+                Button("Copy Link", systemImage: "link", action: copyLink)
             }
-            Button("Unpin Card", systemImage: "pin.slash", role: .destructive) {
-                menu.togglePin(pinned.id)
+            if let presets = actions.presets {
+                Button("Unpin Card", systemImage: "pin.slash", role: .destructive) {
+                    presets.togglePin(pinned.id)
+                }
             }
         } else {
-            if let onEdit {
-                Button("Edit…", systemImage: "pencil", action: onEdit)
+            if let presets = actions.presets {
+                connectWithMenu(presets)
             }
-            if let menu = presetMenu {
-                connectWithMenu(menu)
-                pinMenu(menu)
-                if LinkClipboard.isAvailable {
-                    Button("Copy Link") { menu.copyLink(nil) }
-                }
+            if let browse = actions.browseLibrary {
+                Button("Browse Library", systemImage: "square.grid.2x2", action: browse)
             }
-            Button("Pair with PIN…", action: onPair)
-            if let onSpeedTest {
-                Button("Test Network Speed…", action: onSpeedTest)
+            if let wake = actions.wake {
+                Button("Wake Host", systemImage: "power", action: wake)
             }
-            if let onBrowseLibrary {
-                Button("Browse Library…", action: onBrowseLibrary)
+            if let copyLink = actions.copyLink {
+                Button("Copy Link", systemImage: "link", action: copyLink)
             }
-            if let onSendLogs {
-                Button("Send Logs to Host", action: onSendLogs)
+            if let showDetails = actions.showDetails {
+                Button("Host Details…", systemImage: "info.circle", action: showDetails)
             }
-            if !isOnline, !host.wakeMacs.isEmpty, PunktfunkConnection.wakeOnLANAvailable, let onWake {
-                Button("Wake Host", systemImage: "power", action: onWake)
-            }
-            // Needs a pairing to point at: the start screen skips an unpaired host, so writing
-            // one would set a pointer that never resolves. Unchecked is not "not the default" —
-            // a lone paired host is the default with nothing written.
-            if host.pinnedSHA256 != nil {
-                Button(
-                    isDefaultHost ? "Default Host ✓" : "Make Default Host",
-                    systemImage: "house"
-                ) {
-                    defaultHostID = isDefaultHost ? "" : host.id.uuidString
-                }
-            }
-            // …and the other half of that round trip: what the HOST says this device may do to
-            // it. Empty unless it answered and this device's access carries the grant, so no row
-            // here can be refused for permission. A destructive one confirms in the caller.
-            ForEach(hostActions) { action in
-                Button(
-                    action.available ? action.label : "\(action.label) (Unavailable)",
-                    systemImage: "power",
-                    role: action.danger ? .destructive : nil
-                ) { onHostAction?(action) }
-                .disabled(onHostAction == nil)
-            }
-            if host.pinnedSHA256 != nil {
-                // Dropping the pin does NOT downgrade to TOFU: the next connect must re-pair via
-                // PIN (unless the host advertises pair=optional). Wording reflects that.
-                Button("Forget Identity (re-pair to reconnect)", action: onForget)
-            }
-            Button("Remove", role: .destructive, action: onRemove)
         }
     }
 
-    /// "Connect with ▸" — a ONE-OFF pick that never rebinds the host, with a checkmark on what a
-    /// plain click would use. Its last item is the explicit way to rebind, for the users who do
-    /// want that from here.
+    /// "Connect with ▸": a one-off pick that never rebinds the host, with a checkmark on what a
+    /// plain tap uses. Rebinding lives on the host page.
     @ViewBuilder private func connectWithMenu(_ menu: HostPresetMenu) -> some View {
-        if !menu.profiles.isEmpty {
-            Menu("Connect with") {
+        if !menu.presets.isEmpty {
+            Menu {
                 Button {
                     menu.connectWith(.defaults)
                 } label: {
                     checkable("Default settings", on: menu.boundID == nil)
                 }
-                ForEach(menu.profiles) { profile in
+                ForEach(menu.presets) { preset in
                     Button {
-                        menu.connectWith(.preset(profile.id))
+                        menu.connectWith(.preset(preset.id))
                     } label: {
-                        checkable(profile.name, on: menu.boundID == profile.id)
+                        checkable(preset.name, on: menu.boundID == preset.id)
                     }
                 }
-                Divider()
-                Menu("Set Default Preset") {
-                    Button("Default settings") { menu.setDefault(nil) }
-                    ForEach(menu.profiles) { profile in
-                        Button(profile.name) { menu.setDefault(profile.id) }
-                    }
-                }
-            }
-        }
-    }
-
-    /// "Pin as card ▸" — a host+preset combo gets its own one-click card in the grid, which is
-    /// what turns a regularly-used preset from a menu dive into a press (§5.2a).
-    @ViewBuilder private func pinMenu(_ menu: HostPresetMenu) -> some View {
-        if !menu.profiles.isEmpty {
-            Menu("Pin as Card") {
-                ForEach(menu.profiles) { profile in
-                    Button {
-                        menu.togglePin(profile.id)
-                    } label: {
-                        checkable(profile.name, on: menu.pinnedIDs.contains(profile.id))
-                    }
-                }
+            } label: {
+                Label("Connect with", systemImage: "slider.horizontal.3")
             }
         }
     }
@@ -373,56 +480,27 @@ struct HostCardView: View {
             Text(title)
         }
     }
-
-    /// Technical status line: a square presence pip + monospaced ONLINE/OFFLINE, and PAIRED when a
-    /// certificate is pinned (the lock state, spelled out).
-    @ViewBuilder private func statusRow(_ m: CardMetrics) -> some View {
-        HStack(spacing: 6) {
-            // The OS mark used to lead this row; it is the tile's glyph now (see monogramTile).
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(isOnline ? Color.green : Color.secondary.opacity(0.4))
-                .frame(width: 6, height: 6)
-                // The state is spelled out in the adjacent text, so the pip is decorative —
-                // otherwise VoiceOver reads the status twice ("Online, ONLINE …").
-                .accessibilityHidden(true)
-            Text(isOnline ? "ONLINE" : "OFFLINE")
-            if host.pinnedSHA256 != nil {
-                Text("· PAIRED")
-            }
-            if let nowPlaying {
-                // Green and mixed-case against the row's uppercase technical fields: this is the
-                // one thing on the card that is about the person's evening rather than the box.
-                Text("· \u{25B6} \(nowPlaying)")
-                    .foregroundStyle(Color.green)
-                    .lineLimit(1)
-            }
-        }
-        .font(.geist(m.status, .medium, relativeTo: .caption2))
-        .tracking(0.8)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-    }
 }
 
-/// The preset a card connects with, as a tinted pill. Quiet on a bound primary card (it only
-/// answers "what will a click do?"); prominent on a pinned card, where the preset IS the reason
-/// the card exists — which is where the catalog's `accent` earns its keep.
+/// The preset a card connects with, as a tinted pill after the status. Quiet on a bound primary
+/// card (it only answers "what will a click do?"); prominent on a pinned card, where the preset
+/// IS the reason the card exists — which is where the catalog's `accent` earns its keep.
 ///
-/// Prominence is fill and weight only, never TYPE SIZE: the chip sits on the card's title line,
-/// and a chip taller than the name would make pinned cards taller than their host's.
+/// Prominence is fill and weight only, never TYPE SIZE: the card fixes its second line's height,
+/// and a chip taller than that would make pinned cards taller than their host's.
 struct PresetChip: View {
-    let profile: StreamPreset
+    let preset: StreamPreset
     let size: CGFloat
     var prominent = false
 
     var body: some View {
-        let tint = profile.accentColor
+        let tint = preset.accentColor
         return HStack(spacing: 5) {
             Circle()
                 .fill(tint)
                 .frame(width: size * 0.55, height: size * 0.55)
                 .accessibilityHidden(true) // the name is right there
-            Text(profile.name)
+            Text(preset.name)
                 .font(.geist(size, prominent ? .bold : .semibold, relativeTo: .caption2))
                 .lineLimit(1)
         }
@@ -430,7 +508,7 @@ struct PresetChip: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 2)
         .background(Capsule().fill(tint.opacity(prominent ? 0.24 : 0.12)))
-        .accessibilityLabel("Preset \(profile.name)")
+        .accessibilityLabel("Preset \(preset.name)")
     }
 }
 

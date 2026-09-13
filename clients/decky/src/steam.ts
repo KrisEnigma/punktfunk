@@ -9,7 +9,7 @@
 // TWO shortcuts, both named "Punktfunk" (so they share ONE Steam Input controller-config key —
 // see applyControllerConfig):
 //   • STREAM  — hidden, stateful: the per-session launcher. Its launch options carry the host
-//     reference and the card's profile (PF_REF/PF_PROFILE/PF_REQUEST_ACCESS), rewritten per
+//     reference and the card's preset (PF_REF/PF_PRESET/PF_REQUEST_ACCESS), rewritten per
 //     launch, so one shortcut serves every host. Hidden — an implementation detail.
 //   • GAMEPAD UI — visible, stateless: fixed launch options = bare `--browse` (PF_BROWSE, no
 //     host) → the client's console home (host picker + pairing + settings, gamepad-navigable).
@@ -908,8 +908,8 @@ export async function launchGamepadUi(): Promise<void> {
 
 /** Per-launch extras beyond the host reference (all optional — {} is the plain stream). */
 export interface LaunchOpts {
-  /** A pinned card: stream with this settings profile, one-off (PF_PROFILE → `--profile`). */
-  profileId?: string;
+  /** A pinned card: stream with this preset, one-off (PF_PRESET → `--profile`). */
+  presetId?: string;
   /**
    * A title in the host's library to launch into the stream (PF_GAME → `--game`), by its
    * store-qualified id (`steam:570`). The host resolves it; the Deck only names it.
@@ -923,7 +923,7 @@ export interface LaunchOpts {
   requestAccess?: boolean;
 }
 
-// Host refs and profile ids ride Steam launch options as env-prefix tokens (`PF_REF=<ref>`),
+// Host refs and preset ids ride Steam launch options as env-prefix tokens (`PF_REF=<ref>`),
 // so they must be space/quote-free — Steam's tokenizer and the wrapper's env both break
 // otherwise. Real values are UUIDs or `addr:port`, so this rejects nothing in practice; it is
 // VALIDATION, never encoding (the client must receive the opaque token verbatim).
@@ -948,7 +948,7 @@ function safeClientBin(bin: string | undefined): bin is string {
 }
 
 /**
- * Stream `ref` fullscreen in Gaming Mode, optionally with a pinned card's profile. Encodes the
+ * Stream `ref` fullscreen in Gaming Mode, optionally with a pinned card's preset. Encodes the
  * target into the STREAM shortcut's launch options — one hidden shortcut serves every host —
  * then RunGame.
  *
@@ -986,8 +986,8 @@ function validateLaunch(ref: string, opts: LaunchOpts): void {
   if (!isSafeLaunchId(ref)) {
     throw new Error(`unsupported host reference: ${ref}`);
   }
-  if (opts.profileId && !isSafeLaunchId(opts.profileId)) {
-    throw new Error(`unsupported profile id: ${opts.profileId}`);
+  if (opts.presetId && !isSafeLaunchId(opts.presetId)) {
+    throw new Error(`unsupported preset id: ${opts.presetId}`);
   }
   if (opts.gameId && !isSafeLaunchId(opts.gameId)) {
     throw new Error(`unsupported game id: ${opts.gameId}`);
@@ -1014,8 +1014,8 @@ function launchOptions(ref: string, runner: string, clientBin: string, opts: Lau
     }
     env.push(`PF_CLIENT_BIN=${clientBin}`);
   }
-  if (opts.profileId) {
-    env.push(`PF_PROFILE=${opts.profileId}`);
+  if (opts.presetId) {
+    env.push(`PF_PRESET=${opts.presetId}`);
   }
   if (opts.gameId) {
     env.push(`PF_GAME=${opts.gameId}`);

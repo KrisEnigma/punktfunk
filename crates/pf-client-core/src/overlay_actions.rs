@@ -5,7 +5,7 @@
 //! [`OverlayConfig::parse`] never fails. Short rings pad empty, long ones
 //! truncate; unknown ids and dangling `shortcut:` refs become empty slots;
 //! absent fields take defaults; unparseable blobs take the platform default.
-//! Profiles sync across client versions, so a newer ring must degrade quietly.
+//! Presets sync across client versions, so a newer ring must degrade quietly.
 //!
 //! Swift (`OverlayActions.swift`) and Kotlin (`OverlayActions.kt`) mirror this
 //! file; the tests here are the contract they port.
@@ -82,7 +82,7 @@ impl SlotId {
 }
 
 /// Chord stored as keymap names (`ctrl`, `f4`, `a`), never VKs, so one
-/// profile fires on every client.
+/// preset fires on every client.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shortcut {
     pub id: String,
@@ -92,7 +92,7 @@ pub struct Shortcut {
     pub keys: Vec<String>,
 }
 
-/// Windows VK for a stored key name. The wire is VKs; profiles store names.
+/// Windows VK for a stored key name. The wire is VKs; presets store names.
 /// `None` means this build does not know the name — the chord does not fire.
 pub fn key_vk(name: &str) -> Option<u8> {
     let n = name.trim().to_ascii_lowercase();

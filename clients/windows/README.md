@@ -38,7 +38,7 @@ Walk this after a reactor bump or a change to the render/state architecture:
 - **Hosts** — discovery populates tiles; tile hover fill; "…" → Forget and Rename; add-host modal
   connects; the WOL wait screen cancels.
 - **Settings** — every section renders; combos still show their selection after a section switch
-  *and* a scope switch (the historic blank-combo reconciler bug); profile create / rename / delete;
+  *and* a scope switch (the historic blank-combo reconciler bug); preset create / rename / delete;
   colour swatches repaint; the Overridden marker appears on edit and clears on Reset; the GPU combo
   lists adapters.
 - **Pair** — PIN entry pairs, and the typed PIN reaches the Connect click (the `use_ref` mirror path).

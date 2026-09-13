@@ -1,14 +1,14 @@
-// The settings ONE session runs on — the global defaults with the session's profile overlaid,
+// The settings ONE session runs on — the global defaults with the session's preset overlaid,
 // resolved once at connect and read from there on (design/client-settings-profiles.md §4.2/§4.4):
 //
-//     effective = overlay(profile).apply(globals)
-//     profile   = one-off pick (Connect with ▸)  ??  host.profileID  ??  none
+//     effective = overlay(preset).apply(globals)
+//     preset   = one-off pick (Connect with ▸)  ??  host.presetID  ??  none
 //
 // Before this existed, ~10 sites scattered across the app AND the kit read `UserDefaults` directly
-// mid-session — a per-host profile would have applied to some of them and not others, which is
+// mid-session — a per-host preset would have applied to some of them and not others, which is
 // worse than not shipping the feature. They now read `SessionSettings.current`: the live session's
 // resolution while one is up, the plain globals otherwise (byte-for-byte today's behaviour when no
-// profile is involved).
+// preset is involved).
 //
 // Only SESSION-CONSUMED values live here. Pure app-level preferences — the library toggle, the
 // gamepad-UI switch, HUD placement, auto-wake, background keep-alive — stay plain `@AppStorage`
@@ -74,7 +74,7 @@ public struct EffectiveSettings: Equatable, Sendable {
     /// The preset this resolution came from, when one applied — the HUD names it so "which
     /// preset am I on?" is answerable mid-session, and the one-off/binding distinction never has
     /// to be guessed from the settings themselves.
-    public var profileID: String?
+    public var presetID: String?
     public var presetName: String?
     /// The preset's `#RRGGBB` chip colour. The HUD tints the name with it, matching the card
     /// that launched the session.
@@ -229,7 +229,7 @@ public struct EffectiveSettings: Equatable, Sendable {
         catalog: PresetCatalog? = nil, defaults: UserDefaults = .standard
     ) -> EffectiveSettings {
         let base = EffectiveSettings(defaults: defaults)
-        let profile: StreamPreset? = {
+        let preset: StreamPreset? = {
             switch selection {
             case .defaults:
                 return nil
@@ -240,11 +240,11 @@ public struct EffectiveSettings: Equatable, Sendable {
                 return (catalog ?? PresetCatalog.load()).binding(for: host)
             }
         }()
-        guard let profile else { return base }
-        var out = base.applying(profile.overrides)
-        out.profileID = profile.id
-        out.presetName = profile.name
-        out.presetAccent = profile.accent
+        guard let preset else { return base }
+        var out = base.applying(preset.overrides)
+        out.presetID = preset.id
+        out.presetName = preset.name
+        out.presetAccent = preset.accent
         return out
     }
 }
@@ -354,7 +354,7 @@ public extension EffectiveSettings {
 /// Default settings" on a BOUND host has to force the globals, and "no pick at all" has to fall
 /// through to the binding. Collapsing the two would make the menu item that says "Default
 /// settings" silently connect with the host's preset. It is the same distinction the session
-/// binary's `--profile ""` reserves on the desktop clients.
+/// binary's `--preset ""` reserves on the desktop clients.
 public enum PresetSelection: Hashable, Sendable {
     /// No pick — the host's default binding applies (a plain click/tap).
     case inherit
@@ -363,8 +363,8 @@ public enum PresetSelection: Hashable, Sendable {
     /// This preset, for this one connect. NEVER rebinds the host (§5.2).
     case preset(String)
 
-    public init(profileID: String?) {
-        self = profileID.map(PresetSelection.preset) ?? .inherit
+    public init(presetID: String?) {
+        self = presetID.map(PresetSelection.preset) ?? .inherit
     }
 }
 

@@ -268,7 +268,7 @@ fn connect_spawn(
     let target = target.clone();
     // The closure owns `target`/`fp_hex`; the call itself borrows copies.
     let (addr, port, fp_arg) = (target.addr.clone(), target.port, fp_hex.clone());
-    let profile_arg = target.profile.clone();
+    let preset_arg = target.preset.clone();
     // The launch id: an explicit opts pick (the library's tap-to-play), else one riding
     // the target — a deep link's `launch=` that detoured through the PIN ceremony.
     let launch_arg = opts.launch.clone().or_else(|| target.launch.clone());
@@ -278,7 +278,7 @@ fn connect_spawn(
         &fp_arg,
         opts.connect_timeout.as_secs(),
         launch_arg.as_deref(),
-        profile_arg.as_deref(),
+        preset_arg.as_deref(),
         child,
         move |event| {
             use crate::spawn::SpawnEvent;

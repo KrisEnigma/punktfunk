@@ -25,14 +25,14 @@ struct GamepadLibraryScreen: View {
     /// `.compact` in a landscape phone window — tighter chrome, like every gamepad screen.
     @Environment(\.verticalSizeClass) private var vSizeClass
     /// Resolves a pinned shelf's preset name for the title.
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
 
     private var compact: Bool { vSizeClass == .compact }
     /// The collection the shelf is drilled into, for the title — `host · preset · collection`.
     @State private var collection: String?
 
     private var title: String {
-        let base = target.title(in: profiles)
+        let base = target.title(in: presets)
         guard let collection else { return "\(base) — Library" }
         return "\(base) \u{b7} \(collection) — Library"
     }

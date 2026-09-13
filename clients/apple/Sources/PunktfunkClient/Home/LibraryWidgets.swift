@@ -281,3 +281,102 @@ struct PosterImage: View {
         }
     }
 }
+
+/// A saved host's desktop in the Library tab's Desktops row: its mark and name, a presence dot,
+/// and what a tap does — `Desktop`, or `Resume <title>` while the host has a game up.
+struct LibraryDesktopTile: View {
+    let host: StoredHost
+    let isOnline: Bool
+    let nowPlaying: String?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Group {
+                        if let mark = osIconImage(for: host.osChain) {
+                            mark.resizable().scaledToFit()
+                        } else {
+                            Image(systemName: "desktopcomputer").resizable().scaledToFit()
+                        }
+                    }
+                    .frame(width: 22, height: 22)
+                    .foregroundStyle(Color.brand)
+                    Spacer(minLength: 0)
+                    Circle()
+                        .fill(isOnline ? Color.green : Color.secondary.opacity(0.4))
+                        .frame(width: 7, height: 7)
+                }
+                Spacer(minLength: 0)
+                Text(host.displayName)
+                    .font(.geist(15, .bold, relativeTo: .headline))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(nowPlaying.map { "Resume \($0)" } ?? "Desktop")
+                    .font(.geist(12, relativeTo: .caption))
+                    .foregroundStyle(nowPlaying == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.green))
+                    .lineLimit(1)
+            }
+            .padding(12)
+            .frame(width: 190, height: 108, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(.quaternary, lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// What the host recorded about playing a title, in words: the grid's captions and the details
+/// sheet's stats line share the phrasing.
+enum PlayStatsText {
+    /// `2 hr. ago`, or nil for a title never played.
+    static func lastPlayed(_ stats: GameStats?) -> String? {
+        guard let ms = stats?.lastPlayedUnixMs, ms > 0 else { return nil }
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        return relativeDate.localizedString(for: date, relativeTo: Date())
+    }
+
+    /// `14 hr`. Under a minute says nothing: a launch that never really ran is not play time.
+    static func playTime(_ stats: GameStats?) -> String? {
+        guard let ms = stats?.playTimeMs, ms >= 60_000 else { return nil }
+        return Duration.milliseconds(Int64(clamping: ms)).formatted(
+            .units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 1))
+    }
+
+    /// `Last played 2 hr. ago · 14 hr total · 12 launches`, or nil with nothing recorded.
+    static func summary(_ stats: GameStats?) -> String? {
+        var parts: [String] = []
+        if let last = lastPlayed(stats) { parts.append("Last played \(last)") }
+        if let total = playTime(stats) { parts.append("\(total) total") }
+        if let count = stats?.launchCount, count > 0 {
+            parts.append(count == 1 ? "1 launch" : "\(count) launches")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " \u{b7} ")
+    }
+
+    private static let relativeDate: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+}
+
+/// The Library tab with no paired host: nothing to browse yet, and the way to fix that.
+struct LibraryNoHostView: View {
+    let showHosts: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("No Library Yet", systemImage: "square.grid.2x2")
+        } description: {
+            Text("Pair a host to browse its games here.")
+        } actions: {
+            Button("Show Hosts", action: showHosts)
+        }
+    }
+}

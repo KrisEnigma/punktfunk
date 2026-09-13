@@ -110,9 +110,9 @@ panel drives everything through it.
 
 ## Known gaps
 
-- **Profiles and pinned cards can't be created here.** The panel renders them; making one needs the
+- **Presets and pinned cards can't be created here.** The panel renders them; making one needs the
   desktop client or the client's own gamepad UI.
-- **Per-game pins are on hold.** The shared model pins host+profile; nothing persists a pinned
+- **Per-game pins are on hold.** The shared model pins host+preset; nothing persists a pinned
   *game* yet. The old `decky-pinned.json` is left on disk for a later migration.
 - **A parked connect looks like a hanging one.** The plugin toasts before a request-access launch to
   set expectations, which is a patch, not a fix — the session's connect screen should learn the
