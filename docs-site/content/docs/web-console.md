@@ -140,8 +140,9 @@ Nine destinations in the sidebar (a **More** tab on a phone holds the last five)
   picker. See [Virtual displays](/docs/virtual-displays).
 - **Library** — the games every client sees: turn a launcher source on or off, add or edit a custom
   title with its own art and launch command. See [Your game library](/docs/game-library).
-- **Performance** — arm a capture, run a session, stop it, and read the recording back as
-  per-stage latency, throughput and health graphs.
+- **Performance** — arm a capture, run a session, stop it, and read the recording back: per-stage
+  latency in milliseconds against one frame at the stream's rate, throughput, drops and the round
+  trip. See [Recording a capture](/docs/stats#recording-a-capture-for-a-bug-report).
 - **Troubleshooting** — the host's health checks above its live log stream, your plugins' lines and
   the logs your clients sent: follow it live, filter by level or source, search it. **Export all**
   saves everything as one file for a bug report — see [Reporting an Issue](/docs/report-an-issue).

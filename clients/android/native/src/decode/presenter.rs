@@ -522,7 +522,6 @@ impl Presenter {
         clock: Option<&VsyncShared>,
         tracker: &DisplayTracker,
         meter: &PresentMeter,
-        stats: &crate::stats::VideoStats,
         now_mono_ns: i64,
     ) -> bool {
         // Budget bookkeeping first: reopen on the predicted latch, force-open on the backstop.
@@ -616,7 +615,6 @@ impl Presenter {
         if self.pace_us.len() < 4096 {
             self.pace_us.push(pace_us);
         }
-        stats.note_release(pace_us);
         tracker.note_rendered(frame.pts_us, frame.decoded_ns, release_real_ns);
         true
     }

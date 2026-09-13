@@ -3,52 +3,38 @@ title: Support matrix
 description: What actually works where — host platforms, encoders, client decoders and per-client features, each cell taken from the code that decides it rather than from a feature name.
 ---
 
-This page is the one place that says **what works where**. Read it by finding your row (your host
-desktop, your GPU, your client app) and then reading across; every cell is taken from the code path
-that makes the decision, not from a feature's name.
-
-Support in Punktfunk is **non-uniform by design**. The host does not ship one capture path and one
-input path and hope your desktop cooperates — it carries a separate backend for each compositor and
-each GPU vendor, and it adapts to whatever that combination actually offers. A capability that is
-excellent on KDE can be impossible on gamescope, and one that is free on Windows may need a patched
-binary on Linux. That is why the honest answer to "does Punktfunk do X?" is usually "on which host,
-with which GPU, from which client".
+Find your row — your host desktop, your GPU, your client app — and read across. Every cell is
+taken from the code path that makes the decision, not from a feature's name. Support is
+non-uniform by design: each compositor and GPU vendor gets its own backend, so the honest answer
+to "does Punktfunk do X?" is usually "on which host, with which GPU, from which client".
 
 ## Legend
 
 | | Meaning |
 |---|---|
 | ✅ | Works. |
-| ⚠️ | Works, with a named caveat — the numbered note under the table says which. |
+| ⚠️ | Works, with a caveat — the numbered note under the table says which. |
 | ❌ | Not supported. Nothing to configure. |
 | ❓ | Untested or unverifiable from this repository. The note says what would settle it. |
 
-A ⚠️ is never left unexplained. If you see one, its number is directly below the table.
+## How to read a cell
 
-## Four different kinds of "yes"
+A cell's "yes" can be decided four different ways — which tells you *when* it can turn into a "no"
+on your machine:
 
-The distinction below is the whole value of this page, because it tells you *when* a cell can turn
-into a "no" on your machine:
-
-- **Compiled in** — decided when the binary was built (`#[cfg]`, or a cargo feature). It is either
-  there or it isn't, and no setting changes it. The Windows host has no monitor-mirroring code at
-  all; a hand-built host has no NVENC.
+- **Compiled in** — decided at build time. No setting changes it: a hand-built host has no NVENC.
 - **Probed at runtime** — the host or client asks your driver, GPU or compositor and believes the
   answer. The backend supports it; **your device may still refuse it**. Most codec, 10-bit and
   4:4:4 cells are this kind.
-- **Negotiated** — both ends must advertise it before it happens. The clipboard, pen input, 4:4:4
-  and client-drawn cursors all die if either side says no. Mostly quietly — 4:4:4 is the exception,
-  and deliberately so: the host resolves the chroma *before* the Welcome and names the losing gate
-  in its log, and the client's stats overlay prints `4:4:4→4:2:0` rather than letting you assume
-  you got what you asked for.
-- **Default on / opt-in / operator-gated** — HDR and 10-bit are attempted by default; lossless audio
-  stays on Opus until a client asks for it; the shared clipboard is off on the host until an
-  operator turns it on.
+- **Negotiated** — both ends must advertise it; the clipboard, pen input, 4:4:4 and client-drawn
+  cursors all die if either side says no. The client's stats overlay prints `4:4:4→4:2:0` rather
+  than letting you assume you got what you asked for.
+- **Default on / opt-in / operator-gated** — HDR and 10-bit are attempted by default; lossless
+  audio waits for a client to ask; the shared clipboard is off until an operator turns it on.
 
-One more thing a table cannot show: a few capabilities **latch off for the rest of the host
-process** after a failure — a lost HDR negotiation, a repeatedly dying zero-copy import worker, a
-gamescope that came up without the flags we asked for. Those are called out where they apply. If a
-capability worked yesterday and not today, restart the host before believing the table is wrong.
+A few capabilities also **latch off for the rest of the host process** after a failure — a lost HDR
+negotiation, a repeatedly dying zero-copy import worker. If a capability worked yesterday and not
+today, restart the host before believing the table is wrong.
 
 ## Host platforms
 

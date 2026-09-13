@@ -266,6 +266,10 @@ pub struct NativeClient {
     audio_av_offset_ms: Arc<AtomicI64>,
     /// Playback-ring depth (ms). Audio writes, HUD reads.
     audio_buffer_ms: Arc<AtomicU32>,
+    /// Smoothed QUIC round trip (µs), sampled by the worker. `0` until the first sample.
+    rtt_us: Arc<AtomicU32>,
+    /// The stats overlay window. Receipt and 0xCF timings land in it as they are pulled.
+    hud: Arc<crate::hud::Stats>,
     /// Embedder decode-latency samples. Pump drains per window into ABR; see [`DecodeLatAcc`].
     decode_lat: Arc<Mutex<DecodeLatAcc>>,
     /// Live encoder target (kbps), follows `BitrateChanged`. [`resolved_bitrate_kbps`] is the
@@ -323,6 +327,11 @@ pub struct NativeClient {
     /// (4 988 662 ns). Size rings from this; time from
     /// [`crate::audio::pcm::frame_duration_ns`]. Advancing a clock by this invents 2.3 ms/s.
     pub audio_frame_us: u16,
+    /// Surround coupling the host encodes, a [`crate::audio::AudioLayout`] wire id kept
+    /// verbatim. Build the Opus decoder from `AudioLayout::from_wire(self.audio_layout)`, never
+    /// from the request, and refuse audio on `None` rather than pair channels wrongly. `0` for
+    /// an older host.
+    pub audio_layout: u8,
     /// Host-resolved video codec. Build the decoder from THIS; do not assume HEVC.
     pub codec: u8,
 }
@@ -528,6 +537,7 @@ impl NativeClient {
             // "cheapest lossless rung" under `advertised_client_caps`.
             0,
             0,
+            crate::audio::AudioLayout::Legacy,
             video_codecs,
             preferred_codec,
             display_hdr,
@@ -567,6 +577,9 @@ impl NativeClient {
         audio_channels: u8,
         audio_rate_hz: u32,
         audio_bits: u8,
+        // Surround coupling to ask for ([`crate::audio::AudioLayout`]). The host answers in
+        // [`NativeClient::audio_layout`]; `Legacy` keeps the Hello byte-identical.
+        audio_layout: crate::audio::AudioLayout,
         video_codecs: u8,
         preferred_codec: u8,
         display_hdr: Option<HdrMeta>,
@@ -624,6 +637,7 @@ impl NativeClient {
         let video_e2e_ns = Arc::new(AtomicU64::new(0));
         let audio_av_offset_ms = Arc::new(AtomicI64::new(0));
         let audio_buffer_ms = Arc::new(AtomicU32::new(0));
+        let rtt_us = Arc::new(AtomicU32::new(0));
         let decode_lat = Arc::new(Mutex::new(DecodeLatAcc::default()));
         // Pump seeds from Welcome before ready_tx, then follows every ack.
         let live_bitrate = Arc::new(AtomicU32::new(0));
@@ -648,6 +662,7 @@ impl NativeClient {
         let mic_stats_w = mic_stats.clone();
         let hot_tids_w = hot_tids.clone();
         let clock_offset_w = clock_offset.clone();
+        let rtt_us_w = rtt_us.clone();
         let decode_lat_w = decode_lat.clone();
         let live_bitrate_w = live_bitrate.clone();
         let pad_audio_caps_w = pad_audio_caps.clone();
@@ -684,6 +699,7 @@ impl NativeClient {
                     audio_channels,
                     audio_rate_hz,
                     audio_bits,
+                    audio_layout,
                     video_codecs,
                     preferred_codec,
                     display_hdr,
@@ -725,6 +741,7 @@ impl NativeClient {
                     mic_stats: mic_stats_w,
                     hot_tids: hot_tids_w,
                     clock_offset: clock_offset_w,
+                    rtt_us: rtt_us_w,
                     decode_lat: decode_lat_w,
                     live_bitrate: live_bitrate_w,
                     access_grants: access_grants_w,
@@ -759,6 +776,7 @@ impl NativeClient {
             }
         };
         *mode_slot.lock().unwrap() = negotiated.mode;
+        let hud = Arc::new(crate::hud::Stats::new(clock_offset.clone()));
         Ok(NativeClient {
             frames: frame_chan,
             audio: Mutex::new(audio_rx),
@@ -802,6 +820,8 @@ impl NativeClient {
             video_e2e_ns,
             audio_av_offset_ms,
             audio_buffer_ms,
+            rtt_us,
+            hud,
             decode_lat,
             live_bitrate_kbps: live_bitrate,
             // Match the pump: Automatic, not rate-pinned PyroWave, AND host echoed a rate.
@@ -825,6 +845,7 @@ impl NativeClient {
             audio_sample_rate_hz: negotiated.audio_rate_hz,
             audio_bits: negotiated.audio_bits,
             audio_frame_us: negotiated.audio_frame_us,
+            audio_layout: negotiated.audio_layout,
             codec: negotiated.codec,
         })
     }
@@ -1058,6 +1079,65 @@ impl NativeClient {
         self.audio_buffer_ms.clone()
     }
 
+    /// The stats overlay window. A client notes its decode and display stamps here.
+    pub fn hud(&self) -> &crate::hud::Stats {
+        &self.hud
+    }
+
+    /// The window as an owned handle, for a thread that must not keep the connector alive.
+    pub fn hud_shared(&self) -> Arc<crate::hud::Stats> {
+        self.hud.clone()
+    }
+
+    /// Smoothed QUIC round trip, µs. `0` until the worker's first sample.
+    pub fn rtt_us(&self) -> u32 {
+        self.rtt_us.load(Ordering::Relaxed)
+    }
+
+    fn hud_counters(&self) -> crate::hud::Counters {
+        let mic = self.mic_stats();
+        crate::hud::Counters {
+            frames_dropped: self.frames_dropped(),
+            fec_recovered: self.fec_recovered_shards(),
+            mic_sent: mic.sent,
+            mic_dropped: mic.dropped_full + mic.dropped_stale,
+            audio_buffer_ms: self.audio_buffer_ms(),
+            av_offset_ms: self
+                .audio_av_offset_ms()
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            rtt_us: self.rtt_us(),
+            target_kbps: self.current_bitrate_kbps(),
+        }
+    }
+
+    /// Sample for the overlay only while one is shown. On from connect.
+    pub fn set_hud_enabled(&self, on: bool) {
+        self.hud.set_enabled(on, &self.hud_counters());
+    }
+
+    /// Close the overlay window with everything the connector knows filled in: mode, codec,
+    /// colour, audio format, counters. The caller adds the decoder, display HDR and extras.
+    pub fn hud_snapshot(&self) -> crate::hud::StatsSnapshot {
+        let mut s = self.hud.drain(&self.hud_counters());
+        let m = self.mode();
+        (s.width, s.height, s.refresh_hz) = (m.width, m.height, m.refresh_hz);
+        s.codec = crate::hud::codec_label(self.codec).into();
+        s.bit_depth = self.bit_depth;
+        if matches!(
+            self.color.transfer,
+            crate::quic::ColorInfo::TRC_PQ | crate::quic::ColorInfo::TRC_HLG
+        ) {
+            s.hdr = crate::hud::Hdr::Hdr;
+        }
+        s.chroma_444 = self.chroma_format == crate::quic::CHROMA_IDC_444;
+        s.auto_rate = self.wants_decode;
+        s.audio_lossless = self.audio_codec == crate::quic::AUDIO_CODEC_PCM;
+        s.audio_rate_hz = self.audio_sample_rate_hz;
+        s.audio_bits = self.audio_bits;
+        s.audio_channels = self.audio_channels;
+        s
+    }
+
     pub fn audio_buffer_ms(&self) -> u32 {
         self.audio_buffer_ms.load(Ordering::Relaxed)
     }
@@ -1193,7 +1273,12 @@ impl NativeClient {
     /// One thread per plane; `&self` is for sharing across planes, not two consumers of one.
     pub fn next_frame(&self, timeout: Duration) -> Result<Frame> {
         match self.frames.pop(timeout) {
-            FramePop::Frame(f) => Ok(f),
+            FramePop::Frame(f) => {
+                let completes_au = f.part.as_ref().is_none_or(|p| p.last);
+                self.hud
+                    .note_received(f.pts_ns, f.received_ns, f.data.len(), completes_au);
+                Ok(f)
+            }
             FramePop::Timeout => Err(PunktfunkError::NoFrame),
             FramePop::Closed => Err(PunktfunkError::Closed),
         }
@@ -1308,7 +1393,10 @@ impl NativeClient {
     /// non-blockingly alongside frame samples.
     pub fn next_host_timing(&self, timeout: Duration) -> Result<crate::quic::HostTiming> {
         match self.host_timing.lock().unwrap().recv_timeout(timeout) {
-            Ok(t) => Ok(t),
+            Ok(t) => {
+                self.hud.note_host_timing(&t);
+                Ok(t)
+            }
             Err(RecvTimeoutError::Timeout) => Err(PunktfunkError::NoFrame),
             Err(RecvTimeoutError::Disconnected) => Err(PunktfunkError::Closed),
         }
