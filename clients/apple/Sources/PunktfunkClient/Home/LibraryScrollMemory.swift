@@ -35,8 +35,8 @@ enum LibraryScrollMemory {
         UserDefaults.standard.set(gameID, forKey: key(forHost: hostID))
     }
 
-    /// Forget a host's position — part of removing the host, so a forgotten host leaves no trace
-    /// of what somebody was playing behind on the device.
+    /// Forget a host's position: when the host is removed, so it leaves no trace of what somebody
+    /// was playing, and when the Library's filter switches to it, so it opens at the top.
     static func forget(hostID: String) {
         UserDefaults.standard.removeObject(forKey: key(forHost: hostID))
     }

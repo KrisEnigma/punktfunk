@@ -12,7 +12,7 @@ measurements with the same labels. It speaks one of two vocabularies:
   screen, as a median and a slow-frame figure, and every stage in between.
 
 Turn on **Advanced statistics** in each client's [Settings](/docs/client-settings#overlay) to switch.
-The setting belongs to the device, so a settings profile never changes it.
+The setting belongs to the device, so a settings preset never changes it.
 
 ## Detail levels
 

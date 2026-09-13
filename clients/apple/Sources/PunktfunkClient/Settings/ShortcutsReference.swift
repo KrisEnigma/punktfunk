@@ -38,7 +38,7 @@ struct ShortcutGroup: Identifiable {
 enum ShortcutsCatalog {
     /// Whether a mute key is worth listing when no session is running, for the About page reached
     /// from settings. `SessionModel.micAvailable` is the authority DURING a session — it also
-    /// consults the profile the session actually resolved — but a reference page opened between
+    /// consults the preset the session actually resolved — but a reference page opened between
     /// sessions has no session to ask, so it answers the device-level half of the same question:
     /// a platform with an app-accessible input, the mic setting on, and the OS not refusing.
     /// `.notDetermined` counts, exactly as it does there: the prompt is simply still pending.

@@ -29,6 +29,10 @@ public enum LibrarySortKey: String, CaseIterable, Hashable, Sendable {
     case platform = "platform"
     /// Store label A–Z, then title.
     case store = "store"
+    /// Newest launch first; titles never played keep host order after them.
+    case recent = "recent"
+    /// Most play time first; titles with none keep host order after them.
+    case playTime = "playtime"
 
     /// Parse the persisted value. Lenient by design: an unknown string is a newer client's key,
     /// and the right answer to one is today's shelf rather than an error — the rule `uiPalette`
@@ -47,11 +51,15 @@ public enum LibrarySortKey: String, CaseIterable, Hashable, Sendable {
         case .title: return "A–Z"
         case .platform: return "Platform"
         case .store: return "Store"
+        case .recent: return "Recent"
+        case .playTime: return "Most played"
         }
     }
 
     /// The pills, in the order they are offered.
-    public static let all: [LibrarySortKey] = [.hostOrder, .title, .platform, .store]
+    public static let all: [LibrarySortKey] = [
+        .hostOrder, .title, .platform, .store, .recent, .playTime,
+    ]
 }
 
 /// The two arrangements of the gamepad library. Persisted as `punktfunk.libraryView`
@@ -265,6 +273,16 @@ public enum LibraryCollation {
                 let sa = games[a].storeLabel, sb = games[b].storeLabel
                 if sa != sb { return bytewise(sa, sb) }
                 return byTitleThenIndex()
+            case .recent:
+                let la = games[a].stats?.lastPlayedUnixMs ?? 0
+                let lb = games[b].stats?.lastPlayedUnixMs ?? 0
+                if la != lb { return la > lb }
+                return a < b
+            case .playTime:
+                let pa = games[a].stats?.playTimeMs ?? 0
+                let pb = games[b].stats?.playTimeMs ?? 0
+                if pa != pb { return pa > pb }
+                return a < b
             }
         }
 

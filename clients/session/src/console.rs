@@ -158,7 +158,7 @@ pub fn run(target: Option<&str>) -> u8 {
     let settings_at_start = trust::Settings::load();
     // The console window and its input models are built once from the global defaults and live
     // across launches, so the presentation-tier fields below (touch and mouse model, shortcut
-    // inhibit, match-window, render scale) latch here and no per-host profile can move them.
+    // inhibit, match-window, render scale) latch here and no per-host preset can move them.
     // What the host is told (mode, bitrate, codec, audio, pad) re-resolves per launch and honors
     // the binding; anything else off this snapshot must ride `SessionParams` like the stats tier.
     let latched_mouse = settings_at_start.mouse_mode();
@@ -185,7 +185,7 @@ pub fn run(target: Option<&str>) -> u8 {
         inhibit_shortcuts: settings_at_start.inhibit_shortcuts,
         overlay_actions: settings_at_start.overlay_actions.clone(),
         // Presentation-tier like the rows above: latched at console start, a per-host
-        // profile cannot move it in this mode (the documented P4 gap).
+        // preset cannot move it in this mode (the documented P4 gap).
         present_priority: settings_at_start.present_priority(),
         vsync: settings_at_start.vsync,
         allow_vrr: settings_at_start.allow_vrr,
@@ -228,7 +228,7 @@ pub fn run(target: Option<&str>) -> u8 {
                     launch,
                     title,
                     request_access,
-                    profile,
+                    preset,
                 } => {
                     let Some(pin) = trust::parse_hex32(&fp_hex) else {
                         // Connect (and request-access) pin the host's advertised fingerprint;
@@ -240,19 +240,19 @@ pub fn run(target: Option<&str>) -> u8 {
                         launch = launch.as_deref().unwrap_or("desktop"),
                         "launching from the console");
                     // Re-resolved per launch, not latched: the settings screen may have moved
-                    // the defaults since the last stream, and the host may carry a profile
-                    // binding. A pinned card's one-off profile id wins over that binding, and a
+                    // the defaults since the last stream, and the host may carry a preset
+                    // binding. A pinned card's one-off preset id wins over that binding, and a
                     // dangling id falls back to the defaults instead of blocking the connect.
-                    let (settings, profile) = trust::effective_settings(
+                    let (settings, preset) = trust::effective_settings(
                         Some(&fp_hex),
                         &addr,
                         port,
-                        profile.as_deref(),
+                        preset.as_deref(),
                         launch.as_deref(),
                     );
                     let mut params = session_params(
                         &settings,
-                        profile.map(|p| p.name),
+                        preset.map(|p| p.name),
                         // In-process launch: no spawner resolved a clipboard decision for us.
                         None,
                         addr.clone(),
@@ -267,7 +267,7 @@ pub fn run(target: Option<&str>) -> u8 {
                     );
                     // cursor_forward tells the host the client draws the pointer, true only in
                     // desktop mouse mode — so it follows the latched mode, not this launch's
-                    // profile. Otherwise the host composites no cursor and the stream shows none.
+                    // preset. Otherwise the host composites no cursor and the stream shows none.
                     params.cursor_forward = latched_mouse == trust::MouseMode::Desktop;
                     if request_access {
                         // The host PARKS the connect until the operator approves — outlast its
@@ -315,7 +315,7 @@ pub fn run(target: Option<&str>) -> u8 {
 /// A console row key → its index in the known-hosts store. The key is the pinned
 /// fingerprint when there is one, else `addr:port` (see the row builder) — which names
 /// the placeholder there, never a record pinned at that address. A pinned CARD's key
-/// carries the profile id past a NUL — the console strips that before it sends a
+/// carries the preset id past a NUL — the console strips that before it sends a
 /// command, so nothing here has to.
 fn index_for_key(known: &trust::KnownHosts, key: &str) -> Option<usize> {
     known
@@ -366,9 +366,9 @@ fn seed_row(k: Option<&trust::KnownHost>, addr: &str, port: u16) -> HostRow {
         os: k.map(|h| h.os.clone()).unwrap_or_default(),
         actions: Vec::new(),
         pin: None,
-        bound_profile: None,
+        bound_preset: None,
         running: String::new(),
-        game_profiles: Default::default(),
+        game_presets: Default::default(),
     }
 }
 
@@ -390,9 +390,9 @@ fn fake_host_row() -> HostRow {
         os: "linux/arch/steamos".into(),
         actions: Vec::new(),
         pin: None,
-        bound_profile: None,
+        bound_preset: None,
         running: String::new(),
-        game_profiles: Default::default(),
+        game_presets: Default::default(),
     }
 }
 
@@ -465,7 +465,7 @@ impl ServiceState {
     fn run(mut self, stop: Arc<AtomicBool>) {
         let (discovery_rx, rescan) = discovery::browse();
         self.rescan = Some(rescan);
-        // `rows()` re-parses the host store AND the profile catalog, so rebuilding it every
+        // `rows()` re-parses the host store AND the preset catalog, so rebuilding it every
         // 100 ms read both files ten times a second for a list that changes on events. Rebuilt
         // when something could have moved it, with a floor so anything unmarked still lands.
         let mut dirty = true;
@@ -757,7 +757,7 @@ impl ServiceState {
                     return;
                 };
                 // Edited IN PLACE rather than removed and re-added: the fingerprint, the
-                // learned MAC, the pinned cards and the profile binding all hang off this
+                // learned MAC, the pinned cards and the preset binding all hang off this
                 // entry, and re-adding would silently unpair a host the user only renamed.
                 h.name = if name.trim().is_empty() {
                     addr.clone()
@@ -836,11 +836,11 @@ impl ServiceState {
             ConsoleCmd::PadAction { .. } => {}
             ConsoleCmd::SetPin {
                 key,
-                profile_id,
+                preset_id,
                 pin,
             } => {
                 // Presentation only (design §5.2a): order = card order, appended at the
-                // end; never touches `profile_id` (the default binding). Idempotent, so
+                // end; never touches `preset_id` (the default binding). Idempotent, so
                 // a repeated press inside one refresh window can't double-pin.
                 let mut known = trust::KnownHosts::load();
                 let idx = index_for_key(&known, &key);
@@ -848,39 +848,39 @@ impl ServiceState {
                     tracing::warn!(%key, "pin toggle for an unknown host — ignoring");
                     return;
                 };
-                if pin && !h.pinned_profiles.contains(&profile_id) {
-                    h.pinned_profiles.push(profile_id);
+                if pin && !h.pinned_presets.contains(&preset_id) {
+                    h.pinned_presets.push(preset_id);
                 } else if !pin {
-                    h.pinned_profiles.retain(|id| *id != profile_id);
+                    h.pinned_presets.retain(|id| *id != preset_id);
                 }
                 self.save_known(&known);
                 // `run` refreshes the rows right after this drain, so the carousel and
                 // the pin screen reflect the new card within the same service pass.
             }
-            ConsoleCmd::BindProfile {
+            ConsoleCmd::BindPreset {
                 key,
                 game,
-                profile_id,
+                preset_id,
             } => {
-                // The BINDING half of the profile pair — `KnownHost::profile_id` for the
-                // host, `game_profiles` for one title. `SetPin` above is the presentation
+                // The BINDING half of the preset pair — `KnownHost::preset_id` for the
+                // host, `game_presets` for one title. `SetPin` above is the presentation
                 // half and never touches either; this never touches the pins. Same store
                 // discipline, same refresh-after-drain.
                 let mut known = trust::KnownHosts::load();
                 let idx = index_for_key(&known, &key);
                 let Some(h) = idx.and_then(|i| known.hosts.get_mut(i)) else {
-                    tracing::warn!(%key, "profile bind for an unknown host — ignoring");
+                    tracing::warn!(%key, "preset bind for an unknown host — ignoring");
                     return;
                 };
                 let changed = match &game {
                     Some(id) => {
-                        let moved = h.profile_for_game(id) != profile_id.as_deref();
-                        h.bind_game_profile(id, profile_id.as_deref());
+                        let moved = h.preset_for_game(id) != preset_id.as_deref();
+                        h.bind_game_preset(id, preset_id.as_deref());
                         moved
                     }
                     None => {
-                        let moved = h.profile_id != profile_id;
-                        h.profile_id = profile_id;
+                        let moved = h.preset_id != preset_id;
+                        h.preset_id = preset_id;
                         moved
                     }
                 };
@@ -974,17 +974,17 @@ impl ServiceState {
     }
 
     /// The console home's rows: saved hosts (most recent first) — each followed by its
-    /// pinned profile cards (design §5.2a) — then discovered-but-unsaved ones, then a
+    /// pinned preset cards (design §5.2a) — then discovered-but-unsaved ones, then a
     /// still-uncovered `--browse` seed.
     fn rows(&self) -> Vec<HostRow> {
         let known = trust::KnownHosts::load();
-        let catalog = pf_client_core::profiles::ProfilesFile::load();
+        let catalog = pf_client_core::presets::PresetsFile::load();
         let probed = self.probed.lock().unwrap();
-        let chip = |p: &pf_client_core::profiles::StreamProfile| pf_console_ui::ProfileChip {
+        let chip = |p: &pf_client_core::presets::StreamPreset| pf_console_ui::PresetChip {
             id: p.id.clone(),
             name: p.name.clone(),
             accent: p.accent.clone(),
-            // Only the speed test reads this: a profile that PINS bitrate is the layer its
+            // Only the speed test reads this: a preset that PINS bitrate is the layer its
             // host streams at, so the console must not offer to write the global instead.
             bitrate_kbps: p.overrides.bitrate_kbps,
         };
@@ -1061,8 +1061,8 @@ impl ServiceState {
                         })
                         .collect(),
                     pin: None,
-                    bound_profile: h
-                        .profile_id
+                    bound_preset: h
+                        .preset_id
                         .as_deref()
                         .and_then(|id| catalog.find_by_id(id))
                         .map(chip),
@@ -1071,11 +1071,11 @@ impl ServiceState {
                     // an unpaired host, which has nothing to authenticate the ask with.
                     running: library::now_playing(&h.fp_hex),
                     // Ids straight through, dangling ones included: the bind screen only
-                    // compares, and a deleted profile falls back at resolve, not here.
-                    game_profiles: h.game_profiles.clone(),
+                    // compares, and a deleted preset falls back at resolve, not here.
+                    game_presets: h.game_presets.clone(),
                 };
                 // A pinned card shares the primary tile's live state; its key rides the
-                // profile id behind a NUL (impossible in a fingerprint or `addr:port`),
+                // preset id behind a NUL (impossible in a fingerprint or `addr:port`),
                 // so cursor-follow and the wake path address the card itself.
                 let pins = h
                     .resolved_pins(&catalog)
@@ -1083,7 +1083,7 @@ impl ServiceState {
                     .map(|p| HostRow {
                         key: format!("{key}\0{}", p.id),
                         pin: Some(chip(p)),
-                        bound_profile: None,
+                        bound_preset: None,
                         ..row.clone()
                     })
                     .collect();
@@ -1124,9 +1124,9 @@ impl ServiceState {
                 // do, and no identity to ask what it is running.
                 actions: Vec::new(),
                 pin: None,
-                bound_profile: None,
+                bound_preset: None,
                 running: String::new(),
-                game_profiles: Default::default(),
+                game_presets: Default::default(),
             })
             .collect();
         extra.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1373,6 +1373,7 @@ fn to_model(games: &[library::GameEntry]) -> Vec<LibraryGame> {
             developer: g.developer.clone(),
             year: g.release_year,
             genres: g.genres.clone(),
+            stats: g.stats,
             running: false,
         })
         .collect()

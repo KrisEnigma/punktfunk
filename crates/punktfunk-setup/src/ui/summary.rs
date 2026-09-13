@@ -201,9 +201,6 @@ impl Screen {
         if !self.choices.punktfunk_group {
             self.choices.group_why = None;
         }
-        if !self.choices.gamestream {
-            self.choices.gamestream_why = None;
-        }
         if !self.choices.linger {
             self.choices.linger_why = None;
         }
@@ -247,11 +244,8 @@ impl Screen {
                 (_, true) => "yes — joins the punktfunk group (grants usbip attach)".into(),
                 _ => "no  — the pad arrives as a plain Xbox 360 controller".into(),
             },
-            Field::Gamestream => match (&c.gamestream_why, c.gamestream) {
-                (Some(why), true) => format!("yes — {why}"),
-                (_, true) => "yes".into(),
-                _ => "no  — punktfunk's own apps don't need it".into(),
-            },
+            Field::Gamestream if c.gamestream => "yes".into(),
+            Field::Gamestream => "no  — punktfunk's own apps don't need it".into(),
             Field::Clipboard => yn(c.clipboard).trim_end().to_string(),
             Field::Linger => match (&c.linger_why, c.linger) {
                 (Some(why), true) => format!("yes — {why}"),

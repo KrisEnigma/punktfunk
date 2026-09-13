@@ -8,11 +8,11 @@
 // the description is DYNAMIC — it explains the current choice. The only footers left are the
 // one-line "Applies from the next session." form notes.
 //
-// The SAME builders edit settings profiles (design/client-settings-profiles.md §5.1 —
+// The SAME builders edit settings presets (design/client-settings-profiles.md §5.1 —
 // SettingsView+Scope): a control's binding comes from `scoped(...)` rather than `@AppStorage`, so
 // it writes whichever layer the scope switcher selected, and `described(_:field:)` marks the row
-// when the edited profile overrides it. Rows that are NOT profileable — tier G (this device's
-// hardware and endpoints) and tier H (properties of a host) — are gated on `!inProfileScope` and
+// when the edited preset overrides it. Rows that are NOT presetable — tier G (this device's
+// hardware and endpoints) and tier H (properties of a host) — are gated on `!inPresetScope` and
 // simply don't render there; sections that would end up empty don't either.
 //
 // Category map (SettingsCategory): General = session/app behavior, Display = everything about
@@ -182,7 +182,7 @@ extension SettingsView {
 
     /// True when the editable custom fields should show: the wheel is parked on "Custom…" (sticky),
     /// or the effective size simply isn't one of the presets (e.g. a value synced from a Mac, or a
-    /// profile's own override) — so a non-preset mode stays editable without a persisted flag.
+    /// preset's own override) — so a non-preset mode stays editable without a persisted flag.
     private var isCustomResolution: Bool {
         customMode || !presetResolutionTags.contains("\(effective.width)x\(effective.height)")
     }
@@ -301,7 +301,7 @@ extension SettingsView {
                 Slider(value: bitrateSlider, in: 0...1) {
                     Text("Bitrate")
                 }
-                Text(SpeedTestSheet.mbpsLabel(kbps: effective.bitrateKbps))
+                Text(SpeedTestView.mbpsLabel(kbps: effective.bitrateKbps))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 76, alignment: .trailing)
@@ -399,14 +399,14 @@ extension SettingsView {
 
     // MARK: - General: Session
 
-    /// Empty in profile scope everywhere but macOS: auto-wake is a property of the host and this
+    /// Empty in preset scope everywhere but macOS: auto-wake is a property of the host and this
     /// network, and background keep-alive is a property of this device — neither is something
     /// "Game" and "Work" would ever differ on (§3, tiers H and G).
     private var showsSessionSection: Bool {
         #if os(macOS)
         return true
         #else
-        return !inProfileScope
+        return !inPresetScope
         #endif
     }
 
@@ -421,13 +421,13 @@ extension SettingsView {
                         isOn: scoped(SettingsFields.fullscreenWhileStreaming))
                 }
                 #endif
-                if !inProfileScope {
+                if !inPresetScope {
                     described("Sends Wake-on-LAN to a sleeping saved host and waits for it.") {
                         Toggle("Auto-wake on connect", isOn: $autoWakeEnabled)
                     }
                 }
                 #if os(iOS)
-                if !inProfileScope {
+                if !inPresetScope {
                     described("Audio and the connection stay live when you switch away; video "
                         + "pauses.") {
                         Toggle("Keep streaming in background", isOn: $backgroundKeepAlive)
@@ -461,20 +461,21 @@ extension SettingsView {
                 }
             }
             // Which corner the overlay sits in is a property of this device's screen, not of a
-            // profile (tier G).
-            if !inProfileScope {
+            // preset (tier G).
+            if !inPresetScope {
                 Picker("Position", selection: $hudPlacement) {
                     ForEach(HUDPlacement.allCases) { placement in
                         Text(placement.label).tag(placement.rawValue)
                     }
                 }
                 .disabled(effective.statsVerbosity == StatsVerbosity.off.rawValue)
-                // The vocabulary is this device's choice, never a profile's (tier G).
+                // The vocabulary is this device's choice, never a preset's (tier G).
                 described(Self.advancedStatisticsDescription) {
                     Toggle("Advanced statistics", isOn: $advancedStats)
                 }
                 #if !os(tvOS)
                 Link("What each number means", destination: Self.statsDocsURL)
+                    .foregroundStyle(Color.brand) // a Link takes the system accent, not the tint
                 #endif
             }
         }
@@ -484,8 +485,8 @@ extension SettingsView {
 
     @ViewBuilder var librarySection: some View {
         // An app-level feature switch for this device (tier G) — the whole section collapses in
-        // profile scope rather than rendering an empty group.
-        if !inProfileScope {
+        // preset scope rather than rendering an empty group.
+        if !inPresetScope {
             Section("Library") {
                 described("How the controller-optimized library arranges titles: Shelf is the "
                     + "coverflow, Grid shows more at once.") {
@@ -539,7 +540,7 @@ extension SettingsView {
             quickActionsRow
             // Whether a hardware mouse attached to THIS iPad gets locked is a fact about this
             // device's input hardware (tier G), not about how a host is streamed.
-            if !inProfileScope, UIDevice.current.userInterfaceIdiom == .pad {
+            if !inPresetScope, UIDevice.current.userInterfaceIdiom == .pad {
                 described("Locks a hardware mouse for mouse-look. Needs the stream "
                     + "fullscreen.") {
                     Toggle("Capture pointer for games", isOn: $pointerCapture)
@@ -582,7 +583,7 @@ extension SettingsView {
     @ViewBuilder var quickActionsRow: some View {
         described(dialOpener
                   + "Which actions the in-stream dial offers and the shortcuts it can send; "
-                  + "a profile that changes it owns the whole dial.", field: "overlay_actions") {
+                  + "a preset that changes it owns the whole dial.", field: "overlay_actions") {
             // A SHEET, not a push: the detail column is not a NavigationStack, and a
             // NavigationLink pushed from it popped the collapsed iPhone stack to the category
             // list on the way back and left the selection dead (AboutView's rows say the same).
@@ -604,7 +605,7 @@ extension SettingsView {
                 NavigationStack {
                     QuickActionsEditor(blob: scoped(SettingsFields.overlayActions),
                                        overridden: isOverridden("overlay_actions")) {
-                        if inProfileScope {
+                        if inPresetScope {
                             resetOverride("overlay_actions")
                         } else {
                             scoped(SettingsFields.overlayActions).wrappedValue = ""
@@ -736,7 +737,7 @@ extension SettingsView {
             }
             #if os(macOS)
             // Which speaker THIS Mac plays through is this device's audio routing (tier G).
-            if !inProfileScope {
+            if !inPresetScope {
                 described("Where host audio plays on this Mac.") {
                     Picker("Speaker", selection: $speakerUID) {
                         Text("System default").tag("")
@@ -760,7 +761,7 @@ extension SettingsView {
                     .disabled(!effective.micEnabled)
             }
             #if os(macOS)
-            if !inProfileScope {
+            if !inPresetScope {
                 Picker("Microphone", selection: $micUID) {
                     Text("System default").tag("")
                     ForEach(inputDevices) { device in
@@ -861,16 +862,16 @@ extension SettingsView {
 
     @ViewBuilder var controllersSection: some View {
         Section {
-            // The master switch, above everything it governs. Profileable, so it renders in
-            // both scopes: a "Work" profile can decline to forward what "Game" forwards.
+            // The master switch, above everything it governs. Presetable, so it renders in
+            // both scopes: a "Work" preset can decline to forward what "Game" forwards.
             described("Sends this device's controllers to the host. Off if they already reach it "
                 + "another way.",
                 field: "gamepad_forwarding") {
                 Toggle("Forward controllers", isOn: scoped(SettingsFields.gamepadForwarding))
             }
             // Which physical pad this device forwards, and what its own haptics do, are facts
-            // about THIS device (tier G) — only the virtual pad the host creates is profileable.
-            if !inProfileScope {
+            // about THIS device (tier G) — only the virtual pad the host creates is presetable.
+            if !inPresetScope {
                 if gamepads.controllers.isEmpty {
                     Text("No controllers detected")
                         .foregroundStyle(.secondary)
@@ -888,7 +889,7 @@ extension SettingsView {
                     .disabled(!effective.gamepadForwarding)
                 }
                 // Steam Controller 2 as-is passthrough — device tier like the pad rows above
-                // (EffectiveSettings.sc2Capture is not profileable). The capture engages at the
+                // (EffectiveSettings.sc2Capture is not presetable). The capture engages at the
                 // next stream; the in-stream badge announces it. Caption: see sc2CaptureCaption.
                 described(Self.sc2CaptureCaption) {
                     Toggle("Steam Controller 2 passthrough", isOn: $sc2Capture)
@@ -925,7 +926,7 @@ extension SettingsView {
             }
             #if os(iOS)
             // iPhone only in practice: hidden where the device itself can't play haptics (iPad).
-            if !inProfileScope, CHHapticEngine.capabilitiesForHardware().supportsHaptics {
+            if !inPresetScope, CHHapticEngine.capabilitiesForHardware().supportsHaptics {
                 described("Plays player 1's rumble on the phone itself — for pads without "
                     + "motors.") {
                     Toggle("Rumble on this iPhone", isOn: $rumbleOnDevice)
@@ -934,7 +935,7 @@ extension SettingsView {
             // The rumble mirror's sibling, data flowing the other way: hidden where the
             // device has no motion hardware, engages only while the player-1 controller
             // reports no rotation rate of its own.
-            if !inProfileScope, DeviceGyro.isAvailable {
+            if !inPresetScope, DeviceGyro.isAvailable {
                 described("Sends this device's motion as player 1's when the controller has no "
                     + "gyro.") {
                     Toggle("Gyro from this device", isOn: $gyroFromDevice)
@@ -942,7 +943,7 @@ extension SettingsView {
             }
             #endif
             #if !os(tvOS)
-            if !inProfileScope {
+            if !inPresetScope {
                 described("A controller-friendly layout for the host list and library.") {
                     Toggle("Gamepad-optimized browsing", isOn: $gamepadUIEnabled)
                 }
@@ -962,7 +963,7 @@ extension SettingsView {
             }
             #endif
             #if DEBUG && !os(tvOS)
-            if !inProfileScope {
+            if !inPresetScope {
                 Button("Test Controller…") { showControllerTest = true }
                     .disabled(gamepads.active == nil)
                     .sheet(isPresented: $showControllerTest) { ControllerTestView() }

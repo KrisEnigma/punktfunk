@@ -18,7 +18,7 @@
 ### Primary (164)
 
 ```
-Neu: Profile pro Host – ein Mac, mehrere Gaming-PCs, jeder mit eigenen Einstellungen. Dazu AV1-Hardware-Decoding auf M3 und neuer, HDR und volles 4:4:4 für Schrift.
+Neu: Presets pro Host – ein Mac, mehrere Gaming-PCs, jeder mit eigenen Einstellungen. Dazu AV1-Hardware-Decoding auf M3 und neuer, HDR und volles 4:4:4 für Schrift.
 ```
 
 ### Alternate (156)
@@ -32,7 +32,7 @@ Dein Gaming-PC im Fenster oder im Vollbild, in der exakten Auflösung deines Dis
 ### Primary (161)
 
 ```
-New: per-host profiles — one Mac, several gaming PCs, each with its own settings. Plus AV1 hardware decoding on M3 and later, HDR, and full 4:4:4 for crisp text.
+New: per-host presets — one Mac, several gaming PCs, each with its own settings. Plus AV1 hardware decoding on M3 and later, HDR, and full 4:4:4 for crisp text.
 ```
 
 ### Alternate (156)
@@ -76,7 +76,7 @@ Installierte Steam-Titel und selbst hinzugefügte Spiele erscheinen als Raster m
 
 MESSEN STATT GLAUBEN
 
-Ein gestuftes Overlay zeigt Bildrate, Bitrate und Latenz – über zwei Maschinen hinweg um den Uhrenversatz korrigiert, also eine Messung und kein Versprechen. Ein Geschwindigkeitstest pro Host schlägt eine passende Bitrate vor. Profile halten pro Host fest, wie gestreamt werden soll.
+Ein gestuftes Overlay zeigt Bildrate, Bitrate und Latenz – über zwei Maschinen hinweg um den Uhrenversatz korrigiert, also eine Messung und kein Versprechen. Ein Geschwindigkeitstest pro Host schlägt eine passende Bitrate vor. Presets halten pro Host fest, wie gestreamt werden soll.
 
 WAS DU BRAUCHST
 

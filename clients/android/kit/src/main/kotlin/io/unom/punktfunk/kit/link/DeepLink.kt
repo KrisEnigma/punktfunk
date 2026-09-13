@@ -13,12 +13,12 @@ import java.nio.charset.StandardCharsets
  *
  * ```text
  * punktfunk://connect/<host-ref>[?fp=<64-hex>][&host=<addr[:port]>][&launch=<id>]
- *                               [&profile=<ref>][&name=<label>]
+ *                               [&preset=<ref>][&name=<label>]
  * ```
  *
  * The invariant the grammar exists to keep: **a URL may only ever do what a click on an existing
  * card could do, minus trust decisions.** So it carries *references* to things that already exist
- * on this device — a host record, a settings profile, a library id — and never values: no
+ * on this device — a host record, a settings preset, a library id — and never values: no
  * resolution, no bitrate, no codec. A web page must not be able to shape a session beyond picking
  * among the user's own configurations. `pair` is deliberately not a route and never will be;
  * pairing stays an interactive ceremony.
@@ -31,7 +31,7 @@ object DeepLinks {
     const val MAX_URL_LEN = 2048
     const val MAX_HOST_REF_LEN = 128
     const val MAX_LAUNCH_LEN = 128
-    const val MAX_PROFILE_LEN = 64
+    const val MAX_PRESET_LEN = 64
     const val MAX_NAME_LEN = 64
 
     /** The default native port, as everywhere else in the clients. */
@@ -98,7 +98,8 @@ object DeepLinks {
         var fp: String? = null
         var host: Pair<String, Int>? = null
         var launch: String? = null
-        var profile: String? = null
+        var preset: String? = null
+        var legacyPreset: String? = null
         var name: String? = null
         for (pair in query.split('&')) {
             if (pair.isEmpty()) continue
@@ -135,11 +136,18 @@ object DeepLinks {
                     if (!isSafeLaunchId(value)) return DeepLinkResult.Refused(LinkError.BAD_LAUNCH_ID)
                     launch = value
                 }
-                key == "profile" && profile == null -> {
-                    if (scalarCount(value) > MAX_PROFILE_LEN) {
+                key == "preset" && preset == null -> {
+                    if (scalarCount(value) > MAX_PRESET_LEN) {
+                        return DeepLinkResult.Refused(LinkError.PARAM_TOO_LONG, "preset")
+                    }
+                    preset = value
+                }
+                // The pre-rename spelling: `preset` wins wherever it sits.
+                key == "profile" && legacyPreset == null -> {
+                    if (scalarCount(value) > MAX_PRESET_LEN) {
                         return DeepLinkResult.Refused(LinkError.PARAM_TOO_LONG, "profile")
                     }
-                    profile = value
+                    legacyPreset = value
                 }
                 key == "name" && name == null -> {
                     if (scalarCount(value) > MAX_NAME_LEN) {
@@ -149,7 +157,7 @@ object DeepLinks {
                 }
             }
         }
-        return DeepLinkResult.Parsed(DeepLink(route, hostRef, fp, host, launch, profile, name))
+        return DeepLinkResult.Parsed(DeepLink(route, hostRef, fp, host, launch, preset ?: legacyPreset, name))
     }
 
     /**
@@ -197,13 +205,13 @@ object DeepLinks {
      * pin alongside so the link degrades to a confirmation sheet instead of a dead click when the
      * record is gone.
      */
-    fun forHost(host: KnownHost, launch: String? = null, profile: String? = null) = DeepLink(
+    fun forHost(host: KnownHost, launch: String? = null, preset: String? = null) = DeepLink(
         route = LinkRoute.CONNECT,
         hostRef = host.id,
         fp = host.fpHex.ifEmpty { null },
         host = host.address to host.port,
         launch = launch,
-        profile = profile,
+        preset = preset,
     )
 
     /** The reserved first path segments — plus `pair`, reserved precisely so it can be refused. */
@@ -377,8 +385,8 @@ data class DeepLink(
     val host: Pair<String, Int>? = null,
     /** A store-qualified library id (`steam:570`) for the host to launch on arrival. */
     val launch: String? = null,
-    /** A settings-profile reference (id, or a unique name) — one-off, never rebinding. */
-    val profile: String? = null,
+    /** A settings-preset reference (id, or a unique name) — one-off, never rebinding. */
+    val preset: String? = null,
     /** Display label for the unknown-host confirmation sheet (external emitters). */
     val name: String? = null,
 ) {
@@ -402,7 +410,11 @@ data class DeepLink(
             )
         }
         launch?.let { push("launch", it) }
-        profile?.let { push("profile", it) }
+        // `profile=` as well, for clients that predate `preset=`.
+        preset?.let {
+            push("preset", it)
+            push("profile", it)
+        }
         name?.let { push("name", it) }
         return sb.toString()
     }

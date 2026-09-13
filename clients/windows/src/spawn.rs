@@ -130,7 +130,7 @@ pub(crate) fn silent_exit_banner(code: i32) -> Option<String> {
 /// Spawn the session binary for a connect with `fp_hex` pinned and feed its lifecycle to
 /// `on_event` from a reader thread. The child is parked in `slot` so Disconnect/Cancel
 /// can kill it. `launch` carries a library title id for the host to launch during the
-/// handshake; `profile` is a ONE-OFF settings-profile pick. `Err` = the spawn itself
+/// handshake; `preset` is a ONE-OFF settings-preset pick. `Err` = the spawn itself
 /// failed (binary missing?) — surfaced as a connect error by the caller.
 ///
 /// The argv and the `--resolved-spec` both come from the shared brain
@@ -138,7 +138,7 @@ pub(crate) fn silent_exit_banner(code: i32) -> Option<String> {
 /// its argv until 2026-07-31, which meant no spec — its sessions took the compat path and
 /// re-resolved every setting from the stores (the drift `orchestrate.rs` documents as a
 /// trap), and any field added to the spec was silently Windows-dead. Fullscreen now also
-/// comes from the plan's EFFECTIVE settings (profile-aware) instead of a caller argument.
+/// comes from the plan's EFFECTIVE settings (preset-aware) instead of a caller argument.
 #[allow(clippy::too_many_arguments)] // one cohesive spawn spec (session_params precedent)
 pub(crate) fn spawn_session(
     addr: &str,
@@ -146,7 +146,7 @@ pub(crate) fn spawn_session(
     fp_hex: &str,
     connect_timeout_secs: u64,
     launch: Option<&str>,
-    profile: Option<&str>,
+    preset: Option<&str>,
     slot: SessionChild,
     on_event: impl FnMut(SpawnEvent) + Send + 'static,
 ) -> Result<(), String> {
@@ -162,7 +162,7 @@ pub(crate) fn spawn_session(
             mgmt_port: None, // the library fetch runs in the shell (`Target`), never off a spawn plan
         },
         launch.map(str::to_string),
-        profile.map(str::to_string),
+        preset.map(str::to_string),
     );
     plan.connect_timeout_secs = Some(connect_timeout_secs);
     let mut cmd = Command::new(session_binary());

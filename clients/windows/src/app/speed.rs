@@ -6,7 +6,7 @@ use super::lucide;
 use super::style::*;
 use super::{Screen, Svc};
 use crate::trust::KnownHosts;
-use pf_client_core::profiles::ProfilesFile;
+use pf_client_core::presets::PresetsFile;
 use pf_client_core::speed::run_speed_probe;
 use windows_reactor::*;
 
@@ -132,13 +132,13 @@ pub(crate) fn speed_page(props: &SpeedProps, cx: &mut RenderCx) -> Element {
             let target = ctx.shared.target.lock().unwrap().clone();
             let bound = KnownHosts::load()
                 .resolve(target.fp_hex.as_deref(), &target.addr, target.port)
-                .and_then(|h| h.profile_id.clone());
-            let profile = match target.profile.as_deref() {
+                .and_then(|h| h.preset_id.clone());
+            let preset = match target.preset.as_deref() {
                 Some("") => None,
                 Some(id) => Some(id.to_string()),
                 None => bound,
             }
-            .and_then(|reference| ProfilesFile::load().resolve(&reference).0.cloned());
+            .and_then(|reference| PresetsFile::load().resolve(&reference).0.cloned());
             let kbps = *recommended_kbps;
             let write_global = {
                 let (ctx, ss) = (ctx.clone(), set_screen.clone());
@@ -152,11 +152,11 @@ pub(crate) fn speed_page(props: &SpeedProps, cx: &mut RenderCx) -> Element {
                     ss.call(Screen::Hosts);
                 }
             };
-            let write_profile = |id: String| {
+            let write_preset = |id: String| {
                 let ss = set_screen.clone();
                 move || {
-                    let mut catalog = ProfilesFile::load();
-                    if let Some(slot) = catalog.profiles.iter_mut().find(|x| x.id == id) {
+                    let mut catalog = PresetsFile::load();
+                    if let Some(slot) = catalog.presets.iter_mut().find(|x| x.id == id) {
                         slot.overrides.bitrate_kbps = Some(kbps);
                         if let Err(e) = catalog.save() {
                             tracing::warn!(error = %format!("{e:#}"),
@@ -170,9 +170,9 @@ pub(crate) fn speed_page(props: &SpeedProps, cx: &mut RenderCx) -> Element {
             // bitrate → that override (it's what this host reads). Bound but INHERITING
             // bitrate could legitimately mean either layer — offer both rather than
             // guessing (the GTK client's Ask tier; this shell used to silently CREATE an
-            // override on the profile).
+            // override on the preset).
             let mut buttons: Vec<Element> = Vec::new();
-            match &profile {
+            match &preset {
                 None => buttons.push(
                     button(format!("Use {recommended_mbps:.0} Mb/s"))
                         .accent()
@@ -187,7 +187,7 @@ pub(crate) fn speed_page(props: &SpeedProps, cx: &mut RenderCx) -> Element {
                     ))
                     .accent()
                     .icon(lucide::icon("check"))
-                    .on_click(write_profile(p.id.clone()))
+                    .on_click(write_preset(p.id.clone()))
                     .into(),
                 ),
                 Some(p) => {
@@ -201,7 +201,7 @@ pub(crate) fn speed_page(props: &SpeedProps, cx: &mut RenderCx) -> Element {
                         button(format!("Set in \u{201c}{}\u{201d}", p.name))
                             .accent()
                             .icon(lucide::icon("check"))
-                            .on_click(write_profile(p.id.clone()))
+                            .on_click(write_preset(p.id.clone()))
                             .into(),
                     );
                 }

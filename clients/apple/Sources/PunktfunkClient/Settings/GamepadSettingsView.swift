@@ -1,29 +1,21 @@
-// The gamepad-driven settings screen (iOS/iPadOS/macOS/tvOS): the couch-relevant subset of SettingsView,
-// restyled as a console settings page and fully navigable with a controller — up/down moves the
-// focus bar, left/right steps the focused value, A cycles/toggles it, B closes. Shown from the
-// gamepad home launcher (X); the touch SettingsView remains the full-fidelity editor (custom
-// resolutions, the log bitrate slider, debug tools), and both write the same DefaultsKey storage,
-// so values round-trip freely between the two.
+// The gamepad settings screen (iOS/iPadOS/macOS/tvOS), opened from the gamepad launcher (X):
+// the couch-relevant subset of SettingsView as a console page, navigable with a controller.
+// Up/down moves the focus bar, left/right steps the focused value, A cycles or toggles it, B
+// closes. The touch SettingsView stays the full-fidelity editor; both write the same
+// DefaultsKey storage, so values round-trip freely between them.
 //
-// Rows are rebuilt from live @AppStorage on every render; the focus list dispatches adjust/
-// activate back here BY ROW ID (see `adjust`/`activate`), so a stored input callback can never act
-// on stale captured state. Left/right CLAMPS at a choice list's ends (the dull boundary thud tells
-// the thumb it's the last option); A always cycles forward, wrapping, so every option is reachable
-// with one button. Toggles read left = off, right = on — refusing a no-op with the same thud.
+// Rows are rebuilt from live @AppStorage on every render, and the focus list dispatches
+// adjust/activate back here BY ROW ID, so a stored input callback never acts on stale state.
+// Left/right CLAMPS at a choice list's ends (the boundary thud says it's the last option); A
+// always cycles forward, wrapping. Toggles read left = off, right = on; a no-op gets the thud.
 //
-// The rows are split across SECTION TABS (`GpSettingsTab`) — L1/R1 on a pad, a tap elsewhere. They
-// used to be one long scroll with inline group headers, which meant thumbing past Video and Audio
-// to reach the controller settings; a tab is one shoulder press, and each tab remembers where its
-// focus was. The tab names match the desktop console's and the Android client's, so a setting is
-// found under the same word wherever you look for it.
+// Rows split across SECTION TABS (`GpSettingsTab`), L1/R1 on a pad; each remembers its focus.
+// Tab names match the desktop console's and Android's, so a setting sits under the same word.
 //
-// The trailing Profiles tab (design/client-settings-profiles.md §5.2a/§5.4) is the pin manager
-// for this controller-first surface: a row per catalog profile opens the pin-to-hosts picker — an
-// in-place swap of the row list (B peels back, the "one layer" rule GamepadAddHostView set) with
-// one toggle row per saved host, writing `StoredHost.pinnedProfileIDs` via HostStore.setPinned.
-// Pins are presentation only: never the host's default binding, never the profile itself —
-// profiles are created and edited in the standard interface (and can't be on tvOS, whose
-// per-device catalog the detail strings are honest about).
+// The trailing Presets tab (design/client-settings-profiles.md §5.2a/§5.4) manages pins: one
+// row per catalog preset opens an in-place pin-to-hosts picker (B peels back) that writes
+// `StoredHost.pinnedPresetIDs` via HostStore.setPinned. Pins are presentation only; presets
+// are created and edited in the standard interface (not on tvOS, whose catalog says so).
 
 import PunktfunkKit
 import SwiftUI
@@ -49,7 +41,7 @@ struct GamepadSettingsView: View {
     @Environment(\.gamepadHostedInShell) private var hostedInShell
     /// The About section's link rows (never used on tvOS, which has no browser).
     @Environment(\.openURL) private var openURL
-    /// The saved-host store — the pin picker writes `setPinned` through it and the profile rows
+    /// The saved-host store — the pin picker writes `setPinned` through it and the preset rows
     /// count pins from its live hosts. Threaded in from GamepadHomeView like the home screen
     /// itself (ContentView owns the instance).
     @ObservedObject var store: HostStore
@@ -114,10 +106,10 @@ struct GamepadSettingsView: View {
     @AppStorage(DefaultsKey.gyroFromDevice) private var gyroFromDevice = false
     #endif
     @ObservedObject private var gamepads = GamepadManager.shared
-    /// The profile catalog (ProfileStore.shared, like every other surface that reads it) — the
-    /// Profiles rows re-derive from it each render, so a rename/delete made in the standard
+    /// The preset catalog (PresetStore.shared, like every other surface that reads it) — the
+    /// Presets rows re-derive from it each render, so a rename/delete made in the standard
     /// interface shows up live.
-    @ObservedObject private var profiles = ProfileStore.shared
+    @ObservedObject private var presets = PresetStore.shared
 
     #if os(iOS)
     /// `.compact` in a landscape phone window — tighter chrome so more rows fit.
@@ -139,9 +131,9 @@ struct GamepadSettingsView: View {
     /// Real focus on the strip — the tvOS route to the sections (see `tabStrip`).
     @FocusState private var focusedTab: GpSettingsTab?
     #endif
-    /// The pin-to-hosts picker's profile — non-nil swaps the row list for one toggle row per
+    /// The pin-to-hosts picker's preset — non-nil swaps the row list for one toggle row per
     /// saved host (§5.2a); B (Menu on tvOS) peels back to the settings rows.
-    @State private var pinTarget: StreamProfile?
+    @State private var pinTarget: StreamPreset?
     /// The direction of the last value step (+1 right/forward, -1 left) — picks which edge the
     /// changed value slides in from, so the animation follows the user's motion.
     @State private var lastAdjustDelta = 1
@@ -368,7 +360,7 @@ struct GamepadSettingsView: View {
     /// "Settings", or "Pin “Work”" while the pin picker is up — the title is what says which
     /// layer the row list currently is.
     private var title: String {
-        if let profile = pinTarget { return "Pin “\(profile.name)”" }
+        if let preset = pinTarget { return "Pin “\(preset.name)”" }
         switch aboutPage {
         case .shortcuts: return "Shortcuts"
         case .licenses: return "Acknowledgements"
@@ -445,11 +437,11 @@ struct GamepadSettingsView: View {
     }
 
     /// B peels one layer: the pin picker back to the settings rows — focus returning to the
-    /// profile row it came from — then the screen itself.
+    /// preset row it came from — then the screen itself.
     private func back() {
-        if let profile = pinTarget {
+        if let preset = pinTarget {
             pinTarget = nil
-            focusID = "profile-\(profile.id)"
+            focusID = "preset-\(preset.id)"
         } else if let page = aboutPage {
             aboutPage = nil
             focusID = page == .shortcuts ? "shortcuts" : "licenses"
@@ -523,12 +515,12 @@ struct GamepadSettingsView: View {
                 Spacer(minLength: 12)
                 HStack(spacing: 9) {
                     if isOverridden(row) {
-                        // Same meaning as the pointer shell's override marker: a profile decides
+                        // Same meaning as the pointer shell's override marker: a preset decides
                         // this one, so the value here is not what the session will use.
                         Image(systemName: "person.crop.circle.badge.checkmark")
                             .font(.system(size: m.chevronFont, weight: .semibold))
                             .foregroundStyle(ink.accent.opacity(0.85))
-                            .accessibilityLabel("Set by a profile")
+                            .accessibilityLabel("Set by a preset")
                     }
                     Image(systemName: "chevron.left")
                         .font(.system(size: m.chevronFont, weight: .semibold))
@@ -542,7 +534,7 @@ struct GamepadSettingsView: View {
                             .font(.geist(m.valueFont, .medium, relativeTo: .callout))
                             .foregroundStyle(focused ? ink.fg : ink.fg(0.6))
                     } else {
-                        // The flat rows (profile pin counts, placeholders) keep the quiet slip:
+                        // The flat rows (preset pin counts, placeholders) keep the quiet slip:
                         // keyed by the value so a change slides the new string in following the
                         // user's motion, crossfading over ~14 pt. The ZStack is the stable home
                         // the removed/inserted texts transition within.
@@ -590,17 +582,17 @@ struct GamepadSettingsView: View {
         return "\(row.detail) \(note)"
     }
 
-    /// The sentence a row adds when the start-screen host's profile overrides it. Named rather
+    /// The sentence a row adds when the start-screen host's preset overrides it. Named rather
     /// than implied: this screen edits the defaults, so a row showing one value while the session
     /// streams another is the whole confusion this closes.
     private func overrideNote(_ row: Row) -> String? {
-        guard let field = row.field, let bound = landingProfile,
-              OverlayField.isOverridden(field, in: bound.profile.overrides)
+        guard let field = row.field, let bound = landingPreset,
+              OverlayField.isOverridden(field, in: bound.preset.overrides)
         else { return nil }
-        return "“\(bound.profile.name)” overrides this for \(bound.host)."
+        return "“\(bound.preset.name)” overrides this for \(bound.host)."
     }
 
-    /// Does a profile override this row? Drives the marker beside the value.
+    /// Does a preset override this row? Drives the marker beside the value.
     private func isOverridden(_ row: Row) -> Bool { overrideNote(row) != nil }
 
     /// The option band's fixed stage. A portrait phone is the one place the full 240 pt starves
@@ -628,15 +620,15 @@ struct GamepadSettingsView: View {
         let detail: String
         /// A choice row's full option list (labels only — the tags stay inside the closures)
         /// and where its drum currently rests. nil ⇒ the value renders as plain text (toggles,
-        /// actions, profiles — a two-position switch is not a drum; see GamepadOptionBand).
+        /// actions, presets — a two-position switch is not a drum; see GamepadOptionBand).
         var optionLabels: [String]?
         var selectedIndex: Int?
-        /// The `SettingsOverlay` field this row edits, when it is profileable. The rows write
-        /// GLOBALS — profiles are edited in the standard interface (design §5.4) — so this is
-        /// what lets a row say that a bound host's profile will win over what it shows.
+        /// The `SettingsOverlay` field this row edits, when it is presetable. The rows write
+        /// GLOBALS — presets are edited in the standard interface (design §5.4) — so this is
+        /// what lets a row say that a bound host's preset will win over what it shows.
         var field: String?
         /// Whether left/right means anything here — false hides the value's chevrons (the
-        /// Profiles rows navigate, and the placeholder rows do nothing at all).
+        /// Presets rows navigate, and the placeholder rows do nothing at all).
         var adjustable = true
         /// Dimmed and inert when false: a row whose meaning depends on another setting that is
         /// currently off. It stays in the list and stays FOCUSABLE — its `detail` is how the
@@ -682,7 +674,7 @@ struct GamepadSettingsView: View {
     /// replaces the whole list while it's up (same screen, one layer deeper, so the focus list's
     /// controller wiring and the tvOS focus engine carry over as is).
     private var rows: [Row] {
-        if let profile = pinTarget { return pinRows(for: profile) }
+        if let preset = pinTarget { return pinRows(for: preset) }
         if let page = aboutPage {
             switch page {
             case .shortcuts: return shortcutRows
@@ -812,8 +804,8 @@ struct GamepadSettingsView: View {
 
     /// Every row on the screen, tagged with its section. Built as one list (not per tab) so the
     /// platform-conditional insertions below can still place a row RELATIVE to another by id.
-    /// The profile the start-screen host streams with, if it is bound to one. These rows edit the
-    /// GLOBAL defaults — profiles are made and edited in the standard interface (design §5.4) — so
+    /// The preset the start-screen host streams with, if it is bound to one. These rows edit the
+    /// GLOBAL defaults — presets are made and edited in the standard interface (design §5.4) — so
     /// a bound host would otherwise show one value here and stream with another, with nothing on
     /// screen saying which one wins.
     /// The session will stream PyroWave: the codec is selected AND this device can decode it.
@@ -821,12 +813,12 @@ struct GamepadSettingsView: View {
         codec == "pyrowave" && MetalWaveletDecoder.supported
     }
 
-    private var landingProfile: (host: String, profile: StreamProfile)? {
+    private var landingPreset: (host: String, preset: StreamPreset)? {
         let stored = UserDefaults.standard.string(forKey: DefaultsKey.defaultHost) ?? ""
         guard let host = store.hosts.first(where: {
             $0.id.uuidString.lowercased() == stored.lowercased()
-        }), let profile = profiles.profile(id: host.profileID) else { return nil }
-        return (host.displayName, profile)
+        }), let preset = presets.preset(id: host.presetID) else { return nil }
+        return (host.displayName, preset)
     }
 
     private var allRows: [Row] {
@@ -836,12 +828,12 @@ struct GamepadSettingsView: View {
         let bitrate = SettingsOptions.bitrateOptions(current: bitrateKbps)
         let controllers = SettingsOptions.controllerOptions(gamepads)
         var list: [Row] = []
-        if let bound = landingProfile {
+        if let bound = landingPreset {
             list.append(Row(
-                id: "profileNotice", tab: .stream, icon: "person.crop.circle.badge.checkmark",
-                label: "\(bound.host) uses “\(bound.profile.name)”",
+                id: "presetNotice", tab: .stream, icon: "person.crop.circle.badge.checkmark",
+                label: "\(bound.host) uses “\(bound.preset.name)”",
                 value: "",
-                detail: "These are the defaults. Where that profile sets a value, it wins for "
+                detail: "These are the defaults. Where that preset sets a value, it wins for "
                     + "that host — edit it in the standard settings.",
                 adjustable: false,
                 adjust: { _ in false }, activate: {}))
@@ -1110,39 +1102,39 @@ struct GamepadSettingsView: View {
         if presentPriority != "smooth" {
             list.removeAll { $0.id == "smoothBuffer" }
         }
-        return list + profileRows
+        return list + presetRows
     }
 
-    // MARK: - Profiles (§5.2a)
+    // MARK: - Presets (§5.2a)
 
-    /// The trailing Profiles section: one row per catalog profile, its value how many saved
+    /// The trailing Presets section: one row per catalog preset, its value how many saved
     /// hosts pin it, A opening the pin-to-hosts picker. Read-only beyond that — this surface
-    /// pins and unpins, but profiles are created and edited elsewhere (design §5.4), so
+    /// pins and unpins, but presets are created and edited elsewhere (design §5.4), so
     /// left/right is a boundary thud, not an editor.
-    private var profileRows: [Row] {
-        guard !profiles.profiles.isEmpty else {
+    private var presetRows: [Row] {
+        guard !presets.presets.isEmpty else {
             return [Row(
-                id: "noProfiles", tab: .profiles, icon: "slider.horizontal.3",
-                label: "No profiles yet", value: "",
+                id: "noPresets", tab: .presets, icon: "slider.horizontal.3",
+                label: "No presets yet", value: "",
                 detail: emptyCatalogDetail,
                 adjustable: false,
                 adjust: { _ in false }, activate: {})]
         }
-        return profiles.profiles.map { profile in
+        return presets.presets.map { preset in
             let pins = store.hosts
-                .filter { ($0.pinnedProfileIDs ?? []).contains(profile.id) }.count
+                .filter { ($0.pinnedPresetIDs ?? []).contains(preset.id) }.count
             return Row(
-                id: "profile-\(profile.id)", tab: .profiles,
-                icon: "slider.horizontal.3", label: profile.name,
+                id: "preset-\(preset.id)", tab: .presets,
+                icon: "slider.horizontal.3", label: preset.name,
                 value: pins == 0 ? "Not pinned" : "Pinned to \(pins) host\(pins == 1 ? "" : "s")",
-                detail: profileDetail,
+                detail: presetDetail,
                 adjustable: false,
                 adjust: { _ in false },
                 activate: {
                     // Focus lands on the picker's first row — the focus list's reconcile
                     // follows this id when the row set swaps underneath it.
                     focusID = store.hosts.first.map { "pinHost-\($0.id.uuidString)" } ?? "noHosts"
-                    pinTarget = profile
+                    pinTarget = preset
                 })
         }
     }
@@ -1150,56 +1142,56 @@ struct GamepadSettingsView: View {
     /// The pin-to-hosts picker: one toggle row per SAVED host, sharing the settings rows'
     /// toggle semantics (left = unpin, right = pin, A flips; asking for the state it's in is a
     /// boundary thud). Writes ride `HostStore.setPinned` — pin appends, unpin removes — and
-    /// NEVER the host's default binding (`profileID`): a pin is presentation only (§5.2a).
-    private func pinRows(for profile: StreamProfile) -> [Row] {
+    /// NEVER the host's default binding (`presetID`): a pin is presentation only (§5.2a).
+    private func pinRows(for preset: StreamPreset) -> [Row] {
         guard !store.hosts.isEmpty else {
             return [Row(
-                id: "noHosts", tab: .profiles, icon: "desktopcomputer",
+                id: "noHosts", tab: .presets, icon: "desktopcomputer",
                 label: "No saved hosts yet",
                 value: "",
-                detail: "Pair with a host first, then pin this profile to it.",
+                detail: "Pair with a host first, then pin this preset to it.",
                 adjustable: false,
                 adjust: { _ in false }, activate: {})]
         }
         return store.hosts.map { host in
             let hostID = host.id
-            let pinned = (host.pinnedProfileIDs ?? []).contains(profile.id)
+            let pinned = (host.pinnedPresetIDs ?? []).contains(preset.id)
             return Row(
-                id: "pinHost-\(hostID.uuidString)", tab: .profiles, icon: "desktopcomputer",
+                id: "pinHost-\(hostID.uuidString)", tab: .presets, icon: "desktopcomputer",
                 label: host.displayName,
                 value: pinned ? "Pinned" : "Off",
-                detail: "A pinned profile gets its own card — one press connects with it.",
+                detail: "A pinned preset gets its own card — one press connects with it.",
                 optionLabels: ["Off", "Pinned"],
                 selectedIndex: pinned ? 1 : 0,
                 adjust: { delta in
                     let target = delta > 0
                     guard pinned != target else { return false }
-                    store.setPinned(hostID, profileID: profile.id, pinned: target)
+                    store.setPinned(hostID, presetID: preset.id, pinned: target)
                     return true
                 },
-                activate: { store.setPinned(hostID, profileID: profile.id, pinned: !pinned) })
+                activate: { store.setPinned(hostID, presetID: preset.id, pinned: !pinned) })
         }
     }
 
-    /// The profile rows' explainer. tvOS gets its own: the catalog is per-device (the App Group
-    /// suite — nothing syncs it) and tvOS has no profile editor at all (§5.4), so pointing a TV
-    /// user at a "standard interface" would promise profiles that can never arrive there.
-    private var profileDetail: String {
+    /// The preset rows' explainer. tvOS gets its own: the catalog is per-device (the App Group
+    /// suite — nothing syncs it) and tvOS has no preset editor at all (§5.4), so pointing a TV
+    /// user at a "standard interface" would promise presets that can never arrive there.
+    private var presetDetail: String {
         #if os(tvOS)
-        return "Pin a profile to a host and it gets its own card — one press connects."
+        return "Pin a preset to a host and it gets its own card — one press connects."
         #else
-        return "Pin a profile to a host and it gets its own card — one press connects. Create "
-            + "profiles in the standard interface."
+        return "Pin a preset to a host and it gets its own card — one press connects. Create "
+            + "presets in the standard interface."
         #endif
     }
 
-    /// What the empty catalog's placeholder explains — again honest on tvOS, where profiles
+    /// What the empty catalog's placeholder explains — again honest on tvOS, where presets
     /// cannot be created (on the device or anywhere that would reach its per-device catalog).
     private var emptyCatalogDetail: String {
         #if os(tvOS)
-        return "Profiles bundle stream settings. Creating them isn't available on Apple TV yet."
+        return "Presets bundle stream settings. Creating them isn't available on Apple TV yet."
         #else
-        return "Profiles bundle stream settings. Create them in the standard interface, then "
+        return "Presets bundle stream settings. Create them in the standard interface, then "
             + "pin them here."
         #endif
     }

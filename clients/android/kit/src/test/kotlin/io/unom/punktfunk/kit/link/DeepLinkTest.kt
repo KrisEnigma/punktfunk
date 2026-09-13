@@ -50,7 +50,7 @@ class DeepLinkVectorTest {
             assertEquals(name, want.getString("host_ref"), link.hostRef)
             assertEquals("$name fp", want.optStringOrNull("fp"), link.fp)
             assertEquals("$name launch", want.optStringOrNull("launch"), link.launch)
-            assertEquals("$name profile", want.optStringOrNull("profile"), link.profile)
+            assertEquals("$name preset", want.optStringOrNull("preset"), link.preset)
             assertEquals("$name name", want.optStringOrNull("name"), link.name)
             assertEquals("$name host_addr", want.optStringOrNull("host_addr"), link.host?.first)
             assertEquals(
@@ -177,11 +177,11 @@ class DeepLinkResolutionTest {
     @Test
     fun selfEmittedLinksRoundTripAndSurviveAWipedStore() {
         val h = desk.copy(port = 7777)
-        val link = DeepLinks.forHost(h, launch = "steam:570", profile = "aaaaaaaaaaaa")
+        val link = DeepLinks.forHost(h, launch = "steam:570", preset = "aaaaaaaaaaaa")
         val url = link.toUrl()
         assertEquals(
             "punktfunk://connect/${h.id}?fp=$fp&host=192.168.1.50:7777" +
-                "&launch=steam:570&profile=aaaaaaaaaaaa",
+                "&launch=steam:570&preset=aaaaaaaaaaaa&profile=aaaaaaaaaaaa",
             url,
         )
         assertEquals(link, (DeepLinks.parse(url) as DeepLinkResult.Parsed).link)

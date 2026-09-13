@@ -14,11 +14,11 @@ import androidx.compose.runtime.setValue
 import io.unom.punktfunk.CONNECT_TIMEOUT_MS
 import io.unom.punktfunk.ConnectErrors
 import io.unom.punktfunk.HostActions
-import io.unom.punktfunk.ProfileStore
+import io.unom.punktfunk.PresetStore
 import io.unom.punktfunk.Settings
 import io.unom.punktfunk.SettingsStore
 import io.unom.punktfunk.SpeedTestPhase
-import io.unom.punktfunk.StreamProfile
+import io.unom.punktfunk.StreamPreset
 import io.unom.punktfunk.connectToHost
 import io.unom.punktfunk.deviceName
 import io.unom.punktfunk.effectiveFor
@@ -99,7 +99,7 @@ object SkiaConsole {
 
     // Services.
     private lateinit var knownHostStore: KnownHostStore
-    private lateinit var profileStore: ProfileStore
+    private lateinit var presetStore: PresetStore
     private lateinit var settingsStore: SettingsStore
     private var identity: ClientIdentity? = null
     private var discovery: HostDiscovery? = null
@@ -209,12 +209,12 @@ object SkiaConsole {
         val app = context.applicationContext
         appContext = app
         knownHostStore = KnownHostStore(app)
-        profileStore = ProfileStore(app)
+        presetStore = PresetStore(app)
         settingsStore = SettingsStore(app)
         settings = initial
         val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val base = prefs.getString("json", null)?.let { runCatching { JSONObject(it) }.getOrNull() }
-        val profiles = profileStore.all()
+        val presets = presetStore.all()
         val opts = JSONObject()
             .put("device_name", deviceName(app))
             .put("gpu_cache_bytes", gpuCacheBytes(app))
@@ -222,9 +222,9 @@ object SkiaConsole {
             // gates the console's own "Controller-optimized UI" off switch.
             .put("fallback_ui", !io.unom.punktfunk.isTvDevice(app))
             .put("settings", ConsoleJson.settings(initial, base))
-            .put("profiles", JSONArray(ConsoleJson.profiles(profiles)))
+            .put("presets", JSONArray(ConsoleJson.presets(presets)))
             .put("known_hosts", JSONObject(ConsoleJson.knownHosts(knownHostStore.all())))
-            .put("entry", startEntry(initial, pendingLink, profiles))
+            .put("entry", startEntry(initial, pendingLink, presets))
         handle = runCatching { NativeBridge.nativeConsoleCreate(opts.toString()) }.getOrDefault(0L)
         if (handle == 0L) {
             Log.e(TAG, "console: native create failed")
@@ -245,14 +245,14 @@ object SkiaConsole {
     private fun startEntry(
         s: Settings,
         pendingLink: Boolean,
-        profiles: List<StreamProfile>,
+        presets: List<StreamPreset>,
     ): JSONObject {
         if (pendingLink) return JSONObject()
         val hosts = knownHostStore.all()
         val start = StartScreen.resolve(s.startIn, s.defaultHost, hosts)
         val host = start.host ?: return JSONObject()
         Log.i(TAG, "console start: start_in=${s.startIn} default=${host.name}")
-        val row = ConsoleJson.hostRow(host, null, profiles)
+        val row = ConsoleJson.hostRow(host, null, presets)
         return JSONObject().put(if (start is StartScreen.Stream) "stream" else "library", row)
     }
 
@@ -402,10 +402,10 @@ object SkiaConsole {
         this.onPulse = onPulse
         this.onAnnounce = onAnnounce
         resumeDiscovery()
-        // The touch UI may have paired/forgotten/edited hosts or profiles while we were away.
+        // The touch UI may have paired/forgotten/edited hosts or presets while we were away.
         pushHosts()
         pushKnownHosts()
-        if (handle != 0L) NativeBridge.nativeConsoleSetProfiles(handle, ConsoleJson.profiles(profileStore.all()))
+        if (handle != 0L) NativeBridge.nativeConsoleSetPresets(handle, ConsoleJson.presets(presetStore.all()))
     }
 
     fun detach() {
@@ -430,10 +430,10 @@ object SkiaConsole {
         NativeBridge.nativeConsoleSetSettings(handle, ConsoleJson.settings(s, base).toString())
     }
 
-    /** The profile catalog changed (the touch settings edited it). */
-    fun profilesChanged() {
+    /** The preset catalog changed (the touch settings edited it). */
+    fun presetsChanged() {
         if (handle == 0L) return
-        NativeBridge.nativeConsoleSetProfiles(handle, ConsoleJson.profiles(profileStore.all()))
+        NativeBridge.nativeConsoleSetPresets(handle, ConsoleJson.presets(presetStore.all()))
         pushHosts()
     }
 
@@ -455,9 +455,9 @@ object SkiaConsole {
     fun openLibrary(hostId: String, pinId: String?) {
         if (handle == 0L) return
         val kh = knownHostStore.byId(hostId) ?: return
-        val profiles = profileStore.all()
-        val pin = pinId?.let { id -> profiles.firstOrNull { it.id == id } }
-        val entry = JSONObject().put("library", ConsoleJson.hostRow(kh, pin, profiles))
+        val presets = presetStore.all()
+        val pin = pinId?.let { id -> presets.firstOrNull { it.id == id } }
+        val entry = JSONObject().put("library", ConsoleJson.hostRow(kh, pin, presets))
         NativeBridge.nativeConsoleNavigate(handle, entry.toString())
     }
 
@@ -480,11 +480,11 @@ object SkiaConsole {
             notice("Punktfunk on Android can't do “${link.route.word}” links yet.")
             return
         }
-        val profileRef = link.profile
-        if (profileRef != null) {
-            val (_, resolution) = profileStore.resolve(profileRef)
-            if (resolution != io.unom.punktfunk.ProfileResolution.FOUND) {
-                notice("That link asks for a profile called “$profileRef”, which isn't on this device.")
+        val presetRef = link.preset
+        if (presetRef != null) {
+            val (_, resolution) = presetStore.resolve(presetRef)
+            if (resolution != io.unom.punktfunk.PresetResolution.FOUND) {
+                notice("That link asks for a preset called “$presetRef”, which isn't on this device.")
                 return
             }
         }
@@ -507,7 +507,7 @@ object SkiaConsole {
                     JSONObject()
                         .put("addr", kh.address).put("port", kh.port).put("fp_hex", kh.fpHex)
                         .put("launch", link.launch ?: JSONObject.NULL)
-                        .put("profile", profileRef?.let { profileStore.resolve(it).first?.id } ?: JSONObject.NULL)
+                        .put("preset", presetRef?.let { presetStore.resolve(it).first?.id } ?: JSONObject.NULL)
                         .put("request_access", false),
                 )
             }
@@ -537,7 +537,7 @@ object SkiaConsole {
         NativeBridge.nativeConsoleSetHosts(
             handle,
             ConsoleJson.hostRows(
-                knownHostStore.all(), discovered, reachable, profileStore.all(), hostActions,
+                knownHostStore.all(), discovered, reachable, presetStore.all(), hostActions,
                 nowPlaying,
             ),
         )
@@ -664,7 +664,7 @@ object SkiaConsole {
     /**
      * `OverlayAction::Launch` — the console asked for a session. The trust decision was the
      * console's (an unpaired host went to its Pair screen first), so this is the dial itself:
-     * pinned by the row's fingerprint, with the host's bound profile or the pinned card's
+     * pinned by the row's fingerprint, with the host's bound preset or the pinned card's
      * one-off, and — for the pair screen's "Request access" — the long approval budget.
      */
     private fun launch(a: JSONObject) {
@@ -677,7 +677,7 @@ object SkiaConsole {
         val addr = kh?.address ?: a.optString("addr")
         val port = kh?.port ?: a.optInt("port")
         val launchId = a.optString("launch").takeIf { a.has("launch") && !a.isNull("launch") && it.isNotEmpty() }
-        val profileId = a.optString("profile").takeIf { a.has("profile") && !a.isNull("profile") && it.isNotEmpty() }
+        val presetId = a.optString("preset").takeIf { a.has("preset") && !a.isNull("preset") && it.isNotEmpty() }
         val requestAccess = a.optBoolean("request_access", false)
         val id = identity
         if (id == null) {
@@ -690,8 +690,8 @@ object SkiaConsole {
         holdsLaunch = launchId != null &&
             LibraryCache.standard(app.cacheDir).load(kh?.id ?: fp)?.games
                 ?.firstOrNull { it.id == launchId }?.isLauncher == false
-        val profile: StreamProfile? = profileStore.resolveFor(kh, profileId, launchId)
-        val effective = settings.effectiveFor(profile)
+        val preset: StreamPreset? = presetStore.resolveFor(kh, presetId, launchId)
+        val effective = settings.effectiveFor(preset)
         val d = Dial()
         dial = d
         NativeBridge.nativeConsoleSessionPhase(handle, 0, "")
@@ -730,10 +730,10 @@ object SkiaConsole {
                         h,
                         effective,
                         clipboardSync = record?.clipboardSync ?: false,
-                        profileName = profile?.name,
+                        presetName = preset?.name,
                         hostId = record?.id,
                         launchedFromLibrary = launchId != null,
-                        libraryProfileId = profileId,
+                        libraryPresetId = presetId,
                     )
                     // The console learns the dial landed and keeps the screen: its launch hold
                     // is still waiting on the game. Handing the session over here instead would
@@ -778,7 +778,7 @@ object SkiaConsole {
                     c.optJSONObject("ForgetHost")?.let(::forgetHost)
                     c.optJSONObject("Wake")?.let(::wake)
                     c.optJSONObject("SetPin")?.let(::setPin)
-                    c.optJSONObject("BindProfile")?.let(::bindProfile)
+                    c.optJSONObject("BindPreset")?.let(::bindPreset)
                     c.optJSONObject("SetClipboard")?.let(::setClipboard)
                     c.optJSONObject("OpenPlatformScreen")?.let { onPlatformScreen?.invoke(it.optString("id")) }
                     c.optJSONObject("PadAction")?.let { onPadAction?.invoke(it.optString("action"), it.optString("pad_key")) }
@@ -825,20 +825,20 @@ object SkiaConsole {
     }
 
     /**
-     * `ConsoleCmd::BindProfile` — the host's default binding (`KnownHost.profileId`), or with
-     * `game`, one title's ([KnownHost.gameProfiles]). A null `profile_id` clears either.
+     * `ConsoleCmd::BindPreset` — the host's default binding (`KnownHost.presetId`), or with
+     * `game`, one title's ([KnownHost.gamePresets]). A null `preset_id` clears either.
      */
-    private fun bindProfile(c: JSONObject) {
+    private fun bindPreset(c: JSONObject) {
         val kh = hostForKey(c.optString("key")) ?: return
-        val pid = c.optString("profile_id")
-            .takeIf { c.has("profile_id") && !c.isNull("profile_id") && it.isNotEmpty() }
+        val pid = c.optString("preset_id")
+            .takeIf { c.has("preset_id") && !c.isNull("preset_id") && it.isNotEmpty() }
         val game = c.optString("game")
             .takeIf { c.has("game") && !c.isNull("game") && it.isNotEmpty() }
         val next = when (game) {
             // Cleared bindings leave no key behind, so an unbound host stores an empty map.
-            null -> kh.copy(profileId = pid)
+            null -> kh.copy(presetId = pid)
             else -> kh.copy(
-                gameProfiles = kh.gameProfiles.toMutableMap()
+                gamePresets = kh.gamePresets.toMutableMap()
                     .apply { if (pid == null) remove(game) else put(game, pid) },
             )
         }
@@ -855,10 +855,10 @@ object SkiaConsole {
 
     private fun setPin(c: JSONObject) {
         val kh = hostForKey(c.optString("key")) ?: return
-        val pid = c.optString("profile_id"); val pin = c.optBoolean("pin")
-        val pins = kh.pinnedProfileIds.toMutableList()
+        val pid = c.optString("preset_id"); val pin = c.optBoolean("pin")
+        val pins = kh.pinnedPresetIds.toMutableList()
         if (pin && pid !in pins) pins.add(pid) else if (!pin) pins.remove(pid)
-        knownHostStore.save(kh.copy(pinnedProfileIds = pins))
+        knownHostStore.save(kh.copy(pinnedPresetIds = pins))
         pushHosts(); pushKnownHosts()
     }
 

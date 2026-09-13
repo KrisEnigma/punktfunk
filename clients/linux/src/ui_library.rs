@@ -72,18 +72,18 @@ impl Drop for State {
     }
 }
 
-/// What the page calls the host it is browsing. A request that carries a one-off profile
+/// What the page calls the host it is browsing. A request that carries a one-off preset
 /// came from a PINNED card (design §5.2a), and every title launched off this grid inherits
-/// it — so the page names it, the same `host · profile` shape the card wears. A plain card
+/// it — so the page names it, the same `host · preset` shape the card wears. A plain card
 /// says nothing extra: its binding is the host's own default, not a second thing to read.
-/// A one-off whose profile has since been deleted resolves as no profile everywhere else,
+/// A one-off whose preset has since been deleted resolves as no preset everywhere else,
 /// and reads as a plain host here.
 fn page_host_label(req: &ConnectRequest) -> String {
-    let Some(id) = req.profile.as_deref().filter(|id| !id.is_empty()) else {
+    let Some(id) = req.preset.as_deref().filter(|id| !id.is_empty()) else {
         return req.name.clone();
     };
-    pf_client_core::profiles::ProfilesFile::load()
-        .profiles
+    pf_client_core::presets::PresetsFile::load()
+        .presets
         .into_iter()
         .find(|p| p.id == id)
         .map_or_else(
@@ -97,7 +97,7 @@ fn page_host_label(req: &ConnectRequest) -> String {
 /// that title instead of the desktop. Built from the STORE, like every other "Copy link"
 /// in this shell, because the stable id and the pin live there rather than on the request.
 ///
-/// A shelf opened from a PINNED card carries that card's one-off profile into the link:
+/// A shelf opened from a PINNED card carries that card's one-off preset into the link:
 /// what you copy off that shelf is what pressing the card and picking the title does.
 /// `None` only when the host has left the store while the page was open.
 fn game_link(req: &ConnectRequest, game_id: &str) -> Option<String> {
@@ -107,7 +107,7 @@ fn game_link(req: &ConnectRequest, game_id: &str) -> Option<String> {
         pf_client_core::deeplink::DeepLink::for_host(
             host,
             Some(game_id),
-            req.profile.as_deref().filter(|p| !p.is_empty()),
+            req.preset.as_deref().filter(|p| !p.is_empty()),
         )
         .to_url(),
     )
@@ -583,6 +583,7 @@ fn desktop_entry() -> GameEntry {
         genres: Vec::new(),
         role: None,
         icon: Some(DESKTOP_ICON.into()),
+        stats: None,
     }
 }
 

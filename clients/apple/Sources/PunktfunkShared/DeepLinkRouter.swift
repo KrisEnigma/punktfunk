@@ -1,6 +1,6 @@
 // What a `punktfunk://` link should DO, decided once for both routes.
 //
-// Connect and browse each ran the same three checks side by side — resolve a `profile=` reference,
+// Connect and browse each ran the same three checks side by side — resolve a `preset=` reference,
 // refuse a fingerprint that disagrees with the saved record, refuse to preempt a live session —
 // and had already drifted: the same unsaved host produced two different sentences depending on
 // which route the user came in on.
@@ -17,9 +17,9 @@ public enum DeepLinkRouter {
         case notice(String)
         /// A host named by something GUESSABLE (its label or address): the same action, one tap
         /// later, so a link cannot dial on its own say-so.
-        case confirm(StoredHost, ProfileSelection)
+        case confirm(StoredHost, PresetSelection)
         /// Named by its unguessable record id, or already confirmed: go.
-        case proceed(StoredHost, ProfileSelection)
+        case proceed(StoredHost, PresetSelection)
         /// The link points at the session already running. The open foregrounded the app, which
         /// is all "focus it" can mean mid-stream.
         case alreadyHere
@@ -44,23 +44,23 @@ public enum DeepLinkRouter {
     public static func resolve(
         link: DeepLink,
         hosts: [StoredHost],
-        catalog: ProfileCatalog,
+        catalog: PresetCatalog,
         session: SessionState,
         browse: Bool
     ) -> Outcome {
-        // The profile FIRST: an unknown or ambiguous reference must refuse, never quietly degrade
-        // to the host's own binding, which is a different profile wearing the same host's name.
-        var selection = ProfileSelection.inherit
-        if let reference = link.profile {
-            let (profile, resolution) = catalog.resolve(reference)
+        // The preset FIRST: an unknown or ambiguous reference must refuse, never quietly degrade
+        // to the host's own binding, which is a different preset wearing the same host's name.
+        var selection = PresetSelection.inherit
+        if let reference = link.preset {
+            let (preset, resolution) = catalog.resolve(reference)
             switch resolution {
             case .found:
-                selection = .profile(profile?.id ?? "")
+                selection = .preset(preset?.id ?? "")
             case .notFound:
-                return .notice("No settings profile called “\(reference)” on this device.")
+                return .notice("No settings preset called “\(reference)” on this device.")
             case .ambiguous:
                 return .notice(
-                    "More than one settings profile is called “\(reference)”. "
+                    "More than one settings preset is called “\(reference)”. "
                         + "Rename one, or link to it by its id.")
             }
         }

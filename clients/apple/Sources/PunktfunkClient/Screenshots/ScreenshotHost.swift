@@ -24,7 +24,7 @@ import ImageIO
 @MainActor
 enum ScreenshotMode {
     /// This process was launched to capture a screenshot. Cheap enough to consult from the
-    /// stores' persistence paths (`HostStore` / `ProfileStore`), which must NOT write their
+    /// stores' persistence paths (`HostStore` / `PresetStore`), which must NOT write their
     /// mock contents back into a real user's App Group when the harness runs on a dev Mac.
     static var isActive: Bool {
         !(ProcessInfo.processInfo.environment["PUNKTFUNK_SHOT_SCENE"] ?? "").isEmpty

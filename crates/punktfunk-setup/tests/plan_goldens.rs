@@ -302,7 +302,7 @@ fn a_desktopless_box_pins_gamescope_and_starts_the_console() {
 }
 
 #[test]
-fn a_sunshine_box_moves_the_management_port_and_opens_gamestream() {
+fn a_sunshine_box_moves_the_management_port_and_keeps_gamestream_off() {
     let mut facts = fresh("fedora", Family::Dnf);
     facts.sunshine_active = true;
     facts.firewall = Firewall::Firewalld;
@@ -704,6 +704,29 @@ fn trap_the_steamos_build_ends_the_run_and_sets_host_env_after_it() {
         "the run must end on the last step of the hand-off, not before it: {:?}",
         last.action
     );
+}
+
+/// Both hand-offs end the run, so next to Sunshine the port move must land before they do.
+#[test]
+fn trap_a_hand_off_never_skips_the_mgmt_port_move() {
+    for (id, family) in [("omarchy", Family::Pacman), ("steamos", Family::Steamos)] {
+        let mut facts = fresh(id, family);
+        facts.sunshine_active = true;
+        let plan = plan_for(&facts, &pins());
+        let steps: Vec<_> = plan.steps().collect();
+        let end = steps
+            .iter()
+            .position(|s| s.ends_run)
+            .expect("a step that ends the run");
+        assert!(
+            steps[..=end].iter().any(|s| matches!(
+                &s.action,
+                StepAction::SetEnv { key, value }
+                    if key == "PUNKTFUNK_MGMT_BIND" && value == "0.0.0.0:47991"
+            )),
+            "{id}: the move is planned after the run ends"
+        );
+    }
 }
 
 /// A re-run is documented as safe, and `git clone` into an existing tree is a hard failure.

@@ -47,9 +47,9 @@ struct CreateOptions {
     fallback_ui: bool,
     /// The settings snapshot the shell starts from (`pf_client_core::trust::Settings` JSON).
     settings: pf_client_core::trust::Settings,
-    /// The profile catalog as `[[id, name], …]`.
+    /// The preset catalog as `[[id, name], …]`.
     #[serde(default)]
-    profiles: Vec<(String, String)>,
+    presets: Vec<(String, String)>,
     /// The known-hosts records (`KnownHosts` JSON) — for building `punktfunk://` links.
     #[serde(default)]
     known_hosts: pf_client_core::trust::KnownHosts,
@@ -197,7 +197,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleCrea
         let Some(opts) = json_arg::<CreateOptions>(env, &options) else {
             return Ok(0);
         };
-        let store = Arc::new(SnapshotStore::new(opts.settings, opts.profiles));
+        let store = Arc::new(SnapshotStore::new(opts.settings, opts.presets));
         store.set_known_hosts(opts.known_hosts);
         let console_opts = ConsoleOptions {
             device_name: opts.device_name,
@@ -775,10 +775,10 @@ json_pusher!(
 );
 
 json_pusher!(
-/// `NativeBridge.nativeConsoleSetProfiles(handle, json)` — the profile catalog `[[id, name]]`.
-    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetProfiles,
+/// `NativeBridge.nativeConsoleSetPresets(handle, json)` — the preset catalog `[[id, name]]`.
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPresets,
     Vec<(String, String)>,
-    |h, p| h.store.set_profiles(p)
+    |h, p| h.store.set_presets(p)
 );
 
 json_pusher!(

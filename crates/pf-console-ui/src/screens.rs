@@ -5,7 +5,7 @@
 //! hint bar, so every screen animates and reads the same way.
 
 pub(crate) mod add_host;
-pub(crate) mod bind_profile;
+pub(crate) mod bind_preset;
 pub(crate) mod collections;
 pub(crate) mod controllers;
 pub(crate) mod home;
@@ -52,7 +52,7 @@ pub struct Ctx<'a> {
     /// Live library slot; the top screen owns it.
     pub library: &'a LibraryShared,
     pub settings: &'a mut trust::Settings,
-    /// Persistence for `settings` and the profile catalog. `load` immediately before a
+    /// Persistence for `settings` and the preset catalog. `load` immediately before a
     /// mutation (rebase), then `save`.
     pub store: &'a dyn crate::store::SettingsStore,
     pub platform: crate::platform::Platform,
@@ -82,8 +82,8 @@ pub(crate) struct ConnectIntent {
     /// No-PIN delegated approval. The shell shows "waiting for approval" instead of
     /// "connecting" and parks on a long budget until the host lets this client in.
     pub request_access: bool,
-    /// One-off profile for this launch; `None` keeps the host's default binding.
-    pub profile: Option<String>,
+    /// One-off preset for this launch; `None` keeps the host's default binding.
+    pub preset: Option<String>,
 }
 
 pub(crate) enum Nav {
@@ -136,12 +136,12 @@ pub(crate) fn saved_host_link(
     fp_hex: &str,
     addr: &str,
     port: u16,
-    profile: Option<&str>,
+    preset: Option<&str>,
     launch: Option<&str>,
 ) -> Option<String> {
     let known = store.known_hosts();
     let host = known.resolve(Some(fp_hex), addr, port)?;
-    Some(pf_client_core::deeplink::DeepLink::for_host(host, launch, profile).to_url())
+    Some(pf_client_core::deeplink::DeepLink::for_host(host, launch, preset).to_url())
 }
 
 pub(crate) fn host_link(store: &dyn crate::store::SettingsStore, row: &HostRow) -> Option<String> {
@@ -163,8 +163,8 @@ pub(crate) enum Screen {
     AddHost(add_host::AddHostScreen),
     Pair(pair::PairScreen),
     PinHosts(pin_hosts::PinHostsScreen),
-    /// Which profile the host's primary tile connects with.
-    BindProfile(bind_profile::BindProfileScreen),
+    /// Which preset the host's primary tile connects with.
+    BindPreset(bind_preset::BindPresetScreen),
     /// Attached pads. Android-only — the settings row that opens it is not on desktop.
     Controllers(controllers::ControllersScreen),
     /// In-stream ring, editing mode. Raised by the Quick actions settings row.
@@ -190,7 +190,7 @@ impl Screen {
             Screen::ShortcutEditor(s) => s.menu(ev, ctx, fx),
             Screen::Pair(s) => s.menu(ev, ctx, fx),
             Screen::PinHosts(s) => s.menu(ev, ctx, fx),
-            Screen::BindProfile(s) => s.menu(ev, ctx, fx),
+            Screen::BindPreset(s) => s.menu(ev, ctx, fx),
             Screen::Controllers(s) => s.menu(ev, ctx, fx),
             Screen::HostOptions(s) => s.menu(ev, ctx, fx),
         }
@@ -210,7 +210,7 @@ impl Screen {
             Screen::ShortcutEditor(s) => s.pointer(p, ctx, fx),
             Screen::Pair(s) => s.pointer(p, ctx, fx),
             Screen::PinHosts(s) => s.pointer(p, ctx, fx),
-            Screen::BindProfile(s) => s.pointer(p, ctx, fx),
+            Screen::BindPreset(s) => s.pointer(p, ctx, fx),
             Screen::Controllers(s) => s.pointer(p, ctx, fx),
             Screen::HostOptions(s) => s.pointer(p, ctx, fx),
         }
@@ -267,8 +267,8 @@ impl Screen {
             Screen::RingEditor(s) => s.title(),
             Screen::ShortcutEditor(s) => s.title(),
             Screen::Pair(s) => format!("Pair with {}", s.host_name()),
-            Screen::PinHosts(s) => format!("Pin \u{201c}{}\u{201d}", s.profile_name()),
-            Screen::BindProfile(s) => s.heading(),
+            Screen::PinHosts(s) => format!("Pin \u{201c}{}\u{201d}", s.preset_name()),
+            Screen::BindPreset(s) => s.heading(),
             Screen::Controllers(_) => "Connected controllers".into(),
             Screen::HostOptions(s) => s.title(),
         }
@@ -296,7 +296,7 @@ impl Screen {
             Screen::ShortcutEditor(s) => s.hints(ctx),
             Screen::Pair(s) => s.hints(ctx),
             Screen::PinHosts(s) => s.hints(ctx),
-            Screen::BindProfile(s) => s.hints(ctx),
+            Screen::BindPreset(s) => s.hints(ctx),
             Screen::Controllers(s) => s.hints(ctx),
             Screen::HostOptions(s) => s.hints(ctx),
         }
@@ -322,7 +322,7 @@ impl Screen {
             Screen::ShortcutEditor(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Pair(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::PinHosts(s) => s.render(canvas, rect, k, dt, fonts, ctx),
-            Screen::BindProfile(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::BindPreset(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Controllers(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::HostOptions(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }

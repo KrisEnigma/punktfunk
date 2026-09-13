@@ -3,7 +3,7 @@
 // A tinted `Label` icon comes out monochrome in a menu on every Apple platform: SwiftUI hands the
 // row's icon to UIKit/AppKit as a TEMPLATE image, and a template image is a stencil — the tint is
 // thrown away and the system's own colour is filled in. `.foregroundStyle(.red)` on a trash symbol
-// and `.foregroundStyle(profile.accentColor)` on a swatch both vanish the same way.
+// and `.foregroundStyle(preset.accentColor)` on a swatch both vanish the same way.
 //
 // So the icon is rasterised first. A bitmap marked `.renderingMode(.original)` is not a stencil,
 // and the colour survives into the menu. This is the only place in the app that needs the trick —
@@ -13,7 +13,7 @@ import SwiftUI
 
 @MainActor
 enum MenuIcon {
-    /// A filled dot in `color` — a profile's chip, at menu-icon size.
+    /// A filled dot in `color` — a preset's chip, at menu-icon size.
     static func swatch(_ color: Color, scheme: ColorScheme) -> Image? {
         render(key: "dot-\(scheme)-\(color)", scheme: scheme) {
             Circle().fill(color).frame(width: 12, height: 12)

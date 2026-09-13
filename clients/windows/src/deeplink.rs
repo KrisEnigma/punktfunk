@@ -315,7 +315,7 @@ pub(crate) fn write_shortcut(label: &str, url: &str) -> Result<std::path::PathBu
 }
 
 /// A filename Windows will accept: its reserved characters replaced, length capped, and never
-/// empty. Host and profile names are user text and reach this directly.
+/// empty. Host and preset names are user text and reach this directly.
 fn file_name(label: &str) -> String {
     let cleaned: String = label
         .chars()
