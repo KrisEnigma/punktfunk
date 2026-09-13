@@ -16,7 +16,7 @@ short; the version-bump commit retitles it. Older sections stay as they are.
 
 ## v0.37.0
 
-93 commits since v0.36.0. Wire stays 2. **C ABI 30**, additive. **Driver protocol floor 9.**
+151 commits since v0.36.0. Wire stays 2. **C ABI 30**, additive. **Driver protocol floor 9.**
 Deep dive: `git log v0.36.0..v0.37.0`
 
 ### Versions
@@ -50,19 +50,31 @@ Deep dive: `git log v0.36.0..v0.37.0`
   path (Windows driver: `pool encode ipc copy send`). A consumer that required them must accept
   absent.
 - **JNI.** `nativeVideoStats` and `nativeVideoDecoderLabel` are gone.
-  `nativeVideoStatsLines(handle, tier, advanced, panelHz, panelModeHz, profile): String?` returns
-  the formatted overlay lines. Rebuild the kit.
+  `nativeVideoStatsLines(handle, tier, advanced, panelHz, panelModeHz, preset): String?` returns
+  the formatted overlay lines. `nativeConsoleSetProfiles` is now `nativeConsoleSetPresets`.
+  Rebuild the kit.
 
 ### Knobs
 
-- Client settings gain `advanced_stats` (off). Per device; profiles do not carry it.
+- Profiles are presets in every contract. Links emit `preset=` beside `profile=` and read both.
+  The session, the GTK client and `punktfunk launch` take `--preset`, with `--profile` as an alias.
+  `punktfunk presets` replaces `profiles`, which stays and prints the old JSON. `hosts list --json`
+  adds `preset` and `pinned_presets` beside the old keys. The HUD C field is `preset`.
+- The client catalog moves to `client-presets.json`. Saves also write `client-profiles.json` in the
+  old shape with `"mirror": true`, and host records write both binding keys, so a downgrade keeps
+  its presets.
+- Client settings gain `advanced_stats` (off). Per device; presets do not carry it.
 - The session binary's stdout keeps `stats:` (Advanced Detailed text) and adds `stats-json:`, the
   snapshot the WinUI shell renders.
+- Library: `GameEntry` decodes the host's play stats, and the shared collation spec gains Recent
+  and Most played (`library-collate-vectors.json` v2). `deeplink-vectors.json` v2: a link's `fp`
+  picks its record among hosts at one address.
 - Wire: Hello asks an Opus surround coupling in `audio_layout` and Welcome answers it. Absent on
   either side means the legacy coupling, so older peers keep today's stream.
 - `PUNKTFUNK_D3D11_PLANAR=0|1` (Windows client) overrides the vendor gate on the planar D3D11VA
   hand-off; NVIDIA stays on the RGB ring by default.
-- `punktfunk-host service install` (Windows) opens the firewall on the mgmt port in `host.env`.
+- `punktfunk-host service install --mgmt-bind=IP:PORT` (Windows) writes `PUNKTFUNK_MGMT_BIND` to
+  `host.env` and opens the firewall for that port. Setup passes it next to Sunshine.
 
 ---
 
